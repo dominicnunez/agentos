@@ -37,7 +37,7 @@ func NewWithApprovals(r Records, a Adapter, approvalReader ApprovalReader) *Coor
 }
 
 var (
-	ErrEffectNotPrepared = errors.New("protected effect obligation is not prepared")
+	ErrEffectNotPrepared = errors.New("effect obligation is not persisted")
 	ErrEffectUncertain   = errors.New("effect attempt has uncertain outcome")
 )
 
@@ -68,6 +68,13 @@ func (c *Coordinator) Prepare(ctx context.Context, obligation core.EffectObligat
 	if obligation.Descriptor == "" || obligation.ReplayContext == nil {
 		return obligation, fmt.Errorf("protected effect descriptor and replay context are required")
 	}
+	expectedFingerprint, err := Fingerprint(obligation.Action, obligation.Resource, obligation.ReplayContext)
+	if err != nil {
+		return obligation, fmt.Errorf("fingerprint persisted effect arguments: %w", err)
+	}
+	if obligation.EffectFingerprint != expectedFingerprint {
+		return obligation, fmt.Errorf("effect fingerprint does not match persisted replay context")
+	}
 	stored, _, err := c.load(ctx, obligation.ID)
 	if err == nil {
 		if !sameEffectIntent(stored, obligation) {
@@ -95,13 +102,10 @@ func (c *Coordinator) Execute(ctx context.Context, o core.EffectObligation) (cor
 		return o, err
 	}
 	version := 0
-	if requiresApproval {
-		stored, storedVersion, err := c.load(ctx, o.ID)
-		if err != nil {
-			return o, err
-		}
+	stored, storedVersion, loadErr := c.load(ctx, o.ID)
+	if loadErr == nil {
 		if !sameEffectIntent(stored, o) {
-			return o, fmt.Errorf("prepared effect does not match requested execution")
+			return o, fmt.Errorf("persisted effect does not match requested execution")
 		}
 		o, version = stored, storedVersion
 		switch o.Status {
@@ -115,6 +119,10 @@ func (c *Coordinator) Execute(ctx context.Context, o core.EffectObligation) (cor
 		default:
 			return o, fmt.Errorf("unknown effect status %q", o.Status)
 		}
+	} else if !errors.Is(loadErr, ErrEffectNotPrepared) {
+		return o, loadErr
+	} else if requiresApproval {
+		return o, ErrEffectNotPrepared
 	}
 	var approval core.HumanApproval
 	if requiresApproval || o.ApprovalRef != "" {
