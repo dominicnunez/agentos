@@ -18,7 +18,28 @@ if [ -n "$staged_go" ]; then
     echo "gofmt is required by the Agent OS pre-commit hook. Set AGENTOS_GOFMT if it is not on PATH."
     exit 1
   fi
-  unformatted="$(printf '%s\n' "$staged_go" | xargs "$GOFMT_BIN" -l)"
+  unformatted=""
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    if ! staged_source="$(git show ":$file")"; then
+      echo "Unable to read staged Go file: $file"
+      exit 1
+    fi
+    if ! format_result="$(printf '%s\n' "$staged_source" | "$GOFMT_BIN" -l)"; then
+      echo "gofmt could not parse staged Go file: $file"
+      exit 1
+    fi
+    if [ -n "$format_result" ]; then
+      if [ -n "$unformatted" ]; then
+        unformatted="$unformatted
+$file"
+      else
+        unformatted="$file"
+      fi
+    fi
+  done <<EOF
+$staged_go
+EOF
   if [ -n "$unformatted" ]; then
     echo "The following staged Go files require gofmt:"
     printf '%s\n' "$unformatted"
