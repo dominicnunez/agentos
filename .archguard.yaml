@@ -140,6 +140,13 @@ policy:
       to:
         module: ledger
 
+    - name: projections-test-adapter
+      from:
+        module: projections
+        tests: true
+      to:
+        module: ledger
+
 analysis:
   include_tests: true
   profiles:
