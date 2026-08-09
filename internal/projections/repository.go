@@ -195,25 +195,27 @@ func validateSnapshot(snapshot Snapshot) error {
 			return err
 		}
 	}
+	organized := make([]organizedIdentity, 0, len(snapshot.Agents)+len(snapshot.Teams)+len(snapshot.Intents))
 	for id, state := range snapshot.Agents {
-		if err := validateOrganizedIdentity("agent", id, state.Value.ID, state.Value.OrganizationID, snapshot.Organizations); err != nil {
+		organized = append(organized, organizedIdentity{"agent", id, state.Value.ID, state.Value.OrganizationID})
+	}
+	for id, state := range snapshot.Teams {
+		organized = append(organized, organizedIdentity{"team", id, state.Value.ID, state.Value.OrganizationID})
+	}
+	for id, state := range snapshot.Intents {
+		organized = append(organized, organizedIdentity{"intent", id, state.Value.ID, state.Value.OrganizationID})
+	}
+	for _, record := range organized {
+		if err := validateOrganizedIdentity(record.kind, record.recordID, record.valueID, record.organizationID, snapshot.Organizations); err != nil {
 			return err
 		}
 	}
 	for id, state := range snapshot.Teams {
-		if err := validateOrganizedIdentity("team", id, state.Value.ID, state.Value.OrganizationID, snapshot.Organizations); err != nil {
-			return err
-		}
 		for _, memberID := range state.Value.MemberAgentIDs {
 			member, ok := snapshot.Agents[memberID]
 			if !ok || member.Value.OrganizationID != state.Value.OrganizationID {
 				return fmt.Errorf("team %s references invalid member agent %s", id, memberID)
 			}
-		}
-	}
-	for id, state := range snapshot.Intents {
-		if err := validateOrganizedIdentity("intent", id, state.Value.ID, state.Value.OrganizationID, snapshot.Organizations); err != nil {
-			return err
 		}
 	}
 	for id, state := range snapshot.Goals {
@@ -251,6 +253,13 @@ func validateSnapshot(snapshot Snapshot) error {
 		}
 	}
 	return nil
+}
+
+type organizedIdentity struct {
+	kind           string
+	recordID       core.ID
+	valueID        core.ID
+	organizationID core.ID
 }
 
 func validateIdentity(kind string, recordID, valueID core.ID) error {
