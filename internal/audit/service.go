@@ -11,8 +11,7 @@ import (
 type Severity string
 
 const (
-	High   Severity = "HIGH"
-	Medium Severity = "MEDIUM"
+	High Severity = "HIGH"
 )
 
 type Finding struct {

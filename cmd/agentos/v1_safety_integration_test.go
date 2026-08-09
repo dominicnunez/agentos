@@ -42,7 +42,8 @@ func TestV1SafetyServicesEnforceAndRecordContracts(t *testing.T) {
 	t.Cleanup(func() { _ = l.Close() })
 
 	t.Setenv("AGENTOS_TEST_PROVIDER_TOKEN", "test-secret")
-	secret, err := (secrets.Environment{Prefix: "AGENTOS_TEST_"}).Resolve(ctx, secrets.Ref("PROVIDER_TOKEN"))
+	var secretSource secrets.Source = secrets.Environment{Prefix: "AGENTOS_TEST_"}
+	secret, err := secretSource.Resolve(ctx, secrets.Ref("PROVIDER_TOKEN"))
 	if err != nil || secret != "test-secret" {
 		t.Fatalf("resolve secret by reference: value=%q err=%v", secret, err)
 	}
@@ -56,14 +57,18 @@ func TestV1SafetyServicesEnforceAndRecordContracts(t *testing.T) {
 		t.Fatalf("expected exact capability lease to authorize action: %+v", trace)
 	}
 
-	manager := inference.Manager{Pools: []inference.Pool{{
-		ID: "local", Provider: "fake", Mode: inference.Local,
-		AllowedModels: []string{"fake-model/v1"}, Available: true, ConcurrencyLimit: 1,
-		Snapshot:          inference.UsageSnapshot{Source: "local", ObservedAt: now, Confidence: 1, Remaining: 10, Unit: "requests"},
-		ContinuityReserve: 1,
-	}}}
+	manager := inference.Manager{Pools: []inference.Pool{
+		{ID: "subscription", Mode: inference.Subscription, Available: false},
+		{ID: "metered", Mode: inference.MeteredAPI, Available: false},
+		{
+			ID: "local", Provider: "fake", Mode: inference.Local,
+			AllowedModels: []string{"fake-model/v1"}, Available: true, ConcurrencyLimit: 1,
+			Snapshot:          inference.UsageSnapshot{Source: "local", ObservedAt: now, Confidence: 1, Remaining: 10, Unit: "requests"},
+			ContinuityReserve: 1,
+		},
+	}}
 	selection, err := manager.Select(inference.Request{RequiredModel: "fake-model/v1", EstimatedUsage: 1})
-	if err != nil || selection.PoolID != "local" {
+	if err != nil || selection.PoolID != "local" || selection.Provider != "fake" || selection.Model != "fake-model/v1" || selection.Snapshot.Source != "local" {
 		t.Fatalf("select reserve-safe inference pool: selection=%+v err=%v", selection, err)
 	}
 
@@ -72,8 +77,16 @@ func TestV1SafetyServicesEnforceAndRecordContracts(t *testing.T) {
 		Status: core.KnowledgeCandidate, Content: "Require exact authority before effects.",
 		ProvenanceEventRefs: []string{"source-event-1"}, CreatedBy: "human-1", CreatedAt: now,
 	}
-	if err := knowledge.New(l).Propose(ctx, record); err != nil {
+	knowledgeStore := knowledge.New(l)
+	if err := knowledgeStore.Propose(ctx, record); err != nil {
 		t.Fatalf("propose versioned knowledge: %v", err)
+	}
+	matches, err := knowledgeStore.Search(ctx, "ORGANIZATION", "authority")
+	if err != nil {
+		t.Fatalf("search versioned knowledge: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("candidate knowledge must not be returned as active: %+v", matches)
 	}
 
 	fingerprint, err := effects.Fingerprint("send", "customer-1", map[string]string{"body": "hello"})
