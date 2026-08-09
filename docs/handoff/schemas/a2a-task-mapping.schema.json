@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentos://schemas/a2a-task-mapping/v0.1",
+  "title": "A2ATaskMapping v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "external_actor_id",
+    "a2a_task_id",
+    "intent_envelope_id",
+    "goal_id",
+    "created_at"
+  ],
+  "properties": {
+    "external_actor_id": {
+      "type": "string"
+    },
+    "a2a_task_id": {
+      "type": "string"
+    },
+    "a2a_context_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "intent_envelope_id": {
+      "type": "string"
+    },
+    "goal_id": {
+      "type": "string"
+    },
+    "root_task_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "status": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    }
+  }
+}

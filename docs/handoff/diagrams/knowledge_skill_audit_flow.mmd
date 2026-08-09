@@ -1,0 +1,10 @@
+flowchart TD
+    L[Event Ledger / Artifacts] --> P[Knowledge or Skill Candidate]
+    P --> V[Validation appropriate to risk]
+    V -->|pass| A[ACTIVE version]
+    V -->|fail| Q[Reject / Quarantine]
+    A --> C[Context / Skill loading]
+    A --> AU[AuditService]
+    AU --> F[Audit Finding]
+    F --> R[Revalidate / Revise / Supersede / Dismiss]
+    R --> P

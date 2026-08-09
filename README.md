@@ -16,12 +16,20 @@ The runtime is a Go modular monolith. Internal modules communicate through versi
 
 ## Quick start
 
-Requires Go 1.24+.
+Requires Go 1.26.5.
 
 ```sh
 go test ./...
 AGENTOS_OPERATOR_TOKEN=change-me go run ./cmd/agentos
 ```
+
+Enable the repository-owned commit and push checks once per checkout:
+
+```powershell
+.\scripts\install-git-hooks.cmd
+```
+
+On Unix-like systems, run `./scripts/install-git-hooks.sh` instead. The commit hook checks staged-diff integrity, formatting, tests, and architecture boundaries. The push hook adds module consistency, build, vet, and an advisory Gallow audit. GitHub Actions independently enforces the blocking checks, race-tests the unit suite, and publishes Gallow findings on pull requests.
 
 Then submit a minimal A2A task:
 
@@ -41,3 +49,7 @@ Included: core organizational/work objects, task dependencies, deterministic and
 Deferred: federation, workflow DSLs, semantic/vector memory, Lab, optimizers, production model providers, broad tool ecosystems, and external-effect execution.
 
 See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md) and [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md).
+
+## Authoritative architecture handoff
+
+The complete, unmodified Agent OS v4.2 AI coding handoff is preserved in [docs/handoff/](docs/handoff/README.md). Its original manifest remains at [docs/handoff/MANIFEST.json](docs/handoff/MANIFEST.json) for byte-level integrity verification.

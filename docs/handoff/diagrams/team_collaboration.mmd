@@ -1,0 +1,26 @@
+sequenceDiagram
+    autonumber
+    participant H as Human/Hermes
+    participant C as Collaboration Manager
+    participant A as Agent A
+    participant B as Agent B
+    participant G as Event Gateway
+    participant L as Ledger/Bus
+    participant T as Team State
+
+    H->>C: Goal / TaskContract
+    C->>T: Create collaboration + team assignment
+    par Independent foreground work
+        C->>A: Assignment A
+        C->>B: Assignment B
+    end
+    A->>G: Draft EVIDENCE message for B/team
+    G->>G: Validate + firewall + canonicalize
+    G->>L: Persist canonical message
+    L-->>B: Make P1 message available
+    B->>B: Finish current atomic action
+    B->>L: Read eligible message at action boundary
+    B->>T: Update hypothesis/team projection
+    B->>G: CHALLENGE / RESPONSE
+    G->>L: Persist + route
+    L-->>A: Surface at next boundary

@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/agentos/v4.2/event-envelope.json",
+  "title": "Agent OS Event v4.2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "sequence",
+    "organization_id",
+    "event_type",
+    "created_at",
+    "schema_version",
+    "payload"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "organization_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "event_type": {
+      "enum": [
+        "MESSAGE",
+        "TASK_BLOCKED",
+        "EVIDENCE_PUBLISHED",
+        "RESULT_PUBLISHED",
+        "CANDIDATE_COMPLETE",
+        "INTENT_CREATED",
+        "GOAL_CREATED",
+        "TASK_CREATED",
+        "TASK_ASSIGNED",
+        "TASK_CANCELLED",
+        "EXECUTION_STARTED",
+        "EXECUTION_FINISHED",
+        "CAPABILITY_CHECKED",
+        "CAPABILITY_DENIED",
+        "CAPABILITY_REVOKED",
+        "APPROVAL_PENDING",
+        "APPROVAL_ACKNOWLEDGED",
+        "APPROVAL_DECIDED",
+        "FREEZE_SET",
+        "ACTION_ATTESTED",
+        "COMPLETION_VERIFIED",
+        "COMPLETION_REJECTED",
+        "TASK_VERIFIED_COMPLETE",
+        "KNOWLEDGE_PROPOSED",
+        "SKILL_PROPOSED",
+        "KNOWLEDGE_ACTIVATED",
+        "KNOWLEDGE_SUPERSEDED",
+        "KNOWLEDGE_STALE",
+        "KNOWLEDGE_QUARANTINED",
+        "SKILL_ACTIVATED",
+        "SKILL_SUPERSEDED",
+        "SKILL_QUARANTINED",
+        "AUDIT_RUN_STARTED",
+        "AUDIT_FINDING_CREATED",
+        "AUDIT_FINDING_RESOLVED",
+        "INFERENCE_SELECTED",
+        "INFERENCE_USAGE_RECORDED",
+        "EXECUTION_CONTEXT_MANIFESTED",
+        "TOOL_OUTCOME_RECORDED",
+        "EFFECT_OBLIGATION_CREATED",
+        "EFFECT_ATTEMPTED",
+        "EFFECT_CONFIRMED",
+        "EFFECT_FAILED",
+        "EXTERNAL_ACTOR_AUTHENTICATED",
+        "A2A_WORK_ACCEPTED",
+        "A2A_INPUT_RECEIVED"
+      ]
+    },
+    "source_actor_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source_execution_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "recipient_scope": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "AGENT",
+        "TEAM",
+        "TASK_PARTICIPANTS",
+        null
+      ]
+    },
+    "recipient_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "task_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "collaboration_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "authorization_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "artifact_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "priority": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "P0",
+        "P1",
+        "P2",
+        "P3",
+        null
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}

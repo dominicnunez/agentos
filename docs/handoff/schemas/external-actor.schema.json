@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentos://schemas/external-actor/v0.1",
+  "title": "ExternalActor v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "external_actor_id",
+    "organization_id",
+    "protocol",
+    "status",
+    "capability_refs"
+  ],
+  "properties": {
+    "external_actor_id": {
+      "type": "string"
+    },
+    "organization_id": {
+      "type": "string"
+    },
+    "protocol": {
+      "enum": [
+        "A2A"
+      ]
+    },
+    "peer_identifier": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "credential_binding_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "enum": [
+        "ACTIVE",
+        "DISABLED",
+        "REVOKED"
+      ]
+    },
+    "capability_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "metadata": {
+      "type": "object"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+C4Context
+title Agent OS - System Context
+Person(human, "Human Operator", "Defines goals, constraints, approvals, and audits work")
+System(agentos, "Agent OS", "Builds and runs persistent agents, teams, and artificial organizations")
+System_Ext(hermes, "Hermes / External Agent", "Submits goals/tasks and consumes results")
+System_Ext(models, "Model Providers", "LLM inference services or local inference")
+System_Ext(tools, "External Tools/Resources", "Repositories, browsers, databases, shells, APIs")
+
+Rel(human, agentos, "Goals, organization design, approvals, audit")
+Rel(hermes, agentos, "API / future A2A + Event Contracts-Federation")
+Rel(agentos, models, "Provider-neutral model invocation")
+Rel(agentos, tools, "Capability-gated tool access / MCP adapters")

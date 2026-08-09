@@ -1,0 +1,16 @@
+stateDiagram-v2
+    [*] --> Pending
+    Pending --> Notified
+    Notified --> Acknowledged: human saw notification
+    Acknowledged --> PendingDecision
+    Notified --> PendingDecision: no acknowledgement required
+    PendingDecision --> Approved
+    PendingDecision --> Denied
+    PendingDecision --> PendingDecision: risk-based reminder / escalation
+    Approved --> [*]
+    Denied --> [*]
+    note right of PendingDecision
+      Escalate attention,
+      never authority.
+      Action remains blocked.
+    end note

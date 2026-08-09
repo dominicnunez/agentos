@@ -1,0 +1,15 @@
+flowchart TD
+    T[Task] --> C[Context Builder]
+    E[Event refs] --> C
+    K[Knowledge exact versions] --> C
+    S[Skill exact versions] --> C
+    A[Artifacts] --> C
+    TD[Tool definitions] --> C
+    C --> M[ExecutionContextManifest persisted]
+    M --> X[AgentExecution]
+    X --> TI[Tool Invocation]
+    TI --> R{Known deterministic recovery?}
+    R -->|Yes| DR[Bounded deterministic recovery]
+    R -->|No / still failed| TO[ToolOutcome]
+    DR --> TO
+    TO --> X

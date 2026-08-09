@@ -1,0 +1,13 @@
+stateDiagram-v2
+    [*] --> Draft
+    Draft --> Rejected: invalid/unauthorized
+    Draft --> Validated
+    Validated --> Canonicalized
+    Canonicalized --> Persisted
+    Persisted --> Routed
+    Routed --> Available
+    Available --> Surfaced
+    Surfaced --> Consumed
+    Consumed --> Acknowledged
+    Rejected --> [*]
+    Acknowledged --> [*]

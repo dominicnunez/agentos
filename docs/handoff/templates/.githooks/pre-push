@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+echo "==> go test"
+go test ./...
+
+echo "==> go vet"
+go vet ./...
+
+echo "==> race detector"
+go test -race ./...
+
+echo "==> Archguard"
+go tool archguard check --include-tests --profile modular-monolith
+
+BASE="${GALLOW_BASE:-origin/main}"
+echo "==> Gallow advisory audit against $BASE"
+go tool gallow audit --base "$BASE" --format human || true

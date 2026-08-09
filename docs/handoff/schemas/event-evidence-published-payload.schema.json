@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EVIDENCE_PUBLISHED payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "summary",
+    "artifact_refs"
+  ],
+  "properties": {
+    "summary": {
+      "type": "string"
+    },
+    "artifact_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

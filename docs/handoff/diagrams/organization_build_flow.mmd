@@ -1,0 +1,20 @@
+flowchart TD
+    A[Human describes mission] --> B[Organization Architect interprets]
+    B --> C[Capability + constraint analysis]
+    C --> D[Organization proposal]
+    D --> E{Human review}
+    E -->|Revise| B
+    E -->|Approve| F[Instantiate Organization]
+    F --> G[Collaboration Manager]
+    G --> H{Choose work topology}
+    H --> I[Single Agent]
+    H --> J[Parallel Ensemble]
+    H --> K[Collaborative Team]
+    H --> L[Multi-Team]
+    I --> M[Runtime]
+    J --> M
+    K --> M
+    L --> M
+    M --> N[Ledger + projections]
+    N --> O[Operate / adapt / propose changes]
+    O --> G

@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/agentos/v4.2/event-draft.json",
+  "title": "Agent OS EventDraft v4.2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_type",
+    "payload"
+  ],
+  "properties": {
+    "event_type": {
+      "enum": [
+        "MESSAGE",
+        "TASK_BLOCKED",
+        "EVIDENCE_PUBLISHED",
+        "RESULT_PUBLISHED",
+        "CANDIDATE_COMPLETE",
+        "KNOWLEDGE_PROPOSED",
+        "SKILL_PROPOSED"
+      ]
+    },
+    "recipient_scope": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "AGENT",
+        "TEAM",
+        "TASK_PARTICIPANTS",
+        null
+      ]
+    },
+    "recipient_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "task_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "collaboration_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "artifact_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "proposed_priority": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "P0",
+        "P1",
+        "P2",
+        "P3",
+        null
+      ]
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}

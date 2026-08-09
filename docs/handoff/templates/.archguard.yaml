@@ -1,0 +1,97 @@
+# TEMPLATE: replace packages.root with the actual go.mod module path.
+version: 1
+
+packages:
+  root: github.com/REPLACE_ME/agentos
+  patterns:
+    - ./internal/...
+
+modules:
+  - name: anl
+    path: internal/anl
+  - name: actors
+    path: internal/actors
+  - name: teams
+    path: internal/teams
+  - name: collaboration
+    path: internal/collaboration
+  - name: tasks
+    path: internal/tasks
+  - name: messaging
+    path: internal/bus
+  - name: ledger
+    path: internal/ledger
+  - name: scheduler
+    path: internal/scheduler
+  - name: capability
+    path: internal/capability
+  - name: models
+    path: internal/models
+  - name: tools
+    path: internal/tools
+  - name: organization
+    path: internal/organization
+  - name: federation
+    path: internal/federation
+  - name: api
+    path: internal/api
+
+layers:
+  - name: domain
+    path: domain
+  - name: app
+    path: app
+  - name: ports
+    path: ports
+  - name: adapters
+    path: adapters
+
+policy:
+  default: deny
+  allow:
+    - name: same-module
+      from:
+        module: "*"
+      to:
+        same_module: true
+
+    - name: app-to-local-domain-and-ports
+      from:
+        layer: app
+      to:
+        same_module: true
+        layers: [domain, ports]
+
+    - name: bootstrap-composition-root
+      from:
+        path: internal/bootstrap/**
+      to:
+        internal: true
+
+analysis:
+  include_tests: true
+  profiles:
+    - modular-monolith
+
+  # Add table ownership once persistent tables exist.
+  table_owners: []
+
+  external_imports:
+    - name: domain-production-imports
+      from:
+        layer: domain
+        tests: false
+      allow:
+        packages: []
+
+  forbidden_terms:
+    - name: vendor-terms-in-ports
+      from:
+        layer: ports
+      terms:
+        - openai
+        - anthropic
+        - nats
+        - sqlite
+        - postgres
+        - github

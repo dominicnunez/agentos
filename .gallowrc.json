@@ -1,0 +1,11 @@
+{
+  "format": "human",
+  "production": false,
+  "ignorePatterns": [
+    "internal/generated/**"
+  ],
+  "rules": {
+    "complexity": "off",
+    "test-only-dependency": "off"
+  }
+}

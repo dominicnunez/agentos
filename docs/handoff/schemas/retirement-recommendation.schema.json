@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RetirementRecommendation v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "recommendation_id",
+    "candidate_actor_id",
+    "recommended_state",
+    "reason",
+    "evidence",
+    "rollback"
+  ],
+  "properties": {
+    "recommendation_id": {
+      "type": "string"
+    },
+    "candidate_actor_id": {
+      "type": "string"
+    },
+    "recommended_state": {
+      "enum": [
+        "DORMANT",
+        "ARCHIVED"
+      ]
+    },
+    "reason": {
+      "type": "string"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unique_capability_risk": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "replacement_availability": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "expected_savings": {
+      "type": "object"
+    },
+    "rollback": {
+      "type": "string"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    }
+  }
+}

@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OrganizationHealthVector v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "scope",
+    "dimensions",
+    "hard_gates",
+    "status"
+  ],
+  "properties": {
+    "scope": {
+      "type": "object",
+      "required": [
+        "type",
+        "id"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "organization",
+            "team",
+            "collaboration"
+          ]
+        },
+        "id": {
+          "type": "string"
+        }
+      }
+    },
+    "dimensions": {
+      "type": "object",
+      "required": [
+        "outcome_quality",
+        "reliability",
+        "efficiency",
+        "safety_governance",
+        "epistemic_health",
+        "coordination",
+        "organizational_efficiency",
+        "resilience",
+        "adaptability",
+        "stability",
+        "human_oversight_burden"
+      ],
+      "properties": {
+        "outcome_quality": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "reliability": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "efficiency": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "safety_governance": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "epistemic_health": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "coordination": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "organizational_efficiency": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "resilience": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "adaptability": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "stability": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "human_oversight_burden": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        }
+      },
+      "additionalProperties": false
+    },
+    "hard_gates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "passed"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "detail": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "status": {
+      "enum": [
+        "HEALTHY",
+        "WATCH",
+        "DEGRADED",
+        "CRITICAL"
+      ]
+    },
+    "trend": {
+      "enum": [
+        "IMPROVING",
+        "STABLE",
+        "DECLINING",
+        "UNKNOWN"
+      ]
+    },
+    "aggregate": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    }
+  }
+}

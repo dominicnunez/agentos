@@ -1,0 +1,15 @@
+flowchart TD
+    T[Task + CompletionContract] --> W[Agent/Team Work]
+    W --> CC[CANDIDATE_COMPLETE]
+    CC --> CE[Completion Engine]
+    CE -->|Fail| W
+    CE -->|Verified| O[Verified Outcome]
+    O --> EV[Independent Evaluator]
+    EV --> OH[Organization Health]
+    OH --> OP[Optimization]
+    OP --> EX[Shadow / A-B / Canary Experiment]
+    EX --> EV
+    EV --> REC[Recommendation]
+    REC --> GOV[Governance]
+    GOV -->|Keep/Promote| CH[Versioned Organization Change]
+    GOV -->|Reject/Revert| RV[Rollback]

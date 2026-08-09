@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+GO_BIN="${AGENTOS_GO:-go}"
+GOFMT_BIN="${AGENTOS_GOFMT:-gofmt}"
+
+if ! command -v "$GO_BIN" >/dev/null 2>&1; then
+  echo "Go is required by the Agent OS pre-commit hook. Set AGENTOS_GO to its executable if it is not on PATH."
+  exit 1
+fi
+
+echo "==> staged diff integrity"
+git diff --cached --check
+
+staged_go="$(git diff --cached --name-only --diff-filter=ACMR -- '*.go')"
+if [ -n "$staged_go" ]; then
+  if ! command -v "$GOFMT_BIN" >/dev/null 2>&1; then
+    echo "gofmt is required by the Agent OS pre-commit hook. Set AGENTOS_GOFMT if it is not on PATH."
+    exit 1
+  fi
+  unformatted="$(printf '%s\n' "$staged_go" | xargs "$GOFMT_BIN" -l)"
+  if [ -n "$unformatted" ]; then
+    echo "The following staged Go files require gofmt:"
+    printf '%s\n' "$unformatted"
+    exit 1
+  fi
+fi
+
+echo "==> unit tests"
+"$GO_BIN" test ./...
+
+echo "==> architecture boundaries"
+"$GO_BIN" tool archguard check --include-tests --profile modular-monolith

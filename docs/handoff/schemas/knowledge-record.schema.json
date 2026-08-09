@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentos://schemas/knowledge-record/v0.2",
+  "title": "KnowledgeRecord v0.2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "knowledge_id",
+    "version",
+    "type",
+    "scope",
+    "status",
+    "content",
+    "created_by",
+    "created_at"
+  ],
+  "properties": {
+    "knowledge_id": {
+      "type": "string"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "type": {
+      "enum": [
+        "EXPERIENCE",
+        "LESSON",
+        "KNOWLEDGE",
+        "PROCEDURE"
+      ]
+    },
+    "scope": {
+      "type": "object",
+      "required": [
+        "type",
+        "id"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "AGENT",
+            "TEAM",
+            "ORGANIZATION"
+          ]
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "status": {
+      "enum": [
+        "CANDIDATE",
+        "ACTIVE",
+        "SUPERSEDED",
+        "STALE",
+        "QUARANTINED"
+      ]
+    },
+    "title": {
+      "type": "string"
+    },
+    "content": {
+      "type": "string"
+    },
+    "applicability": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provenance_event_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_artifact_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "created_by": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "last_verified_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "supersedes_version": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    },
+    "change_class": {
+      "enum": [
+        "CORRECTION",
+        "MINOR_REVISION",
+        "MAJOR_REVISION",
+        "SUPERSEDE",
+        null
+      ]
+    },
+    "change_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "basis_type": {
+      "enum": [
+        "SINGLE_EXPERIENCE",
+        "REPEATED_PATTERN",
+        "DELIBERATE_EXPERIMENT",
+        "HUMAN_INPUT",
+        "EXTERNAL_EVIDENCE",
+        "DERIVED",
+        "MIXED",
+        null
+      ]
+    },
+    "occurrence_event_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "validation_method": {
+      "enum": [
+        "UNVALIDATED",
+        "DETERMINISTIC_CHECK",
+        "EXPERIMENTAL_EVIDENCE",
+        "REPEATED_OBSERVATION",
+        "INDEPENDENT_AGENT_JUDGMENT",
+        "HUMAN_JUDGMENT",
+        "MIXED",
+        null
+      ]
+    },
+    "validation_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "validated_by": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "basis_type": {
+            "const": "REPEATED_PATTERN"
+          }
+        },
+        "required": [
+          "basis_type"
+        ]
+      },
+      "then": {
+        "required": [
+          "occurrence_event_refs"
+        ],
+        "properties": {
+          "occurrence_event_refs": {
+            "minItems": 3
+          }
+        }
+      }
+    }
+  ]
+}

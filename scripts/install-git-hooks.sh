@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+repository_root="$(git rev-parse --show-toplevel)"
+git -C "$repository_root" config core.hooksPath .githooks
+echo "Agent OS Git hooks enabled for this checkout."

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OrganizationalExperiment v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "experiment_id",
+    "baseline",
+    "candidates",
+    "stage",
+    "success_metrics",
+    "rollback"
+  ],
+  "properties": {
+    "experiment_id": {
+      "type": "string"
+    },
+    "baseline": {
+      "type": "string"
+    },
+    "candidates": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "stage": {
+      "enum": [
+        "PROPOSED",
+        "SHADOW",
+        "CANARY",
+        "TEMPORARY",
+        "PROMOTED",
+        "REVERTED"
+      ]
+    },
+    "success_metrics": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "budget": {
+      "type": "object"
+    },
+    "minimum_evidence": {
+      "type": "string"
+    },
+    "rollback": {
+      "type": "string"
+    },
+    "cooldown": {
+      "type": "string"
+    }
+  }
+}

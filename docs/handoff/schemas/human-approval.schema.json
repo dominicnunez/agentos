@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HumanApproval v0.2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "approval_id",
+    "action_summary",
+    "boundary",
+    "risk",
+    "urgency",
+    "status",
+    "authorization_ancestry",
+    "effect_fingerprint"
+  ],
+  "properties": {
+    "approval_id": {
+      "type": "string"
+    },
+    "action_summary": {
+      "type": "string"
+    },
+    "why": {
+      "type": "string"
+    },
+    "boundary": {
+      "enum": [
+        "FINANCIAL",
+        "PHYSICAL",
+        "PUBLIC_EXTERNAL",
+        "PRIVILEGE_TRUST",
+        "SENSITIVE_DATA",
+        "DESTRUCTIVE_IRREVERSIBLE",
+        "LEGAL_BINDING",
+        "TRUSTED_CORE"
+      ]
+    },
+    "risk": {
+      "enum": [
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+        "CRITICAL"
+      ]
+    },
+    "urgency": {
+      "enum": [
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+        "CRITICAL"
+      ]
+    },
+    "reversible": {
+      "type": "boolean"
+    },
+    "financial_effect": {
+      "type": "string"
+    },
+    "data_effect": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "PENDING",
+        "NOTIFIED",
+        "ACKNOWLEDGED",
+        "APPROVED",
+        "DENIED"
+      ]
+    },
+    "authorization_ancestry": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "effect_fingerprint": {
+      "type": "string"
+    },
+    "arguments_hash": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "expires_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "single_use": {
+      "type": "boolean"
+    }
+  },
+  "$id": "agentos://schemas/human-approval/v0.2"
+}

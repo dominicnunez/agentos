@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EvaluationRecord v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "evaluation_id",
+    "task_id",
+    "profile_id",
+    "dimensions",
+    "visibility"
+  ],
+  "properties": {
+    "evaluation_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "profile_id": {
+      "type": "string"
+    },
+    "task_class": {
+      "type": "string"
+    },
+    "dimensions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "visibility": {
+      "const": "EVALUATOR_GOVERNANCE_ONLY"
+    },
+    "difficulty_adjustment": {
+      "type": "number"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

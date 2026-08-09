@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentos://schemas/execution-context-manifest/v0.1",
+  "title": "ExecutionContextManifest v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "execution_id",
+    "agent_id",
+    "execution_profile_version",
+    "task_id",
+    "task_contract_version",
+    "context_builder_version",
+    "created_at"
+  ],
+  "properties": {
+    "execution_id": {
+      "type": "string"
+    },
+    "agent_id": {
+      "type": "string"
+    },
+    "execution_profile_version": {
+      "type": [
+        "string",
+        "integer"
+      ]
+    },
+    "provider": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reasoning_setting": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "task_contract_version": {
+      "type": [
+        "string",
+        "integer"
+      ]
+    },
+    "prompt_version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "operating_instruction_version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "policy_version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "event_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "knowledge_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/versionedRef"
+      }
+    },
+    "skill_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/versionedRef"
+      }
+    },
+    "artifact_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/materializedRef"
+      }
+    },
+    "tool_definitions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/versionedRef"
+      }
+    },
+    "additional_context_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/materializedRef"
+      }
+    },
+    "context_builder_version": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "materializationState": {
+      "enum": [
+        "FULL",
+        "SUMMARY",
+        "REFERENCE_ONLY",
+        "OMITTED",
+        "UNAVAILABLE"
+      ]
+    },
+    "versionedRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "materialization_state"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "version": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "materialization_state": {
+          "$ref": "#/$defs/materializationState"
+        }
+      }
+    },
+    "materializedRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "materialization_state"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "version": {
+          "type": [
+            "string",
+            "integer",
+            "null"
+          ]
+        },
+        "materialization_state": {
+          "$ref": "#/$defs/materializationState"
+        }
+      }
+    }
+  }
+}

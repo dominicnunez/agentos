@@ -1,0 +1,9 @@
+flowchart TD
+    A[Authorized protected effect] --> P[Effect-bound approval if required]
+    P --> O[Persist EffectObligation]
+    O --> X[Attempt external effect]
+    X --> R[Record ATTEMPTED]
+    R --> C{Confirmation/reconciliation}
+    C -->|Confirmed| Y[CONFIRMED]
+    C -->|Failed| F[FAILED]
+    C -->|Unknown| U[Remain uncertain / reconcile before retry]

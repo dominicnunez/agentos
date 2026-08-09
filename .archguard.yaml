@@ -1,0 +1,91 @@
+version: 1
+
+packages:
+  root: github.com/dominicnunez/agentos
+  patterns:
+    - ./internal/...
+
+modules:
+  - name: app
+    path: internal/app
+  - name: completion
+    path: internal/completion
+  - name: core
+    path: internal/core
+  - name: events
+    path: internal/events
+  - name: execution
+    path: internal/execution
+  - name: gateway
+    path: internal/gateway
+  - name: ledger
+    path: internal/ledger
+  - name: workflow
+    path: internal/workflow
+
+policy:
+  default: deny
+  allow:
+    - name: same-module
+      from:
+        module: "*"
+      to:
+        same_module: true
+
+    - name: application-orchestration
+      from:
+        module: app
+      to:
+        modules: [completion, core, events, execution]
+
+    - name: completion-domain
+      from:
+        module: completion
+      to:
+        module: core
+
+    - name: execution-domain
+      from:
+        module: execution
+      to:
+        module: core
+
+    - name: operator-boundary
+      from:
+        module: gateway
+      to:
+        modules: [app, core]
+
+    - name: event-persistence
+      from:
+        module: ledger
+      to:
+        module: events
+
+    - name: workflow-domain
+      from:
+        module: workflow
+      to:
+        module: core
+
+    - name: application-test-adapter
+      from:
+        module: app
+        tests: true
+      to:
+        module: ledger
+
+    - name: gateway-test-events
+      from:
+        module: gateway
+        tests: true
+      to:
+        module: events
+
+analysis:
+  include_tests: true
+  profiles:
+    - modular-monolith
+  table_owners:
+    - module: ledger
+      tables: [events]

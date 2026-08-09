@@ -1,0 +1,11 @@
+flowchart TD
+    U[Human] --> H[Hermes Agent]
+    H -->|A2A v1.0| G[A2A Operator Gateway]
+    G --> X[ExternalActor auth/capability check]
+    X --> I[IntentEnvelope]
+    I --> GO[Goal / Task DAG]
+    GO --> E[Event Contracts + Ledger]
+    E --> S[Progress / Blocked / Results]
+    S -->|A2A status/artifacts/input-needed| H
+    HP[Human Approval Boundary] --> E
+    H -. cannot self-approve .-> HP

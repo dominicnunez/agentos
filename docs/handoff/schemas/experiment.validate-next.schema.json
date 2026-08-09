@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentos://schemas/experiment/v0.1",
+  "title": "Experiment v0.1 (VALIDATE NEXT)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "experiment_id",
+    "status",
+    "goal",
+    "trust_label",
+    "budget"
+  ],
+  "properties": {
+    "experiment_id": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "PROPOSED",
+        "RUNNING",
+        "COMPLETED",
+        "FAILED",
+        "DISCARDED",
+        "PROMOTION_CANDIDATE"
+      ]
+    },
+    "goal": {
+      "type": "string"
+    },
+    "trust_label": {
+      "const": "EXPERIMENTAL_UNVERIFIED"
+    },
+    "budget": {
+      "type": "object"
+    },
+    "allowed_inference_pools": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "artifact_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "result_summary": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

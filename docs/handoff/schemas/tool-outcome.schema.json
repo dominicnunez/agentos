@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentos://schemas/tool-outcome/v0.1",
+  "title": "ToolOutcome v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tool_invocation_id",
+    "tool_id",
+    "status",
+    "postcondition_status",
+    "retryability",
+    "recovery_attempted",
+    "started_at",
+    "finished_at"
+  ],
+  "properties": {
+    "tool_invocation_id": {
+      "type": "string"
+    },
+    "tool_id": {
+      "type": "string"
+    },
+    "tool_version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "enum": [
+        "SUCCESS",
+        "PARTIAL",
+        "FAILED"
+      ]
+    },
+    "observed_effect": {
+      "type": [
+        "string",
+        "object",
+        "null"
+      ]
+    },
+    "postcondition_status": {
+      "enum": [
+        "VERIFIED",
+        "FAILED",
+        "NOT_CHECKED"
+      ]
+    },
+    "retryability": {
+      "enum": [
+        "RETRYABLE",
+        "NOT_RETRYABLE",
+        "RETRY_AFTER_CHANGE"
+      ]
+    },
+    "recovery_attempted": {
+      "type": "boolean"
+    },
+    "recovery_result": {
+      "type": [
+        "string",
+        "object",
+        "null"
+      ]
+    },
+    "artifact_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "error_class": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "error_detail": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

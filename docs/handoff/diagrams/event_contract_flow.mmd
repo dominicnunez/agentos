@@ -1,0 +1,7 @@
+flowchart LR
+ M[Model output] --> D[EventDraft\nuntrusted]
+ D --> V[Validate type/payload/routing/authority]
+ V --> E[Stamp trusted envelope]
+ E --> L[(Persist Event)]
+ L --> P[Project / Route]
+ P --> B[Recipient next action boundary]

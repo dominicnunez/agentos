@@ -1,0 +1,14 @@
+flowchart TD
+    E[Experience / External Artifact] --> C[Candidate Claim / Lesson]
+    C --> V[Independent Validation]
+    V -->|Insufficient| Q[Quarantine / Archive]
+    V -->|Validated| K[Active Knowledge]
+    K --> S[Cand. SOP]
+    S --> ST[SOP Tests]
+    ST -->|Pass| SA[Active SOP]
+    SA --> SK[Candidate Skill]
+    SK --> KT[Regression + Security Tests]
+    KT -->|Pass| KA[Active Skill]
+    K --> R[Revalidation / Expiry]
+    SA --> R
+    KA --> R
