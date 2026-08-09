@@ -58,13 +58,7 @@ func Fingerprint(action, resource string, args any) (string, error) {
 // decision. Retrying the same preparation is idempotent; changing any material
 // replay field fails closed under the existing obligation identity.
 func (c *Coordinator) Prepare(ctx context.Context, obligation core.EffectObligation) (core.EffectObligation, error) {
-	if err := validateObligation(obligation); err != nil {
-		return obligation, err
-	}
-	if c == nil || c.records == nil {
-		return obligation, fmt.Errorf("durable effect records are required")
-	}
-	requiresApproval, err := approvals.RequiresHumanApproval(obligation.ConsequenceBoundary)
+	requiresApproval, err := c.validateAndClassify(obligation)
 	if err != nil {
 		return obligation, err
 	}
@@ -96,13 +90,7 @@ func (c *Coordinator) Prepare(ctx context.Context, obligation core.EffectObligat
 }
 
 func (c *Coordinator) Execute(ctx context.Context, o core.EffectObligation) (core.EffectObligation, error) {
-	if err := validateObligation(o); err != nil {
-		return o, err
-	}
-	if c == nil || c.records == nil {
-		return o, fmt.Errorf("durable effect records are required")
-	}
-	requiresApproval, err := approvals.RequiresHumanApproval(o.ConsequenceBoundary)
+	requiresApproval, err := c.validateAndClassify(o)
 	if err != nil {
 		return o, err
 	}
@@ -206,6 +194,16 @@ func validateObligation(obligation core.EffectObligation) error {
 		return fmt.Errorf("effect identity, organization, task, action, resource, fingerprint, and idempotency key are required")
 	}
 	return nil
+}
+
+func (c *Coordinator) validateAndClassify(obligation core.EffectObligation) (bool, error) {
+	if err := validateObligation(obligation); err != nil {
+		return false, err
+	}
+	if c == nil || c.records == nil {
+		return false, fmt.Errorf("durable effect records are required")
+	}
+	return approvals.RequiresHumanApproval(obligation.ConsequenceBoundary)
 }
 
 func sameEffectIntent(stored, requested core.EffectObligation) bool {
