@@ -46,8 +46,19 @@ func (s *Store) Search(ctx context.Context, scope, text string) ([]core.Knowledg
 
 // PatternCandidate enforces the default minimum without confusing frequency with validation.
 func PatternCandidate(refs []string) error {
-	if len(refs) < 3 {
-		return fmt.Errorf("at least three concrete occurrence event refs are required")
+	distinct := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		canonical := strings.TrimSpace(ref)
+		if canonical == "" {
+			return fmt.Errorf("occurrence event refs must be non-empty")
+		}
+		if canonical != ref {
+			return fmt.Errorf("occurrence event refs must not contain surrounding whitespace")
+		}
+		distinct[canonical] = struct{}{}
+	}
+	if len(distinct) < 3 {
+		return fmt.Errorf("at least three distinct concrete occurrence event refs are required")
 	}
 	return nil
 }
