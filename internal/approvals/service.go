@@ -18,6 +18,7 @@ var (
 	ErrApprovalDenied          = errors.New("approval denied")
 	ErrDecisionUnauthorized    = errors.New("human is not authorized for approval boundary")
 	ErrNotificationUnavailable = errors.New("approval notification unavailable")
+	errRecordNotFound          = errors.New("record not found")
 )
 
 var humanBoundaries = map[string]struct{}{
@@ -223,21 +224,21 @@ func (s *Service) Get(ctx context.Context, approvalID core.ID) (core.HumanApprov
 }
 
 func (s *Service) load(ctx context.Context, approvalID core.ID) (core.HumanApproval, int, error) {
-	if s == nil || s.store == nil || approvalID == "" {
+	if s == nil {
 		return core.HumanApproval{}, 0, ErrApprovalNotFound
 	}
-	rows, err := s.store.Records(ctx, "approval", string(approvalID))
+	body, version, err := latestRecord(ctx, s.store, "approval", string(approvalID))
+	if errors.Is(err, errRecordNotFound) {
+		return core.HumanApproval{}, 0, ErrApprovalNotFound
+	}
 	if err != nil {
 		return core.HumanApproval{}, 0, err
 	}
-	if len(rows) == 0 {
-		return core.HumanApproval{}, 0, ErrApprovalNotFound
-	}
 	var approval core.HumanApproval
-	if err := json.Unmarshal(rows[len(rows)-1], &approval); err != nil {
+	if err := json.Unmarshal(body, &approval); err != nil {
 		return core.HumanApproval{}, 0, fmt.Errorf("decode approval %s: %w", approvalID, err)
 	}
-	return approval, len(rows), nil
+	return approval, version, nil
 }
 
 func (s *Service) authorizeDecision(ctx context.Context, humanID core.ID, approval core.HumanApproval) error {
@@ -252,21 +253,35 @@ func (s *Service) append(ctx context.Context, eventType, actorID string, version
 }
 
 func (s *Service) validatePreparedEffect(ctx context.Context, approval core.HumanApproval) error {
-	rows, err := s.store.Records(ctx, "effect", string(approval.EffectObligationID))
+	body, _, err := latestRecord(ctx, s.store, "effect", string(approval.EffectObligationID))
+	if errors.Is(err, errRecordNotFound) {
+		return fmt.Errorf("approval requires a prepared effect obligation")
+	}
 	if err != nil {
 		return err
 	}
-	if len(rows) == 0 {
-		return fmt.Errorf("approval requires a prepared effect obligation")
-	}
 	var obligation core.EffectObligation
-	if err := json.Unmarshal(rows[len(rows)-1], &obligation); err != nil {
+	if err := json.Unmarshal(body, &obligation); err != nil {
 		return fmt.Errorf("decode prepared effect %s: %w", approval.EffectObligationID, err)
 	}
 	if obligation.Status != core.EffectPending || obligation.ID != approval.EffectObligationID || obligation.ApprovalRef != string(approval.ID) || obligation.OrganizationID != approval.OrganizationID || obligation.TaskID != approval.TaskID || obligation.Action != approval.Action || obligation.Resource != approval.Resource || obligation.ConsequenceBoundary != approval.Boundary || obligation.EffectFingerprint != approval.EffectFingerprint {
 		return fmt.Errorf("approval does not match the prepared effect obligation")
 	}
 	return nil
+}
+
+func latestRecord(ctx context.Context, store Store, kind, id string) ([]byte, int, error) {
+	if store == nil || kind == "" || id == "" {
+		return nil, 0, errRecordNotFound
+	}
+	rows, err := store.Records(ctx, kind, id)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(rows) == 0 {
+		return nil, 0, errRecordNotFound
+	}
+	return rows[len(rows)-1], len(rows), nil
 }
 
 func validateRequest(approval core.HumanApproval) error {
@@ -282,3 +297,4 @@ func validateRequest(approval core.HumanApproval) error {
 	}
 	return nil
 }
+
