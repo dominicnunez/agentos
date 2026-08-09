@@ -21,11 +21,11 @@ if [ -n "$staged_go" ]; then
   unformatted=""
   while IFS= read -r file; do
     [ -n "$file" ] || continue
-    if ! staged_source="$(git show ":$file")"; then
+    if ! git cat-file -e ":$file"; then
       echo "Unable to read staged Go file: $file"
       exit 1
     fi
-    if ! format_result="$(printf '%s\n' "$staged_source" | "$GOFMT_BIN" -l)"; then
+    if ! format_result="$(git show ":$file" | "$GOFMT_BIN" -l)"; then
       echo "gofmt could not parse staged Go file: $file"
       exit 1
     fi
