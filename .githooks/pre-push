@@ -8,5 +8,21 @@ if ! command -v "$GO_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 
+echo "==> module consistency"
+"$GO_BIN" mod tidy -diff
+
+echo "==> build"
+"$GO_BIN" build ./...
+
+echo "==> vet"
 "$GO_BIN" vet ./...
+
+echo "==> unit tests"
 "$GO_BIN" test ./...
+
+echo "==> architecture boundaries"
+"$GO_BIN" tool archguard check --include-tests --profile modular-monolith
+
+base="${GALLOW_BASE:-origin/main}"
+echo "==> Gallow advisory audit against $base"
+"$GO_BIN" tool gallow audit --base "$base" --format human || true

@@ -6,9 +6,10 @@ on:
 
 permissions:
   contents: read
+  security-events: write
 
 jobs:
-  test:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,6 +18,36 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: go mod download
-      - run: gofmt -w . && git diff --exit-code
-      - run: go vet ./...
-      - run: go test -race ./...
+
+      - name: Formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: Module consistency
+        run: go mod tidy -diff
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Race-tested unit tests
+        run: go test -race ./...
+
+      - name: Architecture boundaries
+        run: go tool archguard check --include-tests --profile modular-monolith
+
+      - name: Gallow advisory SARIF
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          go tool gallow audit --base "origin/${{ github.base_ref }}" --format sarif > gallow.sarif
+
+      - name: Upload Gallow SARIF
+        if: github.event_name == 'pull_request' && hashFiles('gallow.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: gallow.sarif
+          category: gallow

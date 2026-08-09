@@ -16,7 +16,7 @@ The runtime is a Go modular monolith. Internal modules communicate through versi
 
 ## Quick start
 
-Requires Go 1.24+.
+Requires Go 1.26.5.
 
 ```sh
 go test ./...
@@ -29,7 +29,7 @@ Enable the repository-owned commit and push checks once per checkout:
 .\scripts\install-git-hooks.cmd
 ```
 
-On Unix-like systems, run `./scripts/install-git-hooks.sh` instead. GitHub Actions independently enforces formatting, vetting, and race-tested unit tests on every push and pull request.
+On Unix-like systems, run `./scripts/install-git-hooks.sh` instead. The commit hook checks staged-diff integrity, formatting, tests, and architecture boundaries. The push hook adds module consistency, build, vet, and an advisory Gallow audit. GitHub Actions independently enforces the blocking checks, race-tests the unit suite, and publishes Gallow findings on pull requests.
 
 Then submit a minimal A2A task:
 

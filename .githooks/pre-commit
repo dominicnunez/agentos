@@ -9,6 +9,9 @@ if ! command -v "$GO_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 
+echo "==> staged diff integrity"
+git diff --cached --check
+
 staged_go="$(git diff --cached --name-only --diff-filter=ACMR -- '*.go')"
 if [ -n "$staged_go" ]; then
   if ! command -v "$GOFMT_BIN" >/dev/null 2>&1; then
@@ -23,4 +26,8 @@ if [ -n "$staged_go" ]; then
   fi
 fi
 
+echo "==> unit tests"
 "$GO_BIN" test ./...
+
+echo "==> architecture boundaries"
+"$GO_BIN" tool archguard check --include-tests --profile modular-monolith
