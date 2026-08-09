@@ -42,11 +42,17 @@ curl -X POST http://localhost:8080/a2a/v1/tasks/send \
 
 The current deterministic handler supports `echo <text>`. Use `execution_kind: AGENT` to exercise the fake model adapter. Runtime data defaults to `agentos.db`.
 
+## Testing status
+
+The repository is ready to test as the first V1 vertical slice. The automated suite covers the deterministic and fake-agent paths, event persistence across process restarts, completion verification, Task DAG readiness, the authenticated A2A boundary, exact capability checks, single-use effect approvals, institutional knowledge guards, inference reserves, and deterministic audit checks.
+
+This is not a full V1 acceptance sign-off. The normative acceptance checklist remains in [docs/handoff/docs/08_IMPLEMENTATION_ROADMAP_AND_ACCEPTANCE.md](docs/handoff/docs/08_IMPLEMENTATION_ROADMAP_AND_ACCEPTANCE.md); unimplemented acceptance items must remain visibly incomplete until their runtime paths and adversarial tests exist.
+
 ## Scope
 
-Included: core organizational/work objects, task dependencies, deterministic and agent execution paths, event gateway and ledger, execution manifests, structured tool outcomes, completion contracts, and an inbound A2A boundary.
+Included: core organizational/work objects, task dependencies, deterministic and agent execution paths, event gateway and ledger, execution manifests, structured tool outcomes, completion contracts, an inbound A2A boundary, exact capability checks, versioned knowledge and inference seams, and fingerprinted persist-before-effect coordination.
 
-Deferred: federation, workflow DSLs, semantic/vector memory, Lab, optimizers, production model providers, broad tool ecosystems, and external-effect execution.
+Deferred: federation, workflow DSLs, semantic/vector memory, Lab, optimizers, production provider wiring, broad tool ecosystems, production external-effect adapters, and reconciliation workers.
 
 See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md) and [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md).
 
