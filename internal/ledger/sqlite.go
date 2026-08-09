@@ -61,20 +61,16 @@ func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, ac
 	if err != nil {
 		return fmt.Errorf("encode record: %w", err)
 	}
-	tx, err := l.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	draft := events.TrustedDraft{OrganizationID: organizationID, EventType: eventType, SourceActorID: actorID, TaskID: taskID, AuthorizationRefs: authorizationRefs, ArtifactRefs: artifactRefs, Payload: value}
-	if _, err = appendEvent(ctx, tx, draft); err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, kind, id, version, body, time.Now().UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return fmt.Errorf("append record: %w", err)
-	}
-	return tx.Commit()
+	return l.withTx(ctx, func(tx *sql.Tx) error {
+		draft := events.TrustedDraft{OrganizationID: organizationID, EventType: eventType, SourceActorID: actorID, TaskID: taskID, AuthorizationRefs: authorizationRefs, ArtifactRefs: artifactRefs, Payload: value}
+		if _, err := appendEvent(ctx, tx, draft); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, kind, id, version, body, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return fmt.Errorf("append record: %w", err)
+		}
+		return nil
+	})
 }
 
 // ConsumeApproval durably and atomically claims a single-use approval. A
@@ -83,17 +79,26 @@ func (l *SQLite) ConsumeApproval(ctx context.Context, organizationID, taskID, ap
 	if approvalID == "" || fingerprint == "" {
 		return fmt.Errorf("approval id and fingerprint are required")
 	}
+	return l.withTx(ctx, func(tx *sql.Tx) error {
+		draft := events.TrustedDraft{OrganizationID: organizationID, EventType: "APPROVAL_CONSUMED", TaskID: taskID, Payload: map[string]string{"approval_id": approvalID, "effect_fingerprint": fingerprint, "effect_obligation_id": effectID}}
+		if _, err := appendEvent(ctx, tx, draft); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO consumed_approvals(approval_id,effect_fingerprint,consumed_at) VALUES(?,?,?)`, approvalID, fingerprint, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return fmt.Errorf("consume approval: %w", err)
+		}
+		return nil
+	})
+}
+
+func (l *SQLite) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	tx, err := l.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	draft := events.TrustedDraft{OrganizationID: organizationID, EventType: "APPROVAL_CONSUMED", TaskID: taskID, Payload: map[string]string{"approval_id": approvalID, "effect_fingerprint": fingerprint, "effect_obligation_id": effectID}}
-	if _, err = appendEvent(ctx, tx, draft); err != nil {
+	if err := fn(tx); err != nil {
 		return err
-	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO consumed_approvals(approval_id,effect_fingerprint,consumed_at) VALUES(?,?,?)`, approvalID, fingerprint, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		return fmt.Errorf("consume approval: %w", err)
 	}
 	return tx.Commit()
 }

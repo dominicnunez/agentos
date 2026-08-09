@@ -4,6 +4,12 @@
   "ignorePatterns": [
     "internal/generated/**"
   ],
+  "ignoreFindings": [
+    {
+      "type": "duplicate-code",
+      "file": "**/*_test.go"
+    }
+  ],
   "rules": {
     "complexity": "off",
     "test-only-dependency": "off"
