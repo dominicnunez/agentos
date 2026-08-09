@@ -93,15 +93,11 @@ func (s *Service) ValidateMessageRoute(ctx context.Context, route events.Message
 		return fmt.Errorf("message source is not an Agent in the organization")
 	}
 	if route.TaskID != "" {
-		task, ok := snapshot.Tasks[core.ID(route.TaskID)]
-		if !ok {
-			return fmt.Errorf("message source task does not exist")
+		task, err := messageTaskInOrganization(snapshot, core.ID(route.TaskID), organizationID, "source")
+		if err != nil {
+			return err
 		}
-		taskOrganizationID, err := taskOrganization(snapshot, task.Value)
-		if err != nil || taskOrganizationID != organizationID {
-			return fmt.Errorf("message source task is outside the organization")
-		}
-		if !agentParticipates(snapshot, source.Value.ID, task.Value) {
+		if !agentParticipates(snapshot, source.Value.ID, task) {
 			return fmt.Errorf("message source is not a participant in the task")
 		}
 	}
@@ -117,18 +113,25 @@ func (s *Service) ValidateMessageRoute(ctx context.Context, route events.Message
 			return fmt.Errorf("message recipient Team is outside the organization")
 		}
 	case events.RecipientTask:
-		recipient, ok := snapshot.Tasks[core.ID(route.RecipientID)]
-		if !ok {
-			return fmt.Errorf("message recipient Task does not exist")
-		}
-		recipientOrganizationID, err := taskOrganization(snapshot, recipient.Value)
-		if err != nil || recipientOrganizationID != organizationID {
-			return fmt.Errorf("message recipient Task is outside the organization")
+		if _, err := messageTaskInOrganization(snapshot, core.ID(route.RecipientID), organizationID, "recipient"); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("unsupported message recipient scope")
 	}
 	return nil
+}
+
+func messageTaskInOrganization(snapshot projections.Snapshot, taskID, organizationID core.ID, role string) (core.Task, error) {
+	task, ok := snapshot.Tasks[taskID]
+	if !ok {
+		return core.Task{}, fmt.Errorf("message %s task does not exist", role)
+	}
+	actualOrganizationID, err := taskOrganization(snapshot, task.Value)
+	if err != nil || actualOrganizationID != organizationID {
+		return core.Task{}, fmt.Errorf("message %s task is outside the organization", role)
+	}
+	return task.Value, nil
 }
 
 // Recover validates all durable work before the process exposes an operator

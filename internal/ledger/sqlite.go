@@ -217,32 +217,19 @@ func (l *SQLite) appendMessage(ctx context.Context, draft events.TrustedDraft) (
 	if draft.RecipientScope == "" || draft.RecipientID == "" {
 		return events.Event{}, fmt.Errorf("message recipient is required")
 	}
-	var event events.Event
-	err := l.withTx(ctx, func(tx *sql.Tx) error {
-		var err error
-		event, err = appendEvent(ctx, tx, draft)
-		if err != nil {
-			return err
-		}
+	return l.appendWithProjection(ctx, draft, func(tx *sql.Tx, event events.Event) error {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO inbox(recipient_scope,recipient_id,event_id,organization_id,task_id,available_at) VALUES(?,?,?,?,?,?)`, draft.RecipientScope, draft.RecipientID, event.EventID, draft.OrganizationID, draft.TaskID, event.CreatedAt.Format(time.RFC3339Nano)); err != nil {
 			return fmt.Errorf("project message to inbox: %w", err)
 		}
 		return nil
 	})
-	return event, err
 }
 
 func (l *SQLite) ObserveInbox(ctx context.Context, draft events.TrustedDraft, recipientScope, recipientID string, eventIDs []string) (events.Event, error) {
 	if draft.OrganizationID == "" || draft.RecipientScope != recipientScope || draft.RecipientID != recipientID || len(eventIDs) == 0 {
 		return events.Event{}, fmt.Errorf("observation organization and matching recipient are required")
 	}
-	var observation events.Event
-	err := l.withTx(ctx, func(tx *sql.Tx) error {
-		var err error
-		observation, err = appendEvent(ctx, tx, draft)
-		if err != nil {
-			return err
-		}
+	return l.appendWithProjection(ctx, draft, func(tx *sql.Tx, observation events.Event) error {
 		now := observation.CreatedAt.Format(time.RFC3339Nano)
 		for _, eventID := range eventIDs {
 			result, err := tx.ExecContext(ctx, `UPDATE inbox SET observed_at=?,observation_event_id=? WHERE organization_id=? AND recipient_scope=? AND recipient_id=? AND event_id=? AND observed_at=''`, now, observation.EventID, draft.OrganizationID, recipientScope, recipientID, eventID)
@@ -259,7 +246,22 @@ func (l *SQLite) ObserveInbox(ctx context.Context, draft events.TrustedDraft, re
 		}
 		return nil
 	})
-	return observation, err
+}
+
+// appendWithProjection commits the authoritative event before its derived
+// availability/state rows inside the same transaction. Any projection failure
+// rolls the event back as well.
+func (l *SQLite) appendWithProjection(ctx context.Context, draft events.TrustedDraft, project func(*sql.Tx, events.Event) error) (events.Event, error) {
+	var event events.Event
+	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		event, err = appendEvent(ctx, tx, draft)
+		if err != nil {
+			return err
+		}
+		return project(tx, event)
+	})
+	return event, err
 }
 
 type sqlExecutor interface {
@@ -290,27 +292,17 @@ func appendEvent(ctx context.Context, db sqlExecutor, d events.TrustedDraft) (ev
 	return events.Event{EventID: id, Sequence: seq, OrganizationID: d.OrganizationID, EventType: d.EventType, SourceActorID: d.SourceActorID, SourceExecutionID: d.SourceExecutionID, RecipientScope: d.RecipientScope, RecipientID: d.RecipientID, TaskID: d.TaskID, AuthorizationRefs: d.AuthorizationRefs, ArtifactRefs: d.ArtifactRefs, CreatedAt: now, SchemaVersion: events.SchemaVersion, Payload: data, CorrelationID: d.CorrelationID}, nil
 }
 func (l *SQLite) Events(ctx context.Context, correlationID string) ([]events.Event, error) {
-	rows, err := l.db.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE (?='' OR correlation_id=?) ORDER BY sequence`, correlationID, correlationID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []events.Event
-	for rows.Next() {
-		e, err := scanEvent(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
+	return collectEvents(l.db.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE (?='' OR correlation_id=?) ORDER BY sequence`, correlationID, correlationID))
 }
 
 func (l *SQLite) Inbox(ctx context.Context, recipientScope, recipientID string) ([]events.Event, error) {
-	rows, err := l.db.QueryContext(ctx, `SELECT e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version
+	return collectEvents(l.db.QueryContext(ctx, `SELECT e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version
 FROM inbox i JOIN events e ON e.event_id=i.event_id
 WHERE i.recipient_scope=? AND i.recipient_id=? AND i.observed_at=''
-ORDER BY e.sequence`, recipientScope, recipientID)
+ORDER BY e.sequence`, recipientScope, recipientID))
+}
+
+func collectEvents(rows *sql.Rows, err error) ([]events.Event, error) {
 	if err != nil {
 		return nil, err
 	}
