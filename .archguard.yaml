@@ -86,3 +86,6 @@ analysis:
   include_tests: true
   profiles:
     - modular-monolith
+  table_owners:
+    - module: ledger
+      tables: [events]
