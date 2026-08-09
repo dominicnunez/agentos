@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dominicnunez/agentos/internal/approvals"
 	"github.com/dominicnunez/agentos/internal/audit"
 	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/core"
@@ -24,6 +25,10 @@ func (a *conformanceEffectAdapter) Apply(context.Context, core.EffectObligation)
 	a.calls++
 	return []string{"receipt-v1"}, nil
 }
+
+type conformanceNotifier struct{}
+
+func (conformanceNotifier) Notify(context.Context, core.HumanApproval) error { return nil }
 
 type v1WireContract struct {
 	Manifest          core.ExecutionContextManifest `json:"manifest"`
@@ -94,25 +99,49 @@ func TestV1SafetyServicesEnforceAndRecordContracts(t *testing.T) {
 		t.Fatalf("fingerprint effect: %v", err)
 	}
 	expiresAt := now.Add(time.Hour)
-	approval := &core.HumanApproval{
-		ID: "approval-1", TaskID: "task-1", Action: "send", Resource: "customer-1",
-		EffectFingerprint: fingerprint, Status: "APPROVED", ExpiresAt: &expiresAt, SingleUse: true,
-	}
+	approvalService := approvals.New(l, conformanceNotifier{}, approvals.StaticAuthorizer{{OrganizationID: "org-1", HumanID: "human-1", Boundary: core.BoundaryPublicExternal, Risk: "HIGH"}})
 	obligation := core.EffectObligation{
 		ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", Action: "send", Resource: "customer-1",
-		Descriptor: "send greeting", EffectFingerprint: fingerprint, AuthorizationRefs: []string{"lease-1"},
+		ConsequenceBoundary: core.BoundaryPublicExternal,
+		Descriptor:          "send greeting", EffectFingerprint: fingerprint, AuthorizationRefs: []string{"lease-1"},
 		ApprovalRef: "approval-1", IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"body": "hello"},
 	}
 	adapter := &conformanceEffectAdapter{}
-	coordinator := effects.New(l, adapter)
-	result, err := coordinator.Execute(ctx, obligation, approval)
+	coordinator := effects.NewWithApprovals(l, adapter, approvalService)
+	if _, err := coordinator.Prepare(ctx, obligation); err != nil {
+		t.Fatalf("prepare protected effect obligation: %v", err)
+	}
+	approval, err := approvalService.Request(ctx, core.HumanApproval{
+		ID: "approval-1", OrganizationID: "org-1", TaskID: "task-1", EffectObligationID: "effect-1", Action: "send", Resource: "customer-1",
+		Boundary: core.BoundaryPublicExternal, Risk: "HIGH", Urgency: "NORMAL",
+		EffectFingerprint: fingerprint, ExpiresAt: &expiresAt, SingleUse: true,
+	})
+	if err != nil {
+		t.Fatalf("request exact effect approval: %v", err)
+	}
+	approval, err = approvalService.Acknowledge(ctx, approval.ID, "human-1")
+	if err != nil {
+		t.Fatalf("acknowledge exact effect approval: %v", err)
+	}
+	approval, err = approvalService.BeginDecision(ctx, approval.ID, "human-1")
+	if err != nil {
+		t.Fatalf("begin exact effect decision: %v", err)
+	}
+	approval, err = approvalService.Decide(ctx, approvals.Decision{ApprovalID: approval.ID, HumanID: "human-1", EffectFingerprint: fingerprint, Approve: true})
+	if err != nil || approval.Status != core.ApprovalApproved {
+		t.Fatalf("decide exact effect approval: approval=%+v err=%v", approval, err)
+	}
+	result, err := coordinator.Execute(ctx, obligation)
 	if err != nil || result.Status != core.EffectConfirmed || len(result.ConfirmationEvidenceRefs) != 1 {
 		t.Fatalf("execute approved persisted effect: result=%+v err=%v", result, err)
 	}
 	replay := obligation
 	replay.ID = "effect-2"
 	replay.IdempotencyKey = "effect-key-2"
-	if _, err := coordinator.Execute(ctx, replay, approval); err == nil {
+	if _, err := coordinator.Prepare(ctx, replay); err != nil {
+		t.Fatalf("prepare replay obligation: %v", err)
+	}
+	if _, err := coordinator.Execute(ctx, replay); err == nil {
 		t.Fatal("expected reuse of single-use approval to fail closed")
 	}
 	if adapter.calls != 1 {

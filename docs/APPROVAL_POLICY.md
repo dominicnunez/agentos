@@ -14,4 +14,17 @@ The runtime must require appropriately scoped human approval for:
 
 Unanswered decisions fail closed. Approval must bind the exact effect fingerprint, arguments, task, expiry, and single-use status where applicable. Approval of an effect never grants broader authority.
 
-This first slice does not execute consequential external effects. The A2A endpoint is inbound only.
+The V1 lifecycle is durable: `PENDING -> NOTIFIED -> ACKNOWLEDGED ->
+PENDING_DECISION -> APPROVED | DENIED`. Acknowledgement records attention only.
+Decision authority is matched exactly to human identity, organization,
+consequence boundary, and risk. Urgency controls attention only. Unknown
+boundaries and unavailable authority fail closed.
+
+Before notification, the runtime persists a replay-complete `EffectObligation`
+in `PENDING`. Single-use approval consumption and the transition to `ATTEMPTED`
+commit atomically. A confirmed obligation is idempotent on duplicate delivery;
+an interrupted `ATTEMPTED` obligation remains explicitly uncertain for later
+reconciliation rather than being blindly replayed.
+
+No production consequential-effect adapter is enabled. The A2A endpoint is
+inbound only and ordinary Hermes operator identity cannot decide approvals.

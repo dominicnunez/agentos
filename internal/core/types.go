@@ -230,6 +230,7 @@ type EffectObligation struct {
 	TaskID                   ID                `json:"task_id"`
 	Action                   string            `json:"action"`
 	Resource                 string            `json:"resource"`
+	ConsequenceBoundary      string            `json:"consequence_boundary,omitempty"`
 	Descriptor               string            `json:"canonical_effect_descriptor"`
 	EffectFingerprint        string            `json:"effect_fingerprint"`
 	AuthorizationRefs        []string          `json:"authorization_refs"`
@@ -242,21 +243,49 @@ type EffectObligation struct {
 	ConfirmationEvidenceRefs []string          `json:"confirmation_evidence_refs"`
 	CreatedAt                time.Time         `json:"created_at"`
 }
+
+type ApprovalStatus string
+
+const (
+	ApprovalPending         ApprovalStatus = "PENDING"
+	ApprovalNotified        ApprovalStatus = "NOTIFIED"
+	ApprovalAcknowledged    ApprovalStatus = "ACKNOWLEDGED"
+	ApprovalPendingDecision ApprovalStatus = "PENDING_DECISION"
+	ApprovalApproved        ApprovalStatus = "APPROVED"
+	ApprovalDenied          ApprovalStatus = "DENIED"
+)
+
+const (
+	BoundaryFinancial              = "FINANCIAL"
+	BoundaryPhysicalWorld          = "PHYSICAL_WORLD"
+	BoundaryPublicExternal         = "PUBLIC_EXTERNAL"
+	BoundaryDestructive            = "DESTRUCTIVE_IRREVERSIBLE"
+	BoundarySensitiveDataExpansion = "SENSITIVE_DATA_BOUNDARY_EXPANSION"
+	BoundaryPrivilegeExpansion     = "PRIVILEGE_TRUST_EXPANSION"
+	BoundaryLegalBinding           = "LEGAL_BINDING"
+	BoundaryDeployment             = "AGENT_OS_DEPLOYMENT"
+	BoundaryTrustedCore            = "TRUSTED_CORE_SECURITY"
+)
+
 type HumanApproval struct {
-	ID                ID         `json:"id"`
-	TaskID            ID         `json:"task_id"`
-	Action            string     `json:"action"`
-	Resource          string     `json:"resource"`
-	Boundary          string     `json:"boundary"`
-	Risk              string     `json:"risk"`
-	Urgency           string     `json:"urgency"`
-	EffectFingerprint string     `json:"effect_fingerprint"`
-	Status            string     `json:"status"`
-	CreatedAt         time.Time  `json:"created_at"`
-	AcknowledgedAt    *time.Time `json:"acknowledged_at,omitempty"`
-	DecisionAt        *time.Time `json:"decision_at,omitempty"`
-	ExpiresAt         *time.Time `json:"expires_at,omitempty"`
-	SingleUse         bool       `json:"single_use"`
+	ID                 ID             `json:"id"`
+	OrganizationID     ID             `json:"organization_id"`
+	TaskID             ID             `json:"task_id"`
+	EffectObligationID ID             `json:"effect_obligation_id"`
+	Action             string         `json:"action"`
+	Resource           string         `json:"resource"`
+	Boundary           string         `json:"boundary"`
+	Risk               string         `json:"risk"`
+	Urgency            string         `json:"urgency"`
+	EffectFingerprint  string         `json:"effect_fingerprint"`
+	Status             ApprovalStatus `json:"status"`
+	CreatedAt          time.Time      `json:"created_at"`
+	AcknowledgedAt     *time.Time     `json:"acknowledged_at,omitempty"`
+	AcknowledgedBy     ID             `json:"acknowledged_by,omitempty"`
+	DecisionAt         *time.Time     `json:"decision_at,omitempty"`
+	DecidedBy          ID             `json:"decided_by,omitempty"`
+	ExpiresAt          *time.Time     `json:"expires_at,omitempty"`
+	SingleUse          bool           `json:"single_use"`
 }
 
 type ToolOutcomeStatus string

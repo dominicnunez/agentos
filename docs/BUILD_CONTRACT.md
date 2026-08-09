@@ -44,3 +44,11 @@ envelopes. The SQLite ledger commits each message and its Agent, Team, or Task
 inbox availability in one transaction. Available messages survive restart and
 are materialized, in event order, only at the next applicable AgentExecution
 boundary; the execution manifest records the exact message event references.
+
+Human-required effects persist their complete obligation before notification.
+Approval notification, acknowledgement, pending-decision, approval, and denial
+are versioned durable records. Acknowledgement has no authority effect, and a
+decision must come from a human identity explicitly authorized for the exact
+organization, consequence boundary, and risk. Protected execution reloads that record
+by `ApprovalRef` and revalidates organization, task, action, resource, boundary,
+fingerprint, and expiry before an adapter can run.

@@ -226,3 +226,41 @@ correlation_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, schema_versio
 		t.Fatalf("migrated inbox=%+v err=%v", available, err)
 	}
 }
+
+func TestApprovalConsumptionAndAttemptTransitionAreAtomic(t *testing.T) {
+	ctx := context.Background()
+	l, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	pending := map[string]any{"effect_obligation_id": "effect-1", "status": "PENDING"}
+	if err := l.AppendRecord(ctx, "org-1", "EFFECT_OBLIGATION_TRANSITIONED", "", "task-1", nil, nil, "effect", "effect-1", 1, pending); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.db.ExecContext(ctx, `CREATE TRIGGER fail_effect_attempt BEFORE INSERT ON records WHEN NEW.kind='effect' AND NEW.version=2 BEGIN SELECT RAISE(FAIL, 'injected attempt failure'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	attempted := map[string]any{"effect_obligation_id": "effect-1", "status": "ATTEMPTED"}
+	err = l.ConsumeApprovalAndAppendRecord(ctx, "org-1", "task-1", "approval-1", "fingerprint-1", "effect-1", nil, nil, "effect", "effect-1", 2, attempted)
+	if err == nil {
+		t.Fatal("injected attempt failure was ignored")
+	}
+	stream, err := l.Events(ctx, "")
+	if err != nil || len(stream) != 1 || stream[0].EventType != "EFFECT_OBLIGATION_TRANSITIONED" {
+		t.Fatalf("failed atomic transition left approval consumption: events=%+v err=%v", stream, err)
+	}
+	rows, err := l.Records(ctx, "effect", "effect-1")
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("failed atomic transition changed effect: rows=%d err=%v", len(rows), err)
+	}
+	if _, err := l.db.ExecContext(ctx, `DROP TRIGGER fail_effect_attempt`); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.ConsumeApprovalAndAppendRecord(ctx, "org-1", "task-1", "approval-1", "fingerprint-1", "effect-1", nil, nil, "effect", "effect-1", 2, attempted); err != nil {
+		t.Fatalf("rolled-back approval could not be retried: %v", err)
+	}
+	if err := l.ConsumeApprovalAndAppendRecord(ctx, "org-1", "task-1", "approval-1", "fingerprint-1", "effect-2", nil, nil, "effect", "effect-2", 1, attempted); err == nil {
+		t.Fatal("consumed single-use approval was reused")
+	}
+}
