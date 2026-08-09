@@ -9,20 +9,20 @@ claim.
 | # | Acceptance criterion | Status | Current evidence / remaining gap |
 |---:|---|---|---|
 | 1 | Team/Agent identity survives restart | Covered | `TestDurableObjectsSurviveRestartAndRebuildFromEvents` reopens SQLite and compares both the stored projection and event replay. |
-| 2 | Lateral message without planner relay | Open | `MESSAGE` is an allowed EventDraft type; inbox/routing behavior is not implemented. |
-| 3 | Recipient sees message at an action boundary | Open | Action-boundary inbox surfacing is not implemented. |
-| 4 | Failed persistence never exposes a message | Open | Task availability has this guarantee; the equivalent recipient-inbox failure test is still required. |
+| 2 | Lateral message without planner relay | Covered | `TestLateralMessagesSurviveRestartAndSurfaceAtAgentActionBoundary` sends Agent-, Team-, and Task-addressed EventDrafts directly through the Event Gateway and durable inbox projection. |
+| 3 | Recipient sees message at an action boundary | Covered | The same restart test proves chronologically ordered messages enter the next AgentExecution context and exact manifest event refs before the fake model call. |
+| 4 | Failed persistence never exposes a message | Covered | `TestInboxProjectionFailureRollsBackMessage` forces the inbox write to fail and verifies the transaction leaves neither a ledger event nor inbox availability. |
 | 5 | Blocked worker returns control without authority expansion | Partial | Unsupported execution becomes a durable `TASK_BLOCKED`; parent remediation and adversarial self-escalation coverage remain. |
 | 6 | Child assignment has no unintended positive capability inheritance | Partial | Exact lease matching rejects broader resources; explicit child-assignment coverage remains. |
 | 7 | Human-required action waits for a decision | Open | Approval/effect records exist, but durable pending wait/resume orchestration is not implemented. |
 | 8 | Acknowledgement cannot approve | Open | Acknowledgement/decision lifecycle behavior is not implemented. |
 | 9 | Freeze/revoke prevents time-of-use action | Partial | `TestCheckRequiresExactUnfrozenLease` covers freeze denial; an integrated effect-time revoke race remains. |
-| 10 | Agent text cannot forge trusted state | Partial | `TestAgentCannotMintTrustedControlEvent` covers control-event minting; spoofed identity/completion/attestation cases remain. |
+| 10 | Agent text cannot forge trusted state | Partial | `TestAgentCannotMintTrustedControlEvent`, `TestMessageEnvelopeUsesAuthenticatedIdentity`, and the lateral-message restart test cover control-event minting and sender spoofing; completion and runtime-attestation forgeries remain. |
 | 11 | Candidate completion cannot bypass Completion Engine | Covered | Vertical-slice event ordering and `TestEvaluateRequiresVerifiedSuccess` require verified structured outcome before terminal completion. |
 | 12 | Duplicate delivery cannot duplicate a consequential effect | Partial | Single-use approval consumption blocks reuse; full idempotency/reconciliation after uncertain attempts remains. |
-| 13 | Restart preserves pending work, approval, and inbox | Partial | Pending/blocked tasks and DAG dependencies survive and recover; approvals and inbox availability still need restart tests/runtime paths. |
+| 13 | Restart preserves pending work, approval, and inbox | Partial | Pending/blocked tasks, DAG dependencies, and observed/unobserved inbox state survive reopen; durable approval wait/resume remains. |
 | 14 | Complete operational telemetry | Partial | Inference usage snapshots exist; unified per-run outcome/cost/time/message/block/retry/human telemetry does not. |
-| 15 | Accurate manifest for every model execution | Partial | The fake AgentExecution persists a manifest and wire fields round-trip; exact materialized-reference assertions remain. |
+| 15 | Accurate manifest for every model execution | Covered | Every current AgentExecution persists a manifest before inference; the lateral-message test asserts the exact materialized event references and matching context. |
 | 16 | ToolOutcome failure cannot hide behind success text | Covered | Completion requires both successful status and verified postcondition. |
 | 17 | Safe deterministic recovery precedes cognitive recovery | Covered | `TestRecoverRetriesDeterministicWorkAndBlocksUncertainAgentWork` retries deterministic work and refuses blind adaptive replay. |
 | 18 | Hermes discovers, submits, and continues through A2A | Partial | Agent Card, authenticated submission, status, and input persistence are tested; pinned real Hermes interoperability and post-input completion remain. |

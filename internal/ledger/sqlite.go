@@ -32,10 +32,13 @@ func (l *SQLite) Close() error { return l.db.Close() }
 func (l *SQLite) migrate(ctx context.Context) error {
 	_, err := l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS events (
 sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, organization_id TEXT NOT NULL,
-event_type TEXT NOT NULL, source_actor_id TEXT NOT NULL DEFAULT '', source_execution_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '', authorization_refs BLOB NOT NULL, artifact_refs BLOB NOT NULL, payload BLOB NOT NULL,
+event_type TEXT NOT NULL, source_actor_id TEXT NOT NULL DEFAULT '', source_execution_id TEXT NOT NULL DEFAULT '', recipient_scope TEXT NOT NULL DEFAULT '', recipient_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '', authorization_refs BLOB NOT NULL, artifact_refs BLOB NOT NULL, payload BLOB NOT NULL,
 correlation_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, schema_version INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS events_correlation_idx ON events(correlation_id, sequence);`)
 	if err != nil {
+		return err
+	}
+	if err := l.ensureEventRoutingColumns(ctx); err != nil {
 		return err
 	}
 	_, err = l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS records (
@@ -45,9 +48,51 @@ CREATE INDEX IF NOT EXISTS records_kind_idx ON records(kind, created_at);`)
 	if err != nil {
 		return err
 	}
+	_, err = l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS inbox (
+recipient_scope TEXT NOT NULL, recipient_id TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE,
+organization_id TEXT NOT NULL, task_id TEXT NOT NULL DEFAULT '', available_at TEXT NOT NULL,
+observed_at TEXT NOT NULL DEFAULT '', observation_event_id TEXT NOT NULL DEFAULT '',
+PRIMARY KEY(recipient_scope, recipient_id, event_id));
+CREATE INDEX IF NOT EXISTS inbox_available_idx ON inbox(recipient_scope, recipient_id, observed_at, available_at);`)
+	if err != nil {
+		return err
+	}
 	_, err = l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS consumed_approvals (
 approval_id TEXT PRIMARY KEY, effect_fingerprint TEXT NOT NULL, consumed_at TEXT NOT NULL);`)
 	return err
+}
+
+func (l *SQLite) ensureEventRoutingColumns(ctx context.Context) error {
+	columns := map[string]bool{}
+	rows, err := l.db.QueryContext(ctx, `PRAGMA table_info(events)`)
+	if err != nil {
+		return fmt.Errorf("inspect event schema: %w", err)
+	}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("read event schema: %w", err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for name, ddl := range map[string]string{
+		"recipient_scope": `ALTER TABLE events ADD COLUMN recipient_scope TEXT NOT NULL DEFAULT ''`,
+		"recipient_id":    `ALTER TABLE events ADD COLUMN recipient_id TEXT NOT NULL DEFAULT ''`,
+	} {
+		if columns[name] {
+			continue
+		}
+		if _, err := l.db.ExecContext(ctx, ddl); err != nil {
+			return fmt.Errorf("add event routing column %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // AppendRecord appends the authoritative transition event and updates its
@@ -162,7 +207,59 @@ func (l *SQLite) Records(ctx context.Context, kind, id string) ([][]byte, error)
 	return out, rows.Err()
 }
 func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Event, error) {
+	if d.EventType == "MESSAGE" {
+		return l.appendMessage(ctx, d)
+	}
 	return appendEvent(ctx, l.db, d)
+}
+
+func (l *SQLite) appendMessage(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {
+	if draft.RecipientScope == "" || draft.RecipientID == "" {
+		return events.Event{}, fmt.Errorf("message recipient is required")
+	}
+	var event events.Event
+	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		event, err = appendEvent(ctx, tx, draft)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO inbox(recipient_scope,recipient_id,event_id,organization_id,task_id,available_at) VALUES(?,?,?,?,?,?)`, draft.RecipientScope, draft.RecipientID, event.EventID, draft.OrganizationID, draft.TaskID, event.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+			return fmt.Errorf("project message to inbox: %w", err)
+		}
+		return nil
+	})
+	return event, err
+}
+
+func (l *SQLite) ObserveInbox(ctx context.Context, draft events.TrustedDraft, recipientScope, recipientID string, eventIDs []string) (events.Event, error) {
+	if draft.OrganizationID == "" || draft.RecipientScope != recipientScope || draft.RecipientID != recipientID || len(eventIDs) == 0 {
+		return events.Event{}, fmt.Errorf("observation organization and matching recipient are required")
+	}
+	var observation events.Event
+	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		observation, err = appendEvent(ctx, tx, draft)
+		if err != nil {
+			return err
+		}
+		now := observation.CreatedAt.Format(time.RFC3339Nano)
+		for _, eventID := range eventIDs {
+			result, err := tx.ExecContext(ctx, `UPDATE inbox SET observed_at=?,observation_event_id=? WHERE organization_id=? AND recipient_scope=? AND recipient_id=? AND event_id=? AND observed_at=''`, now, observation.EventID, draft.OrganizationID, recipientScope, recipientID, eventID)
+			if err != nil {
+				return fmt.Errorf("observe inbox event %s: %w", eventID, err)
+			}
+			changed, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if changed != 1 {
+				return fmt.Errorf("inbox event %s is not available to recipient", eventID)
+			}
+		}
+		return nil
+	})
+	return observation, err
 }
 
 type sqlExecutor interface {
@@ -182,7 +279,7 @@ func appendEvent(ctx context.Context, db sqlExecutor, d events.TrustedDraft) (ev
 		return events.Event{}, fmt.Errorf("generate event id: %w", err)
 	}
 	id := "evt-" + hex.EncodeToString(random[:])
-	r, err := db.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,source_execution_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, id, d.OrganizationID, d.EventType, d.SourceActorID, d.SourceExecutionID, d.TaskID, auth, artifacts, data, d.CorrelationID, now.Format(time.RFC3339Nano), events.SchemaVersion)
+	r, err := db.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, d.OrganizationID, d.EventType, d.SourceActorID, d.SourceExecutionID, d.RecipientScope, d.RecipientID, d.TaskID, auth, artifacts, data, d.CorrelationID, now.Format(time.RFC3339Nano), events.SchemaVersion)
 	if err != nil {
 		return events.Event{}, fmt.Errorf("append event: %w", err)
 	}
@@ -190,33 +287,66 @@ func appendEvent(ctx context.Context, db sqlExecutor, d events.TrustedDraft) (ev
 	if err != nil {
 		return events.Event{}, err
 	}
-	return events.Event{EventID: id, Sequence: seq, OrganizationID: d.OrganizationID, EventType: d.EventType, SourceActorID: d.SourceActorID, SourceExecutionID: d.SourceExecutionID, TaskID: d.TaskID, AuthorizationRefs: d.AuthorizationRefs, ArtifactRefs: d.ArtifactRefs, CreatedAt: now, SchemaVersion: events.SchemaVersion, Payload: data, CorrelationID: d.CorrelationID}, nil
+	return events.Event{EventID: id, Sequence: seq, OrganizationID: d.OrganizationID, EventType: d.EventType, SourceActorID: d.SourceActorID, SourceExecutionID: d.SourceExecutionID, RecipientScope: d.RecipientScope, RecipientID: d.RecipientID, TaskID: d.TaskID, AuthorizationRefs: d.AuthorizationRefs, ArtifactRefs: d.ArtifactRefs, CreatedAt: now, SchemaVersion: events.SchemaVersion, Payload: data, CorrelationID: d.CorrelationID}, nil
 }
 func (l *SQLite) Events(ctx context.Context, correlationID string) ([]events.Event, error) {
-	rows, err := l.db.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE (?='' OR correlation_id=?) ORDER BY sequence`, correlationID, correlationID)
+	rows, err := l.db.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE (?='' OR correlation_id=?) ORDER BY sequence`, correlationID, correlationID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []events.Event
 	for rows.Next() {
-		var e events.Event
-		var at string
-		var auth, artifacts []byte
-		if err := rows.Scan(&e.EventID, &e.Sequence, &e.OrganizationID, &e.EventType, &e.SourceActorID, &e.SourceExecutionID, &e.TaskID, &auth, &artifacts, &e.Payload, &e.CorrelationID, &at, &e.SchemaVersion); err != nil {
-			return nil, err
-		}
-		if err = json.Unmarshal(auth, &e.AuthorizationRefs); err != nil {
-			return nil, err
-		}
-		if err = json.Unmarshal(artifacts, &e.ArtifactRefs); err != nil {
-			return nil, err
-		}
-		e.CreatedAt, err = time.Parse(time.RFC3339Nano, at)
+		e, err := scanEvent(rows)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+func (l *SQLite) Inbox(ctx context.Context, recipientScope, recipientID string) ([]events.Event, error) {
+	rows, err := l.db.QueryContext(ctx, `SELECT e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version
+FROM inbox i JOIN events e ON e.event_id=i.event_id
+WHERE i.recipient_scope=? AND i.recipient_id=? AND i.observed_at=''
+ORDER BY e.sequence`, recipientScope, recipientID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []events.Event
+	for rows.Next() {
+		event, err := scanEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func scanEvent(row rowScanner) (events.Event, error) {
+	var event events.Event
+	var createdAt string
+	var authorizationRefs, artifactRefs []byte
+	if err := row.Scan(&event.EventID, &event.Sequence, &event.OrganizationID, &event.EventType, &event.SourceActorID, &event.SourceExecutionID, &event.RecipientScope, &event.RecipientID, &event.TaskID, &authorizationRefs, &artifactRefs, &event.Payload, &event.CorrelationID, &createdAt, &event.SchemaVersion); err != nil {
+		return events.Event{}, err
+	}
+	if err := json.Unmarshal(authorizationRefs, &event.AuthorizationRefs); err != nil {
+		return events.Event{}, err
+	}
+	if err := json.Unmarshal(artifactRefs, &event.ArtifactRefs); err != nil {
+		return events.Event{}, err
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, createdAt)
+	if err != nil {
+		return events.Event{}, err
+	}
+	event.CreatedAt = parsed
+	return event, nil
 }

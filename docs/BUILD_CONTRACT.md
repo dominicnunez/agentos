@@ -38,3 +38,9 @@ authoritative transition events and can be rebuilt by replay. Startup validates
 that state before opening the operator endpoint, preserves blocked work, runs
 dependency-ready pending work, retries only known-safe interrupted deterministic
 work, and blocks interrupted adaptive execution whose outcome is uncertain.
+
+Agent-proposed `MESSAGE` drafts use runtime-stamped sender and recipient
+envelopes. The SQLite ledger commits each message and its Agent, Team, or Task
+inbox availability in one transaction. Available messages survive restart and
+are materialized, in event order, only at the next applicable AgentExecution
+boundary; the execution manifest records the exact message event references.

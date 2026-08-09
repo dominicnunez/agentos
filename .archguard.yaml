@@ -153,4 +153,4 @@ analysis:
     - modular-monolith
   table_owners:
     - module: ledger
-      tables: [consumed_approvals, events, records]
+      tables: [consumed_approvals, events, inbox, records]
