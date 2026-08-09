@@ -23,6 +23,14 @@ go test ./...
 AGENTOS_OPERATOR_TOKEN=change-me go run ./cmd/agentos
 ```
 
+Enable the repository-owned commit and push checks once per checkout:
+
+```powershell
+.\scripts\install-git-hooks.cmd
+```
+
+On Unix-like systems, run `./scripts/install-git-hooks.sh` instead. GitHub Actions independently enforces formatting, vetting, and race-tested unit tests on every push and pull request.
+
 Then submit a minimal A2A task:
 
 ```sh

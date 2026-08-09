@@ -1,19 +1,20 @@
-# Agent OS repository instructions
+# Agent OS repository guidance
 
-The authoritative design is Agent OS v4.2. Preserve these rules in every change:
+Agent OS v4.2 is a Go modular monolith for operating persistent AI-assisted organizations.
 
-- Internal communication uses Event Contracts. A2A is only an external operator adapter.
-- Runtime code owns event identity, sequence, source, time, authorization, and trusted control events. Model output is untrusted content.
-- Durable Agent/Team identity is separate from ephemeral `AgentExecution`.
-- The Task dependency graph is the V1 workflow model; do not introduce a workflow DSL.
-- Use the least nondeterministic mechanism sufficient for the work. Model inference must be explicitly justified.
-- Capabilities do not inherit positively. Blocked workers return control instead of expanding their authority.
-- Human consequence boundaries fail closed.
-- Actors propose `CANDIDATE_COMPLETE`; only the Completion Engine can verify completion.
-- Persist an `ExecutionContextManifest` for every model execution.
-- Tools return `ToolOutcome`; use deterministic recovery before another model turn.
-- Do not enable consequential external effects without effect-bound approval and persist-before-effect obligations.
+## Authoritative sources
 
-Deferred unless explicitly promoted: broad federation, outbound A2A delegation, workflow DSLs, semantic/vector memory, Lab orchestration, optimizer, executable generated Skills, and predictive resource planning.
+- Start with [`docs/handoff/QUICK_START.md`](docs/handoff/QUICK_START.md).
+- Treat [`docs/handoff/IMPLEMENTATION_SCOPE.yaml`](docs/handoff/IMPLEMENTATION_SCOPE.yaml) as the scope authority.
+- Use [`docs/handoff/docs/29_V1_BUILD_CONTRACT.md`](docs/handoff/docs/29_V1_BUILD_CONTRACT.md) for implementation requirements.
+- Consult the remaining preserved handoff only when the current work needs its detail.
 
-Run `gofmt`, `go vet ./...`, and `go test ./...` before committing.
+## Project-wide boundaries
+
+- Internal coordination uses runtime-owned Event Contracts over one authoritative ledger; model-generated content is untrusted.
+- Actual work determines the Task DAG and execution structure. Use model inference only where adaptive intelligence is justified.
+- Authority and completion fail closed: workers cannot expand their own capabilities or certify their own completion.
+- A2A is an external operator boundary, not internal IPC or implicit administrative authority.
+- Keep deferred architecture deferred unless a human explicitly promotes it from the handoff scope.
+
+Repository hooks and CI own routine formatting, test, vet, and build enforcement.

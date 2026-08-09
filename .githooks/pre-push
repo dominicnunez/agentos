@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+GO_BIN="${AGENTOS_GO:-go}"
+
+if ! command -v "$GO_BIN" >/dev/null 2>&1; then
+  echo "Go is required by the Agent OS pre-push hook. Set AGENTOS_GO to its executable if it is not on PATH."
+  exit 1
+fi
+
+"$GO_BIN" vet ./...
+"$GO_BIN" test ./...
