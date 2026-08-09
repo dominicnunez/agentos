@@ -1,0 +1,63 @@
+// Package workflow contains deterministic Task-DAG scheduling policy.
+package workflow
+
+import (
+	"fmt"
+	"sort"
+
+	"github.com/dominicnunez/agentos/internal/core"
+)
+
+// Scheduler finds pending tasks whose dependencies are verified complete.
+// It does not choose a model or mutate task state.
+type Scheduler struct{}
+
+func (Scheduler) Ready(tasks map[core.ID]core.Task) ([]core.Task, error) {
+	if err := validate(tasks); err != nil {
+		return nil, err
+	}
+	ready := make([]core.Task, 0)
+	for _, task := range tasks {
+		if task.Status == core.TaskPending && task.Ready(tasks) {
+			ready = append(ready, task)
+		}
+	}
+	sort.Slice(ready, func(i, j int) bool { return ready[i].ID < ready[j].ID })
+	return ready, nil
+}
+
+func validate(tasks map[core.ID]core.Task) error {
+	for id, task := range tasks {
+		for _, dependency := range task.DependsOn {
+			if _, ok := tasks[dependency]; !ok {
+				return fmt.Errorf("task %s has missing dependency %s", id, dependency)
+			}
+		}
+	}
+	visiting := make(map[core.ID]bool)
+	visited := make(map[core.ID]bool)
+	var visit func(core.ID) error
+	visit = func(id core.ID) error {
+		if visiting[id] {
+			return fmt.Errorf("task dependency cycle at %s", id)
+		}
+		if visited[id] {
+			return nil
+		}
+		visiting[id] = true
+		for _, dependency := range tasks[id].DependsOn {
+			if err := visit(dependency); err != nil {
+				return err
+			}
+		}
+		visiting[id] = false
+		visited[id] = true
+		return nil
+	}
+	for id := range tasks {
+		if err := visit(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}

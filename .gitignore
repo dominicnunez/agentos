@@ -1,0 +1,7 @@
+/agentos
+/agentos.exe
+/*.db
+/*.db-shm
+/*.db-wal
+/.idea/
+/.vscode/
