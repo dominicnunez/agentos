@@ -20,7 +20,7 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v4.2", CreatedAt: now}
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
 	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintVersion: "v1", ExecutionProfileVersion: "v1", RuntimeAdapter: "fake", Status: "ACTIVE"}
 	team := core.Team{ID: "team-1", OrganizationID: organization.ID, Name: "Delivery", MemberAgentIDs: []core.ID{agent.ID}, Status: "ACTIVE", CreatedAt: now}
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "echo hello", NormalizedObjective: "echo hello", HardConstraints: []string{}, ConsequenceBoundaries: []string{}, CreatedAt: now}

@@ -42,7 +42,7 @@ type request struct {
 
 func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" && r.URL.Path == "/.well-known/agent-card.json" {
-		writeJSON(w, http.StatusOK, map[string]any{"name": "Agent OS Operator Gateway", "description": "Inbound work-level gateway for Agent OS v4.2", "url": "/a2a/v1/tasks/send", "version": "0.1.0", "protocolVersion": "1.0", "capabilities": map[string]bool{"streaming": false, "pushNotifications": false}, "skills": []map[string]any{{"id": "submit-work", "name": "Submit organizational work", "tags": []string{"agent-os", "operator"}}}})
+		writeJSON(w, http.StatusOK, map[string]any{"name": "Agent OS Operator Gateway", "description": "Inbound work-level gateway for Agent OS V1", "url": "/a2a/v1/tasks/send", "version": "1.0.0-dev", "protocolVersion": "1.0", "capabilities": map[string]bool{"streaming": false, "pushNotifications": false}, "skills": []map[string]any{{"id": "submit-work", "name": "Submit organizational work", "tags": []string{"agent-os", "operator"}}}})
 		return
 	}
 	if r.URL.Path == "/.well-known/agent-card.json" {
