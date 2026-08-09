@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -29,7 +30,11 @@ func main() {
 	if orgID == "" {
 		orgID = "org-default"
 	}
-	h := gateway.NewA2A(app.New(events.NewGateway(l)), gateway.ExternalActor{ID: "hermes-primary", OrganizationID: orgID, BearerToken: token, Capabilities: []string{"submit_work", "read_status", "provide_input"}})
+	service := app.New(events.NewGateway(l))
+	if _, err := service.Recover(context.Background()); err != nil {
+		log.Fatalf("recover durable runtime before serving: %v", err)
+	}
+	h := gateway.NewA2A(service, gateway.ExternalActor{ID: "hermes-primary", OrganizationID: orgID, BearerToken: token, Capabilities: []string{"submit_work", "read_status", "provide_input"}})
 	s := &http.Server{Addr: ":8080", Handler: h, ReadHeaderTimeout: 5e9}
 	log.Printf("Agent OS listening on %s", s.Addr)
 	log.Fatal(s.ListenAndServe())

@@ -30,6 +30,8 @@ modules:
     path: internal/knowledge
   - name: ledger
     path: internal/ledger
+  - name: projections
+    path: internal/projections
   - name: secrets
     path: internal/secrets
   - name: workflow
@@ -48,7 +50,7 @@ policy:
       from:
         module: app
       to:
-        modules: [completion, core, events, execution]
+        modules: [completion, core, events, execution, projections, workflow]
 
     - name: audit-events
       from:
@@ -98,6 +100,12 @@ policy:
       to:
         module: events
 
+    - name: projection-domain
+      from:
+        module: projections
+      to:
+        modules: [core, events]
+
     - name: workflow-domain
       from:
         module: workflow
@@ -132,6 +140,13 @@ policy:
       to:
         module: ledger
 
+    - name: projections-test-adapter
+      from:
+        module: projections
+        tests: true
+      to:
+        module: ledger
+
 analysis:
   include_tests: true
   profiles:
@@ -139,4 +154,3 @@ analysis:
   table_owners:
     - module: ledger
       tables: [consumed_approvals, events, records]
-

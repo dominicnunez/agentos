@@ -32,3 +32,9 @@ capability-gated status and input continuation. Production deployments must
 replace the example static bearer binding at their ingress boundary and
 explicitly configure a provider adapter. Credentials and A2A wire types remain
 outside core domain objects.
+
+Durable organization/work projections now commit atomically with their
+authoritative transition events and can be rebuilt by replay. Startup validates
+that state before opening the operator endpoint, preserves blocked work, runs
+dependency-ready pending work, retries only known-safe interrupted deterministic
+work, and blocks interrupted adaptive execution whose outcome is uncertain.

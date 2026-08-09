@@ -28,6 +28,35 @@ type TrustedDraft struct {
 	Payload           any
 	CorrelationID     string
 }
+
+// ProjectionDraft couples one trusted event with one rebuildable projection
+// update. The ledger persists both atomically; callers never publish the
+// projection before its authoritative event exists.
+type ProjectionDraft struct {
+	Event          TrustedDraft
+	ProjectionKind string
+	RecordID       string
+	Version        int
+	Value          any
+}
+
+// ProjectionRecord is the canonical event/record representation used to
+// rebuild current state. Value remains raw until a bounded projection module
+// decodes it into its domain type.
+type ProjectionRecord struct {
+	ProjectionKind string          `json:"projection_kind"`
+	RecordID       string          `json:"record_id"`
+	Version        int             `json:"version"`
+	CorrelationID  string          `json:"correlation_id,omitempty"`
+	Value          json.RawMessage `json:"value"`
+}
+
+// ProjectionEventPayload preserves transition detail while carrying the
+// complete versioned record needed for deterministic replay.
+type ProjectionEventPayload struct {
+	Projection ProjectionRecord `json:"projection"`
+	Detail     json.RawMessage  `json:"detail,omitempty"`
+}
 type Event struct {
 	EventID           string          `json:"event_id"`
 	Sequence          int64           `json:"sequence"`
@@ -48,6 +77,12 @@ type Appender interface {
 }
 type Reader interface {
 	Events(context.Context, string) ([]Event, error)
+}
+type ProjectionAppender interface {
+	AppendProjection(context.Context, ProjectionDraft) (Event, error)
+}
+type ProjectionReader interface {
+	Records(context.Context, string, string) ([][]byte, error)
 }
 
 type Gateway struct {
@@ -74,6 +109,23 @@ func (g *Gateway) PublishAgentDraft(ctx context.Context, organizationID, actorID
 }
 func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event, error) {
 	return g.ledger.Append(ctx, draft)
+}
+func (g *Gateway) PublishProjection(ctx context.Context, draft ProjectionDraft) (Event, error) {
+	if draft.Event.EventType == "" || draft.ProjectionKind == "" || draft.RecordID == "" || draft.Version < 1 {
+		return Event{}, fmt.Errorf("event type, projection kind, record id, and positive version are required")
+	}
+	store, ok := g.ledger.(ProjectionAppender)
+	if !ok {
+		return Event{}, fmt.Errorf("event ledger does not support durable projections")
+	}
+	return store.AppendProjection(ctx, draft)
+}
+func (g *Gateway) ProjectionRecords(ctx context.Context, kind, id string) ([][]byte, error) {
+	store, ok := g.ledger.(ProjectionReader)
+	if !ok {
+		return nil, fmt.Errorf("event ledger does not support durable projections")
+	}
+	return store.Records(ctx, kind, id)
 }
 func (g *Gateway) Events(ctx context.Context, correlationID string) ([]Event, error) {
 	return g.ledger.Events(ctx, correlationID)

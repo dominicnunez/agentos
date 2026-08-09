@@ -55,3 +55,32 @@ func TestEventsSurviveReopen(t *testing.T) {
 		t.Fatalf("persisted events after reopen=%+v", eventsAfterRestart)
 	}
 }
+
+func TestProjectionVersionConflictRollsBackItsEvent(t *testing.T) {
+	ctx := context.Background()
+	l, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	draft := events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", TaskID: "task-1", CorrelationID: "request-1"},
+		ProjectionKind: "task",
+		RecordID:       "task-1",
+		Version:        1,
+		Value:          map[string]string{"status": "PENDING"},
+	}
+	if _, err := l.AppendProjection(ctx, draft); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.AppendProjection(ctx, draft); err == nil {
+		t.Fatal("duplicate projection version was accepted")
+	}
+	stream, err := l.Events(ctx, "request-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stream) != 1 {
+		t.Fatalf("projection failure left an orphan event: %+v", stream)
+	}
+}

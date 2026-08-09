@@ -12,7 +12,7 @@ Hermes --A2A--> Operator Gateway --> Intent --> Goal --> Task DAG
                                                   Completion Engine
 ```
 
-The runtime is a Go modular monolith. Internal modules communicate through versioned event contracts, not A2A. SQLite is the authoritative append-only event ledger. LLM execution is explicit and limited to tasks whose `model_inference_policy` permits it.
+The runtime is a Go modular monolith. Internal modules communicate through versioned event contracts, not A2A. SQLite is the authoritative append-only event ledger. Durable Organization, Team, Agent, Intent, Goal, and Task projections can be rebuilt from those events. LLM execution is explicit and limited to tasks whose `model_inference_policy` permits it.
 
 ## Quick start
 
@@ -44,9 +44,9 @@ The current deterministic handler supports `echo <text>`. Use `execution_kind: A
 
 ## Testing status
 
-The repository is ready to test as the first V1 vertical slice. The automated suite covers the deterministic and fake-agent paths, event persistence across process restarts, completion verification, Task DAG readiness, the authenticated A2A boundary, exact capability checks, single-use effect approvals, institutional knowledge guards, inference reserves, and deterministic audit checks.
+The repository is ready to test as an early V1 vertical slice. The automated suite covers the deterministic and fake-agent paths, event-backed projection rebuilds, pending-task restart recovery, fail-closed handling of uncertain interrupted agent work, completion verification, Task DAG readiness, the authenticated A2A boundary, exact capability checks, single-use effect approvals, institutional knowledge guards, inference reserves, and deterministic audit checks.
 
-This is not a full V1 acceptance sign-off. The normative acceptance checklist remains in [docs/handoff/docs/08_IMPLEMENTATION_ROADMAP_AND_ACCEPTANCE.md](docs/handoff/docs/08_IMPLEMENTATION_ROADMAP_AND_ACCEPTANCE.md); unimplemented acceptance items must remain visibly incomplete until their runtime paths and adversarial tests exist.
+This is not a full V1 acceptance sign-off. [docs/V1_ACCEPTANCE_STATUS.md](docs/V1_ACCEPTANCE_STATUS.md) maps the normative checklist to current evidence and keeps incomplete items visible.
 
 ## Scope
 

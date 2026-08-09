@@ -73,6 +73,48 @@ func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, ac
 	})
 }
 
+// AppendProjection atomically appends a trusted transition and its versioned,
+// rebuildable projection record. The event payload includes the full record so
+// the records table can be regenerated from the append-only ledger.
+func (l *SQLite) AppendProjection(ctx context.Context, draft events.ProjectionDraft) (events.Event, error) {
+	if draft.Event.EventType == "" || draft.ProjectionKind == "" || draft.RecordID == "" || draft.Version < 1 {
+		return events.Event{}, fmt.Errorf("event type, projection kind, record id, and positive version are required")
+	}
+	value, err := json.Marshal(draft.Value)
+	if err != nil {
+		return events.Event{}, fmt.Errorf("encode projection value: %w", err)
+	}
+	record := events.ProjectionRecord{
+		ProjectionKind: draft.ProjectionKind,
+		RecordID:       draft.RecordID,
+		Version:        draft.Version,
+		CorrelationID:  draft.Event.CorrelationID,
+		Value:          value,
+	}
+	body, err := json.Marshal(record)
+	if err != nil {
+		return events.Event{}, fmt.Errorf("encode projection record: %w", err)
+	}
+	detail, err := json.Marshal(draft.Event.Payload)
+	if err != nil {
+		return events.Event{}, fmt.Errorf("encode projection event detail: %w", err)
+	}
+	eventDraft := draft.Event
+	eventDraft.Payload = events.ProjectionEventPayload{Projection: record, Detail: detail}
+	var event events.Event
+	err = l.withTx(ctx, func(tx *sql.Tx) error {
+		event, err = appendEvent(ctx, tx, eventDraft)
+		if err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, draft.ProjectionKind, draft.RecordID, draft.Version, body, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return fmt.Errorf("append projection: %w", err)
+		}
+		return nil
+	})
+	return event, err
+}
+
 // ConsumeApproval durably and atomically claims a single-use approval. A
 // duplicate approval ID fails before an external adapter can be called.
 func (l *SQLite) ConsumeApproval(ctx context.Context, organizationID, taskID, approvalID, fingerprint, effectID string) error {
