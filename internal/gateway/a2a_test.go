@@ -74,17 +74,22 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 	if strings.Contains(w.Body.String(), `"events"`) || strings.Contains(w.Body.String(), `"payload"`) {
 		t.Fatalf("status leaked raw ledger data: %s", w.Body.String())
 	}
-	if _, err = l.Append(context.Background(), events.TrustedDraft{OrganizationID: "o", EventType: "TASK_BLOCKED", TaskID: "task-r1", CorrelationID: "r1", Payload: map[string]string{"private": "do not expose"}}); err != nil {
-		t.Fatal(err)
+	body = `{"id":"r2","message":{"role":"user","parts":[{"type":"text","text":"human decision"}]},"metadata":{"execution_kind":"HUMAN"}}`
+	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer token")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status":"BLOCKED"`) {
+		t.Fatalf("blocked submit=%d %s", w.Code, w.Body.String())
 	}
-	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r1/input", strings.NewReader(`{"task_id":"task-r1","text":"detail"}`))
+	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r2/input", strings.NewReader(`{"task_id":"task-r2","text":"detail"}`))
 	r.Header.Set("Authorization", "Bearer token")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("input=%d %s", w.Code, w.Body.String())
 	}
-	es, err := l.Events(context.Background(), "r1")
+	es, err := l.Events(context.Background(), "r2")
 	if err != nil || es[len(es)-1].EventType != "TASK_RESUMED" {
 		t.Fatalf("task was not resumed: events=%+v err=%v", es, err)
 	}
