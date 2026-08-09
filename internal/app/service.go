@@ -49,16 +49,30 @@ func (s *Service) ProvideExternalInput(ctx context.Context, organizationID, acto
 		return err
 	}
 	matched := false
+	blocked := false
 	for _, e := range es {
 		if e.OrganizationID == organizationID && e.TaskID == taskID {
 			matched = true
-			break
+			switch e.EventType {
+			case "TASK_BLOCKED":
+				blocked = true
+			case "TASK_RESUMED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED":
+				blocked = false
+			}
 		}
 	}
 	if !matched {
 		return fmt.Errorf("task is not mapped to this external request and organization")
 	}
-	_, err = s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: organizationID, EventType: "A2A_INPUT_RECEIVED", SourceActorID: actorID, TaskID: taskID, CorrelationID: requestID, Payload: map[string]string{"text": text, "source_external_actor": actorID}})
+	if !blocked {
+		return fmt.Errorf("task is not blocked awaiting external input")
+	}
+	if _, err = s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: organizationID, EventType: "A2A_INPUT_RECEIVED", SourceActorID: actorID, TaskID: taskID, CorrelationID: requestID, Payload: map[string]string{"text": text, "source_external_actor": actorID}}); err != nil {
+		return err
+	}
+	// The trusted resume transition is the scheduler-visible continuation path.
+	// Do not tell the external operator the task is working until it is durable.
+	_, err = s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: organizationID, EventType: "TASK_RESUMED", SourceActorID: "runtime", TaskID: taskID, CorrelationID: requestID, Payload: map[string]string{"reason": "authorized external input received"}})
 	return err
 }
 
@@ -99,6 +113,7 @@ func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 		handler = s.agent
 	default:
 		task.Status = core.TaskBlocked
+		_, _ = s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: in.OrganizationID, EventType: "TASK_BLOCKED", SourceActorID: "runtime", TaskID: string(task.ID), Payload: task, CorrelationID: corr})
 		return Result{}, fmt.Errorf("execution kind %s is declared but not implemented in this slice", in.Kind)
 	}
 	outcome, execErr := handler.Execute(ctx, task, manifest)

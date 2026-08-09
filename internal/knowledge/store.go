@@ -11,7 +11,7 @@ import (
 )
 
 type Records interface {
-	PutRecord(context.Context, string, string, int, any) error
+	AppendRecord(context.Context, string, string, string, string, []string, []string, string, string, int, any) error
 	Records(context.Context, string, string) ([][]byte, error)
 }
 type Store struct{ records Records }
@@ -24,7 +24,7 @@ func (s *Store) Propose(ctx context.Context, r core.KnowledgeRecord) error {
 	if len(r.ProvenanceEventRefs) == 0 {
 		return fmt.Errorf("knowledge provenance is required")
 	}
-	return s.records.PutRecord(ctx, "knowledge", string(r.KnowledgeID), r.Version, r)
+	return s.records.AppendRecord(ctx, "", "KNOWLEDGE_RECORD_TRANSITIONED", string(r.CreatedBy), "", nil, r.EvidenceArtifactRefs, "knowledge", string(r.KnowledgeID), r.Version, r)
 }
 func (s *Store) Search(ctx context.Context, scope, text string) ([]core.KnowledgeRecord, error) {
 	rows, err := s.records.Records(ctx, "knowledge", "")

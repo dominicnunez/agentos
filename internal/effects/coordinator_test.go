@@ -2,9 +2,10 @@ package effects
 
 import (
 	"context"
+	"testing"
+
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/ledger"
-	"testing"
 )
 
 type adapter struct{ called bool }
@@ -35,5 +36,30 @@ func TestPersistBeforeEffectAndFingerprintApproval(t *testing.T) {
 	rows, _ := l.Records(context.Background(), "effect", "e")
 	if len(rows) != 3 {
 		t.Fatalf("versions=%d", len(rows))
+	}
+	events, err := l.Events(context.Background(), "")
+	if err != nil || len(events) != 3 {
+		t.Fatalf("effect transitions were not ledgered: events=%d err=%v", len(events), err)
+	}
+}
+
+func TestSingleUseApprovalIsConsumedBeforeAdapter(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	a := &adapter{}
+	c := New(l, a)
+	fp, _ := Fingerprint("send", "customer", map[string]string{"body": "hi"})
+	approval := core.HumanApproval{ID: "approval-1", Status: "APPROVED", EffectFingerprint: fp, SingleUse: true}
+	o := core.EffectObligation{ID: "effect-1", EffectFingerprint: fp, IdempotencyKey: "key-1"}
+	if _, err = c.Execute(context.Background(), o, &approval); err != nil {
+		t.Fatal(err)
+	}
+	a.called = false
+	o.ID, o.IdempotencyKey = "effect-2", "key-2"
+	if _, err = c.Execute(context.Background(), o, &approval); err == nil || a.called {
+		t.Fatal("consumed approval authorized another adapter invocation")
 	}
 }

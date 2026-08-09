@@ -42,12 +42,18 @@ CREATE INDEX IF NOT EXISTS events_correlation_idx ON events(correlation_id, sequ
 kind TEXT NOT NULL, record_id TEXT NOT NULL, version INTEGER NOT NULL, body BLOB NOT NULL,
 created_at TEXT NOT NULL, PRIMARY KEY(kind, record_id, version));
 CREATE INDEX IF NOT EXISTS records_kind_idx ON records(kind, created_at);`)
+	if err != nil {
+		return err
+	}
+	_, err = l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS consumed_approvals (
+approval_id TEXT PRIMARY KEY, effect_fingerprint TEXT NOT NULL, consumed_at TEXT NOT NULL);`)
 	return err
 }
 
-// PutRecord appends a versioned durable object. The primary key prevents
-// history from being overwritten and makes promotion/version races fail closed.
-func (l *SQLite) PutRecord(ctx context.Context, kind, id string, version int, value any) error {
+// AppendRecord appends the authoritative transition event and updates its
+// rebuildable record projection in one transaction. The event is inserted
+// first so durable object state can never exist without ledger evidence.
+func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, actorID, taskID string, authorizationRefs, artifactRefs []string, kind, id string, version int, value any) error {
 	if kind == "" || id == "" || version < 1 {
 		return fmt.Errorf("kind, id, and positive version are required")
 	}
@@ -55,11 +61,41 @@ func (l *SQLite) PutRecord(ctx context.Context, kind, id string, version int, va
 	if err != nil {
 		return fmt.Errorf("encode record: %w", err)
 	}
-	_, err = l.db.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, kind, id, version, body, time.Now().UTC().Format(time.RFC3339Nano))
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	draft := events.TrustedDraft{OrganizationID: organizationID, EventType: eventType, SourceActorID: actorID, TaskID: taskID, AuthorizationRefs: authorizationRefs, ArtifactRefs: artifactRefs, Payload: value}
+	if _, err = appendEvent(ctx, tx, draft); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, kind, id, version, body, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("append record: %w", err)
 	}
-	return nil
+	return tx.Commit()
+}
+
+// ConsumeApproval durably and atomically claims a single-use approval. A
+// duplicate approval ID fails before an external adapter can be called.
+func (l *SQLite) ConsumeApproval(ctx context.Context, organizationID, taskID, approvalID, fingerprint, effectID string) error {
+	if approvalID == "" || fingerprint == "" {
+		return fmt.Errorf("approval id and fingerprint are required")
+	}
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	draft := events.TrustedDraft{OrganizationID: organizationID, EventType: "APPROVAL_CONSUMED", TaskID: taskID, Payload: map[string]string{"approval_id": approvalID, "effect_fingerprint": fingerprint, "effect_obligation_id": effectID}}
+	if _, err = appendEvent(ctx, tx, draft); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO consumed_approvals(approval_id,effect_fingerprint,consumed_at) VALUES(?,?,?)`, approvalID, fingerprint, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("consume approval: %w", err)
+	}
+	return tx.Commit()
 }
 
 func (l *SQLite) Records(ctx context.Context, kind, id string) ([][]byte, error) {
@@ -79,6 +115,14 @@ func (l *SQLite) Records(ctx context.Context, kind, id string) ([][]byte, error)
 	return out, rows.Err()
 }
 func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Event, error) {
+	return appendEvent(ctx, l.db, d)
+}
+
+type sqlExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func appendEvent(ctx context.Context, db sqlExecutor, d events.TrustedDraft) (events.Event, error) {
 	data, err := json.Marshal(d.Payload)
 	if err != nil {
 		return events.Event{}, fmt.Errorf("encode event: %w", err)
@@ -91,7 +135,7 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 		return events.Event{}, fmt.Errorf("generate event id: %w", err)
 	}
 	id := "evt-" + hex.EncodeToString(random[:])
-	r, err := l.db.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,source_execution_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, id, d.OrganizationID, d.EventType, d.SourceActorID, d.SourceExecutionID, d.TaskID, auth, artifacts, data, d.CorrelationID, now.Format(time.RFC3339Nano), events.SchemaVersion)
+	r, err := db.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,source_execution_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, id, d.OrganizationID, d.EventType, d.SourceActorID, d.SourceExecutionID, d.TaskID, auth, artifacts, data, d.CorrelationID, now.Format(time.RFC3339Nano), events.SchemaVersion)
 	if err != nil {
 		return events.Event{}, fmt.Errorf("append event: %w", err)
 	}

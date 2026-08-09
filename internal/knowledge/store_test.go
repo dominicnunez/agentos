@@ -2,10 +2,11 @@ package knowledge
 
 import (
 	"context"
-	"github.com/dominicnunez/agentos/internal/core"
-	"github.com/dominicnunez/agentos/internal/ledger"
 	"testing"
 	"time"
+
+	"github.com/dominicnunez/agentos/internal/core"
+	"github.com/dominicnunez/agentos/internal/ledger"
 )
 
 func TestStorePreservesVersionsAndRequiresProvenance(t *testing.T) {
@@ -25,6 +26,10 @@ func TestStorePreservesVersionsAndRequiresProvenance(t *testing.T) {
 	}
 	if e = s.Propose(context.Background(), r); e == nil {
 		t.Fatal("version overwritten")
+	}
+	events, err := l.Events(context.Background(), "")
+	if err != nil || len(events) != 1 || events[0].EventType != "KNOWLEDGE_RECORD_TRANSITIONED" {
+		t.Fatalf("knowledge transition was not ledgered: events=%+v err=%v", events, err)
 	}
 	if PatternCandidate([]string{"1", "2"}) == nil {
 		t.Fatal("two occurrences accepted")

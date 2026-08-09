@@ -38,6 +38,17 @@ func TestSubmissionFailsClosedWithoutActorCredential(t *testing.T) {
 	}
 }
 
+func TestSubmissionFailsClosedWithoutCapabilityMapping(t *testing.T) {
+	h := NewA2A(app.New(events.NewGateway(noopLedger{})), ExternalActor{BearerToken: "secret", OrganizationID: "o"})
+	r := httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(`{}`))
+	r.Header.Set("Authorization", "Bearer secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status=%d", w.Code)
+	}
+}
+
 func TestA2AStatusAndInputContinuation(t *testing.T) {
 	l, err := ledger.Open(":memory:")
 	if err != nil {
@@ -60,11 +71,21 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"completed"`) {
 		t.Fatalf("status=%d %s", w.Code, w.Body.String())
 	}
+	if strings.Contains(w.Body.String(), `"events"`) || strings.Contains(w.Body.String(), `"payload"`) {
+		t.Fatalf("status leaked raw ledger data: %s", w.Body.String())
+	}
+	if _, err = l.Append(context.Background(), events.TrustedDraft{OrganizationID: "o", EventType: "TASK_BLOCKED", TaskID: "task-r1", CorrelationID: "r1", Payload: map[string]string{"private": "do not expose"}}); err != nil {
+		t.Fatal(err)
+	}
 	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r1/input", strings.NewReader(`{"task_id":"task-r1","text":"detail"}`))
 	r.Header.Set("Authorization", "Bearer token")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("input=%d %s", w.Code, w.Body.String())
+	}
+	es, err := l.Events(context.Background(), "r1")
+	if err != nil || es[len(es)-1].EventType != "TASK_RESUMED" {
+		t.Fatalf("task was not resumed: events=%+v err=%v", es, err)
 	}
 }

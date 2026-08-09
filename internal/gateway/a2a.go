@@ -68,7 +68,11 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"id": id, "events": es, "state": externalState(es)})
+		status := projectStatus(id, es)
+		if a.allowed("read_result") {
+			status.Result = projectResult(es)
+		}
+		writeJSON(w, http.StatusOK, status)
 		return
 	}
 	if r.Method == "POST" && len(r.URL.Path) > len("/a2a/v1/tasks/") && r.URL.Path[len(r.URL.Path)-6:] == "/input" {
@@ -125,9 +129,6 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 func (a *A2A) allowed(want string) bool {
-	if len(a.actor.Capabilities) == 0 {
-		return want == "submit_work"
-	}
 	for _, v := range a.actor.Capabilities {
 		if v == want {
 			return true
@@ -135,12 +136,45 @@ func (a *A2A) allowed(want string) bool {
 	}
 	return false
 }
+
+// externalStatus is an intentionally narrow A2A projection. Ledger events and
+// their internal payloads are never part of the status-capability response.
+type externalStatus struct {
+	ID     string `json:"id"`
+	State  string `json:"state"`
+	TaskID string `json:"task_id,omitempty"`
+	Result any    `json:"result,omitempty"`
+}
+
+func projectStatus(id string, es []events.Event) externalStatus {
+	s := externalStatus{ID: id, State: externalState(es)}
+	for _, e := range es {
+		if e.TaskID != "" {
+			s.TaskID = e.TaskID
+		}
+	}
+	return s
+}
+
+func projectResult(es []events.Event) any {
+	for i := len(es) - 1; i >= 0; i-- {
+		if es[i].EventType == "RESULT_PUBLISHED" {
+			var result any
+			if json.Unmarshal(es[i].Payload, &result) == nil {
+				return result
+			}
+		}
+	}
+	return nil
+}
 func externalState(es []events.Event) string {
 	state := "working"
 	for _, e := range es {
 		switch e.EventType {
 		case "TASK_BLOCKED":
 			state = "input-required"
+		case "TASK_RESUMED":
+			state = "working"
 		case "TASK_VERIFIED_COMPLETE":
 			state = "completed"
 		case "COMPLETION_REJECTED":
