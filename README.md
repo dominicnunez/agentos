@@ -1,6 +1,6 @@
 # Agent OS
 
-Agent OS is an event-driven runtime for durable artificial organizations. This repository begins the v4.2 build contract with the smallest useful vertical slice:
+Agent OS is an event-driven runtime for durable artificial organizations. This repository builds Agent OS V1 from the smallest useful vertical slice:
 
 ```text
 Hermes --A2A--> Operator Gateway --> Intent --> Goal --> Task DAG
@@ -58,4 +58,4 @@ See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md) and [docs/APPROVAL_POLICY.m
 
 ## Authoritative architecture handoff
 
-The complete, unmodified Agent OS v4.2 AI coding handoff is preserved in [docs/handoff/](docs/handoff/README.md). Its original manifest remains at [docs/handoff/MANIFEST.json](docs/handoff/MANIFEST.json) for byte-level integrity verification.
+The complete, unmodified original AI coding handoff is preserved in [docs/handoff/](docs/handoff/README.md). Its manifest remains at [docs/handoff/MANIFEST.json](docs/handoff/MANIFEST.json) for byte-level integrity verification.

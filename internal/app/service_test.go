@@ -54,7 +54,7 @@ func TestRecoverExecutesPersistedPendingWorkAndPreservesIdentity(t *testing.T) {
 	}
 	g := events.NewGateway(l)
 	repository := projections.New(g)
-	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v4.2"}
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1"}
 	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintVersion: "v1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE"}
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "echo after restart", NormalizedObjective: "echo after restart"}
 	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: "echo after restart", Status: "ACTIVE"}
@@ -156,7 +156,7 @@ func TestRecoverRetriesDeterministicWorkAndBlocksUncertainAgentWork(t *testing.T
 		t.Fatal(err)
 	}
 	repository := projections.New(events.NewGateway(l))
-	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v4.2"}
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1"}
 	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintVersion: "v1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE"}
 	if err := repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "bootstrap", 1, organization, nil); err != nil {
 		t.Fatal(err)
@@ -239,7 +239,7 @@ func TestLateralMessagesSurviveRestartAndSurfaceAtAgentActionBoundary(t *testing
 	gateway := events.NewGateway(l)
 	repository := projections.New(gateway)
 	service := New(gateway)
-	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v4.2"}
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1"}
 	sender := core.Agent{ID: "agent-sender", OrganizationID: organization.ID, BlueprintVersion: "v1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE"}
 	recipient := core.Agent{ID: "agent-recipient", OrganizationID: organization.ID, BlueprintVersion: "v1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE"}
 	team := core.Team{ID: "team-1", OrganizationID: organization.ID, Name: "Delivery", MemberAgentIDs: []core.ID{recipient.ID}, Status: "ACTIVE"}

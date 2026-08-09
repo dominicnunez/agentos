@@ -27,6 +27,9 @@ func TestAgentCardIsPublic(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d", w.Code)
 	}
+	if !strings.Contains(w.Body.String(), `"version":"1.0.0-dev"`) || !strings.Contains(w.Body.String(), `"description":"Inbound work-level gateway for Agent OS V1"`) {
+		t.Fatalf("agent card does not identify Agent OS V1: %s", w.Body.String())
+	}
 }
 func TestSubmissionFailsClosedWithoutActorCredential(t *testing.T) {
 	h := NewA2A(app.New(events.NewGateway(noopLedger{})), ExternalActor{BearerToken: "secret", OrganizationID: "o"})

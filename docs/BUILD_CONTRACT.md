@@ -1,4 +1,4 @@
-# v4.2 build contract
+# Agent OS V1 build contract
 
 ## Invariants
 

@@ -283,7 +283,7 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 	now := time.Now().UTC()
 	organizationID := core.ID(in.OrganizationID)
 	if existing, ok := snapshot.Organizations[organizationID]; !ok {
-		organization := core.Organization{ID: organizationID, Name: in.OrganizationID, PolicyVersion: "v4.2", CreatedAt: now}
+		organization := core.Organization{ID: organizationID, Name: in.OrganizationID, PolicyVersion: "v1", CreatedAt: now}
 		if err := s.state.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", in.RequestID, 1, organization, nil); err != nil {
 			return core.Intent{}, core.Goal{}, core.Task{}, fmt.Errorf("persist organization: %w", err)
 		}
@@ -428,7 +428,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			TaskID:                  task.ID,
 			TaskContractVersion:     task.TaskContractVersion,
 			PromptVersion:           "v1",
-			PolicyVersion:           "v4.2",
+			PolicyVersion:           "v1",
 			EventRefs:               eventRefs,
 			KnowledgeRefs:           []core.VersionedRef{},
 			SkillRefs:               []core.VersionedRef{},
