@@ -1,0 +1,27 @@
+# v3.2 NOTE: this file contains future surface. IMPLEMENTATION_SCOPE.yaml controls what is built.
+# Merge into the primary OpenAPI document during implementation.
+paths:
+  /v1/tasks/{task_id}/blocked:
+    post:
+      summary: Return a task as blocked with an unmet requirement
+  /v1/tasks/{task_id}/candidate-complete:
+    post:
+      summary: Declare candidate completion for Completion Engine verification
+  /v1/approvals/{approval_id}/acknowledge:
+    post:
+      summary: Acknowledge a notification without approving the action
+  /v1/organization-health/{organization_id}:
+    get:
+      summary: Get human-facing organization health and advanced OHV detail
+  /v1/experiments:
+    post:
+      summary: Create a reversible organizational experiment
+  /v1/retirement-recommendations:
+    get:
+      summary: List retirement recommendations for authorized controllers
+  /v1/incidents:
+    post:
+      summary: Enter incident response mode for a scope
+  /v1/emergency/freeze:
+    post:
+      summary: Freeze protected external/consequential actions

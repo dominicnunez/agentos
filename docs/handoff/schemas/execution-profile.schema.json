@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExecutionProfile v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "profile_id",
+    "logical_actor_id",
+    "model",
+    "reasoning",
+    "skills",
+    "tools",
+    "policy_version"
+  ],
+  "properties": {
+    "profile_id": {
+      "type": "string"
+    },
+    "logical_actor_id": {
+      "type": "string"
+    },
+    "model": {
+      "type": "object",
+      "required": [
+        "provider",
+        "model"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    },
+    "reasoning": {
+      "type": "string"
+    },
+    "skills": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "prompt_version": {
+      "type": "string"
+    },
+    "policy_version": {
+      "type": "string"
+    },
+    "memory_policy_version": {
+      "type": "string"
+    },
+    "environment_version": {
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CapabilityContract v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "capability_id",
+    "actor_id",
+    "action",
+    "resource",
+    "scope",
+    "origin_task_id"
+  ],
+  "properties": {
+    "capability_id": {
+      "type": "string"
+    },
+    "actor_id": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string"
+    },
+    "resource": {
+      "type": "string"
+    },
+    "scope": {
+      "type": "string"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "origin_task_id": {
+      "type": "string"
+    },
+    "parent_capability_id": {
+      "type": "string"
+    }
+  }
+}

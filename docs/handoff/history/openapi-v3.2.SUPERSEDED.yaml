@@ -1,0 +1,145 @@
+openapi: 3.1.0
+info:
+  title: Agent OS Control API
+  version: 0.1.0
+  description: >
+    Initial control/audit surface. The web UI should consume the same API.
+servers:
+  - url: http://localhost:8080
+paths:
+  /v1/organization-proposals:
+    post:
+      summary: Compile a human mission into an inspectable organization proposal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mission]
+              properties:
+                mission: { type: string }
+                constraints:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: Proposal created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  proposal_id: { type: string }
+                  interpreted_mission: { type: string }
+                  organization_blueprint: { type: object }
+                  unresolved_questions:
+                    type: array
+                    items: { type: string }
+  /v1/organizations:
+    post:
+      summary: Instantiate an approved organization blueprint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [proposal_id]
+              properties:
+                proposal_id: { type: string }
+      responses:
+        "201":
+          description: Organization created
+  /v1/organizations/{organization_id}:
+    get:
+      summary: Get organization projection
+      parameters:
+        - in: path
+          name: organization_id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Current organization state
+  /v1/goals:
+    post:
+      summary: Submit a goal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [objective]
+              properties:
+                organization_id: { type: string }
+                objective: { type: string }
+                constraints:
+                  type: array
+                  items: { type: string }
+      responses:
+        "202":
+          description: Goal accepted
+  /v1/collaborations/{collaboration_id}:
+    get:
+      summary: Get current collaboration projection
+      parameters:
+        - in: path
+          name: collaboration_id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Current collaboration state
+  /v1/ledger/messages/{message_id}:
+    get:
+      summary: Inspect a persisted ANL message
+      parameters:
+        - in: path
+          name: message_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: view
+          required: false
+          schema:
+            type: string
+            enum: [human, structured, native, raw, provenance]
+            default: human
+      responses:
+        "200":
+          description: Requested audit view
+  /v1/approvals/{approval_id}:
+    post:
+      summary: Resolve a human approval request
+      parameters:
+        - in: path
+          name: approval_id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision:
+                  type: string
+                  enum: [approve, deny]
+                note: { type: string }
+      responses:
+        "200":
+          description: Approval recorded
+  /v1/events:
+    get:
+      summary: Stream runtime events
+      responses:
+        "200":
+          description: Server-Sent Events stream
+          content:
+            text/event-stream:
+              schema:
+                type: string

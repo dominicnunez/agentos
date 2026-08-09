@@ -1,0 +1,63 @@
+openapi: 3.1.0
+info:
+  title: Agent OS V1 API
+  version: 4.2.0
+paths:
+  /v1/organizations:
+    post:
+      summary: Create an organization
+  /v1/teams:
+    post:
+      summary: Create a team
+  /v1/tasks:
+    post:
+      summary: Create or delegate a task under current authority
+  /v1/events:
+    get:
+      summary: Read persisted events visible to the caller
+  /v1/events/drafts:
+    post:
+      summary: Publish a validated EventDraft
+  /v1/tasks/{task_id}/candidate-complete:
+    post:
+      summary: Submit task work to the Completion Engine
+  /v1/approvals:
+    get:
+      summary: List pending human approvals
+  /v1/approvals/{approval_id}/acknowledge:
+    post:
+      summary: Acknowledge without approving
+  /v1/approvals/{approval_id}/decision:
+    post:
+      summary: Approve or deny with authorized human identity
+  /v1/emergency/freeze:
+    post:
+      summary: Freeze consequential/external actions
+  /v1/capabilities/{capability_id}/revoke:
+    post:
+      summary: Revoke a capability lease
+  /v1/knowledge:
+    get:
+      summary: Query active/versioned institutional knowledge visible to the caller
+    post:
+      summary: Propose a knowledge candidate or revision
+  /v1/knowledge/{knowledge_id}/history:
+    get:
+      summary: Read authorized version/provenance history
+  /v1/skills:
+    get:
+      summary: List/load visible skills
+    post:
+      summary: Propose a skill candidate or revision
+  /v1/audit/findings:
+    get:
+      summary: List audit findings visible to the caller
+  /v1/audit/run:
+    post:
+      summary: Trigger an authorized deterministic audit run
+  /v1/inference/pools:
+    get:
+      summary: Read authorized inference pool availability/reserve status
+  /v1/inference/usage:
+    get:
+      summary: Read inference usage telemetry and resource accounting

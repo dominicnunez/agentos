@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "IntentEnvelope v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "intent_id",
+    "original_instruction",
+    "normalized_objective",
+    "source_human_id",
+    "created_at"
+  ],
+  "properties": {
+    "intent_id": {
+      "type": "string"
+    },
+    "original_instruction": {
+      "type": "string",
+      "minLength": 1
+    },
+    "normalized_objective": {
+      "type": "string",
+      "minLength": 1
+    },
+    "hard_constraints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "consequence_boundaries": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "FINANCIAL",
+          "PHYSICAL",
+          "PUBLIC_EXTERNAL",
+          "PRIVILEGE_TRUST",
+          "SENSITIVE_DATA",
+          "DESTRUCTIVE_IRREVERSIBLE",
+          "LEGAL_BINDING",
+          "TRUSTED_CORE"
+        ]
+      }
+    },
+    "source_human_id": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "created": "2026-08-08",
+  "files": [
+    {
+      "path": "00_EXECUTIVE_SUMMARY.md",
+      "sha256": "f26b74111c302637747eb30a12bae3b817b6708e016c83c3b2c9ea51d13eb77d",
+      "bytes": 6136
+    },
+    {
+      "path": "01_DEEP_COMPARATIVE_STUDY.md",
+      "sha256": "d6db682a8df7c9a79ab0f0b5b4330f295bd88c654945bc758dc512776ac53005",
+      "bytes": 23218
+    },
+    {
+      "path": "02_RECOMMENDED_V3_1_AMENDMENTS.md",
+      "sha256": "7d0fd0af800d78d023a2ed2c8e1f3bee293560d3d0e81628153edf7884886607",
+      "bytes": 5312
+    },
+    {
+      "path": "03_BENCHMARK_AND_VALIDATION_PLAN.md",
+      "sha256": "9afaa9053571b19dd7db05b7bc99689c078201f99cba7d5f6cd01de9ddedd97c",
+      "bytes": 3698
+    },
+    {
+      "path": "04_PRIMARY_SOURCES.md",
+      "sha256": "728f6f3f6a6c39506e83ba4e517a501661872315b186ebedde32a970c65ddf28",
+      "bytes": 1375
+    },
+    {
+      "path": "MASTER_RESEARCH_REPORT.md",
+      "sha256": "84e8afccb790cf7e365b81e9520f45d18cea1af5c2df1399391f2b9e3f2907e3",
+      "bytes": 40064
+    },
+    {
+      "path": "README.md",
+      "sha256": "bec2ac51cf951d8213458b61761be0856d4e054e15df784a26835091d18cb47c",
+      "bytes": 422
+    },
+    {
+      "path": "comparison_matrix.csv",
+      "sha256": "aabdde8ab2d6fc041fd36874594062e43d8badef607a694d6c08eaab2d25c503",
+      "bytes": 3503
+    }
+  ]
+}

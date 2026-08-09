@@ -1,0 +1,19 @@
+flowchart TD
+    G[Real Goal / Work] --> D[Task Dependency Graph]
+    D --> K{What mechanism is sufficient?}
+    K -->|Exact / stable| S[Deterministic Go / Rules]
+    K -->|Known external operation| T[Tool / API / DB / CLI]
+    K -->|Adaptive reasoning needed| A[Agent responsibility]
+    A --> N{LLM needed now?}
+    N -->|No| S
+    N -->|Yes| IR[Inference Resource Manager]
+    IR --> AE[AgentExecution]
+    K -->|Interdependent collaboration justified| TM[Team]
+    K -->|Human judgment / authority| H[Human Operator]
+    S --> C[Completion / Evidence]
+    T --> C
+    AE --> C
+    TM --> C
+    H --> C
+    C --> O[Operational Telemetry + Knowledge]
+    O --> L[Lab / Controlled Replay when uncertainty exists]

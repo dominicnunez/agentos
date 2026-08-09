@@ -1,0 +1,50 @@
+{
+  "v1_core": [
+    "event-envelope.schema.json",
+    "event-draft.schema.json",
+    "event-message-payload.schema.json",
+    "blocked-task.schema.json",
+    "event-evidence-published-payload.schema.json",
+    "event-result-published-payload.schema.json",
+    "event-candidate-complete-payload.schema.json",
+    "agent-blueprint.schema.json",
+    "capability-contract.schema.json",
+    "completion-contract.schema.json",
+    "conformance-profile.schema.json",
+    "constitution.schema.json",
+    "human-approval.schema.json",
+    "intent-envelope.schema.json",
+    "task-contract.schema.json",
+    "knowledge-record.schema.json",
+    "skill.schema.json",
+    "audit-finding.schema.json",
+    "inference-pool.schema.json",
+    "inference-usage-snapshot.schema.json",
+    "event-knowledge-proposed-payload.schema.json",
+    "event-skill-proposed-payload.schema.json",
+    "execution-context-manifest.schema.json",
+    "tool-outcome.schema.json",
+    "effect-obligation.schema.json",
+    "external-actor.schema.json",
+    "a2a-task-mapping.schema.json"
+  ],
+  "validate_next": [
+    "execution-profile.schema.json",
+    "evaluation-record.schema.json",
+    "knowledge-record.validate-next.schema.json",
+    "experiment.validate-next.schema.json"
+  ],
+  "future_if_earned": [
+    "memory-record.schema.json",
+    "organization-blueprint.schema.json",
+    "organization-health-vector.schema.json",
+    "organizational-experiment.schema.json",
+    "retirement-recommendation.schema.json",
+    "skill-manifest.schema.json",
+    "sop-manifest.schema.json"
+  ],
+  "superseded": [
+    "semantic-message.schema.json (removed; historical copy under history/)"
+  ],
+  "version": "4.2"
+}

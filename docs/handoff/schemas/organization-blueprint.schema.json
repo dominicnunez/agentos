@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/agentos/schemas/organization-blueprint-0.1.json",
+  "title": "OrganizationBlueprint v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "mission",
+    "version",
+    "teams",
+    "policies"
+  ],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mission": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "teams": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "mission",
+          "roles"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "mission": {
+            "type": "string"
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "capabilities"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "policies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "resource",
+          "effect"
+        ],
+        "properties": {
+          "resource": {
+            "type": "string"
+          },
+          "effect": {
+            "enum": [
+              "ALLOW",
+              "DENY",
+              "REQUIRE_HUMAN_APPROVAL"
+            ]
+          },
+          "condition": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "budget": {
+      "type": "object"
+    }
+  }
+}

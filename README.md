@@ -41,3 +41,7 @@ Included: core organizational/work objects, task dependencies, deterministic and
 Deferred: federation, workflow DSLs, semantic/vector memory, Lab, optimizers, production model providers, broad tool ecosystems, and external-effect execution.
 
 See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md) and [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md).
+
+## Authoritative architecture handoff
+
+The complete, unmodified Agent OS v4.2 AI coding handoff is preserved in [docs/handoff/](docs/handoff/README.md). Its original manifest remains at [docs/handoff/MANIFEST.json](docs/handoff/MANIFEST.json) for byte-level integrity verification.

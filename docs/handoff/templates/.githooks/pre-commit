@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+echo "==> gofmt"
+UNFORMATTED="$(gofmt -l $(git diff --cached --name-only --diff-filter=ACMR -- '*.go') 2>/dev/null || true)"
+if [ -n "$UNFORMATTED" ]; then
+  echo "The following staged Go files need gofmt:"
+  echo "$UNFORMATTED"
+  exit 1
+fi
+
+echo "==> Archguard"
+go tool archguard check --include-tests --profile modular-monolith

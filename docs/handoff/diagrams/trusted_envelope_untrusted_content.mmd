@@ -1,0 +1,7 @@
+flowchart TD
+ D[Agent content] -->|cannot set| T[Trusted control state]
+ D --> G[Event Gateway]
+ G --> E[Runtime-owned Event envelope]
+ E --> L[(Ledger)]
+ A[Authorized runtime operation] --> G
+ L --> T

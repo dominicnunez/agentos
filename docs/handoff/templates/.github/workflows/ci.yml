@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Race
+        run: go test -race ./...
+
+      - name: Architecture
+        run: go tool archguard check --include-tests --profile modular-monolith
+
+      - name: Gallow advisory SARIF
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          go tool gallow audit --base "origin/${{ github.base_ref }}" --format sarif > gallow.sarif
+
+      - name: Upload Gallow SARIF
+        if: github.event_name == 'pull_request'
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: gallow.sarif
+          category: gallow

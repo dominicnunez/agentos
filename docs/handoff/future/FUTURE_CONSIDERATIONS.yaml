@@ -1,0 +1,469 @@
+version: '4.2'
+authority: future-consideration-registry
+promotion_requires_human_scope_change: true
+items:
+- id: FC-001
+  name: TOON context codec
+  tier: VALIDATE_NEXT
+  prerequisites: JSON Event Contract baseline is stable; representative context traces
+    exist; token cost is material
+  revisit_when: Benchmark JSON vs TOON on tokens, latency, parse/accuracy failures
+    across actual models
+  notes: Promote only if net benefit is material; no semantic dependence on codec.
+- id: FC-002
+  name: Additional collaboration topologies
+  tier: VALIDATE_NEXT
+  prerequisites: Representative real work and operational telemetry exist; at least
+    one task class has uncertainty about execution structure
+  revisit_when: Need controlled comparisons among sequential, parallel, turn-based,
+    worker+verifier or other manually configured structures
+  notes: Use replayable/matched/held-out real task classes; do not create work merely
+    to benchmark a topology.
+- id: FC-003
+  name: Automatic collaboration topology selector
+  tier: FUTURE_IF_EARNED
+  prerequisites: Multiple manually configured topologies have repeatable, task-class-specific
+    strengths and enough labeled runs
+  revisit_when: Manual selection becomes costly and prediction can be evaluated held-out
+  notes: Do not build before topologies themselves prove value.
+- id: FC-004
+  name: Advanced knowledge retrieval / consolidation
+  tier: VALIDATE_NEXT
+  prerequisites: V1 versioned KnowledgeRecord is in regular use and simple scope/tag/text
+    retrieval has measured misses or context cost
+  revisit_when: Need embeddings/reranking/consolidation to improve retrieval measurably
+  notes: V1 knowledge store is active; this item is only advanced retrieval/consolidation,
+    not whether memory exists.
+- id: FC-005
+  name: Advanced knowledge taxonomy / lifecycle automation
+  tier: FUTURE_IF_EARNED
+  prerequisites: V1 EXPERIENCE/LESSON/KNOWLEDGE/PROCEDURE types show concrete lifecycle
+    differences that current fields cannot handle
+  revisit_when: Measured maintenance/revalidation needs justify richer classes
+  notes: Do not introduce ontology or many states simply for elegance.
+- id: FC-006
+  name: Automated SOP/procedure promotion and induction
+  tier: FUTURE_IF_EARNED
+  prerequisites: V1 procedures and Skills are repeatedly used and have reliable CompletionContract
+    outcomes
+  revisit_when: Manual/explicit candidate creation becomes a bottleneck and automatic
+    induction can be evaluated
+  notes: Instruction/reference procedures already exist in V1; this is automation,
+    not basic storage.
+- id: FC-007
+  name: Executable skill assets and automatic skill evolution
+  tier: FUTURE_IF_EARNED
+  prerequisites: Instruction/reference Skills prove value; sandbox/security/tests
+    and held-out evaluation are strong
+  revisit_when: Measured benefit justifies generated scripts/code or evolutionary
+    revisions
+  notes: Generated code remains untrusted/sandboxed and never becomes trusted-core
+    plugin merely via skill promotion.
+- id: FC-008
+  name: Offline EvaluationRecord
+  tier: VALIDATE_NEXT
+  prerequisites: Completion Engine produces trustworthy verified outcomes and representative
+    operational task samples exist
+  revisit_when: Need durable cross-run comparisons of profiles/structures beyond raw
+    operational telemetry
+  notes: Keep separate from worker-visible operational feedback; evaluation is an
+    analysis layer over real work.
+- id: FC-009
+  name: Post-task collaborative failure attribution
+  tier: VALIDATE_NEXT
+  prerequisites: Evaluation records stable; enough multi-agent failures to analyze
+  revisit_when: Centralized trace cannot reliably explain distributed failure
+  notes: Gather bounded evidence from participants without exposing hidden comparative
+    grades.
+- id: FC-010
+  name: Evaluator Goodhart/drift monitoring
+  tier: VALIDATE_NEXT
+  prerequisites: Evaluation is used repeatedly for decisions and stable metrics exist
+  revisit_when: Score inflation, calibration drift, task selection skew or diversity
+    collapse becomes plausible
+  notes: Monitor evaluator health before optimizer.
+- id: FC-011
+  name: Manual organizational experiments
+  tier: VALIDATE_NEXT
+  prerequisites: Evaluation stable; enough repeatable task classes
+  revisit_when: Need compare A vs A+skill/model/reasoning vs A+B
+  notes: Use held-out tasks and staged elimination.
+- id: FC-012
+  name: Organization Health Vector
+  tier: FUTURE_IF_EARNED
+  prerequisites: Raw metrics/evaluation dimensions have validated meaning over meaningful
+    sample size
+  revisit_when: Humans need a stable multidimensional operational summary
+  notes: Hard safety gates override any aggregate; avoid early arbitrary scoring.
+- id: FC-013
+  name: Automatic organization optimizer
+  tier: FUTURE_IF_EARNED
+  prerequisites: Evaluation, held-outs, causal controls, health metrics, rollback
+    and experiment framework all stable
+  revisit_when: Manual experiment selection becomes bottleneck and predictive optimizer
+    can be evaluated
+  notes: Optimizer may amplify errors; treat as high-risk subsystem.
+- id: FC-014
+  name: Dormancy/retirement recommendations
+  tier: FUTURE_IF_EARNED
+  prerequisites: Persistent specialized agents actually exist; evaluation can estimate
+    marginal contribution and rare-capability risk
+  revisit_when: Organizational complexity becomes measurable cost
+  notes: Default ACTIVE -> DORMANT -> ARCHIVED; no automatic destructive deletion.
+- id: FC-015
+  name: Natural-language organization builder
+  tier: VALIDATE_NEXT
+  prerequisites: Core organization/team/task primitives stable and can be represented
+    safely
+  revisit_when: Human setup friction becomes meaningful
+  notes: Compile proposal for inspection; do not grant consequential authority from
+    prose without policy checks.
+- id: FC-016
+  name: Portable organization package
+  tier: FUTURE_IF_EARNED
+  prerequisites: Organization/agent/policy/skill schemas stable across versions
+  revisit_when: Need reuse/share/move organizations
+  notes: No embedded live secrets; imported package begins untrusted/quarantined.
+- id: FC-017
+  name: Multiple organizations/businesses per runtime
+  tier: FUTURE_IF_EARNED
+  prerequisites: Single-organization runtime stable and a second real business/use
+    case exists
+  revisit_when: Operational leverage requires co-hosting multiple organizations
+  notes: Start with logical isolation; do not imply strong tenant security.
+- id: FC-018
+  name: Strong multi-tenant isolation
+  tier: FUTURE_IF_EARNED
+  prerequisites: Multiple independent trust domains or customers require shared infrastructure
+  revisit_when: Cross-organization data/authority risk becomes real
+  notes: Requires trust-domain model, storage isolation, secret separation, tests.
+- id: FC-019
+  name: Hermes RuntimeAdapter as internal Agent OS worker
+  tier: VALIDATE_NEXT
+  prerequisites: A2A Operator Gateway and core RuntimeAdapter boundary are stable;
+    a concrete need exists for Agent OS to execute Hermes internally
+  revisit_when: An internal task class benefits from Hermes-specific capabilities
+  notes: Distinct from V1 Hermes external operator via A2A; must not bypass Event
+    Gateway/capability enforcement.
+- id: FC-020
+  name: Outbound A2A client/delegation and broader federation
+  tier: VALIDATE_NEXT
+  prerequisites: Inbound A2A Operator Gateway is stable; a real need exists for Agent
+    OS to discover/delegate to remote external agents
+  revisit_when: Need outbound remote-agent work delegation beyond the Hermes operator
+    relationship
+  notes: Internal Event Contracts remain canonical; do not turn A2A into internal
+    IPC.
+- id: FC-021
+  name: Full federation gateway
+  tier: FUTURE_IF_EARNED
+  prerequisites: At least two external runtimes/providers require interoperable trust/routing/version
+    negotiation
+  revisit_when: Point adapters become repetitive/unsafe
+  notes: Separate trust boundary may justify extraction.
+- id: FC-022
+  name: MLFQ/resource-aware scheduler
+  tier: FUTURE_IF_EARNED
+  prerequisites: Basic scheduler stable; concurrency/resource contention causes measurable
+    tail latency/starvation
+  revisit_when: Scheduler metrics show priority/resource pathology
+  notes: Borrow from AgentRM only when workload exists.
+- id: FC-023
+  name: Zombie/stall detection
+  tier: VALIDATE_NEXT
+  prerequisites: Longer real executions and waiting states exist
+  revisit_when: Stalls consume resources or block progress
+  notes: Distinguish legitimate WAIT from execution stall.
+- id: FC-024
+  name: Context compaction with explicit materialization correctness
+  tier: VALIDATE_NEXT
+  prerequisites: ExecutionContextManifest is stable; real contexts create measurable
+    context pressure
+  revisit_when: Need pruning/summarization while preserving exact FULL/SUMMARY/REFERENCE_ONLY/OMITTED/UNAVAILABLE
+    state
+  notes: Never imply a full Skill/knowledge item remains loaded after compression
+    when only a summary/reference remains.
+- id: FC-025
+  name: Checkpoints
+  tier: FUTURE_IF_EARNED
+  prerequisites: Ledger replay latency becomes measurable
+  revisit_when: Restart/rebuild exceeds accepted operational target
+  notes: Ledger remains authoritative; checkpoints are acceleration only.
+- id: FC-026
+  name: Postgres / durable broker / distributed workers
+  tier: FUTURE_IF_EARNED
+  prerequisites: SQLite/in-process limits are measured or isolation/independent scaling
+    is needed
+  revisit_when: Concurrency, fault isolation, throughput or remote compute demands
+    it
+  notes: Possible Postgres/NATS/gRPC; domain must remain decoupled.
+- id: FC-027
+  name: Distributed consensus / multi-writer ledger
+  tier: FUTURE_IF_EARNED
+  prerequisites: Single-writer authority is a proven availability/scale bottleneck
+    and requirements justify complexity
+  revisit_when: Need multiple authoritative writers across failure domains
+  notes: Do not implement casually; partition safety matters.
+- id: FC-028
+  name: Multi-channel approval escalation platform
+  tier: FUTURE_IF_EARNED
+  prerequisites: Real critical approvals remain unanswered and one notifier is insufficient
+  revisit_when: Operational incidents demonstrate need for SMS/push/backup approvers/quiet-hour
+    policy
+  notes: Risk/urgency semantics already exist; attention can escalate, authority cannot.
+- id: FC-029
+  name: Multi-human governance
+  tier: FUTURE_IF_EARNED
+  prerequisites: More than one human actually needs distinct authority
+  revisit_when: Owner/security/finance/manager separation is operationally needed
+  notes: Define role precedence and optional multi-party approval.
+- id: FC-030
+  name: Incident-response automation subsystem
+  tier: FUTURE_IF_EARNED
+  prerequisites: Freeze/revoke/isolate/evidence primitives exist and incidents recur
+  revisit_when: Manual runbooks are too slow/error-prone
+  notes: Compose existing primitives; avoid duplicate control plane.
+- id: FC-031
+  name: Supply-chain trust platform
+  tier: FUTURE_IF_EARNED
+  prerequisites: External tools/code/skills/packages are routinely activated
+  revisit_when: Manual provenance/quarantine no longer sufficient
+  notes: Start with source/hash/trust-state metadata; add signatures/scanning later.
+- id: FC-032
+  name: Encrypted/deletable sensitive artifact store
+  tier: FUTURE_IF_EARNED
+  prerequisites: Real confidential/PII/secrets must be processed
+  revisit_when: Immutable ledger payload retention conflicts with privacy/security
+    needs
+  notes: Keep structural history while sensitive payload/key can be deleted under
+    policy.
+- id: FC-033
+  name: Information-flow/data classification
+  tier: FUTURE_IF_EARNED
+  prerequisites: Multiple sensitive data classes/providers/trust domains exist
+  revisit_when: Derived-data export decisions need systematic classification
+  notes: Derived data inherits/combines classifications.
+- id: FC-034
+  name: High-assurance communication profiles
+  tier: FUTURE_IF_EARNED
+  prerequisites: Covert-channel risk is material for a concrete deployment
+  revisit_when: Need to bound timing/size/routing/semantic-choice channels
+  notes: Do not claim covert channels can be eliminated.
+- id: FC-035
+  name: Tamper-evident signed checkpoints/backups
+  tier: FUTURE_IF_EARNED
+  prerequisites: Production value makes ledger destruction/tampering a material business
+    risk
+  revisit_when: Disaster-recovery/security requirements become formal
+  notes: Hash-link events, protected keys, off-system backups, restore drills.
+- id: FC-036
+  name: Research & Continuous Improvement organization
+  tier: FUTURE_IF_EARNED
+  prerequisites: Core runtime + evaluation + safe experimentation + knowledge promotion
+    are stable
+  revisit_when: Agent OS can evaluate improvements without circular self-grading
+  notes: Reference organization built on Agent OS, not kernel subsystem.
+- id: FC-037
+  name: Automated Agent OS code self-improvement pipeline
+  tier: FUTURE_IF_EARNED
+  prerequisites: Research org stable; sandbox CI/benchmark/evaluator trust boundaries
+    strong
+  revisit_when: Measured value from candidate patches justifies automation
+  notes: Agents may code/test/propose; runtime deployment still human-approved; trusted
+    core stricter.
+- id: FC-038
+  name: Automatic model/reasoning/team optimization
+  tier: FUTURE_IF_EARNED
+  prerequisites: Evaluation/experiments/held-outs are reliable over many tasks
+  revisit_when: Manual configuration materially limits performance/cost
+  notes: Staged elimination; exploration budget; no exhaustive grid.
+- id: FC-039
+  name: Deterministic event presentation templates
+  tier: VALIDATE_NEXT
+  prerequisites: Audit UI needs consistent human rendering beyond raw envelope/content
+  revisit_when: Humans misread event/control distinction or need stable reports
+  notes: Render event fields deterministically; do not recreate semantic ontology.
+- id: FC-040
+  name: Domain-specific structured content schemas
+  tier: VALIDATE_NEXT
+  prerequisites: A concrete business application needs machine-readable domain content
+  revisit_when: Free-form content blocks deterministic application logic
+  notes: Schema remains application/domain scoped unless core runtime behavior truly
+    depends on it.
+- id: FC-041
+  name: Shared blackboard as dedicated store
+  tier: FUTURE_IF_EARNED
+  prerequisites: Event projections cannot meet shared-current-state performance/consistency
+    needs
+  revisit_when: Measured projection limitations
+  notes: Default remains ledger + projection; dedicated store cannot become competing
+    truth.
+- id: FC-042
+  name: Advanced PlanGraph/versioned planning engine
+  tier: FUTURE_IF_EARNED
+  prerequisites: Task ParentID/DependsOn cannot represent required replanning/alternatives
+  revisit_when: Real workflows need speculative branches/plan versions/diffs
+  notes: Do not introduce before simple Task DAG fails concretely.
+- id: FC-043
+  name: Complex policy DSL / external policy engine
+  tier: FUTURE_IF_EARNED
+  prerequisites: Typed rules become repetitive/unmaintainable and policy complexity
+    is real
+  revisit_when: Rule volume/composition requires a policy language
+  notes: Evaluate existing engines before inventing one.
+- id: FC-044
+  name: Bounded LLM AuditWorker
+  tier: VALIDATE_NEXT
+  prerequisites: Deterministic AuditService is stable; judgment-heavy audit questions
+    recur
+  revisit_when: Sampled model review can find confirmed issues deterministic rules
+    cannot
+  notes: Temporary independent execution; produces candidate findings only; no executive
+    authority.
+- id: FC-045
+  name: Advanced audit scheduling/compliance framework
+  tier: FUTURE_IF_EARNED
+  prerequisites: Real audit volume/regulatory requirements make basic configurable
+    intervals insufficient
+  revisit_when: Need policy-driven sampling, compliance packs, or complex audit evidence
+    workflows
+  notes: Avoid building PagerDuty/GRC platform before concrete requirements.
+- id: FC-046
+  name: Lab / Experiment orchestration
+  tier: VALIDATE_NEXT
+  prerequisites: Core scheduler, sandbox, capability gate, Completion Engine, and
+    inference budgets are working
+  revisit_when: Need disposable parallel prototypes or controlled self-improvement
+    experiments
+  notes: Freedom inside containment; outputs EXPERIMENTAL_UNVERIFIED until promotion.
+- id: FC-047
+  name: Lab promotion gate and held-out reproduction
+  tier: VALIDATE_NEXT
+  prerequisites: Experiment objects produce candidate knowledge/skills/configurations
+  revisit_when: Need systematic promotion without cherry-picking
+  notes: Commissioning parent may nominate but not unilaterally certify trust.
+- id: FC-048
+  name: Surplus inference capacity allocation to Lab/maintenance
+  tier: VALIDATE_NEXT
+  prerequisites: InferencePool telemetry and continuity reserve are reliable
+  revisit_when: Subscription/local capacity is routinely underused near reset/idle
+    periods
+  notes: Allocate only to useful backlog/validation/audits/experiments; do not burn
+    quota for its own sake.
+- id: FC-049
+  name: Inference burn forecasting and target curves
+  tier: VALIDATE_NEXT
+  prerequisites: Sufficient execution usage history by pool/model/task class
+  revisit_when: Static reserve policy either wastes perishable quota or threatens
+    continuity
+  notes: Represent quota uncertainty and forecast error explicitly.
+- id: FC-050
+  name: Automatic local/cloud/model escalation policy
+  tier: VALIDATE_NEXT
+  prerequisites: Completion/cost/latency data exists for same task classes across
+    multiple pools
+  revisit_when: Can evaluate local-first vs frontier-first vs escalation strategies
+    held-out
+  notes: Repeated weak-model failures can cost more than starting strong; test rather
+    than assume.
+- id: FC-051
+  name: Cross-provider verifier routing
+  tier: VALIDATE_NEXT
+  prerequisites: Two or more independent provider/model pools and verification tasks
+    exist
+  revisit_when: Need more independent model adjudication than same-provider review
+  notes: Deterministic verification still preferred whenever possible.
+- id: FC-052
+  name: Predictive capacity planning / multi-GPU / energy-aware scheduling
+  tier: FUTURE_IF_EARNED
+  prerequisites: Multiple local accelerators or material power/thermal/queue constraints
+    exist
+  revisit_when: Basic local InferencePool abstraction becomes insufficient
+  notes: Do not build datacenter scheduler for one local machine.
+- id: FC-053
+  name: Automatic subscription/provider ROI and purchase recommendations
+  tier: FUTURE_IF_EARNED
+  prerequisites: Longitudinal usage/outcome/cost data across providers exists
+  revisit_when: Organization can quantify whether adding/removing paid access creates
+    value
+  notes: Any actual new financial commitment still crosses human approval boundary.
+- id: FC-054
+  name: Automatic contradiction detection and knowledge revalidation
+  tier: VALIDATE_NEXT
+  prerequisites: V1 knowledge store has enough active records and dependency metadata
+    to make automated checks useful
+  revisit_when: Audits find recurring stale/contradictory knowledge manually
+  notes: Detection produces findings/candidates; do not silently rewrite active knowledge.
+- id: FC-055
+  name: Cross-team knowledge promotion
+  tier: VALIDATE_NEXT
+  prerequisites: Multiple teams exist and useful knowledge repeatedly applies beyond
+    source team
+  revisit_when: Duplication or repeated rediscovery becomes measurable
+  notes: Promotion changes visibility/scope, not authority; respect data boundaries.
+- id: FC-056
+  name: Skill A/B testing and evolutionary revision
+  tier: VALIDATE_NEXT
+  prerequisites: V1 Skills have repeatable tasks, tests, and enough executions
+  revisit_when: Need evidence-based revision instead of subjective edits
+  notes: Use held-out evaluation; promising variant does not auto-replace active skill.
+- id: FC-057
+  name: Automatic repeated-pattern clustering/detection
+  tier: VALIDATE_NEXT
+  prerequisites: V1 knowledge store has enough experiences and manual/agent pattern
+    proposals to measure recall/false-positive rates
+  revisit_when: Manual pattern discovery causes repeated missed opportunities or excessive
+    human/agent review effort
+  notes: Three occurrences is the default candidacy threshold, not proof. Automated
+    clustering proposes candidates only.
+- id: FC-058
+  name: Risk-adaptive pattern candidacy thresholds
+  tier: VALIDATE_NEXT
+  prerequisites: Enough pattern candidates exist across task/consequence classes to
+    measure false promotions and missed reusable patterns
+  revisit_when: A single default threshold produces too many weak high-risk candidates
+    or delays harmless reusable lessons
+  notes: Threshold controls investigation/candidacy, never automatic truth.
+- id: FC-059
+  name: Inference telemetry refresh-policy optimization
+  tier: VALIDATE_NEXT
+  prerequisites: Multiple telemetry sources/providers have observed polling cost,
+    staleness, and reset behavior
+  revisit_when: Static cache intervals are materially stale or wasteful
+  notes: Provider APIs/CLIs remain adapter details; optimize refresh without relying
+    on LLM interpretation.
+- id: FC-060
+  name: Generic workflow DSL / dedicated workflow engine
+  tier: FUTURE_IF_EARNED
+  prerequisites: V1 Task dependency graph repeatedly fails to represent actual organizational
+    workflows cleanly
+  revisit_when: Real work requires constructs that cannot be handled by Task dependencies,
+    execution kinds, handlers, and ordinary code without substantial duplication
+  notes: Do not create a workflow language merely because Agent OS executes workflows.
+    Prefer the Task DAG and Go composition first.
+- id: FC-061
+  name: Source-grounded knowledge validation
+  tier: VALIDATE_NEXT
+  prerequisites: V1 knowledge promotion/audit is in regular use with external factual
+    sources
+  revisit_when: Need to verify whether cited evidence actually supports candidate/active
+    claims
+  notes: Return supported/partial/contradicted/unverifiable evidence status; does
+    not require a general semantic ontology.
+- id: FC-062
+  name: Additional SecretSource integrations
+  tier: VALIDATE_NEXT
+  prerequisites: V1 SecretSource seam is stable and real deployments use external
+    secret managers
+  revisit_when: Need 1Password/Bitwarden/Vault/OS keychain or equivalent
+  notes: Keep credentials out of model context where adapters can resolve/use them
+    directly.
+- id: FC-063
+  name: Context hibernation and advanced resume compaction
+  tier: FUTURE_IF_EARNED
+  prerequisites: Long-sleeping work/context restoration becomes a material cost/quality
+    problem after simple checkpoints/context reconstruction
+  revisit_when: Resume/context loading dominates cost or quality and simple materialization
+    is insufficient
+  notes: Preserve ExecutionContextManifest/history and measure information-retention
+    failure explicitly.

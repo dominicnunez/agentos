@@ -1,0 +1,9 @@
+flowchart TD
+    I[Idea / hard task] --> X[Isolated bounded Lab experiment]
+    X --> R[Experimental result]
+    R -->|not useful| D[Discard / retain history]
+    R -->|promising| P[PROMOTION_CANDIDATE]
+    P --> V[Independent reproduction / tests / Completion]
+    V -->|fail| D
+    V -->|pass| G[Normal governance / promotion]
+    G --> K[Trusted knowledge / skill / config]

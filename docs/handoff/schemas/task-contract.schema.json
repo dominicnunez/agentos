@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/agentos/schemas/task-contract-0.2.json",
+  "title": "TaskContract v0.2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id",
+    "version",
+    "objective",
+    "success_criteria",
+    "hard_constraints",
+    "forbidden_actions",
+    "budget",
+    "execution_kind",
+    "model_inference_policy"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "parent_goal_id": {
+      "type": "string"
+    },
+    "parent_task_id": {
+      "type": "string"
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 1
+    },
+    "success_criteria": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "hard_constraints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "forbidden_actions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "allowed_resources": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "required_evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "human_approval_required": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assignee": {
+      "type": "object",
+      "required": [
+        "type",
+        "id"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "agent",
+            "team",
+            "role",
+            "human",
+            "runtime",
+            "tool"
+          ]
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wall_clock_seconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "model_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "currency_minor_units": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "execution_kind": {
+      "enum": [
+        "DETERMINISTIC",
+        "TOOL",
+        "AGENT",
+        "TEAM",
+        "HUMAN",
+        "MIXED"
+      ]
+    },
+    "model_inference_policy": {
+      "enum": [
+        "DISALLOWED",
+        "ALLOWED_IF_JUSTIFIED",
+        "REQUIRED"
+      ]
+    },
+    "runtime_handler_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

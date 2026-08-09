@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ConformanceProfile v0.2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "profile",
+    "architecture",
+    "ledger",
+    "semantic_model",
+    "model_format",
+    "claims",
+    "non_claims"
+  ],
+  "properties": {
+    "profile": {
+      "type": "string"
+    },
+    "architecture": {
+      "type": "string"
+    },
+    "ledger": {
+      "type": "string"
+    },
+    "semantic_model": {
+      "type": "string"
+    },
+    "model_format": {
+      "type": "string"
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "non_claims": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "external_operator_protocols": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "runtime_evidence_features": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$id": "agentos://schemas/conformance-profile/v0.2"
+}

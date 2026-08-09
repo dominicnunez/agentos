@@ -1,0 +1,33 @@
+C4Container
+title Agent OS - Containers
+Person(human, "Human / UI")
+System_Ext(ext, "Hermes / External Agents")
+System_Ext(models, "Model Providers")
+System_Ext(tools, "Tools/Resources")
+
+System_Boundary(aos, "Agent OS") {
+  Container(api, "Control/API Gateway", "Go HTTP", "REST/SSE, auth, goals, approvals, audit")
+  Container(org, "Organization Plane", "Go", "Blueprints, organizations, policies, teams")
+  Container(collab, "Collaboration Manager", "Go + LLM-assisted decisions", "Chooses collaboration topology")
+  Container(runtime, "Agent Runtime", "Go", "Actors, agent/team execution, context projection")
+  Container(anl, "Event Gateway", "Go", "Validation, canonicalization, policy, human rendering")
+  Container(bus, "Durable Message Bus", "Go", "In-process delivery + durable inbox abstraction")
+  Container(sched, "Scheduler", "Go", "DAG readiness, retries, cancellation, budgets")
+  Container(cap, "Capability Gateway", "Go", "Authorization, approvals, idempotency, tools")
+  ContainerDb(ledger, "Ledger / Checkpoints", "SQLite v0.1", "Append-only events, messages, projections/checkpoints")
+}
+
+Rel(human, api, "HTTP/SSE")
+Rel(ext, api, "HTTP; future A2A")
+Rel(api, org, "Organization/goal commands")
+Rel(org, collab, "Goals + organization structure")
+Rel(collab, runtime, "Create/assign collaboration")
+Rel(runtime, anl, "Draft Events")
+Rel(anl, ledger, "Persist canonical messages/events")
+Rel(anl, bus, "Route persisted messages")
+Rel(bus, runtime, "Durable inbox delivery")
+Rel(runtime, sched, "Execution readiness/state")
+Rel(runtime, cap, "Tool/action requests")
+Rel(cap, tools, "Authorized calls")
+Rel(runtime, models, "Model calls")
+Rel(sched, ledger, "Task/checkpoint events")

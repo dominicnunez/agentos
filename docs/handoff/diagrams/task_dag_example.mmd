@@ -1,0 +1,9 @@
+flowchart TD
+    T0[Inspect task] --> T1[Inspect code]
+    T0 --> T2[Reproduce issue]
+    T1 --> T3[Form hypothesis]
+    T2 --> T3
+    T3 --> T4[Implement candidate]
+    T3 --> T5[Independent verification]
+    T4 --> T6[Final tests]
+    T5 --> T6

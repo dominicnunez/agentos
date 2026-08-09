@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgentOS Constitution v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "root_invariants",
+    "human_boundaries"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "root_invariants": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "human_boundaries": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "FINANCIAL",
+          "PHYSICAL",
+          "PUBLIC_EXTERNAL",
+          "PRIVILEGE_TRUST",
+          "SENSITIVE_DATA",
+          "DESTRUCTIVE_IRREVERSIBLE",
+          "LEGAL_BINDING",
+          "TRUSTED_CORE"
+        ]
+      }
+    },
+    "approval_timeout_behavior": {
+      "const": "WAIT_FAIL_CLOSED"
+    },
+    "notification_rule": {
+      "const": "ESCALATE_ATTENTION_NEVER_AUTHORITY"
+    }
+  }
+}

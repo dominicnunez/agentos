@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentos://schemas/audit-finding/v0.2",
+  "title": "AuditFinding v0.2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "finding_id",
+    "rule_id",
+    "severity",
+    "scope",
+    "summary",
+    "status",
+    "created_at"
+  ],
+  "properties": {
+    "finding_id": {
+      "type": "string"
+    },
+    "rule_id": {
+      "type": "string"
+    },
+    "severity": {
+      "enum": [
+        "INFO",
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+        "CRITICAL"
+      ]
+    },
+    "scope": {
+      "type": "object"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "related_knowledge_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "related_skill_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "status": {
+      "enum": [
+        "OPEN",
+        "ACKNOWLEDGED",
+        "RESOLVED",
+        "DISMISSED"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "acknowledged_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "resolved_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "resolution_summary": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "downstream_effect_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

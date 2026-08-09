@@ -1,0 +1,10 @@
+flowchart LR
+    T[Execution Need] --> M[Inference Resource Manager]
+    M --> S[Subscription Pool]
+    M --> A[Metered API Pool]
+    M --> L[Local Compute Pool]
+    S --> E[AgentExecution]
+    A --> E
+    L --> E
+    E --> U[Usage / Outcome Telemetry]
+    U --> M

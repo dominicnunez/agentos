@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SOPManifest v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "sop_id",
+    "version",
+    "state",
+    "purpose",
+    "steps",
+    "evidence"
+  ],
+  "properties": {
+    "sop_id": {
+      "type": "string"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "state": {
+      "enum": [
+        "CANDIDATE",
+        "ACTIVE",
+        "QUARANTINED",
+        "STALE",
+        "REVALIDATING",
+        "RETIRED"
+      ]
+    },
+    "purpose": {
+      "type": "string"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "applicability": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "last_verified": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

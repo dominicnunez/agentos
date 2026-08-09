@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentos://schemas/inference-pool/v0.1",
+  "title": "InferencePool v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "pool_id",
+    "provider",
+    "access_mode",
+    "allowed_models",
+    "availability",
+    "reserve_policy"
+  ],
+  "properties": {
+    "pool_id": {
+      "type": "string"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "access_mode": {
+      "enum": [
+        "SUBSCRIPTION",
+        "METERED_API",
+        "LOCAL"
+      ]
+    },
+    "allowed_models": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "availability": {
+      "enum": [
+        "AVAILABLE",
+        "DEGRADED",
+        "EXHAUSTED",
+        "DISABLED",
+        "UNKNOWN"
+      ]
+    },
+    "concurrency_limit": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    },
+    "estimated_remaining": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "remaining_unit": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "remaining_confidence": {
+      "enum": [
+        "HIGH",
+        "MEDIUM",
+        "LOW",
+        "UNKNOWN",
+        null
+      ]
+    },
+    "reset_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "metered_budget_remaining": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "local_capacity": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "data_policy": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "reserve_policy": {
+      "type": "object"
+    }
+  }
+}

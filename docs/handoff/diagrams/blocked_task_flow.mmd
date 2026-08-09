@@ -1,0 +1,16 @@
+flowchart TD
+    A[Worker receives task] --> B{Can complete within current assignment?}
+    B -->|Yes| C[Work]
+    B -->|No| D[Return: Can't continue / TASK_BLOCKED]
+    D --> E[Parent reviews gap]
+    E --> F[Provide information]
+    E --> G[Rescope]
+    E --> H[Reassign]
+    E --> I[Split]
+    E --> J[Cancel]
+    E --> K[Create new separately authorized assignment]
+    F --> A
+    G --> A
+    H --> L[Other actor]
+    I --> L
+    K --> A

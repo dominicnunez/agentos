@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgentBlueprint v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "blueprint_id",
+    "version",
+    "role",
+    "operating_instructions"
+  ],
+  "properties": {
+    "blueprint_id": {
+      "type": "string"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "role": {
+      "type": "string"
+    },
+    "operating_instructions": {
+      "type": "string"
+    },
+    "default_skill_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "required_capability_classes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

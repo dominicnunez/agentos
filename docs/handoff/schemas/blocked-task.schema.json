@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TASK_BLOCKED payload v4.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id",
+    "task_version",
+    "reason",
+    "summary",
+    "missing",
+    "why_needed",
+    "work_completed"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string"
+    },
+    "task_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "reason": {
+      "enum": [
+        "MISSING_INPUT",
+        "MISSING_ACCESS",
+        "MISSING_TOOL",
+        "DEPENDENCY_UNSATISFIED",
+        "TASK_CONFLICT",
+        "CAPABILITY_GAP",
+        "INSUFFICIENT_EVIDENCE",
+        "POLICY_CONFLICT",
+        "UNSUPPORTED_SEMANTICS"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "missing": {
+      "type": "string"
+    },
+    "why_needed": {
+      "type": "string"
+    },
+    "work_completed": {
+      "type": "string"
+    },
+    "remaining_work": {
+      "type": "string"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "urgency": {
+      "enum": [
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+        "CRITICAL"
+      ]
+    }
+  }
+}

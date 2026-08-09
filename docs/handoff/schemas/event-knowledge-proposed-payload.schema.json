@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentos://schemas/event-knowledge-proposed-payload/v0.1",
+  "title": "KNOWLEDGE_PROPOSED payload v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "knowledge_type",
+    "content"
+  ],
+  "properties": {
+    "knowledge_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "knowledge_type": {
+      "enum": [
+        "EXPERIENCE",
+        "LESSON",
+        "KNOWLEDGE",
+        "PROCEDURE"
+      ]
+    },
+    "title": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "content": {
+      "type": "string"
+    },
+    "basis_type": {
+      "enum": [
+        "SINGLE_EXPERIENCE",
+        "REPEATED_PATTERN",
+        "DELIBERATE_EXPERIMENT",
+        "HUMAN_INPUT",
+        "EXTERNAL_EVIDENCE",
+        "DERIVED",
+        "MIXED",
+        null
+      ]
+    },
+    "occurrence_event_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_artifact_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "applicability": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "basis_type": {
+            "const": "REPEATED_PATTERN"
+          }
+        },
+        "required": [
+          "basis_type"
+        ]
+      },
+      "then": {
+        "required": [
+          "occurrence_event_refs"
+        ],
+        "properties": {
+          "occurrence_event_refs": {
+            "minItems": 3
+          }
+        }
+      }
+    }
+  ]
+}

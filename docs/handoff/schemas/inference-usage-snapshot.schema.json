@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentos://schemas/inference-usage-snapshot/v0.1",
+  "title": "InferenceUsageSnapshot v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "pool_id",
+    "source",
+    "observed_at",
+    "confidence"
+  ],
+  "properties": {
+    "pool_id": {
+      "type": "string"
+    },
+    "provider": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source": {
+      "enum": [
+        "OFFICIAL_API",
+        "PROVIDER_CLI",
+        "SUPPORTED_TELEMETRY",
+        "OBSERVED_ESTIMATE",
+        "CONSERVATIVE_ESTIMATE",
+        "LOCAL_RUNTIME"
+      ]
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "confidence": {
+      "enum": [
+        "HIGH",
+        "MEDIUM",
+        "LOW",
+        "UNKNOWN"
+      ]
+    },
+    "remaining_value": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "remaining_unit": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reset_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "window_description": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "basis": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "cache_valid_until": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    }
+  }
+}

@@ -1,0 +1,14 @@
+flowchart TD
+ H[Human] --> O[Organization / Team / Tasks]
+ O --> S[Deterministic Scheduler]
+ S --> X[AgentExecution]
+ X --> A[RuntimeAdapter]
+ A --> M[Model / Tools]
+ X --> D[EventDraft]
+ D --> G[Event Gateway]
+ G --> L[(Immutable Event Ledger)]
+ L --> P[Inbox / Task / Team / Audit Projections]
+ P --> X
+ X --> C[CANDIDATE_COMPLETE]
+ C --> CE[Completion Engine]
+ CE --> L
