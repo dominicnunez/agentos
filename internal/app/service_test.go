@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dominicnunez/agentos/internal/core"
@@ -223,6 +225,152 @@ func TestRecoverRetriesDeterministicWorkAndBlocksUncertainAgentWork(t *testing.T
 	for _, event := range agentEvents {
 		if event.EventType == "EXECUTION_CONTEXT_MANIFESTED" || event.EventType == "TOOL_OUTCOME_RECORDED" {
 			t.Fatalf("uncertain adaptive execution was blindly replayed: %+v", event)
+		}
+	}
+}
+
+func TestLateralMessagesSurviveRestartAndSurfaceAtAgentActionBoundary(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "agentos.db")
+	l, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	service := New(gateway)
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v4.2"}
+	sender := core.Agent{ID: "agent-sender", OrganizationID: organization.ID, BlueprintVersion: "v1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE"}
+	recipient := core.Agent{ID: "agent-recipient", OrganizationID: organization.ID, BlueprintVersion: "v1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE"}
+	team := core.Team{ID: "team-1", OrganizationID: organization.ID, Name: "Delivery", MemberAgentIDs: []core.ID{recipient.ID}, Status: "ACTIVE"}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "finish from handoff", NormalizedObjective: "finish from handoff"}
+	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: "finish from handoff", Status: "ACTIVE"}
+	sourceTask := core.Task{ID: "task-source", GoalID: goal.ID, Description: "prepare handoff", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: sender.ID, TaskContractVersion: "1", Status: core.TaskCompleted}
+	recipientTask := core.Task{ID: "task-recipient", GoalID: goal.ID, Description: "finish work", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{sourceTask.ID}, AssigneeType: "AGENT", AssigneeID: recipient.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	for _, save := range []func() error{
+		func() error {
+			return repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "request-1", 1, organization, nil)
+		},
+		func() error {
+			return repository.SaveAgent(ctx, "AGENT_CREATED", "runtime", "request-1", 1, sender, nil)
+		},
+		func() error {
+			return repository.SaveAgent(ctx, "AGENT_CREATED", "runtime", "request-1", 1, recipient, nil)
+		},
+		func() error { return repository.SaveTeam(ctx, "TEAM_CREATED", "runtime", "request-1", 1, team, nil) },
+		func() error {
+			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "request-1", 1, intent, nil)
+		},
+		func() error {
+			return repository.SaveGoal(ctx, organization.ID, "GOAL_CREATED", "runtime", "request-1", 1, goal, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "request-1", 1, sourceTask, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "request-1", 1, recipientTask, nil)
+		},
+	} {
+		if err := save(); err != nil {
+			_ = l.Close()
+			t.Fatal(err)
+		}
+	}
+	routes := []struct {
+		scope string
+		id    string
+		body  string
+	}{
+		{events.RecipientAgent, string(recipient.ID), "direct handoff detail"},
+		{events.RecipientTeam, string(team.ID), "team handoff detail"},
+		{events.RecipientTask, string(recipientTask.ID), "task handoff detail"},
+	}
+	messageIDs := make([]string, 0, len(routes))
+	for _, route := range routes {
+		message, err := service.SendMessage(ctx, string(organization.ID), string(sender.ID), "execution-source", "request-1", events.Draft{
+			EventType:      "MESSAGE",
+			RecipientScope: route.scope,
+			RecipientID:    route.id,
+			TaskID:         string(sourceTask.ID),
+			Payload: map[string]any{
+				"body":            route.body,
+				"source_actor_id": "admin",
+			},
+		})
+		if err != nil {
+			_ = l.Close()
+			t.Fatal(err)
+		}
+		if message.SourceActorID != string(sender.ID) {
+			_ = l.Close()
+			t.Fatalf("payload spoofed sender envelope: %+v", message)
+		}
+		messageIDs = append(messageIDs, message.EventID)
+	}
+	if _, err := service.SendMessage(ctx, string(organization.ID), string(sender.ID), "execution-source", "request-1", events.Draft{
+		EventType:      "MESSAGE",
+		RecipientScope: events.RecipientAgent,
+		RecipientID:    "unknown-agent",
+		TaskID:         string(sourceTask.ID),
+		Payload:        map[string]any{"body": "must fail closed"},
+	}); err == nil {
+		_ = l.Close()
+		t.Fatal("unknown recipient accepted")
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	l, err = ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway = events.NewGateway(l)
+	service = New(gateway)
+	recovery, err := service.Recover(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovery.PendingFound != 1 || recovery.TasksExecuted != 1 {
+		t.Fatalf("recovery=%+v", recovery)
+	}
+	stream, err := gateway.Events(ctx, "request-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest core.ExecutionContextManifest
+	var outcome core.ToolOutcome
+	for _, event := range stream {
+		switch event.EventType {
+		case "EXECUTION_CONTEXT_MANIFESTED":
+			if event.TaskID == string(recipientTask.ID) {
+				if err := json.Unmarshal(event.Payload, &manifest); err != nil {
+					t.Fatal(err)
+				}
+			}
+		case "TOOL_OUTCOME_RECORDED":
+			if event.TaskID == string(recipientTask.ID) {
+				if err := json.Unmarshal(event.Payload, &outcome); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	if strings.Join(manifest.EventRefs, ",") != strings.Join(messageIDs, ",") {
+		t.Fatalf("manifest event refs=%v want=%v", manifest.EventRefs, messageIDs)
+	}
+	observed, ok := outcome.ObservedEffect.(string)
+	if !ok {
+		t.Fatalf("observed effect type=%T value=%v", outcome.ObservedEffect, outcome.ObservedEffect)
+	}
+	for _, route := range routes {
+		if !strings.Contains(observed, route.body) {
+			t.Fatalf("model context omitted %q: %s", route.body, observed)
+		}
+		available, err := gateway.Inbox(ctx, route.scope, route.id)
+		if err != nil || len(available) != 0 {
+			t.Fatalf("observed inbox %s/%s=%+v err=%v", route.scope, route.id, available, err)
 		}
 	}
 }

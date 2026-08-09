@@ -50,16 +50,88 @@ type Service struct {
 }
 
 func New(g *events.Gateway) *Service {
-	return &Service{
+	service := &Service{
 		gateway:       g,
 		state:         projections.New(g),
 		deterministic: execution.Deterministic{},
 		agent:         execution.NewAgentExecution(execution.FakeModel{}),
 	}
+	g.SetRouteValidator(service)
+	return service
 }
 
 func (s *Service) Events(ctx context.Context, requestID string) ([]events.Event, error) {
 	return s.gateway.Events(ctx, requestID)
+}
+
+// SendMessage is the lateral Agent-to-Agent/Team/Task path. It deliberately
+// uses an EventDraft; the gateway owns trusted sender metadata, persistence,
+// and inbox availability.
+func (s *Service) SendMessage(ctx context.Context, organizationID, actorID, executionID, correlationID string, draft events.Draft) (events.Event, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if draft.EventType != "MESSAGE" {
+		return events.Event{}, fmt.Errorf("SendMessage accepts only MESSAGE drafts")
+	}
+	return s.gateway.PublishAgentDraft(ctx, organizationID, actorID, executionID, correlationID, draft)
+}
+
+// ValidateMessageRoute implements events.RouteValidator with durable identity
+// and task projections. Authenticated envelope identity, never payload text,
+// determines the sender and recipient.
+func (s *Service) ValidateMessageRoute(ctx context.Context, route events.MessageRoute) error {
+	snapshot, err := s.state.Load(ctx)
+	if err != nil {
+		return err
+	}
+	organizationID := core.ID(route.OrganizationID)
+	if _, ok := snapshot.Organizations[organizationID]; !ok {
+		return fmt.Errorf("message organization does not exist")
+	}
+	source, ok := snapshot.Agents[core.ID(route.SourceActorID)]
+	if !ok || source.Value.OrganizationID != organizationID {
+		return fmt.Errorf("message source is not an Agent in the organization")
+	}
+	if route.TaskID != "" {
+		task, err := messageTaskInOrganization(snapshot, core.ID(route.TaskID), organizationID, "source")
+		if err != nil {
+			return err
+		}
+		if !agentParticipates(snapshot, source.Value.ID, task) {
+			return fmt.Errorf("message source is not a participant in the task")
+		}
+	}
+	switch route.RecipientScope {
+	case events.RecipientAgent:
+		recipient, ok := snapshot.Agents[core.ID(route.RecipientID)]
+		if !ok || recipient.Value.OrganizationID != organizationID {
+			return fmt.Errorf("message recipient Agent is outside the organization")
+		}
+	case events.RecipientTeam:
+		recipient, ok := snapshot.Teams[core.ID(route.RecipientID)]
+		if !ok || recipient.Value.OrganizationID != organizationID {
+			return fmt.Errorf("message recipient Team is outside the organization")
+		}
+	case events.RecipientTask:
+		if _, err := messageTaskInOrganization(snapshot, core.ID(route.RecipientID), organizationID, "recipient"); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported message recipient scope")
+	}
+	return nil
+}
+
+func messageTaskInOrganization(snapshot projections.Snapshot, taskID, organizationID core.ID, role string) (core.Task, error) {
+	task, ok := snapshot.Tasks[taskID]
+	if !ok {
+		return core.Task{}, fmt.Errorf("message %s task does not exist", role)
+	}
+	actualOrganizationID, err := taskOrganization(snapshot, task.Value)
+	if err != nil || actualOrganizationID != organizationID {
+		return core.Task{}, fmt.Errorf("message %s task is outside the organization", role)
+	}
+	return task.Value, nil
 }
 
 // Recover validates all durable work before the process exposes an operator
@@ -339,7 +411,14 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	}
 	executionID := core.ID(fmt.Sprintf("execution-%s-v%d", task.ID, state.Version+1))
 	manifest := core.ExecutionContextManifest{}
+	executionTask := task
+	var inboxBatches []inboxBatch
 	if task.ExecutionKind == core.ExecutionAgent {
+		inboxBatches, err = s.actionBoundaryInbox(ctx, snapshot, task)
+		if err != nil {
+			return taskRun{}, fmt.Errorf("load action-boundary inbox for task %s: %w", task.ID, err)
+		}
+		eventRefs := inboxEventRefs(inboxBatches)
 		manifest = core.ExecutionContextManifest{
 			ExecutionID:             executionID,
 			AgentID:                 task.AssigneeID,
@@ -350,7 +429,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			TaskContractVersion:     task.TaskContractVersion,
 			PromptVersion:           "v1",
 			PolicyVersion:           "v4.2",
-			EventRefs:               []string{},
+			EventRefs:               eventRefs,
 			KnowledgeRefs:           []core.VersionedRef{},
 			SkillRefs:               []core.VersionedRef{},
 			ToolDefinitions:         []core.VersionedRef{},
@@ -362,11 +441,25 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "EXECUTION_CONTEXT_MANIFESTED", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: manifest, CorrelationID: state.CorrelationID}); err != nil {
 			return taskRun{}, fmt.Errorf("persist execution context for task %s: %w", task.ID, err)
 		}
+		if len(eventRefs) > 0 {
+			executionTask.Description, err = materializeMessageContext(task.Description, inboxBatches)
+			if err != nil {
+				return taskRun{}, fmt.Errorf("materialize action-boundary messages for task %s: %w", task.ID, err)
+			}
+		}
 	}
 
-	outcome, executionErr := handler.Execute(ctx, task, manifest)
+	outcome, executionErr := handler.Execute(ctx, executionTask, manifest)
 	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: outcome, CorrelationID: state.CorrelationID}); err != nil {
 		return taskRun{}, fmt.Errorf("persist outcome for task %s: %w", task.ID, err)
+	}
+	for _, batch := range inboxBatches {
+		if len(batch.Events) == 0 {
+			continue
+		}
+		if _, err := s.gateway.ObserveInbox(ctx, string(organizationID), string(task.AssigneeID), string(executionID), string(task.ID), state.CorrelationID, batch.Scope, batch.ID, eventIDs(batch.Events)); err != nil {
+			return taskRun{}, fmt.Errorf("persist inbox observation for task %s: %w", task.ID, err)
+		}
 	}
 	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "EXECUTION_FINISHED", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: map[string]any{"status": outcome.Status}, CorrelationID: state.CorrelationID}); err != nil {
 		return taskRun{}, fmt.Errorf("persist execution finish for task %s: %w", task.ID, err)
@@ -515,4 +608,120 @@ func blockedDetail(reason, missing, whyNeeded string) map[string]any {
 		"why_needed":     whyNeeded,
 		"work_completed": "none",
 	}
+}
+
+type inboxBatch struct {
+	Scope  string
+	ID     string
+	Events []events.Event
+}
+
+func (s *Service) actionBoundaryInbox(ctx context.Context, snapshot projections.Snapshot, task core.Task) ([]inboxBatch, error) {
+	routes := []struct{ scope, id string }{{events.RecipientTask, string(task.ID)}}
+	switch task.AssigneeType {
+	case "AGENT":
+		routes = append(routes, struct{ scope, id string }{events.RecipientAgent, string(task.AssigneeID)})
+		teamIDs := make([]core.ID, 0)
+		for teamID, team := range snapshot.Teams {
+			for _, memberID := range team.Value.MemberAgentIDs {
+				if memberID == task.AssigneeID {
+					teamIDs = append(teamIDs, teamID)
+					break
+				}
+			}
+		}
+		sort.Slice(teamIDs, func(i, j int) bool { return teamIDs[i] < teamIDs[j] })
+		for _, teamID := range teamIDs {
+			routes = append(routes, struct{ scope, id string }{events.RecipientTeam, string(teamID)})
+		}
+	case "TEAM":
+		routes = append(routes, struct{ scope, id string }{events.RecipientTeam, string(task.AssigneeID)})
+	}
+	batches := make([]inboxBatch, 0, len(routes))
+	for _, route := range routes {
+		available, err := s.gateway.Inbox(ctx, route.scope, route.id)
+		if err != nil {
+			return nil, err
+		}
+		batches = append(batches, inboxBatch{Scope: route.scope, ID: route.id, Events: available})
+	}
+	return batches, nil
+}
+
+func inboxEventRefs(batches []inboxBatch) []string {
+	stream := sortedInboxEvents(batches)
+	refs := make([]string, 0, len(stream))
+	for _, event := range stream {
+		refs = append(refs, event.EventID)
+	}
+	return refs
+}
+
+func eventIDs(stream []events.Event) []string {
+	ids := make([]string, 0, len(stream))
+	for _, event := range stream {
+		ids = append(ids, event.EventID)
+	}
+	return ids
+}
+
+func materializeMessageContext(objective string, batches []inboxBatch) (string, error) {
+	type messageView struct {
+		EventID        string          `json:"event_id"`
+		SourceActorID  string          `json:"source_actor_id"`
+		RecipientScope string          `json:"recipient_scope"`
+		RecipientID    string          `json:"recipient_id"`
+		TaskID         string          `json:"task_id,omitempty"`
+		CreatedAt      time.Time       `json:"created_at"`
+		Payload        json.RawMessage `json:"payload"`
+	}
+	stream := sortedInboxEvents(batches)
+	messages := make([]messageView, 0, len(stream))
+	for _, event := range stream {
+		messages = append(messages, messageView{
+			EventID:        event.EventID,
+			SourceActorID:  event.SourceActorID,
+			RecipientScope: event.RecipientScope,
+			RecipientID:    event.RecipientID,
+			TaskID:         event.TaskID,
+			CreatedAt:      event.CreatedAt,
+			Payload:        event.Payload,
+		})
+	}
+	contextView := struct {
+		Objective string        `json:"objective"`
+		Messages  []messageView `json:"messages"`
+	}{Objective: objective, Messages: messages}
+	encoded, err := json.Marshal(contextView)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func sortedInboxEvents(batches []inboxBatch) []events.Event {
+	var stream []events.Event
+	for _, batch := range batches {
+		stream = append(stream, batch.Events...)
+	}
+	sort.Slice(stream, func(i, j int) bool { return stream[i].Sequence < stream[j].Sequence })
+	return stream
+}
+
+func agentParticipates(snapshot projections.Snapshot, agentID core.ID, task core.Task) bool {
+	switch task.AssigneeType {
+	case "AGENT":
+		return task.AssigneeID == agentID
+	case "TEAM":
+		team, ok := snapshot.Teams[task.AssigneeID]
+		if !ok {
+			return false
+		}
+		for _, memberID := range team.Value.MemberAgentIDs {
+			if memberID == agentID {
+				return true
+			}
+		}
+	}
+	return false
 }

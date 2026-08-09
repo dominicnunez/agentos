@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 
@@ -82,5 +83,146 @@ func TestProjectionVersionConflictRollsBackItsEvent(t *testing.T) {
 	}
 	if len(stream) != 1 {
 		t.Fatalf("projection failure left an orphan event: %+v", stream)
+	}
+}
+
+func TestMessageInboxSurvivesReopenAndObservation(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "agentos.db")
+	l, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := l.Append(ctx, events.TrustedDraft{
+		OrganizationID: "org-1",
+		EventType:      "MESSAGE",
+		SourceActorID:  "agent-1",
+		RecipientScope: events.RecipientAgent,
+		RecipientID:    "agent-2",
+		TaskID:         "task-1",
+		Payload:        map[string]any{"body": "restart-safe handoff"},
+	})
+	if err != nil {
+		_ = l.Close()
+		t.Fatal(err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	l, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	available, err := l.Inbox(ctx, events.RecipientAgent, "agent-2")
+	if err != nil || len(available) != 1 || available[0].EventID != message.EventID {
+		_ = l.Close()
+		t.Fatalf("reopened inbox=%+v err=%v", available, err)
+	}
+	observation, err := l.ObserveInbox(ctx, events.TrustedDraft{
+		OrganizationID: "org-1",
+		EventType:      "INBOX_EVENTS_OBSERVED",
+		SourceActorID:  "agent-2",
+		RecipientScope: events.RecipientAgent,
+		RecipientID:    "agent-2",
+		TaskID:         "task-2",
+		Payload:        map[string]any{"event_ids": []string{message.EventID}},
+	}, events.RecipientAgent, "agent-2", []string{message.EventID})
+	if err != nil {
+		_ = l.Close()
+		t.Fatal(err)
+	}
+	if observation.EventType != "INBOX_EVENTS_OBSERVED" {
+		_ = l.Close()
+		t.Fatalf("observation=%+v", observation)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	l, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	available, err = l.Inbox(ctx, events.RecipientAgent, "agent-2")
+	if err != nil || len(available) != 0 {
+		t.Fatalf("observed inbox after reopen=%+v err=%v", available, err)
+	}
+	stream, err := l.Events(ctx, "")
+	if err != nil || len(stream) != 2 || stream[1].EventID != observation.EventID {
+		t.Fatalf("durable message/observation stream=%+v err=%v", stream, err)
+	}
+}
+
+func TestInboxProjectionFailureRollsBackMessage(t *testing.T) {
+	ctx := context.Background()
+	l, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	if _, err := l.db.ExecContext(ctx, `CREATE TRIGGER fail_inbox_insert BEFORE INSERT ON inbox BEGIN SELECT RAISE(FAIL, 'injected inbox failure'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	_, err = l.Append(ctx, events.TrustedDraft{
+		OrganizationID: "org-1",
+		EventType:      "MESSAGE",
+		SourceActorID:  "agent-1",
+		RecipientScope: events.RecipientAgent,
+		RecipientID:    "agent-2",
+		Payload:        map[string]any{"body": "must not become available"},
+	})
+	if err == nil {
+		t.Fatal("injected inbox projection failure was ignored")
+	}
+	stream, readErr := l.Events(ctx, "")
+	if readErr != nil || len(stream) != 0 {
+		t.Fatalf("failed message left ledger evidence: events=%+v err=%v", stream, readErr)
+	}
+	available, readErr := l.Inbox(ctx, events.RecipientAgent, "agent-2")
+	if readErr != nil || len(available) != 0 {
+		t.Fatalf("failed message became available: inbox=%+v err=%v", available, readErr)
+	}
+}
+
+func TestOpenMigratesEventRoutingColumns(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.ExecContext(ctx, `CREATE TABLE events (
+sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, organization_id TEXT NOT NULL,
+event_type TEXT NOT NULL, source_actor_id TEXT NOT NULL DEFAULT '', source_execution_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '', authorization_refs BLOB NOT NULL, artifact_refs BLOB NOT NULL, payload BLOB NOT NULL,
+correlation_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, schema_version INTEGER NOT NULL);`)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	l, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	message, err := l.Append(ctx, events.TrustedDraft{
+		OrganizationID: "org-1",
+		EventType:      "MESSAGE",
+		SourceActorID:  "agent-1",
+		RecipientScope: events.RecipientTask,
+		RecipientID:    "task-1",
+		Payload:        map[string]any{"body": "after migration"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	available, err := l.Inbox(ctx, events.RecipientTask, "task-1")
+	if err != nil || len(available) != 1 || available[0].EventID != message.EventID {
+		t.Fatalf("migrated inbox=%+v err=%v", available, err)
 	}
 }
