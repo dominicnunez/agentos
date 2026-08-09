@@ -147,7 +147,11 @@ func TestNotificationFailureRemainsDurablyPending(t *testing.T) {
 	}
 	failing := &notifier{err: fmt.Errorf("delivery unavailable")}
 	service := approvals.New(l, failing, nil)
-	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", Action: "deploy", Resource: "agent-os", ConsequenceBoundary: core.BoundaryDeployment, Descriptor: "deploy Agent OS", EffectFingerprint: "fingerprint-1", ApprovalRef: "approval-1", IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"version": "1"}}
+	fingerprint, err := effects.Fingerprint("deploy", "agent-os", map[string]string{"version": "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", Action: "deploy", Resource: "agent-os", ConsequenceBoundary: core.BoundaryDeployment, Descriptor: "deploy Agent OS", EffectFingerprint: fingerprint, ApprovalRef: "approval-1", IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"version": "1"}}
 	if _, err := effects.NewWithApprovals(l, &effectAdapter{}, service).Prepare(ctx, obligation); err != nil {
 		_ = l.Close()
 		t.Fatal(err)
@@ -162,7 +166,7 @@ func TestNotificationFailureRemainsDurablyPending(t *testing.T) {
 		Boundary:           core.BoundaryDeployment,
 		Risk:               "HIGH",
 		Urgency:            "NORMAL",
-		EffectFingerprint:  "fingerprint-1",
+		EffectFingerprint:  fingerprint,
 	})
 	if !errors.Is(err, approvals.ErrNotificationUnavailable) || approval.Status != core.ApprovalPending {
 		_ = l.Close()
@@ -219,7 +223,7 @@ func TestDeniedDecisionCancelsPreparedEffect(t *testing.T) {
 	service := approvals.New(l, &notifier{}, authorizer)
 	adapter := &effectAdapter{}
 	coordinator := effects.NewWithApprovals(l, adapter, service)
-	fingerprint, _ := effects.Fingerprint("delete", "record-1", map[string]bool{"permanent": true})
+	fingerprint, _ := effects.Fingerprint("delete", "record-1", map[string]string{"permanent": "true"})
 	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", Action: "delete", Resource: "record-1", ConsequenceBoundary: core.BoundaryDestructive, Descriptor: "permanently delete record", EffectFingerprint: fingerprint, ApprovalRef: "approval-1", IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"permanent": "true"}}
 	if _, err := coordinator.Prepare(ctx, obligation); err != nil {
 		t.Fatal(err)
