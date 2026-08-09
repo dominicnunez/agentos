@@ -86,4 +86,3 @@ analysis:
   include_tests: true
   profiles:
     - modular-monolith
-

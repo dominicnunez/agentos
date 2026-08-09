@@ -7,13 +7,11 @@ tool (
 	github.com/dominicnunez/gallow/cmd/gallow
 )
 
-require (
-	github.com/dominicnunez/archguard v0.0.0-20260521162903-d94aba3763e6
-	github.com/dominicnunez/gallow v0.0.0-20260520183017-3603a0a4bf96
-	modernc.org/sqlite v1.38.2
-)
+require modernc.org/sqlite v1.38.2
 
 require (
+	github.com/dominicnunez/archguard v0.0.0-20260521162903-d94aba3763e6 // indirect
+	github.com/dominicnunez/gallow v0.0.0-20260520183017-3603a0a4bf96 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
@@ -23,7 +21,7 @@ require (
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
 	golang.org/x/mod v0.36.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.34.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/tools v0.44.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.66.3 // indirect
