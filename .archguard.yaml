@@ -8,18 +8,30 @@ packages:
 modules:
   - name: app
     path: internal/app
+  - name: audit
+    path: internal/audit
+  - name: authority
+    path: internal/authority
   - name: completion
     path: internal/completion
   - name: core
     path: internal/core
+  - name: effects
+    path: internal/effects
   - name: events
     path: internal/events
   - name: execution
     path: internal/execution
   - name: gateway
     path: internal/gateway
+  - name: inference
+    path: internal/inference
+  - name: knowledge
+    path: internal/knowledge
   - name: ledger
     path: internal/ledger
+  - name: secrets
+    path: internal/secrets
   - name: workflow
     path: internal/workflow
 
@@ -38,6 +50,18 @@ policy:
       to:
         modules: [completion, core, events, execution]
 
+    - name: audit-events
+      from:
+        module: audit
+      to:
+        module: events
+
+    - name: authority-domain
+      from:
+        module: authority
+      to:
+        module: core
+
     - name: completion-domain
       from:
         module: completion
@@ -50,11 +74,23 @@ policy:
       to:
         module: core
 
+    - name: effects-domain
+      from:
+        module: effects
+      to:
+        module: core
+
     - name: operator-boundary
       from:
         module: gateway
       to:
-        modules: [app, core]
+        modules: [app, core, events]
+
+    - name: knowledge-domain
+      from:
+        module: knowledge
+      to:
+        module: core
 
     - name: event-persistence
       from:
@@ -75,12 +111,26 @@ policy:
       to:
         module: ledger
 
-    - name: gateway-test-events
+    - name: effects-test-adapter
+      from:
+        module: effects
+        tests: true
+      to:
+        module: ledger
+
+    - name: gateway-test-adapter
       from:
         module: gateway
         tests: true
       to:
-        module: events
+        module: ledger
+
+    - name: knowledge-test-adapter
+      from:
+        module: knowledge
+        tests: true
+      to:
+        module: ledger
 
 analysis:
   include_tests: true
@@ -88,4 +138,5 @@ analysis:
     - modular-monolith
   table_owners:
     - module: ledger
-      tables: [events]
+      tables: [consumed_approvals, events, records]
+
