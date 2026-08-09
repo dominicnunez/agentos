@@ -32,7 +32,6 @@ type Coordinator struct {
 	approvals ApprovalReader
 }
 
-func New(r Records, a Adapter) *Coordinator { return &Coordinator{records: r, adapter: a} }
 func NewWithApprovals(r Records, a Adapter, approvalReader ApprovalReader) *Coordinator {
 	return &Coordinator{records: r, adapter: a, approvals: approvalReader}
 }
@@ -61,6 +60,9 @@ func Fingerprint(action, resource string, args any) (string, error) {
 func (c *Coordinator) Prepare(ctx context.Context, obligation core.EffectObligation) (core.EffectObligation, error) {
 	if err := validateObligation(obligation); err != nil {
 		return obligation, err
+	}
+	if c == nil || c.records == nil {
+		return obligation, fmt.Errorf("durable effect records are required")
 	}
 	requiresApproval, err := approvals.RequiresHumanApproval(obligation.ConsequenceBoundary)
 	if err != nil {
@@ -96,6 +98,9 @@ func (c *Coordinator) Prepare(ctx context.Context, obligation core.EffectObligat
 func (c *Coordinator) Execute(ctx context.Context, o core.EffectObligation) (core.EffectObligation, error) {
 	if err := validateObligation(o); err != nil {
 		return o, err
+	}
+	if c == nil || c.records == nil {
+		return o, fmt.Errorf("durable effect records are required")
 	}
 	requiresApproval, err := approvals.RequiresHumanApproval(o.ConsequenceBoundary)
 	if err != nil {
@@ -149,6 +154,9 @@ func (c *Coordinator) Execute(ctx context.Context, o core.EffectObligation) (cor
 			return o, err
 		}
 		version = 1
+	}
+	if c.adapter == nil {
+		return o, fmt.Errorf("effect adapter is required")
 	}
 	now := time.Now().UTC()
 	o.Status = core.EffectAttempted
@@ -236,3 +244,4 @@ func validateApproval(obligation core.EffectObligation, approval core.HumanAppro
 func (c *Coordinator) record(ctx context.Context, o core.EffectObligation, version int) error {
 	return c.records.AppendRecord(ctx, string(o.OrganizationID), "EFFECT_OBLIGATION_TRANSITIONED", "", string(o.TaskID), o.AuthorizationRefs, o.ConfirmationEvidenceRefs, "effect", string(o.ID), version, o)
 }
+
