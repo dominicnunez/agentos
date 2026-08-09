@@ -81,6 +81,11 @@ type Task struct {
 	ExecutionKind        ExecutionKind        `json:"execution_kind"`
 	ModelInferencePolicy ModelInferencePolicy `json:"model_inference_policy"`
 	DependsOn            []ID                 `json:"depends_on,omitempty"`
+	ParentID             ID                   `json:"parent_id,omitempty"`
+	AssigneeType         string               `json:"assignee_type,omitempty"`
+	AssigneeID           ID                   `json:"assignee_id,omitempty"`
+	RuntimeHandlerRef    string               `json:"runtime_handler_ref,omitempty"`
+	TaskContractVersion  string               `json:"task_contract_version"`
 	Status               TaskStatus           `json:"status"`
 }
 
@@ -113,6 +118,13 @@ type MaterializationState string
 
 const MaterializedFull MaterializationState = "FULL"
 
+const (
+	MaterializedSummary       MaterializationState = "SUMMARY"
+	MaterializedReferenceOnly MaterializationState = "REFERENCE_ONLY"
+	MaterializedOmitted       MaterializationState = "OMITTED"
+	MaterializedUnavailable   MaterializationState = "UNAVAILABLE"
+)
+
 type VersionedRef struct {
 	ID                   string               `json:"id"`
 	Version              string               `json:"version"`
@@ -132,8 +144,119 @@ type ExecutionContextManifest struct {
 	KnowledgeRefs           []VersionedRef `json:"knowledge_refs"`
 	SkillRefs               []VersionedRef `json:"skill_refs"`
 	ToolDefinitions         []VersionedRef `json:"tool_definitions"`
+	ArtifactRefs            []VersionedRef `json:"artifact_refs"`
+	AdditionalContextRefs   []VersionedRef `json:"additional_context_refs"`
 	ContextBuilderVersion   string         `json:"context_builder_version"`
 	CreatedAt               time.Time      `json:"created_at"`
+}
+
+type CapabilityLease struct {
+	ID           ID         `json:"id"`
+	ActorID      ID         `json:"actor_id"`
+	Action       string     `json:"action"`
+	Resource     string     `json:"resource"`
+	Scope        string     `json:"scope"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+	OriginTaskID ID         `json:"origin_task_id"`
+	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
+}
+
+type AuthorizationTrace struct {
+	Allowed  bool   `json:"allowed"`
+	LeaseID  ID     `json:"lease_id,omitempty"`
+	ActorID  ID     `json:"actor_id"`
+	TaskID   ID     `json:"task_id"`
+	Action   string `json:"action"`
+	Resource string `json:"resource"`
+	Scope    string `json:"scope"`
+	Reason   string `json:"reason"`
+}
+
+type KnowledgeStatus string
+
+const (
+	KnowledgeCandidate   KnowledgeStatus = "CANDIDATE"
+	KnowledgeActive      KnowledgeStatus = "ACTIVE"
+	KnowledgeSuperseded  KnowledgeStatus = "SUPERSEDED"
+	KnowledgeStale       KnowledgeStatus = "STALE"
+	KnowledgeQuarantined KnowledgeStatus = "QUARANTINED"
+)
+
+type KnowledgeRecord struct {
+	KnowledgeID          ID              `json:"knowledge_id"`
+	Version              int             `json:"version"`
+	Type                 string          `json:"type"`
+	Scope                string          `json:"scope"`
+	Tags                 []string        `json:"tags,omitempty"`
+	Status               KnowledgeStatus `json:"status"`
+	Content              string          `json:"content"`
+	ProvenanceEventRefs  []string        `json:"provenance_event_refs"`
+	EvidenceArtifactRefs []string        `json:"evidence_artifact_refs"`
+	Applicability        string          `json:"applicability,omitempty"`
+	CreatedBy            ID              `json:"created_by"`
+	CreatedAt            time.Time       `json:"created_at"`
+	LastVerifiedAt       *time.Time      `json:"last_verified_at,omitempty"`
+	SupersedesVersion    *int            `json:"supersedes_version,omitempty"`
+}
+type Skill struct {
+	SkillID                   ID              `json:"skill_id"`
+	Version                   int             `json:"version"`
+	Name                      string          `json:"name"`
+	Description               string          `json:"description"`
+	Scope                     string          `json:"scope"`
+	Status                    KnowledgeStatus `json:"status"`
+	InstructionsRef           string          `json:"instructions_ref"`
+	ReferenceRefs             []string        `json:"reference_refs"`
+	RequiredCapabilityClasses []string        `json:"required_capability_classes"`
+	ProvenanceEventRefs       []string        `json:"provenance_event_refs"`
+	ValidationEvidenceRefs    []string        `json:"validation_evidence_refs"`
+	CreatedBy                 ID              `json:"created_by"`
+	LastVerifiedAt            *time.Time      `json:"last_verified_at,omitempty"`
+}
+
+type EffectStatus string
+
+const (
+	EffectPending   EffectStatus = "PENDING"
+	EffectAttempted EffectStatus = "ATTEMPTED"
+	EffectConfirmed EffectStatus = "CONFIRMED"
+	EffectFailed    EffectStatus = "FAILED"
+	EffectCancelled EffectStatus = "CANCELLED"
+)
+
+type EffectObligation struct {
+	ID                       ID                `json:"effect_obligation_id"`
+	OrganizationID           ID                `json:"organization_id"`
+	TaskID                   ID                `json:"task_id"`
+	Action                   string            `json:"action"`
+	Resource                 string            `json:"resource"`
+	Descriptor               string            `json:"canonical_effect_descriptor"`
+	EffectFingerprint        string            `json:"effect_fingerprint"`
+	AuthorizationRefs        []string          `json:"authorization_refs"`
+	ApprovalRef              string            `json:"approval_ref,omitempty"`
+	IdempotencyKey           string            `json:"idempotency_key"`
+	ReplayContext            map[string]string `json:"replay_context"`
+	Status                   EffectStatus      `json:"status"`
+	AttemptCount             int               `json:"attempt_count"`
+	LastAttemptAt            *time.Time        `json:"last_attempt_at,omitempty"`
+	ConfirmationEvidenceRefs []string          `json:"confirmation_evidence_refs"`
+	CreatedAt                time.Time         `json:"created_at"`
+}
+type HumanApproval struct {
+	ID                ID         `json:"id"`
+	TaskID            ID         `json:"task_id"`
+	Action            string     `json:"action"`
+	Resource          string     `json:"resource"`
+	Boundary          string     `json:"boundary"`
+	Risk              string     `json:"risk"`
+	Urgency           string     `json:"urgency"`
+	EffectFingerprint string     `json:"effect_fingerprint"`
+	Status            string     `json:"status"`
+	CreatedAt         time.Time  `json:"created_at"`
+	AcknowledgedAt    *time.Time `json:"acknowledged_at,omitempty"`
+	DecisionAt        *time.Time `json:"decision_at,omitempty"`
+	ExpiresAt         *time.Time `json:"expires_at,omitempty"`
+	SingleUse         bool       `json:"single_use"`
 }
 
 type ToolOutcomeStatus string

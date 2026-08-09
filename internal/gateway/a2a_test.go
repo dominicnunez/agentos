@@ -4,10 +4,12 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/dominicnunez/agentos/internal/app"
 	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/ledger"
 )
 
 type noopLedger struct{}
@@ -33,5 +35,36 @@ func TestSubmissionFailsClosedWithoutActorCredential(t *testing.T) {
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status=%d", w.Code)
+	}
+}
+
+func TestA2AStatusAndInputContinuation(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	h := NewA2A(app.New(events.NewGateway(l)), ExternalActor{ID: "hermes", OrganizationID: "o", BearerToken: "token", Capabilities: []string{"submit_work", "read_status", "provide_input"}})
+	body := `{"id":"r1","message":{"role":"user","parts":[{"type":"text","text":"echo hello"}]}}`
+	r := httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer token")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("submit=%d %s", w.Code, w.Body.String())
+	}
+	r = httptest.NewRequest(http.MethodGet, "/a2a/v1/tasks/r1", nil)
+	r.Header.Set("Authorization", "Bearer token")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"completed"`) {
+		t.Fatalf("status=%d %s", w.Code, w.Body.String())
+	}
+	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r1/input", strings.NewReader(`{"task_id":"task-r1","text":"detail"}`))
+	r.Header.Set("Authorization", "Bearer token")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("input=%d %s", w.Code, w.Body.String())
 	}
 }

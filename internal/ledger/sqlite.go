@@ -35,7 +35,48 @@ sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, organ
 event_type TEXT NOT NULL, source_actor_id TEXT NOT NULL DEFAULT '', source_execution_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '', authorization_refs BLOB NOT NULL, artifact_refs BLOB NOT NULL, payload BLOB NOT NULL,
 correlation_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, schema_version INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS events_correlation_idx ON events(correlation_id, sequence);`)
+	if err != nil {
+		return err
+	}
+	_, err = l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS records (
+kind TEXT NOT NULL, record_id TEXT NOT NULL, version INTEGER NOT NULL, body BLOB NOT NULL,
+created_at TEXT NOT NULL, PRIMARY KEY(kind, record_id, version));
+CREATE INDEX IF NOT EXISTS records_kind_idx ON records(kind, created_at);`)
 	return err
+}
+
+// PutRecord appends a versioned durable object. The primary key prevents
+// history from being overwritten and makes promotion/version races fail closed.
+func (l *SQLite) PutRecord(ctx context.Context, kind, id string, version int, value any) error {
+	if kind == "" || id == "" || version < 1 {
+		return fmt.Errorf("kind, id, and positive version are required")
+	}
+	body, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("encode record: %w", err)
+	}
+	_, err = l.db.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, kind, id, version, body, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return fmt.Errorf("append record: %w", err)
+	}
+	return nil
+}
+
+func (l *SQLite) Records(ctx context.Context, kind, id string) ([][]byte, error) {
+	rows, err := l.db.QueryContext(ctx, `SELECT body FROM records WHERE kind=? AND (?='' OR record_id=?) ORDER BY record_id,version`, kind, id, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out [][]byte
+	for rows.Next() {
+		var body []byte
+		if err := rows.Scan(&body); err != nil {
+			return nil, err
+		}
+		out = append(out, body)
+	}
+	return out, rows.Err()
 }
 func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Event, error) {
 	data, err := json.Marshal(d.Payload)

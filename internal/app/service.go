@@ -36,6 +36,32 @@ func New(g *events.Gateway) *Service {
 	return &Service{gateway: g, deterministic: execution.Deterministic{}, agent: execution.NewAgentExecution(execution.FakeModel{})}
 }
 
+func (s *Service) Events(ctx context.Context, requestID string) ([]events.Event, error) {
+	return s.gateway.Events(ctx, requestID)
+}
+
+func (s *Service) ProvideExternalInput(ctx context.Context, organizationID, actorID, requestID, taskID, text string) error {
+	if organizationID == "" || actorID == "" || requestID == "" || taskID == "" || text == "" {
+		return fmt.Errorf("organization, actor, request, task, and text are required")
+	}
+	es, err := s.gateway.Events(ctx, requestID)
+	if err != nil {
+		return err
+	}
+	matched := false
+	for _, e := range es {
+		if e.OrganizationID == organizationID && e.TaskID == taskID {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return fmt.Errorf("task is not mapped to this external request and organization")
+	}
+	_, err = s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: organizationID, EventType: "A2A_INPUT_RECEIVED", SourceActorID: actorID, TaskID: taskID, CorrelationID: requestID, Payload: map[string]string{"text": text, "source_external_actor": actorID}})
+	return err
+}
+
 func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 	if in.RequestID == "" || in.OrganizationID == "" || in.Statement == "" {
 		return Result{}, fmt.Errorf("request_id, organization_id, and statement are required")
@@ -48,7 +74,7 @@ func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 	if in.Kind == core.ExecutionAgent {
 		policy = core.InferenceRequired
 	}
-	task := core.Task{ID: core.ID("task-" + corr), GoalID: goal.ID, Description: in.Statement, ExecutionKind: in.Kind, ModelInferencePolicy: policy, Status: core.TaskPending}
+	task := core.Task{ID: core.ID("task-" + corr), GoalID: goal.ID, Description: in.Statement, ExecutionKind: in.Kind, ModelInferencePolicy: policy, TaskContractVersion: "1", Status: core.TaskPending}
 	for _, d := range []events.TrustedDraft{{OrganizationID: in.OrganizationID, EventType: "INTENT_CREATED", Payload: intent, CorrelationID: corr}, {OrganizationID: in.OrganizationID, EventType: "GOAL_CREATED", Payload: goal, CorrelationID: corr}, {OrganizationID: in.OrganizationID, EventType: "TASK_CREATED", TaskID: string(task.ID), Payload: task, CorrelationID: corr}} {
 		if _, err := s.gateway.PublishTrusted(ctx, d); err != nil {
 			return Result{}, err

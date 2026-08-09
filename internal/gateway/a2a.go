@@ -6,12 +6,14 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/app"
 	"github.com/dominicnunez/agentos/internal/core"
+	"github.com/dominicnunez/agentos/internal/events"
 )
 
 type ExternalActor struct {
 	ID             string
 	OrganizationID string
 	BearerToken    string
+	Capabilities   []string
 }
 type A2A struct {
 	service *app.Service
@@ -43,12 +45,59 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"name": "Agent OS Operator Gateway", "description": "Inbound work-level gateway for Agent OS v4.2", "url": "/a2a/v1/tasks/send", "version": "0.1.0", "protocolVersion": "1.0", "capabilities": map[string]bool{"streaming": false, "pushNotifications": false}, "skills": []map[string]any{{"id": "submit-work", "name": "Submit organizational work", "tags": []string{"agent-os", "operator"}}}})
 		return
 	}
-	if r.Method != "POST" || r.URL.Path != "/a2a/v1/tasks/send" {
+	if r.URL.Path == "/.well-known/agent-card.json" {
 		http.NotFound(w, r)
 		return
 	}
 	if a.actor.BearerToken == "" || r.Header.Get("Authorization") != "Bearer "+a.actor.BearerToken {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authenticated external actor required"})
+		return
+	}
+	if r.Method == "GET" && len(r.URL.Path) > len("/a2a/v1/tasks/") && r.URL.Path[:len("/a2a/v1/tasks/")] == "/a2a/v1/tasks/" {
+		if !a.allowed("read_status") {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "capability read_status required"})
+			return
+		}
+		id := r.URL.Path[len("/a2a/v1/tasks/"):]
+		es, err := a.service.Events(r.Context(), id)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if len(es) == 0 {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"id": id, "events": es, "state": externalState(es)})
+		return
+	}
+	if r.Method == "POST" && len(r.URL.Path) > len("/a2a/v1/tasks/") && r.URL.Path[len(r.URL.Path)-6:] == "/input" {
+		if !a.allowed("provide_input") {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "capability provide_input required"})
+			return
+		}
+		id := r.URL.Path[len("/a2a/v1/tasks/") : len(r.URL.Path)-6]
+		var in struct {
+			TaskID string `json:"task_id"`
+			Text   string `json:"text"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := a.service.ProvideExternalInput(r.Context(), a.actor.OrganizationID, a.actor.ID, id, in.TaskID, in.Text); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]string{"state": "working"})
+		return
+	}
+	if r.Method != "POST" || r.URL.Path != "/a2a/v1/tasks/send" {
+		http.NotFound(w, r)
+		return
+	}
+	if !a.allowed("submit_work") {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "capability submit_work required"})
 		return
 	}
 	defer r.Body.Close()
@@ -74,6 +123,31 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+func (a *A2A) allowed(want string) bool {
+	if len(a.actor.Capabilities) == 0 {
+		return want == "submit_work"
+	}
+	for _, v := range a.actor.Capabilities {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+func externalState(es []events.Event) string {
+	state := "working"
+	for _, e := range es {
+		switch e.EventType {
+		case "TASK_BLOCKED":
+			state = "input-required"
+		case "TASK_VERIFIED_COMPLETE":
+			state = "completed"
+		case "COMPLETION_REJECTED":
+			state = "failed"
+		}
+	}
+	return state
 }
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
