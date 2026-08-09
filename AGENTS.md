@@ -1,6 +1,6 @@
 # Agent OS repository guidance
 
-Agent OS v4.2 is a Go modular monolith for operating persistent AI-assisted organizations.
+Agent OS is a Go modular monolith for operating persistent AI-assisted organizations.
 
 ## Authoritative sources
 
