@@ -23,7 +23,10 @@ const (
 type Versioned[T any] struct {
 	Version       int
 	CorrelationID string
-	Value         T
+	// Generic instantiations read Value throughout app and projection code, but
+	// Gallow cannot currently connect those reads to this generic declaration.
+	// gallow-ignore-next-line unused-field
+	Value T
 }
 
 type Snapshot struct {
@@ -188,24 +191,18 @@ func decodeKind[T any](bodies [][]byte, target map[core.ID]Versioned[T]) error {
 
 func validateSnapshot(snapshot Snapshot) error {
 	for id, state := range snapshot.Organizations {
-		if id == "" || state.Value.ID != id {
-			return fmt.Errorf("organization record %s has mismatched identity %s", id, state.Value.ID)
+		if err := validateIdentity("organization", id, state.Value.ID); err != nil {
+			return err
 		}
 	}
 	for id, state := range snapshot.Agents {
-		if state.Value.ID != id {
-			return fmt.Errorf("agent record %s has mismatched identity %s", id, state.Value.ID)
-		}
-		if _, ok := snapshot.Organizations[state.Value.OrganizationID]; !ok {
-			return fmt.Errorf("agent %s references missing organization %s", id, state.Value.OrganizationID)
+		if err := validateOrganizedIdentity("agent", id, state.Value.ID, state.Value.OrganizationID, snapshot.Organizations); err != nil {
+			return err
 		}
 	}
 	for id, state := range snapshot.Teams {
-		if state.Value.ID != id {
-			return fmt.Errorf("team record %s has mismatched identity %s", id, state.Value.ID)
-		}
-		if _, ok := snapshot.Organizations[state.Value.OrganizationID]; !ok {
-			return fmt.Errorf("team %s references missing organization %s", id, state.Value.OrganizationID)
+		if err := validateOrganizedIdentity("team", id, state.Value.ID, state.Value.OrganizationID, snapshot.Organizations); err != nil {
+			return err
 		}
 		for _, memberID := range state.Value.MemberAgentIDs {
 			member, ok := snapshot.Agents[memberID]
@@ -215,16 +212,13 @@ func validateSnapshot(snapshot Snapshot) error {
 		}
 	}
 	for id, state := range snapshot.Intents {
-		if state.Value.ID != id {
-			return fmt.Errorf("intent record %s has mismatched identity %s", id, state.Value.ID)
-		}
-		if _, ok := snapshot.Organizations[state.Value.OrganizationID]; !ok {
-			return fmt.Errorf("intent %s references missing organization %s", id, state.Value.OrganizationID)
+		if err := validateOrganizedIdentity("intent", id, state.Value.ID, state.Value.OrganizationID, snapshot.Organizations); err != nil {
+			return err
 		}
 	}
 	for id, state := range snapshot.Goals {
-		if state.Value.ID != id {
-			return fmt.Errorf("goal record %s has mismatched identity %s", id, state.Value.ID)
+		if err := validateIdentity("goal", id, state.Value.ID); err != nil {
+			return err
 		}
 		if _, ok := snapshot.Intents[state.Value.IntentID]; !ok {
 			return fmt.Errorf("goal %s references missing intent %s", id, state.Value.IntentID)
@@ -232,8 +226,8 @@ func validateSnapshot(snapshot Snapshot) error {
 	}
 	for id, state := range snapshot.Tasks {
 		task := state.Value
-		if task.ID != id {
-			return fmt.Errorf("task record %s has mismatched identity %s", id, task.ID)
+		if err := validateIdentity("task", id, task.ID); err != nil {
+			return err
 		}
 		goal, ok := snapshot.Goals[task.GoalID]
 		if !ok {
@@ -255,6 +249,23 @@ func validateSnapshot(snapshot Snapshot) error {
 		default:
 			return fmt.Errorf("task %s has unsupported assignee type %s", id, task.AssigneeType)
 		}
+	}
+	return nil
+}
+
+func validateIdentity(kind string, recordID, valueID core.ID) error {
+	if recordID == "" || valueID != recordID {
+		return fmt.Errorf("%s record %s has mismatched identity %s", kind, recordID, valueID)
+	}
+	return nil
+}
+
+func validateOrganizedIdentity(kind string, recordID, valueID, organizationID core.ID, organizations map[core.ID]Versioned[core.Organization]) error {
+	if err := validateIdentity(kind, recordID, valueID); err != nil {
+		return err
+	}
+	if _, ok := organizations[organizationID]; !ok {
+		return fmt.Errorf("%s %s references missing organization %s", kind, recordID, organizationID)
 	}
 	return nil
 }
