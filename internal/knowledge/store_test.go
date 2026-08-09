@@ -37,6 +37,9 @@ func TestStorePreservesVersionsAndRequiresProvenance(t *testing.T) {
 	if PatternCandidate([]string{"1", "1", "1"}) == nil {
 		t.Fatal("one repeated occurrence accepted as a pattern")
 	}
+	if PatternCandidate([]string{"1", " 1", "1 "}) == nil {
+		t.Fatal("padded forms of one occurrence accepted as distinct")
+	}
 	if PatternCandidate([]string{"1", "2", ""}) == nil {
 		t.Fatal("empty occurrence reference accepted")
 	}

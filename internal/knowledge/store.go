@@ -48,10 +48,14 @@ func (s *Store) Search(ctx context.Context, scope, text string) ([]core.Knowledg
 func PatternCandidate(refs []string) error {
 	distinct := make(map[string]struct{}, len(refs))
 	for _, ref := range refs {
-		if strings.TrimSpace(ref) == "" {
+		canonical := strings.TrimSpace(ref)
+		if canonical == "" {
 			return fmt.Errorf("occurrence event refs must be non-empty")
 		}
-		distinct[ref] = struct{}{}
+		if canonical != ref {
+			return fmt.Errorf("occurrence event refs must not contain surrounding whitespace")
+		}
+		distinct[canonical] = struct{}{}
 	}
 	if len(distinct) < 3 {
 		return fmt.Errorf("at least three distinct concrete occurrence event refs are required")
