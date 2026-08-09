@@ -29,7 +29,7 @@ func main() {
 	if orgID == "" {
 		orgID = "org-default"
 	}
-	h := gateway.NewA2A(app.New(events.NewGateway(l)), gateway.ExternalActor{ID: "hermes-primary", OrganizationID: orgID, BearerToken: token})
+	h := gateway.NewA2A(app.New(events.NewGateway(l)), gateway.ExternalActor{ID: "hermes-primary", OrganizationID: orgID, BearerToken: token, Capabilities: []string{"submit_work", "read_status", "provide_input"}})
 	s := &http.Server{Addr: ":8080", Handler: h, ReadHeaderTimeout: 5e9}
 	log.Printf("Agent OS listening on %s", s.Addr)
 	log.Fatal(s.ListenAndServe())

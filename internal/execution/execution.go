@@ -1,8 +1,11 @@
 package execution
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -34,6 +37,58 @@ type FakeModel struct{}
 func (FakeModel) Name() string { return "fake-model/v1" }
 func (FakeModel) Complete(_ context.Context, prompt string) (string, error) {
 	return "fake-model: " + prompt, nil
+}
+
+// OpenAICompatible is the V1 real-provider adapter. Credentials are resolved
+// at call time and placed only in the outbound adapter request.
+type OpenAICompatible struct {
+	Endpoint, Model string
+	APIKey          func(context.Context) (string, error)
+	Client          *http.Client
+}
+
+func (a OpenAICompatible) Name() string { return "openai-compatible/" + a.Model }
+func (a OpenAICompatible) Complete(ctx context.Context, prompt string) (string, error) {
+	if a.Endpoint == "" || a.Model == "" || a.APIKey == nil {
+		return "", fmt.Errorf("real model adapter is not configured")
+	}
+	key, err := a.APIKey(ctx)
+	if err != nil {
+		return "", err
+	}
+	body, _ := json.Marshal(map[string]any{"model": a.Model, "messages": []map[string]string{{"role": "user", "content": prompt}}})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.Endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+key)
+	client := a.Client
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return "", fmt.Errorf("model provider returned %s", resp.Status)
+	}
+	var decoded struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err = json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return "", err
+	}
+	if len(decoded.Choices) == 0 {
+		return "", fmt.Errorf("model provider returned no choices")
+	}
+	return decoded.Choices[0].Message.Content, nil
 }
 
 type AgentExecution struct{ model ModelAdapter }

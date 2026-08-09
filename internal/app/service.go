@@ -36,6 +36,46 @@ func New(g *events.Gateway) *Service {
 	return &Service{gateway: g, deterministic: execution.Deterministic{}, agent: execution.NewAgentExecution(execution.FakeModel{})}
 }
 
+func (s *Service) Events(ctx context.Context, requestID string) ([]events.Event, error) {
+	return s.gateway.Events(ctx, requestID)
+}
+
+func (s *Service) ProvideExternalInput(ctx context.Context, organizationID, actorID, requestID, taskID, text string) error {
+	if organizationID == "" || actorID == "" || requestID == "" || taskID == "" || text == "" {
+		return fmt.Errorf("organization, actor, request, task, and text are required")
+	}
+	es, err := s.gateway.Events(ctx, requestID)
+	if err != nil {
+		return err
+	}
+	matched := false
+	blocked := false
+	for _, e := range es {
+		if e.OrganizationID == organizationID && e.TaskID == taskID {
+			matched = true
+			switch e.EventType {
+			case "TASK_BLOCKED":
+				blocked = true
+			case "TASK_RESUMED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED":
+				blocked = false
+			}
+		}
+	}
+	if !matched {
+		return fmt.Errorf("task is not mapped to this external request and organization")
+	}
+	if !blocked {
+		return fmt.Errorf("task is not blocked awaiting external input")
+	}
+	if _, err = s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: organizationID, EventType: "A2A_INPUT_RECEIVED", SourceActorID: actorID, TaskID: taskID, CorrelationID: requestID, Payload: map[string]string{"text": text, "source_external_actor": actorID}}); err != nil {
+		return err
+	}
+	// The trusted resume transition is the scheduler-visible continuation path.
+	// Do not tell the external operator the task is working until it is durable.
+	_, err = s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: organizationID, EventType: "TASK_RESUMED", SourceActorID: "runtime", TaskID: taskID, CorrelationID: requestID, Payload: map[string]string{"reason": "authorized external input received"}})
+	return err
+}
+
 func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 	if in.RequestID == "" || in.OrganizationID == "" || in.Statement == "" {
 		return Result{}, fmt.Errorf("request_id, organization_id, and statement are required")
@@ -48,7 +88,7 @@ func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 	if in.Kind == core.ExecutionAgent {
 		policy = core.InferenceRequired
 	}
-	task := core.Task{ID: core.ID("task-" + corr), GoalID: goal.ID, Description: in.Statement, ExecutionKind: in.Kind, ModelInferencePolicy: policy, Status: core.TaskPending}
+	task := core.Task{ID: core.ID("task-" + corr), GoalID: goal.ID, Description: in.Statement, ExecutionKind: in.Kind, ModelInferencePolicy: policy, TaskContractVersion: "1", Status: core.TaskPending}
 	for _, d := range []events.TrustedDraft{{OrganizationID: in.OrganizationID, EventType: "INTENT_CREATED", Payload: intent, CorrelationID: corr}, {OrganizationID: in.OrganizationID, EventType: "GOAL_CREATED", Payload: goal, CorrelationID: corr}, {OrganizationID: in.OrganizationID, EventType: "TASK_CREATED", TaskID: string(task.ID), Payload: task, CorrelationID: corr}} {
 		if _, err := s.gateway.PublishTrusted(ctx, d); err != nil {
 			return Result{}, err
@@ -73,6 +113,7 @@ func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 		handler = s.agent
 	default:
 		task.Status = core.TaskBlocked
+		_, _ = s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: in.OrganizationID, EventType: "TASK_BLOCKED", SourceActorID: "runtime", TaskID: string(task.ID), Payload: task, CorrelationID: corr})
 		return Result{}, fmt.Errorf("execution kind %s is declared but not implemented in this slice", in.Kind)
 	}
 	outcome, execErr := handler.Execute(ctx, task, manifest)

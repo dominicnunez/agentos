@@ -18,6 +18,17 @@ The operator gateway accepts a bounded A2A task, creates an Intent, Goal, and si
 
 The fake adapter is deliberately non-intelligent: it makes the execution seam testable without hiding deterministic work behind an LLM.
 
-## Not yet implemented
+## Implemented V1 seams
 
-External effects and durable effect obligations, full capability issuance, production identity/authentication, schedulers with leases/recovery, projections, real model adapters, multi-node A2A interoperability, knowledge/skills, and advanced resource management are subsequent slices.
+The repository includes exact fail-closed capability checks, append-only
+versioned records, provenance-gated institutional knowledge, deterministic audit
+rules, reserve-aware inference selection and normalized usage snapshots, an
+environment-backed `SecretSource`, a real OpenAI-compatible model adapter, and
+fingerprinted persist-before-effect obligations with distinct attempted and
+confirmed states.
+
+The A2A adapter supports authenticated discovery and submission plus
+capability-gated status and input continuation. Production deployments must
+replace the example static bearer binding at their ingress boundary and
+explicitly configure a provider adapter. Credentials and A2A wire types remain
+outside core domain objects.
