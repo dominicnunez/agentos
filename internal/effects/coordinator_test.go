@@ -56,6 +56,71 @@ func TestPersistBeforeEffectAndFingerprintApproval(t *testing.T) {
 	}
 }
 
+func TestPrepareRejectsFingerprintThatDoesNotBindReplayContext(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	coordinator := NewWithApprovals(l, &adapter{}, &approvalReader{})
+	safeFingerprint, err := Fingerprint("send", "customer", map[string]string{"body": "safe"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org", TaskID: "task", Action: "send", Resource: "customer", ConsequenceBoundary: core.BoundaryPublicExternal, Descriptor: "send message", EffectFingerprint: safeFingerprint, ApprovalRef: "approval-1", IdempotencyKey: "key-1", ReplayContext: map[string]string{"body": "unapproved"}}
+	if _, err = coordinator.Prepare(context.Background(), obligation); err == nil {
+		t.Fatal("mismatched replay context was persisted under an approved fingerprint")
+	}
+	rows, err := l.Records(context.Background(), "effect", "effect-1")
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("mismatched effect reached durable records: rows=%d err=%v", len(rows), err)
+	}
+}
+
+func TestUnprotectedEffectsReloadDurableState(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	adapter := &adapter{}
+	coordinator := NewWithApprovals(l, adapter, nil)
+	fingerprint, err := Fingerprint("cache", "record-1", map[string]string{"value": "ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obligation := core.EffectObligation{ID: "effect-confirmed", OrganizationID: "org", TaskID: "task", Action: "cache", Resource: "record-1", EffectFingerprint: fingerprint, IdempotencyKey: "key-confirmed", ReplayContext: map[string]string{"value": "ready"}}
+	confirmed, err := coordinator.Execute(context.Background(), obligation)
+	if err != nil || confirmed.Status != core.EffectConfirmed || !adapter.called {
+		t.Fatalf("initial unprotected effect failed: result=%+v called=%v err=%v", confirmed, adapter.called, err)
+	}
+	adapter.called = false
+	confirmed, err = coordinator.Execute(context.Background(), obligation)
+	if err != nil || confirmed.Status != core.EffectConfirmed || adapter.called {
+		t.Fatalf("confirmed redelivery was not idempotent: result=%+v called=%v err=%v", confirmed, adapter.called, err)
+	}
+
+	uncertain := obligation
+	uncertain.ID = "effect-uncertain"
+	uncertain.IdempotencyKey = "key-uncertain"
+	uncertain.Status = core.EffectPending
+	if err = l.AppendRecord(context.Background(), "org", "EFFECT_OBLIGATION_TRANSITIONED", "", "task", nil, nil, "effect", string(uncertain.ID), 1, uncertain); err != nil {
+		t.Fatal(err)
+	}
+	uncertain.Status = core.EffectAttempted
+	uncertain.AttemptCount = 1
+	if err = l.AppendRecord(context.Background(), "org", "EFFECT_OBLIGATION_TRANSITIONED", "", "task", nil, nil, "effect", string(uncertain.ID), 2, uncertain); err != nil {
+		t.Fatal(err)
+	}
+	adapter.called = false
+	requested := uncertain
+	requested.Status = ""
+	requested.AttemptCount = 0
+	if _, err = coordinator.Execute(context.Background(), requested); !errors.Is(err, ErrEffectUncertain) || adapter.called {
+		t.Fatalf("uncertain unprotected effect was replayed: called=%v err=%v", adapter.called, err)
+	}
+}
+
 func TestSingleUseApprovalIsConsumedBeforeAdapter(t *testing.T) {
 	l, err := ledger.Open(":memory:")
 	if err != nil {
