@@ -59,7 +59,7 @@ func TestV1SafetyServicesEnforceAndRecordContracts(t *testing.T) {
 	manager := inference.Manager{Pools: []inference.Pool{{
 		ID: "local", Provider: "fake", Mode: inference.Local,
 		AllowedModels: []string{"fake-model/v1"}, Available: true, ConcurrencyLimit: 1,
-		Snapshot: inference.UsageSnapshot{Source: "local", ObservedAt: now, Confidence: 1, Remaining: 10, Unit: "requests"},
+		Snapshot:          inference.UsageSnapshot{Source: "local", ObservedAt: now, Confidence: 1, Remaining: 10, Unit: "requests"},
 		ContinuityReserve: 1,
 	}}}
 	selection, err := manager.Select(inference.Request{RequiredModel: "fake-model/v1", EstimatedUsage: 1})
