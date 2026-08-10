@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/intake"
 	"github.com/dominicnunez/agentos/internal/secrets"
 )
@@ -47,6 +48,33 @@ func TestConfiguredExternalActorsResolvesDistinctServerOwnedIdentity(t *testing.
 
 func TestConfiguredExternalActorsDisablesA2AWithoutRegistry(t *testing.T) {
 	registry, err := configuredExternalActors(context.Background(), "", testSecrets{})
+	if err != nil || registry != nil {
+		t.Fatalf("registry=%v err=%v", registry, err)
+	}
+}
+
+func TestConfiguredEffectReconcilersResolveExactServerOwnedStatusChecker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reconcilers.json")
+	config := `{"reconcilers":[{"organization_id":"org-1","action":"send","resource":"destination-1","status":"ACTIVE","status_url":"https://status.example/effects","token_ref":"STATUS_TOKEN","authorization_ref":"security-review-2","expires_at":"2099-01-01T00:00:00Z"}]}`
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := configuredEffectReconcilers(context.Background(), path, testSecrets{"STATUS_TOKEN": "configured-effect-status-token-000001"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obligation := core.EffectObligation{OrganizationID: "org-1", Action: "send", Resource: "destination-1"}
+	if reconciler, ok := registry.ReconcilerFor(obligation); !ok || reconciler == nil {
+		t.Fatal("configured status checker was not resolved")
+	}
+	obligation.Resource = "other-destination"
+	if _, ok := registry.ReconcilerFor(obligation); ok {
+		t.Fatal("status checker escaped its exact resource binding")
+	}
+}
+
+func TestConfiguredEffectReconcilersDisableChecksWithoutRegistry(t *testing.T) {
+	registry, err := configuredEffectReconcilers(context.Background(), "", testSecrets{})
 	if err != nil || registry != nil {
 		t.Fatalf("registry=%v err=%v", registry, err)
 	}

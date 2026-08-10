@@ -105,7 +105,9 @@ expired, revoked, frozen, corrupt, or unavailable.
 
 Startup discovers durable `ATTEMPTED` obligations before serving. Reconciliation
 uses a separate read-only destination-status interface and never invokes the
-effect-writing adapter. A destination observation may transition an obligation
+effect-writing adapter. A reviewed registry binds each HTTPS checker to an
+exact organization, action, and resource; credentials remain in the adapter
+boundary. A destination observation may transition an obligation
 to `CONFIRMED` or `FAILED` only with durable evidence; unavailable support,
 lookup errors, unknown or malformed status, missing evidence, and attempt drift
 leave the obligation explicitly `ATTEMPTED` for operator resolution. No

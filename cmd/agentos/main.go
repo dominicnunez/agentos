@@ -14,6 +14,7 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/app"
 	"github.com/dominicnunez/agentos/internal/effects"
+	"github.com/dominicnunez/agentos/internal/effectstatus"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/gateway"
 	"github.com/dominicnunez/agentos/internal/intake"
@@ -56,6 +57,10 @@ func run() (err error) {
 	if err != nil {
 		return err
 	}
+	reconcilers, err := configuredEffectReconcilers(context.Background(), os.Getenv("AGENTOS_EFFECT_RECONCILERS_FILE"), secrets.Environment{})
+	if err != nil {
+		return err
+	}
 	if registry != nil && registry.HasCredential(humanToken) {
 		return fmt.Errorf("human and external-agent credentials must be distinct")
 	}
@@ -66,7 +71,7 @@ func run() (err error) {
 	if _, err := service.Recover(context.Background()); err != nil {
 		return fmt.Errorf("recover durable runtime before serving: %w", err)
 	}
-	effectRecovery, err := effects.NewReconciliationService(l).Recover(context.Background(), nil)
+	effectRecovery, err := effects.NewReconciliationService(l).Recover(context.Background(), reconcilers)
 	if err != nil {
 		return fmt.Errorf("recover effect obligations before serving: %w", err)
 	}
@@ -84,6 +89,35 @@ func run() (err error) {
 	s := &http.Server{Addr: listenAddress, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: time.Minute}
 	log.Printf("Agent OS listening on %s", s.Addr)
 	return s.ListenAndServe()
+}
+
+func configuredEffectReconcilers(ctx context.Context, path string, source secrets.Source) (*effectstatus.HTTPReconcilerRegistry, error) {
+	if path == "" {
+		return nil, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open effect reconciler registry: %w", err)
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	bindings, err := effectstatus.DecodeHTTPReconcilerConfig(file)
+	if err != nil {
+		return nil, err
+	}
+	for i := range bindings {
+		value, err := source.Resolve(ctx, secrets.Ref(bindings[i].TokenRef))
+		if err != nil {
+			return nil, fmt.Errorf("resolve effect reconciler %s/%s/%s credential: %w", bindings[i].OrganizationID, bindings[i].Action, bindings[i].Resource, err)
+		}
+		bindings[i].BearerToken = string(value)
+	}
+	registry, err := effectstatus.NewHTTPReconcilerRegistry(bindings, nil)
+	if err != nil {
+		return nil, fmt.Errorf("validate effect reconciler registry: %w", err)
+	}
+	return registry, nil
 }
 
 func configuredExternalActors(ctx context.Context, path string, source secrets.Source) (*gateway.ExternalActorRegistry, error) {
