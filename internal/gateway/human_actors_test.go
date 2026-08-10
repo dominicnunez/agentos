@@ -61,6 +61,8 @@ func TestHumanActorRegistryRejectsUnreviewedOrAmbiguousConfig(t *testing.T) {
 		{name: "unknown role", mutate: func(actor *HumanActor) { actor.Role = "ADMIN" }},
 		{name: "unsupported own scope", mutate: func(actor *HumanActor) { actor.WorkScope = intake.WorkScopeOwn }},
 		{name: "weak credential", mutate: func(actor *HumanActor) { actor.BearerToken = "short" }},
+		{name: "invalid actor id", mutate: func(actor *HumanActor) { actor.ID = "human with spaces" }},
+		{name: "invalid organization id", mutate: func(actor *HumanActor) { actor.OrganizationID = strings.Repeat("o", 257) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			actor := base

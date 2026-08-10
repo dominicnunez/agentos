@@ -100,63 +100,43 @@ func run() (err error) {
 }
 
 func configuredHumanActors(ctx context.Context, path string, source secrets.Source) (*gateway.HumanActorRegistry, error) {
-	if path == "" {
-		return nil, nil
-	}
-	actors, err := decodeConfigFile(path, "human actor registry", gateway.DecodeHumanActorConfig)
-	if err != nil {
-		return nil, err
-	}
-	if err := resolveRegistryCredentials(ctx, source, actors,
+	return configuredRegistry(ctx, path, source, "human actor registry", "human actor", gateway.DecodeHumanActorConfig,
 		func(actor gateway.HumanActor) (string, string) { return actor.ID, actor.TokenRef },
-		func(actor *gateway.HumanActor, token string) { actor.BearerToken = token }); err != nil {
-		return nil, fmt.Errorf("resolve human actor credential: %w", err)
-	}
-	registry, err := gateway.NewHumanActorRegistry(actors)
-	if err != nil {
-		return nil, fmt.Errorf("validate human actor registry: %w", err)
-	}
-	return registry, nil
+		func(actor *gateway.HumanActor, token string) { actor.BearerToken = token }, gateway.NewHumanActorRegistry)
 }
 
 func configuredEffectReconcilers(ctx context.Context, path string, source secrets.Source) (*effectstatus.HTTPReconcilerRegistry, error) {
-	if path == "" {
-		return nil, nil
-	}
-	bindings, err := decodeConfigFile(path, "effect reconciler registry", effectstatus.DecodeHTTPReconcilerConfig)
-	if err != nil {
-		return nil, err
-	}
-	if err := resolveRegistryCredentials(ctx, source, bindings,
+	return configuredRegistry(ctx, path, source, "effect reconciler registry", "effect reconciler", effectstatus.DecodeHTTPReconcilerConfig,
 		func(binding effectstatus.HTTPReconcilerBinding) (string, string) {
 			return fmt.Sprintf("%s/%s/%s", binding.OrganizationID, binding.Action, binding.Resource), binding.TokenRef
 		},
-		func(binding *effectstatus.HTTPReconcilerBinding, token string) { binding.BearerToken = token }); err != nil {
-		return nil, fmt.Errorf("resolve effect reconciler credential: %w", err)
-	}
-	registry, err := effectstatus.NewHTTPReconcilerRegistry(bindings, nil)
-	if err != nil {
-		return nil, fmt.Errorf("validate effect reconciler registry: %w", err)
-	}
-	return registry, nil
+		func(binding *effectstatus.HTTPReconcilerBinding, token string) { binding.BearerToken = token },
+		func(bindings []effectstatus.HTTPReconcilerBinding) (*effectstatus.HTTPReconcilerRegistry, error) {
+			return effectstatus.NewHTTPReconcilerRegistry(bindings, nil)
+		})
 }
 
 func configuredExternalActors(ctx context.Context, path string, source secrets.Source) (*gateway.ExternalActorRegistry, error) {
-	if path == "" {
-		return nil, nil
-	}
-	actors, err := decodeConfigFile(path, "external actor registry", gateway.DecodeExternalActorConfig)
-	if err != nil {
-		return nil, err
-	}
-	if err := resolveRegistryCredentials(ctx, source, actors,
+	return configuredRegistry(ctx, path, source, "external actor registry", "external actor", gateway.DecodeExternalActorConfig,
 		func(actor gateway.ExternalActor) (string, string) { return actor.ID, actor.TokenRef },
-		func(actor *gateway.ExternalActor, token string) { actor.BearerToken = token }); err != nil {
-		return nil, fmt.Errorf("resolve external actor credential: %w", err)
+		func(actor *gateway.ExternalActor, token string) { actor.BearerToken = token }, gateway.NewExternalActorRegistry)
+}
+
+func configuredRegistry[T, R any](ctx context.Context, path string, source secrets.Source, registryName, entryName string, decode func(io.Reader) ([]T, error), identity func(T) (string, string), set func(*T, string), validate func([]T) (R, error)) (R, error) {
+	var zero R
+	if path == "" {
+		return zero, nil
 	}
-	registry, err := gateway.NewExternalActorRegistry(actors)
+	entries, err := decodeConfigFile(path, registryName, decode)
 	if err != nil {
-		return nil, fmt.Errorf("validate external actor registry: %w", err)
+		return zero, err
+	}
+	if err := resolveRegistryCredentials(ctx, source, entries, identity, set); err != nil {
+		return zero, fmt.Errorf("resolve %s credential: %w", entryName, err)
+	}
+	registry, err := validate(entries)
+	if err != nil {
+		return zero, fmt.Errorf("validate %s: %w", registryName, err)
 	}
 	return registry, nil
 }

@@ -112,7 +112,7 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 	if err := validatePrincipal(principal); err != nil {
 		return View{}, err
 	}
-	if err := validateMessage(message); err != nil {
+	if err := validateMessageContent(message); err != nil {
 		return View{}, err
 	}
 	stream, err := s.app.ExternalEvents(ctx, principal.OrganizationID, message.ConversationID)
@@ -120,6 +120,12 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 		return View{}, fmt.Errorf("%w: load work stream", ErrUnavailable)
 	}
 	if len(stream) == 0 {
+		if err := ValidateIdentifier("conversation", message.ConversationID); err != nil {
+			return View{}, err
+		}
+		if err := ValidateIdentifier("message", message.MessageID); err != nil {
+			return View{}, err
+		}
 		if !principal.Allowed(CapabilitySubmitWork) {
 			return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilitySubmitWork)
 		}
@@ -143,6 +149,10 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 		}
 		initialIDMatches := initial.MessageID == message.MessageID
 		initialReplay := initialIDMatches && initial.Text == message.Text
+		durableInputReplay := matchesDurableInput(stream, principal, message)
+		if err := ValidateIdentifier("message", message.MessageID); err != nil && !initialReplay && !durableInputReplay {
+			return View{}, err
+		}
 		if initialIDMatches && !initialReplay {
 			return View{}, fmt.Errorf("%w: initial message id is bound to different content", ErrConflict)
 		}
@@ -174,7 +184,7 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 				}
 			}
 		case StateWorking, StateCompleted, StateFailed:
-			if !initialReplay && !matchesDurableInput(stream, principal, message) {
+			if !initialReplay && !durableInputReplay {
 				return View{}, fmt.Errorf("%w: conversation is bound to different work", ErrConflict)
 			}
 			if !principal.Allowed(CapabilityReadStatus) {
@@ -197,14 +207,17 @@ func (s *Service) Get(ctx context.Context, principal Principal, taskID string) (
 	if !principal.Allowed(CapabilityReadStatus) {
 		return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
 	}
-	if err := validateIdentifier("task", taskID); err != nil {
-		return View{}, err
+	if taskID == "" {
+		return View{}, ValidateIdentifier("task", taskID)
 	}
 	conversationID, stream, err := s.app.ExternalTaskEvents(ctx, principal.OrganizationID, taskID)
 	if err != nil {
 		return View{}, fmt.Errorf("%w: load work stream", ErrUnavailable)
 	}
 	if len(stream) == 0 || streamTaskID(stream) != taskID {
+		if err := ValidateIdentifier("task", taskID); err != nil {
+			return View{}, err
+		}
 		return View{}, ErrNotFound
 	}
 	if _, err := authorizedInitialWork(principal, stream); err != nil {
@@ -214,7 +227,7 @@ func (s *Service) Get(ctx context.Context, principal Principal, taskID string) (
 }
 
 func validatePrincipal(principal Principal) error {
-	if validateIdentifier("principal", principal.ID) != nil || validateIdentifier("organization", principal.OrganizationID) != nil || principal.Channel == "" {
+	if ValidateIdentifier("principal", principal.ID) != nil || ValidateIdentifier("organization", principal.OrganizationID) != nil || principal.Channel == "" {
 		return fmt.Errorf("%w: authenticated principal, organization, and channel are required", ErrInvalid)
 	}
 	switch principal.Kind {
@@ -234,12 +247,9 @@ func validatePrincipal(principal Principal) error {
 	return nil
 }
 
-func validateMessage(message Message) error {
-	if err := validateIdentifier("conversation", message.ConversationID); err != nil {
-		return err
-	}
-	if err := validateIdentifier("message", message.MessageID); err != nil {
-		return err
+func validateMessageContent(message Message) error {
+	if message.ConversationID == "" || message.MessageID == "" {
+		return fmt.Errorf("%w: conversation and message identifiers are required", ErrInvalid)
 	}
 	if strings.TrimSpace(message.Text) == "" || len(message.Text) > 64<<10 || !utf8.ValidString(message.Text) {
 		return fmt.Errorf("%w: text must be valid UTF-8 between 1 and 65536 bytes", ErrInvalid)
@@ -247,7 +257,8 @@ func validateMessage(message Message) error {
 	return nil
 }
 
-func validateIdentifier(name, value string) error {
+// ValidateIdentifier applies the canonical operator-boundary identifier rules.
+func ValidateIdentifier(name, value string) error {
 	if value == "" || len(value) > 256 || !utf8.ValidString(value) {
 		return fmt.Errorf("%w: %s identifier must be valid UTF-8 between 1 and 256 bytes", ErrInvalid, name)
 	}

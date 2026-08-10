@@ -84,6 +84,9 @@ func validateHumanActor(actor HumanActor) error {
 	if actor.ID == "" || actor.OrganizationID == "" || actor.TokenRef == "" || actor.ReviewRef == "" {
 		return fmt.Errorf("id, organization_id, token_ref, and review_ref are required")
 	}
+	if err := validateOperatorIdentity(actor.ID, actor.OrganizationID); err != nil {
+		return err
+	}
 	if err := trustconfig.ValidateCredentialLifecycle(string(actor.Status), actor.BearerToken, actor.ExpiresAt); err != nil {
 		return err
 	}

@@ -58,7 +58,10 @@ capability for the operation.
 
 External Agent identities come only from `AGENTOS_A2A_ACTORS_FILE`. The gateway
 ignores content-supplied identity, organization, role, and capability claims.
-There is no self-registration or trust-on-first-use path.
+There is no self-registration or trust-on-first-use path. Actor and
+organization identifiers are validated when either reviewed registry is loaded,
+so an unusable identity fails startup instead of authenticating into a gateway
+that will reject every request.
 
 Both channels enforce `read_status`, `read_result`, `provide_input`, and
 `submit_work` independently. `OWN` is the default Agent scope; deliberate

@@ -78,6 +78,8 @@ func TestExternalActorRegistryRejectsAmbiguousOrWeakAuthority(t *testing.T) {
 		{name: "duplicate credential", actors: []ExternalActor{valid, testExternalActor("two", "org-1", testExternalToken, ExternalRoleOperator, intake.WorkScopeOwn)}},
 		{name: "weak credential", actors: []ExternalActor{withActorCredential(valid, "short")}},
 		{name: "unknown role", actors: []ExternalActor{withActorRole(valid, "ADMIN")}},
+		{name: "invalid actor id", actors: []ExternalActor{withActorIdentity(valid, "actor with spaces")}},
+		{name: "invalid organization id", actors: []ExternalActor{withActorOrganization(valid, "org\nforged")}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -118,5 +120,10 @@ func withActorCredential(actor ExternalActor, token string) ExternalActor {
 
 func withActorRole(actor ExternalActor, role ExternalActorRole) ExternalActor {
 	actor.Role = role
+	return actor
+}
+
+func withActorOrganization(actor ExternalActor, organizationID string) ExternalActor {
+	actor.OrganizationID = organizationID
 	return actor
 }

@@ -64,6 +64,10 @@ SQLite maintains a durable external-work index from authenticated organization
 and caller request ID to the authoritative correlation stream. Startup
 materializes this index for pre-index V1 ledgers before serving, preserving
 existing work without a runtime legacy lookup path or duplicate submission.
+New operator identifiers must satisfy the bounded canonical format. A
+previously accepted noncanonical conversation, message, or Task identifier is
+grandfathered only when an exact tenant-scoped durable binding or Event already
+exists; the same shape cannot create new work or new input.
 
 Authorized external input for a blocked `HUMAN` Task is persisted with its A2A
 `messageId` before the

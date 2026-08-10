@@ -93,6 +93,9 @@ func validateExternalActor(actor ExternalActor) error {
 	if actor.ID == "" || actor.OrganizationID == "" || actor.TokenRef == "" || actor.ReviewRef == "" {
 		return fmt.Errorf("id, organization_id, token_ref, and review_ref are required")
 	}
+	if err := validateOperatorIdentity(actor.ID, actor.OrganizationID); err != nil {
+		return err
+	}
 	if err := trustconfig.ValidateCredentialLifecycle(string(actor.Status), actor.BearerToken, actor.ExpiresAt); err != nil {
 		return err
 	}
@@ -109,6 +112,13 @@ func validateExternalActor(actor ExternalActor) error {
 		return fmt.Errorf("requests_per_minute must be between 1 and 10000")
 	}
 	return nil
+}
+
+func validateOperatorIdentity(actorID, organizationID string) error {
+	if err := intake.ValidateIdentifier("actor", actorID); err != nil {
+		return err
+	}
+	return intake.ValidateIdentifier("organization", organizationID)
 }
 
 func actorCapabilities(role ExternalActorRole) []string {

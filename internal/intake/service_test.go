@@ -2,8 +2,10 @@ package intake
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -179,6 +181,45 @@ func TestIntakeBoundsUntrustedIdentifiersAndText(t *testing.T) {
 		if _, err := service.Handle(context.Background(), principal, message); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("unbounded message err=%v", err)
 		}
+	}
+}
+
+func TestIntakeGrandfathersOnlyDurablyBoundLegacyConversationIDs(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy-binding.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := New(app.New(events.NewGateway(store)))
+	principal := testPrincipal("agent-1", core.PrincipalExternalAgent, ChannelA2A)
+	message := Message{ConversationID: "canonical-conversation", MessageID: "message-1", Text: "echo legacy"}
+	view, err := service.Handle(ctx, principal, message)
+	if err != nil || view.State != StateCompleted {
+		t.Fatalf("initial work=%+v err=%v", view, err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE external_work SET request_id = ? WHERE organization_id = ? AND request_id = ?`, "case 123", "org-1", message.ConversationID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	message.ConversationID = "case 123"
+	view, err = service.Handle(ctx, principal, message)
+	if err != nil || view.State != StateCompleted || view.ConversationID != message.ConversationID {
+		t.Fatalf("durably bound legacy conversation=%+v err=%v", view, err)
+	}
+	message.ConversationID = "case 456"
+	if _, err := service.Handle(ctx, principal, message); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unbound legacy-shaped conversation err=%v", err)
 	}
 }
 
