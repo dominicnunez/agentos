@@ -31,6 +31,9 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Lint
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4 run
+
       - name: Race-tested unit tests
         run: go test -race ./...
 

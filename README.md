@@ -29,7 +29,7 @@ Enable the repository-owned commit and push checks once per checkout:
 .\scripts\install-git-hooks.cmd
 ```
 
-On Unix-like systems, run `./scripts/install-git-hooks.sh` instead. The commit hook checks staged-diff integrity, formatting, tests, and architecture boundaries. The push hook adds module consistency, build, vet, and an advisory Gallow audit. GitHub Actions independently enforces the blocking checks, race-tests the unit suite, and publishes Gallow findings on pull requests.
+On Unix-like systems, run `./scripts/install-git-hooks.sh` instead. The commit hook checks staged-diff integrity, formatting, tests, and architecture boundaries. The push hook adds module consistency, build, vet, a pinned blocking GolangCI-Lint pass, and an advisory Gallow audit. GitHub Actions independently enforces the same lint configuration, race-tests the unit suite, and publishes Gallow findings on pull requests. The first push-hook lint run downloads the pinned linter release through the Go toolchain.
 
 Then submit a minimal A2A task:
 
