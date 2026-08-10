@@ -55,6 +55,8 @@ fingerprint, and expiry before an adapter can run.
 
 Every effect obligation also binds the acting identity, exact scope, and durable
 capability references. Immediately before an adapter can transition the effect
-to `ATTEMPTED`, the coordinator reloads the latest organization freeze and lease
-records, records the authorization trace, and fails closed if authority is
-missing, expired, revoked, frozen, corrupt, or unavailable.
+to `ATTEMPTED`, one SQLite transaction reloads the latest approval, organization
+freeze, and lease records, revalidates them at a shared time-of-use boundary,
+records the authorization trace, and fails closed if authority is missing,
+expired, revoked, frozen, corrupt, or unavailable.
+
