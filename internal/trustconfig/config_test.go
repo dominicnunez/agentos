@@ -29,6 +29,23 @@ func TestDecodeObjectIsStrict(t *testing.T) {
 	}
 }
 
+func TestDecodeEntriesRequiresContent(t *testing.T) {
+	t.Parallel()
+
+	type registry struct {
+		Entries []string `json:"entries"`
+	}
+	var populated registry
+	entries, err := DecodeEntries(strings.NewReader(`{"entries":["trusted"]}`), "registry", "entry", &populated, &populated.Entries)
+	if err != nil || len(entries) != 1 || entries[0] != "trusted" {
+		t.Fatalf("entries=%v err=%v", entries, err)
+	}
+	var empty registry
+	if _, err := DecodeEntries(strings.NewReader(`{"entries":[]}`), "registry", "entry", &empty, &empty.Entries); err == nil {
+		t.Fatal("DecodeEntries accepted an empty registry")
+	}
+}
+
 func TestValidateCredentialLifecycle(t *testing.T) {
 	t.Parallel()
 

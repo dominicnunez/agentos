@@ -22,9 +22,7 @@ const reconciliationResponseLimit = 64 << 10
 type ReconcilerBindingStatus string
 
 const (
-	ReconcilerBindingActive    ReconcilerBindingStatus = "ACTIVE"
-	ReconcilerBindingSuspended ReconcilerBindingStatus = "SUSPENDED"
-	ReconcilerBindingRevoked   ReconcilerBindingStatus = "REVOKED"
+	ReconcilerBindingActive ReconcilerBindingStatus = "ACTIVE"
 )
 
 type HTTPReconcilerBinding struct {
@@ -70,13 +68,7 @@ type reconciliationResponse struct {
 
 func DecodeHTTPReconcilerConfig(reader io.Reader) ([]HTTPReconcilerBinding, error) {
 	var config HTTPReconcilerConfig
-	if err := trustconfig.DecodeObject(reader, "effect reconciler registry", &config); err != nil {
-		return nil, err
-	}
-	if len(config.Reconcilers) == 0 {
-		return nil, fmt.Errorf("effect reconciler registry must contain at least one binding")
-	}
-	return config.Reconcilers, nil
+	return trustconfig.DecodeEntries(reader, "effect reconciler registry", "binding", &config, &config.Reconcilers)
 }
 
 func NewHTTPReconcilerRegistry(bindings []HTTPReconcilerBinding, client *http.Client) (*HTTPReconcilerRegistry, error) {

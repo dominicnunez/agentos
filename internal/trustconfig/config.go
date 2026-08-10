@@ -26,6 +26,18 @@ func DecodeObject(reader io.Reader, name string, target any) error {
 	return nil
 }
 
+// DecodeEntries decodes one trusted registry object and requires at least one
+// entry. The entries pointer must refer to a field in target.
+func DecodeEntries[T any](reader io.Reader, name, entryName string, target any, entries *[]T) ([]T, error) {
+	if err := DecodeObject(reader, name, target); err != nil {
+		return nil, err
+	}
+	if len(*entries) == 0 {
+		return nil, fmt.Errorf("%s must contain at least one %s", name, entryName)
+	}
+	return *entries, nil
+}
+
 // ValidateCredentialLifecycle validates the shared lifecycle fields for a
 // credential-backed trusted registry entry.
 func ValidateCredentialLifecycle(status, credential string, expiresAt *time.Time) error {

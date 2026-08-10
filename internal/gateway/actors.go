@@ -76,13 +76,7 @@ type ActorSession struct {
 
 func DecodeExternalActorConfig(reader io.Reader) ([]ExternalActor, error) {
 	var config ExternalActorConfig
-	if err := trustconfig.DecodeObject(reader, "external actor registry", &config); err != nil {
-		return nil, err
-	}
-	if len(config.Actors) == 0 {
-		return nil, fmt.Errorf("external actor registry must contain at least one actor")
-	}
-	return config.Actors, nil
+	return trustconfig.DecodeEntries(reader, "external actor registry", "actor", &config, &config.Actors)
 }
 
 func NewExternalActorRegistry(actors []ExternalActor) (*ExternalActorRegistry, error) {
