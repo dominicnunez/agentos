@@ -120,7 +120,8 @@ func configuredListenAddress() (string, bool, error) {
 		return "", false, fmt.Errorf("AGENTOS_LISTEN_ADDR must be a host:port address")
 	}
 	parsedIP := net.ParseIP(host)
-	remote := host == "" || !(strings.EqualFold(host, "localhost") || (parsedIP != nil && parsedIP.IsLoopback()))
+	loopback := strings.EqualFold(host, "localhost") || (parsedIP != nil && parsedIP.IsLoopback())
+	remote := host == "" || !loopback
 	allowRemote := false
 	switch configured := os.Getenv("AGENTOS_ALLOW_REMOTE"); configured {
 	case "", "false":
