@@ -93,7 +93,20 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusAccepted, map[string]string{"state": "working"})
+		es, err := a.service.Events(r.Context(), id)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		status := projectStatus(id, es)
+		if a.allowed("read_result") {
+			status.Result = projectResult(es)
+		}
+		responseStatus := http.StatusAccepted
+		if status.State == "completed" || status.State == "failed" {
+			responseStatus = http.StatusOK
+		}
+		writeJSON(w, responseStatus, status)
 		return
 	}
 	if r.Method != "POST" || r.URL.Path != "/a2a/v1/tasks/send" {

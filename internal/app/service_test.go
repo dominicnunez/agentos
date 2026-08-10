@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
@@ -226,6 +227,107 @@ func TestRecoverRetriesDeterministicWorkAndBlocksUncertainAgentWork(t *testing.T
 		if event.EventType == "EXECUTION_CONTEXT_MANIFESTED" || event.EventType == "TOOL_OUTCOME_RECORDED" {
 			t.Fatalf("uncertain adaptive execution was blindly replayed: %+v", event)
 		}
+	}
+}
+
+func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
+	for _, stage := range []string{"input_durable", "task_resumed", "completion_verified"} {
+		t.Run(stage, func(t *testing.T) {
+			ctx := context.Background()
+			l, err := ledger.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = l.Close() })
+			gateway := events.NewGateway(l)
+			service := New(gateway)
+			result, err := service.Submit(ctx, Submit{RequestID: "request-1", OrganizationID: "org-1", Statement: "human response", Kind: core.ExecutionHuman})
+			if err != nil || result.Task.Status != core.TaskBlocked {
+				t.Fatalf("submit=%+v err=%v", result, err)
+			}
+			inputEvent, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+				OrganizationID: "org-1",
+				EventType:      "A2A_INPUT_RECEIVED",
+				SourceActorID:  "hermes",
+				TaskID:         string(result.Task.ID),
+				CorrelationID:  "request-1",
+				Payload:        externalInputPayload{Text: "approved task input", SourceExternalActor: "hermes"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := service.state.Load(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state := snapshot.Tasks[result.Task.ID]
+			if stage != "input_durable" {
+				task := state.Value
+				task.Status = core.TaskPending
+				if err := service.state.SaveTask(ctx, "org-1", "TASK_RESUMED", "runtime", "request-1", state.Version+1, task, map[string]string{"input_event_ref": inputEvent.EventID}); err != nil {
+					t.Fatal(err)
+				}
+				state = projections.Versioned[core.Task]{Version: state.Version + 1, CorrelationID: "request-1", Value: task}
+			}
+			if stage == "completion_verified" {
+				task := state.Value
+				task.Status = core.TaskRunning
+				if err := service.state.SaveTask(ctx, "org-1", "EXECUTION_STARTED", "runtime", "request-1", state.Version+1, task, map[string]string{"input_event_ref": inputEvent.EventID}); err != nil {
+					t.Fatal(err)
+				}
+				state = projections.Versioned[core.Task]{Version: state.Version + 1, CorrelationID: "request-1", Value: task}
+				executionID := "external-input-" + inputEvent.EventID
+				now := time.Now().UTC()
+				outcome := core.ToolOutcome{ToolInvocationID: core.ID("a2a-input-" + inputEvent.EventID), ToolID: "a2a.external-input", ToolVersion: "v1", Status: core.OutcomeSucceeded, ObservedEffect: map[string]string{"input_event_ref": inputEvent.EventID}, PostconditionStatus: core.PostconditionVerified, Retryability: core.NotRetryable, StartedAt: now, FinishedAt: now}
+				for _, draft := range []events.TrustedDraft{
+					{OrganizationID: "org-1", EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: outcome, CorrelationID: "request-1"},
+					{OrganizationID: "org-1", EventType: "EXECUTION_FINISHED", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: map[string]any{"status": outcome.Status}, CorrelationID: "request-1"},
+					{OrganizationID: "org-1", EventType: "CANDIDATE_COMPLETE", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: map[string]any{"tool_invocation_id": outcome.ToolInvocationID}, CorrelationID: "request-1"},
+				} {
+					if _, err := gateway.PublishTrusted(ctx, draft); err != nil {
+						t.Fatal(err)
+					}
+				}
+				contract := core.CompletionContract{TaskID: task.ID, TaskVersion: state.Version, Criteria: []core.CompletionCriterion{{ID: "durable-external-input", Assurance: core.AssuranceDeterministic, Required: true}}}
+				detail := completionDetail{Contract: contract, Result: service.completion.Evaluate(contract, outcome)}
+				if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "COMPLETION_VERIFIED", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: detail, CorrelationID: "request-1"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			recovered := New(gateway)
+			recovery, err := recovered.Recover(ctx)
+			if err != nil || recovery.TasksExecuted != 1 {
+				t.Fatalf("recovery=%+v err=%v", recovery, err)
+			}
+			snapshot, err = recovered.state.Load(ctx)
+			if err != nil || snapshot.Tasks[result.Task.ID].Value.Status != core.TaskCompleted {
+				t.Fatalf("recovered task=%+v err=%v", snapshot.Tasks[result.Task.ID], err)
+			}
+			stream, err := gateway.Events(ctx, "request-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, eventType := range []string{"A2A_INPUT_RECEIVED", "TASK_RESUMED", "EXECUTION_STARTED", "TOOL_OUTCOME_RECORDED", "EXECUTION_FINISHED", "CANDIDATE_COMPLETE", "COMPLETION_VERIFIED", "TASK_VERIFIED_COMPLETE"} {
+				count := 0
+				for _, event := range stream {
+					if event.EventType == eventType && event.TaskID == string(result.Task.ID) {
+						count++
+					}
+				}
+				if count != 1 {
+					t.Fatalf("%s count=%d stream=%+v", eventType, count, stream)
+				}
+			}
+			eventCount := len(stream)
+			if _, err := recovered.Recover(ctx); err != nil {
+				t.Fatal(err)
+			}
+			stream, err = gateway.Events(ctx, "request-1")
+			if err != nil || len(stream) != eventCount {
+				t.Fatalf("second recovery appended events: count=%d want=%d err=%v", len(stream), eventCount, err)
+			}
+		})
 	}
 }
 

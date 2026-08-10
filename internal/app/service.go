@@ -161,10 +161,34 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 		return RecoveryResult{}, fmt.Errorf("load durable runtime state: %w", err)
 	}
 	result := RecoveryResult{}
+	continuedInputs := 0
 	for _, state := range sortedTaskStates(snapshot.Tasks) {
 		organizationID, err := taskOrganization(snapshot, state.Value)
 		if err != nil {
 			return RecoveryResult{}, err
+		}
+		if state.Value.ExecutionKind == core.ExecutionHuman && state.Value.Status != core.TaskCompleted {
+			stream, err := s.gateway.Events(ctx, state.CorrelationID)
+			if err != nil {
+				return RecoveryResult{}, err
+			}
+			inputEvent, _, found, err := externalInputForTask(stream, state.Value.ID)
+			if err != nil {
+				return RecoveryResult{}, err
+			}
+			if found {
+				if state.Value.Status == core.TaskPending {
+					result.PendingFound++
+				}
+				if state.Value.Status == core.TaskRunning {
+					result.RunningRecovered++
+				}
+				if err := s.continueExternalInputTask(ctx, organizationID, state.Value.ID, state.CorrelationID, inputEvent); err != nil {
+					return RecoveryResult{}, fmt.Errorf("recover external input continuation for task %s: %w", state.Value.ID, err)
+				}
+				continuedInputs++
+				continue
+			}
 		}
 		switch state.Value.Status {
 		case core.TaskPending:
@@ -202,11 +226,16 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 	if err != nil {
 		return RecoveryResult{}, err
 	}
-	result.TasksExecuted = len(runs)
+	result.TasksExecuted = len(runs) + continuedInputs
 	if err := s.reconcileGoals(ctx); err != nil {
 		return RecoveryResult{}, err
 	}
 	return result, nil
+}
+
+type externalInputPayload struct {
+	Text                string `json:"text"`
+	SourceExternalActor string `json:"source_external_actor"`
 }
 
 func (s *Service) ProvideExternalInput(ctx context.Context, organizationID, actorID, requestID, taskID, text string) error {
@@ -231,22 +260,196 @@ func (s *Service) ProvideExternalInput(ctx context.Context, organizationID, acto
 	if actualOrganizationID != core.ID(organizationID) {
 		return fmt.Errorf("task is not mapped to this external request and organization")
 	}
-	if state.Value.Status != core.TaskBlocked {
-		return fmt.Errorf("task is not blocked awaiting external input")
+	if state.Value.ExecutionKind != core.ExecutionHuman {
+		return fmt.Errorf("external input can continue only a HUMAN task")
 	}
-	if _, err = s.gateway.PublishTrusted(ctx, events.TrustedDraft{
-		OrganizationID: organizationID,
-		EventType:      "A2A_INPUT_RECEIVED",
-		SourceActorID:  actorID,
-		TaskID:         taskID,
-		CorrelationID:  requestID,
-		Payload:        map[string]string{"text": text, "source_external_actor": actorID},
-	}); err != nil {
+	stream, err := s.gateway.Events(ctx, requestID)
+	if err != nil {
 		return err
 	}
+	inputEvent, input, found, err := externalInputForTask(stream, core.ID(taskID))
+	if err != nil {
+		return err
+	}
+	if found {
+		if inputEvent.SourceActorID != actorID || input.SourceExternalActor != actorID || input.Text != text {
+			return fmt.Errorf("task already has different durable external input")
+		}
+	} else {
+		if state.Value.Status != core.TaskBlocked {
+			return fmt.Errorf("task is not blocked awaiting external input")
+		}
+		inputEvent, err = s.gateway.PublishTrusted(ctx, events.TrustedDraft{
+			OrganizationID: organizationID,
+			EventType:      "A2A_INPUT_RECEIVED",
+			SourceActorID:  actorID,
+			TaskID:         taskID,
+			CorrelationID:  requestID,
+			Payload:        externalInputPayload{Text: text, SourceExternalActor: actorID},
+		})
+		if err != nil {
+			return err
+		}
+	}
+	if err := s.continueExternalInputTask(ctx, actualOrganizationID, core.ID(taskID), requestID, inputEvent); err != nil {
+		return err
+	}
+	return s.reconcileGoals(ctx)
+}
+
+// continueExternalInputTask resumes from the durable input Event Contract and
+// appends only missing phases. The external actor supplies content; the runtime
+// alone records outcome and completion attestations.
+func (s *Service) continueExternalInputTask(ctx context.Context, organizationID, taskID core.ID, correlationID string, inputEvent events.Event) error {
+	if inputEvent.EventID == "" || inputEvent.EventType != "A2A_INPUT_RECEIVED" || core.ID(inputEvent.TaskID) != taskID {
+		return fmt.Errorf("valid durable external input event is required")
+	}
+	for {
+		snapshot, err := s.state.Load(ctx)
+		if err != nil {
+			return err
+		}
+		state, ok := snapshot.Tasks[taskID]
+		if !ok || state.CorrelationID != correlationID || state.Value.ExecutionKind != core.ExecutionHuman {
+			return fmt.Errorf("external input continuation task is invalid")
+		}
+		task := state.Value
+		switch task.Status {
+		case core.TaskCompleted:
+			return nil
+		case core.TaskBlocked:
+			task.Status = core.TaskPending
+			detail := map[string]string{"reason": "authorized external input received", "input_event_ref": inputEvent.EventID}
+			if err := s.state.SaveTask(ctx, organizationID, "TASK_RESUMED", "runtime", correlationID, state.Version+1, task, detail); err != nil {
+				return err
+			}
+			continue
+		case core.TaskPending:
+			task.Status = core.TaskRunning
+			detail := map[string]string{"mode": "A2A_HUMAN_INPUT", "input_event_ref": inputEvent.EventID}
+			if err := s.state.SaveTask(ctx, organizationID, "EXECUTION_STARTED", "runtime", correlationID, state.Version+1, task, detail); err != nil {
+				return fmt.Errorf("persist external input execution start for task %s: %w", task.ID, err)
+			}
+			continue
+		case core.TaskRunning:
+			return s.finishExternalInputTask(ctx, organizationID, state, inputEvent)
+		default:
+			return fmt.Errorf("external input continuation cannot advance task in status %s", task.Status)
+		}
+	}
+}
+
+func (s *Service) finishExternalInputTask(ctx context.Context, organizationID core.ID, state projections.Versioned[core.Task], inputEvent events.Event) error {
 	task := state.Value
-	task.Status = core.TaskPending
-	return s.state.SaveTask(ctx, actualOrganizationID, "TASK_RESUMED", "runtime", requestID, state.Version+1, task, map[string]string{"reason": "authorized external input received"})
+	executionID := core.ID("external-input-" + inputEvent.EventID)
+	stream, err := s.gateway.Events(ctx, state.CorrelationID)
+	if err != nil {
+		return err
+	}
+	outcomeEvent, hasOutcome, err := continuationEvent(stream, "TOOL_OUTCOME_RECORDED", task.ID, executionID)
+	if err != nil {
+		return err
+	}
+	var outcome core.ToolOutcome
+	if hasOutcome {
+		if err := json.Unmarshal(outcomeEvent.Payload, &outcome); err != nil || outcome.ToolID != "a2a.external-input" || outcome.Status != core.OutcomeSucceeded || outcome.PostconditionStatus != core.PostconditionVerified {
+			return fmt.Errorf("durable external input outcome is invalid")
+		}
+	} else {
+		now := time.Now().UTC()
+		outcome = core.ToolOutcome{
+			ToolInvocationID:    core.ID("a2a-input-" + inputEvent.EventID),
+			ToolID:              "a2a.external-input",
+			ToolVersion:         "v1",
+			Status:              core.OutcomeSucceeded,
+			ObservedEffect:      map[string]string{"status": "authorized external input persisted", "input_event_ref": inputEvent.EventID},
+			PostconditionStatus: core.PostconditionVerified,
+			Retryability:        core.NotRetryable,
+			StartedAt:           now,
+			FinishedAt:          now,
+		}
+		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: outcome, CorrelationID: state.CorrelationID}); err != nil {
+			return fmt.Errorf("persist external input outcome for task %s: %w", task.ID, err)
+		}
+	}
+	if err := s.publishContinuationEventIfMissing(ctx, stream, organizationID, task.ID, state.CorrelationID, executionID, "EXECUTION_FINISHED", map[string]any{"status": outcome.Status}); err != nil {
+		return err
+	}
+	if err := s.publishContinuationEventIfMissing(ctx, stream, organizationID, task.ID, state.CorrelationID, executionID, "CANDIDATE_COMPLETE", map[string]any{"tool_invocation_id": outcome.ToolInvocationID, "input_event_ref": inputEvent.EventID}); err != nil {
+		return err
+	}
+	contract := core.CompletionContract{TaskID: task.ID, TaskVersion: state.Version, Criteria: []core.CompletionCriterion{{ID: "durable-external-input", Description: "authorized external input was durably recorded", Assurance: core.AssuranceDeterministic, Required: true}}}
+	complete := s.completion.Evaluate(contract, outcome)
+	detail := completionDetail{Contract: contract, Result: complete}
+	if !complete.Complete {
+		task.Status = core.TaskFailed
+		if err := s.state.SaveTask(ctx, organizationID, "COMPLETION_REJECTED", "runtime", state.CorrelationID, state.Version+1, task, detail); err != nil {
+			return fmt.Errorf("persist rejected external input completion for task %s: %w", task.ID, err)
+		}
+		return nil
+	}
+	verifiedEvent, verified, err := continuationEvent(stream, "COMPLETION_VERIFIED", task.ID, executionID)
+	if err != nil {
+		return err
+	}
+	if verified {
+		var recorded completionDetail
+		if err := json.Unmarshal(verifiedEvent.Payload, &recorded); err != nil || !recorded.Result.Complete || recorded.Contract.TaskID != task.ID {
+			return fmt.Errorf("durable external input completion verification is invalid")
+		}
+		detail = recorded
+	} else if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "COMPLETION_VERIFIED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: detail, CorrelationID: state.CorrelationID}); err != nil {
+		return fmt.Errorf("persist external input completion verification for task %s: %w", task.ID, err)
+	}
+	task.Status = core.TaskCompleted
+	if err := s.state.SaveTask(ctx, organizationID, "TASK_VERIFIED_COMPLETE", "runtime", state.CorrelationID, state.Version+1, task, detail); err != nil {
+		return fmt.Errorf("persist completed external input task %s: %w", task.ID, err)
+	}
+	return nil
+}
+
+func (s *Service) publishContinuationEventIfMissing(ctx context.Context, stream []events.Event, organizationID, taskID core.ID, correlationID string, executionID core.ID, eventType string, payload any) error {
+	if _, found, err := continuationEvent(stream, eventType, taskID, executionID); err != nil {
+		return err
+	} else if found {
+		return nil
+	}
+	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: eventType, SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(taskID), Payload: payload, CorrelationID: correlationID}); err != nil {
+		return fmt.Errorf("persist external input %s for task %s: %w", eventType, taskID, err)
+	}
+	return nil
+}
+
+func externalInputForTask(stream []events.Event, taskID core.ID) (events.Event, externalInputPayload, bool, error) {
+	var found events.Event
+	var payload externalInputPayload
+	for _, event := range stream {
+		if event.EventType != "A2A_INPUT_RECEIVED" || core.ID(event.TaskID) != taskID {
+			continue
+		}
+		if found.EventID != "" {
+			return events.Event{}, externalInputPayload{}, false, fmt.Errorf("task has multiple durable external input events")
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.Text == "" || payload.SourceExternalActor == "" || payload.SourceExternalActor != event.SourceActorID {
+			return events.Event{}, externalInputPayload{}, false, fmt.Errorf("durable external input event is invalid")
+		}
+		found = event
+	}
+	return found, payload, found.EventID != "", nil
+}
+
+func continuationEvent(stream []events.Event, eventType string, taskID, executionID core.ID) (events.Event, bool, error) {
+	var found events.Event
+	for _, event := range stream {
+		if event.EventType != eventType || core.ID(event.TaskID) != taskID || core.ID(event.SourceExecutionID) != executionID {
+			continue
+		}
+		if found.EventID != "" {
+			return events.Event{}, false, fmt.Errorf("duplicate %s event for external input continuation", eventType)
+		}
+		found = event
+	}
+	return found, found.EventID != "", nil
 }
 
 func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
@@ -426,6 +629,13 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		handler = s.deterministic
 	case core.ExecutionAgent:
 		handler = s.agent
+	case core.ExecutionHuman:
+		task.Status = core.TaskBlocked
+		detail := blockedDetail("human task is awaiting authorized external input", "human-provided task input", "the runtime cannot invent or infer a human response")
+		if err := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); err != nil {
+			return taskRun{}, fmt.Errorf("persist input-required HUMAN task %s: %w", task.ID, err)
+		}
+		return taskRun{}, nil
 	default:
 		task.Status = core.TaskBlocked
 		detail := blockedDetail("execution kind is declared but unavailable in this V1 slice", "authorized runtime handler", "the worker cannot expand its own execution authority")

@@ -33,6 +33,15 @@ replace the example static bearer binding at their ingress boundary and
 explicitly configure a provider adapter. Credentials and A2A wire types remain
 outside core domain objects.
 
+Authorized external input for a blocked `HUMAN` Task is persisted before the
+Task resumes. The runtime then records a deterministic structured outcome and
+uses the Completion Engine to verify the Task; the external actor cannot mint a
+completion event. Input does not make unavailable tool work or uncertain
+adaptive recovery executable, and it never constitutes approval for a
+consequential effect. Continuation phases are keyed by the durable input event;
+retry and startup recovery append only missing phases and reject conflicting
+input.
+
 Durable organization/work projections now commit atomically with their
 authoritative transition events and can be rebuilt by replay. Startup validates
 that state before opening the operator endpoint, preserves blocked work, runs

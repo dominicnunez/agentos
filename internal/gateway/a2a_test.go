@@ -58,7 +58,8 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	h := NewA2A(app.New(events.NewGateway(l)), ExternalActor{ID: "hermes", OrganizationID: "o", BearerToken: "token", Capabilities: []string{"submit_work", "read_status", "provide_input"}})
+	service := app.New(events.NewGateway(l))
+	h := NewA2A(service, ExternalActor{ID: "hermes", OrganizationID: "o", BearerToken: "token", Capabilities: []string{"submit_work", "read_status", "provide_input"}})
 	body := `{"id":"r1","message":{"role":"user","parts":[{"type":"text","text":"echo hello"}]}}`
 	r := httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer token")
@@ -85,15 +86,86 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status":"BLOCKED"`) {
 		t.Fatalf("blocked submit=%d %s", w.Code, w.Body.String())
 	}
+	unauthorized := NewA2A(service, ExternalActor{ID: "observer", OrganizationID: "o", BearerToken: "observer-token", Capabilities: []string{"read_status"}})
+	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r2/input", strings.NewReader(`{"task_id":"task-r2","text":"forged"}`))
+	r.Header.Set("Authorization", "Bearer observer-token")
+	w = httptest.NewRecorder()
+	unauthorized.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("unauthorized input=%d %s", w.Code, w.Body.String())
+	}
 	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r2/input", strings.NewReader(`{"task_id":"task-r2","text":"detail"}`))
 	r.Header.Set("Authorization", "Bearer token")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	if w.Code != http.StatusAccepted {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"completed"`) {
 		t.Fatalf("input=%d %s", w.Code, w.Body.String())
 	}
 	es, err := l.Events(context.Background(), "r2")
-	if err != nil || es[len(es)-1].EventType != "TASK_RESUMED" {
-		t.Fatalf("task was not resumed: events=%+v err=%v", es, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertA2AEventOrder(t, es, "A2A_INPUT_RECEIVED", "TASK_RESUMED", "EXECUTION_STARTED", "TOOL_OUTCOME_RECORDED", "EXECUTION_FINISHED", "CANDIDATE_COMPLETE", "COMPLETION_VERIFIED", "TASK_VERIFIED_COMPLETE")
+	for _, event := range es {
+		if strings.HasPrefix(event.EventType, "APPROVAL_") || strings.HasPrefix(event.EventType, "CAPABILITY_") || strings.HasPrefix(event.EventType, "EFFECT_") {
+			t.Fatalf("external input crossed a governance boundary: %+v", event)
+		}
+	}
+	eventCount := len(es)
+	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r2/input", strings.NewReader(`{"task_id":"task-r2","text":"detail"}`))
+	r.Header.Set("Authorization", "Bearer token")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"completed"`) {
+		t.Fatalf("idempotent input retry=%d %s", w.Code, w.Body.String())
+	}
+	es, err = l.Events(context.Background(), "r2")
+	if err != nil || len(es) != eventCount {
+		t.Fatalf("idempotent retry appended events: count=%d want=%d err=%v", len(es), eventCount, err)
+	}
+	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r2/input", strings.NewReader(`{"task_id":"task-r2","text":"different"}`))
+	r.Header.Set("Authorization", "Bearer token")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("conflicting input retry=%d %s", w.Code, w.Body.String())
+	}
+
+	body = `{"id":"r3","message":{"role":"user","parts":[{"type":"text","text":"unavailable tool"}]},"metadata":{"execution_kind":"TOOL"}}`
+	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer token")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status":"BLOCKED"`) {
+		t.Fatalf("tool submit=%d %s", w.Code, w.Body.String())
+	}
+	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r3/input", strings.NewReader(`{"task_id":"task-r3","text":"replay"}`))
+	r.Header.Set("Authorization", "Bearer token")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("non-human input=%d %s", w.Code, w.Body.String())
+	}
+	es, err = l.Events(context.Background(), "r3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range es {
+		if event.EventType == "A2A_INPUT_RECEIVED" || event.EventType == "TASK_RESUMED" {
+			t.Fatalf("non-human task was made replayable: %+v", event)
+		}
+	}
+}
+
+func assertA2AEventOrder(t *testing.T, stream []events.Event, expected ...string) {
+	t.Helper()
+	next := 0
+	for _, event := range stream {
+		if next < len(expected) && event.EventType == expected[next] {
+			next++
+		}
+	}
+	if next != len(expected) {
+		t.Fatalf("event order missing %q after %d matches: %+v", expected[next], next, stream)
 	}
 }
