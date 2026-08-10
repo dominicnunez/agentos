@@ -116,8 +116,8 @@ func TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision(t *testing.
 		t.Fatalf("approval did not survive restart: approval=%+v err=%v", approval, err)
 	}
 	coordinator = effects.New(l, adapter, service)
-	if _, err := service.BeginDecision(ctx, approval.ID, "hermes-operator"); !errors.Is(err, approvals.ErrDecisionUnauthorized) {
-		t.Fatalf("ordinary Hermes identity entered decision state: %v", err)
+	if _, err := service.BeginDecision(ctx, approval.ID, "external-agent-operator"); !errors.Is(err, approvals.ErrDecisionUnauthorized) {
+		t.Fatalf("ordinary external-Agent identity entered decision state: %v", err)
 	}
 	wrongRiskService := approvals.New(l, nil, approvals.StaticAuthorizer{{OrganizationID: "org-1", HumanID: "human-approver", Boundary: core.BoundaryPublicExternal, Risk: "LOW"}})
 	if _, err := wrongRiskService.BeginDecision(ctx, approval.ID, "human-approver"); !errors.Is(err, approvals.ErrDecisionUnauthorized) {

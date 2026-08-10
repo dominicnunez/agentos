@@ -9,12 +9,16 @@
 5. A tool report is not proof of an effect. `ToolOutcome` distinguishes status, observed effect, verification, and retryability.
 6. Completion is evaluated against an explicit `CompletionContract`, not an actor's self-report.
 7. `ExecutionContextManifest` records what an execution was actually given.
-8. A2A v1.0 is an external Hermes/operator boundary. It does not become the internal communication model.
+8. A2A v1.0 is an external Agent/operator boundary. It does not become the internal communication model.
 9. Approval decisions fail closed. An approval authorizes a fingerprinted effect, never a general privilege expansion.
 
 ## First slice
 
-The operator gateway accepts a bounded A2A task, creates an Intent, Goal, and single-node Task DAG, executes either a deterministic handler or a fake-model `AgentExecution`, records each transition, applies the completion engine, and returns terminal task state.
+The shared intake boundary accepts bounded work from either the direct Human
+Gateway or A2A Operator Gateway, creates an Intent, Goal, and single-node Task
+DAG, executes either a deterministic handler or a fake-model `AgentExecution`,
+records each transition, applies the completion engine, and returns terminal
+task state.
 
 The fake adapter is deliberately non-intelligent: it makes the execution seam testable without hiding deterministic work behind an LLM.
 
@@ -27,11 +31,22 @@ environment-backed `SecretSource`, a real OpenAI-compatible model adapter, and
 fingerprinted persist-before-effect obligations with distinct attempted and
 confirmed states.
 
-The A2A adapter supports authenticated discovery and submission plus
-capability-gated status and input continuation. Production deployments must
-replace the example static bearer binding at their ingress boundary and
-explicitly configure a provider adapter. Credentials and A2A wire types remain
-outside core domain objects.
+The A2A adapter exposes canonical A2A v1.0 Agent Card discovery and authenticated
+JSON-RPC `SendMessage` and `GetTask`, with capability-gated status, result, and
+input continuation. It does not expose legacy discovery, method aliases, or
+custom REST task routes. A2A is disabled without a reviewed external-actor
+registry. Each enabled actor has a unique secret reference, deterministic role
+profile, own/organization work scope, status, expiry, and request ceilings.
+Credentials and A2A wire types remain outside core domain objects. Production
+deployments must explicitly configure a provider adapter.
+
+The A2A adapter and first-party Human Gateway translate into one principal-aware
+Intake Service. The Intent records the authenticated principal ID/kind and source
+channel. Known deterministic handlers are selected without inference; otherwise
+unstructured natural-language work uses `AgentExecution` because interpretation
+is justified. Unsupported execution mechanisms fail closed. Direct human chat
+uses a credential distinct from external Agents and is a work/input surface, not a
+trusted approval API.
 
 Task execution publishes a typed `RESULT_PUBLISHED` contract before
 `CANDIDATE_COMPLETE`. Its payload and trusted envelope carry matching Artifact
@@ -41,16 +56,17 @@ alone cannot expose result content. Status and result lookup are scoped to the
 authenticated actor's organization; a mismatched request is indistinguishable
 from an unknown request.
 
-Authorized external input for a blocked `HUMAN` Task is persisted before the
+Authorized external input for a blocked `HUMAN` Task is persisted with its A2A
+`messageId` before the
 Task resumes. The runtime then records a deterministic structured outcome and
 uses the Completion Engine to verify the Task; the external actor cannot mint a
 completion event. Input does not make unavailable tool work or uncertain
 adaptive recovery executable, and it never constitutes approval for a
 consequential effect. Continuation phases are keyed by the durable input event;
-retry and startup recovery append only missing phases and reject conflicting
-input.
+delivery retry and startup recovery append only missing phases and reject
+conflicting input.
 
-The A2A work and input surfaces reject authority-shaped fields such as approval,
+The A2A and direct-human work/input surfaces reject authority-shaped fields such as approval,
 capability, authorization, effect-obligation, freeze, and policy overrides.
 Ordinary operator text that claims approval remains untrusted task content. It
 cannot change a prepared `HumanApproval`, and a protected effect remains pending

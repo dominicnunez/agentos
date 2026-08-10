@@ -4,6 +4,14 @@ import "time"
 
 type ID string
 
+type PrincipalKind string
+
+const (
+	PrincipalRuntime       PrincipalKind = "RUNTIME"
+	PrincipalHuman         PrincipalKind = "HUMAN"
+	PrincipalExternalAgent PrincipalKind = "EXTERNAL_AGENT"
+)
+
 type Organization struct {
 	ID            ID        `json:"id"`
 	Name          string    `json:"name"`
@@ -28,14 +36,18 @@ type Agent struct {
 	Status                  string `json:"status"`
 }
 type Intent struct {
-	ID                    ID        `json:"id"`
-	OrganizationID        ID        `json:"organization_id"`
-	OriginalInstruction   string    `json:"original_instruction"`
-	NormalizedObjective   string    `json:"normalized_objective"`
-	HardConstraints       []string  `json:"hard_constraints"`
-	ConsequenceBoundaries []string  `json:"consequence_boundaries"`
-	SourceHumanID         ID        `json:"source_human_id,omitempty"`
-	CreatedAt             time.Time `json:"created_at"`
+	ID                    ID            `json:"id"`
+	OrganizationID        ID            `json:"organization_id"`
+	OriginalInstruction   string        `json:"original_instruction"`
+	NormalizedObjective   string        `json:"normalized_objective"`
+	HardConstraints       []string      `json:"hard_constraints"`
+	ConsequenceBoundaries []string      `json:"consequence_boundaries"`
+	SourcePrincipalID     ID            `json:"source_principal_id"`
+	SourcePrincipalKind   PrincipalKind `json:"source_principal_kind"`
+	SourceChannel         string        `json:"source_channel"`
+	SourceMessageID       string        `json:"source_message_id,omitempty"`
+	SourceHumanID         ID            `json:"source_human_id,omitempty"`
+	CreatedAt             time.Time     `json:"created_at"`
 }
 type Goal struct {
 	ID        ID        `json:"id"`

@@ -39,6 +39,25 @@ type ResultPublishedPayload struct {
 	ArtifactRefs []string `json:"artifact_refs,omitempty"`
 }
 
+// OperatorInputReceivedPayload is the durable, untrusted-content contract for
+// one continuation message from any authenticated operator channel. MessageID
+// makes delivery retries idempotent; the trusted envelope identity remains
+// authoritative.
+type OperatorInputReceivedPayload struct {
+	MessageID           string `json:"message_id"`
+	Text                string `json:"text"`
+	SourcePrincipalID   string `json:"source_principal_id"`
+	SourcePrincipalKind string `json:"source_principal_kind"`
+	SourceChannel       string `json:"source_channel"`
+}
+
+type OperatorWorkAcceptedPayload struct {
+	MessageID           string `json:"message_id"`
+	SourcePrincipalID   string `json:"source_principal_id"`
+	SourcePrincipalKind string `json:"source_principal_kind"`
+	SourceChannel       string `json:"source_channel"`
+}
+
 func (p ResultPublishedPayload) ValidFor(artifactRefs []string) bool {
 	return p.Summary != "" && sameStrings(p.ArtifactRefs, artifactRefs)
 }

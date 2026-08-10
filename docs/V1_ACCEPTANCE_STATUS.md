@@ -25,9 +25,17 @@ claim.
 | 15 | Accurate manifest for every model execution | Covered | Every current AgentExecution persists a manifest before inference; the lateral-message test asserts the exact materialized event references and matching context. |
 | 16 | ToolOutcome failure cannot hide behind success text | Covered | Completion requires both successful status and verified postcondition. |
 | 17 | Safe deterministic recovery precedes cognitive recovery | Covered | `TestRecoverRetriesDeterministicWorkAndBlocksUncertainAgentWork` retries deterministic work and refuses blind adaptive replay. |
-| 18 | Hermes discovers, submits, and continues through A2A | Partial | Agent Card, authenticated submission, status, input continuation/recovery, and canonical `RESULT_PUBLISHED` Artifact-ref mapping are tested; `read_result` is enforced independently from `read_status`. Pinned real Hermes interoperability remains. |
-| 19 | A2A identity cannot bypass capability/human approval | Covered | Submission/status/input capabilities and organization binding fail closed. `TestA2AOperatorCannotApprovePreparedProtectedEffect` prepares an exactly fingerprinted deployment obligation and pending human approval, rejects authority-shaped A2A fields, persists ordinary Hermes approval text only as task input, and proves the approval remains undecided and the effect adapter unreachable. |
+| 18 | An authorized A2A-capable Agent discovers, submits, and continues work | Covered | CI runs a dependency-free A2A v1.0 client against a live Agent OS JSON-RPC gateway configured by the reviewed actor registry. Go conformance tests cover authenticated `SendMessage`, `GetTask`, blocked continuation, durable `messageId` replay, canonical result Artifact mapping, role capability separation, own/organization visibility, expiry/revocation, request ceilings, organization isolation, and strict rejection of legacy surfaces. |
+| 19 | A2A identity cannot bypass capability/human approval | Covered | Submission/status/input capabilities and organization binding fail closed. `TestA2AOperatorCannotApprovePreparedProtectedEffect` prepares an exactly fingerprinted deployment obligation and pending human approval, rejects authority-shaped A2A fields, persists ordinary external-Agent approval text only as task input, and proves the approval remains undecided and the effect adapter unreachable. |
 | 20 | Protected effects use exact approval and durable obligation/reconciliation | Partial | Exact durable approval is reloaded and revalidated in the attempt transaction, with replay-complete persist-before-effect transitions and atomic single-use consumption/attempt; automated reconciliation and production adapters remain deliberately disabled. |
 
 V1 remains incomplete until every row is covered by the required runtime path and
 adversarial regression test.
+
+In addition to the preserved checklist, `TestNaturalLanguageIntakePreservesPrincipalAndRoutingProvenance`,
+`TestHumanAndExternalAgentCanContinueSharedWorkWithoutSharingIdentity`, and the Human
+Gateway adversarial tests cover the promoted direct-human intake requirement.
+They prove deterministic-first routing, justified AgentExecution fallback,
+cross-channel organizational continuity, exact source provenance, retry
+idempotency, result scoping, and the separation of conversational text from
+trusted approval state.

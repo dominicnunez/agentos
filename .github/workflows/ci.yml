@@ -37,6 +37,36 @@ jobs:
       - name: Race-tested unit tests
         run: go test -race ./...
 
+      - name: A2A Agent and human intake interoperability
+        env:
+          AGENTOS_DB: work/a2a-interop.db
+          AGENTOS_A2A_ACTORS_FILE: scripts/testdata/a2a-actors-ci.json
+          AGENTOS_A2A_AGENT_TOKEN: ci-a2a-agent-token-000000000000001
+          AGENTOS_HUMAN_TOKEN: ci-human-operator-token-00000000001
+          AGENTOS_ORGANIZATION_ID: a2a-interop-org
+          AGENTOS_PUBLIC_URL: http://127.0.0.1:8080
+        run: |
+          go build -o work/agentos ./cmd/agentos
+          ./work/agentos >work/a2a-interop.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8080/.well-known/agent-card.json >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              cat work/a2a-interop.log
+              exit 1
+            fi
+            sleep 1
+          done
+          python3 scripts/verify-a2a-interop.py \
+            --url http://127.0.0.1:8080 \
+            --token "$AGENTOS_A2A_AGENT_TOKEN"
+          python3 scripts/verify-human-intake.py \
+            --url http://127.0.0.1:8080 \
+            --token "$AGENTOS_HUMAN_TOKEN"
+
       - name: Architecture boundaries
         run: go tool archguard check --include-tests --profile modular-monolith
 
