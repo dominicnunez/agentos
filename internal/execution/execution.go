@@ -92,7 +92,9 @@ func (a OpenAICompatible) Complete(ctx context.Context, prompt string) (ModelRes
 	if err != nil {
 		return ModelResponse{}, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode/100 != 2 {
 		return ModelResponse{}, fmt.Errorf("model provider returned %s", resp.Status)
 	}

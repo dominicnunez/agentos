@@ -14,7 +14,11 @@ func TestStorePreservesVersionsAndRequiresProvenance(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	defer l.Close()
+	t.Cleanup(func() {
+		if err := l.Close(); err != nil {
+			t.Errorf("close ledger: %v", err)
+		}
+	})
 	s := New(l)
 	r := core.KnowledgeRecord{KnowledgeID: "k", Version: 1, Scope: "ORGANIZATION", Status: core.KnowledgeCandidate, Content: "lesson", CreatedAt: time.Now()}
 	if s.Propose(context.Background(), r) == nil {

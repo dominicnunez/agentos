@@ -154,7 +154,7 @@ policy:
         module: gateway
         tests: true
       to:
-        module: ledger
+        modules: [approvals, effects, ledger]
 
     - name: knowledge-test-adapter
       from:

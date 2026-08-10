@@ -155,7 +155,7 @@ func (s *Service) Notify(ctx context.Context, approvalID core.ID) (core.HumanApp
 		return approval, ErrNotificationUnavailable
 	}
 	if err := s.notifier.Notify(ctx, approval); err != nil {
-		return approval, fmt.Errorf("%w: %v", ErrNotificationUnavailable, err)
+		return approval, fmt.Errorf("%w: %w", ErrNotificationUnavailable, err)
 	}
 	approval.Status = core.ApprovalNotified
 	if err := s.append(ctx, "APPROVAL_NOTIFIED", "runtime", version+1, approval); err != nil {

@@ -17,4 +17,4 @@ Agent OS is a Go modular monolith for operating persistent AI-assisted organizat
 - A2A is an external operator boundary, not internal IPC or implicit administrative authority.
 - Keep deferred architecture deferred unless a human explicitly promotes it from the handoff scope.
 
-Repository hooks and CI own routine formatting, test, vet, and build enforcement.
+Repository hooks and CI own routine formatting, lint, test, vet, and build enforcement.

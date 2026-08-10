@@ -45,7 +45,11 @@ func TestPersistBeforeEffectAndFingerprintApproval(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	defer l.Close()
+	t.Cleanup(func() {
+		if err := l.Close(); err != nil {
+			t.Errorf("close ledger: %v", err)
+		}
+	})
 	a := &adapter{}
 	reader := &approvalReader{}
 	c := New(l, a, reader)
@@ -146,7 +150,11 @@ func TestSingleUseApprovalIsConsumedBeforeAdapter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
+	t.Cleanup(func() {
+		if err := l.Close(); err != nil {
+			t.Errorf("close ledger: %v", err)
+		}
+	})
 	a := &adapter{}
 	reader := &approvalReader{}
 	c := New(l, a, reader)

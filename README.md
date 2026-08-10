@@ -29,7 +29,7 @@ Enable the repository-owned commit and push checks once per checkout:
 .\scripts\install-git-hooks.cmd
 ```
 
-On Unix-like systems, run `./scripts/install-git-hooks.sh` instead. The commit hook checks staged-diff integrity, formatting, tests, and architecture boundaries. The push hook adds module consistency, build, vet, and an advisory Gallow audit. GitHub Actions independently enforces the blocking checks, race-tests the unit suite, and publishes Gallow findings on pull requests.
+On Unix-like systems, run `./scripts/install-git-hooks.sh` instead. The commit hook checks staged-diff integrity, formatting, tests, and architecture boundaries. The push hook adds module consistency, build, vet, a pinned blocking GolangCI-Lint pass, and an advisory Gallow audit. GitHub Actions independently enforces the same lint configuration, race-tests the unit suite, and publishes Gallow findings on pull requests. The first push-hook lint run downloads the pinned linter release through the Go toolchain.
 
 Then submit a minimal A2A task:
 
@@ -44,7 +44,7 @@ The current deterministic handler supports `echo <text>`. Use `execution_kind: A
 
 ## Testing status
 
-The repository is ready to test as an early V1 vertical slice. The automated suite covers the deterministic and fake-agent paths, event-backed projection rebuilds, restart-safe Agent/Team/Task inbox delivery at execution boundaries, pending-task recovery, durable human-approval wait/decision state, fail-closed handling of uncertain interrupted work, completion verification, Task DAG readiness, the authenticated A2A boundary, exact capability checks, single-use effect approvals, unified per-run operational telemetry, institutional knowledge guards, inference reserves, and deterministic audit checks.
+The repository is ready to test as an early V1 vertical slice. The automated suite covers the deterministic and fake-agent paths, event-backed projection rebuilds, restart-safe Agent/Team/Task inbox delivery at execution boundaries, pending-task recovery, durable human-approval wait/decision state, fail-closed handling of uncertain interrupted work, completion verification, Task DAG readiness, the authenticated A2A and protected-effect boundary, exact capability checks, single-use effect approvals, unified per-run operational telemetry, institutional knowledge guards, inference reserves, and deterministic audit checks.
 
 This is not a full V1 acceptance sign-off. [docs/V1_ACCEPTANCE_STATUS.md](docs/V1_ACCEPTANCE_STATUS.md) maps the normative checklist to current evidence and keeps incomplete items visible.
 

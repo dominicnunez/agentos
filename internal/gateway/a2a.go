@@ -2,7 +2,10 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/dominicnunez/agentos/internal/app"
 	"github.com/dominicnunez/agentos/internal/core"
@@ -38,6 +41,62 @@ type request struct {
 		OrganizationID string             `json:"organization_id"`
 		ExecutionKind  core.ExecutionKind `json:"execution_kind"`
 	} `json:"metadata"`
+}
+
+var forbiddenAuthorityFields = map[string]struct{}{
+	"approval":           {},
+	"approvalref":        {},
+	"approvalstatus":     {},
+	"approved":           {},
+	"authorizationrefs":  {},
+	"capabilities":       {},
+	"capabilityrefs":     {},
+	"effectobligation":   {},
+	"effectobligationid": {},
+	"freeze":             {},
+	"humanapproval":      {},
+	"policyoverride":     {},
+	"unfreeze":           {},
+}
+
+func decodeWorkContent(w http.ResponseWriter, r *http.Request, target any) error {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		return err
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return err
+	}
+	if err := rejectAuthorityFields(envelope); err != nil {
+		return err
+	}
+	for field, metadata := range envelope {
+		if canonicalWorkField(field) != "metadata" {
+			continue
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(metadata, &fields); err != nil {
+			return fmt.Errorf("metadata must be an object: %w", err)
+		}
+		if err := rejectAuthorityFields(fields); err != nil {
+			return err
+		}
+	}
+	return json.Unmarshal(body, target)
+}
+
+func rejectAuthorityFields(fields map[string]json.RawMessage) error {
+	for field := range fields {
+		if _, forbidden := forbiddenAuthorityFields[canonicalWorkField(field)]; forbidden {
+			return fmt.Errorf("A2A work content cannot carry authority field %q", field)
+		}
+	}
+	return nil
+}
+
+func canonicalWorkField(field string) string {
+	return strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(field))
 }
 
 func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -81,11 +140,14 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		id := r.URL.Path[len("/a2a/v1/tasks/") : len(r.URL.Path)-6]
+		defer func() {
+			_ = r.Body.Close()
+		}()
 		var in struct {
 			TaskID string `json:"task_id"`
 			Text   string `json:"text"`
 		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil {
+		if err := decodeWorkContent(w, r, &in); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
@@ -117,9 +179,11 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "capability submit_work required"})
 		return
 	}
-	defer r.Body.Close()
+	defer func() {
+		_ = r.Body.Close()
+	}()
 	var req request
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+	if err := decodeWorkContent(w, r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
