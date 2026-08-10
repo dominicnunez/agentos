@@ -27,10 +27,11 @@ claim.
 | 17 | Safe deterministic recovery precedes cognitive recovery | Covered | `TestRecoverRetriesDeterministicWorkAndBlocksUncertainAgentWork` retries deterministic work and refuses blind adaptive replay. |
 | 18 | An authorized A2A-capable Agent discovers, submits, and continues work | Covered | CI runs a dependency-free A2A v1.0 client against a live Agent OS JSON-RPC gateway configured by the reviewed actor registry. Go conformance tests cover authenticated `SendMessage`, `GetTask`, blocked continuation, durable `messageId` replay, canonical result Artifact mapping, role capability separation, own/organization visibility, expiry/revocation, request ceilings, organization isolation, and strict rejection of legacy surfaces. |
 | 19 | A2A identity cannot bypass capability/human approval | Covered | Submission/status/input capabilities and organization binding fail closed. `TestA2AOperatorCannotApprovePreparedProtectedEffect` prepares an exactly fingerprinted deployment obligation and pending human approval, rejects authority-shaped A2A fields, persists ordinary external-Agent approval text only as task input, and proves the approval remains undecided and the effect adapter unreachable. |
-| 20 | Protected effects use exact approval and durable obligation/reconciliation | Partial | Exact durable approval is reloaded and revalidated in the attempt transaction, with replay-complete persist-before-effect transitions and atomic single-use consumption/attempt; automated reconciliation and production adapters remain deliberately disabled. |
+| 20 | Protected effects use exact approval and durable obligation/reconciliation | Covered | Exact durable approval is reloaded and revalidated in the attempt transaction, with replay-complete persist-before-effect transitions and atomic single-use consumption/attempt. `TestRecoveryConfirmsAttemptedEffectAfterRestartWithoutResend` proves restart discovery and evidence-backed confirmation without adapter replay; the fail-closed recovery tests preserve `ATTEMPTED` for unavailable, unknown, malformed, unsupported, or stale observations and persist evidence-backed failure. Production effect adapters remain deliberately disabled. |
 
-V1 remains incomplete until every row is covered by the required runtime path and
-adversarial regression test.
+Every normative row is covered by a bounded runtime path and adversarial
+regression test. This is V1 acceptance-suite coverage, not authorization to
+enable production consequential-effect adapters.
 
 In addition to the preserved checklist, `TestNaturalLanguageIntakePreservesPrincipalAndRoutingProvenance`,
 `TestHumanAndExternalAgentCanContinueSharedWorkWithoutSharingIdentity`, and the Human

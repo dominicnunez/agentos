@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/app"
+	"github.com/dominicnunez/agentos/internal/effects"
+	"github.com/dominicnunez/agentos/internal/effectstatus"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/gateway"
 	"github.com/dominicnunez/agentos/internal/intake"
@@ -55,6 +58,10 @@ func run() (err error) {
 	if err != nil {
 		return err
 	}
+	reconcilers, err := configuredEffectReconcilers(context.Background(), os.Getenv("AGENTOS_EFFECT_RECONCILERS_FILE"), secrets.Environment{})
+	if err != nil {
+		return err
+	}
 	if registry != nil && registry.HasCredential(humanToken) {
 		return fmt.Errorf("human and external-agent credentials must be distinct")
 	}
@@ -64,6 +71,13 @@ func run() (err error) {
 	service := app.New(events.NewGateway(l))
 	if _, err := service.Recover(context.Background()); err != nil {
 		return fmt.Errorf("recover durable runtime before serving: %w", err)
+	}
+	effectRecovery, err := effects.NewReconciliationService(l).Recover(context.Background(), reconcilers)
+	if err != nil {
+		return fmt.Errorf("recover effect obligations before serving: %w", err)
+	}
+	for _, item := range effectRecovery {
+		log.Printf("effect requires reconciliation: effect_id=%s task_id=%s reason=%s", item.EffectID, item.TaskID, item.Reason)
 	}
 	operator := intake.New(service)
 	capabilities := []string{intake.CapabilitySubmitWork, intake.CapabilityReadStatus, intake.CapabilityReadResult, intake.CapabilityProvideInput}
@@ -78,18 +92,33 @@ func run() (err error) {
 	return s.ListenAndServe()
 }
 
+func configuredEffectReconcilers(ctx context.Context, path string, source secrets.Source) (*effectstatus.HTTPReconcilerRegistry, error) {
+	if path == "" {
+		return nil, nil
+	}
+	bindings, err := decodeConfigFile(path, "effect reconciler registry", effectstatus.DecodeHTTPReconcilerConfig)
+	if err != nil {
+		return nil, err
+	}
+	for i := range bindings {
+		value, err := source.Resolve(ctx, secrets.Ref(bindings[i].TokenRef))
+		if err != nil {
+			return nil, fmt.Errorf("resolve effect reconciler %s/%s/%s credential: %w", bindings[i].OrganizationID, bindings[i].Action, bindings[i].Resource, err)
+		}
+		bindings[i].BearerToken = string(value)
+	}
+	registry, err := effectstatus.NewHTTPReconcilerRegistry(bindings, nil)
+	if err != nil {
+		return nil, fmt.Errorf("validate effect reconciler registry: %w", err)
+	}
+	return registry, nil
+}
+
 func configuredExternalActors(ctx context.Context, path string, source secrets.Source) (*gateway.ExternalActorRegistry, error) {
 	if path == "" {
 		return nil, nil
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open external actor registry: %w", err)
-	}
-	defer func() {
-		_ = file.Close()
-	}()
-	actors, err := gateway.DecodeExternalActorConfig(file)
+	actors, err := decodeConfigFile(path, "external actor registry", gateway.DecodeExternalActorConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +137,17 @@ func configuredExternalActors(ctx context.Context, path string, source secrets.S
 		return nil, fmt.Errorf("validate external actor registry: %w", err)
 	}
 	return registry, nil
+}
+
+func decodeConfigFile[T any](path, name string, decode func(io.Reader) ([]T, error)) ([]T, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", name, err)
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	return decode(file)
 }
 
 func configuredListenAddress() (string, bool, error) {

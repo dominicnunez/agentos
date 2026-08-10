@@ -20,6 +20,8 @@ modules:
     path: internal/core
   - name: effects
     path: internal/effects
+  - name: effectstatus
+    path: internal/effectstatus
   - name: events
     path: internal/events
   - name: execution
@@ -40,6 +42,8 @@ modules:
     path: internal/secrets
   - name: telemetry
     path: internal/telemetry
+  - name: trustconfig
+    path: internal/trustconfig
   - name: workflow
     path: internal/workflow
 
@@ -100,11 +104,17 @@ policy:
       to:
         modules: [approvals, authority, core]
 
+    - name: effect-status-boundary
+      from:
+        module: effectstatus
+      to:
+        modules: [core, effects, trustconfig]
+
     - name: operator-boundary
       from:
         module: gateway
       to:
-        modules: [core, intake]
+        modules: [core, intake, trustconfig]
 
     - name: operator-intake
       from:

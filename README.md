@@ -53,6 +53,11 @@ A2A is disabled when `AGENTOS_A2A_ACTORS_FILE` is absent. The server listens on
 `127.0.0.1:8080` by default; remote binding additionally requires the explicit
 `AGENTOS_ALLOW_REMOTE=true` setting and an HTTPS `AGENTOS_PUBLIC_URL`.
 
+Interrupted external-effect status checks are separately disabled unless
+`AGENTOS_EFFECT_RECONCILERS_FILE` names an exact-scope HTTPS registry. See
+[docs/EFFECT_RECONCILIATION.md](docs/EFFECT_RECONCILIATION.md) for its
+read-only protocol and fail-closed configuration.
+
 Enable the repository-owned commit and push checks once per checkout:
 
 ```powershell
@@ -93,7 +98,7 @@ constitutes a trusted approval decision.
 
 ## Testing status
 
-The repository is ready to test as an early V1 vertical slice. The automated suite covers the deterministic and fake-agent paths, event-backed projection rebuilds, restart-safe Agent/Team/Task inbox delivery at execution boundaries, pending-task recovery, durable human-approval wait/decision state, fail-closed handling of uncertain interrupted work, completion verification, Task DAG readiness, the authenticated A2A and protected-effect boundary, vendor-neutral A2A v1.0 interoperability, exact capability checks, single-use effect approvals, unified per-run operational telemetry, institutional knowledge guards, inference reserves, and deterministic audit checks.
+The repository is ready to test as an early V1 vertical slice. The automated suite covers the deterministic and fake-agent paths, event-backed projection rebuilds, restart-safe Agent/Team/Task inbox delivery at execution boundaries, pending-task recovery, durable human-approval wait/decision state, fail-closed reconciliation of uncertain attempted effects without blind resend, completion verification, Task DAG readiness, the authenticated A2A and protected-effect boundary, vendor-neutral A2A v1.0 interoperability, exact capability checks, single-use effect approvals, unified per-run operational telemetry, institutional knowledge guards, inference reserves, and deterministic audit checks.
 
 This is not a full V1 acceptance sign-off. [docs/V1_ACCEPTANCE_STATUS.md](docs/V1_ACCEPTANCE_STATUS.md) maps the normative checklist to current evidence and keeps incomplete items visible.
 
@@ -103,7 +108,7 @@ Included: core organizational/work objects, task dependencies, deterministic and
 
 Deferred: federation, workflow DSLs, semantic/vector memory, Lab, optimizers, production provider wiring, broad tool ecosystems, production external-effect adapters, and reconciliation workers.
 
-See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md), [docs/OPERATOR_INTAKE.md](docs/OPERATOR_INTAKE.md), [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md), and [docs/A2A_INTEROP.md](docs/A2A_INTEROP.md).
+See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md), [docs/OPERATOR_INTAKE.md](docs/OPERATOR_INTAKE.md), [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md), [docs/A2A_INTEROP.md](docs/A2A_INTEROP.md), and [docs/EFFECT_RECONCILIATION.md](docs/EFFECT_RECONCILIATION.md).
 
 ## Authoritative architecture handoff
 

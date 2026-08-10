@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/intake"
+	"github.com/dominicnunez/agentos/internal/trustconfig"
 )
 
 type ExternalActorStatus string
@@ -75,20 +75,8 @@ type ActorSession struct {
 }
 
 func DecodeExternalActorConfig(reader io.Reader) ([]ExternalActor, error) {
-	decoder := json.NewDecoder(io.LimitReader(reader, 1<<20))
-	decoder.DisallowUnknownFields()
 	var config ExternalActorConfig
-	if err := decoder.Decode(&config); err != nil {
-		return nil, fmt.Errorf("decode external actor registry: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return nil, fmt.Errorf("external actor registry must contain one JSON object")
-	}
-	if len(config.Actors) == 0 {
-		return nil, fmt.Errorf("external actor registry must contain at least one actor")
-	}
-	return config.Actors, nil
+	return trustconfig.DecodeEntries(reader, "external actor registry", "actor", &config, &config.Actors)
 }
 
 func NewExternalActorRegistry(actors []ExternalActor) (*ExternalActorRegistry, error) {
@@ -170,14 +158,8 @@ func validateExternalActor(actor ExternalActor) error {
 	if actor.ID == "" || actor.OrganizationID == "" || actor.AuthorizationRef == "" {
 		return fmt.Errorf("id, organization_id, and authorization_ref are required")
 	}
-	if len(actor.BearerToken) < 32 {
-		return fmt.Errorf("resolved bearer credential must contain at least 32 characters")
-	}
-	if actor.ExpiresAt == nil || actor.ExpiresAt.IsZero() {
-		return fmt.Errorf("expires_at is required")
-	}
-	if actor.Status != ExternalActorActive && actor.Status != ExternalActorSuspended && actor.Status != ExternalActorRevoked {
-		return fmt.Errorf("status must be ACTIVE, SUSPENDED, or REVOKED")
+	if err := trustconfig.ValidateCredentialLifecycle(string(actor.Status), actor.BearerToken, actor.ExpiresAt); err != nil {
+		return err
 	}
 	if actor.WorkScope != intake.WorkScopeOwn && actor.WorkScope != intake.WorkScopeOrganization {
 		return fmt.Errorf("work_scope must be OWN or ORGANIZATION")

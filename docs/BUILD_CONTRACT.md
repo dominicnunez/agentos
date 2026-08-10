@@ -103,6 +103,16 @@ freeze, and lease records, revalidates them at a shared time-of-use boundary,
 records the authorization trace, and fails closed if authority is missing,
 expired, revoked, frozen, corrupt, or unavailable.
 
+Startup discovers durable `ATTEMPTED` obligations before serving. Reconciliation
+uses a separate read-only destination-status interface and never invokes the
+effect-writing adapter. A reviewed registry binds each HTTPS checker to an
+exact organization, action, and resource; credentials remain in the adapter
+boundary. A destination observation may transition an obligation
+to `CONFIRMED` or `FAILED` only with durable evidence; unavailable support,
+lookup errors, unknown or malformed status, missing evidence, and attempt drift
+leave the obligation explicitly `ATTEMPTED` for operator resolution. No
+production effect adapter or blind resend path is enabled.
+
 Terminal work records one typed `RUN_TELEMETRY_RECORDED` Event Contract before
 the goal enters `COMPLETED` or `FAILED`. The telemetry module deterministically
 projects every Task in the run's authoritative Event Contract stream into

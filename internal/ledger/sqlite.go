@@ -337,6 +337,40 @@ func (l *SQLite) Records(ctx context.Context, kind, id string) ([][]byte, error)
 	}
 	return out, rows.Err()
 }
+
+// LatestRecords returns the current durable version of every record of a kind,
+// ordered by record identity. Callers still re-read a specific record before a
+// state transition so discovery never becomes a stale write authorization.
+func (l *SQLite) LatestRecords(ctx context.Context, kind string) ([][]byte, error) {
+	if kind == "" {
+		return nil, fmt.Errorf("record kind is required")
+	}
+	rows, err := l.db.QueryContext(ctx, `SELECT current.body
+FROM records AS current
+JOIN (
+	SELECT record_id, MAX(version) AS version
+	FROM records
+	WHERE kind=?
+	GROUP BY record_id
+) AS latest ON latest.record_id=current.record_id AND latest.version=current.version
+WHERE current.kind=?
+ORDER BY current.record_id`, kind, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = rows.Close() // Iteration and close failures are reported by rows.Err.
+	}()
+	var out [][]byte
+	for rows.Next() {
+		var body []byte
+		if err := rows.Scan(&body); err != nil {
+			return nil, err
+		}
+		out = append(out, body)
+	}
+	return out, rows.Err()
+}
 func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Event, error) {
 	if d.EventType == "MESSAGE" || d.RecipientScope != "" || d.RecipientID != "" {
 		return l.appendAddressed(ctx, d)
