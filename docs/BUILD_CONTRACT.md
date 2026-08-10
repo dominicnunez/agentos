@@ -27,8 +27,10 @@ environment-backed `SecretSource`, a real OpenAI-compatible model adapter, and
 fingerprinted persist-before-effect obligations with distinct attempted and
 confirmed states.
 
-The A2A adapter supports authenticated discovery and submission plus
-capability-gated status and input continuation. Production deployments must
+The A2A adapter exposes canonical A2A v1.0 Agent Card discovery and authenticated
+JSON-RPC `SendMessage` and `GetTask`, with capability-gated status, result, and
+input continuation. It does not expose legacy discovery, method aliases, or
+custom REST task routes. Production deployments must
 replace the example static bearer binding at their ingress boundary and
 explicitly configure a provider adapter. Credentials and A2A wire types remain
 outside core domain objects.
@@ -41,14 +43,15 @@ alone cannot expose result content. Status and result lookup are scoped to the
 authenticated actor's organization; a mismatched request is indistinguishable
 from an unknown request.
 
-Authorized external input for a blocked `HUMAN` Task is persisted before the
+Authorized external input for a blocked `HUMAN` Task is persisted with its A2A
+`messageId` before the
 Task resumes. The runtime then records a deterministic structured outcome and
 uses the Completion Engine to verify the Task; the external actor cannot mint a
 completion event. Input does not make unavailable tool work or uncertain
 adaptive recovery executable, and it never constitutes approval for a
 consequential effect. Continuation phases are keyed by the durable input event;
-retry and startup recovery append only missing phases and reject conflicting
-input.
+delivery retry and startup recovery append only missing phases and reject
+conflicting input.
 
 The A2A work and input surfaces reject authority-shaped fields such as approval,
 capability, authorization, effect-obligation, freeze, and policy overrides.

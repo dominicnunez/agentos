@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 
 	"github.com/dominicnunez/agentos/internal/app"
@@ -40,11 +41,18 @@ func run() (err error) {
 	if orgID == "" {
 		orgID = "org-default"
 	}
+	publicURL := os.Getenv("AGENTOS_PUBLIC_URL")
+	if publicURL != "" {
+		parsed, parseErr := url.Parse(publicURL)
+		if parseErr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("AGENTOS_PUBLIC_URL must be an absolute HTTP(S) origin")
+		}
+	}
 	service := app.New(events.NewGateway(l))
 	if _, err := service.Recover(context.Background()); err != nil {
 		return fmt.Errorf("recover durable runtime before serving: %w", err)
 	}
-	h := gateway.NewA2A(service, gateway.ExternalActor{ID: "hermes-primary", OrganizationID: orgID, BearerToken: token, Capabilities: []string{"submit_work", "read_status", "provide_input"}})
+	h := gateway.NewA2A(service, gateway.ExternalActor{ID: "hermes-primary", OrganizationID: orgID, BearerToken: token, PublicURL: publicURL, Capabilities: []string{"submit_work", "read_status", "read_result", "provide_input"}})
 	s := &http.Server{Addr: ":8080", Handler: h, ReadHeaderTimeout: 5e9}
 	log.Printf("Agent OS listening on %s", s.Addr)
 	return s.ListenAndServe()

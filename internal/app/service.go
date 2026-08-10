@@ -255,17 +255,12 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 	return result, nil
 }
 
-type externalInputPayload struct {
-	Text                string `json:"text"`
-	SourceExternalActor string `json:"source_external_actor"`
-}
-
-func (s *Service) ProvideExternalInput(ctx context.Context, organizationID, actorID, requestID, taskID, text string) error {
+func (s *Service) ProvideExternalInput(ctx context.Context, organizationID, actorID, requestID, taskID, messageID, text string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if organizationID == "" || actorID == "" || requestID == "" || taskID == "" || text == "" {
-		return fmt.Errorf("organization, actor, request, task, and text are required")
+	if organizationID == "" || actorID == "" || requestID == "" || taskID == "" || messageID == "" || text == "" {
+		return fmt.Errorf("organization, actor, request, task, message, and text are required")
 	}
 	snapshot, err := s.state.Load(ctx)
 	if err != nil {
@@ -294,7 +289,7 @@ func (s *Service) ProvideExternalInput(ctx context.Context, organizationID, acto
 		return err
 	}
 	if found {
-		if inputEvent.SourceActorID != actorID || input.SourceExternalActor != actorID || input.Text != text {
+		if inputEvent.SourceActorID != actorID || input.SourceExternalActor != actorID || input.MessageID != messageID || input.Text != text {
 			return fmt.Errorf("task already has different durable external input")
 		}
 	} else {
@@ -307,7 +302,7 @@ func (s *Service) ProvideExternalInput(ctx context.Context, organizationID, acto
 			SourceActorID:  actorID,
 			TaskID:         taskID,
 			CorrelationID:  requestID,
-			Payload:        externalInputPayload{Text: text, SourceExternalActor: actorID},
+			Payload:        events.A2AInputReceivedPayload{MessageID: messageID, Text: text, SourceExternalActor: actorID},
 		})
 		if err != nil {
 			return err
@@ -451,18 +446,18 @@ func (s *Service) publishContinuationEventIfMissing(ctx context.Context, stream 
 	return nil
 }
 
-func externalInputForTask(stream []events.Event, taskID core.ID) (events.Event, externalInputPayload, bool, error) {
+func externalInputForTask(stream []events.Event, taskID core.ID) (events.Event, events.A2AInputReceivedPayload, bool, error) {
 	var found events.Event
-	var payload externalInputPayload
+	var payload events.A2AInputReceivedPayload
 	for _, event := range stream {
 		if event.EventType != "A2A_INPUT_RECEIVED" || core.ID(event.TaskID) != taskID {
 			continue
 		}
 		if found.EventID != "" {
-			return events.Event{}, externalInputPayload{}, false, fmt.Errorf("task has multiple durable external input events")
+			return events.Event{}, events.A2AInputReceivedPayload{}, false, fmt.Errorf("task has multiple durable external input events")
 		}
-		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.Text == "" || payload.SourceExternalActor == "" || payload.SourceExternalActor != event.SourceActorID {
-			return events.Event{}, externalInputPayload{}, false, fmt.Errorf("durable external input event is invalid")
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.MessageID == "" || payload.Text == "" || payload.SourceExternalActor == "" || payload.SourceExternalActor != event.SourceActorID {
+			return events.Event{}, events.A2AInputReceivedPayload{}, false, fmt.Errorf("durable external input event is invalid")
 		}
 		found = event
 	}

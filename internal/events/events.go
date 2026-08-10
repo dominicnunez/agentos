@@ -39,6 +39,15 @@ type ResultPublishedPayload struct {
 	ArtifactRefs []string `json:"artifact_refs,omitempty"`
 }
 
+// A2AInputReceivedPayload is the durable, untrusted-content contract for one
+// external continuation message. MessageID makes delivery retries idempotent;
+// authenticated envelope identity remains authoritative.
+type A2AInputReceivedPayload struct {
+	MessageID           string `json:"message_id"`
+	Text                string `json:"text"`
+	SourceExternalActor string `json:"source_external_actor"`
+}
+
 func (p ResultPublishedPayload) ValidFor(artifactRefs []string) bool {
 	return p.Summary != "" && sameStrings(p.ArtifactRefs, artifactRefs)
 }
