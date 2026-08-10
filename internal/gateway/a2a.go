@@ -134,7 +134,9 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		id := r.URL.Path[len("/a2a/v1/tasks/") : len(r.URL.Path)-6]
-		defer r.Body.Close()
+		defer func() {
+			_ = r.Body.Close()
+		}()
 		var in struct {
 			TaskID string `json:"task_id"`
 			Text   string `json:"text"`
@@ -171,7 +173,9 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "capability submit_work required"})
 		return
 	}
-	defer r.Body.Close()
+	defer func() {
+		_ = r.Body.Close()
+	}()
 	var req request
 	if err := decodeWorkContent(w, r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

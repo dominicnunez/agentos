@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -13,18 +15,26 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() (err error) {
 	path := os.Getenv("AGENTOS_DB")
 	if path == "" {
 		path = "agentos.db"
 	}
 	l, err := ledger.Open(path)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	defer l.Close()
+	defer func() {
+		err = errors.Join(err, l.Close())
+	}()
 	token := os.Getenv("AGENTOS_OPERATOR_TOKEN")
 	if token == "" {
-		log.Fatal("AGENTOS_OPERATOR_TOKEN is required (fail closed)")
+		return fmt.Errorf("AGENTOS_OPERATOR_TOKEN is required (fail closed)")
 	}
 	orgID := os.Getenv("AGENTOS_ORGANIZATION_ID")
 	if orgID == "" {
@@ -32,10 +42,10 @@ func main() {
 	}
 	service := app.New(events.NewGateway(l))
 	if _, err := service.Recover(context.Background()); err != nil {
-		log.Fatalf("recover durable runtime before serving: %v", err)
+		return fmt.Errorf("recover durable runtime before serving: %w", err)
 	}
 	h := gateway.NewA2A(service, gateway.ExternalActor{ID: "hermes-primary", OrganizationID: orgID, BearerToken: token, Capabilities: []string{"submit_work", "read_status", "provide_input"}})
 	s := &http.Server{Addr: ":8080", Handler: h, ReadHeaderTimeout: 5e9}
 	log.Printf("Agent OS listening on %s", s.Addr)
-	log.Fatal(s.ListenAndServe())
+	return s.ListenAndServe()
 }

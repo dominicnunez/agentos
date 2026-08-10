@@ -15,7 +15,11 @@ func TestAppendAndRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
+	t.Cleanup(func() {
+		if err := l.Close(); err != nil {
+			t.Errorf("close ledger: %v", err)
+		}
+	})
 	e, err := l.Append(context.Background(), events.TrustedDraft{OrganizationID: "o", EventType: "TASK_CREATED", TaskID: "1", Payload: map[string]string{"ok": "yes"}, CorrelationID: "c"})
 	if err != nil {
 		t.Fatal(err)

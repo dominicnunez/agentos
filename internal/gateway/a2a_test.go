@@ -158,7 +158,11 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
+	t.Cleanup(func() {
+		if err := l.Close(); err != nil {
+			t.Errorf("close ledger: %v", err)
+		}
+	})
 	service := app.New(events.NewGateway(l))
 	h := NewA2A(service, ExternalActor{ID: "hermes", OrganizationID: "o", BearerToken: "token", Capabilities: []string{"submit_work", "read_status", "read_result", "provide_input"}})
 	body := `{"id":"r1","message":{"role":"user","parts":[{"type":"text","text":"echo hello"}]}}`

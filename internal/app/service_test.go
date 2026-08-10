@@ -21,7 +21,11 @@ func TestVerticalSlice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
+	t.Cleanup(func() {
+		if err := l.Close(); err != nil {
+			t.Errorf("close ledger: %v", err)
+		}
+	})
 	s := New(events.NewGateway(l))
 	r, err := s.Submit(context.Background(), Submit{RequestID: "r1", OrganizationID: "o1", Statement: "echo hello", Kind: core.ExecutionDeterministic})
 	if err != nil {
@@ -64,7 +68,11 @@ func TestAgentExecutionUsesFakeAdapter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
+	t.Cleanup(func() {
+		if err := l.Close(); err != nil {
+			t.Errorf("close ledger: %v", err)
+		}
+	})
 	r, err := New(events.NewGateway(l)).Submit(context.Background(), Submit{RequestID: "r2", OrganizationID: "o1", Statement: "summarize", Kind: core.ExecutionAgent})
 	if err != nil {
 		t.Fatal(err)
@@ -80,7 +88,11 @@ func TestRejectedRunRecordsTelemetryAndFailsGoal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
+	t.Cleanup(func() {
+		if err := l.Close(); err != nil {
+			t.Errorf("close ledger: %v", err)
+		}
+	})
 	r, err := New(events.NewGateway(l)).Submit(context.Background(), Submit{RequestID: "rejected", OrganizationID: "org-1", Statement: "unsupported", Kind: core.ExecutionDeterministic})
 	if err != nil {
 		t.Fatal(err)
@@ -108,7 +120,11 @@ func TestRunTelemetryAggregatesEveryTaskInCompletedDAG(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
+	t.Cleanup(func() {
+		if err := l.Close(); err != nil {
+			t.Errorf("close ledger: %v", err)
+		}
+	})
 	gateway := events.NewGateway(l)
 	repository := projections.New(gateway)
 	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1"}
