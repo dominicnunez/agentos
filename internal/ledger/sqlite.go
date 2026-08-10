@@ -71,18 +71,20 @@ func (l *SQLite) ensureEventRoutingColumns(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("inspect event schema: %w", err)
 	}
+	defer func() {
+		_ = rows.Close() // Iteration and close failures are reported by rows.Err.
+	}()
 	for rows.Next() {
 		var cid, notNull, primaryKey int
 		var name, columnType string
 		var defaultValue any
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			_ = rows.Close()
 			return fmt.Errorf("read event schema: %w", err)
 		}
 		columns[name] = true
 	}
-	if err := rows.Close(); err != nil {
-		return err
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate event schema: %w", err)
 	}
 	for name, ddl := range map[string]string{
 		"recipient_scope": `ALTER TABLE events ADD COLUMN recipient_scope TEXT NOT NULL DEFAULT ''`,

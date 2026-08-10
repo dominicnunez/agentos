@@ -215,6 +215,8 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 			result.PendingFound++
 		case core.TaskBlocked:
 			result.BlockedPreserved++
+		case core.TaskCompleted, core.TaskFailed:
+			// Terminal tasks require no recovery action.
 		case core.TaskRunning:
 			task := state.Value
 			detail := any(map[string]string{"reason": "process restarted before execution reached a durable terminal state"})
@@ -337,6 +339,8 @@ func (s *Service) continueExternalInputTask(ctx context.Context, organizationID,
 		switch task.Status {
 		case core.TaskCompleted:
 			return nil
+		case core.TaskFailed:
+			return fmt.Errorf("external input continuation cannot advance failed task %s", task.ID)
 		case core.TaskBlocked:
 			task.Status = core.TaskPending
 			detail := map[string]string{"reason": "authorized external input received", "input_event_ref": inputEvent.EventID}
@@ -663,9 +667,16 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			return taskRun{}, fmt.Errorf("persist input-required HUMAN task %s: %w", task.ID, err)
 		}
 		return taskRun{}, nil
-	default:
+	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
 		task.Status = core.TaskBlocked
 		detail := blockedDetail("execution kind is declared but unavailable in this V1 slice", "authorized runtime handler", "the worker cannot expand its own execution authority")
+		if err := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); err != nil {
+			return taskRun{}, fmt.Errorf("persist blocked task %s: %w", task.ID, err)
+		}
+		return taskRun{}, nil
+	default:
+		task.Status = core.TaskBlocked
+		detail := blockedDetail("execution kind is unknown and unavailable", "recognized authorized runtime handler", "the worker cannot expand its own execution authority")
 		if err := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); err != nil {
 			return taskRun{}, fmt.Errorf("persist blocked task %s: %w", task.ID, err)
 		}

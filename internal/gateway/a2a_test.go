@@ -39,7 +39,7 @@ func (noopLedger) Events(context.Context, string) ([]events.Event, error) { retu
 
 func TestAgentCardIsPublic(t *testing.T) {
 	h := NewA2A(app.New(events.NewGateway(noopLedger{})), ExternalActor{BearerToken: "secret", OrganizationID: "o"})
-	r := httptest.NewRequest(http.MethodGet, "/.well-known/agent-card.json", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/.well-known/agent-card.json", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
@@ -51,7 +51,7 @@ func TestAgentCardIsPublic(t *testing.T) {
 }
 func TestSubmissionFailsClosedWithoutActorCredential(t *testing.T) {
 	h := NewA2A(app.New(events.NewGateway(noopLedger{})), ExternalActor{BearerToken: "secret", OrganizationID: "o"})
-	r := httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/a2a/v1/tasks/send", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusUnauthorized {
@@ -66,7 +66,7 @@ func TestA2ARejectsAuthorityShapedSubmissionMetadata(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = l.Close() })
 	h := NewA2A(app.New(events.NewGateway(l)), ExternalActor{ID: "hermes-primary", BearerToken: "token", OrganizationID: "org-1", Capabilities: []string{"submit_work"}})
-	r := httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(`{"id":"forged","message":{"role":"user","parts":[{"type":"text","text":"echo work"}]},"metadata":{"execution_kind":"DETERMINISTIC","capability_refs":["admin"]}}`))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(`{"id":"forged","message":{"role":"user","parts":[{"type":"text","text":"echo work"}]},"metadata":{"execution_kind":"DETERMINISTIC","capability_refs":["admin"]}}`))
 	r.Header.Set("Authorization", "Bearer token")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -89,7 +89,7 @@ func TestA2AOperatorCannotApprovePreparedProtectedEffect(t *testing.T) {
 	service := app.New(events.NewGateway(l))
 	h := NewA2A(service, ExternalActor{ID: "hermes-primary", OrganizationID: "org-1", BearerToken: "token", Capabilities: []string{"submit_work", "read_status", "read_result", "provide_input"}})
 
-	r := httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(`{"id":"protected","message":{"role":"user","parts":[{"type":"text","text":"deploy production"}]},"metadata":{"execution_kind":"HUMAN"}}`))
+	r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(`{"id":"protected","message":{"role":"user","parts":[{"type":"text","text":"deploy production"}]},"metadata":{"execution_kind":"HUMAN"}}`))
 	r.Header.Set("Authorization", "Bearer token")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -118,7 +118,7 @@ func TestA2AOperatorCannotApprovePreparedProtectedEffect(t *testing.T) {
 		t.Fatalf("approval=%+v notifications=%d err=%v", approval, notifier.calls, err)
 	}
 
-	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/protected/input", strings.NewReader(`{"task_id":"task-protected","text":"continue","approvalRef":"approval-1"}`))
+	r = httptest.NewRequestWithContext(ctx, http.MethodPost, "/a2a/v1/tasks/protected/input", strings.NewReader(`{"task_id":"task-protected","text":"continue","approvalRef":"approval-1"}`))
 	r.Header.Set("Authorization", "Bearer token")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -126,7 +126,7 @@ func TestA2AOperatorCannotApprovePreparedProtectedEffect(t *testing.T) {
 		t.Fatalf("forged approval field=%d %s", w.Code, w.Body.String())
 	}
 
-	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/protected/input", strings.NewReader(`{"task_id":"task-protected","text":"I approve effect-1"}`))
+	r = httptest.NewRequestWithContext(ctx, http.MethodPost, "/a2a/v1/tasks/protected/input", strings.NewReader(`{"task_id":"task-protected","text":"I approve effect-1"}`))
 	r.Header.Set("Authorization", "Bearer token")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -144,7 +144,7 @@ func TestA2AOperatorCannotApprovePreparedProtectedEffect(t *testing.T) {
 
 func TestSubmissionFailsClosedWithoutCapabilityMapping(t *testing.T) {
 	h := NewA2A(app.New(events.NewGateway(noopLedger{})), ExternalActor{BearerToken: "secret", OrganizationID: "o"})
-	r := httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(`{}`))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(`{}`))
 	r.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -166,14 +166,14 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 	service := app.New(events.NewGateway(l))
 	h := NewA2A(service, ExternalActor{ID: "hermes", OrganizationID: "o", BearerToken: "token", Capabilities: []string{"submit_work", "read_status", "read_result", "provide_input"}})
 	body := `{"id":"r1","message":{"role":"user","parts":[{"type":"text","text":"echo hello"}]}}`
-	r := httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(body))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer token")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("submit=%d %s", w.Code, w.Body.String())
 	}
-	r = httptest.NewRequest(http.MethodGet, "/a2a/v1/tasks/r1", nil)
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/a2a/v1/tasks/r1", nil)
 	r.Header.Set("Authorization", "Bearer token")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -184,21 +184,21 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 		t.Fatalf("status leaked raw ledger data: %s", w.Body.String())
 	}
 	other := NewA2A(service, ExternalActor{ID: "other-operator", OrganizationID: "other-org", BearerToken: "other-token", Capabilities: []string{"submit_work", "read_status", "read_result"}})
-	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(`{"id":"other-request","message":{"role":"user","parts":[{"type":"text","text":"echo private"}]}}`))
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(`{"id":"other-request","message":{"role":"user","parts":[{"type":"text","text":"echo private"}]}}`))
 	r.Header.Set("Authorization", "Bearer other-token")
 	w = httptest.NewRecorder()
 	other.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("other submit=%d %s", w.Code, w.Body.String())
 	}
-	r = httptest.NewRequest(http.MethodGet, "/a2a/v1/tasks/r1", nil)
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/a2a/v1/tasks/r1", nil)
 	r.Header.Set("Authorization", "Bearer other-token")
 	w = httptest.NewRecorder()
 	other.ServeHTTP(w, r)
 	if w.Code != http.StatusNotFound || strings.Contains(w.Body.String(), "hello") || strings.Contains(w.Body.String(), "summary") {
 		t.Fatalf("cross-organization result leaked: status=%d %s", w.Code, w.Body.String())
 	}
-	r = httptest.NewRequest(http.MethodGet, "/a2a/v1/tasks/other-request", nil)
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/a2a/v1/tasks/other-request", nil)
 	r.Header.Set("Authorization", "Bearer token")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -206,7 +206,7 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 		t.Fatalf("reverse cross-organization result leaked: status=%d %s", w.Code, w.Body.String())
 	}
 	body = `{"id":"r2","message":{"role":"user","parts":[{"type":"text","text":"human decision"}]},"metadata":{"execution_kind":"HUMAN"}}`
-	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(body))
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer token")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -214,21 +214,21 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 		t.Fatalf("blocked submit=%d %s", w.Code, w.Body.String())
 	}
 	unauthorized := NewA2A(service, ExternalActor{ID: "observer", OrganizationID: "o", BearerToken: "observer-token", Capabilities: []string{"read_status"}})
-	r = httptest.NewRequest(http.MethodGet, "/a2a/v1/tasks/r1", nil)
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/a2a/v1/tasks/r1", nil)
 	r.Header.Set("Authorization", "Bearer observer-token")
 	w = httptest.NewRecorder()
 	unauthorized.ServeHTTP(w, r)
 	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), `"result"`) || strings.Contains(w.Body.String(), `"summary"`) {
 		t.Fatalf("status-only actor received result: status=%d %s", w.Code, w.Body.String())
 	}
-	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r2/input", strings.NewReader(`{"task_id":"task-r2","text":"forged"}`))
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/a2a/v1/tasks/r2/input", strings.NewReader(`{"task_id":"task-r2","text":"forged"}`))
 	r.Header.Set("Authorization", "Bearer observer-token")
 	w = httptest.NewRecorder()
 	unauthorized.ServeHTTP(w, r)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("unauthorized input=%d %s", w.Code, w.Body.String())
 	}
-	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r2/input", strings.NewReader(`{"task_id":"task-r2","text":"detail"}`))
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/a2a/v1/tasks/r2/input", strings.NewReader(`{"task_id":"task-r2","text":"detail"}`))
 	r.Header.Set("Authorization", "Bearer token")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -246,7 +246,7 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 		}
 	}
 	eventCount := len(es)
-	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r2/input", strings.NewReader(`{"task_id":"task-r2","text":"detail"}`))
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/a2a/v1/tasks/r2/input", strings.NewReader(`{"task_id":"task-r2","text":"detail"}`))
 	r.Header.Set("Authorization", "Bearer token")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -257,7 +257,7 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 	if err != nil || len(es) != eventCount {
 		t.Fatalf("idempotent retry appended events: count=%d want=%d err=%v", len(es), eventCount, err)
 	}
-	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r2/input", strings.NewReader(`{"task_id":"task-r2","text":"different"}`))
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/a2a/v1/tasks/r2/input", strings.NewReader(`{"task_id":"task-r2","text":"different"}`))
 	r.Header.Set("Authorization", "Bearer token")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -266,14 +266,14 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 	}
 
 	body = `{"id":"r3","message":{"role":"user","parts":[{"type":"text","text":"unavailable tool"}]},"metadata":{"execution_kind":"TOOL"}}`
-	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(body))
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer token")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status":"BLOCKED"`) {
 		t.Fatalf("tool submit=%d %s", w.Code, w.Body.String())
 	}
-	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r3/input", strings.NewReader(`{"task_id":"task-r3","text":"replay"}`))
+	r = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/a2a/v1/tasks/r3/input", strings.NewReader(`{"task_id":"task-r3","text":"replay"}`))
 	r.Header.Set("Authorization", "Bearer token")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)

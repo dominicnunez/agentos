@@ -206,8 +206,10 @@ func Project(correlationID string, stream []events.Event) (Run, error) {
 		case core.TaskCompleted:
 		case core.TaskFailed:
 			run.Outcome = "REJECTED"
-		default:
+		case core.TaskPending, core.TaskRunning, core.TaskBlocked:
 			return Run{}, fmt.Errorf("task %s is not terminal", taskID)
+		default:
+			return Run{}, fmt.Errorf("task %s has unknown status %q", taskID, status)
 		}
 	}
 	if run.OrganizationID == "" || terminalAt.IsZero() {
