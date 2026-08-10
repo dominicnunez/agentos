@@ -18,7 +18,7 @@ import (
 
 type Records interface {
 	AppendRecord(context.Context, string, string, string, string, []string, []string, string, string, int, any) error
-	AuthorizeAndAppendEffectAttempt(context.Context, string, string, string, string, string, string, []string, string, string, bool, []string, string, string, int, any) (core.AuthorizationTrace, error)
+	AuthorizeAndAppendEffectAttempt(context.Context, core.EffectObligation, int, any) (core.AuthorizationTrace, error)
 	Records(context.Context, string, string) ([][]byte, error)
 }
 type Adapter interface {
@@ -135,7 +135,7 @@ func (c *Coordinator) Execute(ctx context.Context, o core.EffectObligation) (cor
 		if err != nil {
 			return o, fmt.Errorf("load durable approval: %w", err)
 		}
-		if err := validateApproval(o, approval, time.Now().UTC()); err != nil {
+		if err := approvals.ValidateForEffect(approval, o, time.Now().UTC()); err != nil {
 			if errors.Is(err, approvals.ErrApprovalDenied) && version > 0 {
 				o.Status = core.EffectCancelled
 				if recordErr := c.record(ctx, o, version+1); recordErr != nil {
@@ -161,7 +161,7 @@ func (c *Coordinator) Execute(ctx context.Context, o core.EffectObligation) (cor
 	attempt.Status = core.EffectAttempted
 	attempt.AttemptCount++
 	attempt.LastAttemptAt = &now
-	trace, err := c.records.AuthorizeAndAppendEffectAttempt(ctx, string(o.OrganizationID), string(o.TaskID), string(o.ActorID), o.Action, o.Resource, o.Scope, o.AuthorizationRefs, string(approval.ID), o.EffectFingerprint, approval.SingleUse, o.ConfirmationEvidenceRefs, "effect", string(o.ID), version+1, attempt)
+	trace, err := c.records.AuthorizeAndAppendEffectAttempt(ctx, o, version+1, attempt)
 	if err != nil {
 		return o, fmt.Errorf("begin authorized effect attempt: %w", err)
 	}
@@ -235,25 +235,7 @@ func sameEffectIntent(stored, requested core.EffectObligation) bool {
 		reflect.DeepEqual(stored.ReplayContext, requested.ReplayContext)
 }
 
-func validateApproval(obligation core.EffectObligation, approval core.HumanApproval, now time.Time) error {
-	switch approval.Status {
-	case core.ApprovalPending, core.ApprovalNotified, core.ApprovalAcknowledged, core.ApprovalPendingDecision:
-		return approvals.ErrApprovalPending
-	case core.ApprovalDenied:
-		return approvals.ErrApprovalDenied
-	case core.ApprovalApproved:
-	default:
-		return fmt.Errorf("unknown approval status %q", approval.Status)
-	}
-	if approval.OrganizationID != obligation.OrganizationID || approval.TaskID != obligation.TaskID || approval.EffectObligationID != obligation.ID || approval.Action != obligation.Action || approval.Resource != obligation.Resource || approval.Boundary != obligation.ConsequenceBoundary || approval.EffectFingerprint != obligation.EffectFingerprint {
-		return fmt.Errorf("approval does not authorize exact effect")
-	}
-	if approval.ExpiresAt != nil && !now.Before(*approval.ExpiresAt) {
-		return fmt.Errorf("approval has expired")
-	}
-	return nil
-}
-
 func (c *Coordinator) record(ctx context.Context, o core.EffectObligation, version int) error {
 	return c.records.AppendRecord(ctx, string(o.OrganizationID), "EFFECT_OBLIGATION_TRANSITIONED", "", string(o.TaskID), o.AuthorizationRefs, o.ConfirmationEvidenceRefs, "effect", string(o.ID), version, o)
 }
+
