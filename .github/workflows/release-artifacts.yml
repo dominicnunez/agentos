@@ -1,0 +1,48 @@
+name: release-artifacts
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-artifacts-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-python@8549b9f8f590ad24eab7482f36f6e1e24d34597b # 2026-08-03
+        with:
+          python-version-file: .python-version
+      - name: Build and verify release-candidate artifacts
+        env:
+          GOCACHE: ${{ runner.temp }}/agentos-gocache-a
+          GOMODCACHE: ${{ runner.temp }}/agentos-gomodcache-a
+        run: |
+          python3 scripts/build-release.py --output "$RUNNER_TEMP/agentos-release-a"
+          (cd "$RUNNER_TEMP/agentos-release-a" && sha256sum --check SHA256SUMS)
+
+      - name: Verify byte reproducibility
+        env:
+          GOCACHE: ${{ runner.temp }}/agentos-gocache-b
+          GOMODCACHE: ${{ runner.temp }}/agentos-gomodcache-b
+        run: |
+          python3 scripts/build-release.py --output "$RUNNER_TEMP/agentos-release-b"
+          diff --recursive --no-dereference \
+            "$RUNNER_TEMP/agentos-release-a" \
+            "$RUNNER_TEMP/agentos-release-b"

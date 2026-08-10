@@ -143,7 +143,7 @@ and is not exposed through A2A. See
 
 The repository is ready to test as an early V1 vertical slice. The automated suite covers the deterministic and fake-agent paths, event-backed projection rebuilds, restart-safe Agent/Team/Task inbox delivery at execution boundaries, pending-task recovery, durable human-approval wait/decision state, fail-closed reconciliation of uncertain attempted effects without blind resend, completion verification, Task DAG readiness, the authenticated A2A and protected-effect boundary, vendor-neutral A2A v1.0 interoperability, exact capability checks, single-use effect approvals, unified per-run operational telemetry, institutional knowledge guards, inference reserves, and deterministic audit checks.
 
-This is not a full V1 release sign-off. [docs/V1_ACCEPTANCE_STATUS.md](docs/V1_ACCEPTANCE_STATUS.md) maps the normative architecture checklist to automated evidence; [docs/V1_RELEASE_READINESS.md](docs/V1_RELEASE_READINESS.md) tracks the separate operational release gates.
+This is not a full V1 release sign-off. [docs/V1_ACCEPTANCE_STATUS.md](docs/V1_ACCEPTANCE_STATUS.md) maps the normative architecture checklist to automated evidence; [docs/V1_RELEASE_READINESS.md](docs/V1_RELEASE_READINESS.md) tracks the separate operational release gates, and [docs/RELEASE.md](docs/RELEASE.md) defines reproducible artifacts and their publication boundary.
 
 ## Scope
 

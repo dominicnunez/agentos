@@ -133,7 +133,7 @@ func run(ctx context.Context) (err error) {
 		mux.Handle("/v1/human/", gateway.NewHuman(operator, humanActors))
 	}
 	if externalActors != nil {
-		mux.Handle("/", gateway.NewA2A(operator, externalActors, publicURL))
+		mux.Handle("/", gateway.NewA2A(operator, externalActors, publicURL, version))
 	}
 	s := &http.Server{Addr: listenAddress, Handler: mux, TLSConfig: tlsConfig, MaxHeaderBytes: 32 << 10, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: time.Minute}
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", s.Addr)

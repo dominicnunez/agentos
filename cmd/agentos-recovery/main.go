@@ -14,6 +14,8 @@ import (
 	"github.com/dominicnunez/agentos/internal/ledger/recovery"
 )
 
+var version = "1.0.0-dev"
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -27,7 +29,11 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		return fmt.Errorf("context and output are required")
 	}
 	if len(args) == 0 {
-		return fmt.Errorf("command is required: backup, restore, or verify")
+		return fmt.Errorf("command is required: backup, restore, verify, or version")
+	}
+	if len(args) == 1 && (args[0] == "--version" || args[0] == "version") {
+		_, err := fmt.Fprintln(output, version)
+		return err
 	}
 	var result recovery.Result
 	var err error
@@ -59,7 +65,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		}
 		result, err = recovery.Verify(ctx, *database)
 	default:
-		return fmt.Errorf("unsupported command %q: use backup, restore, or verify", args[0])
+		return fmt.Errorf("unsupported command %q: use backup, restore, verify, or version", args[0])
 	}
 	if err != nil {
 		return err
