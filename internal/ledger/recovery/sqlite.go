@@ -81,32 +81,8 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	if _, err := db.ExecContext(ctx, `PRAGMA query_only=ON`); err != nil {
 		return Result{}, fmt.Errorf("make recovery verification read-only: %w", err)
 	}
-	rows, err := db.QueryContext(ctx, `PRAGMA integrity_check`)
-	if err != nil {
-		return Result{}, fmt.Errorf("check SQLite integrity: %w", err)
-	}
-	integrityOK := false
-	for rows.Next() {
-		var finding string
-		if err := rows.Scan(&finding); err != nil {
-			_ = rows.Close()
-			return Result{}, fmt.Errorf("read SQLite integrity result: %w", err)
-		}
-		if finding != "ok" {
-			_ = rows.Close()
-			return Result{}, fmt.Errorf("SQLite integrity check failed: %s", finding)
-		}
-		integrityOK = true
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return Result{}, fmt.Errorf("iterate SQLite integrity results: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return Result{}, fmt.Errorf("close SQLite integrity results: %w", err)
-	}
-	if !integrityOK {
-		return Result{}, fmt.Errorf("SQLite integrity check returned no result")
+	if err := verifyIntegrity(ctx, db); err != nil {
+		return Result{}, err
 	}
 
 	var tableCount int
@@ -138,30 +114,56 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	return result, err
 }
 
-func verifyColumns(ctx context.Context, db *sql.DB, table string, required []string) error {
+func verifyIntegrity(ctx context.Context, db *sql.DB) (finalErr error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA integrity_check`)
+	if err != nil {
+		return fmt.Errorf("check SQLite integrity: %w", err)
+	}
+	defer func() {
+		finalErr = errors.Join(finalErr, rows.Close())
+	}()
+	integrityOK := false
+	for rows.Next() {
+		var finding string
+		if err := rows.Scan(&finding); err != nil {
+			return fmt.Errorf("read SQLite integrity result: %w", err)
+		}
+		if finding != "ok" {
+			return fmt.Errorf("SQLite integrity check failed: %s", finding)
+		}
+		integrityOK = true
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate SQLite integrity results: %w", err)
+	}
+	if !integrityOK {
+		return fmt.Errorf("SQLite integrity check returned no result")
+	}
+	return nil
+}
+
+func verifyColumns(ctx context.Context, db *sql.DB, table string, required []string) (finalErr error) {
 	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
 	if err != nil {
 		return fmt.Errorf("inspect Agent OS table %s: %w", table, err)
 	}
+	defer func() {
+		finalErr = errors.Join(finalErr, rows.Close())
+	}()
 	found := make(map[string]struct{}, len(required))
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			_ = rows.Close()
 			return fmt.Errorf("read Agent OS table %s: %w", table, err)
 		}
 		found[name] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
 		return fmt.Errorf("iterate Agent OS table %s: %w", table, err)
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close Agent OS table %s inspection: %w", table, err)
 	}
 	for _, column := range required {
 		if _, ok := found[column]; !ok {
-			return fmt.Errorf("Agent OS table %s is missing column %s", table, column)
+			return fmt.Errorf("agent OS table %s is missing column %s", table, column)
 		}
 	}
 	return nil

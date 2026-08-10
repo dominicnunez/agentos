@@ -23,7 +23,7 @@ func TestRunRequiresKnownCommand(t *testing.T) {
 func TestRunVerifyReturnsStructuredResult(t *testing.T) {
 	directory := t.TempDir()
 	source := filepath.Join(directory, "source.db")
-	store, err := recoveryFixture(source)
+	store, err := recoveryFixture(context.Background(), source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,12 +43,12 @@ func TestRunVerifyReturnsStructuredResult(t *testing.T) {
 	}
 }
 
-func recoveryFixture(path string) (*sql.DB, error) {
+func recoveryFixture(ctx context.Context, path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
 	}
-	_, err = db.Exec(`CREATE TABLE events(
+	_, err = db.ExecContext(ctx, `CREATE TABLE events(
 sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, organization_id TEXT NOT NULL DEFAULT '',
 event_type TEXT NOT NULL DEFAULT '', source_actor_id TEXT NOT NULL DEFAULT '', source_execution_id TEXT NOT NULL DEFAULT '',
 recipient_scope TEXT NOT NULL DEFAULT '', recipient_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '',

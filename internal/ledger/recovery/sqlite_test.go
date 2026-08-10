@@ -76,12 +76,13 @@ func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 }
 
 func TestRecoveryRejectsCorruptionWrongSchemaAndCancelledPublication(t *testing.T) {
+	ctx := context.Background()
 	directory := t.TempDir()
 	corrupt := filepath.Join(directory, "corrupt.db")
 	if err := os.WriteFile(corrupt, []byte("not sqlite"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Verify(context.Background(), corrupt); err == nil {
+	if _, err := Verify(ctx, corrupt); err == nil {
 		t.Fatal("corrupt database passed verification")
 	}
 
@@ -90,25 +91,25 @@ func TestRecoveryRejectsCorruptionWrongSchemaAndCancelledPublication(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`CREATE TABLE unrelated(value TEXT)`); err != nil {
+	if _, err := db.ExecContext(ctx, `CREATE TABLE unrelated(value TEXT)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Verify(context.Background(), wrongSchema); err == nil {
+	if _, err := Verify(ctx, wrongSchema); err == nil {
 		t.Fatal("non-Agent OS SQLite database passed verification")
 	}
 
 	incompleteSchema := filepath.Join(directory, "incomplete-schema.db")
 	incompleteDB := createTestLedger(t, incompleteSchema)
-	if _, err := incompleteDB.Exec(`ALTER TABLE inbox DROP COLUMN organization_id`); err != nil {
+	if _, err := incompleteDB.ExecContext(ctx, `ALTER TABLE inbox DROP COLUMN organization_id`); err != nil {
 		t.Fatal(err)
 	}
 	if err := incompleteDB.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Verify(context.Background(), incompleteSchema); err == nil {
+	if _, err := Verify(ctx, incompleteSchema); err == nil {
 		t.Fatal("Agent OS ledger with a missing required column passed verification")
 	}
 
@@ -154,7 +155,7 @@ func createTestLedger(t *testing.T, path string) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.Exec(`CREATE TABLE events(
+	_, err = db.ExecContext(context.Background(), `CREATE TABLE events(
 sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, organization_id TEXT NOT NULL DEFAULT '',
 event_type TEXT NOT NULL DEFAULT '', source_actor_id TEXT NOT NULL DEFAULT '', source_execution_id TEXT NOT NULL DEFAULT '',
 recipient_scope TEXT NOT NULL DEFAULT '', recipient_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '',
