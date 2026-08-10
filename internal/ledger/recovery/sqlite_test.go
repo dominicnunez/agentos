@@ -149,6 +149,34 @@ func TestBackupRefusesExistingDestination(t *testing.T) {
 	}
 }
 
+func TestBackupRefusesStaleDestinationSidecars(t *testing.T) {
+	directory := t.TempDir()
+	source := filepath.Join(directory, "source.db")
+	db := createTestLedger(t, source)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"-journal", "-shm", "-wal"} {
+		t.Run(suffix, func(t *testing.T) {
+			destination := filepath.Join(directory, "recovered"+suffix+".db")
+			sidecar := destination + suffix
+			if err := os.WriteFile(sidecar, []byte("stale"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Backup(context.Background(), source, destination); err == nil {
+				t.Fatal("backup published beside an existing SQLite sidecar")
+			}
+			if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("backup published destination: %v", err)
+			}
+			content, err := os.ReadFile(sidecar)
+			if err != nil || string(content) != "stale" {
+				t.Fatalf("existing sidecar changed: content=%q err=%v", content, err)
+			}
+		})
+	}
+}
+
 func createTestLedger(t *testing.T, path string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)

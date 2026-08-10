@@ -264,8 +264,14 @@ func clone(ctx context.Context, source, destination string) (result Result, fina
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
+	if err := requireNoSidecars(resolvedDestination); err != nil {
+		return Result{}, err
+	}
 	if err := os.Link(temporaryPath, resolvedDestination); err != nil {
 		return Result{}, fmt.Errorf("publish recovery file without overwrite: %w", err)
+	}
+	if err := requireNoSidecars(resolvedDestination); err != nil {
+		return Result{}, errors.Join(err, os.Remove(resolvedDestination))
 	}
 	if err := syncDirectory(filepath.Dir(resolvedDestination)); err != nil {
 		return Result{}, errors.Join(err, os.Remove(resolvedDestination))
@@ -316,6 +322,18 @@ func destinationPath(path string) (string, error) {
 		return "", fmt.Errorf("inspect destination: %w", err)
 	}
 	return resolved, nil
+}
+
+func requireNoSidecars(path string) error {
+	for _, suffix := range []string{"-journal", "-shm", "-wal"} {
+		sidecar := path + suffix
+		if _, err := os.Lstat(sidecar); err == nil {
+			return fmt.Errorf("destination SQLite sidecar already exists: %s", filepath.Base(sidecar))
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect destination SQLite sidecar: %w", err)
+		}
+	}
+	return nil
 }
 
 func samePath(left, right string) bool {

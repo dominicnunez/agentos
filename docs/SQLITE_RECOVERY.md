@@ -18,8 +18,10 @@ go run ./cmd/agentos-recovery backup \
 The output path and its parent directory must already be selected by the
 operator, and the output file must not exist. The utility writes a private
 staging file, verifies SQLite integrity and the Agent OS ledger tables, syncs
-it, then publishes it without an overwrite race. It returns JSON containing
-the resolved path, SHA-256 checksum, size, event count, and maximum sequence.
+it, then publishes it without an overwrite race. Existing SQLite journal, WAL,
+or shared-memory sidecars at the destination are rejected so stale state cannot
+be applied to a recovered ledger. The utility returns JSON containing the
+resolved path, SHA-256 checksum, size, event count, and maximum sequence.
 
 Backups contain the full event ledger and may contain sensitive organizational
 data. Moving one to a new storage or trust boundary requires the established
