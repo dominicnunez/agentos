@@ -78,6 +78,28 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 	if strings.Contains(w.Body.String(), `"events"`) || strings.Contains(w.Body.String(), `"payload"`) {
 		t.Fatalf("status leaked raw ledger data: %s", w.Body.String())
 	}
+	other := NewA2A(service, ExternalActor{ID: "other-operator", OrganizationID: "other-org", BearerToken: "other-token", Capabilities: []string{"submit_work", "read_status", "read_result"}})
+	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(`{"id":"other-request","message":{"role":"user","parts":[{"type":"text","text":"echo private"}]}}`))
+	r.Header.Set("Authorization", "Bearer other-token")
+	w = httptest.NewRecorder()
+	other.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("other submit=%d %s", w.Code, w.Body.String())
+	}
+	r = httptest.NewRequest(http.MethodGet, "/a2a/v1/tasks/r1", nil)
+	r.Header.Set("Authorization", "Bearer other-token")
+	w = httptest.NewRecorder()
+	other.ServeHTTP(w, r)
+	if w.Code != http.StatusNotFound || strings.Contains(w.Body.String(), "hello") || strings.Contains(w.Body.String(), "summary") {
+		t.Fatalf("cross-organization result leaked: status=%d %s", w.Code, w.Body.String())
+	}
+	r = httptest.NewRequest(http.MethodGet, "/a2a/v1/tasks/other-request", nil)
+	r.Header.Set("Authorization", "Bearer token")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusNotFound || strings.Contains(w.Body.String(), "private") || strings.Contains(w.Body.String(), "summary") {
+		t.Fatalf("reverse cross-organization result leaked: status=%d %s", w.Code, w.Body.String())
+	}
 	body = `{"id":"r2","message":{"role":"user","parts":[{"type":"text","text":"human decision"}]},"metadata":{"execution_kind":"HUMAN"}}`
 	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer token")

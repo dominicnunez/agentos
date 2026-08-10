@@ -64,6 +64,25 @@ func (s *Service) Events(ctx context.Context, requestID string) ([]events.Event,
 	return s.gateway.Events(ctx, requestID)
 }
 
+// ExternalEvents returns a request stream only when every event belongs to the
+// authenticated external actor's organization. A mismatched or mixed stream is
+// indistinguishable from an unknown request and never leaks tenant existence.
+func (s *Service) ExternalEvents(ctx context.Context, organizationID, requestID string) ([]events.Event, error) {
+	if organizationID == "" || requestID == "" {
+		return nil, fmt.Errorf("organization and request are required")
+	}
+	stream, err := s.gateway.Events(ctx, requestID)
+	if err != nil {
+		return nil, err
+	}
+	for _, event := range stream {
+		if event.OrganizationID != organizationID {
+			return nil, nil
+		}
+	}
+	return stream, nil
+}
+
 // SendMessage is the lateral Agent-to-Agent/Team/Task path. It deliberately
 // uses an EventDraft; the gateway owns trusted sender metadata, persistence,
 // and inbox availability.

@@ -59,7 +59,7 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		id := r.URL.Path[len("/a2a/v1/tasks/"):]
-		es, err := a.service.Events(r.Context(), id)
+		es, err := a.service.ExternalEvents(r.Context(), a.actor.OrganizationID, id)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -93,7 +93,7 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
-		es, err := a.service.Events(r.Context(), id)
+		es, err := a.service.ExternalEvents(r.Context(), a.actor.OrganizationID, id)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return

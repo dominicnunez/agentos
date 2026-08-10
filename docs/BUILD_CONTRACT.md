@@ -37,7 +37,9 @@ Task execution publishes a typed `RESULT_PUBLISHED` contract before
 `CANDIDATE_COMPLETE`. Its payload and trusted envelope carry matching Artifact
 references. A2A status includes it only after verified completion and only for
 an external actor with the separate `read_result` capability; `read_status`
-alone cannot expose result content.
+alone cannot expose result content. Status and result lookup are scoped to the
+authenticated actor's organization; a mismatched request is indistinguishable
+from an unknown request.
 
 Authorized external input for a blocked `HUMAN` Task is persisted before the
 Task resumes. The runtime then records a deterministic structured outcome and
