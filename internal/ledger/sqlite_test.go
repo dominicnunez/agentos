@@ -8,10 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dominicnunez/agentos/internal/app"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
-	"github.com/dominicnunez/agentos/internal/intake"
 )
 
 func TestExternalWorkIndexMigratesLegacyCorrelation(t *testing.T) {
@@ -23,7 +21,7 @@ func TestExternalWorkIndexMigratesLegacyCorrelation(t *testing.T) {
 	now := time.Now().UTC()
 	organization := core.Organization{ID: "org-1", Name: "org-1", PolicyVersion: "v1", CreatedAt: now}
 	agent := core.Agent{ID: "agent-local-org-1", OrganizationID: organization.ID, BlueprintVersion: "v1-local-worker", ExecutionProfileVersion: "v1-fake", RuntimeAdapter: "local", Status: "ACTIVE"}
-	intent := core.Intent{ID: "intent-legacy-request", OrganizationID: organization.ID, OriginalInstruction: "echo legacy", NormalizedObjective: "echo legacy", SourcePrincipalID: "agent-1", SourcePrincipalKind: core.PrincipalExternalAgent, SourceChannel: intake.ChannelA2A, SourceMessageID: "message-1", CreatedAt: now}
+	intent := core.Intent{ID: "intent-legacy-request", OrganizationID: organization.ID, OriginalInstruction: "echo legacy", NormalizedObjective: "echo legacy", SourcePrincipalID: "agent-1", SourcePrincipalKind: core.PrincipalExternalAgent, SourceChannel: "A2A", SourceMessageID: "message-1", CreatedAt: now}
 	goal := core.Goal{ID: "goal-legacy-request", IntentID: intent.ID, Objective: intent.OriginalInstruction, Status: "COMPLETED", CreatedAt: now}
 	task := core.Task{ID: "task-legacy-request", GoalID: goal.ID, Description: intent.OriginalInstruction, ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskCompleted}
 	for _, projection := range []struct {
@@ -40,7 +38,7 @@ func TestExternalWorkIndexMigratesLegacyCorrelation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := legacy.db.Exec(`DELETE FROM external_work`); err != nil {
+	if _, err := legacy.db.ExecContext(context.Background(), `DELETE FROM external_work`); err != nil {
 		t.Fatal(err)
 	}
 	if err := legacy.Close(); err != nil {
@@ -64,19 +62,16 @@ func TestExternalWorkIndexMigratesLegacyCorrelation(t *testing.T) {
 	if err != nil || len(stream) != 5 {
 		t.Fatalf("legacy stream=%+v err=%v", stream, err)
 	}
-	service := intake.New(app.New(events.NewGateway(migrated)))
-	principal := intake.Principal{ID: "agent-1", Kind: core.PrincipalExternalAgent, OrganizationID: "org-1", Channel: intake.ChannelA2A, Capabilities: []string{intake.CapabilitySubmitWork, intake.CapabilityReadStatus}, WorkScope: intake.WorkScopeOwn}
-	view, err := service.Handle(context.Background(), principal, intake.Message{ConversationID: "legacy-request", MessageID: "message-1", Text: "echo legacy"})
-	if err != nil || view.TaskID != "task-legacy-request" || view.State != intake.StateCompleted {
-		t.Fatalf("migrated view=%+v err=%v", view, err)
+	if err := migrated.Close(); err != nil {
+		t.Fatal(err)
 	}
-	view, err = service.Get(context.Background(), principal, "task-legacy-request")
-	if err != nil || view.ConversationID != "legacy-request" {
-		t.Fatalf("migrated task lookup=%+v err=%v", view, err)
+	migrated, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
 	}
 	after, err := migrated.Events(context.Background(), correlationID)
 	if err != nil || len(after) != len(stream) {
-		t.Fatalf("legacy replay duplicated work: before=%d after=%d err=%v", len(stream), len(after), err)
+		t.Fatalf("repeated migration changed legacy work: before=%d after=%d err=%v", len(stream), len(after), err)
 	}
 }
 

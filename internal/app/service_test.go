@@ -391,7 +391,7 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 			if err != nil || result.Task.Status != core.TaskBlocked {
 				t.Fatalf("submit=%+v err=%v", result, err)
 			}
-			correlationID := externalWorkID("org-1", "request-1")
+			correlationID := core.ExternalWorkID("org-1", "request-1")
 			inputPayload := any(events.OperatorInputReceivedPayload{
 				MessageID: "message-1", Text: "approved task input", SourcePrincipalID: "external-agent",
 				SourcePrincipalKind: string(core.PrincipalExternalAgent), SourceChannel: "A2A",
