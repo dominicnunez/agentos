@@ -229,6 +229,111 @@ func TestRecoverRetriesDeterministicWorkAndBlocksUncertainAgentWork(t *testing.T
 	}
 }
 
+func TestBlockedChildReturnsControlToParentWithoutAuthorityExpansion(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	service := New(gateway)
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1"}
+	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintVersion: "v1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE"}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "complete governed work", NormalizedObjective: "complete governed work"}
+	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: "complete governed work", Status: "ACTIVE"}
+	child := core.Task{ID: "task-child", GoalID: goal.ID, ParentID: "task-parent", Description: "use unavailable tool", ExecutionKind: core.ExecutionTool, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	parent := core.Task{ID: "task-parent", GoalID: goal.ID, Description: "govern child remediation", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{child.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	for _, save := range []func() error{
+		func() error {
+			return repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "request-1", 1, organization, nil)
+		},
+		func() error { return repository.SaveAgent(ctx, "AGENT_CREATED", "runtime", "request-1", 1, agent, nil) },
+		func() error {
+			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "request-1", 1, intent, nil)
+		},
+		func() error {
+			return repository.SaveGoal(ctx, organization.ID, "GOAL_CREATED", "runtime", "request-1", 1, goal, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "request-1", 1, parent, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "request-1", 1, child, nil)
+		},
+	} {
+		if err := save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	recovery, err := service.Recover(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovery.TasksExecuted != 2 {
+		t.Fatalf("recovery=%+v", recovery)
+	}
+	snapshot, err := repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tasks[child.ID].Value.Status != core.TaskBlocked || snapshot.Tasks[parent.ID].Value.Status != core.TaskBlocked {
+		t.Fatalf("blocked child or governing parent state changed unexpectedly: child=%+v parent=%+v", snapshot.Tasks[child.ID], snapshot.Tasks[parent.ID])
+	}
+	if err := service.ValidateAddressedRoute(ctx, events.AddressedRoute{OrganizationID: string(organization.ID), EventType: "TASK_BLOCKED", SourceActorID: string(agent.ID), ValidateSource: true, RecipientScope: events.RecipientTask, RecipientID: string(child.ID), TaskID: string(child.ID)}); err == nil {
+		t.Fatal("blocked child could route its escalation somewhere other than its parent")
+	}
+	if err := service.ValidateAddressedRoute(ctx, events.AddressedRoute{OrganizationID: string(organization.ID), EventType: "TASK_BLOCKED", SourceActorID: string(agent.ID), ValidateSource: true, RecipientScope: events.RecipientTask, RecipientID: string(parent.ID)}); err == nil {
+		t.Fatal("blocked event without a source child task was accepted")
+	}
+	if err := service.ValidateAddressedRoute(ctx, events.AddressedRoute{OrganizationID: string(organization.ID), EventType: "TASK_BLOCKED", SourceActorID: string(agent.ID), ValidateSource: true, RecipientScope: events.RecipientTask, RecipientID: string(parent.ID), TaskID: string(parent.ID)}); err == nil {
+		t.Fatal("root task was accepted as a blocked child source")
+	}
+	upward, err := gateway.Inbox(ctx, events.RecipientTask, string(parent.ID))
+	if err != nil || len(upward) != 0 {
+		t.Fatalf("parent remediation inbox=%+v err=%v", upward, err)
+	}
+	stream, err := l.Events(ctx, "request-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blockedEvent events.Event
+	var parentManifest core.ExecutionContextManifest
+	observed := false
+	for _, event := range stream {
+		if strings.HasPrefix(event.EventType, "CAPABILITY_") || strings.HasPrefix(event.EventType, "APPROVAL_") {
+			t.Fatalf("blocked worker changed authority: %+v", event)
+		}
+		if event.EventType == "TASK_BLOCKED" && event.TaskID == string(child.ID) && event.RecipientID == string(parent.ID) {
+			blockedEvent = event
+		}
+		if event.EventType == "EXECUTION_CONTEXT_MANIFESTED" && event.TaskID == string(parent.ID) {
+			if err := json.Unmarshal(event.Payload, &parentManifest); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if event.EventType == "INBOX_EVENTS_OBSERVED" && event.TaskID == string(parent.ID) {
+			observed = true
+		}
+	}
+	if blockedEvent.EventID == "" || len(blockedEvent.AuthorizationRefs) != 0 {
+		t.Fatalf("blocked work gained authority or lost its upward route: %+v", blockedEvent)
+	}
+	var payload events.ProjectionEventPayload
+	if err := json.Unmarshal(blockedEvent.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	var detail events.TaskBlockedPayload
+	if err := json.Unmarshal(payload.Detail, &detail); err != nil || detail.Reason == "" || detail.Missing == "" || detail.WhyNeeded == "" || detail.WorkCompleted == "" {
+		t.Fatalf("blocked-work contract=%+v err=%v", detail, err)
+	}
+	if !observed || len(parentManifest.EventRefs) != 1 || parentManifest.EventRefs[0] != blockedEvent.EventID {
+		t.Fatalf("parent did not receive a bounded remediation pass: manifest=%+v observed=%v blocked=%+v", parentManifest, observed, blockedEvent)
+	}
+}
+
 func TestLateralMessagesSurviveRestartAndSurfaceAtAgentActionBoundary(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "agentos.db")

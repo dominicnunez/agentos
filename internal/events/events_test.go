@@ -24,9 +24,9 @@ func (m *memoryLedger) Append(_ context.Context, d TrustedDraft) (Event, error) 
 }
 func (m *memoryLedger) Events(context.Context, string) ([]Event, error) { return m.events, nil }
 
-type routeValidatorFunc func(context.Context, MessageRoute) error
+type routeValidatorFunc func(context.Context, AddressedRoute) error
 
-func (f routeValidatorFunc) ValidateMessageRoute(ctx context.Context, route MessageRoute) error {
+func (f routeValidatorFunc) ValidateAddressedRoute(ctx context.Context, route AddressedRoute) error {
 	return f(ctx, route)
 }
 
@@ -55,8 +55,8 @@ func TestMessageFailsClosedWithoutRouteValidator(t *testing.T) {
 func TestMessageEnvelopeUsesAuthenticatedIdentity(t *testing.T) {
 	ledger := &memoryLedger{}
 	gateway := NewGateway(ledger)
-	var validated MessageRoute
-	gateway.SetRouteValidator(routeValidatorFunc(func(_ context.Context, route MessageRoute) error {
+	var validated AddressedRoute
+	gateway.SetRouteValidator(routeValidatorFunc(func(_ context.Context, route AddressedRoute) error {
 		validated = route
 		if route.RecipientID != "recipient" {
 			return errors.New("unexpected recipient")
@@ -81,5 +81,46 @@ func TestMessageEnvelopeUsesAuthenticatedIdentity(t *testing.T) {
 	}
 	if validated.SourceActorID != "agent-1" || validated.TaskID != "task-1" {
 		t.Fatalf("route validation did not receive trusted identity: %+v", validated)
+	}
+}
+
+func TestTaskBlockedRequiresUpwardRouteAndContract(t *testing.T) {
+	ledger := &memoryLedger{}
+	gateway := NewGateway(ledger)
+	gateway.SetRouteValidator(routeValidatorFunc(func(_ context.Context, route AddressedRoute) error {
+		if route.RecipientScope != RecipientTask || route.RecipientID != "task-parent" || route.TaskID != "task-child" {
+			return errors.New("blocked work was not routed to its parent task")
+		}
+		return nil
+	}))
+	valid := Draft{
+		EventType:      "TASK_BLOCKED",
+		RecipientScope: RecipientTask,
+		RecipientID:    "task-parent",
+		TaskID:         "task-child",
+		Payload:        TaskBlockedPayload{Reason: "missing access", Missing: "read invoice", WhyNeeded: "complete assigned analysis", WorkCompleted: "validated inputs"},
+	}
+	if _, err := gateway.PublishAgentDraft(context.Background(), "org", "agent", "execution", "correlation", valid); err != nil {
+		t.Fatal(err)
+	}
+	invalid := valid
+	invalid.RecipientID = ""
+	if _, err := gateway.PublishAgentDraft(context.Background(), "org", "agent", "execution", "correlation", invalid); err == nil {
+		t.Fatal("unaddressed blocked work was accepted")
+	}
+	invalid = valid
+	invalid.TaskID = ""
+	if _, err := gateway.PublishAgentDraft(context.Background(), "org", "agent", "execution", "correlation", invalid); err == nil {
+		t.Fatal("blocked work without a source child task was accepted")
+	}
+	invalid = valid
+	invalid.RecipientScope = RecipientAgent
+	if _, err := gateway.PublishAgentDraft(context.Background(), "org", "agent", "execution", "correlation", invalid); err == nil {
+		t.Fatal("blocked work addressed outside the parent task scope was accepted")
+	}
+	invalid = valid
+	invalid.Payload = TaskBlockedPayload{Reason: "missing access"}
+	if _, err := gateway.PublishAgentDraft(context.Background(), "org", "agent", "execution", "correlation", invalid); err == nil {
+		t.Fatal("incomplete blocked-work contract was accepted")
 	}
 }

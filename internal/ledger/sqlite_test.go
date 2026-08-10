@@ -66,7 +66,7 @@ func TestProjectionVersionConflictRollsBackItsEvent(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = l.Close() })
 	draft := events.ProjectionDraft{
-		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", TaskID: "task-1", CorrelationID: "request-1"},
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_BLOCKED", RecipientScope: events.RecipientTask, RecipientID: "task-parent", TaskID: "task-1", CorrelationID: "request-1"},
 		ProjectionKind: "task",
 		RecordID:       "task-1",
 		Version:        1,
@@ -84,6 +84,10 @@ func TestProjectionVersionConflictRollsBackItsEvent(t *testing.T) {
 	}
 	if len(stream) != 1 {
 		t.Fatalf("projection failure left an orphan event: %+v", stream)
+	}
+	available, err := l.Inbox(ctx, events.RecipientTask, "task-parent")
+	if err != nil || len(available) != 1 || available[0].EventID != stream[0].EventID {
+		t.Fatalf("projection failure changed addressed availability: inbox=%+v err=%v", available, err)
 	}
 }
 

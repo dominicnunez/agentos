@@ -26,6 +26,40 @@ func (Scheduler) Ready(tasks map[core.ID]core.Task) ([]core.Task, error) {
 	return ready, nil
 }
 
+// RemediationReady finds pending parent tasks whose ordinary dependency path
+// is blocked by one or more direct children. Every other dependency must be
+// complete. The runtime uses this separate path to let the parent observe the
+// blocked-work contract without pretending the child completed.
+func (Scheduler) RemediationReady(tasks map[core.ID]core.Task) ([]core.Task, error) {
+	if err := validate(tasks); err != nil {
+		return nil, err
+	}
+	ready := make([]core.Task, 0)
+	for _, task := range tasks {
+		if task.Status != core.TaskPending {
+			continue
+		}
+		blockedChild := false
+		eligible := len(task.DependsOn) > 0
+		for _, dependencyID := range task.DependsOn {
+			dependency := tasks[dependencyID]
+			switch {
+			case dependency.Status == core.TaskCompleted:
+				continue
+			case dependency.Status == core.TaskBlocked && dependency.ParentID == task.ID:
+				blockedChild = true
+			default:
+				eligible = false
+			}
+		}
+		if eligible && blockedChild {
+			ready = append(ready, task)
+		}
+	}
+	sort.Slice(ready, func(i, j int) bool { return ready[i].ID < ready[j].ID })
+	return ready, nil
+}
+
 func validate(tasks map[core.ID]core.Task) error {
 	for id, task := range tasks {
 		for _, dependency := range task.DependsOn {
