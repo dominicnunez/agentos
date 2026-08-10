@@ -234,19 +234,85 @@ func (s *Service) ProvideExternalInput(ctx context.Context, organizationID, acto
 	if state.Value.Status != core.TaskBlocked {
 		return fmt.Errorf("task is not blocked awaiting external input")
 	}
-	if _, err = s.gateway.PublishTrusted(ctx, events.TrustedDraft{
+	inputEvent, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
 		OrganizationID: organizationID,
 		EventType:      "A2A_INPUT_RECEIVED",
 		SourceActorID:  actorID,
 		TaskID:         taskID,
 		CorrelationID:  requestID,
 		Payload:        map[string]string{"text": text, "source_external_actor": actorID},
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 	task := state.Value
 	task.Status = core.TaskPending
-	return s.state.SaveTask(ctx, actualOrganizationID, "TASK_RESUMED", "runtime", requestID, state.Version+1, task, map[string]string{"reason": "authorized external input received"})
+	if err := s.state.SaveTask(ctx, actualOrganizationID, "TASK_RESUMED", "runtime", requestID, state.Version+1, task, map[string]string{"reason": "authorized external input received", "input_event_ref": inputEvent.EventID}); err != nil {
+		return err
+	}
+	if task.ExecutionKind != core.ExecutionHuman {
+		return nil
+	}
+	resumed := projections.Versioned[core.Task]{Version: state.Version + 1, CorrelationID: requestID, Value: task}
+	if err := s.completeExternalInputTask(ctx, actualOrganizationID, resumed, inputEvent.EventID); err != nil {
+		return err
+	}
+	return s.reconcileGoals(ctx)
+}
+
+// completeExternalInputTask turns durable input into deterministic evidence for
+// a HUMAN task. The external actor supplies content; only the runtime records
+// the ToolOutcome and asks the Completion Engine to verify the task.
+func (s *Service) completeExternalInputTask(ctx context.Context, organizationID core.ID, state projections.Versioned[core.Task], inputEventID string) error {
+	task := state.Value
+	if task.ExecutionKind != core.ExecutionHuman || task.Status != core.TaskPending || inputEventID == "" {
+		return fmt.Errorf("external input completion requires a pending HUMAN task and durable input event")
+	}
+	task.Status = core.TaskRunning
+	startDetail := map[string]string{"mode": "A2A_HUMAN_INPUT", "input_event_ref": inputEventID}
+	if err := s.state.SaveTask(ctx, organizationID, "EXECUTION_STARTED", "runtime", state.CorrelationID, state.Version+1, task, startDetail); err != nil {
+		return fmt.Errorf("persist external input execution start for task %s: %w", task.ID, err)
+	}
+	executionID := core.ID(fmt.Sprintf("external-input-%s-v%d", task.ID, state.Version+1))
+	now := time.Now().UTC()
+	outcome := core.ToolOutcome{
+		ToolInvocationID:    core.ID("a2a-input-" + string(task.ID)),
+		ToolID:              "a2a.external-input",
+		ToolVersion:         "v1",
+		Status:              core.OutcomeSucceeded,
+		ObservedEffect:      map[string]string{"status": "authorized external input persisted", "input_event_ref": inputEventID},
+		PostconditionStatus: core.PostconditionVerified,
+		Retryability:        core.NotRetryable,
+		StartedAt:           now,
+		FinishedAt:          now,
+	}
+	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: outcome, CorrelationID: state.CorrelationID}); err != nil {
+		return fmt.Errorf("persist external input outcome for task %s: %w", task.ID, err)
+	}
+	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "EXECUTION_FINISHED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: map[string]any{"status": outcome.Status}, CorrelationID: state.CorrelationID}); err != nil {
+		return fmt.Errorf("persist external input execution finish for task %s: %w", task.ID, err)
+	}
+	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "CANDIDATE_COMPLETE", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: map[string]any{"tool_invocation_id": outcome.ToolInvocationID, "input_event_ref": inputEventID}, CorrelationID: state.CorrelationID}); err != nil {
+		return fmt.Errorf("persist external input completion candidate for task %s: %w", task.ID, err)
+	}
+	contract := core.CompletionContract{TaskID: task.ID, TaskVersion: state.Version + 1, Criteria: []core.CompletionCriterion{{ID: "durable-external-input", Description: "authorized external input was durably recorded", Assurance: core.AssuranceDeterministic, Required: true}}}
+	complete := s.completion.Evaluate(contract, outcome)
+	detail := completionDetail{Contract: contract, Result: complete}
+	if !complete.Complete {
+		task.Status = core.TaskFailed
+		if err := s.state.SaveTask(ctx, organizationID, "COMPLETION_REJECTED", "runtime", state.CorrelationID, state.Version+2, task, detail); err != nil {
+			return fmt.Errorf("persist rejected external input completion for task %s: %w", task.ID, err)
+		}
+		return nil
+	}
+	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "COMPLETION_VERIFIED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: detail, CorrelationID: state.CorrelationID}); err != nil {
+		return fmt.Errorf("persist external input completion verification for task %s: %w", task.ID, err)
+	}
+	task.Status = core.TaskCompleted
+	if err := s.state.SaveTask(ctx, organizationID, "TASK_VERIFIED_COMPLETE", "runtime", state.CorrelationID, state.Version+2, task, detail); err != nil {
+		return fmt.Errorf("persist completed external input task %s: %w", task.ID, err)
+	}
+	return nil
 }
 
 func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
@@ -426,6 +492,13 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		handler = s.deterministic
 	case core.ExecutionAgent:
 		handler = s.agent
+	case core.ExecutionHuman:
+		task.Status = core.TaskBlocked
+		detail := blockedDetail("human task is awaiting authorized external input", "human-provided task input", "the runtime cannot invent or infer a human response")
+		if err := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); err != nil {
+			return taskRun{}, fmt.Errorf("persist input-required HUMAN task %s: %w", task.ID, err)
+		}
+		return taskRun{}, nil
 	default:
 		task.Status = core.TaskBlocked
 		detail := blockedDetail("execution kind is declared but unavailable in this V1 slice", "authorized runtime handler", "the worker cannot expand its own execution authority")
