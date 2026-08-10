@@ -6,10 +6,22 @@ run:
 linters:
   default: none
   enable:
+    - bidichk
+    - bodyclose
+    - containedctx
+    - durationcheck
     - errcheck
+    - errorlint
+    - exhaustive
+    - forcetypeassert
     - ineffassign
+    - musttag
+    - nilerr
+    - noctx
+    - nolintlint
+    - rowserrcheck
+    - sqlclosecheck
     - staticcheck
-    - unused
 
 issues:
   max-issues-per-linter: 0
