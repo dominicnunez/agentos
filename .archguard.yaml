@@ -8,6 +8,8 @@ packages:
 modules:
   - name: app
     path: internal/app
+  - name: approvals
+    path: internal/approvals
   - name: audit
     path: internal/audit
   - name: authority
@@ -52,6 +54,12 @@ policy:
       to:
         modules: [completion, core, events, execution, projections, workflow]
 
+    - name: approval-domain
+      from:
+        module: approvals
+      to:
+        module: core
+
     - name: audit-events
       from:
         module: audit
@@ -80,7 +88,7 @@ policy:
       from:
         module: effects
       to:
-        module: core
+        modules: [approvals, core]
 
     - name: operator-boundary
       from:
@@ -118,6 +126,13 @@ policy:
         tests: true
       to:
         module: ledger
+
+    - name: approvals-test-adapters
+      from:
+        module: approvals
+        tests: true
+      to:
+        modules: [effects, events, ledger]
 
     - name: effects-test-adapter
       from:

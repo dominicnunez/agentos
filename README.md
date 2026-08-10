@@ -44,13 +44,13 @@ The current deterministic handler supports `echo <text>`. Use `execution_kind: A
 
 ## Testing status
 
-The repository is ready to test as an early V1 vertical slice. The automated suite covers the deterministic and fake-agent paths, event-backed projection rebuilds, restart-safe Agent/Team/Task inbox delivery at execution boundaries, pending-task recovery, fail-closed handling of uncertain interrupted agent work, completion verification, Task DAG readiness, the authenticated A2A boundary, exact capability checks, single-use effect approvals, institutional knowledge guards, inference reserves, and deterministic audit checks.
+The repository is ready to test as an early V1 vertical slice. The automated suite covers the deterministic and fake-agent paths, event-backed projection rebuilds, restart-safe Agent/Team/Task inbox delivery at execution boundaries, pending-task recovery, durable human-approval wait/decision state, fail-closed handling of uncertain interrupted work, completion verification, Task DAG readiness, the authenticated A2A boundary, exact capability checks, single-use effect approvals, institutional knowledge guards, inference reserves, and deterministic audit checks.
 
 This is not a full V1 acceptance sign-off. [docs/V1_ACCEPTANCE_STATUS.md](docs/V1_ACCEPTANCE_STATUS.md) maps the normative checklist to current evidence and keeps incomplete items visible.
 
 ## Scope
 
-Included: core organizational/work objects, task dependencies, deterministic and agent execution paths, event gateway and ledger, durable addressed messages and inboxes, execution manifests, structured tool outcomes, completion contracts, an inbound A2A boundary, exact capability checks, versioned knowledge and inference seams, and fingerprinted persist-before-effect coordination.
+Included: core organizational/work objects, task dependencies, deterministic and agent execution paths, event gateway and ledger, durable addressed messages and inboxes, execution manifests, structured tool outcomes, completion contracts, an inbound A2A boundary, exact capability checks, durable effect-bound human approvals, versioned knowledge and inference seams, and fingerprinted persist-before-effect coordination.
 
 Deferred: federation, workflow DSLs, semantic/vector memory, Lab, optimizers, production provider wiring, broad tool ecosystems, production external-effect adapters, and reconciliation workers.
 

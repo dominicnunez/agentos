@@ -108,13 +108,7 @@ func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, ac
 	}
 	return l.withTx(ctx, func(tx *sql.Tx) error {
 		draft := events.TrustedDraft{OrganizationID: organizationID, EventType: eventType, SourceActorID: actorID, TaskID: taskID, AuthorizationRefs: authorizationRefs, ArtifactRefs: artifactRefs, Payload: value}
-		if _, err := appendEvent(ctx, tx, draft); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, kind, id, version, body, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-			return fmt.Errorf("append record: %w", err)
-		}
-		return nil
+		return appendRecord(ctx, tx, draft, kind, id, version, body)
 	})
 }
 
@@ -160,11 +154,17 @@ func (l *SQLite) AppendProjection(ctx context.Context, draft events.ProjectionDr
 	return event, err
 }
 
-// ConsumeApproval durably and atomically claims a single-use approval. A
-// duplicate approval ID fails before an external adapter can be called.
-func (l *SQLite) ConsumeApproval(ctx context.Context, organizationID, taskID, approvalID, fingerprint, effectID string) error {
-	if approvalID == "" || fingerprint == "" {
-		return fmt.Errorf("approval id and fingerprint are required")
+// ConsumeApprovalAndAppendRecord atomically claims a single-use approval and
+// advances its exact effect to ATTEMPTED. A crash can therefore leave either a
+// resumable PENDING effect or an explicitly uncertain ATTEMPTED effect, never a
+// consumed approval with no durable attempt record.
+func (l *SQLite) ConsumeApprovalAndAppendRecord(ctx context.Context, organizationID, taskID, approvalID, fingerprint, effectID string, authorizationRefs, artifactRefs []string, kind, id string, version int, value any) error {
+	if approvalID == "" || fingerprint == "" || kind == "" || id == "" || version < 1 {
+		return fmt.Errorf("approval, effect, record identity, and positive version are required")
+	}
+	body, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("encode approved effect record: %w", err)
 	}
 	return l.withTx(ctx, func(tx *sql.Tx) error {
 		draft := events.TrustedDraft{OrganizationID: organizationID, EventType: "APPROVAL_CONSUMED", TaskID: taskID, Payload: map[string]string{"approval_id": approvalID, "effect_fingerprint": fingerprint, "effect_obligation_id": effectID}}
@@ -174,8 +174,19 @@ func (l *SQLite) ConsumeApproval(ctx context.Context, organizationID, taskID, ap
 		if _, err := tx.ExecContext(ctx, `INSERT INTO consumed_approvals(approval_id,effect_fingerprint,consumed_at) VALUES(?,?,?)`, approvalID, fingerprint, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 			return fmt.Errorf("consume approval: %w", err)
 		}
-		return nil
+		effectDraft := events.TrustedDraft{OrganizationID: organizationID, EventType: "EFFECT_OBLIGATION_TRANSITIONED", TaskID: taskID, AuthorizationRefs: authorizationRefs, ArtifactRefs: artifactRefs, Payload: value}
+		return appendRecord(ctx, tx, effectDraft, kind, id, version, body)
 	})
+}
+
+func appendRecord(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft, kind, id string, version int, body []byte) error {
+	if _, err := appendEvent(ctx, tx, draft); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, kind, id, version, body, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("append record: %w", err)
+	}
+	return nil
 }
 
 func (l *SQLite) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
