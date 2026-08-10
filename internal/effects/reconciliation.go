@@ -118,8 +118,8 @@ func (s *ReconciliationService) reconcileOne(ctx context.Context, discovered cor
 		item.Reason = "reconciler unavailable"
 		return item, nil
 	}
-	observation, err := reconciler.Check(ctx, discovered)
-	if err != nil {
+	observation, checked := destinationObservation(ctx, reconciler, discovered)
+	if !checked {
 		item.Reason = "destination status check failed"
 		return item, nil
 	}
@@ -183,6 +183,13 @@ func (s *ReconciliationService) reconcileOne(ctx context.Context, discovered cor
 		return RecoveryItem{}, fmt.Errorf("persist reconciled effect %s: %w", current.ID, err)
 	}
 	return item, nil
+}
+
+// destinationObservation deliberately converts adapter availability errors
+// into an unavailable observation. Recovery retains ATTEMPTED in that case.
+func destinationObservation(ctx context.Context, reconciler Reconciler, obligation core.EffectObligation) (ReconciliationObservation, bool) {
+	observation, err := reconciler.Check(ctx, obligation)
+	return observation, err == nil
 }
 
 func normalizedEvidence(refs []string) []string {
