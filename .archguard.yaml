@@ -42,6 +42,8 @@ modules:
     path: internal/secrets
   - name: telemetry
     path: internal/telemetry
+  - name: trustconfig
+    path: internal/trustconfig
   - name: workflow
     path: internal/workflow
 
@@ -106,13 +108,13 @@ policy:
       from:
         module: effectstatus
       to:
-        modules: [core, effects]
+        modules: [core, effects, trustconfig]
 
     - name: operator-boundary
       from:
         module: gateway
       to:
-        modules: [core, intake]
+        modules: [core, intake, trustconfig]
 
     - name: operator-intake
       from:

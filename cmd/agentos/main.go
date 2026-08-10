@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -95,14 +96,7 @@ func configuredEffectReconcilers(ctx context.Context, path string, source secret
 	if path == "" {
 		return nil, nil
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open effect reconciler registry: %w", err)
-	}
-	defer func() {
-		_ = file.Close()
-	}()
-	bindings, err := effectstatus.DecodeHTTPReconcilerConfig(file)
+	bindings, err := decodeConfigFile(path, "effect reconciler registry", effectstatus.DecodeHTTPReconcilerConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -124,14 +118,7 @@ func configuredExternalActors(ctx context.Context, path string, source secrets.S
 	if path == "" {
 		return nil, nil
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open external actor registry: %w", err)
-	}
-	defer func() {
-		_ = file.Close()
-	}()
-	actors, err := gateway.DecodeExternalActorConfig(file)
+	actors, err := decodeConfigFile(path, "external actor registry", gateway.DecodeExternalActorConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -150,6 +137,17 @@ func configuredExternalActors(ctx context.Context, path string, source secrets.S
 		return nil, fmt.Errorf("validate external actor registry: %w", err)
 	}
 	return registry, nil
+}
+
+func decodeConfigFile[T any](path, name string, decode func(io.Reader) ([]T, error)) ([]T, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", name, err)
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	return decode(file)
 }
 
 func configuredListenAddress() (string, bool, error) {

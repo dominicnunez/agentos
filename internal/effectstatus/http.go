@@ -14,6 +14,7 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/effects"
+	"github.com/dominicnunez/agentos/internal/trustconfig"
 )
 
 const reconciliationResponseLimit = 64 << 10
@@ -68,15 +69,9 @@ type reconciliationResponse struct {
 }
 
 func DecodeHTTPReconcilerConfig(reader io.Reader) ([]HTTPReconcilerBinding, error) {
-	decoder := json.NewDecoder(io.LimitReader(reader, 1<<20))
-	decoder.DisallowUnknownFields()
 	var config HTTPReconcilerConfig
-	if err := decoder.Decode(&config); err != nil {
-		return nil, fmt.Errorf("decode effect reconciler registry: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return nil, fmt.Errorf("effect reconciler registry must contain one JSON object")
+	if err := trustconfig.DecodeObject(reader, "effect reconciler registry", &config); err != nil {
+		return nil, err
 	}
 	if len(config.Reconcilers) == 0 {
 		return nil, fmt.Errorf("effect reconciler registry must contain at least one binding")
@@ -176,14 +171,8 @@ func validateHTTPReconcilerBinding(binding HTTPReconcilerBinding) error {
 	if binding.OrganizationID == "" || binding.Action == "" || binding.Resource == "" || binding.TokenRef == "" || binding.AuthorizationRef == "" {
 		return fmt.Errorf("organization_id, action, resource, token_ref, and authorization_ref are required")
 	}
-	if binding.Status != ReconcilerBindingActive && binding.Status != ReconcilerBindingSuspended && binding.Status != ReconcilerBindingRevoked {
-		return fmt.Errorf("status must be ACTIVE, SUSPENDED, or REVOKED")
-	}
-	if len(binding.BearerToken) < 32 {
-		return fmt.Errorf("resolved bearer credential must contain at least 32 characters")
-	}
-	if binding.ExpiresAt == nil || binding.ExpiresAt.IsZero() {
-		return fmt.Errorf("expires_at is required")
+	if err := trustconfig.ValidateCredentialLifecycle(string(binding.Status), binding.BearerToken, binding.ExpiresAt); err != nil {
+		return err
 	}
 	parsed, err := url.Parse(binding.StatusURL)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
