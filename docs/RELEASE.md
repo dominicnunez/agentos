@@ -23,18 +23,16 @@ levels, downloads the committed module graph, verifies cached module content
 against its recorded hashes before compilation, removes local paths and link
 build IDs, and embeds `VERSION` into both commands.
 
-The target matrix is:
+The V1 target matrix is intentionally Linux-only:
 
 | Operating system | Architectures | Package |
 |---|---|---|
 | Linux | amd64, arm64 | `.tar.gz` |
-| macOS | amd64, arm64 | `.tar.gz` |
-| Windows | amd64, arm64 | `.zip` |
 
 Each package contains:
 
-- `agentos` or `agentos.exe`;
-- `agentos-recovery` or `agentos-recovery.exe`;
+- `agentos`;
+- `agentos-recovery`;
 - `README.md` and `VERSION`; and
 - the target's CycloneDX 1.6 module SBOM.
 
@@ -50,6 +48,7 @@ inspects archive content and metadata, and runs both native binaries' version
 commands. It has read-only repository permission and does not upload or
 publish artifacts. Each of the two builds uses its own fresh Go module and
 build caches; no release cache is restored, shared between builds, or saved.
+macOS and Windows packages are outside the V1 support boundary.
 
 ## Publication boundary
 

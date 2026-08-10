@@ -33,7 +33,7 @@ Target: `1.0.0-rc.1`
 
 ### Operations
 
-- Cross-platform reproducible release builder for both commands, per-target
+- Linux amd64/arm64 reproducible release builder for both commands, per-target
   CycloneDX SBOMs, SHA-256 checksums, and deterministic in-toto provenance.
 - CI enforcement for formatting, build, vet, lint, race tests, fuzzing,
   vulnerability scanning, interoperability, recovery, and architecture.

@@ -14,8 +14,6 @@ import re
 import subprocess
 import tarfile
 import tempfile
-import time
-import zipfile
 from pathlib import Path
 from urllib.parse import quote
 
@@ -25,10 +23,6 @@ REPOSITORY = "https://github.com/dominicnunez/agentos"
 TARGETS = (
     ("linux", "amd64"),
     ("linux", "arm64"),
-    ("darwin", "amd64"),
-    ("darwin", "arm64"),
-    ("windows", "amd64"),
-    ("windows", "arm64"),
 )
 BINARIES = (
     ("agentos", "./cmd/agentos"),
@@ -286,44 +280,10 @@ def tar_gzip(path: Path, root_name: str, files: dict[str, tuple[bytes, int]], ep
                     archive.addfile(info, io.BytesIO(content))
 
 
-def zip_timestamp(epoch: int) -> tuple[int, int, int, int, int, int]:
-    return time.gmtime(epoch - (epoch % 2))[:6]
-
-
-def zip_archive(path: Path, root_name: str, files: dict[str, tuple[bytes, int]], epoch: int) -> None:
-    timestamp = zip_timestamp(epoch)
-    with zipfile.ZipFile(path, mode="x", compression=zipfile.ZIP_STORED) as archive:
-        for name in sorted(files):
-            content, mode = files[name]
-            info = zipfile.ZipInfo(filename=f"{root_name}/{name}", date_time=timestamp)
-            info.compress_type = zipfile.ZIP_STORED
-            info.create_system = 3
-            info.external_attr = mode << 16
-            archive.writestr(info, content)
-
-
 def verify_archive(
     path: Path, root_name: str, files: dict[str, tuple[bytes, int]], epoch: int
 ) -> None:
     expected = {f"{root_name}/{name}": value for name, value in files.items()}
-    if path.suffix == ".zip":
-        with zipfile.ZipFile(path) as archive:
-            entries = archive.infolist()
-            if len(entries) != len(expected) or len({entry.filename for entry in entries}) != len(entries):
-                raise RuntimeError(f"archive {path.name} has missing or duplicate entries")
-            for entry in entries:
-                value = expected.get(entry.filename)
-                if value is None or entry.is_dir():
-                    raise RuntimeError(f"archive {path.name} has an unexpected entry")
-                content, mode = value
-                if (
-                    archive.read(entry) != content
-                    or entry.external_attr >> 16 != mode
-                    or entry.date_time != zip_timestamp(epoch)
-                    or entry.compress_type != zipfile.ZIP_STORED
-                ):
-                    raise RuntimeError(f"archive {path.name} entry {entry.filename} changed")
-        return
     with tarfile.open(path, mode="r:gz") as archive:
         entries = archive.getmembers()
         if len(entries) != len(expected) or len({entry.name for entry in entries}) != len(entries):
@@ -460,7 +420,7 @@ def main() -> int:
                 "VERSION": (version_file.read_bytes(), 0o644),
             }
             for binary_name, package in BINARIES:
-                filename = binary_name + (".exe" if goos == "windows" else "")
+                filename = binary_name
                 binary = target_dir / filename
                 build_binary(package, binary, goos, goarch, version)
                 packaged[filename] = (binary.read_bytes(), 0o755)
@@ -471,18 +431,14 @@ def main() -> int:
             produced.append(sbom_path)
             packaged[sbom_name] = (sbom, 0o644)
             root_name = f"agentos_{version}_{target}"
-            if goos == "windows":
-                archive_path = output / (root_name + ".zip")
-                zip_archive(archive_path, root_name, packaged, epoch)
-            else:
-                archive_path = output / (root_name + ".tar.gz")
-                tar_gzip(archive_path, root_name, packaged, epoch)
+            archive_path = output / (root_name + ".tar.gz")
+            tar_gzip(archive_path, root_name, packaged, epoch)
             verify_archive(archive_path, root_name, packaged, epoch)
             produced.append(archive_path)
 
             if (goos, goarch) == (host_goos, host_goarch):
                 for binary_name, _ in BINARIES:
-                    smoke(target_dir / (binary_name + (".exe" if goos == "windows" else "")), version)
+                    smoke(target_dir / binary_name, version)
 
     subjects = [
         {"digest": {"sha256": digest(path)}, "name": path.name}
