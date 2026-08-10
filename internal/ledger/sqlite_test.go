@@ -274,4 +274,3 @@ func TestApprovalConsumptionAndAttemptTransitionAreAtomic(t *testing.T) {
 		t.Fatal("consumed single-use approval was reused")
 	}
 }
-
