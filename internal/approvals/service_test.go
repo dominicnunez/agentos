@@ -31,7 +31,7 @@ func (a *effectAdapter) Apply(context.Context, core.EffectObligation) ([]string,
 	return []string{"receipt-1"}, nil
 }
 
-func TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision(t *testing.T) {
+func TestApprovalWaitsAcrossRestart(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "agentos.db")
 	l, err := ledger.Open(path)
@@ -41,10 +41,6 @@ func TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision(t *testing.
 	n := &notifier{}
 	authorizer := approvals.StaticAuthorizer{{OrganizationID: "org-1", HumanID: "human-approver", Boundary: core.BoundaryPublicExternal, Risk: "HIGH"}}
 	service := approvals.New(l, n, authorizer)
-	fingerprint, err := effects.Fingerprint("send", "customer-1", map[string]string{"body": "hello"})
-	if err != nil {
-		t.Fatal(err)
-	}
 	obligation := core.EffectObligation{
 		ID:                  "effect-1",
 		OrganizationID:      "org-1",
@@ -55,12 +51,12 @@ func TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision(t *testing.
 		Scope:               "org-1",
 		ConsequenceBoundary: core.BoundaryPublicExternal,
 		Descriptor:          "send greeting",
-		EffectFingerprint:   fingerprint,
 		AuthorizationRefs:   []string{"lease-1"},
 		ApprovalRef:         "approval-1",
 		IdempotencyKey:      "effect-key-1",
 		ReplayContext:       map[string]string{"body": "hello"},
 	}
+	fingerprint := setApprovalTestFingerprint(t, &obligation)
 	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1", Action: "send", Resource: "customer-1", Scope: "org-1"}
 	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "human-approver", "task-1", nil, nil, "capability_lease", "lease-1", 1, lease); err != nil {
 		_ = l.Close()
@@ -81,7 +77,7 @@ func TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision(t *testing.
 		Resource:           "customer-1",
 		Boundary:           core.BoundaryPublicExternal,
 		Risk:               "HIGH",
-		Urgency:            "NORMAL",
+		Urgency:            "MEDIUM",
 		EffectFingerprint:  fingerprint,
 		SingleUse:          true,
 	})
@@ -155,11 +151,8 @@ func TestNotificationFailureRemainsDurablyPending(t *testing.T) {
 	}
 	failing := &notifier{err: fmt.Errorf("delivery unavailable")}
 	service := approvals.New(l, failing, nil)
-	fingerprint, err := effects.Fingerprint("deploy", "agent-os", map[string]string{"version": "1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", Action: "deploy", Resource: "agent-os", Scope: "org-1", ConsequenceBoundary: core.BoundaryDeployment, Descriptor: "deploy Agent OS", EffectFingerprint: fingerprint, AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1", IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"version": "1"}}
+	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", Action: "deploy", Resource: "agent-os", Scope: "org-1", ConsequenceBoundary: core.BoundaryDeployment, Descriptor: "deploy Agent OS", AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1", IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"version": "1"}}
+	fingerprint := setApprovalTestFingerprint(t, &obligation)
 	if _, err := effects.New(l, &effectAdapter{}, service).Prepare(ctx, obligation); err != nil {
 		_ = l.Close()
 		t.Fatal(err)
@@ -173,7 +166,7 @@ func TestNotificationFailureRemainsDurablyPending(t *testing.T) {
 		Resource:           "agent-os",
 		Boundary:           core.BoundaryDeployment,
 		Risk:               "HIGH",
-		Urgency:            "NORMAL",
+		Urgency:            "MEDIUM",
 		EffectFingerprint:  fingerprint,
 	})
 	if !errors.Is(err, approvals.ErrNotificationUnavailable) || approval.Status != core.ApprovalPending {
@@ -210,13 +203,81 @@ func TestApprovalRequestRequiresPreparedMatchingEffect(t *testing.T) {
 	t.Cleanup(func() { _ = l.Close() })
 	n := &notifier{}
 	service := approvals.New(l, n, nil)
-	_, err = service.Request(ctx, core.HumanApproval{ID: "approval-1", OrganizationID: "org-1", TaskID: "task-1", EffectObligationID: "missing-effect", Action: "deploy", Resource: "agent-os", Boundary: core.BoundaryDeployment, Risk: "HIGH", Urgency: "NORMAL", EffectFingerprint: "fingerprint-1"})
+	_, err = service.Request(ctx, core.HumanApproval{ID: "approval-1", OrganizationID: "org-1", TaskID: "task-1", EffectObligationID: "missing-effect", Action: "deploy", Resource: "agent-os", Boundary: core.BoundaryDeployment, Risk: "HIGH", Urgency: "MEDIUM", EffectFingerprint: "fingerprint-1"})
 	if err == nil || n.calls != 0 {
 		t.Fatalf("approval without prepared effect was notified: calls=%d err=%v", n.calls, err)
 	}
 	rows, err := l.Records(ctx, "approval", "approval-1")
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("approval without prepared effect was persisted: rows=%d err=%v", len(rows), err)
+	}
+}
+
+func TestApprovalRequestRejectsUnknownRiskAndUrgency(t *testing.T) {
+	for _, test := range []struct {
+		name, risk, urgency string
+	}{
+		{name: "unknown risk", risk: "SEVERE", urgency: "HIGH"},
+		{name: "unknown urgency", risk: "HIGH", urgency: "IMMEDIATE"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := approvals.New(nil, nil, nil)
+			_, err := service.Request(t.Context(), core.HumanApproval{
+				ID: "approval-1", OrganizationID: "org-1", TaskID: "task-1", EffectObligationID: "effect-1",
+				Action: "deploy", Resource: "agent-os", Boundary: core.BoundaryDeployment,
+				Risk: test.risk, Urgency: test.urgency, EffectFingerprint: "fingerprint-1",
+			})
+			if err == nil {
+				t.Fatal("unknown decision level was accepted")
+			}
+		})
+	}
+}
+
+func TestApprovalMutationsRevalidateAuthorityAndCurrentEffect(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	obligation := core.EffectObligation{
+		ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "agent-1",
+		Action: "deploy", Resource: "agent-os", Scope: "org-1", ConsequenceBoundary: core.BoundaryDeployment,
+		Descriptor: "deploy exact release", ApprovalRef: "approval-1",
+		IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"version": "1.0.0"}, Status: core.EffectPending,
+	}
+	fingerprint := setApprovalTestFingerprint(t, &obligation)
+	if err := l.AppendRecord(ctx, "org-1", "EFFECT_OBLIGATION_PREPARED", "agent-1", "task-1", nil, nil, "effect", "effect-1", 1, obligation); err != nil {
+		t.Fatal(err)
+	}
+	authorizer := approvals.StaticAuthorizer{{OrganizationID: "org-1", HumanID: "approver-1", Boundary: core.BoundaryDeployment, Risk: "HIGH"}}
+	service := approvals.New(l, &notifier{}, authorizer)
+	approval, err := service.Request(ctx, core.HumanApproval{
+		ID: "approval-1", OrganizationID: "org-1", TaskID: "task-1", EffectObligationID: "effect-1",
+		Action: "deploy", Resource: "agent-os", Boundary: core.BoundaryDeployment,
+		Risk: "HIGH", Urgency: "MEDIUM", EffectFingerprint: fingerprint, SingleUse: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Acknowledge(ctx, approval.ID, "ordinary-operator"); !errors.Is(err, approvals.ErrDecisionUnauthorized) {
+		t.Fatalf("unauthorized acknowledgement error=%v", err)
+	}
+	if _, err := service.Acknowledge(ctx, approval.ID, "approver-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.BeginDecision(ctx, approval.ID, "approver-1"); err != nil {
+		t.Fatal(err)
+	}
+	obligation.Scope = "expanded-scope"
+	if err := l.AppendRecord(ctx, "org-1", "EFFECT_OBLIGATION_TRANSITIONED", "runtime", "task-1", nil, nil, "effect", "effect-1", 2, obligation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Decide(ctx, approvals.Decision{
+		ApprovalID: approval.ID, HumanID: "approver-1", EffectFingerprint: fingerprint, Approve: true,
+	}); err == nil {
+		t.Fatal("decision was accepted after an authority-bearing effect field changed")
 	}
 }
 
@@ -231,12 +292,12 @@ func TestDeniedDecisionCancelsPreparedEffect(t *testing.T) {
 	service := approvals.New(l, &notifier{}, authorizer)
 	adapter := &effectAdapter{}
 	coordinator := effects.New(l, adapter, service)
-	fingerprint, _ := effects.Fingerprint("delete", "record-1", map[string]string{"permanent": "true"})
-	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", Action: "delete", Resource: "record-1", Scope: "org-1", ConsequenceBoundary: core.BoundaryDestructive, Descriptor: "permanently delete record", EffectFingerprint: fingerprint, AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1", IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"permanent": "true"}}
+	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", Action: "delete", Resource: "record-1", Scope: "org-1", ConsequenceBoundary: core.BoundaryDestructive, Descriptor: "permanently delete record", AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1", IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"permanent": "true"}}
+	fingerprint := setApprovalTestFingerprint(t, &obligation)
 	if _, err := coordinator.Prepare(ctx, obligation); err != nil {
 		t.Fatal(err)
 	}
-	approval, err := service.Request(ctx, core.HumanApproval{ID: "approval-1", OrganizationID: "org-1", TaskID: "task-1", EffectObligationID: "effect-1", Action: "delete", Resource: "record-1", Boundary: core.BoundaryDestructive, Risk: "CRITICAL", Urgency: "NORMAL", EffectFingerprint: fingerprint, SingleUse: true})
+	approval, err := service.Request(ctx, core.HumanApproval{ID: "approval-1", OrganizationID: "org-1", TaskID: "task-1", EffectObligationID: "effect-1", Action: "delete", Resource: "record-1", Boundary: core.BoundaryDestructive, Risk: "CRITICAL", Urgency: "MEDIUM", EffectFingerprint: fingerprint, SingleUse: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,6 +330,16 @@ func assertEffectWaiting(t *testing.T, ctx context.Context, coordinator *effects
 	if adapter.calls != 0 {
 		t.Fatalf("waiting effect called adapter %d times", adapter.calls)
 	}
+}
+
+func setApprovalTestFingerprint(t *testing.T, obligation *core.EffectObligation) string {
+	t.Helper()
+	fingerprint, err := effects.Fingerprint(*obligation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obligation.EffectFingerprint = fingerprint
+	return fingerprint
 }
 
 func assertEventOrder(t *testing.T, stream []events.Event, expected ...string) {

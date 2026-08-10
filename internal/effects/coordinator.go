@@ -3,8 +3,6 @@ package effects
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,17 +41,8 @@ var (
 	ErrEffectUnauthorized = errors.New("effect is not authorized at time of use")
 )
 
-func Fingerprint(action, resource string, args any) (string, error) {
-	b, e := json.Marshal(struct {
-		Action    string `json:"action"`
-		Resource  string `json:"resource"`
-		Arguments any    `json:"arguments"`
-	}{action, resource, args})
-	if e != nil {
-		return "", e
-	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:]), nil
+func Fingerprint(obligation core.EffectObligation) (string, error) {
+	return core.FingerprintEffect(obligation)
 }
 
 // Prepare persists the complete protected intent before notification or human
@@ -69,13 +58,6 @@ func (c *Coordinator) Prepare(ctx context.Context, obligation core.EffectObligat
 	}
 	if obligation.Descriptor == "" || obligation.ReplayContext == nil {
 		return obligation, fmt.Errorf("protected effect descriptor and replay context are required")
-	}
-	expectedFingerprint, err := Fingerprint(obligation.Action, obligation.Resource, obligation.ReplayContext)
-	if err != nil {
-		return obligation, fmt.Errorf("fingerprint persisted effect arguments: %w", err)
-	}
-	if obligation.EffectFingerprint != expectedFingerprint {
-		return obligation, fmt.Errorf("effect fingerprint does not match persisted replay context")
 	}
 	stored, _, err := c.load(ctx, obligation.ID)
 	if err == nil {
@@ -228,6 +210,13 @@ func validateObligation(obligation core.EffectObligation) error {
 func (c *Coordinator) validateAndClassify(obligation core.EffectObligation) (bool, error) {
 	if err := validateObligation(obligation); err != nil {
 		return false, err
+	}
+	expectedFingerprint, err := Fingerprint(obligation)
+	if err != nil {
+		return false, fmt.Errorf("fingerprint effect intent: %w", err)
+	}
+	if obligation.EffectFingerprint != expectedFingerprint {
+		return false, fmt.Errorf("effect fingerprint does not match effect intent")
 	}
 	if c == nil || c.records == nil {
 		return false, fmt.Errorf("durable effect records are required")

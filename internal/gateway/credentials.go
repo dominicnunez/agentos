@@ -49,6 +49,10 @@ type credentialRegistry struct {
 	now          func() time.Time
 }
 
+type credentialSource interface {
+	operatorCredentials() *credentialRegistry
+}
+
 type OperatorSession struct {
 	Principal intake.Principal
 	actor     *credentialRegistration
@@ -108,14 +112,36 @@ func (r *credentialRegistry) hasCredential(token string) bool {
 	return ok
 }
 
-// OperatorRegistriesOverlap detects credential reuse across independently
-// authorized ingress channels without retaining plaintext credentials.
-func OperatorRegistriesOverlap(humans *HumanActorRegistry, agents *ExternalActorRegistry) bool {
-	if humans == nil || agents == nil || humans.credentials == nil || agents.credentials == nil {
-		return false
+// OperatorRegistriesOverlap detects credential or principal-ID reuse across
+// independently authorized ingress channels without retaining plaintext
+// credentials. Each channel must represent a distinct security principal even
+// when one person operates several of them.
+func OperatorRegistriesOverlap(registries ...credentialSource) bool {
+	for left := 0; left < len(registries); left++ {
+		leftCredentials := registries[left].operatorCredentials()
+		if leftCredentials == nil {
+			continue
+		}
+		for right := left + 1; right < len(registries); right++ {
+			rightCredentials := registries[right].operatorCredentials()
+			if rightCredentials != nil && credentialRegistriesOverlap(leftCredentials, rightCredentials) {
+				return true
+			}
+		}
 	}
-	for credential := range humans.credentials.byCredential {
-		if _, exists := agents.credentials.byCredential[credential]; exists {
+	return false
+}
+
+func credentialRegistriesOverlap(left, right *credentialRegistry) bool {
+	identities := make(map[string]struct{}, len(left.byCredential))
+	for credential, registration := range left.byCredential {
+		if _, exists := right.byCredential[credential]; exists {
+			return true
+		}
+		identities[registration.principal.ID] = struct{}{}
+	}
+	for _, registration := range right.byCredential {
+		if _, exists := identities[registration.principal.ID]; exists {
 			return true
 		}
 	}

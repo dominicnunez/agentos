@@ -34,6 +34,13 @@ var humanBoundaries = map[string]struct{}{
 	core.BoundaryTrustedCore:            {},
 }
 
+var decisionLevels = map[string]struct{}{
+	"LOW":      {},
+	"MEDIUM":   {},
+	"HIGH":     {},
+	"CRITICAL": {},
+}
+
 // RequiresHumanApproval recognizes the closed V1 consequence-boundary set.
 // Unknown non-empty boundaries fail closed instead of silently becoming
 // unprotected work.
@@ -45,6 +52,14 @@ func RequiresHumanApproval(boundary string) (bool, error) {
 		return false, fmt.Errorf("unknown consequence boundary %q", boundary)
 	}
 	return true, nil
+}
+
+// ValidDecisionLevel recognizes the closed vocabulary shared by approval risk
+// and urgency. Unknown values are configuration errors, not extensibility
+// points, because silently widening either field can misroute a decision.
+func ValidDecisionLevel(level string) bool {
+	_, ok := decisionLevels[level]
+	return ok
 }
 
 // ValidateForEffect checks that the latest durable approval still authorizes
@@ -172,6 +187,15 @@ func (s *Service) Acknowledge(ctx context.Context, approvalID, humanID core.ID) 
 	if err != nil {
 		return core.HumanApproval{}, err
 	}
+	if err := s.authorizeDecision(ctx, humanID, approval); err != nil {
+		return approval, err
+	}
+	if err := s.validateUnexpired(approval); err != nil {
+		return approval, err
+	}
+	if err := s.validatePreparedEffect(ctx, approval); err != nil {
+		return approval, err
+	}
 	if approval.Status != core.ApprovalPending && approval.Status != core.ApprovalNotified {
 		return approval, fmt.Errorf("approval %s cannot be acknowledged from %s", approval.ID, approval.Status)
 	}
@@ -191,6 +215,12 @@ func (s *Service) BeginDecision(ctx context.Context, approvalID, humanID core.ID
 		return core.HumanApproval{}, err
 	}
 	if err := s.authorizeDecision(ctx, humanID, approval); err != nil {
+		return approval, err
+	}
+	if err := s.validateUnexpired(approval); err != nil {
+		return approval, err
+	}
+	if err := s.validatePreparedEffect(ctx, approval); err != nil {
 		return approval, err
 	}
 	if approval.Status != core.ApprovalAcknowledged {
@@ -224,6 +254,9 @@ func (s *Service) Decide(ctx context.Context, decision Decision) (core.HumanAppr
 	if decision.EffectFingerprint == "" || decision.EffectFingerprint != approval.EffectFingerprint {
 		return approval, fmt.Errorf("decision does not match the exact effect fingerprint")
 	}
+	if err := s.validatePreparedEffect(ctx, approval); err != nil {
+		return approval, err
+	}
 	now := s.now()
 	if decision.Approve && approval.ExpiresAt != nil && !now.Before(*approval.ExpiresAt) {
 		return approval, ErrApprovalExpired
@@ -243,6 +276,32 @@ func (s *Service) Decide(ctx context.Context, decision Decision) (core.HumanAppr
 func (s *Service) Get(ctx context.Context, approvalID core.ID) (core.HumanApproval, error) {
 	approval, _, err := s.load(ctx, approvalID)
 	return approval, err
+}
+
+// DecisionContext returns the trusted, current approval and prepared effect for
+// an exactly authorized decision principal. Transport-supplied effect details
+// are never used to construct this view.
+type DecisionContext struct {
+	Approval core.HumanApproval
+	Effect   core.EffectObligation
+}
+
+func (s *Service) DecisionContext(ctx context.Context, approvalID, humanID core.ID) (DecisionContext, error) {
+	approval, _, err := s.load(ctx, approvalID)
+	if err != nil {
+		return DecisionContext{}, err
+	}
+	if err := s.authorizeDecision(ctx, humanID, approval); err != nil {
+		return DecisionContext{}, err
+	}
+	if err := s.validateUnexpired(approval); err != nil {
+		return DecisionContext{}, err
+	}
+	obligation, err := s.preparedEffect(ctx, approval)
+	if err != nil {
+		return DecisionContext{}, err
+	}
+	return DecisionContext{Approval: approval, Effect: obligation}, nil
 }
 
 func (s *Service) load(ctx context.Context, approvalID core.ID) (core.HumanApproval, int, error) {
@@ -270,26 +329,38 @@ func (s *Service) authorizeDecision(ctx context.Context, humanID core.ID, approv
 	return nil
 }
 
+func (s *Service) validateUnexpired(approval core.HumanApproval) error {
+	if approval.ExpiresAt != nil && !s.now().Before(*approval.ExpiresAt) {
+		return ErrApprovalExpired
+	}
+	return nil
+}
+
 func (s *Service) append(ctx context.Context, eventType, actorID string, version int, approval core.HumanApproval) error {
 	return s.store.AppendRecord(ctx, string(approval.OrganizationID), eventType, actorID, string(approval.TaskID), nil, nil, "approval", string(approval.ID), version, approval)
 }
 
 func (s *Service) validatePreparedEffect(ctx context.Context, approval core.HumanApproval) error {
+	_, err := s.preparedEffect(ctx, approval)
+	return err
+}
+
+func (s *Service) preparedEffect(ctx context.Context, approval core.HumanApproval) (core.EffectObligation, error) {
 	body, _, err := latestRecord(ctx, s.store, "effect", string(approval.EffectObligationID))
 	if errors.Is(err, errRecordNotFound) {
-		return fmt.Errorf("approval requires a prepared effect obligation")
+		return core.EffectObligation{}, fmt.Errorf("approval requires a prepared effect obligation")
 	}
 	if err != nil {
-		return err
+		return core.EffectObligation{}, err
 	}
 	var obligation core.EffectObligation
 	if err := json.Unmarshal(body, &obligation); err != nil {
-		return fmt.Errorf("decode prepared effect %s: %w", approval.EffectObligationID, err)
+		return core.EffectObligation{}, fmt.Errorf("decode prepared effect %s: %w", approval.EffectObligationID, err)
 	}
 	if obligation.Status != core.EffectPending || !approvalMatchesEffect(approval, obligation) {
-		return fmt.Errorf("approval does not match the prepared effect obligation")
+		return core.EffectObligation{}, fmt.Errorf("approval does not match the prepared effect obligation")
 	}
-	return nil
+	return obligation, nil
 }
 
 func approvalMatchesEffect(approval core.HumanApproval, obligation core.EffectObligation) bool {
@@ -301,9 +372,11 @@ func approvalMatchesEffect(approval core.HumanApproval, obligation core.EffectOb
 		approval.EffectObligationID == obligation.ID
 	sameEffect := approval.Action == obligation.Action &&
 		approval.Resource == obligation.Resource &&
-		approval.Boundary == obligation.ConsequenceBoundary &&
-		approval.EffectFingerprint == obligation.EffectFingerprint
-	return sameWork && sameEffect
+		approval.Boundary == obligation.ConsequenceBoundary
+	expectedFingerprint, err := core.FingerprintEffect(obligation)
+	exactFingerprint := err == nil && obligation.EffectFingerprint == expectedFingerprint &&
+		approval.EffectFingerprint == expectedFingerprint
+	return sameWork && sameEffect && exactFingerprint
 }
 
 func latestRecord(ctx context.Context, store Store, kind, id string) ([]byte, int, error) {
@@ -330,6 +403,12 @@ func validateRequest(approval core.HumanApproval) error {
 	}
 	if !required {
 		return fmt.Errorf("approval requires a human consequence boundary")
+	}
+	if !ValidDecisionLevel(approval.Risk) {
+		return fmt.Errorf("approval risk must be LOW, MEDIUM, HIGH, or CRITICAL")
+	}
+	if !ValidDecisionLevel(approval.Urgency) {
+		return fmt.Errorf("approval urgency must be LOW, MEDIUM, HIGH, or CRITICAL")
 	}
 	return nil
 }

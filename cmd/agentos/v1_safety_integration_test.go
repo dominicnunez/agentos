@@ -97,18 +97,19 @@ func TestV1SafetyServicesEnforceAndRecordContracts(t *testing.T) {
 		t.Fatalf("candidate knowledge must not be returned as active: %+v", matches)
 	}
 
-	fingerprint, err := effects.Fingerprint("send", "customer-1", map[string]string{"body": "hello"})
-	if err != nil {
-		t.Fatalf("fingerprint effect: %v", err)
-	}
 	expiresAt := now.Add(time.Hour)
 	approvalService := approvals.New(l, conformanceNotifier{}, approvals.StaticAuthorizer{{OrganizationID: "org-1", HumanID: "human-1", Boundary: core.BoundaryPublicExternal, Risk: "HIGH"}})
 	obligation := core.EffectObligation{
 		ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", Action: "send", Resource: "customer-1", Scope: "org-1",
 		ConsequenceBoundary: core.BoundaryPublicExternal,
-		Descriptor:          "send greeting", EffectFingerprint: fingerprint, AuthorizationRefs: []string{"lease-1"},
+		Descriptor:          "send greeting", AuthorizationRefs: []string{"lease-1"},
 		ApprovalRef: "approval-1", IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"body": "hello"},
 	}
+	fingerprint, err := effects.Fingerprint(obligation)
+	if err != nil {
+		t.Fatalf("fingerprint effect: %v", err)
+	}
+	obligation.EffectFingerprint = fingerprint
 	adapter := &conformanceEffectAdapter{}
 	coordinator := effects.New(l, adapter, approvalService)
 	if _, err := coordinator.Prepare(ctx, obligation); err != nil {
@@ -116,7 +117,7 @@ func TestV1SafetyServicesEnforceAndRecordContracts(t *testing.T) {
 	}
 	approval, err := approvalService.Request(ctx, core.HumanApproval{
 		ID: "approval-1", OrganizationID: "org-1", TaskID: "task-1", EffectObligationID: "effect-1", Action: "send", Resource: "customer-1",
-		Boundary: core.BoundaryPublicExternal, Risk: "HIGH", Urgency: "NORMAL",
+		Boundary: core.BoundaryPublicExternal, Risk: "HIGH", Urgency: "MEDIUM",
 		EffectFingerprint: fingerprint, ExpiresAt: &expiresAt, SingleUse: true,
 	})
 	if err != nil {
@@ -141,6 +142,10 @@ func TestV1SafetyServicesEnforceAndRecordContracts(t *testing.T) {
 	replay := obligation
 	replay.ID = "effect-2"
 	replay.IdempotencyKey = "effect-key-2"
+	replay.EffectFingerprint, err = effects.Fingerprint(replay)
+	if err != nil {
+		t.Fatalf("fingerprint replay effect: %v", err)
+	}
 	if _, err := coordinator.Prepare(ctx, replay); err != nil {
 		t.Fatalf("prepare replay obligation: %v", err)
 	}

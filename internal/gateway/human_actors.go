@@ -42,6 +42,13 @@ type HumanActorRegistry struct {
 	credentials *credentialRegistry
 }
 
+func (r *HumanActorRegistry) operatorCredentials() *credentialRegistry {
+	if r == nil {
+		return nil
+	}
+	return r.credentials
+}
+
 func DecodeHumanActorConfig(reader io.Reader) ([]HumanActor, error) {
 	var config HumanActorConfig
 	return trustconfig.DecodeEntries(reader, "human actor registry", "actor", &config, &config.Actors)

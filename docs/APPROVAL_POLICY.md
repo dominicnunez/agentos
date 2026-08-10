@@ -39,3 +39,10 @@ The direct Human Gateway is likewise conversational work/input only: even text
 from its authenticated human principal cannot decide an exact-effect approval.
 Approval requires a separate trusted control bound to the authorized human,
 effect fingerprint, scope, and current policy state.
+
+The V1 control is documented in [APPROVAL_CONTROL.md](APPROVAL_CONTROL.md). It
+uses a separate listener and reviewed credential registry. Grants match the
+organization, consequence boundary, and risk exactly; no wildcard or inherited
+authority exists. Every mutation reloads the current prepared effect from the
+ledger. Human work, completion-review, and A2A identities are rejected, and
+identity or credential reuse across those channels prevents startup.
