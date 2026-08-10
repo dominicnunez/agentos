@@ -7,6 +7,13 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 )
 
+type FreezeState struct {
+	OrganizationID core.ID   `json:"organization_id"`
+	Frozen         bool      `json:"frozen"`
+	Reason         string    `json:"reason,omitempty"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
 // Check deliberately performs no positive inheritance: every protected action
 // needs an unrevoked lease matching actor, task origin, action, resource and scope.
 func Check(now time.Time, actorID, taskID core.ID, action, resource, scope string, leases []core.CapabilityLease, frozen bool) core.AuthorizationTrace {
