@@ -293,15 +293,17 @@ func (s *Service) validatePreparedEffect(ctx context.Context, approval core.Huma
 }
 
 func approvalMatchesEffect(approval core.HumanApproval, obligation core.EffectObligation) bool {
-	return approval.ID != "" &&
-		string(approval.ID) == obligation.ApprovalRef &&
-		approval.OrganizationID == obligation.OrganizationID &&
+	if approval.ID == "" || string(approval.ID) != obligation.ApprovalRef {
+		return false
+	}
+	sameWork := approval.OrganizationID == obligation.OrganizationID &&
 		approval.TaskID == obligation.TaskID &&
-		approval.EffectObligationID == obligation.ID &&
-		approval.Action == obligation.Action &&
+		approval.EffectObligationID == obligation.ID
+	sameEffect := approval.Action == obligation.Action &&
 		approval.Resource == obligation.Resource &&
 		approval.Boundary == obligation.ConsequenceBoundary &&
 		approval.EffectFingerprint == obligation.EffectFingerprint
+	return sameWork && sameEffect
 }
 
 func latestRecord(ctx context.Context, store Store, kind, id string) ([]byte, int, error) {
