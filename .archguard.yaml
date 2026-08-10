@@ -88,7 +88,7 @@ policy:
       from:
         module: effects
       to:
-        modules: [approvals, core]
+        modules: [approvals, authority, core]
 
     - name: operator-boundary
       from:
@@ -106,7 +106,7 @@ policy:
       from:
         module: ledger
       to:
-        module: events
+        modules: [authority, core, events]
 
     - name: projection-domain
       from:
