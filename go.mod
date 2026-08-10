@@ -7,7 +7,10 @@ tool (
 	github.com/dominicnunez/gallow/cmd/gallow
 )
 
-require modernc.org/sqlite v1.38.2
+require (
+	github.com/dominicnunez/codex-sdk-go v0.0.0-20260810152213-366b1935433f
+	modernc.org/sqlite v1.38.2
+)
 
 require (
 	github.com/dominicnunez/archguard v0.0.0-20260521162903-d94aba3763e6 // indirect

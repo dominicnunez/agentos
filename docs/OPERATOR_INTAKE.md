@@ -24,8 +24,11 @@ Routing follows the minimal-justified-LLM rule:
 - a bounded `DETERMINISTIC`, `AGENT`, or `HUMAN` hint may be requested;
 - unavailable `TOOL`, `TEAM`, and `MIXED` routes fail closed.
 
-The router is deterministic. The current Agent route uses the fake model
-adapter so V1 remains testable without a provider credential.
+The router is deterministic. The Agent route uses the fake model adapter by
+default so V1 remains testable without a provider credential. A deployment may
+explicitly select the confined Codex subscription adapter described in
+[Codex subscription provider](CODEX_SUBSCRIPTION_PROVIDER.md); intake text does
+not select or reconfigure providers.
 
 ## Direct human API
 

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/completion"
@@ -16,6 +15,8 @@ import (
 	"github.com/dominicnunez/agentos/internal/telemetry"
 	"github.com/dominicnunez/agentos/internal/workflow"
 )
+
+const submissionTimeout = 25 * time.Second
 
 type Submit struct {
 	RequestID           string
@@ -46,7 +47,7 @@ type RecoveryResult struct {
 }
 
 type Service struct {
-	mu            sync.Mutex
+	permit        chan struct{}
 	gateway       *events.Gateway
 	state         *projections.Repository
 	scheduler     workflow.Scheduler
@@ -71,6 +72,7 @@ func NewWithModel(g *events.Gateway, model execution.ModelAdapter) *Service {
 		panic("model adapter descriptor is incomplete")
 	}
 	service := &Service{
+		permit:        make(chan struct{}, 1),
 		gateway:       g,
 		state:         projections.New(g),
 		deterministic: execution.Deterministic{},
@@ -152,8 +154,10 @@ func (s *Service) requireExternalWorkCorrelation(ctx context.Context, organizati
 // uses an EventDraft; the gateway owns trusted sender metadata, persistence,
 // and inbox availability.
 func (s *Service) SendMessage(ctx context.Context, organizationID, actorID, executionID, correlationID string, draft events.Draft) (events.Event, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.acquire(ctx); err != nil {
+		return events.Event{}, err
+	}
+	defer s.release()
 	if draft.EventType != "MESSAGE" {
 		return events.Event{}, fmt.Errorf("SendMessage accepts only MESSAGE drafts")
 	}
@@ -237,8 +241,10 @@ func addressedTaskInOrganization(snapshot projections.Snapshot, taskID, organiza
 // work. Interrupted deterministic work is safe to retry; interrupted adaptive
 // execution fails closed as blocked because its outcome may be uncertain.
 func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.acquire(ctx); err != nil {
+		return RecoveryResult{}, err
+	}
+	defer s.release()
 
 	snapshot, err := s.state.Load(ctx)
 	if err != nil {
@@ -331,8 +337,10 @@ type OperatorInput struct {
 }
 
 func (s *Service) ProvideOperatorInput(ctx context.Context, input OperatorInput) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.acquire(ctx); err != nil {
+		return err
+	}
+	defer s.release()
 
 	if input.OrganizationID == "" || input.PrincipalID == "" || input.PrincipalKind == "" || input.SourceChannel == "" || input.RequestID == "" || input.TaskID == "" || input.MessageID == "" || input.Text == "" {
 		return fmt.Errorf("organization, principal, source, request, task, message, and text are required")
@@ -621,8 +629,15 @@ func continuationEvent(stream []events.Event, eventType string, taskID, executio
 }
 
 func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if ctx == nil {
+		return Result{}, fmt.Errorf("submission context is required")
+	}
+	ctx, cancel := context.WithTimeout(ctx, submissionTimeout)
+	defer cancel()
+	if err := s.acquire(ctx); err != nil {
+		return Result{}, fmt.Errorf("wait for submission service: %w", err)
+	}
+	defer s.release()
 
 	if in.RequestID == "" || in.OrganizationID == "" || in.Statement == "" {
 		return Result{}, fmt.Errorf("request_id, organization_id, and statement are required")
@@ -684,6 +699,22 @@ func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 		return Result{}, err
 	}
 	return Result{Intent: intent, Goal: goal, Task: task, Outcome: run.Outcome, Completion: run.Completion, Events: eventStream}, run.ExecutionError
+}
+
+func (s *Service) acquire(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("service context is required")
+	}
+	select {
+	case s.permit <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Service) release() {
+	<-s.permit
 }
 
 func (s *Service) ensureOperatorAcceptance(ctx context.Context, in Submit, taskID core.ID) error {

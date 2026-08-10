@@ -64,6 +64,28 @@ func TestVerticalSlice(t *testing.T) {
 		t.Fatalf("replay duplicated terminal telemetry: before=%d after=%d telemetry=%d", len(r.Events), len(replayed.Events), telemetryEvents)
 	}
 }
+
+func TestSubmitDeadlineIncludesServiceQueueWait(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := l.Close(); err != nil {
+			t.Errorf("close ledger: %v", err)
+		}
+	})
+	s := New(events.NewGateway(l))
+	s.permit <- struct{}{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = s.Submit(ctx, Submit{RequestID: "queued", OrganizationID: "o1", Statement: "echo queued"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("queued submission error=%v", err)
+	}
+	<-s.permit
+}
+
 func TestAgentExecutionUsesFakeAdapter(t *testing.T) {
 	l, err := ledger.Open(":memory:")
 	if err != nil {

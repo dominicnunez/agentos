@@ -91,6 +91,13 @@ Message metadata entry `"agentos.execution_kind":"AGENT"` exercises the fake
 model adapter; `HUMAN` exercises blocked-input continuation. Runtime data
 defaults to `agentos.db`.
 
+The confined Codex subscription provider is available only when explicitly
+selected with `AGENTOS_MODEL_PROVIDER=codex-subscription` and the exact binary,
+SDK credential-file, and model settings documented in
+[docs/CODEX_SUBSCRIPTION_PROVIDER.md](docs/CODEX_SUBSCRIPTION_PROVIDER.md).
+Merely installing Codex or setting its normal user configuration never enables
+external inference in Agent OS.
+
 Direct human natural-language intake uses a distinct authenticated endpoint and
 the same internal router:
 
@@ -116,7 +123,9 @@ This is not a full V1 release sign-off. [docs/V1_ACCEPTANCE_STATUS.md](docs/V1_A
 
 Included: core organizational/work objects, task dependencies, deterministic and agent execution paths, event gateway and ledger, durable addressed messages and inboxes, execution manifests, structured tool outcomes, completion contracts, an inbound A2A boundary, exact capability checks, durable effect-bound human approvals, versioned knowledge and inference seams, and fingerprinted persist-before-effect coordination.
 
-Deferred: federation, workflow DSLs, semantic/vector memory, Lab, optimizers, production provider wiring, broad tool ecosystems, production external-effect adapters, and reconciliation workers.
+Deferred: federation, workflow DSLs, semantic/vector memory, Lab, optimizers,
+broad tool ecosystems, production external-effect adapters, and reconciliation
+workers.
 
 See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md), [docs/OPERATOR_INTAKE.md](docs/OPERATOR_INTAKE.md), [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md), [docs/A2A_INTEROP.md](docs/A2A_INTEROP.md), [docs/EFFECT_RECONCILIATION.md](docs/EFFECT_RECONCILIATION.md), [docs/SQLITE_RECOVERY.md](docs/SQLITE_RECOVERY.md), and [docs/CODEX_SUBSCRIPTION_PROVIDER.md](docs/CODEX_SUBSCRIPTION_PROVIDER.md).
 
