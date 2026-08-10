@@ -29,7 +29,7 @@ func TestVerticalSlice(t *testing.T) {
 	if !r.Completion.Complete || r.Task.Status != core.TaskCompleted || r.Goal.Status != "COMPLETED" {
 		t.Fatalf("unexpected result: %#v", r)
 	}
-	assertEventOrder(t, r.Events, "TASK_CREATED", "EXECUTION_STARTED", "TOOL_OUTCOME_RECORDED", "COMPLETION_VERIFIED", "TASK_VERIFIED_COMPLETE")
+	assertEventOrder(t, r.Events, "TASK_CREATED", "EXECUTION_STARTED", "TOOL_OUTCOME_RECORDED", "RESULT_PUBLISHED", "COMPLETION_VERIFIED", "TASK_VERIFIED_COMPLETE")
 }
 func TestAgentExecutionUsesFakeAdapter(t *testing.T) {
 	l, err := ledger.Open(":memory:")
@@ -282,6 +282,7 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 				for _, draft := range []events.TrustedDraft{
 					{OrganizationID: "org-1", EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: outcome, CorrelationID: "request-1"},
 					{OrganizationID: "org-1", EventType: "EXECUTION_FINISHED", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: map[string]any{"status": outcome.Status}, CorrelationID: "request-1"},
+					{OrganizationID: "org-1", EventType: "RESULT_PUBLISHED", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: events.ResultPublishedPayload{Summary: "authorized external input persisted"}, CorrelationID: "request-1"},
 					{OrganizationID: "org-1", EventType: "CANDIDATE_COMPLETE", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: map[string]any{"tool_invocation_id": outcome.ToolInvocationID}, CorrelationID: "request-1"},
 				} {
 					if _, err := gateway.PublishTrusted(ctx, draft); err != nil {
@@ -308,7 +309,7 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, eventType := range []string{"A2A_INPUT_RECEIVED", "TASK_RESUMED", "EXECUTION_STARTED", "TOOL_OUTCOME_RECORDED", "EXECUTION_FINISHED", "CANDIDATE_COMPLETE", "COMPLETION_VERIFIED", "TASK_VERIFIED_COMPLETE"} {
+			for _, eventType := range []string{"A2A_INPUT_RECEIVED", "TASK_RESUMED", "EXECUTION_STARTED", "TOOL_OUTCOME_RECORDED", "EXECUTION_FINISHED", "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_VERIFIED", "TASK_VERIFIED_COMPLETE"} {
 				count := 0
 				for _, event := range stream {
 					if event.EventType == eventType && event.TaskID == string(result.Task.ID) {

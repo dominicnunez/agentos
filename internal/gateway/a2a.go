@@ -69,7 +69,7 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		status := projectStatus(id, es)
-		if a.allowed("read_result") {
+		if a.allowed("read_result") && status.State == "completed" {
 			status.Result = projectResult(es)
 		}
 		writeJSON(w, http.StatusOK, status)
@@ -99,7 +99,7 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		status := projectStatus(id, es)
-		if a.allowed("read_result") {
+		if a.allowed("read_result") && status.State == "completed" {
 			status.Result = projectResult(es)
 		}
 		responseStatus := http.StatusAccepted
@@ -172,13 +172,25 @@ func projectStatus(id string, es []events.Event) externalStatus {
 func projectResult(es []events.Event) any {
 	for i := len(es) - 1; i >= 0; i-- {
 		if es[i].EventType == "RESULT_PUBLISHED" {
-			var result any
-			if json.Unmarshal(es[i].Payload, &result) == nil {
+			var result events.ResultPublishedPayload
+			if json.Unmarshal(es[i].Payload, &result) == nil && result.Summary != "" && equalStrings(result.ArtifactRefs, es[i].ArtifactRefs) {
 				return result
 			}
 		}
 	}
 	return nil
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 func externalState(es []events.Event) string {
 	state := "working"

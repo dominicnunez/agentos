@@ -375,6 +375,13 @@ func (s *Service) finishExternalInputTask(ctx context.Context, organizationID co
 	if err := s.publishContinuationEventIfMissing(ctx, stream, organizationID, task.ID, state.CorrelationID, executionID, "EXECUTION_FINISHED", map[string]any{"status": outcome.Status}); err != nil {
 		return err
 	}
+	summary, err := outcomeSummary(outcome)
+	if err != nil {
+		return fmt.Errorf("materialize external input result for task %s: %w", task.ID, err)
+	}
+	if err := s.publishContinuationEventIfMissing(ctx, stream, organizationID, task.ID, state.CorrelationID, executionID, "RESULT_PUBLISHED", events.ResultPublishedPayload{Summary: summary, ArtifactRefs: outcome.ArtifactRefs}); err != nil {
+		return err
+	}
 	if err := s.publishContinuationEventIfMissing(ctx, stream, organizationID, task.ID, state.CorrelationID, executionID, "CANDIDATE_COMPLETE", map[string]any{"tool_invocation_id": outcome.ToolInvocationID, "input_event_ref": inputEvent.EventID}); err != nil {
 		return err
 	}
@@ -722,9 +729,14 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		}
 		return taskRun{Outcome: outcome, ExecutionError: executionErr}, nil
 	}
-	candidate := events.TrustedDraft{OrganizationID: string(organizationID), EventType: "CANDIDATE_COMPLETE", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: map[string]any{"tool_invocation_id": outcome.ToolInvocationID}, CorrelationID: state.CorrelationID}
+	resultEvent, err := s.publishTaskResult(ctx, organizationID, state.CorrelationID, executionID, task, outcome)
+	if err != nil {
+		return taskRun{}, err
+	}
+	candidatePayload := map[string]any{"tool_invocation_id": outcome.ToolInvocationID, "result_event_id": resultEvent.EventID, "artifact_refs": outcome.ArtifactRefs}
+	candidate := events.TrustedDraft{OrganizationID: string(organizationID), EventType: "CANDIDATE_COMPLETE", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: candidatePayload, CorrelationID: state.CorrelationID}
 	if task.ExecutionKind == core.ExecutionAgent {
-		if _, err := s.gateway.PublishAgentDraft(ctx, string(organizationID), string(task.AssigneeID), string(executionID), state.CorrelationID, events.Draft{EventType: "CANDIDATE_COMPLETE", TaskID: string(task.ID), Payload: candidate.Payload}); err != nil {
+		if _, err := s.gateway.PublishAgentDraft(ctx, string(organizationID), string(task.AssigneeID), string(executionID), state.CorrelationID, events.Draft{EventType: "CANDIDATE_COMPLETE", TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: candidate.Payload}); err != nil {
 			return taskRun{}, fmt.Errorf("persist completion candidate for task %s: %w", task.ID, err)
 		}
 	} else if _, err := s.gateway.PublishTrusted(ctx, candidate); err != nil {
@@ -749,6 +761,51 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		}
 	}
 	return taskRun{Outcome: outcome, Completion: complete, ExecutionError: executionErr}, nil
+}
+
+func (s *Service) publishTaskResult(ctx context.Context, organizationID core.ID, correlationID string, executionID core.ID, task core.Task, outcome core.ToolOutcome) (events.Event, error) {
+	summary, err := outcomeSummary(outcome)
+	if err != nil {
+		return events.Event{}, fmt.Errorf("materialize result summary for task %s: %w", task.ID, err)
+	}
+	payload := events.ResultPublishedPayload{Summary: summary, ArtifactRefs: outcome.ArtifactRefs}
+	if task.ExecutionKind == core.ExecutionAgent {
+		event, err := s.gateway.PublishAgentDraft(ctx, string(organizationID), string(task.AssigneeID), string(executionID), correlationID, events.Draft{EventType: "RESULT_PUBLISHED", TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: payload})
+		if err != nil {
+			return events.Event{}, fmt.Errorf("persist agent result for task %s: %w", task.ID, err)
+		}
+		return event, nil
+	}
+	event, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "RESULT_PUBLISHED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: payload, CorrelationID: correlationID})
+	if err != nil {
+		return events.Event{}, fmt.Errorf("persist runtime result for task %s: %w", task.ID, err)
+	}
+	return event, nil
+}
+
+func outcomeSummary(outcome core.ToolOutcome) (string, error) {
+	if summary, ok := outcome.ObservedEffect.(string); ok && summary != "" {
+		return summary, nil
+	}
+	if fields, ok := outcome.ObservedEffect.(map[string]string); ok && fields["status"] != "" {
+		return fields["status"], nil
+	}
+	if fields, ok := outcome.ObservedEffect.(map[string]any); ok {
+		if summary, ok := fields["status"].(string); ok && summary != "" {
+			return summary, nil
+		}
+	}
+	if outcome.ObservedEffect != nil {
+		encoded, err := json.Marshal(outcome.ObservedEffect)
+		if err != nil {
+			return "", err
+		}
+		return string(encoded), nil
+	}
+	if outcome.ErrorDetail != "" {
+		return outcome.ErrorDetail, nil
+	}
+	return fmt.Sprintf("task outcome: %s", outcome.Status), nil
 }
 
 type completionDetail struct {
