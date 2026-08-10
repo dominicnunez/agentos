@@ -152,6 +152,14 @@ func (l *SQLite) AppendProjection(ctx context.Context, draft events.ProjectionDr
 		if _, err = tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, draft.ProjectionKind, draft.RecordID, draft.Version, body, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 			return fmt.Errorf("append projection: %w", err)
 		}
+		if eventDraft.RecipientScope != "" || eventDraft.RecipientID != "" {
+			if eventDraft.RecipientScope == "" || eventDraft.RecipientID == "" {
+				return fmt.Errorf("addressed projection recipient is required")
+			}
+			if err := projectInbox(ctx, tx, event); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	return event, err
@@ -324,22 +332,26 @@ func (l *SQLite) Records(ctx context.Context, kind, id string) ([][]byte, error)
 	return out, rows.Err()
 }
 func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Event, error) {
-	if d.EventType == "MESSAGE" {
-		return l.appendMessage(ctx, d)
+	if d.EventType == "MESSAGE" || d.RecipientScope != "" || d.RecipientID != "" {
+		return l.appendAddressed(ctx, d)
 	}
 	return appendEvent(ctx, l.db, d)
 }
 
-func (l *SQLite) appendMessage(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {
+func (l *SQLite) appendAddressed(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {
 	if draft.RecipientScope == "" || draft.RecipientID == "" {
-		return events.Event{}, fmt.Errorf("message recipient is required")
+		return events.Event{}, fmt.Errorf("addressed event recipient is required")
 	}
 	return l.appendWithProjection(ctx, draft, func(tx *sql.Tx, event events.Event) error {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO inbox(recipient_scope,recipient_id,event_id,organization_id,task_id,available_at) VALUES(?,?,?,?,?,?)`, draft.RecipientScope, draft.RecipientID, event.EventID, draft.OrganizationID, draft.TaskID, event.CreatedAt.Format(time.RFC3339Nano)); err != nil {
-			return fmt.Errorf("project message to inbox: %w", err)
-		}
-		return nil
+		return projectInbox(ctx, tx, event)
 	})
+}
+
+func projectInbox(ctx context.Context, tx *sql.Tx, event events.Event) error {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO inbox(recipient_scope,recipient_id,event_id,organization_id,task_id,available_at) VALUES(?,?,?,?,?,?)`, event.RecipientScope, event.RecipientID, event.EventID, event.OrganizationID, event.TaskID, event.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("project addressed event to inbox: %w", err)
+	}
+	return nil
 }
 
 func (l *SQLite) ObserveInbox(ctx context.Context, draft events.TrustedDraft, recipientScope, recipientID string, eventIDs []string) (events.Event, error) {

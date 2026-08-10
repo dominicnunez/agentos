@@ -23,6 +23,17 @@ type Draft struct {
 	ArtifactRefs   []string `json:"artifact_refs,omitempty"`
 	Payload        any      `json:"payload"`
 }
+
+type TaskBlockedPayload struct {
+	Reason        string   `json:"reason"`
+	Missing       string   `json:"missing"`
+	WhyNeeded     string   `json:"why_needed"`
+	WorkCompleted string   `json:"work_completed"`
+	RemainingWork string   `json:"remaining_work,omitempty"`
+	EvidenceRefs  []string `json:"evidence_refs,omitempty"`
+	Urgency       string   `json:"urgency,omitempty"`
+}
+
 type TrustedDraft struct {
 	OrganizationID    string
 	EventType         string
@@ -101,16 +112,18 @@ type InboxObserver interface {
 	ObserveInbox(context.Context, TrustedDraft, string, string, []string) (Event, error)
 }
 
-type MessageRoute struct {
+type AddressedRoute struct {
 	OrganizationID string
+	EventType      string
 	SourceActorID  string
+	ValidateSource bool
 	RecipientScope string
 	RecipientID    string
 	TaskID         string
 }
 
 type RouteValidator interface {
-	ValidateMessageRoute(context.Context, MessageRoute) error
+	ValidateAddressedRoute(context.Context, AddressedRoute) error
 }
 
 type Gateway struct {
@@ -141,14 +154,17 @@ func (g *Gateway) PublishAgentDraft(ctx context.Context, organizationID, actorID
 	if !agentTypes[draft.EventType] {
 		return Event{}, fmt.Errorf("event type %s is not agent-proposable", draft.EventType)
 	}
+	if draft.EventType == "TASK_BLOCKED" && (!validRecipient(draft.RecipientScope) || draft.RecipientID == "") {
+		return Event{}, fmt.Errorf("task blocked draft requires an upward recipient")
+	}
 	trusted := TrustedDraft{OrganizationID: organizationID, EventType: draft.EventType, SourceActorID: actorID, SourceExecutionID: executionID, RecipientScope: draft.RecipientScope, RecipientID: draft.RecipientID, TaskID: draft.TaskID, ArtifactRefs: draft.ArtifactRefs, Payload: draft.Payload, CorrelationID: correlationID}
-	if err := g.validateMessage(ctx, trusted); err != nil {
+	if err := g.validateAddressed(ctx, trusted, true); err != nil {
 		return Event{}, err
 	}
 	return g.ledger.Append(ctx, trusted)
 }
 func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event, error) {
-	if err := g.validateMessage(ctx, draft); err != nil {
+	if err := g.validateAddressed(ctx, draft, false); err != nil {
 		return Event{}, err
 	}
 	return g.ledger.Append(ctx, draft)
@@ -156,6 +172,9 @@ func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event
 func (g *Gateway) PublishProjection(ctx context.Context, draft ProjectionDraft) (Event, error) {
 	if draft.Event.EventType == "" || draft.ProjectionKind == "" || draft.RecordID == "" || draft.Version < 1 {
 		return Event{}, fmt.Errorf("event type, projection kind, record id, and positive version are required")
+	}
+	if err := g.validateAddressed(ctx, draft.Event, false); err != nil {
+		return Event{}, err
 	}
 	store, ok := g.ledger.(ProjectionAppender)
 	if !ok {
@@ -207,27 +226,44 @@ func (g *Gateway) ObserveInbox(ctx context.Context, organizationID, actorID, exe
 	return observer.ObserveInbox(ctx, draft, recipientScope, recipientID, eventIDs)
 }
 
-func (g *Gateway) validateMessage(ctx context.Context, draft TrustedDraft) error {
-	if draft.EventType != "MESSAGE" {
+func (g *Gateway) validateAddressed(ctx context.Context, draft TrustedDraft, sourceRequired bool) error {
+	addressed := draft.EventType == "MESSAGE" || draft.RecipientScope != "" || draft.RecipientID != ""
+	if !addressed {
 		return nil
 	}
-	if draft.OrganizationID == "" || draft.SourceActorID == "" || !validRecipient(draft.RecipientScope) || draft.RecipientID == "" {
-		return fmt.Errorf("message organization, source actor, and valid recipient are required")
+	validateSource := sourceRequired || draft.EventType == "MESSAGE"
+	if draft.OrganizationID == "" || !validRecipient(draft.RecipientScope) || draft.RecipientID == "" {
+		return fmt.Errorf("addressed event organization and valid recipient are required")
 	}
-	var content struct {
-		Body string `json:"body"`
+	if validateSource && draft.SourceActorID == "" {
+		return fmt.Errorf("addressed agent event requires an authenticated source")
 	}
-	payload, err := json.Marshal(draft.Payload)
-	if err != nil {
-		return fmt.Errorf("encode message payload: %w", err)
+	if draft.EventType == "MESSAGE" {
+		var content struct {
+			Body string `json:"body"`
+		}
+		if err := decodePayload(draft.Payload, &content); err != nil || content.Body == "" {
+			return fmt.Errorf("message payload requires a non-empty body")
+		}
 	}
-	if err := json.Unmarshal(payload, &content); err != nil || content.Body == "" {
-		return fmt.Errorf("message payload requires a non-empty body")
+	if draft.EventType == "TASK_BLOCKED" {
+		var content TaskBlockedPayload
+		if err := decodePayload(draft.Payload, &content); err != nil || content.Reason == "" || content.Missing == "" || content.WhyNeeded == "" || content.WorkCompleted == "" {
+			return fmt.Errorf("task blocked payload requires reason, missing, why_needed, and work_completed")
+		}
 	}
 	if g.routeValidator == nil {
-		return fmt.Errorf("message route validator is required")
+		return fmt.Errorf("addressed event route validator is required")
 	}
-	return g.routeValidator.ValidateMessageRoute(ctx, MessageRoute{OrganizationID: draft.OrganizationID, SourceActorID: draft.SourceActorID, RecipientScope: draft.RecipientScope, RecipientID: draft.RecipientID, TaskID: draft.TaskID})
+	return g.routeValidator.ValidateAddressedRoute(ctx, AddressedRoute{OrganizationID: draft.OrganizationID, EventType: draft.EventType, SourceActorID: draft.SourceActorID, ValidateSource: validateSource, RecipientScope: draft.RecipientScope, RecipientID: draft.RecipientID, TaskID: draft.TaskID})
+}
+
+func decodePayload(value any, target any) error {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(payload, target)
 }
 
 func validRecipient(scope string) bool {

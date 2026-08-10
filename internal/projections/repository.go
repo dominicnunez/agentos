@@ -66,7 +66,20 @@ func (r *Repository) SaveTask(ctx context.Context, organizationID core.ID, event
 	return r.save(ctx, string(organizationID), eventType, actorID, string(value.ID), correlationID, KindTask, value.ID, version, value, detail)
 }
 
+// SaveBlockedTask atomically persists the blocked child projection and makes
+// the same Event Contract available to its parent Task for remediation.
+func (r *Repository) SaveBlockedTask(ctx context.Context, organizationID core.ID, actorID, correlationID string, version int, value core.Task, detail events.TaskBlockedPayload, parentTaskID core.ID) error {
+	if value.Status != core.TaskBlocked || value.ParentID == "" || value.ParentID != parentTaskID {
+		return fmt.Errorf("blocked child task and exact parent are required")
+	}
+	return r.saveAddressed(ctx, string(organizationID), "TASK_BLOCKED", actorID, string(value.ID), correlationID, KindTask, value.ID, version, value, detail, events.RecipientTask, string(parentTaskID))
+}
+
 func (r *Repository) save(ctx context.Context, organizationID, eventType, actorID, taskID, correlationID, kind string, id core.ID, version int, value, detail any) error {
+	return r.saveAddressed(ctx, organizationID, eventType, actorID, taskID, correlationID, kind, id, version, value, detail, "", "")
+}
+
+func (r *Repository) saveAddressed(ctx context.Context, organizationID, eventType, actorID, taskID, correlationID, kind string, id core.ID, version int, value, detail any, recipientScope, recipientID string) error {
 	if r == nil || r.gateway == nil {
 		return fmt.Errorf("durable projection gateway is required")
 	}
@@ -75,6 +88,8 @@ func (r *Repository) save(ctx context.Context, organizationID, eventType, actorI
 			OrganizationID: organizationID,
 			EventType:      eventType,
 			SourceActorID:  actorID,
+			RecipientScope: recipientScope,
+			RecipientID:    recipientID,
 			TaskID:         taskID,
 			CorrelationID:  correlationID,
 			Payload:        detail,

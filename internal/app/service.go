@@ -76,60 +76,69 @@ func (s *Service) SendMessage(ctx context.Context, organizationID, actorID, exec
 	return s.gateway.PublishAgentDraft(ctx, organizationID, actorID, executionID, correlationID, draft)
 }
 
-// ValidateMessageRoute implements events.RouteValidator with durable identity
+// ValidateAddressedRoute implements events.RouteValidator with durable identity
 // and task projections. Authenticated envelope identity, never payload text,
 // determines the sender and recipient.
-func (s *Service) ValidateMessageRoute(ctx context.Context, route events.MessageRoute) error {
+func (s *Service) ValidateAddressedRoute(ctx context.Context, route events.AddressedRoute) error {
 	snapshot, err := s.state.Load(ctx)
 	if err != nil {
 		return err
 	}
 	organizationID := core.ID(route.OrganizationID)
 	if _, ok := snapshot.Organizations[organizationID]; !ok {
-		return fmt.Errorf("message organization does not exist")
+		return fmt.Errorf("addressed event organization does not exist")
 	}
-	source, ok := snapshot.Agents[core.ID(route.SourceActorID)]
-	if !ok || source.Value.OrganizationID != organizationID {
-		return fmt.Errorf("message source is not an Agent in the organization")
+	var source *projections.Versioned[core.Agent]
+	if route.ValidateSource {
+		state, ok := snapshot.Agents[core.ID(route.SourceActorID)]
+		if !ok || state.Value.OrganizationID != organizationID {
+			return fmt.Errorf("addressed event source is not an Agent in the organization")
+		}
+		source = &state
 	}
+	var sourceTask core.Task
 	if route.TaskID != "" {
-		task, err := messageTaskInOrganization(snapshot, core.ID(route.TaskID), organizationID, "source")
+		task, err := addressedTaskInOrganization(snapshot, core.ID(route.TaskID), organizationID, "source")
 		if err != nil {
 			return err
 		}
-		if !agentParticipates(snapshot, source.Value.ID, task) {
-			return fmt.Errorf("message source is not a participant in the task")
+		if source != nil && !agentParticipates(snapshot, source.Value.ID, task) {
+			return fmt.Errorf("addressed event source is not a participant in the task")
 		}
+		sourceTask = task
 	}
 	switch route.RecipientScope {
 	case events.RecipientAgent:
 		recipient, ok := snapshot.Agents[core.ID(route.RecipientID)]
 		if !ok || recipient.Value.OrganizationID != organizationID {
-			return fmt.Errorf("message recipient Agent is outside the organization")
+			return fmt.Errorf("addressed event recipient Agent is outside the organization")
 		}
 	case events.RecipientTeam:
 		recipient, ok := snapshot.Teams[core.ID(route.RecipientID)]
 		if !ok || recipient.Value.OrganizationID != organizationID {
-			return fmt.Errorf("message recipient Team is outside the organization")
+			return fmt.Errorf("addressed event recipient Team is outside the organization")
 		}
 	case events.RecipientTask:
-		if _, err := messageTaskInOrganization(snapshot, core.ID(route.RecipientID), organizationID, "recipient"); err != nil {
+		if _, err := addressedTaskInOrganization(snapshot, core.ID(route.RecipientID), organizationID, "recipient"); err != nil {
 			return err
 		}
 	default:
-		return fmt.Errorf("unsupported message recipient scope")
+		return fmt.Errorf("unsupported addressed event recipient scope")
+	}
+	if route.EventType == "TASK_BLOCKED" && sourceTask.ParentID != "" && (route.RecipientScope != events.RecipientTask || core.ID(route.RecipientID) != sourceTask.ParentID) {
+		return fmt.Errorf("blocked child task must return control to its parent task")
 	}
 	return nil
 }
 
-func messageTaskInOrganization(snapshot projections.Snapshot, taskID, organizationID core.ID, role string) (core.Task, error) {
+func addressedTaskInOrganization(snapshot projections.Snapshot, taskID, organizationID core.ID, role string) (core.Task, error) {
 	task, ok := snapshot.Tasks[taskID]
 	if !ok {
-		return core.Task{}, fmt.Errorf("message %s task does not exist", role)
+		return core.Task{}, fmt.Errorf("addressed event %s task does not exist", role)
 	}
 	actualOrganizationID, err := taskOrganization(snapshot, task.Value)
 	if err != nil || actualOrganizationID != organizationID {
-		return core.Task{}, fmt.Errorf("message %s task is outside the organization", role)
+		return core.Task{}, fmt.Errorf("addressed event %s task is outside the organization", role)
 	}
 	return task.Value, nil
 }
@@ -161,17 +170,25 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 			task := state.Value
 			detail := any(map[string]string{"reason": "process restarted before execution reached a durable terminal state"})
 			eventType := "TASK_RECOVERED"
+			var blocked events.TaskBlockedPayload
 			if task.ExecutionKind == core.ExecutionDeterministic {
 				task.Status = core.TaskPending
 				result.PendingFound++
 			} else {
 				task.Status = core.TaskBlocked
 				eventType = "TASK_BLOCKED"
-				detail = blockedDetail("interrupted adaptive execution has an uncertain outcome", "operator reconciliation", "blind replay could duplicate cost or nondeterministic work")
+				blocked = blockedDetail("interrupted adaptive execution has an uncertain outcome", "operator reconciliation", "blind replay could duplicate cost or nondeterministic work")
+				detail = blocked
 				result.BlockedPreserved++
 			}
-			if err := s.state.SaveTask(ctx, organizationID, eventType, "runtime", state.CorrelationID, state.Version+1, task, detail); err != nil {
-				return RecoveryResult{}, fmt.Errorf("persist recovery for task %s: %w", task.ID, err)
+			var saveErr error
+			if eventType == "TASK_BLOCKED" {
+				saveErr = s.saveBlockedTask(ctx, snapshot, state, organizationID, task, blocked)
+			} else {
+				saveErr = s.state.SaveTask(ctx, organizationID, eventType, "runtime", state.CorrelationID, state.Version+1, task, detail)
+			}
+			if saveErr != nil {
+				return RecoveryResult{}, fmt.Errorf("persist recovery for task %s: %w", task.ID, saveErr)
 			}
 			result.RunningRecovered++
 		}
@@ -399,7 +416,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	default:
 		task.Status = core.TaskBlocked
 		detail := blockedDetail("execution kind is declared but unavailable in this V1 slice", "authorized runtime handler", "the worker cannot expand its own execution authority")
-		if err := s.state.SaveTask(ctx, organizationID, "TASK_BLOCKED", "runtime", state.CorrelationID, state.Version+1, task, detail); err != nil {
+		if err := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); err != nil {
 			return taskRun{}, fmt.Errorf("persist blocked task %s: %w", task.ID, err)
 		}
 		return taskRun{}, nil
@@ -442,7 +459,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			return taskRun{}, fmt.Errorf("persist execution context for task %s: %w", task.ID, err)
 		}
 		if len(eventRefs) > 0 {
-			executionTask.Description, err = materializeMessageContext(task.Description, inboxBatches)
+			executionTask.Description, err = materializeInboxContext(task.Description, inboxBatches)
 			if err != nil {
 				return taskRun{}, fmt.Errorf("materialize action-boundary messages for task %s: %w", task.ID, err)
 			}
@@ -601,13 +618,19 @@ func sortedTaskStates(tasks map[core.ID]projections.Versioned[core.Task]) []proj
 	return states
 }
 
-func blockedDetail(reason, missing, whyNeeded string) map[string]any {
-	return map[string]any{
-		"reason":         reason,
-		"missing":        missing,
-		"why_needed":     whyNeeded,
-		"work_completed": "none",
+func (s *Service) saveBlockedTask(ctx context.Context, snapshot projections.Snapshot, previous projections.Versioned[core.Task], organizationID core.ID, blocked core.Task, detail events.TaskBlockedPayload) error {
+	if blocked.ParentID == "" {
+		return s.state.SaveTask(ctx, organizationID, "TASK_BLOCKED", "runtime", previous.CorrelationID, previous.Version+1, blocked, detail)
 	}
+	parent, ok := snapshot.Tasks[blocked.ParentID]
+	if !ok || parent.Value.GoalID != blocked.GoalID {
+		return fmt.Errorf("blocked child task %s references invalid parent %s", blocked.ID, blocked.ParentID)
+	}
+	return s.state.SaveBlockedTask(ctx, organizationID, "runtime", previous.CorrelationID, previous.Version+1, blocked, detail, parent.Value.ID)
+}
+
+func blockedDetail(reason, missing, whyNeeded string) events.TaskBlockedPayload {
+	return events.TaskBlockedPayload{Reason: reason, Missing: missing, WhyNeeded: whyNeeded, WorkCompleted: "none"}
 }
 
 type inboxBatch struct {
@@ -665,9 +688,10 @@ func eventIDs(stream []events.Event) []string {
 	return ids
 }
 
-func materializeMessageContext(objective string, batches []inboxBatch) (string, error) {
-	type messageView struct {
+func materializeInboxContext(objective string, batches []inboxBatch) (string, error) {
+	type eventView struct {
 		EventID        string          `json:"event_id"`
+		EventType      string          `json:"event_type"`
 		SourceActorID  string          `json:"source_actor_id"`
 		RecipientScope string          `json:"recipient_scope"`
 		RecipientID    string          `json:"recipient_id"`
@@ -676,10 +700,11 @@ func materializeMessageContext(objective string, batches []inboxBatch) (string, 
 		Payload        json.RawMessage `json:"payload"`
 	}
 	stream := sortedInboxEvents(batches)
-	messages := make([]messageView, 0, len(stream))
+	available := make([]eventView, 0, len(stream))
 	for _, event := range stream {
-		messages = append(messages, messageView{
+		available = append(available, eventView{
 			EventID:        event.EventID,
+			EventType:      event.EventType,
 			SourceActorID:  event.SourceActorID,
 			RecipientScope: event.RecipientScope,
 			RecipientID:    event.RecipientID,
@@ -689,9 +714,9 @@ func materializeMessageContext(objective string, batches []inboxBatch) (string, 
 		})
 	}
 	contextView := struct {
-		Objective string        `json:"objective"`
-		Messages  []messageView `json:"messages"`
-	}{Objective: objective, Messages: messages}
+		Objective string      `json:"objective"`
+		Events    []eventView `json:"events"`
+	}{Objective: objective, Events: available}
 	encoded, err := json.Marshal(contextView)
 	if err != nil {
 		return "", err
