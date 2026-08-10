@@ -50,6 +50,13 @@ consequential effect. Continuation phases are keyed by the durable input event;
 retry and startup recovery append only missing phases and reject conflicting
 input.
 
+The A2A work and input surfaces reject authority-shaped fields such as approval,
+capability, authorization, effect-obligation, freeze, and policy overrides.
+Ordinary operator text that claims approval remains untrusted task content. It
+cannot change a prepared `HumanApproval`, and a protected effect remains pending
+with its adapter unreachable until the separately authorized human lifecycle
+records an exact decision.
+
 Durable organization/work projections now commit atomically with their
 authoritative transition events and can be rebuilt by replay. Startup validates
 that state before opening the operator endpoint, preserves blocked work, runs
