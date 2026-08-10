@@ -52,16 +52,30 @@ type Service struct {
 	scheduler     workflow.Scheduler
 	deterministic execution.Handler
 	agent         execution.Handler
+	agentModel    execution.ModelDescriptor
 	verifier      completion.Verifier
 	completion    completion.Engine
 }
 
 func New(g *events.Gateway) *Service {
+	return NewWithModel(g, execution.FakeModel{})
+}
+
+func NewWithModel(g *events.Gateway, model execution.ModelAdapter) *Service {
+	if g == nil || model == nil {
+		panic("event gateway and model adapter are required")
+	}
+	agent := execution.NewAgentExecution(model)
+	descriptor := agent.Descriptor()
+	if descriptor.Provider == "" || descriptor.Model == "" || descriptor.ExecutionProfileVersion == "" {
+		panic("model adapter descriptor is incomplete")
+	}
 	service := &Service{
 		gateway:       g,
 		state:         projections.New(g),
 		deterministic: execution.Deterministic{},
-		agent:         execution.NewAgentExecution(execution.FakeModel{}),
+		agent:         agent,
+		agentModel:    descriptor,
 		verifier:      completion.Verifier{},
 	}
 	g.SetRouteValidator(service)
@@ -906,9 +920,9 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		manifest = core.ExecutionContextManifest{
 			ExecutionID:             executionID,
 			AgentID:                 task.AssigneeID,
-			ExecutionProfileVersion: "v1-fake",
-			Provider:                "fake",
-			Model:                   "fake-model/v1",
+			ExecutionProfileVersion: s.agentModel.ExecutionProfileVersion,
+			Provider:                s.agentModel.Provider,
+			Model:                   s.agentModel.Model,
 			TaskID:                  task.ID,
 			TaskContractVersion:     task.TaskContractVersion,
 			PromptVersion:           "v1",

@@ -1,0 +1,29 @@
+# V1 release readiness
+
+This is the operational release gate for Agent OS V1. It complements the
+architecture evidence in [V1_ACCEPTANCE_STATUS.md](V1_ACCEPTANCE_STATUS.md).
+Passing the architecture checklist does not by itself authorize deployment.
+
+| Gate | Status | Evidence or next action |
+|---|---|---|
+| Architecture acceptance | PASS | All 20 V1 requirements have linked automated evidence. |
+| Required CI | PASS | Build, vet, lint, race tests, vulnerability scan, architecture checks, interoperability, and advisory dead-code analysis run on pushes and pull requests. |
+| Controlled startup | PASS | At least one reviewed operator registry is required; remote exposure fails closed without explicit TLS configuration. |
+| Graceful shutdown | PASS | Process signals cancel the runtime context, stop HTTP intake, drain active requests within a bounded timeout, and close SQLite. |
+| Operator input robustness | PASS | Strict size-limited decoding, authority-field rejection, adversarial tests, and bounded fuzzing cover the Human and A2A shared work-content boundary. |
+| Binary version identity | PASS | `agentos --version` is linked from the repository `VERSION` value and checked in CI. |
+| Backup and restore | TODO | Document and test an operator-owned SQLite backup, restore, and rollback procedure. |
+| Real model provider | TODO | Wire one explicitly enabled provider without granting tool or approval authority. The Codex subscription adapter is the next candidate. |
+| Approval control | BLOCKED | Requires a separately authenticated exact-effect control and an approved trusted-control design. Chat remains untrusted work content. |
+| Release artifacts | TODO | Produce pinned cross-platform binaries, checksums, SBOMs, and build provenance. |
+| Loopback pilot | TODO | Exercise Human and A2A Agent paths, restart continuity, input continuation, result visibility, expiry, and revocation against a disposable ledger. |
+| Consequential effects | DISABLED | No production effect-writing adapter is enabled. Keep disabled through the initial pilot. |
+
+## Release sequence
+
+1. Complete backup/restore and a disposable loopback pilot harness.
+2. Integrate and constrain the real model provider.
+3. Produce reproducible `v1.0.0-rc.1` artifacts.
+4. Review the trusted approval control before implementing it.
+5. Consider one reversible external effect only after the release candidate is
+   stable and reconciliation evidence is demonstrated.

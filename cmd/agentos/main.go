@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/app"
@@ -24,13 +26,44 @@ import (
 	"github.com/dominicnunez/agentos/internal/secrets"
 )
 
+var version = "1.0.0-dev"
+
 func main() {
-	if err := run(); err != nil {
+	handled, err := printVersion(os.Args[1:], os.Stdout)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if handled {
+		return
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err = run(ctx); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run() (err error) {
+func printVersion(args []string, output io.Writer) (bool, error) {
+	if len(args) == 0 {
+		return false, nil
+	}
+	if len(args) != 1 || (args[0] != "--version" && args[0] != "version") {
+		return false, fmt.Errorf("unsupported argument; use --version or configure the runtime through AGENTOS_* environment variables")
+	}
+	if output == nil {
+		return false, fmt.Errorf("version output is required")
+	}
+	_, err := fmt.Fprintln(output, version)
+	return true, err
+}
+
+func run(ctx context.Context) (err error) {
+	if ctx == nil {
+		return fmt.Errorf("runtime context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	path := os.Getenv("AGENTOS_DB")
 	if path == "" {
 		path = "agentos.db"
@@ -51,18 +84,18 @@ func run() (err error) {
 	if err != nil {
 		return err
 	}
-	externalActors, err := configuredExternalActors(context.Background(), os.Getenv("AGENTOS_A2A_ACTORS_FILE"), secrets.Environment{})
+	externalActors, err := configuredExternalActors(ctx, os.Getenv("AGENTOS_A2A_ACTORS_FILE"), secrets.Environment{})
 	if err != nil {
 		return err
 	}
-	humanActors, err := configuredHumanActors(context.Background(), os.Getenv("AGENTOS_HUMAN_ACTORS_FILE"), secrets.Environment{})
+	humanActors, err := configuredHumanActors(ctx, os.Getenv("AGENTOS_HUMAN_ACTORS_FILE"), secrets.Environment{})
 	if err != nil {
 		return err
 	}
 	if externalActors == nil && humanActors == nil {
 		return fmt.Errorf("at least one reviewed operator registry is required")
 	}
-	reconcilers, err := configuredEffectReconcilers(context.Background(), os.Getenv("AGENTOS_EFFECT_RECONCILERS_FILE"), secrets.Environment{})
+	reconcilers, err := configuredEffectReconcilers(ctx, os.Getenv("AGENTOS_EFFECT_RECONCILERS_FILE"), secrets.Environment{})
 	if err != nil {
 		return err
 	}
@@ -73,10 +106,10 @@ func run() (err error) {
 		return err
 	}
 	service := app.New(events.NewGateway(l))
-	if _, err := service.Recover(context.Background()); err != nil {
+	if _, err := service.Recover(ctx); err != nil {
 		return fmt.Errorf("recover durable runtime before serving: %w", err)
 	}
-	effectRecovery, err := effects.NewReconciliationService(l).Recover(context.Background(), reconcilers)
+	effectRecovery, err := effects.NewReconciliationService(l).Recover(ctx, reconcilers)
 	if err != nil {
 		return fmt.Errorf("recover effect obligations before serving: %w", err)
 	}
@@ -92,11 +125,54 @@ func run() (err error) {
 		mux.Handle("/", gateway.NewA2A(operator, externalActors, publicURL))
 	}
 	s := &http.Server{Addr: listenAddress, Handler: mux, TLSConfig: tlsConfig, MaxHeaderBytes: 32 << 10, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: time.Minute}
-	log.Printf("Agent OS listening on %s", s.Addr)
-	if tlsConfig != nil {
-		return s.ListenAndServeTLS(os.Getenv("AGENTOS_TLS_CERT_FILE"), os.Getenv("AGENTOS_TLS_KEY_FILE"))
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", s.Addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", s.Addr, err)
 	}
-	return s.ListenAndServe()
+	log.Printf("Agent OS listening on %s", listener.Addr())
+	return serve(ctx, s, listener, os.Getenv("AGENTOS_TLS_CERT_FILE"), os.Getenv("AGENTOS_TLS_KEY_FILE"))
+}
+
+func serve(ctx context.Context, server *http.Server, listener net.Listener, certFile, keyFile string) error {
+	if listener == nil {
+		return fmt.Errorf("runtime context, server, and listener are required")
+	}
+	if ctx == nil || server == nil {
+		_ = listener.Close()
+		return fmt.Errorf("runtime context, server, and listener are required")
+	}
+	if err := ctx.Err(); err != nil {
+		_ = listener.Close()
+		return err
+	}
+	result := make(chan error, 1)
+	go func() {
+		if server.TLSConfig != nil {
+			result <- server.ServeTLS(listener, certFile, keyFile)
+			return
+		}
+		result <- server.Serve(listener)
+	}()
+
+	select {
+	case err := <-result:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		shutdownErr := server.Shutdown(shutdownCtx)
+		if shutdownErr != nil {
+			shutdownErr = errors.Join(shutdownErr, server.Close())
+		}
+		serveErr := <-result
+		if errors.Is(serveErr, http.ErrServerClosed) {
+			serveErr = nil
+		}
+		return errors.Join(shutdownErr, serveErr)
+	}
 }
 
 func configuredHumanActors(ctx context.Context, path string, source secrets.Source) (*gateway.HumanActorRegistry, error) {
