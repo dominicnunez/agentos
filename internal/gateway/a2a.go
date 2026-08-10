@@ -29,10 +29,9 @@ type A2A struct {
 func NewA2A(service *intake.Service, actor ExternalActor) *A2A {
 	return &A2A{
 		service: service,
-		principal: intake.Principal{
-			ID: actor.ID, Kind: core.PrincipalExternalAgent, OrganizationID: actor.OrganizationID,
-			Channel: intake.ChannelA2A, Capabilities: actor.Capabilities,
-		},
+		principal: operatorPrincipal(
+			actor.ID, core.PrincipalExternalAgent, actor.OrganizationID, intake.ChannelA2A, actor.Capabilities,
+		),
 		publicURL: actor.PublicURL, bearerToken: actor.BearerToken,
 	}
 }

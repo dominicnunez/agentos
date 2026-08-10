@@ -368,8 +368,17 @@ func TestRecoverRetriesDeterministicWorkAndBlocksUncertainAgentWork(t *testing.T
 }
 
 func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
-	for _, stage := range []string{"input_durable", "task_resumed", "completion_verified"} {
-		t.Run(stage, func(t *testing.T) {
+	tests := []struct {
+		name, stage string
+		legacy      bool
+	}{
+		{name: "input_durable", stage: "input_durable"},
+		{name: "task_resumed", stage: "task_resumed"},
+		{name: "completion_verified", stage: "completion_verified"},
+		{name: "legacy_input_durable", stage: "input_durable", legacy: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
 			l, err := ledger.Open(":memory:")
 			if err != nil {
@@ -382,16 +391,20 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 			if err != nil || result.Task.Status != core.TaskBlocked {
 				t.Fatalf("submit=%+v err=%v", result, err)
 			}
+			inputPayload := any(events.OperatorInputReceivedPayload{
+				MessageID: "message-1", Text: "approved task input", SourcePrincipalID: "hermes",
+				SourcePrincipalKind: string(core.PrincipalExternalAgent), SourceChannel: "A2A",
+			})
+			if test.legacy {
+				inputPayload = map[string]string{"text": "approved task input", "source_external_actor": "hermes"}
+			}
 			inputEvent, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
 				OrganizationID: "org-1",
 				EventType:      "A2A_INPUT_RECEIVED",
 				SourceActorID:  "hermes",
 				TaskID:         string(result.Task.ID),
 				CorrelationID:  "request-1",
-				Payload: events.OperatorInputReceivedPayload{
-					MessageID: "message-1", Text: "approved task input", SourcePrincipalID: "hermes",
-					SourcePrincipalKind: string(core.PrincipalExternalAgent), SourceChannel: "A2A",
-				},
+				Payload:        inputPayload,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -401,7 +414,7 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 				t.Fatal(err)
 			}
 			state := snapshot.Tasks[result.Task.ID]
-			if stage != "input_durable" {
+			if test.stage != "input_durable" {
 				task := state.Value
 				task.Status = core.TaskPending
 				if err := service.state.SaveTask(ctx, "org-1", "TASK_RESUMED", "runtime", "request-1", state.Version+1, task, map[string]string{"input_event_ref": inputEvent.EventID}); err != nil {
@@ -409,7 +422,7 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 				}
 				state = projections.Versioned[core.Task]{Version: state.Version + 1, CorrelationID: "request-1", Value: task}
 			}
-			if stage == "completion_verified" {
+			if test.stage == "completion_verified" {
 				task := state.Value
 				task.Status = core.TaskRunning
 				if err := service.state.SaveTask(ctx, "org-1", "EXECUTION_STARTED", "runtime", "request-1", state.Version+1, task, map[string]string{"input_event_ref": inputEvent.EventID}); err != nil {

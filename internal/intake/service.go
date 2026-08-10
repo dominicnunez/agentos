@@ -129,9 +129,18 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 			return View{}, fmt.Errorf("%w: submit work", ErrUnavailable)
 		}
 	} else {
+		initial, found := initialMessage(stream)
+		if !found {
+			return View{}, fmt.Errorf("%w: work has no durable initial message", ErrUnavailable)
+		}
+		initialIDMatches := initial.MessageID == message.MessageID
+		initialReplay := initialIDMatches && initial.Text == message.Text
+		if initialIDMatches && !initialReplay {
+			return View{}, fmt.Errorf("%w: initial message id is bound to different content", ErrConflict)
+		}
 		switch externalState(stream) {
 		case StateInputRequired:
-			if matchesOriginalInstruction(stream, message.Text) {
+			if initialReplay {
 				if !principal.Allowed(CapabilityReadStatus) {
 					return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
 				}
@@ -157,10 +166,10 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 				}
 			}
 		case StateWorking, StateCompleted, StateFailed:
-			if !matchesOriginalInstruction(stream, message.Text) && !matchesDurableInput(stream, principal, message) {
+			if !initialReplay && !matchesDurableInput(stream, principal, message) {
 				return View{}, fmt.Errorf("%w: conversation is bound to different work", ErrConflict)
 			}
-			if !principal.Allowed(CapabilityReadStatus) && !matchesDurableInput(stream, principal, message) {
+			if !principal.Allowed(CapabilityReadStatus) {
 				return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
 			}
 		default:
@@ -260,7 +269,7 @@ func streamTaskID(stream []events.Event) string {
 	return ""
 }
 
-func matchesOriginalInstruction(stream []events.Event, statement string) bool {
+func initialMessage(stream []events.Event) (Message, bool) {
 	for _, event := range stream {
 		if event.EventType != "INTENT_CREATED" {
 			continue
@@ -268,10 +277,13 @@ func matchesOriginalInstruction(stream []events.Event, statement string) bool {
 		var payload events.ProjectionEventPayload
 		var intent core.Intent
 		if json.Unmarshal(event.Payload, &payload) == nil && json.Unmarshal(payload.Projection.Value, &intent) == nil {
-			return intent.OriginalInstruction == statement
+			if intent.SourceMessageID == "" || intent.OriginalInstruction == "" {
+				return Message{}, false
+			}
+			return Message{MessageID: intent.SourceMessageID, Text: intent.OriginalInstruction}, true
 		}
 	}
-	return false
+	return Message{}, false
 }
 
 func matchesDurableInput(stream []events.Event, principal Principal, message Message) bool {

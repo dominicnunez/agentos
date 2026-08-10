@@ -26,10 +26,9 @@ type Human struct {
 func NewHuman(service *intake.Service, actor HumanActor) *Human {
 	return &Human{
 		service: service,
-		principal: intake.Principal{
-			ID: actor.ID, Kind: core.PrincipalHuman, OrganizationID: actor.OrganizationID,
-			Channel: intake.ChannelHumanDirect, Capabilities: actor.Capabilities,
-		},
+		principal: operatorPrincipal(
+			actor.ID, core.PrincipalHuman, actor.OrganizationID, intake.ChannelHumanDirect, actor.Capabilities,
+		),
 		bearerToken: actor.BearerToken,
 	}
 }
@@ -84,15 +83,15 @@ func (h *Human) handleMessage(w http.ResponseWriter, r *http.Request) {
 		ConversationID: request.ConversationID, MessageID: request.MessageID,
 		Text: request.Text, RequestedKind: request.ExecutionKind,
 	})
-	if err != nil {
-		h.writeIntakeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, humanResponse(view))
+	h.writeView(w, view, err)
 }
 
 func (h *Human) handleGetTask(w http.ResponseWriter, r *http.Request, taskID string) {
 	view, err := h.service.Get(r.Context(), h.principal, taskID)
+	h.writeView(w, view, err)
+}
+
+func (h *Human) writeView(w http.ResponseWriter, view intake.View, err error) {
 	if err != nil {
 		h.writeIntakeError(w, err)
 		return

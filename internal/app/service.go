@@ -478,12 +478,53 @@ func externalInputForTask(stream []events.Event, taskID core.ID) (events.Event, 
 		if found.EventID != "" {
 			return events.Event{}, events.OperatorInputReceivedPayload{}, false, fmt.Errorf("task has multiple durable external input events")
 		}
-		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.MessageID == "" || payload.Text == "" || payload.SourcePrincipalID == "" || payload.SourcePrincipalKind == "" || payload.SourceChannel == "" || payload.SourcePrincipalID != event.SourceActorID {
+		var err error
+		payload, err = decodeOperatorInput(event)
+		if err != nil {
 			return events.Event{}, events.OperatorInputReceivedPayload{}, false, fmt.Errorf("durable external input event is invalid")
 		}
 		found = event
 	}
 	return found, payload, found.EventID != "", nil
+}
+
+func decodeOperatorInput(event events.Event) (events.OperatorInputReceivedPayload, error) {
+	var current events.OperatorInputReceivedPayload
+	if err := json.Unmarshal(event.Payload, &current); err == nil && validOperatorInput(event, current) {
+		return current, nil
+	}
+	if event.EventType != "A2A_INPUT_RECEIVED" || event.EventID == "" {
+		return events.OperatorInputReceivedPayload{}, fmt.Errorf("unsupported operator input contract")
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(event.Payload, &fields); err != nil || len(fields) != 2 {
+		return events.OperatorInputReceivedPayload{}, fmt.Errorf("invalid legacy A2A input contract")
+	}
+	var text, sourceExternalActor string
+	if err := json.Unmarshal(fields["text"], &text); err != nil || json.Unmarshal(fields["source_external_actor"], &sourceExternalActor) != nil || text == "" || sourceExternalActor == "" || sourceExternalActor != event.SourceActorID {
+		return events.OperatorInputReceivedPayload{}, fmt.Errorf("invalid legacy A2A input contract")
+	}
+	return events.OperatorInputReceivedPayload{
+		MessageID:           "legacy-a2a-" + event.EventID,
+		Text:                text,
+		SourcePrincipalID:   sourceExternalActor,
+		SourcePrincipalKind: string(core.PrincipalExternalAgent),
+		SourceChannel:       "A2A",
+	}, nil
+}
+
+func validOperatorInput(event events.Event, input events.OperatorInputReceivedPayload) bool {
+	if input.MessageID == "" || input.Text == "" || input.SourcePrincipalID == "" || input.SourcePrincipalID != event.SourceActorID {
+		return false
+	}
+	switch event.EventType {
+	case "A2A_INPUT_RECEIVED":
+		return input.SourcePrincipalKind == string(core.PrincipalExternalAgent) && input.SourceChannel == "A2A"
+	case "HUMAN_INPUT_RECEIVED":
+		return input.SourcePrincipalKind == string(core.PrincipalHuman) && input.SourceChannel == "HUMAN_DIRECT"
+	default:
+		return false
+	}
 }
 
 func operatorInputEventType(channel string) (string, error) {

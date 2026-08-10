@@ -135,6 +135,38 @@ func TestHumanAndHermesCanContinueSharedWorkWithoutSharingIdentity(t *testing.T)
 	}
 }
 
+func TestIntakeUsesDurableMessageIDsForContinuationAndReplayAuthorization(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := New(app.New(events.NewGateway(store)))
+	human := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	hermes := testPrincipal("hermes-1", core.PrincipalExternalAgent, ChannelA2A)
+
+	const repeatedText = "choose the launch date"
+	view, err := service.Handle(ctx, human, Message{ConversationID: "same-text", MessageID: "initial-message", Text: repeatedText, RequestedKind: core.ExecutionHuman})
+	if err != nil || view.State != StateInputRequired {
+		t.Fatalf("blocked work=%+v err=%v", view, err)
+	}
+	view, err = service.Handle(ctx, hermes, Message{ConversationID: "same-text", MessageID: "continuation-message", Text: repeatedText})
+	if err != nil || view.State != StateCompleted {
+		t.Fatalf("same-text continuation=%+v err=%v", view, err)
+	}
+
+	submitOnly := human
+	submitOnly.Capabilities = []string{CapabilitySubmitWork}
+	message := Message{ConversationID: "read-guard", MessageID: "submission", Text: "echo private status"}
+	if _, err := service.Handle(ctx, submitOnly, message); err != nil {
+		t.Fatalf("initial submission failed: %v", err)
+	}
+	if _, err := service.Handle(ctx, submitOnly, message); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("existing-work replay without read capability err=%v", err)
+	}
+}
+
 func testPrincipal(id string, kind core.PrincipalKind, channel string) Principal {
 	return Principal{
 		ID: id, Kind: kind, OrganizationID: "org-1", Channel: channel,
