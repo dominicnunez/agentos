@@ -25,20 +25,46 @@ The adapter must:
 Codex approval handlers are not Agent OS approval handlers. A Codex request for
 permission must fail; it must never create or consume a `HumanApproval`.
 
-## SDK prerequisite
+## SDK boundary
 
-The current SDK high-level `RunOptions` exposes approval policy but does not
-forward `cwd` or sandbox settings into `thread/start`. Although the lower-level
-protocol types support both, duplicating the SDK's turn lifecycle inside Agent
-OS would create a second, fragile protocol implementation.
+The pinned SDK revision includes the reviewed high-level confinement controls:
+an absolute working directory on both thread and turn requests, thread-scoped
+configuration, read-only sandbox mode, and granular restricted-readable roots.
+It also normalizes or rejects turn working directories at the protocol
+boundary. Agent OS therefore uses the SDK's single turn lifecycle instead of
+maintaining a second protocol implementation.
 
-Before enabling this provider, extend the SDK's high-level run options to carry
-an absolute working directory and explicit sandbox mode through
-`buildThreadParams`, with tests proving those fields are sent. Agent OS must
-then pin the reviewed SDK revision and fail startup if the restricted profile
-cannot be established.
+The provider still treats SDK and Codex output as untrusted. A turn is rejected
+if the stream reports an error, lacks token telemetry, attempts a command, file
+change, web search, MCP call, or returns any item outside the narrow
+conversation-only allowlist.
 
 The Agent OS service now accepts a configured `ModelAdapter` and derives each
 `ExecutionContextManifest` from that adapter's descriptor. This removes the
 previous fake-provider hard-coding and is the integration seam for the secured
 Codex adapter.
+
+## Deployment configuration
+
+The provider remains disabled by default. Selecting it requires all four exact
+settings:
+
+- `AGENTOS_MODEL_PROVIDER=codex-subscription`
+- `AGENTOS_CODEX_BINARY` set to an absolute, clean path to a reviewed regular
+  Codex binary (symlinks are rejected)
+- `AGENTOS_CODEX_CREDENTIALS_FILE` set to an absolute, clean path to an SDK
+  credential file (symlinks and group/world-readable Unix files are rejected)
+- `AGENTOS_CODEX_MODEL` set to the exact model identifier
+
+The app-server receives a fresh isolated home and a minimal child environment.
+Each inference receives a fresh empty working directory, `never` approval,
+read-only sandboxing, no platform-default readable roots, disabled web search,
+and a 20-second queue-and-execution deadline, leaving headroom inside the HTTP
+server's 30-second response window. The outer Agent OS submission boundary has
+a context-aware 25-second deadline that includes service serialization. Shell,
+unified execution, multi-agent collaboration, hooks, goals, memory, remote
+plugins, network proxying, and web
+search are disabled in the thread-scoped Codex configuration before inference
+begins. Only the credential refresh callback is registered; all
+authority-bearing callbacks fail with method-not-found. Subscription cost
+remains unknown rather than being invented.

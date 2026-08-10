@@ -20,6 +20,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/effects"
 	"github.com/dominicnunez/agentos/internal/effectstatus"
 	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/gateway"
 	"github.com/dominicnunez/agentos/internal/intake"
 	"github.com/dominicnunez/agentos/internal/ledger"
@@ -105,7 +106,14 @@ func run(ctx context.Context) (err error) {
 	if err := validatePublicURL(publicURL, remote, externalActors != nil, tlsConfig != nil); err != nil {
 		return err
 	}
-	service := app.New(events.NewGateway(l))
+	model, closeModel, err := configuredModel(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		err = errors.Join(err, closeModel())
+	}()
+	service := app.NewWithModel(events.NewGateway(l), model)
 	if _, err := service.Recover(ctx); err != nil {
 		return fmt.Errorf("recover durable runtime before serving: %w", err)
 	}
@@ -131,6 +139,26 @@ func run(ctx context.Context) (err error) {
 	}
 	log.Printf("Agent OS listening on %s", listener.Addr())
 	return serve(ctx, s, listener, os.Getenv("AGENTOS_TLS_CERT_FILE"), os.Getenv("AGENTOS_TLS_KEY_FILE"))
+}
+
+func configuredModel(ctx context.Context) (execution.ModelAdapter, func() error, error) {
+	provider := os.Getenv("AGENTOS_MODEL_PROVIDER")
+	switch provider {
+	case "", "fake":
+		return execution.FakeModel{}, func() error { return nil }, nil
+	case "codex-subscription":
+		adapter, err := execution.NewCodexSubscription(ctx, execution.CodexSubscriptionConfig{
+			BinaryPath:      os.Getenv("AGENTOS_CODEX_BINARY"),
+			CredentialsPath: os.Getenv("AGENTOS_CODEX_CREDENTIALS_FILE"),
+			Model:           os.Getenv("AGENTOS_CODEX_MODEL"),
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("configure Codex subscription provider: %w", err)
+		}
+		return adapter, adapter.Close, nil
+	default:
+		return nil, nil, fmt.Errorf("AGENTOS_MODEL_PROVIDER must be fake or codex-subscription")
+	}
 }
 
 func serve(ctx context.Context, server *http.Server, listener net.Listener, certFile, keyFile string) error {

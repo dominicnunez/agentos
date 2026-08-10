@@ -65,6 +65,35 @@ func TestPrintVersionDoesNotStartRuntime(t *testing.T) {
 	}
 }
 
+func TestConfiguredModelIsFakeUnlessExplicitlySelected(t *testing.T) {
+	t.Setenv("AGENTOS_MODEL_PROVIDER", "")
+	model, closeModel, err := configuredModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if descriptor := model.Descriptor(); descriptor.Provider != "fake" {
+		t.Fatalf("descriptor=%+v", descriptor)
+	}
+	if err := closeModel(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("AGENTOS_MODEL_PROVIDER", "unreviewed")
+	if _, _, err := configuredModel(context.Background()); err == nil {
+		t.Fatal("unknown provider was accepted")
+	}
+}
+
+func TestConfiguredCodexProviderFailsClosedWithoutExactFiles(t *testing.T) {
+	t.Setenv("AGENTOS_MODEL_PROVIDER", "codex-subscription")
+	t.Setenv("AGENTOS_CODEX_BINARY", "")
+	t.Setenv("AGENTOS_CODEX_CREDENTIALS_FILE", "")
+	t.Setenv("AGENTOS_CODEX_MODEL", "gpt-test")
+	if _, _, err := configuredModel(context.Background()); err == nil {
+		t.Fatal("incomplete Codex provider configuration was accepted")
+	}
+}
+
 func TestConfiguredHumanActorsResolvesReviewedRole(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "human-actors.json")
 	config := `{"actors":[{"id":"human-1","organization_id":"org-1","status":"ACTIVE","role":"OPERATOR","work_scope":"ORGANIZATION","token_ref":"HUMAN_1_TOKEN","review_ref":"security-review-2","expires_at":"2099-01-01T00:00:00Z","max_concurrent":2,"requests_per_minute":30}]}`
