@@ -106,7 +106,7 @@ policy:
       from:
         module: ledger
       to:
-        modules: [authority, core, events]
+        modules: [approvals, authority, core, events]
 
     - name: projection-domain
       from:
@@ -169,3 +169,4 @@ analysis:
   table_owners:
     - module: ledger
       tables: [consumed_approvals, events, inbox, records]
+
