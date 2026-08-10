@@ -154,8 +154,8 @@ func (g *Gateway) PublishAgentDraft(ctx context.Context, organizationID, actorID
 	if !agentTypes[draft.EventType] {
 		return Event{}, fmt.Errorf("event type %s is not agent-proposable", draft.EventType)
 	}
-	if draft.EventType == "TASK_BLOCKED" && (!validRecipient(draft.RecipientScope) || draft.RecipientID == "") {
-		return Event{}, fmt.Errorf("task blocked draft requires an upward recipient")
+	if draft.EventType == "TASK_BLOCKED" && (draft.TaskID == "" || draft.RecipientScope != RecipientTask || draft.RecipientID == "") {
+		return Event{}, fmt.Errorf("task blocked draft requires a source child task and parent task recipient")
 	}
 	trusted := TrustedDraft{OrganizationID: organizationID, EventType: draft.EventType, SourceActorID: actorID, SourceExecutionID: executionID, RecipientScope: draft.RecipientScope, RecipientID: draft.RecipientID, TaskID: draft.TaskID, ArtifactRefs: draft.ArtifactRefs, Payload: draft.Payload, CorrelationID: correlationID}
 	if err := g.validateAddressed(ctx, trusted, true); err != nil {

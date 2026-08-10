@@ -272,43 +272,65 @@ func TestBlockedChildReturnsControlToParentWithoutAuthorityExpansion(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recovery.TasksExecuted != 1 {
+	if recovery.TasksExecuted != 2 {
 		t.Fatalf("recovery=%+v", recovery)
 	}
 	snapshot, err := repository.Load(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Tasks[child.ID].Value.Status != core.TaskBlocked || snapshot.Tasks[parent.ID].Value.Status != core.TaskPending {
+	if snapshot.Tasks[child.ID].Value.Status != core.TaskBlocked || snapshot.Tasks[parent.ID].Value.Status != core.TaskBlocked {
 		t.Fatalf("blocked child or governing parent state changed unexpectedly: child=%+v parent=%+v", snapshot.Tasks[child.ID], snapshot.Tasks[parent.ID])
 	}
 	if err := service.ValidateAddressedRoute(ctx, events.AddressedRoute{OrganizationID: string(organization.ID), EventType: "TASK_BLOCKED", SourceActorID: string(agent.ID), ValidateSource: true, RecipientScope: events.RecipientTask, RecipientID: string(child.ID), TaskID: string(child.ID)}); err == nil {
 		t.Fatal("blocked child could route its escalation somewhere other than its parent")
 	}
+	if err := service.ValidateAddressedRoute(ctx, events.AddressedRoute{OrganizationID: string(organization.ID), EventType: "TASK_BLOCKED", SourceActorID: string(agent.ID), ValidateSource: true, RecipientScope: events.RecipientTask, RecipientID: string(parent.ID)}); err == nil {
+		t.Fatal("blocked event without a source child task was accepted")
+	}
+	if err := service.ValidateAddressedRoute(ctx, events.AddressedRoute{OrganizationID: string(organization.ID), EventType: "TASK_BLOCKED", SourceActorID: string(agent.ID), ValidateSource: true, RecipientScope: events.RecipientTask, RecipientID: string(parent.ID), TaskID: string(parent.ID)}); err == nil {
+		t.Fatal("root task was accepted as a blocked child source")
+	}
 	upward, err := gateway.Inbox(ctx, events.RecipientTask, string(parent.ID))
-	if err != nil || len(upward) != 1 {
+	if err != nil || len(upward) != 0 {
 		t.Fatalf("parent remediation inbox=%+v err=%v", upward, err)
 	}
-	event := upward[0]
-	if event.EventType != "TASK_BLOCKED" || event.TaskID != string(child.ID) || event.RecipientID != string(parent.ID) || len(event.AuthorizationRefs) != 0 {
-		t.Fatalf("blocked work gained authority or lost its upward route: %+v", event)
+	stream, err := l.Events(ctx, "request-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blockedEvent events.Event
+	var parentManifest core.ExecutionContextManifest
+	observed := false
+	for _, event := range stream {
+		if strings.HasPrefix(event.EventType, "CAPABILITY_") || strings.HasPrefix(event.EventType, "APPROVAL_") {
+			t.Fatalf("blocked worker changed authority: %+v", event)
+		}
+		if event.EventType == "TASK_BLOCKED" && event.TaskID == string(child.ID) && event.RecipientID == string(parent.ID) {
+			blockedEvent = event
+		}
+		if event.EventType == "EXECUTION_CONTEXT_MANIFESTED" && event.TaskID == string(parent.ID) {
+			if err := json.Unmarshal(event.Payload, &parentManifest); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if event.EventType == "INBOX_EVENTS_OBSERVED" && event.TaskID == string(parent.ID) {
+			observed = true
+		}
+	}
+	if blockedEvent.EventID == "" || len(blockedEvent.AuthorizationRefs) != 0 {
+		t.Fatalf("blocked work gained authority or lost its upward route: %+v", blockedEvent)
 	}
 	var payload events.ProjectionEventPayload
-	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+	if err := json.Unmarshal(blockedEvent.Payload, &payload); err != nil {
 		t.Fatal(err)
 	}
 	var detail events.TaskBlockedPayload
 	if err := json.Unmarshal(payload.Detail, &detail); err != nil || detail.Reason == "" || detail.Missing == "" || detail.WhyNeeded == "" || detail.WorkCompleted == "" {
 		t.Fatalf("blocked-work contract=%+v err=%v", detail, err)
 	}
-	stream, err := l.Events(ctx, "request-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, event := range stream {
-		if strings.HasPrefix(event.EventType, "CAPABILITY_") || strings.HasPrefix(event.EventType, "APPROVAL_") {
-			t.Fatalf("blocked worker changed authority: %+v", event)
-		}
+	if !observed || len(parentManifest.EventRefs) != 1 || parentManifest.EventRefs[0] != blockedEvent.EventID {
+		t.Fatalf("parent did not receive a bounded remediation pass: manifest=%+v observed=%v blocked=%+v", parentManifest, observed, blockedEvent)
 	}
 }
 

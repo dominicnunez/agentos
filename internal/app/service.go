@@ -125,8 +125,13 @@ func (s *Service) ValidateAddressedRoute(ctx context.Context, route events.Addre
 	default:
 		return fmt.Errorf("unsupported addressed event recipient scope")
 	}
-	if route.EventType == "TASK_BLOCKED" && sourceTask.ParentID != "" && (route.RecipientScope != events.RecipientTask || core.ID(route.RecipientID) != sourceTask.ParentID) {
-		return fmt.Errorf("blocked child task must return control to its parent task")
+	if route.EventType == "TASK_BLOCKED" {
+		if route.TaskID == "" || sourceTask.ParentID == "" {
+			return fmt.Errorf("blocked event source must be a child task with an existing parent")
+		}
+		if route.RecipientScope != events.RecipientTask || core.ID(route.RecipientID) != sourceTask.ParentID {
+			return fmt.Errorf("blocked child task must return control to its parent task")
+		}
 	}
 	return nil
 }
@@ -387,12 +392,20 @@ func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {
 		if err != nil {
 			return nil, fmt.Errorf("validate durable task graph: %w", err)
 		}
+		remediation := false
 		if len(ready) == 0 {
-			return runs, nil
+			ready, err = s.scheduler.RemediationReady(tasks)
+			if err != nil {
+				return nil, fmt.Errorf("validate durable remediation graph: %w", err)
+			}
+			if len(ready) == 0 {
+				return runs, nil
+			}
+			remediation = true
 		}
 		for _, task := range ready {
 			state := snapshot.Tasks[task.ID]
-			run, err := s.executeTask(ctx, snapshot, state)
+			run, err := s.executeTask(ctx, snapshot, state, remediation)
 			if err != nil {
 				return nil, err
 			}
@@ -401,7 +414,7 @@ func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {
 	}
 }
 
-func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot, state projections.Versioned[core.Task]) (taskRun, error) {
+func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot, state projections.Versioned[core.Task], remediation bool) (taskRun, error) {
 	task := state.Value
 	organizationID, err := taskOrganization(snapshot, task)
 	if err != nil {
@@ -423,7 +436,11 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	}
 
 	task.Status = core.TaskRunning
-	if err := s.state.SaveTask(ctx, organizationID, "EXECUTION_STARTED", "runtime", state.CorrelationID, state.Version+1, task, nil); err != nil {
+	var startDetail any
+	if remediation {
+		startDetail = map[string]any{"mode": "BLOCKED_CHILD_REMEDIATION"}
+	}
+	if err := s.state.SaveTask(ctx, organizationID, "EXECUTION_STARTED", "runtime", state.CorrelationID, state.Version+1, task, startDetail); err != nil {
 		return taskRun{}, fmt.Errorf("persist execution start for task %s: %w", task.ID, err)
 	}
 	executionID := core.ID(fmt.Sprintf("execution-%s-v%d", task.ID, state.Version+1))
@@ -480,6 +497,20 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	}
 	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "EXECUTION_FINISHED", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: map[string]any{"status": outcome.Status}, CorrelationID: state.CorrelationID}); err != nil {
 		return taskRun{}, fmt.Errorf("persist execution finish for task %s: %w", task.ID, err)
+	}
+	if remediation {
+		task.Status = core.TaskBlocked
+		detail := events.TaskBlockedPayload{
+			Reason:        "a direct child remains blocked after the parent remediation pass",
+			Missing:       "an authorized remediation decision for the blocked child",
+			WhyNeeded:     "a blocked dependency cannot be treated as completed or gain authority automatically",
+			WorkCompleted: "the parent observed the blocked-work event and completed a bounded remediation pass",
+		}
+		running := projections.Versioned[core.Task]{Version: state.Version + 1, CorrelationID: state.CorrelationID, Value: task}
+		if err := s.saveBlockedTask(ctx, snapshot, running, organizationID, task, detail); err != nil {
+			return taskRun{}, fmt.Errorf("persist remediation-required parent task %s: %w", task.ID, err)
+		}
+		return taskRun{Outcome: outcome, ExecutionError: executionErr}, nil
 	}
 	candidate := events.TrustedDraft{OrganizationID: string(organizationID), EventType: "CANDIDATE_COMPLETE", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: map[string]any{"tool_invocation_id": outcome.ToolInvocationID}, CorrelationID: state.CorrelationID}
 	if task.ExecutionKind == core.ExecutionAgent {

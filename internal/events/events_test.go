@@ -109,6 +109,16 @@ func TestTaskBlockedRequiresUpwardRouteAndContract(t *testing.T) {
 		t.Fatal("unaddressed blocked work was accepted")
 	}
 	invalid = valid
+	invalid.TaskID = ""
+	if _, err := gateway.PublishAgentDraft(context.Background(), "org", "agent", "execution", "correlation", invalid); err == nil {
+		t.Fatal("blocked work without a source child task was accepted")
+	}
+	invalid = valid
+	invalid.RecipientScope = RecipientAgent
+	if _, err := gateway.PublishAgentDraft(context.Background(), "org", "agent", "execution", "correlation", invalid); err == nil {
+		t.Fatal("blocked work addressed outside the parent task scope was accepted")
+	}
+	invalid = valid
 	invalid.Payload = TaskBlockedPayload{Reason: "missing access"}
 	if _, err := gateway.PublishAgentDraft(context.Background(), "org", "agent", "execution", "correlation", invalid); err == nil {
 		t.Fatal("incomplete blocked-work contract was accepted")
