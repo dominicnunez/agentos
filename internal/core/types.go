@@ -228,8 +228,10 @@ type EffectObligation struct {
 	ID                       ID                `json:"effect_obligation_id"`
 	OrganizationID           ID                `json:"organization_id"`
 	TaskID                   ID                `json:"task_id"`
+	ActorID                  ID                `json:"actor_id"`
 	Action                   string            `json:"action"`
 	Resource                 string            `json:"resource"`
+	Scope                    string            `json:"scope"`
 	ConsequenceBoundary      string            `json:"consequence_boundary,omitempty"`
 	Descriptor               string            `json:"canonical_effect_descriptor"`
 	EffectFingerprint        string            `json:"effect_fingerprint"`
