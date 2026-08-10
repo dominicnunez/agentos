@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/approvals"
@@ -17,7 +18,7 @@ import (
 
 type Records interface {
 	AppendRecord(context.Context, string, string, string, string, []string, []string, string, string, int, any) error
-	ConsumeApprovalAndAppendRecord(context.Context, string, string, string, string, string, []string, []string, string, string, int, any) error
+	AuthorizeAndAppendEffectAttempt(context.Context, string, string, string, string, string, string, []string, string, string, bool, []string, string, string, int, any) (core.AuthorizationTrace, error)
 	Records(context.Context, string, string) ([][]byte, error)
 }
 type Adapter interface {
@@ -32,13 +33,14 @@ type Coordinator struct {
 	approvals ApprovalReader
 }
 
-func NewWithApprovals(r Records, a Adapter, approvalReader ApprovalReader) *Coordinator {
+func New(r Records, a Adapter, approvalReader ApprovalReader) *Coordinator {
 	return &Coordinator{records: r, adapter: a, approvals: approvalReader}
 }
 
 var (
-	ErrEffectNotPrepared = errors.New("effect obligation is not persisted")
-	ErrEffectUncertain   = errors.New("effect attempt has uncertain outcome")
+	ErrEffectNotPrepared  = errors.New("effect obligation is not persisted")
+	ErrEffectUncertain    = errors.New("effect attempt has uncertain outcome")
+	ErrEffectUnauthorized = errors.New("effect is not authorized at time of use")
 )
 
 func Fingerprint(action, resource string, args any) (string, error) {
@@ -154,17 +156,19 @@ func (c *Coordinator) Execute(ctx context.Context, o core.EffectObligation) (cor
 	if c.adapter == nil {
 		return o, fmt.Errorf("effect adapter is required")
 	}
+	attempt := o
 	now := time.Now().UTC()
-	o.Status = core.EffectAttempted
-	o.AttemptCount++
-	o.LastAttemptAt = &now
-	if approval.SingleUse {
-		if err := c.records.ConsumeApprovalAndAppendRecord(ctx, string(o.OrganizationID), string(o.TaskID), string(approval.ID), o.EffectFingerprint, string(o.ID), o.AuthorizationRefs, o.ConfirmationEvidenceRefs, "effect", string(o.ID), version+1, o); err != nil {
-			return o, fmt.Errorf("single-use approval unavailable: %w", err)
-		}
-	} else if err := c.record(ctx, o, version+1); err != nil {
-		return o, err
+	attempt.Status = core.EffectAttempted
+	attempt.AttemptCount++
+	attempt.LastAttemptAt = &now
+	trace, err := c.records.AuthorizeAndAppendEffectAttempt(ctx, string(o.OrganizationID), string(o.TaskID), string(o.ActorID), o.Action, o.Resource, o.Scope, o.AuthorizationRefs, string(approval.ID), o.EffectFingerprint, approval.SingleUse, o.ConfirmationEvidenceRefs, "effect", string(o.ID), version+1, attempt)
+	if err != nil {
+		return o, fmt.Errorf("begin authorized effect attempt: %w", err)
 	}
+	if !trace.Allowed {
+		return o, fmt.Errorf("%w: %s", ErrEffectUnauthorized, trace.Reason)
+	}
+	o = attempt
 	evidence, err := c.adapter.Apply(ctx, o)
 	if err != nil {
 		o.Status = core.EffectFailed
@@ -198,8 +202,8 @@ func (c *Coordinator) load(ctx context.Context, effectID core.ID) (core.EffectOb
 }
 
 func validateObligation(obligation core.EffectObligation) error {
-	if obligation.ID == "" || obligation.OrganizationID == "" || obligation.TaskID == "" || obligation.Action == "" || obligation.Resource == "" || obligation.EffectFingerprint == "" || obligation.IdempotencyKey == "" {
-		return fmt.Errorf("effect identity, organization, task, action, resource, fingerprint, and idempotency key are required")
+	if obligation.ID == "" || obligation.OrganizationID == "" || obligation.TaskID == "" || obligation.ActorID == "" || obligation.Action == "" || obligation.Resource == "" || obligation.Scope == "" || obligation.EffectFingerprint == "" || obligation.IdempotencyKey == "" || len(obligation.AuthorizationRefs) == 0 {
+		return fmt.Errorf("effect identity, organization, task, actor, action, resource, scope, authorization, fingerprint, and idempotency key are required")
 	}
 	return nil
 }
@@ -218,13 +222,16 @@ func sameEffectIntent(stored, requested core.EffectObligation) bool {
 	return stored.ID == requested.ID &&
 		stored.OrganizationID == requested.OrganizationID &&
 		stored.TaskID == requested.TaskID &&
+		stored.ActorID == requested.ActorID &&
 		stored.Action == requested.Action &&
 		stored.Resource == requested.Resource &&
+		stored.Scope == requested.Scope &&
 		stored.ConsequenceBoundary == requested.ConsequenceBoundary &&
 		stored.Descriptor == requested.Descriptor &&
 		stored.EffectFingerprint == requested.EffectFingerprint &&
 		stored.ApprovalRef == requested.ApprovalRef &&
 		stored.IdempotencyKey == requested.IdempotencyKey &&
+		slices.Equal(stored.AuthorizationRefs, requested.AuthorizationRefs) &&
 		reflect.DeepEqual(stored.ReplayContext, requested.ReplayContext)
 }
 
