@@ -16,7 +16,7 @@ claim.
 | 6 | Child assignment has no unintended positive capability inheritance | Partial | Exact lease matching rejects broader resources; explicit child-assignment coverage remains. |
 | 7 | Human-required action waits for a decision | Covered | `TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision` proves a prepared effect remains unavailable through notification, acknowledgement, restart, unauthorized identity, and mismatched fingerprint until the exact authorized decision is durable. |
 | 8 | Acknowledgement cannot approve | Covered | The same lifecycle test persists `APPROVAL_ACKNOWLEDGED`, verifies no decision timestamp exists, and confirms the effect adapter remains unreachable. |
-| 9 | Freeze/revoke prevents time-of-use action | Covered | `TestFreezeAndRevokePreventEffectAtTimeOfUse` prepares an approved effect, then proves a durable organization freeze and a subsequent durable lease revocation each prevent `ATTEMPTED` and keep the adapter unreachable while recording denial traces. |
+| 9 | Freeze/revoke prevents time-of-use action | Covered | `TestFreezeAndRevokePreventEffectAtTimeOfUse` proves durable freeze and revocation prevent `ATTEMPTED`; `TestApprovalExpiryIsRecheckedInsideAttemptTransaction` proves stale preflight approval state cannot bypass transaction-time expiry. Both keep the adapter unreachable. |
 | 10 | Agent text cannot forge trusted state | Partial | `TestAgentCannotMintTrustedControlEvent`, `TestMessageEnvelopeUsesAuthenticatedIdentity`, and the lateral-message restart test cover control-event minting and sender spoofing; completion and runtime-attestation forgeries remain. |
 | 11 | Candidate completion cannot bypass Completion Engine | Covered | Vertical-slice event ordering and `TestEvaluateRequiresVerifiedSuccess` require verified structured outcome before terminal completion. |
 | 12 | Duplicate delivery cannot duplicate a consequential effect | Covered | `TestSingleUseApprovalIsConsumedBeforeAdapter` proves confirmed-effect redelivery is idempotent and a single-use decision cannot authorize a second effect; the ledger atomically couples consumption with `ATTEMPTED`. |
@@ -27,7 +27,8 @@ claim.
 | 17 | Safe deterministic recovery precedes cognitive recovery | Covered | `TestRecoverRetriesDeterministicWorkAndBlocksUncertainAgentWork` retries deterministic work and refuses blind adaptive replay. |
 | 18 | Hermes discovers, submits, and continues through A2A | Partial | Agent Card, authenticated submission, status, and input persistence are tested; pinned real Hermes interoperability and post-input completion remain. |
 | 19 | A2A identity cannot bypass capability/human approval | Partial | Submission/status/input capabilities and organization binding fail closed; protected-effect integration remains. |
-| 20 | Protected effects use exact approval and durable obligation/reconciliation | Partial | Exact durable approval and replay-complete persist-before-effect transitions are tested, including atomic single-use consumption/attempt; automated reconciliation and production adapters remain deliberately disabled. |
+| 20 | Protected effects use exact approval and durable obligation/reconciliation | Partial | Exact durable approval is reloaded and revalidated in the attempt transaction, with replay-complete persist-before-effect transitions and atomic single-use consumption/attempt; automated reconciliation and production adapters remain deliberately disabled. |
 
 V1 remains incomplete until every row is covered by the required runtime path and
 adversarial regression test.
+
