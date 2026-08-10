@@ -90,7 +90,7 @@ type sendMessageResponse struct {
 	Task a2aTask `json:"task"`
 }
 
-func (a *A2A) serveJSONRPC(w http.ResponseWriter, r *http.Request) {
+func (a *A2A) serveJSONRPC(w http.ResponseWriter, r *http.Request, principal intake.Principal) {
 	defer func() {
 		_ = r.Body.Close()
 	}()
@@ -105,15 +105,15 @@ func (a *A2A) serveJSONRPC(w http.ResponseWriter, r *http.Request) {
 	}
 	switch request.Method {
 	case "SendMessage":
-		a.sendMessage(w, r, request)
+		a.sendMessage(w, r, request, principal)
 	case "GetTask":
-		a.getTask(w, r, request)
+		a.getTask(w, r, request, principal)
 	default:
 		writeRPCError(w, request.ID, rpcMethodNotFound, "A2A method is not supported")
 	}
 }
 
-func (a *A2A) sendMessage(w http.ResponseWriter, r *http.Request, request jsonRPCRequest) {
+func (a *A2A) sendMessage(w http.ResponseWriter, r *http.Request, request jsonRPCRequest, principal intake.Principal) {
 	var params sendMessageParams
 	if err := json.Unmarshal(request.Params, &params); err != nil {
 		writeRPCError(w, request.ID, rpcInvalidParams, "params.message is required")
@@ -129,7 +129,7 @@ func (a *A2A) sendMessage(w http.ResponseWriter, r *http.Request, request jsonRP
 		writeRPCError(w, request.ID, rpcInvalidParams, err.Error())
 		return
 	}
-	view, err := a.service.Handle(r.Context(), a.principal, intake.Message{
+	view, err := a.service.Handle(r.Context(), principal, intake.Message{
 		ConversationID: message.ContextID, MessageID: message.MessageID,
 		Text: message.Parts[0].Text, RequestedKind: kind,
 	})
@@ -140,13 +140,13 @@ func (a *A2A) sendMessage(w http.ResponseWriter, r *http.Request, request jsonRP
 	writeRPCResult(w, request.ID, sendMessageResponse{Task: projectA2ATask(view)})
 }
 
-func (a *A2A) getTask(w http.ResponseWriter, r *http.Request, request jsonRPCRequest) {
+func (a *A2A) getTask(w http.ResponseWriter, r *http.Request, request jsonRPCRequest, principal intake.Principal) {
 	var params getTaskParams
 	if err := json.Unmarshal(request.Params, &params); err != nil || params.ID == "" {
 		writeRPCError(w, request.ID, rpcInvalidParams, "params.id is required")
 		return
 	}
-	view, err := a.service.Get(r.Context(), a.principal, params.ID)
+	view, err := a.service.Get(r.Context(), principal, params.ID)
 	if err != nil {
 		a.writeIntakeError(w, request.ID, err)
 		return

@@ -21,10 +21,37 @@ Requires Go 1.26.5.
 
 ```sh
 go test ./...
-AGENTOS_OPERATOR_TOKEN=agent-change-me \
-AGENTOS_HUMAN_TOKEN=human-change-me \
+AGENTOS_A2A_ACTORS_FILE=./a2a-actors.json \
+AGENTOS_A2A_AGENT_TOKEN=replace-with-at-least-32-random-characters \
+AGENTOS_HUMAN_TOKEN=replace-with-another-32-character-secret \
 go run ./cmd/agentos
 ```
+
+`a2a-actors.json` is a trusted deployment input. A minimal least-privilege
+registry entry is:
+
+```json
+{
+  "actors": [{
+    "id": "assistant-agent",
+    "organization_id": "org-default",
+    "status": "ACTIVE",
+    "role": "COLLABORATOR",
+    "work_scope": "OWN",
+    "token_ref": "AGENTOS_A2A_AGENT_TOKEN",
+    "authorization_ref": "human-reviewed-config-1",
+    "expires_at": "2027-01-01T00:00:00Z",
+    "max_concurrent": 2,
+    "requests_per_minute": 30
+  }]
+}
+```
+
+Use a current expiry when creating the file. The credential is resolved from
+the named environment variable and is never placed in the registry file.
+A2A is disabled when `AGENTOS_A2A_ACTORS_FILE` is absent. The server listens on
+`127.0.0.1:8080` by default; remote binding additionally requires the explicit
+`AGENTOS_ALLOW_REMOTE=true` setting and an HTTPS `AGENTOS_PUBLIC_URL`.
 
 Enable the repository-owned commit and push checks once per checkout:
 
@@ -40,7 +67,7 @@ environments. Then submit a minimal A2A v1.0 JSON-RPC task:
 ```sh
 curl -X POST http://localhost:8080/ \
   -H 'Content-Type: application/json' \
-	-H 'Authorization: Bearer change-me' \
+	-H 'Authorization: Bearer replace-with-at-least-32-random-characters' \
 	-d '{"jsonrpc":"2.0","id":"rpc-1","method":"SendMessage","params":{"message":{"messageId":"message-1","contextId":"request-1","role":"ROLE_USER","parts":[{"text":"echo hello","mediaType":"text/plain"}]}}}'
 ```
 
@@ -55,7 +82,7 @@ the same internal router:
 ```sh
 curl -X POST http://localhost:8080/v1/human/messages \
   -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer human-change-me' \
+  -H 'Authorization: Bearer replace-with-another-32-character-secret' \
   -d '{"conversation_id":"human-1","message_id":"message-1","text":"draft a concise release update"}'
 ```
 

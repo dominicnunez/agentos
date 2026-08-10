@@ -1,0 +1,16 @@
+{
+  "actors": [
+    {
+      "id": "ci-external-agent",
+      "organization_id": "a2a-interop-org",
+      "status": "ACTIVE",
+      "role": "OPERATOR",
+      "work_scope": "OWN",
+      "token_ref": "AGENTOS_A2A_AGENT_TOKEN",
+      "authorization_ref": "ci-reviewed-a2a-v1",
+      "expires_at": "2099-01-01T00:00:00Z",
+      "max_concurrent": 4,
+      "requests_per_minute": 60
+    }
+  ]
+}

@@ -2,38 +2,23 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
-	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/intake"
 )
 
-type ExternalActor struct {
-	ID             string
-	OrganizationID string
-	BearerToken    string
-	PublicURL      string
-	Capabilities   []string
-}
-
 type A2A struct {
-	service     *intake.Service
-	principal   intake.Principal
-	publicURL   string
-	bearerToken string
+	service   *intake.Service
+	actors    *ExternalActorRegistry
+	publicURL string
 }
 
-func NewA2A(service *intake.Service, actor ExternalActor) *A2A {
-	return &A2A{
-		service: service,
-		principal: operatorPrincipal(
-			actor.ID, core.PrincipalExternalAgent, actor.OrganizationID, intake.ChannelA2A, actor.Capabilities,
-		),
-		publicURL: actor.PublicURL, bearerToken: actor.BearerToken,
-	}
+func NewA2A(service *intake.Service, actors *ExternalActorRegistry, publicURL string) *A2A {
+	return &A2A{service: service, actors: actors, publicURL: publicURL}
 }
 
 var forbiddenAuthorityFields = map[string]struct{}{
@@ -101,15 +86,36 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if a.principal.ID == "" || a.principal.OrganizationID == "" || a.bearerToken == "" || r.Header.Get("Authorization") != "Bearer "+a.bearerToken {
+	token, ok := bearerCredential(r.Header.Get("Authorization"))
+	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authenticated external actor required"})
 		return
 	}
+	session, err := a.actors.Acquire(token)
+	if errors.Is(err, ErrActorLimited) {
+		w.Header().Set("Retry-After", "60")
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "external actor request limit reached"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authenticated external actor required"})
+		return
+	}
+	defer session.Release()
 	if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
 		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "A2A JSON-RPC requires application/json"})
 		return
 	}
-	a.serveJSONRPC(w, r)
+	a.serveJSONRPC(w, r, session.Principal)
+}
+
+func bearerCredential(header string) (string, bool) {
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		return "", false
+	}
+	token := strings.TrimPrefix(header, prefix)
+	return token, token != "" && !strings.ContainsAny(token, " \t\r\n")
 }
 
 func (a *A2A) agentCard(r *http.Request) map[string]any {

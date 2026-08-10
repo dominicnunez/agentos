@@ -34,10 +34,11 @@ confirmed states.
 The A2A adapter exposes canonical A2A v1.0 Agent Card discovery and authenticated
 JSON-RPC `SendMessage` and `GetTask`, with capability-gated status, result, and
 input continuation. It does not expose legacy discovery, method aliases, or
-custom REST task routes. Production deployments must
-replace the example static bearer binding at their ingress boundary and
-explicitly configure a provider adapter. Credentials and A2A wire types remain
-outside core domain objects.
+custom REST task routes. A2A is disabled without a reviewed external-actor
+registry. Each enabled actor has a unique secret reference, deterministic role
+profile, own/organization work scope, status, expiry, and request ceilings.
+Credentials and A2A wire types remain outside core domain objects. Production
+deployments must explicitly configure a provider adapter.
 
 The A2A adapter and first-party Human Gateway translate into one principal-aware
 Intake Service. The Intent records the authenticated principal ID/kind and source

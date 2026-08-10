@@ -46,6 +46,7 @@ func TestNaturalLanguageIntakePreservesPrincipalAndRoutingProvenance(t *testing.
 	service := New(runtime)
 	human := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
 	externalAgent := testPrincipal("external-agent-1", core.PrincipalExternalAgent, ChannelA2A)
+	externalAgent.WorkScope = WorkScopeOrganization
 
 	view, err := service.Handle(ctx, human, Message{ConversationID: "human-work", MessageID: "human-message-1", Text: "draft a concise release update"})
 	if err != nil || view.State != StateCompleted || view.Result != "fake-model: draft a concise release update" {
@@ -90,6 +91,7 @@ func TestHumanAndExternalAgentCanContinueSharedWorkWithoutSharingIdentity(t *tes
 	service := New(app.New(events.NewGateway(store)))
 	human := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
 	externalAgent := testPrincipal("external-agent-1", core.PrincipalExternalAgent, ChannelA2A)
+	externalAgent.WorkScope = WorkScopeOrganization
 
 	view, err := service.Handle(ctx, human, Message{ConversationID: "shared", MessageID: "human-message-1", Text: "choose the launch date", RequestedKind: core.ExecutionHuman})
 	if err != nil || view.State != StateInputRequired || view.Prompt == "" {
@@ -145,6 +147,7 @@ func TestIntakeUsesDurableMessageIDsForContinuationAndReplayAuthorization(t *tes
 	service := New(app.New(events.NewGateway(store)))
 	human := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
 	externalAgent := testPrincipal("external-agent-1", core.PrincipalExternalAgent, ChannelA2A)
+	externalAgent.WorkScope = WorkScopeOrganization
 
 	const repeatedText = "choose the launch date"
 	view, err := service.Handle(ctx, human, Message{ConversationID: "same-text", MessageID: "initial-message", Text: repeatedText, RequestedKind: core.ExecutionHuman})
@@ -168,9 +171,13 @@ func TestIntakeUsesDurableMessageIDsForContinuationAndReplayAuthorization(t *tes
 }
 
 func testPrincipal(id string, kind core.PrincipalKind, channel string) Principal {
+	scope := WorkScopeOwn
+	if kind == core.PrincipalHuman {
+		scope = WorkScopeOrganization
+	}
 	return Principal{
 		ID: id, Kind: kind, OrganizationID: "org-1", Channel: channel,
-		Capabilities: []string{CapabilitySubmitWork, CapabilityReadStatus, CapabilityReadResult, CapabilityProvideInput},
+		Capabilities: []string{CapabilitySubmitWork, CapabilityReadStatus, CapabilityReadResult, CapabilityProvideInput}, WorkScope: scope,
 	}
 }
 

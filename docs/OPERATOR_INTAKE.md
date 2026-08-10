@@ -48,16 +48,22 @@ behavior remains testable without a provider credential.
 same message endpoint continues blocked `HUMAN` work when a new message uses the
 same conversation ID. Message IDs are persisted for retry idempotency.
 
-The authenticated human and external Agent may observe or continue work in their shared
-organization only when their explicit `read_status`, `read_result`, or
-`provide_input` capabilities allow it. Each input event retains the actual
-principal and channel provenance.
+The authenticated human and external Agent may observe or continue work only
+when their explicit `read_status`, `read_result`, or `provide_input`
+capabilities and work-visibility scope allow it. `OWN` is the default external
+Agent scope; cross-principal organization access requires the deliberate
+`ORGANIZATION` scope. Each input event retains the actual principal and channel
+provenance.
 
 An external Agent must implement the A2A v1.0 client capabilities described in
 [A2A Agent interoperability profile](A2A_INTEROP.md) before it can use the A2A
 Gateway. Protocol support does not grant Agent OS authority: the authenticated
 principal still needs each configured Agent OS capability for the requested
 operation.
+
+External Agent identities come only from the trusted startup registry. The
+gateway ignores content-supplied identity, organization, role, and capability
+claims. A2A has no self-registration or trust-on-first-use path.
 
 ## Authority boundary
 

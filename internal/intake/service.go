@@ -22,11 +22,16 @@ const (
 	CapabilityReadResult   = "read_result"
 	CapabilityProvideInput = "provide_input"
 
+	WorkScopeOwn          WorkScope = "OWN"
+	WorkScopeOrganization WorkScope = "ORGANIZATION"
+
 	StateWorking       = "WORKING"
 	StateInputRequired = "INPUT_REQUIRED"
 	StateCompleted     = "COMPLETED"
 	StateFailed        = "FAILED"
 )
+
+type WorkScope string
 
 var (
 	ErrInvalid     = errors.New("invalid operator message")
@@ -42,6 +47,7 @@ type Principal struct {
 	OrganizationID string
 	Channel        string
 	Capabilities   []string
+	WorkScope      WorkScope
 }
 
 func (p Principal) Allowed(capability string) bool {
@@ -133,6 +139,9 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 		if !found {
 			return View{}, fmt.Errorf("%w: work has no durable initial message", ErrUnavailable)
 		}
+		if !principalCanAccess(principal, initial) {
+			return View{}, ErrNotFound
+		}
 		initialIDMatches := initial.MessageID == message.MessageID
 		initialReplay := initialIDMatches && initial.Text == message.Text
 		if initialIDMatches && !initialReplay {
@@ -200,6 +209,13 @@ func (s *Service) Get(ctx context.Context, principal Principal, taskID string) (
 	if len(stream) == 0 || streamTaskID(stream) != taskID {
 		return View{}, ErrNotFound
 	}
+	initial, found := initialMessage(stream)
+	if !found {
+		return View{}, fmt.Errorf("%w: work has no durable initial message", ErrUnavailable)
+	}
+	if !principalCanAccess(principal, initial) {
+		return View{}, ErrNotFound
+	}
 	return projectView(conversationID, stream, principal.Allowed(CapabilityReadResult)), nil
 }
 
@@ -209,11 +225,11 @@ func validatePrincipal(principal Principal) error {
 	}
 	switch principal.Kind {
 	case core.PrincipalHuman:
-		if principal.Channel != ChannelHumanDirect {
+		if principal.Channel != ChannelHumanDirect || principal.WorkScope != WorkScopeOrganization {
 			return fmt.Errorf("%w: human principal channel mismatch", ErrInvalid)
 		}
 	case core.PrincipalExternalAgent:
-		if principal.Channel != ChannelA2A {
+		if principal.Channel != ChannelA2A || (principal.WorkScope != WorkScopeOwn && principal.WorkScope != WorkScopeOrganization) {
 			return fmt.Errorf("%w: external-agent principal channel mismatch", ErrInvalid)
 		}
 	case core.PrincipalRuntime:
@@ -269,7 +285,12 @@ func streamTaskID(stream []events.Event) string {
 	return ""
 }
 
-func initialMessage(stream []events.Event) (Message, bool) {
+type initialWork struct {
+	Message
+	PrincipalID core.ID
+}
+
+func initialMessage(stream []events.Event) (initialWork, bool) {
 	for _, event := range stream {
 		if event.EventType != "INTENT_CREATED" {
 			continue
@@ -278,12 +299,16 @@ func initialMessage(stream []events.Event) (Message, bool) {
 		var intent core.Intent
 		if json.Unmarshal(event.Payload, &payload) == nil && json.Unmarshal(payload.Projection.Value, &intent) == nil {
 			if intent.SourceMessageID == "" || intent.OriginalInstruction == "" {
-				return Message{}, false
+				return initialWork{}, false
 			}
-			return Message{MessageID: intent.SourceMessageID, Text: intent.OriginalInstruction}, true
+			return initialWork{Message: Message{MessageID: intent.SourceMessageID, Text: intent.OriginalInstruction}, PrincipalID: intent.SourcePrincipalID}, true
 		}
 	}
-	return Message{}, false
+	return initialWork{}, false
+}
+
+func principalCanAccess(principal Principal, work initialWork) bool {
+	return principal.WorkScope == WorkScopeOrganization || (principal.WorkScope == WorkScopeOwn && work.PrincipalID == core.ID(principal.ID))
 }
 
 func matchesDurableInput(stream []events.Event, principal Principal, message Message) bool {

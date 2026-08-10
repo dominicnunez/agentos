@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"net/http"
 	"strings"
@@ -18,18 +20,19 @@ type HumanActor struct {
 }
 
 type Human struct {
-	service     *intake.Service
-	principal   intake.Principal
-	bearerToken string
+	service    *intake.Service
+	principal  intake.Principal
+	tokenHash  [sha256.Size]byte
+	configured bool
 }
 
 func NewHuman(service *intake.Service, actor HumanActor) *Human {
 	return &Human{
 		service: service,
 		principal: operatorPrincipal(
-			actor.ID, core.PrincipalHuman, actor.OrganizationID, intake.ChannelHumanDirect, actor.Capabilities,
+			actor.ID, core.PrincipalHuman, actor.OrganizationID, intake.ChannelHumanDirect, actor.Capabilities, intake.WorkScopeOrganization,
 		),
-		bearerToken: actor.BearerToken,
+		tokenHash: sha256.Sum256([]byte(actor.BearerToken)), configured: actor.BearerToken != "",
 	}
 }
 
@@ -50,7 +53,9 @@ type humanTaskResponse struct {
 }
 
 func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h.bearerToken == "" || h.principal.ID == "" || h.principal.OrganizationID == "" || r.Header.Get("Authorization") != "Bearer "+h.bearerToken {
+	token, ok := bearerCredential(r.Header.Get("Authorization"))
+	provided := sha256.Sum256([]byte(token))
+	if !ok || !h.configured || h.principal.ID == "" || h.principal.OrganizationID == "" || subtle.ConstantTimeCompare(provided[:], h.tokenHash[:]) != 1 {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authenticated human operator required"})
 		return
 	}

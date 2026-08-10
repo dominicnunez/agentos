@@ -40,8 +40,9 @@ jobs:
       - name: A2A Agent and human intake interoperability
         env:
           AGENTOS_DB: work/a2a-interop.db
-          AGENTOS_OPERATOR_TOKEN: a2a-interop-token
-          AGENTOS_HUMAN_TOKEN: human-interop-token
+          AGENTOS_A2A_ACTORS_FILE: scripts/testdata/a2a-actors-ci.json
+          AGENTOS_A2A_AGENT_TOKEN: ci-a2a-agent-token-000000000000001
+          AGENTOS_HUMAN_TOKEN: ci-human-operator-token-00000000001
           AGENTOS_ORGANIZATION_ID: a2a-interop-org
           AGENTOS_PUBLIC_URL: http://127.0.0.1:8080
         run: |
@@ -61,7 +62,7 @@ jobs:
           done
           python3 scripts/verify-a2a-interop.py \
             --url http://127.0.0.1:8080 \
-            --token "$AGENTOS_OPERATOR_TOKEN"
+            --token "$AGENTOS_A2A_AGENT_TOKEN"
           python3 scripts/verify-human-intake.py \
             --url http://127.0.0.1:8080 \
             --token "$AGENTOS_HUMAN_TOKEN"
