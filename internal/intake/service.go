@@ -135,12 +135,9 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 			return View{}, fmt.Errorf("%w: submit work", ErrUnavailable)
 		}
 	} else {
-		initial, found := initialMessage(stream)
-		if !found {
-			return View{}, fmt.Errorf("%w: work has no durable initial message", ErrUnavailable)
-		}
-		if !principalCanAccess(principal, initial) {
-			return View{}, ErrNotFound
+		initial, err := authorizedInitialWork(principal, stream)
+		if err != nil {
+			return View{}, err
 		}
 		initialIDMatches := initial.MessageID == message.MessageID
 		initialReplay := initialIDMatches && initial.Text == message.Text
@@ -209,12 +206,8 @@ func (s *Service) Get(ctx context.Context, principal Principal, taskID string) (
 	if len(stream) == 0 || streamTaskID(stream) != taskID {
 		return View{}, ErrNotFound
 	}
-	initial, found := initialMessage(stream)
-	if !found {
-		return View{}, fmt.Errorf("%w: work has no durable initial message", ErrUnavailable)
-	}
-	if !principalCanAccess(principal, initial) {
-		return View{}, ErrNotFound
+	if _, err := authorizedInitialWork(principal, stream); err != nil {
+		return View{}, err
 	}
 	return projectView(conversationID, stream, principal.Allowed(CapabilityReadResult)), nil
 }
@@ -309,6 +302,17 @@ func initialMessage(stream []events.Event) (initialWork, bool) {
 
 func principalCanAccess(principal Principal, work initialWork) bool {
 	return principal.WorkScope == WorkScopeOrganization || (principal.WorkScope == WorkScopeOwn && work.PrincipalID == core.ID(principal.ID))
+}
+
+func authorizedInitialWork(principal Principal, stream []events.Event) (initialWork, error) {
+	initial, found := initialMessage(stream)
+	if !found {
+		return initialWork{}, fmt.Errorf("%w: work has no durable initial message", ErrUnavailable)
+	}
+	if !principalCanAccess(principal, initial) {
+		return initialWork{}, ErrNotFound
+	}
+	return initial, nil
 }
 
 func matchesDurableInput(stream []events.Event, principal Principal, message Message) bool {
