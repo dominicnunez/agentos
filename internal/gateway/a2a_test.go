@@ -111,12 +111,49 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 			t.Fatalf("external input crossed a governance boundary: %+v", event)
 		}
 	}
-	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r2/input", strings.NewReader(`{"task_id":"task-r2","text":"duplicate"}`))
+	eventCount := len(es)
+	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r2/input", strings.NewReader(`{"task_id":"task-r2","text":"detail"}`))
+	r.Header.Set("Authorization", "Bearer token")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"completed"`) {
+		t.Fatalf("idempotent input retry=%d %s", w.Code, w.Body.String())
+	}
+	es, err = l.Events(context.Background(), "r2")
+	if err != nil || len(es) != eventCount {
+		t.Fatalf("idempotent retry appended events: count=%d want=%d err=%v", len(es), eventCount, err)
+	}
+	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r2/input", strings.NewReader(`{"task_id":"task-r2","text":"different"}`))
 	r.Header.Set("Authorization", "Bearer token")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("duplicate input=%d %s", w.Code, w.Body.String())
+		t.Fatalf("conflicting input retry=%d %s", w.Code, w.Body.String())
+	}
+
+	body = `{"id":"r3","message":{"role":"user","parts":[{"type":"text","text":"unavailable tool"}]},"metadata":{"execution_kind":"TOOL"}}`
+	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer token")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status":"BLOCKED"`) {
+		t.Fatalf("tool submit=%d %s", w.Code, w.Body.String())
+	}
+	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r3/input", strings.NewReader(`{"task_id":"task-r3","text":"replay"}`))
+	r.Header.Set("Authorization", "Bearer token")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("non-human input=%d %s", w.Code, w.Body.String())
+	}
+	es, err = l.Events(context.Background(), "r3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range es {
+		if event.EventType == "A2A_INPUT_RECEIVED" || event.EventType == "TASK_RESUMED" {
+			t.Fatalf("non-human task was made replayable: %+v", event)
+		}
 	}
 }
 
