@@ -28,6 +28,13 @@ jobs:
       - name: Build
         run: go build ./...
 
+      - name: Version contract
+        run: |
+          mkdir -p work
+          version=$(tr -d '\r\n' < VERSION)
+          go build -ldflags "-X main.version=$version" -o work/agentos-version ./cmd/agentos
+          test "$(./work/agentos-version --version)" = "$version"
+
       - name: Vet
         run: go vet ./...
 
@@ -36,6 +43,9 @@ jobs:
 
       - name: Race-tested unit tests
         run: go test -race ./...
+
+      - name: Bounded operator-boundary fuzzing
+        run: go test ./internal/gateway -run=^$ -fuzz=FuzzOperatorWorkContent -fuzztime=10s -parallel=4
 
       - name: Vulnerability scan
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...

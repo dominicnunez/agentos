@@ -11,6 +11,7 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/ledger"
 	"github.com/dominicnunez/agentos/internal/projections"
 	"github.com/dominicnunez/agentos/internal/telemetry"
@@ -81,6 +82,46 @@ func TestAgentExecutionUsesFakeAdapter(t *testing.T) {
 		t.Fatalf("effect=%q", r.Outcome.ObservedEffect)
 	}
 	assertEventOrder(t, r.Events, "EXECUTION_CONTEXT_MANIFESTED", "TOOL_OUTCOME_RECORDED", "INFERENCE_USAGE_RECORDED", "EXECUTION_FINISHED", "RUN_TELEMETRY_RECORDED")
+}
+
+type describedModel struct{}
+
+func (describedModel) Name() string { return "codex-subscription/test-model" }
+func (describedModel) Descriptor() execution.ModelDescriptor {
+	return execution.ModelDescriptor{Provider: "codex-subscription", Model: "test-model", ExecutionProfileVersion: "v1-codex-subscription"}
+}
+func (describedModel) Complete(_ context.Context, prompt string) (execution.ModelResponse, error) {
+	return execution.ModelResponse{Text: "configured-model: " + prompt, Usage: events.InferenceUsageRecordedPayload{Source: "provider_cli", Provider: "codex-subscription", Model: "test-model", InputTokens: 1, OutputTokens: 1, TotalTokens: 2}}, nil
+}
+
+func TestAgentExecutionManifestUsesConfiguredModelDescriptor(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := l.Close(); err != nil {
+			t.Errorf("close ledger: %v", err)
+		}
+	})
+	r, err := NewWithModel(events.NewGateway(l), describedModel{}).Submit(context.Background(), Submit{RequestID: "configured-model", OrganizationID: "o1", Statement: "summarize", Kind: core.ExecutionAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range r.Events {
+		if event.EventType != "EXECUTION_CONTEXT_MANIFESTED" {
+			continue
+		}
+		var manifest core.ExecutionContextManifest
+		if err := json.Unmarshal(event.Payload, &manifest); err != nil {
+			t.Fatal(err)
+		}
+		if manifest.Provider != "codex-subscription" || manifest.Model != "test-model" || manifest.ExecutionProfileVersion != "v1-codex-subscription" {
+			t.Fatalf("manifest=%+v", manifest)
+		}
+		return
+	}
+	t.Fatal("execution context manifest was not recorded")
 }
 
 type indexedTaskLedger struct{}

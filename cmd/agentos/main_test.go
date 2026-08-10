@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/intake"
@@ -44,6 +48,20 @@ func TestConfiguredExternalActorsResolvesDistinctServerOwnedIdentity(t *testing.
 	}
 	if registry.HasCredential("different-external-agent-token-001") {
 		t.Fatal("unknown credential matched registry")
+	}
+}
+
+func TestPrintVersionDoesNotStartRuntime(t *testing.T) {
+	var output bytes.Buffer
+	handled, err := printVersion([]string{"--version"}, &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled || output.String() != version+"\n" {
+		t.Fatalf("handled=%t output=%q", handled, output.String())
+	}
+	if _, err := printVersion([]string{"serve"}, &output); err == nil {
+		t.Fatal("unknown command was accepted")
 	}
 }
 
@@ -162,5 +180,47 @@ func TestConfiguredTLSFailsClosedForRemoteListeners(t *testing.T) {
 	config, err := configuredTLS(true)
 	if err != nil || config == nil || config.MinVersion != tls.VersionTLS13 {
 		t.Fatalf("TLS config=%+v err=%v", config, err)
+	}
+}
+
+func TestServeStopsCleanlyWhenRuntimeContextIsCancelled(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{
+		Handler:           http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }),
+		ReadHeaderTimeout: time.Second,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- serve(ctx, server, listener, "", "")
+	}()
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+listener.Addr().String(), nil)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request) //nolint:gosec // loopback listener owned by this test
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		cancel()
+		t.Fatalf("status=%d", response.StatusCode)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve returned error during graceful shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop after runtime cancellation")
 	}
 }
