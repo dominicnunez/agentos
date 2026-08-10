@@ -184,7 +184,7 @@ func TestConfiguredTLSFailsClosedForRemoteListeners(t *testing.T) {
 }
 
 func TestServeStopsCleanlyWhenRuntimeContextIsCancelled(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}

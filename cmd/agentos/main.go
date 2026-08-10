@@ -125,7 +125,7 @@ func run(ctx context.Context) (err error) {
 		mux.Handle("/", gateway.NewA2A(operator, externalActors, publicURL))
 	}
 	s := &http.Server{Addr: listenAddress, Handler: mux, TLSConfig: tlsConfig, MaxHeaderBytes: 32 << 10, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: time.Minute}
-	listener, err := net.Listen("tcp", s.Addr)
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", s.Addr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", s.Addr, err)
 	}
