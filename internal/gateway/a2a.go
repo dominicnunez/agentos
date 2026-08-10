@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/dominicnunez/agentos/internal/intake"
+	"github.com/dominicnunez/agentos/internal/trustconfig"
 )
 
 type A2A struct {
@@ -51,15 +52,7 @@ func decodeWorkContent(w http.ResponseWriter, r *http.Request, target any) error
 	if err := rejectAuthorityContent(content); err != nil {
 		return err
 	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return fmt.Errorf("operator work content must contain one JSON object")
-	}
-	return nil
+	return trustconfig.DecodeObject(bytes.NewReader(body), "operator work content", target)
 }
 
 func hasJSONContentType(value string) bool {

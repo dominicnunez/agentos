@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -27,6 +26,7 @@ type Submit struct {
 	SourcePrincipalID   core.ID
 	SourcePrincipalKind core.PrincipalKind
 	SourceChannel       string
+	correlationID       string
 }
 
 type Result struct {
@@ -79,7 +79,11 @@ func (s *Service) ExternalEvents(ctx context.Context, organizationID, requestID 
 	if organizationID == "" || requestID == "" {
 		return nil, fmt.Errorf("organization and request are required")
 	}
-	stream, err := s.gateway.Events(ctx, externalWorkID(organizationID, requestID))
+	correlationID, err := s.externalWorkCorrelation(ctx, organizationID, requestID)
+	if err != nil {
+		return nil, err
+	}
+	stream, err := s.gateway.Events(ctx, correlationID)
 	if err != nil {
 		return nil, err
 	}
@@ -112,19 +116,34 @@ func (s *Service) ExternalTaskEvents(ctx context.Context, organizationID, taskID
 	if actualOrganizationID != core.ID(organizationID) {
 		return "", nil, nil
 	}
-	goalState, ok := snapshot.Goals[taskState.Value.GoalID]
-	if !ok {
-		return "", nil, fmt.Errorf("task goal is unavailable")
+	requestID, found, err := s.gateway.ResolveExternalRequest(ctx, organizationID, taskState.CorrelationID)
+	if err != nil {
+		return "", nil, err
 	}
-	intentState, ok := snapshot.Intents[goalState.Value.IntentID]
-	if !ok || intentState.Value.ExternalRequestID == "" {
-		return "", nil, fmt.Errorf("task intent is unavailable")
+	if !found {
+		goalState, goalFound := snapshot.Goals[taskState.Value.GoalID]
+		intentState, intentFound := snapshot.Intents[goalState.Value.IntentID]
+		if !goalFound || !intentFound || intentState.Value.ExternalRequestID == "" {
+			return "", nil, fmt.Errorf("task external identity is unavailable")
+		}
+		requestID = intentState.Value.ExternalRequestID
 	}
 	stream, err := s.gateway.Events(ctx, taskState.CorrelationID)
 	if err != nil {
 		return "", nil, err
 	}
-	return intentState.Value.ExternalRequestID, stream, nil
+	return requestID, stream, nil
+}
+
+func (s *Service) externalWorkCorrelation(ctx context.Context, organizationID, requestID string) (string, error) {
+	correlationID, found, err := s.gateway.ResolveExternalWork(ctx, organizationID, requestID)
+	if err != nil {
+		return "", err
+	}
+	if found {
+		return correlationID, nil
+	}
+	return core.ExternalWorkID(organizationID, requestID), nil
 }
 
 // SendMessage is the lateral Agent-to-Agent/Team/Task path. It deliberately
@@ -324,7 +343,10 @@ func (s *Service) ProvideOperatorInput(ctx context.Context, input OperatorInput)
 	if err != nil {
 		return err
 	}
-	correlationID := externalWorkID(input.OrganizationID, input.RequestID)
+	correlationID, err := s.externalWorkCorrelation(ctx, input.OrganizationID, input.RequestID)
+	if err != nil {
+		return err
+	}
 	state, ok := snapshot.Tasks[core.ID(input.TaskID)]
 	if !ok || state.CorrelationID != correlationID {
 		return fmt.Errorf("task is not mapped to this external request")
@@ -615,7 +637,11 @@ func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 	if in.SourceChannel == "" {
 		in.SourceChannel = "INTERNAL"
 	}
-	correlationID := externalWorkID(in.OrganizationID, in.RequestID)
+	correlationID, err := s.externalWorkCorrelation(ctx, in.OrganizationID, in.RequestID)
+	if err != nil {
+		return Result{}, err
+	}
+	in.correlationID = correlationID
 	intent, goal, task, err := s.ensureSubmission(ctx, in)
 	if err != nil {
 		return Result{}, err
@@ -666,7 +692,7 @@ func (s *Service) ensureOperatorAcceptance(ctx context.Context, in Submit, taskI
 		MessageID: in.MessageID, SourcePrincipalID: string(in.SourcePrincipalID),
 		SourcePrincipalKind: string(in.SourcePrincipalKind), SourceChannel: in.SourceChannel,
 	}
-	correlationID := externalWorkID(in.OrganizationID, in.RequestID)
+	correlationID := in.correlationID
 	stream, err := s.gateway.Events(ctx, correlationID)
 	if err != nil {
 		return err
@@ -715,7 +741,7 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 	}
 	now := time.Now().UTC()
 	organizationID := core.ID(in.OrganizationID)
-	correlationID := externalWorkID(in.OrganizationID, in.RequestID)
+	correlationID := in.correlationID
 	if existing, ok := snapshot.Organizations[organizationID]; !ok {
 		organization := core.Organization{ID: organizationID, Name: in.OrganizationID, PolicyVersion: "v1", CreatedAt: now}
 		if err := s.state.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", correlationID, 1, organization, nil); err != nil {
@@ -790,11 +816,6 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 		return core.Intent{}, core.Goal{}, core.Task{}, fmt.Errorf("persist task before scheduling: %w", err)
 	}
 	return intent, goal, task, nil
-}
-
-func externalWorkID(organizationID, requestID string) string {
-	digest := sha256.Sum256([]byte("agentos.external-work.v1\x00" + organizationID + "\x00" + requestID))
-	return fmt.Sprintf("w-%x", digest[:16])
 }
 
 func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {

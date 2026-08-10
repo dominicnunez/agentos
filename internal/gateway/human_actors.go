@@ -87,8 +87,8 @@ func validateHumanActor(actor HumanActor) error {
 	if err := trustconfig.ValidateCredentialLifecycle(string(actor.Status), actor.BearerToken, actor.ExpiresAt); err != nil {
 		return err
 	}
-	if actor.WorkScope != intake.WorkScopeOwn && actor.WorkScope != intake.WorkScopeOrganization {
-		return fmt.Errorf("work_scope must be OWN or ORGANIZATION")
+	if actor.WorkScope != intake.WorkScopeOrganization {
+		return fmt.Errorf("work_scope must be ORGANIZATION for a human actor")
 	}
 	if humanCapabilities(actor.Role) == nil {
 		return fmt.Errorf("role must be CONTRIBUTOR, OBSERVER, RESULT_READER, or OPERATOR")

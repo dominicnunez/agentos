@@ -3,12 +3,100 @@ package ledger
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/dominicnunez/agentos/internal/app"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/intake"
 )
+
+func TestExternalWorkIndexMigratesLegacyCorrelation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "org-1", PolicyVersion: "v1", CreatedAt: now}
+	agent := core.Agent{ID: "agent-local-org-1", OrganizationID: organization.ID, BlueprintVersion: "v1-local-worker", ExecutionProfileVersion: "v1-fake", RuntimeAdapter: "local", Status: "ACTIVE"}
+	intent := core.Intent{ID: "intent-legacy-request", OrganizationID: organization.ID, OriginalInstruction: "echo legacy", NormalizedObjective: "echo legacy", SourcePrincipalID: "agent-1", SourcePrincipalKind: core.PrincipalExternalAgent, SourceChannel: intake.ChannelA2A, SourceMessageID: "message-1", CreatedAt: now}
+	goal := core.Goal{ID: "goal-legacy-request", IntentID: intent.ID, Objective: intent.OriginalInstruction, Status: "COMPLETED", CreatedAt: now}
+	task := core.Task{ID: "task-legacy-request", GoalID: goal.ID, Description: intent.OriginalInstruction, ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskCompleted}
+	for _, projection := range []struct {
+		eventType, kind, recordID, taskID string
+		value                             any
+	}{
+		{"ORGANIZATION_CREATED", "organization", string(organization.ID), "", organization},
+		{"AGENT_CREATED", "agent", string(agent.ID), "", agent},
+		{"INTENT_CREATED", "intent", string(intent.ID), "", intent},
+		{"GOAL_CREATED", "goal", string(goal.ID), "", goal},
+		{"TASK_VERIFIED_COMPLETE", "task", string(task.ID), string(task.ID), task},
+	} {
+		if err := insertLegacyProjection(context.Background(), legacy, projection.eventType, projection.kind, projection.recordID, projection.taskID, projection.value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := legacy.db.Exec(`DELETE FROM external_work`); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = migrated.Close() })
+	correlationID, found, err := migrated.ResolveExternalWork(context.Background(), "org-1", "legacy-request")
+	if err != nil || !found || correlationID != "legacy-request" {
+		t.Fatalf("correlation=%q found=%t err=%v", correlationID, found, err)
+	}
+	requestID, found, err := migrated.ResolveExternalRequest(context.Background(), "org-1", correlationID)
+	if err != nil || !found || requestID != "legacy-request" {
+		t.Fatalf("request=%q found=%t err=%v", requestID, found, err)
+	}
+	stream, err := migrated.Events(context.Background(), correlationID)
+	if err != nil || len(stream) != 5 {
+		t.Fatalf("legacy stream=%+v err=%v", stream, err)
+	}
+	service := intake.New(app.New(events.NewGateway(migrated)))
+	principal := intake.Principal{ID: "agent-1", Kind: core.PrincipalExternalAgent, OrganizationID: "org-1", Channel: intake.ChannelA2A, Capabilities: []string{intake.CapabilitySubmitWork, intake.CapabilityReadStatus}, WorkScope: intake.WorkScopeOwn}
+	view, err := service.Handle(context.Background(), principal, intake.Message{ConversationID: "legacy-request", MessageID: "message-1", Text: "echo legacy"})
+	if err != nil || view.TaskID != "task-legacy-request" || view.State != intake.StateCompleted {
+		t.Fatalf("migrated view=%+v err=%v", view, err)
+	}
+	view, err = service.Get(context.Background(), principal, "task-legacy-request")
+	if err != nil || view.ConversationID != "legacy-request" {
+		t.Fatalf("migrated task lookup=%+v err=%v", view, err)
+	}
+	after, err := migrated.Events(context.Background(), correlationID)
+	if err != nil || len(after) != len(stream) {
+		t.Fatalf("legacy replay duplicated work: before=%d after=%d err=%v", len(stream), len(after), err)
+	}
+}
+
+func insertLegacyProjection(ctx context.Context, l *SQLite, eventType, kind, recordID, taskID string, value any) error {
+	encodedValue, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	record := events.ProjectionRecord{ProjectionKind: kind, RecordID: recordID, Version: 1, CorrelationID: "legacy-request", Value: encodedValue}
+	body, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	payload := events.ProjectionEventPayload{Projection: record}
+	if _, err := appendEvent(ctx, l.db, events.TrustedDraft{OrganizationID: "org-1", EventType: eventType, SourceActorID: "runtime", TaskID: taskID, CorrelationID: "legacy-request", Payload: payload}); err != nil {
+		return err
+	}
+	_, err = l.db.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, kind, recordID, 1, body, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
 
 func TestAppendAndRead(t *testing.T) {
 	l, err := Open(":memory:")
@@ -164,7 +252,7 @@ func TestMessageInboxSurvivesReopenAndObservation(t *testing.T) {
 	}
 }
 
-func TestInboxProjectionFailureRollsBackMessage(t *testing.T) {
+func TestMessageRollbackOnInboxFailure(t *testing.T) {
 	ctx := context.Background()
 	l, err := Open(":memory:")
 	if err != nil {

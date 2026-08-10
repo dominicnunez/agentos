@@ -150,6 +150,10 @@ type ProjectionAppender interface {
 type ProjectionReader interface {
 	Records(context.Context, string, string) ([][]byte, error)
 }
+type ExternalWorkResolver interface {
+	ResolveExternalWork(context.Context, string, string) (string, bool, error)
+	ResolveExternalRequest(context.Context, string, string) (string, bool, error)
+}
 type InboxReader interface {
 	Inbox(context.Context, string, string) ([]Event, error)
 }
@@ -191,6 +195,22 @@ func NewGateway(ledger interface {
 // runtime supplies this validator.
 func (g *Gateway) SetRouteValidator(validator RouteValidator) {
 	g.routeValidator = validator
+}
+
+func (g *Gateway) ResolveExternalWork(ctx context.Context, organizationID, requestID string) (string, bool, error) {
+	resolver, ok := g.ledger.(ExternalWorkResolver)
+	if !ok {
+		return "", false, nil
+	}
+	return resolver.ResolveExternalWork(ctx, organizationID, requestID)
+}
+
+func (g *Gateway) ResolveExternalRequest(ctx context.Context, organizationID, correlationID string) (string, bool, error) {
+	resolver, ok := g.ledger.(ExternalWorkResolver)
+	if !ok {
+		return "", false, nil
+	}
+	return resolver.ResolveExternalRequest(ctx, organizationID, correlationID)
 }
 
 var agentTypes = map[string]bool{"MESSAGE": true, "TASK_BLOCKED": true, "EVIDENCE_PUBLISHED": true, "RESULT_PUBLISHED": true, "CANDIDATE_COMPLETE": true, "KNOWLEDGE_PROPOSED": true, "SKILL_PROPOSED": true}

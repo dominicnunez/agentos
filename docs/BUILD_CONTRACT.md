@@ -60,6 +60,11 @@ alone cannot expose result content. Status and result lookup use opaque,
 tenant-scoped work and task IDs; a mismatched request is indistinguishable from
 an unknown request.
 
+SQLite maintains a durable external-work index from authenticated organization
+and caller request ID to the authoritative correlation stream. Startup
+materializes this index for pre-index V1 ledgers before serving, preserving
+existing work without a runtime legacy lookup path or duplicate submission.
+
 Authorized external input for a blocked `HUMAN` Task is persisted with its A2A
 `messageId` before the
 Task resumes. The runtime then records a deterministic structured outcome and

@@ -107,12 +107,10 @@ func configuredHumanActors(ctx context.Context, path string, source secrets.Sour
 	if err != nil {
 		return nil, err
 	}
-	for i := range actors {
-		value, err := source.Resolve(ctx, secrets.Ref(actors[i].TokenRef))
-		if err != nil {
-			return nil, fmt.Errorf("resolve human actor %q credential: %w", actors[i].ID, err)
-		}
-		actors[i].BearerToken = string(value)
+	if err := resolveRegistryCredentials(ctx, source, actors,
+		func(actor gateway.HumanActor) (string, string) { return actor.ID, actor.TokenRef },
+		func(actor *gateway.HumanActor, token string) { actor.BearerToken = token }); err != nil {
+		return nil, fmt.Errorf("resolve human actor credential: %w", err)
 	}
 	registry, err := gateway.NewHumanActorRegistry(actors)
 	if err != nil {
@@ -129,12 +127,12 @@ func configuredEffectReconcilers(ctx context.Context, path string, source secret
 	if err != nil {
 		return nil, err
 	}
-	for i := range bindings {
-		value, err := source.Resolve(ctx, secrets.Ref(bindings[i].TokenRef))
-		if err != nil {
-			return nil, fmt.Errorf("resolve effect reconciler %s/%s/%s credential: %w", bindings[i].OrganizationID, bindings[i].Action, bindings[i].Resource, err)
-		}
-		bindings[i].BearerToken = string(value)
+	if err := resolveRegistryCredentials(ctx, source, bindings,
+		func(binding effectstatus.HTTPReconcilerBinding) (string, string) {
+			return fmt.Sprintf("%s/%s/%s", binding.OrganizationID, binding.Action, binding.Resource), binding.TokenRef
+		},
+		func(binding *effectstatus.HTTPReconcilerBinding, token string) { binding.BearerToken = token }); err != nil {
+		return nil, fmt.Errorf("resolve effect reconciler credential: %w", err)
 	}
 	registry, err := effectstatus.NewHTTPReconcilerRegistry(bindings, nil)
 	if err != nil {
@@ -151,21 +149,31 @@ func configuredExternalActors(ctx context.Context, path string, source secrets.S
 	if err != nil {
 		return nil, err
 	}
-	for i := range actors {
-		if actors[i].TokenRef == "" {
-			return nil, fmt.Errorf("external actor %q token_ref is required", actors[i].ID)
-		}
-		value, err := source.Resolve(ctx, secrets.Ref(actors[i].TokenRef))
-		if err != nil {
-			return nil, fmt.Errorf("resolve external actor %q credential: %w", actors[i].ID, err)
-		}
-		actors[i].BearerToken = string(value)
+	if err := resolveRegistryCredentials(ctx, source, actors,
+		func(actor gateway.ExternalActor) (string, string) { return actor.ID, actor.TokenRef },
+		func(actor *gateway.ExternalActor, token string) { actor.BearerToken = token }); err != nil {
+		return nil, fmt.Errorf("resolve external actor credential: %w", err)
 	}
 	registry, err := gateway.NewExternalActorRegistry(actors)
 	if err != nil {
 		return nil, fmt.Errorf("validate external actor registry: %w", err)
 	}
 	return registry, nil
+}
+
+func resolveRegistryCredentials[T any](ctx context.Context, source secrets.Source, entries []T, identity func(T) (string, string), set func(*T, string)) error {
+	for index := range entries {
+		name, tokenRef := identity(entries[index])
+		if tokenRef == "" {
+			return fmt.Errorf("%s token_ref is required", name)
+		}
+		value, err := source.Resolve(ctx, secrets.Ref(tokenRef))
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		set(&entries[index], string(value))
+	}
+	return nil
 }
 
 func decodeConfigFile[T any](path, name string, decode func(io.Reader) ([]T, error)) ([]T, error) {
