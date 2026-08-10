@@ -177,8 +177,11 @@ func Project(correlationID string, stream []events.Event) (Run, error) {
 			run.Blocks++
 		case "TASK_RECOVERED":
 			run.Retries++
-		case "A2A_INPUT_RECEIVED", "HUMAN_INPUT_RECEIVED", "APPROVAL_DECIDED":
+		case "A2A_INPUT_RECEIVED", "HUMAN_INPUT_RECEIVED", "APPROVAL_DECIDED", "COMPLETION_REVIEW_DECIDED":
 			run.HumanInterventions++
+			if event.EventType == "COMPLETION_REVIEW_DECIDED" {
+				run.CompletionEvidenceEventRefs = append(run.CompletionEvidenceEventRefs, event.EventID)
+			}
 			if event.EventType == "APPROVAL_DECIDED" {
 				var approval core.HumanApproval
 				if err := json.Unmarshal(event.Payload, &approval); err != nil {

@@ -9,7 +9,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/events"
 )
 
-func TestProjectBuildsCompleteReplayableRunSummary(t *testing.T) {
+func TestRunTelemetryIsComplete(t *testing.T) {
 	started := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
 	task := core.Task{ID: "task-1", ExecutionKind: core.ExecutionAgent, Status: core.TaskPending}
 	projection := events.ProjectionEventPayload{Projection: events.ProjectionRecord{ProjectionKind: "task", RecordID: "task-1", Version: 1, Value: jsonBody(t, task)}}
@@ -26,12 +26,13 @@ func TestProjectBuildsCompleteReplayableRunSummary(t *testing.T) {
 		testEvent(t, "e7", "TASK_BLOCKED", "task-1", "", started.Add(6*time.Second), map[string]string{"reason": "input"}),
 		testEvent(t, "e8", "TASK_RECOVERED", "task-1", "", started.Add(7*time.Second), map[string]string{"reason": "restart"}),
 		testEvent(t, "e9", "A2A_INPUT_RECEIVED", "task-1", "", started.Add(8*time.Second), map[string]string{"text": "answer"}),
+		testEvent(t, "e9r", "COMPLETION_REVIEW_DECIDED", "task-1", "", started.Add(8500*time.Millisecond), map[string]string{"decision": "APPROVE"}),
 		testEvent(t, "e10", "CAPABILITY_DENIED", "task-1", "", started.Add(9*time.Second), map[string]string{"reason": "missing"}),
 		testEvent(t, "e11", "RESULT_PUBLISHED", "task-1", "execution-1", started.Add(10*time.Second), events.ResultPublishedPayload{Summary: "done", ArtifactRefs: []string{"artifact-1"}}),
 		testEvent(t, "e12", "COMPLETION_VERIFIED", "task-1", "", started.Add(11*time.Second), map[string]bool{"complete": true}),
 		testEvent(t, "e13", "TASK_VERIFIED_COMPLETE", "task-1", "", started.Add(12*time.Second), completedProjection),
 	}
-	stream[10].ArtifactRefs = []string{"artifact-1"}
+	stream[11].ArtifactRefs = []string{"artifact-1"}
 
 	run, err := Project("request-1", stream)
 	if err != nil {
@@ -46,10 +47,10 @@ func TestProjectBuildsCompleteReplayableRunSummary(t *testing.T) {
 	if len(run.ModelUses) != 1 || run.ModelUses[0].TotalTokens != 15 || run.ModelUses[0].CostUSD == nil || *run.ModelUses[0].CostUSD != cost || !run.CostComplete || run.TotalCostUSD != cost {
 		t.Fatalf("model usage=%+v run=%+v", run.ModelUses, run)
 	}
-	if run.ToolCalls != 1 || run.Messages != 1 || run.Blocks != 1 || run.Retries != 2 || run.HumanInterventions != 1 || run.SafetyDenials != 1 {
+	if run.ToolCalls != 1 || run.Messages != 1 || run.Blocks != 1 || run.Retries != 2 || run.HumanInterventions != 2 || run.SafetyDenials != 1 {
 		t.Fatalf("operational counters=%+v", run)
 	}
-	if len(run.CompletionEvidenceEventRefs) != 3 || len(run.CompletionEvidenceArtifactRefs) != 1 || run.CompletionEvidenceArtifactRefs[0] != "artifact-1" {
+	if len(run.CompletionEvidenceEventRefs) != 4 || len(run.CompletionEvidenceArtifactRefs) != 1 || run.CompletionEvidenceArtifactRefs[0] != "artifact-1" {
 		t.Fatalf("completion evidence=%+v", run)
 	}
 }

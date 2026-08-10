@@ -19,10 +19,12 @@ const (
 	ChannelA2A         = "A2A"
 	ChannelHumanDirect = "HUMAN_DIRECT"
 
-	CapabilitySubmitWork   = "submit_work"
-	CapabilityReadStatus   = "read_status"
-	CapabilityReadResult   = "read_result"
-	CapabilityProvideInput = "provide_input"
+	CapabilitySubmitWork       = "submit_work"
+	CapabilityReadStatus       = "read_status"
+	CapabilityReadResult       = "read_result"
+	CapabilityProvideInput     = "provide_input"
+	CapabilityReviewCompletion = "review_completion"
+	MaximumReviewFeedbackBytes = 64 << 10
 
 	WorkScopeOwn          WorkScope = "OWN"
 	WorkScopeOrganization WorkScope = "ORGANIZATION"
@@ -75,6 +77,27 @@ type View struct {
 	Prompt         string
 	Result         string
 	UpdatedAt      time.Time
+}
+
+type CompletionReviewView struct {
+	ReviewID     string
+	TaskID       string
+	TaskVersion  int
+	Fingerprint  string
+	State        string
+	Objective    string
+	Result       string
+	Criteria     []core.CompletionCriterion
+	EvidenceRefs []string
+	UpdatedAt    time.Time
+}
+
+type CompletionReviewDecision struct {
+	TaskID      string
+	ReviewID    string
+	Fingerprint string
+	Decision    core.CompletionReviewDecision
+	Feedback    string
 }
 
 type Router struct{}
@@ -224,6 +247,85 @@ func (s *Service) Get(ctx context.Context, principal Principal, taskID string) (
 		return View{}, err
 	}
 	return projectView(conversationID, stream, principal.Allowed(CapabilityReadResult)), nil
+}
+
+func (s *Service) GetCompletionReview(ctx context.Context, principal Principal, taskID string) (CompletionReviewView, error) {
+	if err := validateCompletionReviewer(principal); err != nil {
+		return CompletionReviewView{}, err
+	}
+	if err := ValidateIdentifier("task", taskID); err != nil {
+		return CompletionReviewView{}, err
+	}
+	view, found, err := s.app.CompletionReview(ctx, principal.OrganizationID, taskID)
+	if err != nil {
+		return CompletionReviewView{}, fmt.Errorf("%w: load completion review", ErrUnavailable)
+	}
+	if !found {
+		return CompletionReviewView{}, ErrNotFound
+	}
+	return projectCompletionReview(view, "PENDING"), nil
+}
+
+func (s *Service) DecideCompletionReview(ctx context.Context, principal Principal, decision CompletionReviewDecision) (CompletionReviewView, error) {
+	if err := validateCompletionReviewer(principal); err != nil {
+		return CompletionReviewView{}, err
+	}
+	if err := ValidateIdentifier("task", decision.TaskID); err != nil {
+		return CompletionReviewView{}, err
+	}
+	if err := ValidateIdentifier("review", decision.ReviewID); err != nil {
+		return CompletionReviewView{}, err
+	}
+	if len(decision.Fingerprint) != 64 {
+		return CompletionReviewView{}, fmt.Errorf("%w: review fingerprint must be 64 lowercase hexadecimal characters", ErrInvalid)
+	}
+	for _, character := range decision.Fingerprint {
+		if !strings.ContainsRune("0123456789abcdef", character) {
+			return CompletionReviewView{}, fmt.Errorf("%w: review fingerprint must be 64 lowercase hexadecimal characters", ErrInvalid)
+		}
+	}
+	if !utf8.ValidString(decision.Feedback) || len(decision.Feedback) > MaximumReviewFeedbackBytes {
+		return CompletionReviewView{}, fmt.Errorf("%w: review feedback must be valid UTF-8 no larger than 65536 bytes", ErrInvalid)
+	}
+	switch decision.Decision {
+	case core.CompletionReviewApprove, core.CompletionReviewReject:
+	case core.CompletionReviewRevise:
+		if strings.TrimSpace(decision.Feedback) == "" {
+			return CompletionReviewView{}, fmt.Errorf("%w: revision feedback is required", ErrInvalid)
+		}
+	default:
+		return CompletionReviewView{}, fmt.Errorf("%w: review decision is unsupported", ErrInvalid)
+	}
+	view, err := s.app.ReviewCompletion(ctx, app.CompletionReviewInput{
+		OrganizationID: principal.OrganizationID, TaskID: decision.TaskID,
+		ReviewID: decision.ReviewID, Fingerprint: decision.Fingerprint,
+		Decision: decision.Decision, ReviewerID: principal.ID, ReviewerKind: principal.Kind,
+		SourceChannel: principal.Channel, Feedback: decision.Feedback,
+	})
+	if err != nil {
+		return CompletionReviewView{}, fmt.Errorf("%w: decide completion review", ErrConflict)
+	}
+	return projectCompletionReview(view, string(view.Decision)), nil
+}
+
+func validateCompletionReviewer(principal Principal) error {
+	if err := validatePrincipal(principal); err != nil {
+		return err
+	}
+	if principal.Kind != core.PrincipalHuman || principal.Channel != ChannelHumanDirect || principal.WorkScope != WorkScopeOrganization || !principal.Allowed(CapabilityReviewCompletion) {
+		return fmt.Errorf("%w: %s", ErrForbidden, CapabilityReviewCompletion)
+	}
+	return nil
+}
+
+func projectCompletionReview(view app.CompletionReviewView, state string) CompletionReviewView {
+	return CompletionReviewView{
+		ReviewID: string(view.Request.ID), TaskID: string(view.Request.TaskID),
+		TaskVersion: view.Request.TaskVersion, Fingerprint: view.Request.Fingerprint,
+		State: state, Objective: view.Request.Objective, Result: view.Result,
+		Criteria:     append([]core.CompletionCriterion(nil), view.Request.Contract.Criteria...),
+		EvidenceRefs: append([]string(nil), view.Request.EvidenceRefs...), UpdatedAt: view.UpdatedAt,
+	}
 }
 
 func validatePrincipal(principal Principal) error {

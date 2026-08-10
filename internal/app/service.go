@@ -250,6 +250,35 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 	if err != nil {
 		return RecoveryResult{}, fmt.Errorf("load durable runtime state: %w", err)
 	}
+	for _, state := range sortedTaskStates(snapshot.Tasks) {
+		stream, err := s.gateway.Events(ctx, state.CorrelationID)
+		if err != nil {
+			return RecoveryResult{}, err
+		}
+		requests, decisions, err := completionReviewRecords(stream)
+		if err != nil {
+			return RecoveryResult{}, fmt.Errorf("validate completion review recovery for task %s: %w", state.Value.ID, err)
+		}
+		var latest completion.ReviewRequest
+		for _, event := range stream {
+			if event.EventType != "COMPLETION_REVIEW_REQUESTED" {
+				continue
+			}
+			var request completion.ReviewRequest
+			if json.Unmarshal(event.Payload, &request) == nil && request.TaskID == state.Value.ID {
+				latest = requests[request.ID]
+			}
+		}
+		if recorded, decided := decisions[latest.ID]; decided {
+			if err := s.continueCompletionReview(ctx, latest, recorded.Review, recorded.Event); err != nil {
+				return RecoveryResult{}, fmt.Errorf("recover completion review for task %s: %w", state.Value.ID, err)
+			}
+		}
+	}
+	snapshot, err = s.state.Load(ctx)
+	if err != nil {
+		return RecoveryResult{}, fmt.Errorf("reload durable runtime state after completion reviews: %w", err)
+	}
 	result := RecoveryResult{}
 	continuedInputs := 0
 	for _, state := range sortedTaskStates(snapshot.Tasks) {
@@ -948,6 +977,17 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			return taskRun{}, fmt.Errorf("load action-boundary inbox for task %s: %w", task.ID, err)
 		}
 		eventRefs := inboxEventRefs(inboxBatches)
+		stream, err := s.gateway.Events(ctx, state.CorrelationID)
+		if err != nil {
+			return taskRun{}, fmt.Errorf("load completion revision context for task %s: %w", task.ID, err)
+		}
+		revision, revisionEvent, hasRevision, err := latestRevision(stream, task.ID)
+		if err != nil {
+			return taskRun{}, fmt.Errorf("validate completion revision context for task %s: %w", task.ID, err)
+		}
+		if hasRevision {
+			eventRefs = append(eventRefs, revisionEvent.EventID)
+		}
 		manifest = core.ExecutionContextManifest{
 			ExecutionID:             executionID,
 			AgentID:                 task.AssigneeID,
@@ -976,11 +1016,18 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 				return taskRun{}, fmt.Errorf("materialize action-boundary messages for task %s: %w", task.ID, err)
 			}
 		}
+		if hasRevision {
+			executionTask.Description, err = materializeRevisionContext(executionTask.Description, revision, revisionEvent.EventID)
+			if err != nil {
+				return taskRun{}, fmt.Errorf("materialize completion revision for task %s: %w", task.ID, err)
+			}
+		}
 	}
 
 	executionResult, executionErr := handler.Execute(ctx, executionTask, manifest)
 	outcome, verifierAvailable := s.verifier.Verify(executionTask, executionResult.Outcome)
-	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: outcome, CorrelationID: state.CorrelationID}); err != nil {
+	outcomeEvent, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: outcome, CorrelationID: state.CorrelationID})
+	if err != nil {
 		return taskRun{}, fmt.Errorf("persist outcome for task %s: %w", task.ID, err)
 	}
 	if executionResult.InferenceUsage != nil {
@@ -1022,15 +1069,28 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	}
 	candidatePayload := map[string]any{"tool_invocation_id": outcome.ToolInvocationID, "result_event_id": resultEvent.EventID, "artifact_refs": outcome.ArtifactRefs}
 	candidate := events.TrustedDraft{OrganizationID: string(organizationID), EventType: "CANDIDATE_COMPLETE", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: candidatePayload, CorrelationID: state.CorrelationID}
+	var candidateEvent events.Event
 	if task.ExecutionKind == core.ExecutionAgent {
-		if _, err := s.gateway.PublishAgentDraft(ctx, string(organizationID), string(task.AssigneeID), string(executionID), state.CorrelationID, events.Draft{EventType: "CANDIDATE_COMPLETE", TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: candidate.Payload}); err != nil {
+		candidateEvent, err = s.gateway.PublishAgentDraft(ctx, string(organizationID), string(task.AssigneeID), string(executionID), state.CorrelationID, events.Draft{EventType: "CANDIDATE_COMPLETE", TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: candidate.Payload})
+		if err != nil {
 			return taskRun{}, fmt.Errorf("persist completion candidate for task %s: %w", task.ID, err)
 		}
-	} else if _, err := s.gateway.PublishTrusted(ctx, candidate); err != nil {
-		return taskRun{}, fmt.Errorf("persist completion candidate for task %s: %w", task.ID, err)
+	} else {
+		candidateEvent, err = s.gateway.PublishTrusted(ctx, candidate)
+		if err != nil {
+			return taskRun{}, fmt.Errorf("persist completion candidate for task %s: %w", task.ID, err)
+		}
 	}
 
-	contract := core.CompletionContract{TaskID: task.ID, TaskVersion: state.Version + 1, Criteria: []core.CompletionCriterion{{ID: "verified-outcome", Description: "work produced a verified successful outcome", Assurance: core.AssuranceDeterministic, Required: true}}}
+	assurance := core.AssuranceDeterministic
+	criterionID := "verified-outcome"
+	criterionDescription := "work produced a verified successful outcome"
+	if task.ExecutionKind == core.ExecutionAgent && outcome.Status == core.OutcomeSucceeded && !verifierAvailable {
+		assurance = core.AssuranceHumanJudgment
+		criterionID = "reviewed-outcome"
+		criterionDescription = "an authorized reviewer judged the recorded candidate against the task objective"
+	}
+	contract := core.CompletionContract{TaskID: task.ID, TaskVersion: state.Version + 1, Criteria: []core.CompletionCriterion{{ID: criterionID, Description: criterionDescription, Assurance: assurance, Required: true}}}
 	complete := s.completion.Evaluate(contract, outcome)
 	detail := completionDetail{Contract: contract, Result: complete}
 	if complete.Complete {
@@ -1042,7 +1102,11 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			return taskRun{}, fmt.Errorf("persist completed task %s: %w", task.ID, err)
 		}
 	} else if task.ExecutionKind == core.ExecutionAgent && outcome.Status == core.OutcomeSucceeded && !verifierAvailable {
-		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "COMPLETION_REVIEW_REQUIRED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: detail, CorrelationID: state.CorrelationID}); err != nil {
+		request, err := completion.NewReviewRequest(organizationID, task.ID, contract.TaskVersion, task.Description, contract, []string{outcomeEvent.EventID, resultEvent.EventID, candidateEvent.EventID}, time.Now().UTC())
+		if err != nil {
+			return taskRun{}, fmt.Errorf("build completion review request for task %s: %w", task.ID, err)
+		}
+		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "COMPLETION_REVIEW_REQUESTED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: request, CorrelationID: state.CorrelationID}); err != nil {
 			return taskRun{}, fmt.Errorf("persist completion review requirement for task %s: %w", task.ID, err)
 		}
 		task.Status = core.TaskBlocked
@@ -1052,7 +1116,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			WhyNeeded:     "model output is work content and cannot certify its own completion",
 			WorkCompleted: "the provider output, runtime outcome, and completion candidate were durably recorded",
 			RemainingWork: "evaluate the recorded candidate using an approved independent or human judgment path",
-			EvidenceRefs:  []string{resultEvent.EventID},
+			EvidenceRefs:  append([]string(nil), request.EvidenceRefs...),
 		}
 		running := projections.Versioned[core.Task]{Version: state.Version + 1, CorrelationID: state.CorrelationID, Value: task}
 		if err := s.saveBlockedTask(ctx, snapshot, running, organizationID, task, blocked); err != nil {
@@ -1113,8 +1177,9 @@ func outcomeSummary(outcome core.ToolOutcome) (string, error) {
 }
 
 type completionDetail struct {
-	Contract core.CompletionContract `json:"contract"`
-	Result   completion.Result       `json:"result"`
+	Contract    core.CompletionContract `json:"contract"`
+	Result      completion.Result       `json:"result"`
+	JudgmentRef string                  `json:"judgment_ref,omitempty"`
 }
 
 func (s *Service) reconcileGoals(ctx context.Context) error {
@@ -1202,12 +1267,18 @@ func (s *Service) readTaskResult(ctx context.Context, correlationID string) (tas
 			if err := json.Unmarshal(event.Payload, &result.Outcome); err != nil {
 				return taskRun{}, err
 			}
-		case "COMPLETION_VERIFIED", "COMPLETION_REVIEW_REQUIRED":
+		case "COMPLETION_VERIFIED":
 			var detail completionDetail
 			if err := json.Unmarshal(event.Payload, &detail); err != nil {
 				return taskRun{}, err
 			}
 			result.Completion = detail.Result
+		case "COMPLETION_REVIEW_REQUESTED":
+			var request completion.ReviewRequest
+			if err := json.Unmarshal(event.Payload, &request); err != nil || !request.Valid() {
+				return taskRun{}, fmt.Errorf("invalid completion review request")
+			}
+			result.Completion = s.completion.Evaluate(request.Contract, result.Outcome)
 		case "COMPLETION_REJECTED":
 			var payload events.ProjectionEventPayload
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
@@ -1346,6 +1417,25 @@ func materializeInboxContext(objective string, batches []inboxBatch) (string, er
 		Objective string      `json:"objective"`
 		Events    []eventView `json:"events"`
 	}{Objective: objective, Events: available}
+	encoded, err := json.Marshal(contextView)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func materializeRevisionContext(objective string, review completion.HumanReview, eventRef string) (string, error) {
+	contextView := struct {
+		Objective string `json:"objective"`
+		Revision  struct {
+			EventRef      string  `json:"event_ref"`
+			ReviewerID    core.ID `json:"reviewer_id"`
+			UntrustedText string  `json:"untrusted_text"`
+		} `json:"completion_revision"`
+	}{Objective: objective}
+	contextView.Revision.EventRef = eventRef
+	contextView.Revision.ReviewerID = review.ReviewerID
+	contextView.Revision.UntrustedText = review.Feedback
 	encoded, err := json.Marshal(contextView)
 	if err != nil {
 		return "", err

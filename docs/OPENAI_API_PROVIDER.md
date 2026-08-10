@@ -38,10 +38,11 @@ key or prompt in the error.
 The runtime durably records a successful OpenAI response as a result and
 completion candidate, then leaves the task `BLOCKED` when no independent
 verifier exists for its CompletionContract. It emits
-`COMPLETION_REVIEW_REQUIRED` instead of converting nonempty model text into
+`COMPLETION_REVIEW_REQUESTED` instead of converting nonempty model text into
 deterministic proof. The output can become verified completion only through an
-approved independent or human judgment path; that continuation is not yet part
-of this V1 provider slice.
+authenticated Human `REVIEWER` decision bound to the exact recorded evidence.
+That path is described in [Completion review](COMPLETION_REVIEW.md); it records
+`HUMAN_JUDGMENT` and never changes the ToolOutcome into deterministic proof.
 
 ## Configuration
 

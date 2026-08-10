@@ -34,9 +34,12 @@ fingerprinted persist-before-effect obligations with distinct attempted and
 confirmed states.
 
 Real-provider output is durably recorded as a result and
-`CANDIDATE_COMPLETE`, but remains `BLOCKED` for approved independent judgment
-when its CompletionContract has no runtime verifier. Nonempty model text is not
-treated as deterministic proof.
+`CANDIDATE_COMPLETE`, but remains `BLOCKED` when its CompletionContract has no
+runtime verifier. A dedicated authenticated Human `REVIEWER` may approve,
+reject, or request revision against a fingerprinted set of exact evidence
+events. External Agents and ordinary Human operators cannot decide completion.
+Human judgment remains `HUMAN_JUDGMENT`; it never turns nonempty model text or
+an unchecked ToolOutcome into deterministic proof.
 
 The A2A adapter exposes canonical A2A v1.0 Agent Card discovery and authenticated
 JSON-RPC `SendMessage` and `GetTask`, with capability-gated status, result, and

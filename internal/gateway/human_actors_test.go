@@ -45,6 +45,32 @@ func TestHumanActorRegistryEnforcesLifecycleAndRole(t *testing.T) {
 	}
 }
 
+func TestReviewerRoleHasOnlyReviewPlaneAccess(t *testing.T) {
+	expires := time.Now().UTC().Add(time.Hour)
+	registry, err := NewHumanActorRegistry([]HumanActor{{
+		ID: "reviewer-1", OrganizationID: "org-1", Status: OperatorActive,
+		Role: HumanRoleReviewer, WorkScope: intake.WorkScopeOrganization,
+		TokenRef: "REVIEWER_TOKEN", ReviewRef: "review-1", ExpiresAt: &expires,
+		MaxConcurrent: 1, RequestsPerMinute: 10, BearerToken: testReviewerToken,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := registry.Acquire(testReviewerToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Release()
+	if !session.Principal.Allowed(intake.CapabilityReadStatus) || !session.Principal.Allowed(intake.CapabilityReviewCompletion) {
+		t.Fatalf("reviewer has no review access: %+v", session.Principal)
+	}
+	for _, denied := range []string{intake.CapabilitySubmitWork, intake.CapabilityReadResult, intake.CapabilityProvideInput} {
+		if session.Principal.Allowed(denied) {
+			t.Fatalf("reviewer inherited work-plane capability %q", denied)
+		}
+	}
+}
+
 func TestHumanActorRegistryRejectsUnreviewedOrAmbiguousConfig(t *testing.T) {
 	expires := time.Now().UTC().Add(time.Hour)
 	base := HumanActor{

@@ -113,7 +113,18 @@ func (t Task) Ready(tasks map[ID]Task) bool {
 
 type Assurance string
 
-const AssuranceDeterministic Assurance = "DETERMINISTIC"
+const (
+	AssuranceDeterministic Assurance = "DETERMINISTIC"
+	AssuranceHumanJudgment Assurance = "HUMAN_JUDGMENT"
+)
+
+type CompletionReviewDecision string
+
+const (
+	CompletionReviewApprove CompletionReviewDecision = "APPROVE"
+	CompletionReviewReject  CompletionReviewDecision = "REJECT"
+	CompletionReviewRevise  CompletionReviewDecision = "REVISE"
+)
 
 type CompletionCriterion struct {
 	ID          string    `json:"id"`
