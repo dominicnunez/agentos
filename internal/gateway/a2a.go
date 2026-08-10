@@ -18,10 +18,11 @@ type A2A struct {
 	service   *intake.Service
 	actors    *ExternalActorRegistry
 	publicURL string
+	version   string
 }
 
-func NewA2A(service *intake.Service, actors *ExternalActorRegistry, publicURL string) *A2A {
-	return &A2A{service: service, actors: actors, publicURL: publicURL}
+func NewA2A(service *intake.Service, actors *ExternalActorRegistry, publicURL, version string) *A2A {
+	return &A2A{service: service, actors: actors, publicURL: publicURL, version: version}
 }
 
 var forbiddenAuthorityFields = map[string]struct{}{
@@ -138,7 +139,7 @@ func (a *A2A) agentCard(r *http.Request) map[string]any {
 	return map[string]any{
 		"name":        "Agent OS Operator Gateway",
 		"description": "Inbound work-level gateway for Agent OS V1",
-		"version":     "1.0.0-dev",
+		"version":     a.version,
 		"provider": map[string]string{
 			"organization": "Agent OS",
 			"url":          endpoint,

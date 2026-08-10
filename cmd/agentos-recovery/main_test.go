@@ -20,6 +20,18 @@ func TestRunRequiresKnownCommand(t *testing.T) {
 	}
 }
 
+func TestRunPrintsVersionWithoutOpeningDatabase(t *testing.T) {
+	for _, args := range [][]string{{"--version"}, {"version"}} {
+		var output bytes.Buffer
+		if err := run(context.Background(), args, &output); err != nil {
+			t.Fatal(err)
+		}
+		if output.String() != version+"\n" {
+			t.Fatalf("run(%v) output=%q", args, output.String())
+		}
+	}
+}
+
 func TestRunVerifyReturnsStructuredResult(t *testing.T) {
 	directory := t.TempDir()
 	source := filepath.Join(directory, "source.db")

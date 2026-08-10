@@ -42,7 +42,8 @@ func (noopLedger) Append(_ context.Context, draft events.TrustedDraft) (events.E
 func (noopLedger) Events(context.Context, string) ([]events.Event, error) { return nil, nil }
 
 func TestAgentCardAdvertisesOnlyA2AV1JSONRPC(t *testing.T) {
-	handler := NewA2A(intake.New(app.New(events.NewGateway(noopLedger{}))), nil, "https://agentos.example")
+	const releaseVersion = "1.0.0-rc.1"
+	handler := NewA2A(intake.New(app.New(events.NewGateway(noopLedger{}))), nil, "https://agentos.example", releaseVersion)
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/.well-known/agent-card.json", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -61,7 +62,7 @@ func TestAgentCardAdvertisesOnlyA2AV1JSONRPC(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &card); err != nil {
 		t.Fatal(err)
 	}
-	if card.Version != "1.0.0-dev" || len(card.SupportedInterfaces) != 1 || card.SupportedInterfaces[0].URL != "https://agentos.example/" || card.SupportedInterfaces[0].ProtocolBinding != "JSONRPC" || card.SupportedInterfaces[0].ProtocolVersion != "1.0" || len(card.Security) != 1 {
+	if card.Version != releaseVersion || len(card.SupportedInterfaces) != 1 || card.SupportedInterfaces[0].URL != "https://agentos.example/" || card.SupportedInterfaces[0].ProtocolBinding != "JSONRPC" || card.SupportedInterfaces[0].ProtocolVersion != "1.0" || len(card.Security) != 1 {
 		t.Fatalf("unexpected Agent Card: %+v", card)
 	}
 	for _, legacyPath := range []string{"/.well-known/agent.json", "/a2a/v1/tasks/send", "/a2a/v1/tasks/task-1"} {
@@ -375,7 +376,7 @@ func testA2A(t *testing.T, service *intake.Service, actors ...ExternalActor) *A2
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewA2A(service, registry, "")
+	return NewA2A(service, registry, "", "test-version")
 }
 
 func sendMessageBody(t *testing.T, rpcID, messageID, contextID, text string, metadata map[string]any) string {

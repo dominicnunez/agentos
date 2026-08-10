@@ -12,8 +12,10 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -33,7 +35,9 @@ jobs:
           mkdir -p work
           version=$(tr -d '\r\n' < VERSION)
           go build -ldflags "-X main.version=$version" -o work/agentos-version ./cmd/agentos
+          go build -ldflags "-X main.version=$version" -o work/agentos-recovery-version ./cmd/agentos-recovery
           test "$(./work/agentos-version --version)" = "$version"
+          test "$(./work/agentos-recovery-version --version)" = "$version"
 
       - name: Vet
         run: go vet ./...
@@ -165,7 +169,7 @@ jobs:
       - name: Upload Gallow SARIF
         if: github.event_name == 'pull_request' && hashFiles('gallow.sarif') != ''
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
         with:
           sarif_file: gallow.sarif
           category: gallow
