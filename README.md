@@ -135,6 +135,11 @@ work routes to the current fake `AgentExecution`; the router itself does not use
 an LLM. Human and external-Agent credentials must be distinct. Conversation text never
 constitutes a trusted approval decision.
 
+Exact-effect approval decisions use a disabled-by-default listener with a
+separate reviewed principal registry. It is not a natural-language or A2A
+surface, and it reloads the complete current effect from the ledger before each
+transition. See [docs/APPROVAL_CONTROL.md](docs/APPROVAL_CONTROL.md).
+
 Completion review uses a separate human-only control; it is not a chat command
 and is not exposed through A2A. See
 [docs/COMPLETION_REVIEW.md](docs/COMPLETION_REVIEW.md).
@@ -153,7 +158,7 @@ Deferred: federation, workflow DSLs, semantic/vector memory, Lab, optimizers,
 broad tool ecosystems, production external-effect adapters, and reconciliation
 workers.
 
-See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md), [docs/OPERATOR_INTAKE.md](docs/OPERATOR_INTAKE.md), [docs/COMPLETION_REVIEW.md](docs/COMPLETION_REVIEW.md), [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md), [docs/A2A_INTEROP.md](docs/A2A_INTEROP.md), [docs/EFFECT_RECONCILIATION.md](docs/EFFECT_RECONCILIATION.md), [docs/SQLITE_RECOVERY.md](docs/SQLITE_RECOVERY.md), [docs/CODEX_SUBSCRIPTION_PROVIDER.md](docs/CODEX_SUBSCRIPTION_PROVIDER.md), and [docs/OPENAI_API_PROVIDER.md](docs/OPENAI_API_PROVIDER.md).
+See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md), [docs/OPERATOR_INTAKE.md](docs/OPERATOR_INTAKE.md), [docs/COMPLETION_REVIEW.md](docs/COMPLETION_REVIEW.md), [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md), [docs/APPROVAL_CONTROL.md](docs/APPROVAL_CONTROL.md), [docs/A2A_INTEROP.md](docs/A2A_INTEROP.md), [docs/EFFECT_RECONCILIATION.md](docs/EFFECT_RECONCILIATION.md), [docs/SQLITE_RECOVERY.md](docs/SQLITE_RECOVERY.md), [docs/CODEX_SUBSCRIPTION_PROVIDER.md](docs/CODEX_SUBSCRIPTION_PROVIDER.md), and [docs/OPENAI_API_PROVIDER.md](docs/OPENAI_API_PROVIDER.md).
 
 ## Authoritative architecture handoff
 

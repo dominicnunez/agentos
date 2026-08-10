@@ -114,7 +114,7 @@ policy:
       from:
         module: gateway
       to:
-        modules: [core, intake, trustconfig]
+        modules: [approvals, core, intake, trustconfig]
 
     - name: operator-intake
       from:

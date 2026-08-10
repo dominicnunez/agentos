@@ -155,11 +155,8 @@ func TestA2ACannotApproveEffects(t *testing.T) {
 	}
 	taskID := taskIDFromRPC(t, response)
 
-	fingerprint, err := effects.Fingerprint("deploy", "agent-os", map[string]string{"version": "1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: core.ID(taskID), ActorID: "agent-local-org-1", Action: "deploy", Resource: "agent-os", Scope: "org-1", ConsequenceBoundary: core.BoundaryDeployment, Descriptor: "deploy Agent OS", EffectFingerprint: fingerprint, AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1", IdempotencyKey: "deploy-1", ReplayContext: map[string]string{"version": "1"}}
+	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: core.ID(taskID), ActorID: "agent-local-org-1", Action: "deploy", Resource: "agent-os", Scope: "org-1", ConsequenceBoundary: core.BoundaryDeployment, Descriptor: "deploy Agent OS", AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1", IdempotencyKey: "deploy-1", ReplayContext: map[string]string{"version": "1"}}
+	fingerprint := setGatewayEffectFingerprint(t, &obligation)
 	lease := core.CapabilityLease{ID: "lease-1", ActorID: obligation.ActorID, OriginTaskID: obligation.TaskID, Action: obligation.Action, Resource: obligation.Resource, Scope: obligation.Scope}
 	if err := ledgerStore.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "human-approver", taskID, nil, nil, "capability_lease", "lease-1", 1, lease); err != nil {
 		t.Fatal(err)
@@ -171,7 +168,7 @@ func TestA2ACannotApproveEffects(t *testing.T) {
 	if _, err := coordinator.Prepare(ctx, obligation); err != nil {
 		t.Fatal(err)
 	}
-	approval, err := approvalService.Request(ctx, core.HumanApproval{ID: "approval-1", OrganizationID: "org-1", TaskID: core.ID(taskID), EffectObligationID: "effect-1", Action: "deploy", Resource: "agent-os", Boundary: core.BoundaryDeployment, Risk: "HIGH", Urgency: "NORMAL", EffectFingerprint: fingerprint, SingleUse: true})
+	approval, err := approvalService.Request(ctx, core.HumanApproval{ID: "approval-1", OrganizationID: "org-1", TaskID: core.ID(taskID), EffectObligationID: "effect-1", Action: "deploy", Resource: "agent-os", Boundary: core.BoundaryDeployment, Risk: "HIGH", Urgency: "MEDIUM", EffectFingerprint: fingerprint, SingleUse: true})
 	if err != nil || approval.Status != core.ApprovalNotified || notifier.calls != 1 {
 		t.Fatalf("approval=%+v notifications=%d err=%v", approval, notifier.calls, err)
 	}

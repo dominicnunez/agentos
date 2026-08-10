@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/app"
+	"github.com/dominicnunez/agentos/internal/approvals"
 	"github.com/dominicnunez/agentos/internal/effects"
 	"github.com/dominicnunez/agentos/internal/effectstatus"
 	"github.com/dominicnunez/agentos/internal/events"
@@ -96,6 +97,13 @@ func run(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
+	approvalActors, err := configuredApprovalActors(ctx, os.Getenv("AGENTOS_APPROVAL_ACTORS_FILE"), secrets.Environment{})
+	if err != nil {
+		return err
+	}
+	if approvalActors == nil && approvalControlEnvironmentConfigured() {
+		return fmt.Errorf("approval control configuration requires AGENTOS_APPROVAL_ACTORS_FILE")
+	}
 	if externalActors == nil && humanActors == nil {
 		return fmt.Errorf("at least one reviewed operator registry is required")
 	}
@@ -103,8 +111,8 @@ func run(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	if gateway.OperatorRegistriesOverlap(humanActors, externalActors) {
-		return fmt.Errorf("human and external-agent credentials must be distinct")
+	if gateway.OperatorRegistriesOverlap(humanActors, externalActors, approvalActors) {
+		return fmt.Errorf("human, external-agent, and approval-control identities and credentials must be distinct")
 	}
 	if err := validatePublicURL(publicURL, remote, externalActors != nil, tlsConfig != nil); err != nil {
 		return err
@@ -135,13 +143,40 @@ func run(ctx context.Context) (err error) {
 	if externalActors != nil {
 		mux.Handle("/", gateway.NewA2A(operator, externalActors, publicURL, version))
 	}
-	s := &http.Server{Addr: listenAddress, Handler: mux, TLSConfig: tlsConfig, MaxHeaderBytes: 32 << 10, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: time.Minute}
+	s := newHTTPServer(listenAddress, mux, tlsConfig)
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", s.Addr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", s.Addr, err)
 	}
 	log.Printf("Agent OS listening on %s", listener.Addr())
-	return serve(ctx, s, listener, os.Getenv("AGENTOS_TLS_CERT_FILE"), os.Getenv("AGENTOS_TLS_KEY_FILE"))
+	bindings := []serverBinding{{server: s, listener: listener, certFile: os.Getenv("AGENTOS_TLS_CERT_FILE"), keyFile: os.Getenv("AGENTOS_TLS_KEY_FILE")}}
+	if approvalActors != nil {
+		controlAddress, controlRemote, configErr := configuredControlListenAddress()
+		if configErr != nil {
+			_ = listener.Close()
+			return configErr
+		}
+		controlTLS, configErr := configuredControlTLS(controlRemote)
+		if configErr != nil {
+			_ = listener.Close()
+			return configErr
+		}
+		approvalService := approvals.New(l, nil, approvalActors)
+		controlMux := http.NewServeMux()
+		controlMux.Handle("/v1/control/approvals/", gateway.NewApprovalControl(approvalService, approvalActors))
+		controlServer := newHTTPServer(controlAddress, controlMux, controlTLS)
+		controlListener, listenErr := (&net.ListenConfig{}).Listen(ctx, "tcp", controlServer.Addr)
+		if listenErr != nil {
+			_ = listener.Close()
+			return fmt.Errorf("listen on approval control %s: %w", controlServer.Addr, listenErr)
+		}
+		log.Printf("Agent OS approval control listening on %s", controlListener.Addr())
+		bindings = append(bindings, serverBinding{
+			server: controlServer, listener: controlListener,
+			certFile: os.Getenv("AGENTOS_CONTROL_TLS_CERT_FILE"), keyFile: os.Getenv("AGENTOS_CONTROL_TLS_KEY_FILE"),
+		})
+	}
+	return serveAll(ctx, bindings)
 }
 
 func configuredModel(ctx context.Context, source secrets.Source) (execution.ModelAdapter, func() error, error) {
@@ -193,51 +228,92 @@ func validateModelExposure(provider string, remote bool) error {
 }
 
 func serve(ctx context.Context, server *http.Server, listener net.Listener, certFile, keyFile string) error {
-	if listener == nil {
-		return fmt.Errorf("runtime context, server, and listener are required")
-	}
-	if ctx == nil || server == nil {
-		_ = listener.Close()
+	return serveAll(ctx, []serverBinding{{server: server, listener: listener, certFile: certFile, keyFile: keyFile}})
+}
+
+type serverBinding struct {
+	server            *http.Server
+	listener          net.Listener
+	certFile, keyFile string
+}
+
+func serveAll(ctx context.Context, bindings []serverBinding) error {
+	if ctx == nil || len(bindings) == 0 {
+		closeListeners(bindings)
 		return fmt.Errorf("runtime context, server, and listener are required")
 	}
 	if err := ctx.Err(); err != nil {
-		_ = listener.Close()
+		closeListeners(bindings)
 		return err
 	}
-	result := make(chan error, 1)
-	go func() {
-		if server.TLSConfig != nil {
-			result <- server.ServeTLS(listener, certFile, keyFile)
-			return
+	for _, binding := range bindings {
+		if binding.server == nil || binding.listener == nil {
+			closeListeners(bindings)
+			return fmt.Errorf("runtime context, server, and listener are required")
 		}
-		result <- server.Serve(listener)
-	}()
-
+	}
+	results := make(chan error, len(bindings))
+	for _, binding := range bindings {
+		binding := binding
+		go func() {
+			if binding.server.TLSConfig != nil {
+				results <- binding.server.ServeTLS(binding.listener, binding.certFile, binding.keyFile)
+				return
+			}
+			results <- binding.server.Serve(binding.listener)
+		}()
+	}
+	var result error
+	completed := 0
 	select {
-	case err := <-result:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+	case serveErr := <-results:
+		completed = 1
+		if !errors.Is(serveErr, http.ErrServerClosed) {
+			result = serveErr
 		}
-		return err
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		shutdownErr := server.Shutdown(shutdownCtx)
-		if shutdownErr != nil {
-			shutdownErr = errors.Join(shutdownErr, server.Close())
-		}
-		serveErr := <-result
-		if errors.Is(serveErr, http.ErrServerClosed) {
-			serveErr = nil
-		}
-		return errors.Join(shutdownErr, serveErr)
 	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, binding := range bindings {
+		shutdownErr := binding.server.Shutdown(shutdownCtx)
+		if shutdownErr != nil {
+			shutdownErr = errors.Join(shutdownErr, binding.server.Close())
+		}
+		result = errors.Join(result, shutdownErr)
+	}
+	for completed < len(bindings) {
+		serveErr := <-results
+		if !errors.Is(serveErr, http.ErrServerClosed) {
+			result = errors.Join(result, serveErr)
+		}
+		completed++
+	}
+	return result
+}
+
+func closeListeners(bindings []serverBinding) {
+	for _, binding := range bindings {
+		if binding.listener != nil {
+			_ = binding.listener.Close()
+		}
+	}
+}
+
+func newHTTPServer(address string, handler http.Handler, tlsConfig *tls.Config) *http.Server {
+	return &http.Server{Addr: address, Handler: handler, TLSConfig: tlsConfig, MaxHeaderBytes: 32 << 10, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: time.Minute}
 }
 
 func configuredHumanActors(ctx context.Context, path string, source secrets.Source) (*gateway.HumanActorRegistry, error) {
 	return configuredRegistry(ctx, path, source, "human actor registry", "human actor", gateway.DecodeHumanActorConfig,
 		func(actor gateway.HumanActor) (string, string) { return actor.ID, actor.TokenRef },
 		func(actor *gateway.HumanActor, token string) { actor.BearerToken = token }, gateway.NewHumanActorRegistry)
+}
+
+func configuredApprovalActors(ctx context.Context, path string, source secrets.Source) (*gateway.ApprovalActorRegistry, error) {
+	return configuredRegistry(ctx, path, source, "approval actor registry", "approval actor", gateway.DecodeApprovalActorConfig,
+		func(actor gateway.ApprovalActor) (string, string) { return actor.ID, actor.TokenRef },
+		func(actor *gateway.ApprovalActor, token string) { actor.BearerToken = token }, gateway.NewApprovalActorRegistry)
 }
 
 func configuredEffectReconcilers(ctx context.Context, path string, source secrets.Source) (*effectstatus.HTTPReconcilerRegistry, error) {
@@ -303,44 +379,72 @@ func decodeConfigFile[T any](path, name string, decode func(io.Reader) ([]T, err
 }
 
 func configuredListenAddress() (string, bool, error) {
-	address := os.Getenv("AGENTOS_LISTEN_ADDR")
+	return configuredAddress("AGENTOS_LISTEN_ADDR", "AGENTOS_ALLOW_REMOTE", "127.0.0.1:8080", "")
+}
+
+func configuredControlListenAddress() (string, bool, error) {
+	return configuredAddress("AGENTOS_CONTROL_LISTEN_ADDR", "AGENTOS_CONTROL_ALLOW_REMOTE", "127.0.0.1:8082", "approval control ")
+}
+
+func configuredAddress(addressVariable, remoteVariable, defaultAddress, label string) (string, bool, error) {
+	address := os.Getenv(addressVariable)
 	if address == "" {
-		address = "127.0.0.1:8080"
+		address = defaultAddress
 	}
 	host, port, err := net.SplitHostPort(address)
 	if err != nil || port == "" {
-		return "", false, fmt.Errorf("AGENTOS_LISTEN_ADDR must be a host:port address")
+		return "", false, fmt.Errorf("%s must be a host:port address", addressVariable)
 	}
 	parsedIP := net.ParseIP(host)
 	loopback := strings.EqualFold(host, "localhost") || (parsedIP != nil && parsedIP.IsLoopback())
 	remote := host == "" || !loopback
 	allowRemote := false
-	switch configured := os.Getenv("AGENTOS_ALLOW_REMOTE"); configured {
+	switch configured := os.Getenv(remoteVariable); configured {
 	case "", "false":
 	case "true":
 		allowRemote = true
 	default:
-		return "", false, fmt.Errorf("AGENTOS_ALLOW_REMOTE must be true or false")
+		return "", false, fmt.Errorf("%s must be true or false", remoteVariable)
 	}
 	if remote && !allowRemote {
-		return "", false, fmt.Errorf("remote listening is disabled; set AGENTOS_ALLOW_REMOTE=true deliberately")
+		return "", false, fmt.Errorf("%sremote listening is disabled; set %s=true deliberately", label, remoteVariable)
 	}
 	return address, remote, nil
 }
 
 func configuredTLS(remote bool) (*tls.Config, error) {
-	certFile := os.Getenv("AGENTOS_TLS_CERT_FILE")
-	keyFile := os.Getenv("AGENTOS_TLS_KEY_FILE")
+	return configuredTLSFiles(remote, "AGENTOS_TLS_CERT_FILE", "AGENTOS_TLS_KEY_FILE", "")
+}
+
+func configuredControlTLS(remote bool) (*tls.Config, error) {
+	return configuredTLSFiles(remote, "AGENTOS_CONTROL_TLS_CERT_FILE", "AGENTOS_CONTROL_TLS_KEY_FILE", "approval control ")
+}
+
+func configuredTLSFiles(remote bool, certVariable, keyVariable, label string) (*tls.Config, error) {
+	certFile := os.Getenv(certVariable)
+	keyFile := os.Getenv(keyVariable)
 	if (certFile == "") != (keyFile == "") {
-		return nil, fmt.Errorf("AGENTOS_TLS_CERT_FILE and AGENTOS_TLS_KEY_FILE must be configured together")
+		return nil, fmt.Errorf("%s and %s must be configured together", certVariable, keyVariable)
 	}
 	if certFile == "" {
 		if remote {
-			return nil, fmt.Errorf("remote listening requires TLS certificate and key files")
+			return nil, fmt.Errorf("%sremote listening requires TLS certificate and key files", label)
 		}
 		return nil, nil
 	}
 	return &tls.Config{MinVersion: tls.VersionTLS13}, nil
+}
+
+func approvalControlEnvironmentConfigured() bool {
+	for _, variable := range []string{
+		"AGENTOS_CONTROL_LISTEN_ADDR", "AGENTOS_CONTROL_ALLOW_REMOTE",
+		"AGENTOS_CONTROL_TLS_CERT_FILE", "AGENTOS_CONTROL_TLS_KEY_FILE",
+	} {
+		if os.Getenv(variable) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func validatePublicURL(publicURL string, remote, a2aEnabled, tlsEnabled bool) error {

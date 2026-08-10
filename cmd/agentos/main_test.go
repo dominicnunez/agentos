@@ -166,6 +166,28 @@ func TestConfiguredHumanActorsResolvesReviewedRole(t *testing.T) {
 	}
 }
 
+func TestConfiguredApprovalActorsResolveExactDecisionGrant(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "approval-actors.json")
+	config := `{"actors":[{"id":"approver-1","organization_id":"org-1","status":"ACTIVE","token_ref":"APPROVAL_TOKEN","review_ref":"security-review-3","expires_at":"2099-01-01T00:00:00Z","max_concurrent":2,"requests_per_minute":30,"grants":[{"boundary":"AGENT_OS_DEPLOYMENT","risk":"HIGH"}]}]}`
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const token = "configured-approval-control-token-001"
+	registry, err := configuredApprovalActors(context.Background(), path, testSecrets{"APPROVAL_TOKEN": token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := registry.Acquire(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.Release()
+	approval := core.HumanApproval{OrganizationID: "org-1", Boundary: core.BoundaryDeployment, Risk: "HIGH"}
+	if session.Principal.ID != "approver-1" || session.Principal.Kind != core.PrincipalHuman || len(session.Principal.Capabilities) != 0 || !registry.CanDecide(context.Background(), approval, "approver-1") {
+		t.Fatalf("approval principal=%+v", session.Principal)
+	}
+}
+
 func TestConfiguredExternalActorsDisablesA2AWithoutRegistry(t *testing.T) {
 	registry, err := configuredExternalActors(context.Background(), "", testSecrets{})
 	if err != nil || registry != nil {
@@ -219,6 +241,40 @@ func TestConfiguredListenAddressIsLoopbackByDefaultAndRemoteIsExplicit(t *testin
 	t.Setenv("AGENTOS_ALLOW_REMOTE", "1")
 	if _, _, err := configuredListenAddress(); err == nil {
 		t.Fatal("noncanonical remote-listener switch was accepted")
+	}
+}
+
+func TestConfiguredApprovalControlIsLoopbackAndTLSFailsClosedRemotely(t *testing.T) {
+	t.Setenv("AGENTOS_CONTROL_LISTEN_ADDR", "")
+	t.Setenv("AGENTOS_CONTROL_ALLOW_REMOTE", "")
+	t.Setenv("AGENTOS_CONTROL_TLS_CERT_FILE", "")
+	t.Setenv("AGENTOS_CONTROL_TLS_KEY_FILE", "")
+	address, remote, err := configuredControlListenAddress()
+	if err != nil || address != "127.0.0.1:8082" || remote {
+		t.Fatalf("default control address=%q remote=%t err=%v", address, remote, err)
+	}
+	if approvalControlEnvironmentConfigured() {
+		t.Fatal("empty control environment enabled the listener")
+	}
+	t.Setenv("AGENTOS_CONTROL_LISTEN_ADDR", "0.0.0.0:8082")
+	if _, _, err := configuredControlListenAddress(); err == nil {
+		t.Fatal("remote approval control was enabled implicitly")
+	}
+	t.Setenv("AGENTOS_CONTROL_ALLOW_REMOTE", "true")
+	if _, remote, err = configuredControlListenAddress(); err != nil || !remote {
+		t.Fatalf("explicit remote control listener remote=%t err=%v", remote, err)
+	}
+	if _, err := configuredControlTLS(true); err == nil {
+		t.Fatal("remote approval control accepted plaintext")
+	}
+	t.Setenv("AGENTOS_CONTROL_TLS_CERT_FILE", "control.crt")
+	t.Setenv("AGENTOS_CONTROL_TLS_KEY_FILE", "control.key")
+	config, err := configuredControlTLS(true)
+	if err != nil || config == nil || config.MinVersion != tls.VersionTLS13 {
+		t.Fatalf("control TLS config=%+v err=%v", config, err)
+	}
+	if !approvalControlEnvironmentConfigured() {
+		t.Fatal("explicit control environment was not detected")
 	}
 }
 
@@ -302,5 +358,45 @@ func TestServeStopsCleanlyWhenRuntimeContextIsCancelled(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("server did not stop after runtime cancellation")
+	}
+}
+
+func TestServeAllStopsBothListenersWhenRuntimeContextIsCancelled(t *testing.T) {
+	listeners := make([]net.Listener, 0, 2)
+	bindings := make([]serverBinding, 0, 2)
+	for range 2 {
+		listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		listeners = append(listeners, listener)
+		bindings = append(bindings, serverBinding{
+			server:   &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }), ReadHeaderTimeout: time.Second},
+			listener: listener,
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serveAll(ctx, bindings) }()
+	for _, listener := range listeners {
+		response, err := http.Get("http://" + listener.Addr().String()) //nolint:gosec,noctx // loopback listener owned by this test
+		if err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusNoContent {
+			cancel()
+			t.Fatalf("status=%d", response.StatusCode)
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serveAll returned error during graceful shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("servers did not stop after runtime cancellation")
 	}
 }
