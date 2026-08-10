@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dominicnunez/agentos/internal/approvals"
 	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/ledger"
@@ -32,6 +33,13 @@ func persistCapability(t *testing.T, l *ledger.SQLite, obligation core.EffectObl
 	}
 }
 
+func persistApproval(t *testing.T, l *ledger.SQLite, approval core.HumanApproval) {
+	t.Helper()
+	if err := l.AppendRecord(context.Background(), string(approval.OrganizationID), "APPROVAL_DECIDED", string(approval.DecidedBy), string(approval.TaskID), nil, nil, "approval", string(approval.ID), 1, approval); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPersistBeforeEffectAndFingerprintApproval(t *testing.T) {
 	l, e := ledger.Open(":memory:")
 	if e != nil {
@@ -52,6 +60,7 @@ func TestPersistBeforeEffectAndFingerprintApproval(t *testing.T) {
 		t.Fatal("mismatched approval reached adapter")
 	}
 	reader.approval.EffectFingerprint = fp
+	persistApproval(t, l, reader.approval)
 	got, e := c.Execute(context.Background(), o)
 	if e != nil || got.Status != core.EffectConfirmed || !a.called {
 		t.Fatalf("got=%+v err=%v", got, e)
@@ -61,7 +70,7 @@ func TestPersistBeforeEffectAndFingerprintApproval(t *testing.T) {
 		t.Fatalf("versions=%d", len(rows))
 	}
 	events, err := l.Events(context.Background(), "")
-	if err != nil || len(events) != 5 {
+	if err != nil || len(events) != 6 {
 		t.Fatalf("effect transitions were not ledgered: events=%d err=%v", len(events), err)
 	}
 }
@@ -148,6 +157,7 @@ func TestSingleUseApprovalIsConsumedBeforeAdapter(t *testing.T) {
 	if _, err = c.Prepare(context.Background(), o); err != nil {
 		t.Fatal(err)
 	}
+	persistApproval(t, l, reader.approval)
 	if _, err = c.Execute(context.Background(), o); err != nil {
 		t.Fatal(err)
 	}
@@ -189,6 +199,41 @@ func TestProtectedEffectRejectsExpiredApprovalAndUnknownBoundary(t *testing.T) {
 	unknown.ConsequenceBoundary = "NEW_UNREVIEWED_BOUNDARY"
 	if _, err := coordinator.Prepare(context.Background(), unknown); err == nil {
 		t.Fatal("unknown consequence boundary was treated as unprotected")
+	}
+}
+
+func TestApprovalExpiryIsRecheckedInsideAttemptTransaction(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	adapter := &adapter{}
+	fingerprint, err := Fingerprint("deploy", "agent-os", map[string]string{"version": "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org", TaskID: "task", ActorID: "actor", Action: "deploy", Resource: "agent-os", Scope: "org", ConsequenceBoundary: core.BoundaryDeployment, Descriptor: "deploy Agent OS", EffectFingerprint: fingerprint, AuthorizationRefs: []string{"lease"}, ApprovalRef: "approval-1", IdempotencyKey: "key-1", ReplayContext: map[string]string{"version": "1"}}
+	persistCapability(t, l, obligation)
+	coordinator := New(l, adapter, &approvalReader{})
+	if _, err := coordinator.Prepare(ctx, obligation); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().UTC().Add(time.Hour)
+	staleApproval := core.HumanApproval{ID: "approval-1", OrganizationID: "org", TaskID: "task", EffectObligationID: "effect-1", Action: "deploy", Resource: "agent-os", Boundary: core.BoundaryDeployment, Status: core.ApprovalApproved, EffectFingerprint: fingerprint, ExpiresAt: &future}
+	coordinator.approvals = &approvalReader{approval: staleApproval}
+	expired := time.Now().UTC().Add(-time.Minute)
+	durableApproval := staleApproval
+	durableApproval.ExpiresAt = &expired
+	persistApproval(t, l, durableApproval)
+
+	if _, err := coordinator.Execute(ctx, obligation); !errors.Is(err, approvals.ErrApprovalExpired) || adapter.called {
+		t.Fatalf("expired durable approval reached adapter: called=%v err=%v", adapter.called, err)
+	}
+	rows, err := l.Records(ctx, "effect", "effect-1")
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("expired approval advanced effect: versions=%d err=%v", len(rows), err)
 	}
 }
 
@@ -240,6 +285,7 @@ func TestFreezeAndRevokePreventEffectAtTimeOfUse(t *testing.T) {
 	if _, err := coordinator.Prepare(ctx, obligation); err != nil {
 		t.Fatal(err)
 	}
+	persistApproval(t, l, reader.approval)
 	now := time.Now().UTC()
 	freeze := authority.FreezeState{OrganizationID: "org-1", Frozen: true, Reason: "incident", UpdatedAt: now}
 	if err := l.AppendRecord(ctx, "org-1", "FREEZE_SET", "human-1", "task-1", nil, nil, "organization_freeze", "org-1", 1, freeze); err != nil {
@@ -270,3 +316,4 @@ func TestFreezeAndRevokePreventEffectAtTimeOfUse(t *testing.T) {
 		t.Fatalf("time-of-use denials were not durable: traces=%d err=%v", len(traces), err)
 	}
 }
+
