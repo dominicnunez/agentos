@@ -5,7 +5,7 @@ Agent OS V1 accepts natural-language work through two first-class adapters:
 ```text
 Human -> Human Gateway ----+
                             +-> Intake Service -> Intent -> Goal -> Task DAG
-Hermes -> A2A Gateway -----+
+Agent --> A2A Gateway -----+
 ```
 
 The adapters authenticate different principal kinds and translate their wire
@@ -48,10 +48,16 @@ behavior remains testable without a provider credential.
 same message endpoint continues blocked `HUMAN` work when a new message uses the
 same conversation ID. Message IDs are persisted for retry idempotency.
 
-The authenticated human and Hermes may observe or continue work in their shared
+The authenticated human and external Agent may observe or continue work in their shared
 organization only when their explicit `read_status`, `read_result`, or
 `provide_input` capabilities allow it. Each input event retains the actual
 principal and channel provenance.
+
+An external Agent must implement the A2A v1.0 client capabilities described in
+[A2A Agent interoperability profile](A2A_INTEROP.md) before it can use the A2A
+Gateway. Protocol support does not grant Agent OS authority: the authenticated
+principal still needs each configured Agent OS capability for the requested
+operation.
 
 ## Authority boundary
 

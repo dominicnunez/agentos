@@ -13,14 +13,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout pinned Hermes v0.20.0 A2A client
-        uses: actions/checkout@v4
-        with:
-          repository: NousResearch/hermes-agent
-          ref: 3c27eb6234bf91b8ceee9e9071591b31e9b148cb
-          path: work/hermes-v0.20.0
-          sparse-checkout: plugins/platforms/a2a
-          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -45,16 +37,16 @@ jobs:
       - name: Race-tested unit tests
         run: go test -race ./...
 
-      - name: Hermes v0.20.0 and human intake interoperability
+      - name: A2A Agent and human intake interoperability
         env:
-          AGENTOS_DB: work/hermes-interop.db
-          AGENTOS_OPERATOR_TOKEN: hermes-interop-token
+          AGENTOS_DB: work/a2a-interop.db
+          AGENTOS_OPERATOR_TOKEN: a2a-interop-token
           AGENTOS_HUMAN_TOKEN: human-interop-token
-          AGENTOS_ORGANIZATION_ID: hermes-interop-org
+          AGENTOS_ORGANIZATION_ID: a2a-interop-org
           AGENTOS_PUBLIC_URL: http://127.0.0.1:8080
         run: |
           go build -o work/agentos ./cmd/agentos
-          ./work/agentos >work/hermes-interop.log 2>&1 &
+          ./work/agentos >work/a2a-interop.log 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
           for attempt in $(seq 1 30); do
@@ -62,13 +54,12 @@ jobs:
               break
             fi
             if [ "$attempt" -eq 30 ]; then
-              cat work/hermes-interop.log
+              cat work/a2a-interop.log
               exit 1
             fi
             sleep 1
           done
-          python3 scripts/verify-hermes-v020-interop.py \
-            --hermes-root work/hermes-v0.20.0 \
+          python3 scripts/verify-a2a-interop.py \
             --url http://127.0.0.1:8080 \
             --token "$AGENTOS_OPERATOR_TOKEN"
           python3 scripts/verify-human-intake.py \

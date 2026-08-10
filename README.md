@@ -5,7 +5,7 @@ Agent OS is an event-driven runtime for durable artificial organizations. This r
 ```text
 Human --> Human Gateway --+
                            +--> shared Intake Router --> Intent --> Goal --> Task DAG
-Hermes ----A2A Gateway ----+                              |          |
+Agent -----A2A Gateway ----+                              |          |
                                                           +--> Event Gateway --> SQLite ledger
                                                                      |
                                                  deterministic handler or AgentExecution
@@ -61,12 +61,12 @@ curl -X POST http://localhost:8080/v1/human/messages \
 
 Registered `echo` work stays deterministic. Other unstructured natural-language
 work routes to the current fake `AgentExecution`; the router itself does not use
-an LLM. Human and Hermes credentials must be distinct. Conversation text never
+an LLM. Human and external-Agent credentials must be distinct. Conversation text never
 constitutes a trusted approval decision.
 
 ## Testing status
 
-The repository is ready to test as an early V1 vertical slice. The automated suite covers the deterministic and fake-agent paths, event-backed projection rebuilds, restart-safe Agent/Team/Task inbox delivery at execution boundaries, pending-task recovery, durable human-approval wait/decision state, fail-closed handling of uncertain interrupted work, completion verification, Task DAG readiness, the authenticated A2A and protected-effect boundary, pinned real-client Hermes v0.20.0 interoperability, exact capability checks, single-use effect approvals, unified per-run operational telemetry, institutional knowledge guards, inference reserves, and deterministic audit checks.
+The repository is ready to test as an early V1 vertical slice. The automated suite covers the deterministic and fake-agent paths, event-backed projection rebuilds, restart-safe Agent/Team/Task inbox delivery at execution boundaries, pending-task recovery, durable human-approval wait/decision state, fail-closed handling of uncertain interrupted work, completion verification, Task DAG readiness, the authenticated A2A and protected-effect boundary, vendor-neutral A2A v1.0 interoperability, exact capability checks, single-use effect approvals, unified per-run operational telemetry, institutional knowledge guards, inference reserves, and deterministic audit checks.
 
 This is not a full V1 acceptance sign-off. [docs/V1_ACCEPTANCE_STATUS.md](docs/V1_ACCEPTANCE_STATUS.md) maps the normative checklist to current evidence and keeps incomplete items visible.
 
@@ -76,7 +76,7 @@ Included: core organizational/work objects, task dependencies, deterministic and
 
 Deferred: federation, workflow DSLs, semantic/vector memory, Lab, optimizers, production provider wiring, broad tool ecosystems, production external-effect adapters, and reconciliation workers.
 
-See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md), [docs/OPERATOR_INTAKE.md](docs/OPERATOR_INTAKE.md), [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md), and [docs/HERMES_INTEROP.md](docs/HERMES_INTEROP.md).
+See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md), [docs/OPERATOR_INTAKE.md](docs/OPERATOR_INTAKE.md), [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md), and [docs/A2A_INTEROP.md](docs/A2A_INTEROP.md).
 
 ## Authoritative architecture handoff
 

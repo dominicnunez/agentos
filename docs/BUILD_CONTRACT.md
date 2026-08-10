@@ -9,7 +9,7 @@
 5. A tool report is not proof of an effect. `ToolOutcome` distinguishes status, observed effect, verification, and retryability.
 6. Completion is evaluated against an explicit `CompletionContract`, not an actor's self-report.
 7. `ExecutionContextManifest` records what an execution was actually given.
-8. A2A v1.0 is an external Hermes/operator boundary. It does not become the internal communication model.
+8. A2A v1.0 is an external Agent/operator boundary. It does not become the internal communication model.
 9. Approval decisions fail closed. An approval authorizes a fingerprinted effect, never a general privilege expansion.
 
 ## First slice
@@ -44,7 +44,7 @@ Intake Service. The Intent records the authenticated principal ID/kind and sourc
 channel. Known deterministic handlers are selected without inference; otherwise
 unstructured natural-language work uses `AgentExecution` because interpretation
 is justified. Unsupported execution mechanisms fail closed. Direct human chat
-uses a credential distinct from Hermes and is a work/input surface, not a
+uses a credential distinct from external Agents and is a work/input surface, not a
 trusted approval API.
 
 Task execution publishes a typed `RESULT_PUBLISHED` contract before

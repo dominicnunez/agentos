@@ -62,7 +62,7 @@ func run() (err error) {
 	}
 	operator := intake.New(service)
 	capabilities := []string{intake.CapabilitySubmitWork, intake.CapabilityReadStatus, intake.CapabilityReadResult, intake.CapabilityProvideInput}
-	a2a := gateway.NewA2A(operator, gateway.ExternalActor{ID: "hermes-primary", OrganizationID: orgID, BearerToken: token, PublicURL: publicURL, Capabilities: capabilities})
+	a2a := gateway.NewA2A(operator, gateway.ExternalActor{ID: "external-agent-primary", OrganizationID: orgID, BearerToken: token, PublicURL: publicURL, Capabilities: capabilities})
 	human := gateway.NewHuman(operator, gateway.HumanActor{ID: "human-primary", OrganizationID: orgID, BearerToken: humanToken, Capabilities: capabilities})
 	mux := http.NewServeMux()
 	mux.Handle("/v1/human/", human)

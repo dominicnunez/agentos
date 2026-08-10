@@ -45,7 +45,7 @@ func TestNaturalLanguageIntakePreservesPrincipalAndRoutingProvenance(t *testing.
 	runtime := app.New(events.NewGateway(store))
 	service := New(runtime)
 	human := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
-	hermes := testPrincipal("hermes-1", core.PrincipalExternalAgent, ChannelA2A)
+	externalAgent := testPrincipal("external-agent-1", core.PrincipalExternalAgent, ChannelA2A)
 
 	view, err := service.Handle(ctx, human, Message{ConversationID: "human-work", MessageID: "human-message-1", Text: "draft a concise release update"})
 	if err != nil || view.State != StateCompleted || view.Result != "fake-model: draft a concise release update" {
@@ -62,13 +62,13 @@ func TestNaturalLanguageIntakePreservesPrincipalAndRoutingProvenance(t *testing.
 		t.Fatalf("agent route lacks manifested inference evidence: %+v", stream)
 	}
 
-	view, err = service.Handle(ctx, hermes, Message{ConversationID: "hermes-work", MessageID: "hermes-message-1", Text: "echo hello"})
+	view, err = service.Handle(ctx, externalAgent, Message{ConversationID: "agent-work", MessageID: "agent-message-1", Text: "echo hello"})
 	if err != nil || view.State != StateCompleted || view.Result != "hello" {
-		t.Fatalf("Hermes view=%+v err=%v", view, err)
+		t.Fatalf("external-Agent view=%+v err=%v", view, err)
 	}
-	intent, task, stream = projectedWork(t, store, "hermes-work")
-	if intent.SourcePrincipalID != "hermes-1" || intent.SourcePrincipalKind != core.PrincipalExternalAgent || intent.SourceChannel != ChannelA2A || intent.SourceMessageID != "hermes-message-1" || intent.SourceHumanID != "" {
-		t.Fatalf("Hermes provenance=%+v", intent)
+	intent, task, stream = projectedWork(t, store, "agent-work")
+	if intent.SourcePrincipalID != "external-agent-1" || intent.SourcePrincipalKind != core.PrincipalExternalAgent || intent.SourceChannel != ChannelA2A || intent.SourceMessageID != "agent-message-1" || intent.SourceHumanID != "" {
+		t.Fatalf("external-Agent provenance=%+v", intent)
 	}
 	if task.ExecutionKind != core.ExecutionDeterministic || !containsEvent(stream, "A2A_WORK_ACCEPTED") || containsEvent(stream, "INFERENCE_USAGE_RECORDED") {
 		t.Fatalf("deterministic route used model inference: task=%+v events=%+v", task, stream)
@@ -76,11 +76,11 @@ func TestNaturalLanguageIntakePreservesPrincipalAndRoutingProvenance(t *testing.
 
 	shared, err := service.Get(ctx, human, view.TaskID)
 	if err != nil || shared.Result != "hello" {
-		t.Fatalf("authorized human could not observe Hermes work: view=%+v err=%v", shared, err)
+		t.Fatalf("authorized human could not observe external-Agent work: view=%+v err=%v", shared, err)
 	}
 }
 
-func TestHumanAndHermesCanContinueSharedWorkWithoutSharingIdentity(t *testing.T) {
+func TestHumanAndExternalAgentCanContinueSharedWorkWithoutSharingIdentity(t *testing.T) {
 	ctx := context.Background()
 	store, err := ledger.Open(":memory:")
 	if err != nil {
@@ -89,15 +89,15 @@ func TestHumanAndHermesCanContinueSharedWorkWithoutSharingIdentity(t *testing.T)
 	t.Cleanup(func() { _ = store.Close() })
 	service := New(app.New(events.NewGateway(store)))
 	human := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
-	hermes := testPrincipal("hermes-1", core.PrincipalExternalAgent, ChannelA2A)
+	externalAgent := testPrincipal("external-agent-1", core.PrincipalExternalAgent, ChannelA2A)
 
 	view, err := service.Handle(ctx, human, Message{ConversationID: "shared", MessageID: "human-message-1", Text: "choose the launch date", RequestedKind: core.ExecutionHuman})
 	if err != nil || view.State != StateInputRequired || view.Prompt == "" {
 		t.Fatalf("blocked human work=%+v err=%v", view, err)
 	}
-	view, err = service.Handle(ctx, hermes, Message{ConversationID: "shared", MessageID: "hermes-message-1", Text: "Use September 15", RequestedKind: core.ExecutionHuman})
+	view, err = service.Handle(ctx, externalAgent, Message{ConversationID: "shared", MessageID: "agent-message-1", Text: "Use September 15", RequestedKind: core.ExecutionHuman})
 	if err != nil || view.State != StateCompleted || view.Result != "authorized external input persisted" {
-		t.Fatalf("Hermes continuation=%+v err=%v", view, err)
+		t.Fatalf("external-Agent continuation=%+v err=%v", view, err)
 	}
 	stream, err := store.Events(ctx, "shared")
 	if err != nil {
@@ -114,11 +114,11 @@ func TestHumanAndHermesCanContinueSharedWorkWithoutSharingIdentity(t *testing.T)
 		}
 		found = true
 	}
-	if !found || input.SourcePrincipalID != "hermes-1" || input.SourcePrincipalKind != string(core.PrincipalExternalAgent) || input.SourceChannel != ChannelA2A || input.MessageID != "hermes-message-1" {
+	if !found || input.SourcePrincipalID != "external-agent-1" || input.SourcePrincipalKind != string(core.PrincipalExternalAgent) || input.SourceChannel != ChannelA2A || input.MessageID != "agent-message-1" {
 		t.Fatalf("continuation provenance=%+v found=%t", input, found)
 	}
 	eventCount := len(stream)
-	view, err = service.Handle(ctx, hermes, Message{ConversationID: "shared", MessageID: "hermes-message-1", Text: "Use September 15"})
+	view, err = service.Handle(ctx, externalAgent, Message{ConversationID: "shared", MessageID: "agent-message-1", Text: "Use September 15"})
 	if err != nil || view.State != StateCompleted {
 		t.Fatalf("idempotent retry=%+v err=%v", view, err)
 	}
@@ -127,7 +127,7 @@ func TestHumanAndHermesCanContinueSharedWorkWithoutSharingIdentity(t *testing.T)
 		t.Fatalf("retry appended events=%d want=%d err=%v", len(stream), eventCount, err)
 	}
 
-	noInput := hermes
+	noInput := externalAgent
 	noInput.Capabilities = []string{CapabilityReadStatus}
 	_, err = service.Handle(ctx, noInput, Message{ConversationID: "new-block", MessageID: "message-1", Text: "decision", RequestedKind: core.ExecutionHuman})
 	if !errors.Is(err, ErrForbidden) {
@@ -144,14 +144,14 @@ func TestIntakeUsesDurableMessageIDsForContinuationAndReplayAuthorization(t *tes
 	t.Cleanup(func() { _ = store.Close() })
 	service := New(app.New(events.NewGateway(store)))
 	human := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
-	hermes := testPrincipal("hermes-1", core.PrincipalExternalAgent, ChannelA2A)
+	externalAgent := testPrincipal("external-agent-1", core.PrincipalExternalAgent, ChannelA2A)
 
 	const repeatedText = "choose the launch date"
 	view, err := service.Handle(ctx, human, Message{ConversationID: "same-text", MessageID: "initial-message", Text: repeatedText, RequestedKind: core.ExecutionHuman})
 	if err != nil || view.State != StateInputRequired {
 		t.Fatalf("blocked work=%+v err=%v", view, err)
 	}
-	view, err = service.Handle(ctx, hermes, Message{ConversationID: "same-text", MessageID: "continuation-message", Text: repeatedText})
+	view, err = service.Handle(ctx, externalAgent, Message{ConversationID: "same-text", MessageID: "continuation-message", Text: repeatedText})
 	if err != nil || view.State != StateCompleted {
 		t.Fatalf("same-text continuation=%+v err=%v", view, err)
 	}

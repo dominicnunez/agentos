@@ -392,16 +392,16 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 				t.Fatalf("submit=%+v err=%v", result, err)
 			}
 			inputPayload := any(events.OperatorInputReceivedPayload{
-				MessageID: "message-1", Text: "approved task input", SourcePrincipalID: "hermes",
+				MessageID: "message-1", Text: "approved task input", SourcePrincipalID: "external-agent",
 				SourcePrincipalKind: string(core.PrincipalExternalAgent), SourceChannel: "A2A",
 			})
 			if test.legacy {
-				inputPayload = map[string]string{"text": "approved task input", "source_external_actor": "hermes"}
+				inputPayload = map[string]string{"text": "approved task input", "source_external_actor": "external-agent"}
 			}
 			inputEvent, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
 				OrganizationID: "org-1",
 				EventType:      "A2A_INPUT_RECEIVED",
-				SourceActorID:  "hermes",
+				SourceActorID:  "external-agent",
 				TaskID:         string(result.Task.ID),
 				CorrelationID:  "request-1",
 				Payload:        inputPayload,

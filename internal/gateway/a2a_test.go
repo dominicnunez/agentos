@@ -41,7 +41,7 @@ func (noopLedger) Append(_ context.Context, draft events.TrustedDraft) (events.E
 func (noopLedger) Events(context.Context, string) ([]events.Event, error) { return nil, nil }
 
 func TestAgentCardAdvertisesOnlyA2AV1JSONRPC(t *testing.T) {
-	handler := NewA2A(intake.New(app.New(events.NewGateway(noopLedger{}))), ExternalActor{ID: "hermes", BearerToken: "secret", OrganizationID: "o", PublicURL: "https://agentos.example"})
+	handler := NewA2A(intake.New(app.New(events.NewGateway(noopLedger{}))), ExternalActor{ID: "external-agent", BearerToken: "secret", OrganizationID: "o", PublicURL: "https://agentos.example"})
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/.well-known/agent-card.json", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -75,7 +75,7 @@ func TestAgentCardAdvertisesOnlyA2AV1JSONRPC(t *testing.T) {
 
 func TestA2AFailsClosedWithoutActorCredentialOrCapability(t *testing.T) {
 	body := sendMessageBody(t, "rpc-1", "message-1", "request-1", "echo hello", nil)
-	handler := NewA2A(intake.New(app.New(events.NewGateway(noopLedger{}))), ExternalActor{ID: "hermes", BearerToken: "secret", OrganizationID: "o"})
+	handler := NewA2A(intake.New(app.New(events.NewGateway(noopLedger{}))), ExternalActor{ID: "external-agent", BearerToken: "secret", OrganizationID: "o"})
 	response := serveRPC(handler, "", body)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("credential status=%d", response.Code)
@@ -98,7 +98,7 @@ func TestA2ARejectsNestedAuthorityShapedContent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		handler := NewA2A(intake.New(app.New(events.NewGateway(ledgerStore))), ExternalActor{ID: "hermes", BearerToken: "token", OrganizationID: "org-1", Capabilities: []string{intake.CapabilitySubmitWork}})
+		handler := NewA2A(intake.New(app.New(events.NewGateway(ledgerStore))), ExternalActor{ID: "external-agent", BearerToken: "token", OrganizationID: "org-1", Capabilities: []string{intake.CapabilitySubmitWork}})
 		response := serveRPC(handler, "token", body)
 		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-32600`) || !strings.Contains(response.Body.String(), "cannot carry authority field") {
 			t.Fatalf("authority content=%d %s", response.Code, response.Body.String())
@@ -121,7 +121,7 @@ func TestA2AOperatorCannotApprovePreparedProtectedEffect(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ledgerStore.Close() })
 	service := app.New(events.NewGateway(ledgerStore))
-	handler := NewA2A(intake.New(service), ExternalActor{ID: "hermes-primary", OrganizationID: "org-1", BearerToken: "token", Capabilities: []string{intake.CapabilitySubmitWork, intake.CapabilityReadStatus, intake.CapabilityReadResult, intake.CapabilityProvideInput}})
+	handler := NewA2A(intake.New(service), ExternalActor{ID: "external-agent-primary", OrganizationID: "org-1", BearerToken: "token", Capabilities: []string{intake.CapabilitySubmitWork, intake.CapabilityReadStatus, intake.CapabilityReadResult, intake.CapabilityProvideInput}})
 
 	response := serveRPC(handler, "token", sendMessageBody(t, "rpc-1", "message-1", "protected", "deploy production", map[string]any{agentOSExecutionKindKey: "HUMAN"}))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), a2aStateInputRequired) {
@@ -176,7 +176,7 @@ func TestA2ASendGetAndContinueUseV1TaskContracts(t *testing.T) {
 	t.Cleanup(func() { _ = ledgerStore.Close() })
 	service := app.New(events.NewGateway(ledgerStore))
 	operator := intake.New(service)
-	handler := NewA2A(operator, ExternalActor{ID: "hermes", OrganizationID: "o", BearerToken: "token", Capabilities: []string{intake.CapabilitySubmitWork, intake.CapabilityReadStatus, intake.CapabilityReadResult, intake.CapabilityProvideInput}})
+	handler := NewA2A(operator, ExternalActor{ID: "external-agent", OrganizationID: "o", BearerToken: "token", Capabilities: []string{intake.CapabilitySubmitWork, intake.CapabilityReadStatus, intake.CapabilityReadResult, intake.CapabilityProvideInput}})
 
 	response := serveRPC(handler, "token", sendMessageBody(t, "rpc-1", "message-1", "r1", "echo hello", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"task":{"id":"task-r1","contextId":"r1"`) || !strings.Contains(response.Body.String(), a2aStateCompleted) || !strings.Contains(response.Body.String(), `"text":"hello"`) {
@@ -246,7 +246,7 @@ func TestA2ARejectsUnsupportedMethodsAndExecutionKinds(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ledgerStore.Close() })
-	handler := NewA2A(intake.New(app.New(events.NewGateway(ledgerStore))), ExternalActor{ID: "hermes", OrganizationID: "o", BearerToken: "token", Capabilities: []string{intake.CapabilitySubmitWork}})
+	handler := NewA2A(intake.New(app.New(events.NewGateway(ledgerStore))), ExternalActor{ID: "external-agent", OrganizationID: "o", BearerToken: "token", Capabilities: []string{intake.CapabilitySubmitWork}})
 	response := serveRPC(handler, "token", `{"jsonrpc":"2.0","id":"rpc-1","method":"message/send","params":{}}`)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-32601`) {
 		t.Fatalf("legacy method=%d %s", response.Code, response.Body.String())
