@@ -120,7 +120,7 @@ func TestHTTPReconcilerRegistryFailsClosedOnUntrustedConfiguration(t *testing.T)
 }
 
 func TestDecodeHTTPReconcilerConfigIsStrict(t *testing.T) {
-	valid := `{"reconcilers":[{"organization_id":"org-1","action":"send","resource":"destination-1","status":"ACTIVE","status_url":"https://status.example/effects","token_ref":"STATUS_TOKEN","authorization_ref":"review-1","expires_at":"2099-01-01T00:00:00Z"}]}`
+	valid := `{"reconcilers":[{"organization_id":"org-1","action":"send","resource":"destination-1","status":"ACTIVE","status_url":"https://status.example/effects","token_ref":"STATUS_TOKEN","review_ref":"review-1","expires_at":"2099-01-01T00:00:00Z"}]}`
 	bindings, err := DecodeHTTPReconcilerConfig(strings.NewReader(valid))
 	if err != nil || len(bindings) != 1 || bindings[0].TokenRef != "STATUS_TOKEN" {
 		t.Fatalf("bindings=%+v err=%v", bindings, err)
@@ -139,7 +139,7 @@ func testReconcilerBinding(statusURL string) HTTPReconcilerBinding {
 	expires := time.Now().UTC().Add(time.Hour)
 	return HTTPReconcilerBinding{
 		OrganizationID: "org-1", Action: "send", Resource: "destination-1", Status: ReconcilerBindingActive,
-		StatusURL: statusURL, TokenRef: "STATUS_TOKEN", AuthorizationRef: "review-1", ExpiresAt: &expires,
+		StatusURL: statusURL, TokenRef: "STATUS_TOKEN", ReviewRef: "review-1", ExpiresAt: &expires,
 		BearerToken: testReconcilerToken,
 	}
 }

@@ -45,6 +45,7 @@ type Intent struct {
 	SourcePrincipalID     ID            `json:"source_principal_id"`
 	SourcePrincipalKind   PrincipalKind `json:"source_principal_kind"`
 	SourceChannel         string        `json:"source_channel"`
+	ExternalRequestID     string        `json:"external_request_id,omitempty"`
 	SourceMessageID       string        `json:"source_message_id,omitempty"`
 	SourceHumanID         ID            `json:"source_human_id,omitempty"`
 	CreatedAt             time.Time     `json:"created_at"`

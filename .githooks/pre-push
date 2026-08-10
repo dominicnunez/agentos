@@ -23,6 +23,9 @@ echo "==> golangci-lint v2.11.4"
 echo "==> unit tests"
 "$GO_BIN" test ./...
 
+echo "==> vulnerability scan"
+"$GO_BIN" run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
 echo "==> architecture boundaries"
 "$GO_BIN" tool archguard check --include-tests --profile modular-monolith
 

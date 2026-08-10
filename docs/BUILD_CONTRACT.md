@@ -27,7 +27,8 @@ The fake adapter is deliberately non-intelligent: it makes the execution seam te
 The repository includes exact fail-closed capability checks, append-only
 versioned records, provenance-gated institutional knowledge, deterministic audit
 rules, reserve-aware inference selection and normalized usage snapshots, an
-environment-backed `SecretSource`, a real OpenAI-compatible model adapter, and
+environment-backed `SecretSource`, an HTTPS/host-allowlisted OpenAI-compatible
+model adapter with bounded responses and no redirects, and
 fingerprinted persist-before-effect obligations with distinct attempted and
 confirmed states.
 
@@ -45,16 +46,19 @@ Intake Service. The Intent records the authenticated principal ID/kind and sourc
 channel. Known deterministic handlers are selected without inference; otherwise
 unstructured natural-language work uses `AgentExecution` because interpretation
 is justified. Unsupported execution mechanisms fail closed. Direct human chat
-uses a credential distinct from external Agents and is a work/input surface, not a
-trusted approval API.
+uses a reviewed role registry distinct from external Agents and is a work/input
+surface, not a trusted approval API. Both registries enforce credential expiry,
+concurrency, and request rates before intake, and cross-channel credential reuse
+fails startup. Non-loopback listeners require an explicit remote switch, TLS
+1.3 certificate and key files, and an HTTPS public origin.
 
 Task execution publishes a typed `RESULT_PUBLISHED` contract before
 `CANDIDATE_COMPLETE`. Its payload and trusted envelope carry matching Artifact
 references. A2A status includes it only after verified completion and only for
 an external actor with the separate `read_result` capability; `read_status`
-alone cannot expose result content. Status and result lookup are scoped to the
-authenticated actor's organization; a mismatched request is indistinguishable
-from an unknown request.
+alone cannot expose result content. Status and result lookup use opaque,
+tenant-scoped work and task IDs; a mismatched request is indistinguishable from
+an unknown request.
 
 Authorized external input for a blocked `HUMAN` Task is persisted with its A2A
 `messageId` before the

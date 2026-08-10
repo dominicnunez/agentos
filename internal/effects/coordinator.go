@@ -177,6 +177,10 @@ func (c *Coordinator) Execute(ctx context.Context, o core.EffectObligation) (cor
 		_ = c.record(ctx, o, version+2)
 		return o, err
 	}
+	evidence = normalizedEvidence(evidence)
+	if len(evidence) == 0 {
+		return o, ErrEffectUncertain
+	}
 	o.Status = core.EffectConfirmed
 	o.ConfirmationEvidenceRefs = evidence
 	if err = c.record(ctx, o, version+2); err != nil {

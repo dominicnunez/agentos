@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/dominicnunez/agentos/internal/app"
 	"github.com/dominicnunez/agentos/internal/core"
@@ -110,8 +112,8 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 	if err := validatePrincipal(principal); err != nil {
 		return View{}, err
 	}
-	if message.ConversationID == "" || message.MessageID == "" || strings.TrimSpace(message.Text) == "" {
-		return View{}, fmt.Errorf("%w: conversation, message, and text are required", ErrInvalid)
+	if err := validateMessage(message); err != nil {
+		return View{}, err
 	}
 	stream, err := s.app.ExternalEvents(ctx, principal.OrganizationID, message.ConversationID)
 	if err != nil {
@@ -195,11 +197,10 @@ func (s *Service) Get(ctx context.Context, principal Principal, taskID string) (
 	if !principal.Allowed(CapabilityReadStatus) {
 		return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
 	}
-	if taskID == "" {
-		return View{}, fmt.Errorf("%w: task is required", ErrInvalid)
+	if err := validateIdentifier("task", taskID); err != nil {
+		return View{}, err
 	}
-	conversationID := strings.TrimPrefix(taskID, "task-")
-	stream, err := s.app.ExternalEvents(ctx, principal.OrganizationID, conversationID)
+	conversationID, stream, err := s.app.ExternalTaskEvents(ctx, principal.OrganizationID, taskID)
 	if err != nil {
 		return View{}, fmt.Errorf("%w: load work stream", ErrUnavailable)
 	}
@@ -213,7 +214,7 @@ func (s *Service) Get(ctx context.Context, principal Principal, taskID string) (
 }
 
 func validatePrincipal(principal Principal) error {
-	if principal.ID == "" || principal.OrganizationID == "" || principal.Channel == "" {
+	if validateIdentifier("principal", principal.ID) != nil || validateIdentifier("organization", principal.OrganizationID) != nil || principal.Channel == "" {
 		return fmt.Errorf("%w: authenticated principal, organization, and channel are required", ErrInvalid)
 	}
 	switch principal.Kind {
@@ -229,6 +230,31 @@ func validatePrincipal(principal Principal) error {
 		return fmt.Errorf("%w: runtime is not an operator principal", ErrInvalid)
 	default:
 		return fmt.Errorf("%w: principal kind is unsupported", ErrInvalid)
+	}
+	return nil
+}
+
+func validateMessage(message Message) error {
+	if err := validateIdentifier("conversation", message.ConversationID); err != nil {
+		return err
+	}
+	if err := validateIdentifier("message", message.MessageID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(message.Text) == "" || len(message.Text) > 64<<10 || !utf8.ValidString(message.Text) {
+		return fmt.Errorf("%w: text must be valid UTF-8 between 1 and 65536 bytes", ErrInvalid)
+	}
+	return nil
+}
+
+func validateIdentifier(name, value string) error {
+	if value == "" || len(value) > 256 || !utf8.ValidString(value) {
+		return fmt.Errorf("%w: %s identifier must be valid UTF-8 between 1 and 256 bytes", ErrInvalid, name)
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) || unicode.IsSpace(character) {
+			return fmt.Errorf("%w: %s identifier cannot contain whitespace or control characters", ErrInvalid, name)
+		}
 	}
 	return nil
 }

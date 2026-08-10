@@ -15,9 +15,9 @@ func TestExternalActorRegistryRejectsUnknownExpiredAndRevokedActors(t *testing.T
 	expired := testExternalActor("expired", "org-1", testObserverToken, ExternalRoleOperator, intake.WorkScopeOrganization)
 	expired.ExpiresAt = timePointer(now.Add(-time.Minute))
 	revoked := testExternalActor("revoked", "org-1", testOtherToken, ExternalRoleOperator, intake.WorkScopeOrganization)
-	revoked.Status = ExternalActorRevoked
+	revoked.Status = OperatorRevoked
 	suspended := testExternalActor("suspended", "org-1", testOwnReaderToken, ExternalRoleOperator, intake.WorkScopeOrganization)
-	suspended.Status = ExternalActorSuspended
+	suspended.Status = OperatorSuspended
 	registry, err := NewExternalActorRegistry([]ExternalActor{active, expired, revoked, suspended})
 	if err != nil {
 		t.Fatal(err)
@@ -28,7 +28,7 @@ func TestExternalActorRegistryRejectsUnknownExpiredAndRevokedActors(t *testing.T
 		"revoked":   testOtherToken,
 		"suspended": testOwnReaderToken,
 	} {
-		if _, err := registry.Acquire(token); !errors.Is(err, ErrActorUnauthorized) {
+		if _, err := registry.Acquire(token); !errors.Is(err, ErrOperatorUnauthorized) {
 			t.Fatalf("%s actor err=%v", name, err)
 		}
 	}
@@ -54,7 +54,7 @@ func TestExternalActorRegistryEnforcesCredentialAndRequestLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registry.Acquire(testExternalToken); !errors.Is(err, ErrActorLimited) {
+	if _, err := registry.Acquire(testExternalToken); !errors.Is(err, ErrOperatorLimited) {
 		t.Fatalf("concurrent request err=%v", err)
 	}
 	first.Release()
@@ -63,7 +63,7 @@ func TestExternalActorRegistryEnforcesCredentialAndRequestLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	second.Release()
-	if _, err := registry.Acquire(testExternalToken); !errors.Is(err, ErrActorLimited) {
+	if _, err := registry.Acquire(testExternalToken); !errors.Is(err, ErrOperatorLimited) {
 		t.Fatalf("per-minute request err=%v", err)
 	}
 }
@@ -89,7 +89,7 @@ func TestExternalActorRegistryRejectsAmbiguousOrWeakAuthority(t *testing.T) {
 }
 
 func TestDecodeExternalActorConfigRejectsUnknownAndTrailingContent(t *testing.T) {
-	valid := `{"actors":[{"id":"agent","organization_id":"org","status":"ACTIVE","role":"SUBMITTER","work_scope":"OWN","token_ref":"AGENT_TOKEN","authorization_ref":"review-1","expires_at":"2099-01-01T00:00:00Z","max_concurrent":1,"requests_per_minute":10}]}`
+	valid := `{"actors":[{"id":"agent","organization_id":"org","status":"ACTIVE","role":"SUBMITTER","work_scope":"OWN","token_ref":"AGENT_TOKEN","review_ref":"review-1","expires_at":"2099-01-01T00:00:00Z","max_concurrent":1,"requests_per_minute":10}]}`
 	actors, err := DecodeExternalActorConfig(strings.NewReader(valid))
 	if err != nil || len(actors) != 1 || actors[0].TokenRef != "AGENT_TOKEN" {
 		t.Fatalf("actors=%+v err=%v", actors, err)

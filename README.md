@@ -23,7 +23,8 @@ Requires Go 1.26.5.
 go test ./...
 AGENTOS_A2A_ACTORS_FILE=./a2a-actors.json \
 AGENTOS_A2A_AGENT_TOKEN=replace-with-at-least-32-random-characters \
-AGENTOS_HUMAN_TOKEN=replace-with-another-32-character-secret \
+AGENTOS_HUMAN_ACTORS_FILE=./human-actors.json \
+AGENTOS_HUMAN_OPERATOR_TOKEN=replace-with-another-32-character-secret \
 go run ./cmd/agentos
 ```
 
@@ -39,7 +40,7 @@ registry entry is:
     "role": "COLLABORATOR",
     "work_scope": "OWN",
     "token_ref": "AGENTOS_A2A_AGENT_TOKEN",
-    "authorization_ref": "human-reviewed-config-1",
+    "review_ref": "reviewed-config-1",
     "expires_at": "2027-01-01T00:00:00Z",
     "max_concurrent": 2,
     "requests_per_minute": 30
@@ -47,11 +48,15 @@ registry entry is:
 }
 ```
 
-Use a current expiry when creating the file. The credential is resolved from
-the named environment variable and is never placed in the registry file.
-A2A is disabled when `AGENTOS_A2A_ACTORS_FILE` is absent. The server listens on
-`127.0.0.1:8080` by default; remote binding additionally requires the explicit
-`AGENTOS_ALLOW_REMOTE=true` setting and an HTTPS `AGENTOS_PUBLIC_URL`.
+`human-actors.json` uses the same fields, with `role` set to `CONTRIBUTOR`,
+`OBSERVER`, `RESULT_READER`, or `OPERATOR`, `work_scope` set to
+`ORGANIZATION`, and its own `token_ref`, `review_ref`, expiry, and limits.
+Credentials are resolved from each `token_ref`
+and never stored in a registry file. Each registry is optional, but startup
+requires at least one. The server listens on `127.0.0.1:8080` by default.
+Remote binding additionally requires `AGENTOS_ALLOW_REMOTE=true`, an HTTPS
+`AGENTOS_PUBLIC_URL`, and both `AGENTOS_TLS_CERT_FILE` and
+`AGENTOS_TLS_KEY_FILE`; remote plaintext is rejected.
 
 Interrupted external-effect status checks are separately disabled unless
 `AGENTOS_EFFECT_RECONCILERS_FILE` names an exact-scope HTTPS registry. See
@@ -64,10 +69,10 @@ Enable the repository-owned commit and push checks once per checkout:
 .\scripts\install-git-hooks.cmd
 ```
 
-On Unix-like systems, run `./scripts/install-git-hooks.sh` instead. The commit hook checks staged-diff integrity, formatting, tests, and architecture boundaries. The push hook adds module consistency, build, vet, a pinned blocking GolangCI-Lint pass, and an advisory Gallow audit. GitHub Actions independently enforces the same lint configuration, race-tests the unit suite, and publishes Gallow findings on pull requests. The first push-hook lint run downloads the pinned linter release through the Go toolchain.
+On Unix-like systems, run `./scripts/install-git-hooks.sh` instead. The commit hook checks staged-diff integrity, formatting, tests, and architecture boundaries. The push hook adds module consistency, build, vet, pinned GolangCI-Lint and `govulncheck` passes, and an advisory Gallow audit. GitHub Actions independently enforces the same checks, race-tests the unit suite, and publishes Gallow findings on pull requests. First runs download the pinned tools through the Go toolchain.
 
-Set `AGENTOS_PUBLIC_URL` to the externally reachable HTTP(S) origin in deployed
-environments. Then submit a minimal A2A v1.0 JSON-RPC task:
+Set `AGENTOS_PUBLIC_URL` to the reachable origin; non-loopback deployments must
+use HTTPS. Then submit a minimal A2A v1.0 JSON-RPC task:
 
 ```sh
 curl -X POST http://localhost:8080/ \

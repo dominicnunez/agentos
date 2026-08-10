@@ -1,10 +1,12 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 
@@ -38,7 +40,7 @@ var forbiddenAuthorityFields = map[string]struct{}{
 }
 
 func decodeWorkContent(w http.ResponseWriter, r *http.Request, target any) error {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 256<<10))
 	if err != nil {
 		return err
 	}
@@ -49,7 +51,20 @@ func decodeWorkContent(w http.ResponseWriter, r *http.Request, target any) error
 	if err := rejectAuthorityContent(content); err != nil {
 		return err
 	}
-	return json.Unmarshal(body, target)
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("operator work content must contain one JSON object")
+	}
+	return nil
+}
+
+func hasJSONContentType(value string) bool {
+	mediaType, _, err := mime.ParseMediaType(value)
+	return err == nil && mediaType == "application/json"
 }
 
 func rejectAuthorityContent(content any) error {
@@ -92,7 +107,7 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session, err := a.actors.Acquire(token)
-	if errors.Is(err, ErrActorLimited) {
+	if errors.Is(err, ErrOperatorLimited) {
 		w.Header().Set("Retry-After", "60")
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "external actor request limit reached"})
 		return
@@ -102,7 +117,7 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer session.Release()
-	if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
+	if !hasJSONContentType(r.Header.Get("Content-Type")) {
 		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "A2A JSON-RPC requires application/json"})
 		return
 	}

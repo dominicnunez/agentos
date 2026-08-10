@@ -1,9 +1,11 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -115,12 +117,12 @@ func (a *A2A) serveJSONRPC(w http.ResponseWriter, r *http.Request, principal int
 
 func (a *A2A) sendMessage(w http.ResponseWriter, r *http.Request, request jsonRPCRequest, principal intake.Principal) {
 	var params sendMessageParams
-	if err := json.Unmarshal(request.Params, &params); err != nil {
+	if err := decodeStrictRaw(request.Params, &params); err != nil {
 		writeRPCError(w, request.ID, rpcInvalidParams, "params.message is required")
 		return
 	}
 	message := params.Message
-	if message.MessageID == "" || message.ContextID == "" || message.Role != a2aRoleUser || len(message.Parts) != 1 || message.Parts[0].Text == "" || (message.Parts[0].MediaType != "" && message.Parts[0].MediaType != "text/plain") {
+	if message.MessageID == "" || message.ContextID == "" || message.Role != a2aRoleUser || len(message.Parts) != 1 || message.Parts[0].Text == "" || len(message.Metadata) > 16 || (message.Parts[0].MediaType != "" && message.Parts[0].MediaType != "text/plain") {
 		writeRPCError(w, request.ID, rpcInvalidParams, "one ROLE_USER text/plain message part with messageId and contextId is required")
 		return
 	}
@@ -142,7 +144,7 @@ func (a *A2A) sendMessage(w http.ResponseWriter, r *http.Request, request jsonRP
 
 func (a *A2A) getTask(w http.ResponseWriter, r *http.Request, request jsonRPCRequest, principal intake.Principal) {
 	var params getTaskParams
-	if err := json.Unmarshal(request.Params, &params); err != nil || params.ID == "" {
+	if err := decodeStrictRaw(request.Params, &params); err != nil || params.ID == "" {
 		writeRPCError(w, request.ID, rpcInvalidParams, "params.id is required")
 		return
 	}
@@ -181,7 +183,7 @@ func requestedExecutionKind(metadata map[string]json.RawMessage) (core.Execution
 }
 
 func validRPCID(id json.RawMessage) bool {
-	if len(id) == 0 || string(id) == "null" {
+	if len(id) == 0 || len(id) > 256 || string(id) == "null" {
 		return false
 	}
 	var value any
@@ -194,6 +196,18 @@ func validRPCID(id json.RawMessage) bool {
 	default:
 		return false
 	}
+}
+
+func decodeStrictRaw(raw json.RawMessage, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("content must contain one JSON object")
+	}
+	return nil
 }
 
 func projectA2ATask(view intake.View) a2aTask {

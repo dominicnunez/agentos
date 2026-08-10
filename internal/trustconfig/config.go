@@ -3,6 +3,7 @@
 package trustconfig
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,7 +15,14 @@ const registryLimit = 1 << 20
 // DecodeObject decodes exactly one size-limited JSON object and rejects unknown
 // fields or trailing content.
 func DecodeObject(reader io.Reader, name string, target any) error {
-	decoder := json.NewDecoder(io.LimitReader(reader, registryLimit))
+	content, err := io.ReadAll(io.LimitReader(reader, registryLimit+1))
+	if err != nil {
+		return fmt.Errorf("read %s: %w", name, err)
+	}
+	if len(content) > registryLimit {
+		return fmt.Errorf("%s exceeds %d bytes", name, registryLimit)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(content))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return fmt.Errorf("decode %s: %w", name, err)
