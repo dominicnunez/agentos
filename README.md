@@ -113,6 +113,13 @@ fake-provider security/recovery, bounded live-test-plan, financial-approval, and
 sensitive-data-boundary gates in
 [docs/V1_RELEASE_READINESS.md](docs/V1_RELEASE_READINESS.md) are satisfied.
 
+Release/security testing may explicitly select
+`AGENTOS_MODEL_PROVIDER=fake-review`. This loopback-only adapter performs no
+network access, fails startup on a remote listener, and deliberately has no
+deterministic completion verifier. The backup/restart pilot can therefore
+exercise the dedicated reviewer path without a provider credential or charge.
+It is test evidence, not a real model provider.
+
 Direct human natural-language intake uses a distinct authenticated endpoint and
 the same internal router:
 

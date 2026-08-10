@@ -78,6 +78,18 @@ func TestConfiguredModelIsFakeUnlessExplicitlySelected(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	t.Setenv("AGENTOS_MODEL_PROVIDER", "fake-review")
+	model, closeModel, err = configuredModel(context.Background(), testSecrets{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if descriptor := model.Descriptor(); descriptor.Provider != "fake-review" || descriptor.Model != "fake-review-model/v1" || descriptor.ExecutionProfileVersion != "v1-fake-review" {
+		t.Fatalf("descriptor=%+v", descriptor)
+	}
+	if err := closeModel(); err != nil {
+		t.Fatal(err)
+	}
+
 	t.Setenv("AGENTOS_MODEL_PROVIDER", "unreviewed")
 	if _, _, err := configuredModel(context.Background(), testSecrets{}); err == nil {
 		t.Fatal("unknown provider was accepted")
@@ -91,6 +103,20 @@ func TestConfiguredCodexProviderFailsClosedWithoutExactFiles(t *testing.T) {
 	t.Setenv("AGENTOS_CODEX_MODEL", "gpt-test")
 	if _, _, err := configuredModel(context.Background(), testSecrets{}); err == nil {
 		t.Fatal("incomplete Codex provider configuration was accepted")
+	}
+}
+
+func TestFakeReviewProviderIsRestrictedToLoopback(t *testing.T) {
+	if err := validateModelExposure("fake-review", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateModelExposure("fake-review", true); err == nil {
+		t.Fatal("fake-review provider was accepted for remote exposure")
+	}
+	for _, provider := range []string{"", "fake", "codex-subscription", "openai-api"} {
+		if err := validateModelExposure(provider, true); err != nil {
+			t.Fatalf("provider %q was rejected by the fake-review exposure guard: %v", provider, err)
+		}
 	}
 }
 

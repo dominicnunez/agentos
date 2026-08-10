@@ -23,6 +23,21 @@ func TestAgentExecutionReturnsSeparateUsageContract(t *testing.T) {
 	}
 }
 
+func TestReviewFakeModelIsASeparateNonNetworkProfile(t *testing.T) {
+	executor := NewAgentExecution(ReviewFakeModel{})
+	descriptor := executor.Descriptor()
+	if descriptor.Provider != "fake-review" || descriptor.Model != "fake-review-model/v1" || descriptor.ExecutionProfileVersion != "v1-fake-review" {
+		t.Fatalf("descriptor=%+v", descriptor)
+	}
+	result, err := executor.Execute(context.Background(), core.Task{ID: "task-1", Description: "review work", ModelInferencePolicy: core.InferenceAllowed}, core.ExecutionContextManifest{Provider: descriptor.Provider, Model: descriptor.Model, ExecutionProfileVersion: descriptor.ExecutionProfileVersion})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome.ObservedEffect != "fake-review-model: review work" || result.Outcome.ToolID != "fake-review-model/v1" || result.InferenceUsage == nil || result.InferenceUsage.Provider != "fake-review" || !result.InferenceUsage.Valid() {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
 type mismatchedUsageModel struct{}
 
 func (mismatchedUsageModel) Name() string { return "configured/model" }

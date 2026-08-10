@@ -81,6 +81,9 @@ func run(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
+	if err := validateModelExposure(os.Getenv("AGENTOS_MODEL_PROVIDER"), remote); err != nil {
+		return err
+	}
 	tlsConfig, err := configuredTLS(remote)
 	if err != nil {
 		return err
@@ -146,6 +149,8 @@ func configuredModel(ctx context.Context, source secrets.Source) (execution.Mode
 	switch provider {
 	case "", "fake":
 		return execution.FakeModel{}, func() error { return nil }, nil
+	case "fake-review":
+		return execution.ReviewFakeModel{}, func() error { return nil }, nil
 	case "codex-subscription":
 		adapter, err := execution.NewCodexSubscription(ctx, execution.CodexSubscriptionConfig{
 			BinaryPath:      os.Getenv("AGENTOS_CODEX_BINARY"),
@@ -176,8 +181,15 @@ func configuredModel(ctx context.Context, source secrets.Source) (execution.Mode
 		}
 		return adapter, func() error { return nil }, nil
 	default:
-		return nil, nil, fmt.Errorf("AGENTOS_MODEL_PROVIDER must be fake, codex-subscription, or openai-api")
+		return nil, nil, fmt.Errorf("AGENTOS_MODEL_PROVIDER must be fake, fake-review, codex-subscription, or openai-api")
 	}
+}
+
+func validateModelExposure(provider string, remote bool) error {
+	if provider == "fake-review" && remote {
+		return fmt.Errorf("fake-review model provider is restricted to loopback release testing")
+	}
+	return nil
 }
 
 func serve(ctx context.Context, server *http.Server, listener net.Listener, certFile, keyFile string) error {

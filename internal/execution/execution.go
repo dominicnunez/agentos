@@ -64,6 +64,28 @@ func (FakeModel) Complete(_ context.Context, prompt string) (ModelResponse, erro
 	}, nil
 }
 
+// ReviewFakeModel is a non-network release-test adapter. Unlike FakeModel, its
+// Tool ID has no deterministic verifier, so it exercises the exact completion
+// review path without sending data to a real provider.
+type ReviewFakeModel struct{}
+
+func (ReviewFakeModel) Name() string { return "fake-review-model/v1" }
+func (ReviewFakeModel) Descriptor() ModelDescriptor {
+	return ModelDescriptor{Provider: "fake-review", Model: "fake-review-model/v1", ExecutionProfileVersion: "v1-fake-review"}
+}
+func (ReviewFakeModel) Complete(_ context.Context, prompt string) (ModelResponse, error) {
+	zero := 0.0
+	return ModelResponse{
+		Text: "fake-review-model: " + prompt,
+		Usage: events.InferenceUsageRecordedPayload{
+			Source:   "fake_review_adapter",
+			Provider: "fake-review",
+			Model:    "fake-review-model/v1",
+			CostUSD:  &zero,
+		},
+	}, nil
+}
+
 type AgentExecution struct {
 	model      ModelAdapter
 	descriptor ModelDescriptor

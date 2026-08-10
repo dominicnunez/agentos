@@ -65,6 +65,16 @@ Decision delivery is idempotent for the same reviewer and exact content.
 Startup recovery continues a durable decision from the last completed phase
 without inventing judgment or replaying an uncertain model call.
 
+## Credential-free release test
+
+The `fake-review` model profile is a loopback-only, non-network test adapter
+whose Tool ID has no deterministic verifier. Remote exposure fails startup.
+The process-level release gate uses it to
+leave an exact candidate pending across backup and restore, deny ordinary
+Operator and A2A credentials, reject a stale fingerprint, accept the dedicated
+reviewer's exact decision, and verify idempotent replay. It never enables or
+contacts a real provider.
+
 The earlier pre-V1 `COMPLETION_REVIEW_REQUIRED` notification carried a
 different payload and is not interpreted as this authority contract. Recovery
 leaves work containing that event safely blocked for manual reconciliation;
