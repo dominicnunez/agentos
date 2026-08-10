@@ -173,7 +173,7 @@ func projectResult(es []events.Event) any {
 	for i := len(es) - 1; i >= 0; i-- {
 		if es[i].EventType == "RESULT_PUBLISHED" {
 			var result events.ResultPublishedPayload
-			if json.Unmarshal(es[i].Payload, &result) == nil && result.Summary != "" && equalStrings(result.ArtifactRefs, es[i].ArtifactRefs) {
+			if json.Unmarshal(es[i].Payload, &result) == nil && result.ValidFor(es[i].ArtifactRefs) {
 				return result
 			}
 		}
@@ -181,17 +181,6 @@ func projectResult(es []events.Event) any {
 	return nil
 }
 
-func equalStrings(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for i := range left {
-		if left[i] != right[i] {
-			return false
-		}
-	}
-	return true
-}
 func externalState(es []events.Event) string {
 	state := "working"
 	for _, e := range es {

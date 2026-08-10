@@ -39,6 +39,10 @@ type ResultPublishedPayload struct {
 	ArtifactRefs []string `json:"artifact_refs,omitempty"`
 }
 
+func (p ResultPublishedPayload) ValidFor(artifactRefs []string) bool {
+	return p.Summary != "" && sameStrings(p.ArtifactRefs, artifactRefs)
+}
+
 type TrustedDraft struct {
 	OrganizationID    string
 	EventType         string
@@ -164,7 +168,7 @@ func (g *Gateway) PublishAgentDraft(ctx context.Context, organizationID, actorID
 	}
 	if draft.EventType == "RESULT_PUBLISHED" {
 		var result ResultPublishedPayload
-		if draft.TaskID == "" || decodePayload(draft.Payload, &result) != nil || result.Summary == "" || !sameStrings(result.ArtifactRefs, draft.ArtifactRefs) {
+		if draft.TaskID == "" || decodePayload(draft.Payload, &result) != nil || !result.ValidFor(draft.ArtifactRefs) {
 			return Event{}, fmt.Errorf("result published draft requires a task, summary, and matching artifact refs")
 		}
 	}
