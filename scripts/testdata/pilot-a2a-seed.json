@@ -1,0 +1,52 @@
+{
+  "actors": [
+    {
+      "id": "pilot-agent",
+      "organization_id": "pilot-org",
+      "status": "ACTIVE",
+      "role": "OPERATOR",
+      "work_scope": "OWN",
+      "token_ref": "AGENTOS_PILOT_AGENT_TOKEN",
+      "review_ref": "pilot-reviewed-agent-v1",
+      "expires_at": "2099-01-01T00:00:00Z",
+      "max_concurrent": 4,
+      "requests_per_minute": 100
+    },
+    {
+      "id": "pilot-reader",
+      "organization_id": "pilot-org",
+      "status": "ACTIVE",
+      "role": "RESULT_READER",
+      "work_scope": "ORGANIZATION",
+      "token_ref": "AGENTOS_PILOT_READER_TOKEN",
+      "review_ref": "pilot-reviewed-reader-v1",
+      "expires_at": "2099-01-01T00:00:00Z",
+      "max_concurrent": 4,
+      "requests_per_minute": 100
+    },
+    {
+      "id": "pilot-revocable",
+      "organization_id": "pilot-org",
+      "status": "ACTIVE",
+      "role": "SUBMITTER",
+      "work_scope": "OWN",
+      "token_ref": "AGENTOS_PILOT_REVOKED_TOKEN",
+      "review_ref": "pilot-reviewed-revocation-v1",
+      "expires_at": "2099-01-01T00:00:00Z",
+      "max_concurrent": 2,
+      "requests_per_minute": 30
+    },
+    {
+      "id": "pilot-expired",
+      "organization_id": "pilot-org",
+      "status": "ACTIVE",
+      "role": "SUBMITTER",
+      "work_scope": "OWN",
+      "token_ref": "AGENTOS_PILOT_EXPIRED_TOKEN",
+      "review_ref": "pilot-reviewed-expiry-v1",
+      "expires_at": "2000-01-01T00:00:00Z",
+      "max_concurrent": 2,
+      "requests_per_minute": 30
+    }
+  ]
+}
