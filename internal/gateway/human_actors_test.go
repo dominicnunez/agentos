@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ func TestHumanActorRegistryEnforcesLifecycleAndRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := denied.Acquire("expired-human-operator-token-000001"); err != ErrOperatorUnauthorized {
+	if _, err := denied.Acquire("expired-human-operator-token-000001"); !errors.Is(err, ErrOperatorUnauthorized) {
 		t.Fatalf("expired credential error=%v", err)
 	}
 }

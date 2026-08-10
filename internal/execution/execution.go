@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -144,7 +145,7 @@ func (a OpenAICompatible) Complete(ctx context.Context, prompt string) (ModelRes
 	if err = decoder.Decode(&decoded); err != nil {
 		return ModelResponse{}, err
 	}
-	if err = decoder.Decode(&struct{}{}); err != io.EOF {
+	if err = decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return ModelResponse{}, fmt.Errorf("model provider returned trailing content")
 	}
 	if len(decoded.Choices) == 0 {

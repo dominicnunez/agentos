@@ -106,7 +106,10 @@ func (s *Service) ExternalTaskEvents(ctx context.Context, organizationID, taskID
 		return "", nil, nil
 	}
 	actualOrganizationID, err := taskOrganization(snapshot, taskState.Value)
-	if err != nil || actualOrganizationID != core.ID(organizationID) {
+	if err != nil {
+		return "", nil, err
+	}
+	if actualOrganizationID != core.ID(organizationID) {
 		return "", nil, nil
 	}
 	goalState, ok := snapshot.Goals[taskState.Value.GoalID]
