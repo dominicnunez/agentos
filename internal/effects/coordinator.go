@@ -238,4 +238,3 @@ func sameEffectIntent(stored, requested core.EffectObligation) bool {
 func (c *Coordinator) record(ctx context.Context, o core.EffectObligation, version int) error {
 	return c.records.AppendRecord(ctx, string(o.OrganizationID), "EFFECT_OBLIGATION_TRANSITIONED", "", string(o.TaskID), o.AuthorizationRefs, o.ConfirmationEvidenceRefs, "effect", string(o.ID), version, o)
 }
-
