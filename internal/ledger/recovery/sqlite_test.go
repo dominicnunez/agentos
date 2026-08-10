@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -174,6 +175,41 @@ func TestBackupRefusesStaleDestinationSidecars(t *testing.T) {
 				t.Fatalf("existing sidecar changed: content=%q err=%v", content, err)
 			}
 		})
+	}
+}
+
+func TestRecoveryEscapesSQLiteDSNCharacters(t *testing.T) {
+	directory := t.TempDir()
+	seed := filepath.Join(directory, "seed.db")
+	db := createTestLedger(t, seed)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	special := "#"
+	if runtime.GOOS != "windows" {
+		special = "?"
+	}
+	source := filepath.Join(directory, "source"+special+"snapshot.db")
+	if err := os.Rename(seed, source); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := Verify(context.Background(), source)
+	if err != nil || verified.Path != source {
+		t.Fatalf("verify special path: result=%+v err=%v", verified, err)
+	}
+	destination := filepath.Join(directory, "backup"+special+"dated.db")
+	backup, err := Backup(context.Background(), source, destination)
+	if err != nil || backup.Path != destination {
+		t.Fatalf("backup special path: result=%+v err=%v", backup, err)
+	}
+	if _, err := os.Stat(destination); err != nil {
+		t.Fatalf("exact backup destination missing: %v", err)
+	}
+	if special == "?" {
+		prefix := filepath.Join(directory, "backup")
+		if _, err := os.Stat(prefix); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("SQLite opened DSN prefix instead of exact path: %v", err)
+		}
 	}
 }
 

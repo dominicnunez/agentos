@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -68,7 +69,7 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	if err != nil {
 		return Result{}, err
 	}
-	db, err := sql.Open("sqlite", resolved)
+	db, err := sql.Open("sqlite", sqliteFileURI(resolved, true))
 	if err != nil {
 		return Result{}, fmt.Errorf("open recovery database: %w", err)
 	}
@@ -203,7 +204,7 @@ func clone(ctx context.Context, source, destination string) (result Result, fina
 		}
 	}()
 
-	db, err := sql.Open("sqlite", resolvedSource)
+	db, err := sql.Open("sqlite", sqliteFileURI(resolvedSource, true))
 	if err != nil {
 		return Result{}, fmt.Errorf("open backup source: %w", err)
 	}
@@ -225,7 +226,7 @@ func clone(ctx context.Context, source, destination string) (result Result, fina
 		if !ok {
 			return fmt.Errorf("SQLite driver does not support online backup")
 		}
-		backup, err := provider.NewBackup(temporaryPath)
+		backup, err := provider.NewBackup(sqliteFileURI(temporaryPath, false))
 		if err != nil {
 			return err
 		}
@@ -334,6 +335,20 @@ func requireNoSidecars(path string) error {
 		}
 	}
 	return nil
+}
+
+func sqliteFileURI(path string, readOnly bool) string {
+	slashPath := filepath.ToSlash(path)
+	if runtime.GOOS == "windows" && !strings.HasPrefix(slashPath, "/") {
+		slashPath = "/" + slashPath
+	}
+	uri := url.URL{Scheme: "file", Path: slashPath}
+	if readOnly {
+		query := uri.Query()
+		query.Set("mode", "ro")
+		uri.RawQuery = query.Encode()
+	}
+	return uri.String()
 }
 
 func samePath(left, right string) bool {
