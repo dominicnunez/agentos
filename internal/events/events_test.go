@@ -42,10 +42,12 @@ func TestAgentCannotMintTrustedStateEvents(t *testing.T) {
 		"FREEZE_SET",
 		"ACTION_ATTESTED",
 		"TOOL_OUTCOME_RECORDED",
+		"INFERENCE_USAGE_RECORDED",
 		"EXECUTION_CONTEXT_MANIFESTED",
 		"INBOX_EVENTS_OBSERVED",
 		"COMPLETION_VERIFIED",
 		"TASK_VERIFIED_COMPLETE",
+		"RUN_TELEMETRY_RECORDED",
 	}
 	for _, eventType := range trustedOnly {
 		t.Run(eventType, func(t *testing.T) {

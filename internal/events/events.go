@@ -43,6 +43,23 @@ func (p ResultPublishedPayload) ValidFor(artifactRefs []string) bool {
 	return p.Summary != "" && sameStrings(p.ArtifactRefs, artifactRefs)
 }
 
+type InferenceUsageRecordedPayload struct {
+	Source       string   `json:"source"`
+	Provider     string   `json:"provider"`
+	Model        string   `json:"model"`
+	InputTokens  int      `json:"input_tokens"`
+	OutputTokens int      `json:"output_tokens"`
+	TotalTokens  int      `json:"total_tokens"`
+	CostUSD      *float64 `json:"cost_usd,omitempty"`
+}
+
+func (p InferenceUsageRecordedPayload) Valid() bool {
+	return p.Source != "" && p.Provider != "" && p.Model != "" &&
+		p.InputTokens >= 0 && p.OutputTokens >= 0 &&
+		p.TotalTokens == p.InputTokens+p.OutputTokens &&
+		(p.CostUSD == nil || *p.CostUSD >= 0)
+}
+
 type TrustedDraft struct {
 	OrganizationID    string
 	EventType         string
