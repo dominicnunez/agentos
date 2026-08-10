@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/dominicnunez/agentos/internal/approvals"
 	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
@@ -156,15 +157,20 @@ func (l *SQLite) AppendProjection(ctx context.Context, draft events.ProjectionDr
 	return event, err
 }
 
-// AuthorizeAndAppendEffectAttempt serializes the latest durable freeze/lease
-// state with the action's ATTEMPTED transition. A freeze or revocation therefore
-// orders before the attempt and denies it, or after the effect has durably begun.
-func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, organizationID, taskID, actorID, action, resource, scope string, authorizationRefs []string, approvalID, fingerprint string, singleUse bool, artifactRefs []string, kind, id string, version int, value any) (core.AuthorizationTrace, error) {
-	if organizationID == "" || taskID == "" || actorID == "" || action == "" || resource == "" || scope == "" || len(authorizationRefs) == 0 || kind == "" || id == "" || version < 1 {
+// AuthorizeAndAppendEffectAttempt serializes the latest durable approval,
+// freeze, and lease state with the action's ATTEMPTED transition. Authorization
+// that changes before this transaction blocks the effect; authorization that
+// changes afterward orders after the effect has durably begun.
+func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, obligation core.EffectObligation, version int, value any) (core.AuthorizationTrace, error) {
+	if obligation.OrganizationID == "" || obligation.TaskID == "" || obligation.ActorID == "" || obligation.Action == "" || obligation.Resource == "" || obligation.Scope == "" || len(obligation.AuthorizationRefs) == 0 || obligation.ID == "" || version < 1 {
 		return core.AuthorizationTrace{}, fmt.Errorf("effect authority, record identity, and positive version are required")
 	}
-	if singleUse && (approvalID == "" || fingerprint == "") {
-		return core.AuthorizationTrace{}, fmt.Errorf("single-use approval identity and fingerprint are required")
+	requiresApproval, err := approvals.RequiresHumanApproval(obligation.ConsequenceBoundary)
+	if err != nil {
+		return core.AuthorizationTrace{}, err
+	}
+	if requiresApproval && obligation.ApprovalRef == "" {
+		return core.AuthorizationTrace{}, fmt.Errorf("%w: durable approval is required", approvals.ErrApprovalPending)
 	}
 	body, err := json.Marshal(value)
 	if err != nil {
@@ -172,7 +178,20 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, organizati
 	}
 	var trace core.AuthorizationTrace
 	err = l.withTx(ctx, func(tx *sql.Tx) error {
-		freezeBody, found, err := latestRecordBody(ctx, tx, "organization_freeze", organizationID)
+		var approval core.HumanApproval
+		if obligation.ApprovalRef != "" {
+			approvalBody, found, err := latestRecordBody(ctx, tx, "approval", obligation.ApprovalRef)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return approvals.ErrApprovalPending
+			}
+			if err := json.Unmarshal(approvalBody, &approval); err != nil {
+				return fmt.Errorf("decode approval %s: %w", obligation.ApprovalRef, err)
+			}
+		}
+		freezeBody, found, err := latestRecordBody(ctx, tx, "organization_freeze", string(obligation.OrganizationID))
 		if err != nil {
 			return err
 		}
@@ -182,13 +201,13 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, organizati
 			if err := json.Unmarshal(freezeBody, &state); err != nil {
 				return fmt.Errorf("decode organization freeze: %w", err)
 			}
-			if string(state.OrganizationID) != organizationID {
+			if state.OrganizationID != obligation.OrganizationID {
 				return fmt.Errorf("organization freeze identity mismatch")
 			}
 			frozen = state.Frozen
 		}
-		leases := make([]core.CapabilityLease, 0, len(authorizationRefs))
-		for _, ref := range authorizationRefs {
+		leases := make([]core.CapabilityLease, 0, len(obligation.AuthorizationRefs))
+		for _, ref := range obligation.AuthorizationRefs {
 			leaseBody, found, err := latestRecordBody(ctx, tx, "capability_lease", ref)
 			if err != nil {
 				return err
@@ -205,12 +224,18 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, organizati
 			}
 			leases = append(leases, lease)
 		}
-		trace = authority.Check(time.Now().UTC(), core.ID(actorID), core.ID(taskID), action, resource, scope, leases, frozen)
+		authorizedAt := time.Now().UTC()
+		if obligation.ApprovalRef != "" {
+			if err := approvals.ValidateForEffect(approval, obligation, authorizedAt); err != nil {
+				return err
+			}
+		}
+		trace = authority.Check(authorizedAt, obligation.ActorID, obligation.TaskID, obligation.Action, obligation.Resource, obligation.Scope, leases, frozen)
 		traceBody, err := json.Marshal(trace)
 		if err != nil {
 			return err
 		}
-		traceVersion, err := nextRecordVersion(ctx, tx, "authorization_trace", id)
+		traceVersion, err := nextRecordVersion(ctx, tx, "authorization_trace", string(obligation.ID))
 		if err != nil {
 			return err
 		}
@@ -218,24 +243,24 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, organizati
 		if trace.Allowed {
 			eventType = "CAPABILITY_CHECKED"
 		}
-		traceDraft := events.TrustedDraft{OrganizationID: organizationID, EventType: eventType, SourceActorID: actorID, TaskID: taskID, AuthorizationRefs: authorizationRefs, Payload: trace}
-		if err := appendRecord(ctx, tx, traceDraft, "authorization_trace", id, traceVersion, traceBody); err != nil {
+		traceDraft := events.TrustedDraft{OrganizationID: string(obligation.OrganizationID), EventType: eventType, SourceActorID: string(obligation.ActorID), TaskID: string(obligation.TaskID), AuthorizationRefs: obligation.AuthorizationRefs, Payload: trace}
+		if err := appendRecord(ctx, tx, traceDraft, "authorization_trace", string(obligation.ID), traceVersion, traceBody); err != nil {
 			return err
 		}
 		if !trace.Allowed {
 			return nil
 		}
-		if singleUse {
-			draft := events.TrustedDraft{OrganizationID: organizationID, EventType: "APPROVAL_CONSUMED", TaskID: taskID, Payload: map[string]string{"approval_id": approvalID, "effect_fingerprint": fingerprint, "effect_obligation_id": id}}
+		if approval.SingleUse {
+			draft := events.TrustedDraft{OrganizationID: string(obligation.OrganizationID), EventType: "APPROVAL_CONSUMED", TaskID: string(obligation.TaskID), Payload: map[string]string{"approval_id": obligation.ApprovalRef, "effect_fingerprint": obligation.EffectFingerprint, "effect_obligation_id": string(obligation.ID)}}
 			if _, err := appendEvent(ctx, tx, draft); err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO consumed_approvals(approval_id,effect_fingerprint,consumed_at) VALUES(?,?,?)`, approvalID, fingerprint, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO consumed_approvals(approval_id,effect_fingerprint,consumed_at) VALUES(?,?,?)`, obligation.ApprovalRef, obligation.EffectFingerprint, authorizedAt.Format(time.RFC3339Nano)); err != nil {
 				return fmt.Errorf("consume approval: %w", err)
 			}
 		}
-		effectDraft := events.TrustedDraft{OrganizationID: organizationID, EventType: "EFFECT_OBLIGATION_TRANSITIONED", TaskID: taskID, AuthorizationRefs: authorizationRefs, ArtifactRefs: artifactRefs, Payload: value}
-		return appendRecord(ctx, tx, effectDraft, kind, id, version, body)
+		effectDraft := events.TrustedDraft{OrganizationID: string(obligation.OrganizationID), EventType: "EFFECT_OBLIGATION_TRANSITIONED", TaskID: string(obligation.TaskID), AuthorizationRefs: obligation.AuthorizationRefs, ArtifactRefs: obligation.ConfirmationEvidenceRefs, Payload: value}
+		return appendRecord(ctx, tx, effectDraft, "effect", string(obligation.ID), version, body)
 	})
 	return trace, err
 }
@@ -434,3 +459,4 @@ func scanEvent(row rowScanner) (events.Event, error) {
 	event.CreatedAt = parsed
 	return event, nil
 }
+
