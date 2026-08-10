@@ -1,42 +1,46 @@
 # V1 acceptance status
 
-This matrix tracks the normative checklist in
-`docs/handoff/docs/08_IMPLEMENTATION_ROADMAP_AND_ACCEPTANCE.md`. “Covered” means
-the current bounded behavior has an automated regression test. “Partial” means
-only a supporting seam or narrower case exists. It is not a production-readiness
-claim.
+This compact index maps the normative checklist in
+`docs/handoff/docs/08_IMPLEMENTATION_ROADMAP_AND_ACCEPTANCE.md` to current
+automated evidence. A checked row is not a production-readiness or deployment
+authorization claim.
 
-| # | Acceptance criterion | Status | Current evidence / remaining gap |
-|---:|---|---|---|
-| 1 | Team/Agent identity survives restart | Covered | `TestDurableObjectsSurviveRestartAndRebuildFromEvents` reopens SQLite and compares both the stored projection and event replay. |
-| 2 | Lateral message without planner relay | Covered | `TestLateralMessagesSurviveRestartAndSurfaceAtAgentActionBoundary` sends Agent-, Team-, and Task-addressed EventDrafts directly through the Event Gateway and durable inbox projection. |
-| 3 | Recipient sees message at an action boundary | Covered | The same restart test proves chronologically ordered messages enter the next AgentExecution context and exact manifest event refs before the fake model call. |
-| 4 | Failed persistence never exposes a message | Covered | `TestInboxProjectionFailureRollsBackMessage` forces the inbox write to fail and verifies the transaction leaves neither a ledger event nor inbox availability. |
-| 5 | Blocked worker returns control without authority expansion | Covered | `TestBlockedChildReturnsControlToParentWithoutAuthorityExpansion` proves unsupported child work becomes a typed, durably addressed `TASK_BLOCKED` contract in the parent Task inbox while emitting no capability or approval transition. |
-| 6 | Child assignment has no unintended positive capability inheritance | Covered | `TestChildAssignmentDoesNotInheritParentCapability` proves that assigning a child Task to the same Agent does not transfer the parent Task's lease; only a lease explicitly originating from the child authorizes its action. |
-| 7 | Human-required action waits for a decision | Covered | `TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision` proves a prepared effect remains unavailable through notification, acknowledgement, restart, unauthorized identity, and mismatched fingerprint until the exact authorized decision is durable. |
-| 8 | Acknowledgement cannot approve | Covered | The same lifecycle test persists `APPROVAL_ACKNOWLEDGED`, verifies no decision timestamp exists, and confirms the effect adapter remains unreachable. |
-| 9 | Freeze/revoke prevents time-of-use action | Covered | `TestFreezeAndRevokePreventEffectAtTimeOfUse` proves durable freeze and revocation prevent `ATTEMPTED`; `TestApprovalExpiryIsRecheckedInsideAttemptTransaction` proves stale preflight approval state cannot bypass transaction-time expiry. Both keep the adapter unreachable. |
-| 10 | Agent text cannot forge trusted state | Covered | `TestAgentCannotMintTrustedStateEvents` rejects identity, approval, authority, completion, and runtime-attestation event types before persistence; `TestMessageEnvelopeUsesAuthenticatedIdentity` proves forged control text and metadata remain content under a runtime-stamped envelope; `TestCandidateCompletionCannotMintVerifiedCompletion` preserves the candidate/verified boundary. |
-| 11 | Candidate completion cannot bypass Completion Engine | Covered | Vertical-slice event ordering and `TestEvaluateRequiresVerifiedSuccess` require verified structured outcome before terminal completion. |
-| 12 | Duplicate delivery cannot duplicate a consequential effect | Covered | `TestSingleUseApprovalIsConsumedBeforeAdapter` proves confirmed-effect redelivery is idempotent and a single-use decision cannot authorize a second effect; the ledger atomically couples consumption with `ATTEMPTED`. |
-| 13 | Restart preserves pending work, approval, and inbox | Covered | Runtime recovery tests preserve pending/blocked tasks and dependencies, inbox tests preserve availability/observation, and approval tests reopen SQLite with pending or acknowledged decisions and replay-complete effect obligations intact. |
-| 14 | Complete operational telemetry | Covered | `TestProjectBuildsCompleteReplayableRunSummary` proves one typed terminal projection records verified outcome, execution mechanisms, wall time, model/token/cost use, tool calls, messages, blocks, retries, human interventions, safety denials, and completion evidence. `TestRunTelemetryAggregatesEveryTaskInCompletedDAG` and `TestRejectedRunRecordsTelemetryAndFailsGoal` cover multi-node and rejected runs. `TestVerticalSlice` proves exactly-once persistence across redelivery; provider usage and configured cost capture are adapter-tested. |
-| 15 | Accurate manifest for every model execution | Covered | Every current AgentExecution persists a manifest before inference; the lateral-message test asserts the exact materialized event references and matching context. |
-| 16 | ToolOutcome failure cannot hide behind success text | Covered | Completion requires both successful status and verified postcondition. |
-| 17 | Safe deterministic recovery precedes cognitive recovery | Covered | `TestRecoverRetriesDeterministicWorkAndBlocksUncertainAgentWork` retries deterministic work and refuses blind adaptive replay. |
-| 18 | An authorized A2A-capable Agent discovers, submits, and continues work | Covered | CI runs a dependency-free A2A v1.0 client against a live Agent OS JSON-RPC gateway configured by the reviewed actor registry. Go conformance tests cover authenticated `SendMessage`, `GetTask`, blocked continuation, durable `messageId` replay, canonical result Artifact mapping, role capability separation, own/organization visibility, expiry/revocation, request ceilings, organization isolation, and strict rejection of legacy surfaces. |
-| 19 | A2A identity cannot bypass capability/human approval | Covered | Submission/status/input capabilities and organization binding fail closed. `TestA2AOperatorCannotApprovePreparedProtectedEffect` prepares an exactly fingerprinted deployment obligation and pending human approval, rejects authority-shaped A2A fields, persists ordinary external-Agent approval text only as task input, and proves the approval remains undecided and the effect adapter unreachable. |
-| 20 | Protected effects use exact approval and durable obligation/reconciliation | Covered | Exact durable approval is reloaded and revalidated in the attempt transaction, with replay-complete persist-before-effect transitions and atomic single-use consumption/attempt. `TestRecoveryConfirmsAttemptedEffectAfterRestartWithoutResend` proves restart discovery and evidence-backed confirmation without adapter replay; the fail-closed recovery tests preserve `ATTEMPTED` for unavailable, unknown, malformed, unsupported, or stale observations and persist evidence-backed failure. Production effect adapters remain deliberately disabled. |
+| # | Requirement | Evidence |
+|---:|---|---|
+| 1 | Durable identity | PASS — [`TestDurableObjectsSurviveRestartAndRebuildFromEvents`](../internal/projections/repository_test.go) |
+| 2 | Direct lateral messaging | PASS — [`TestLateralMessagesAtActionBoundary`](../internal/app/service_test.go) |
+| 3 | Action-boundary delivery | PASS — [`TestLateralMessagesAtActionBoundary`](../internal/app/service_test.go) |
+| 4 | Atomic message delivery | PASS — [`TestMessageRollbackOnInboxFailure`](../internal/ledger/sqlite_test.go) |
+| 5 | Blocked work returns control | PASS — [`TestBlockedChildReturnsToParent`](../internal/app/service_test.go) |
+| 6 | No implicit authority inheritance | PASS — [`TestChildAssignmentDoesNotInheritParentCapability`](../internal/authority/authority_test.go) |
+| 7 | Durable approval wait | PASS — [`TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision`](../internal/approvals/service_test.go) |
+| 8 | Acknowledgement is not approval | PASS — [`TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision`](../internal/approvals/service_test.go) |
+| 9 | Time-of-use revocation | PASS — [`TestRevocationBlocksEffect`](../internal/effects/coordinator_test.go), [`TestApprovalExpiryAtAttempt`](../internal/effects/coordinator_test.go) |
+| 10 | Untrusted text stays untrusted | PASS — [`TestAgentCannotMintTrustedStateEvents`](../internal/events/events_test.go), [`TestMessageEnvelopeUsesAuthenticatedIdentity`](../internal/events/events_test.go), [`TestCandidateCompletionCannotMintVerifiedCompletion`](../internal/events/events_test.go) |
+| 11 | Verified completion only | PASS — [`TestVerifierOwnsPostconditionTrust`](../internal/completion/verifier_test.go), [`TestEvaluateRequiresVerifiedSuccess`](../internal/completion/engine_test.go) |
+| 12 | Consequential effects are idempotent | PASS — [`TestSingleUseApprovalBeforeEffect`](../internal/effects/coordinator_test.go) |
+| 13 | Restart continuity | PASS — [`TestRecoverExecutesPersistedPendingWorkAndPreservesIdentity`](../internal/app/service_test.go), [`TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision`](../internal/approvals/service_test.go), [`TestMessageInboxSurvivesReopenAndObservation`](../internal/ledger/sqlite_test.go) |
+| 14 | Complete run telemetry | PASS — [`TestProjectBuildsCompleteReplayableRunSummary`](../internal/telemetry/telemetry_test.go), [`TestRunTelemetryCoversDAG`](../internal/app/service_test.go) |
+| 15 | Model executions have manifests | PASS — [`TestAgentExecutionUsesFakeAdapter`](../internal/app/service_test.go), [`TestAgentExecutionReturnsSeparateUsageContract`](../internal/execution/execution_test.go) |
+| 16 | Tool failures remain failures | PASS — [`TestRejectedRunRecordsTelemetryAndFailsGoal`](../internal/app/service_test.go), [`TestEvaluateRequiresVerifiedSuccess`](../internal/completion/engine_test.go) |
+| 17 | Deterministic-first recovery | PASS — [`TestRecoveryIsDeterministicFirst`](../internal/app/service_test.go) |
+| 18 | Authorized A2A operation | PASS — live A2A v1.0 CI, [`TestA2ASendGetAndContinueUseV1TaskContracts`](../internal/gateway/a2a_test.go) |
+| 19 | A2A cannot approve effects | PASS — [`TestA2ACannotApproveEffects`](../internal/gateway/a2a_test.go) |
+| 20 | Durable effect recovery | PASS — [`TestEffectSuccessNeedsEvidence`](../internal/effects/coordinator_test.go), [`TestRecoveryConfirmsAttemptedEffectAfterRestartWithoutResend`](../internal/effects/reconciliation_test.go) |
 
-Every normative row is covered by a bounded runtime path and adversarial
-regression test. This is V1 acceptance-suite coverage, not authorization to
-enable production consequential-effect adapters.
+## Evidence scope
 
-In addition to the preserved checklist, `TestNaturalLanguageIntakePreservesPrincipalAndRoutingProvenance`,
-`TestHumanAndExternalAgentCanContinueSharedWorkWithoutSharingIdentity`, and the Human
-Gateway adversarial tests cover the promoted direct-human intake requirement.
-They prove deterministic-first routing, justified AgentExecution fallback,
-cross-channel organizational continuity, exact source provenance, retry
-idempotency, result scoping, and the separation of conversational text from
-trusted approval state.
+- Identity and inbox tests reopen SQLite and compare stored state with replay.
+- Approval and effect tests cover exact fingerprints, acknowledgement versus
+  decision, expiry, freeze, revocation, single use, attempt-time authorization,
+  crash uncertainty, and evidence-backed reconciliation without replay.
+- Telemetry tests cover every task in a DAG, execution mechanism, timing,
+  provider usage, cost, tool calls, messages, blocks, retries, interventions,
+  denials, and completion evidence.
+- Operator tests cover authenticated intake, replay, capability roles,
+  visibility, lifecycle and request limits, tenant isolation, and rejection of
+  authority-shaped content.
+
+Production consequential-effect adapters remain disabled. A security finding
+that weakens a row returns it to partial until the runtime path and adversarial
+regression are corrected.

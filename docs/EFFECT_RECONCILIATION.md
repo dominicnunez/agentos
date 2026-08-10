@@ -17,7 +17,7 @@ resource:
     "status": "ACTIVE",
     "status_url": "https://status.example/effects",
     "token_ref": "AGENTOS_EFFECT_STATUS_TOKEN",
-    "authorization_ref": "reviewed-reconciler-1",
+    "review_ref": "reviewed-reconciler-1",
     "expires_at": "2027-01-01T00:00:00Z"
   }]
 }

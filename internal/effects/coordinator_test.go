@@ -12,11 +12,41 @@ import (
 	"github.com/dominicnunez/agentos/internal/ledger"
 )
 
-type adapter struct{ called bool }
+type adapter struct {
+	called   bool
+	evidence []string
+}
 
 func (a *adapter) Apply(_ context.Context, _ core.EffectObligation) ([]string, error) {
 	a.called = true
+	if a.evidence != nil {
+		return a.evidence, nil
+	}
 	return []string{"receipt"}, nil
+}
+
+func TestEffectSuccessNeedsEvidence(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	missingEvidence := &adapter{evidence: []string{}}
+	coordinator := New(l, missingEvidence, nil)
+	fingerprint, err := Fingerprint("cache", "record-1", map[string]string{"value": "ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obligation := core.EffectObligation{ID: "effect-no-evidence", OrganizationID: "org", TaskID: "task", ActorID: "actor", Action: "cache", Resource: "record-1", Scope: "org", EffectFingerprint: fingerprint, AuthorizationRefs: []string{"lease"}, IdempotencyKey: "key-no-evidence", ReplayContext: map[string]string{"value": "ready"}}
+	persistCapability(t, l, obligation)
+	result, err := coordinator.Execute(context.Background(), obligation)
+	if !errors.Is(err, ErrEffectUncertain) || result.Status != core.EffectAttempted || !missingEvidence.called {
+		t.Fatalf("result=%+v called=%t err=%v", result, missingEvidence.called, err)
+	}
+	rows, err := l.Records(context.Background(), "effect", string(obligation.ID))
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("effect did not remain durably attempted: versions=%d err=%v", len(rows), err)
+	}
 }
 
 type approvalReader struct{ approval core.HumanApproval }
@@ -145,7 +175,7 @@ func TestUnprotectedEffectsReloadDurableState(t *testing.T) {
 	}
 }
 
-func TestSingleUseApprovalIsConsumedBeforeAdapter(t *testing.T) {
+func TestSingleUseApprovalBeforeEffect(t *testing.T) {
 	l, err := ledger.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -210,7 +240,7 @@ func TestProtectedEffectRejectsExpiredApprovalAndUnknownBoundary(t *testing.T) {
 	}
 }
 
-func TestApprovalExpiryIsRecheckedInsideAttemptTransaction(t *testing.T) {
+func TestApprovalExpiryAtAttempt(t *testing.T) {
 	ctx := context.Background()
 	l, err := ledger.Open(":memory:")
 	if err != nil {
@@ -271,7 +301,7 @@ func TestInterruptedAttemptIsNotBlindlyReplayed(t *testing.T) {
 	}
 }
 
-func TestFreezeAndRevokePreventEffectAtTimeOfUse(t *testing.T) {
+func TestRevocationBlocksEffect(t *testing.T) {
 	ctx := context.Background()
 	l, err := ledger.Open(":memory:")
 	if err != nil {

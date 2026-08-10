@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,7 +25,7 @@ func (s testSecrets) Resolve(_ context.Context, ref secrets.Ref) (secrets.Value,
 
 func TestConfiguredExternalActorsResolvesDistinctServerOwnedIdentity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "actors.json")
-	config := `{"actors":[{"id":"agent-1","organization_id":"org-1","status":"ACTIVE","role":"COLLABORATOR","work_scope":"OWN","token_ref":"AGENT_1_TOKEN","authorization_ref":"security-review-1","expires_at":"2099-01-01T00:00:00Z","max_concurrent":2,"requests_per_minute":30}]}`
+	config := `{"actors":[{"id":"agent-1","organization_id":"org-1","status":"ACTIVE","role":"COLLABORATOR","work_scope":"OWN","token_ref":"AGENT_1_TOKEN","review_ref":"security-review-1","expires_at":"2099-01-01T00:00:00Z","max_concurrent":2,"requests_per_minute":30}]}`
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -46,6 +47,27 @@ func TestConfiguredExternalActorsResolvesDistinctServerOwnedIdentity(t *testing.
 	}
 }
 
+func TestConfiguredHumanActorsResolvesReviewedRole(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "human-actors.json")
+	config := `{"actors":[{"id":"human-1","organization_id":"org-1","status":"ACTIVE","role":"OPERATOR","work_scope":"ORGANIZATION","token_ref":"HUMAN_1_TOKEN","review_ref":"security-review-2","expires_at":"2099-01-01T00:00:00Z","max_concurrent":2,"requests_per_minute":30}]}`
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const token = "configured-human-operator-token-00001"
+	registry, err := configuredHumanActors(context.Background(), path, testSecrets{"HUMAN_1_TOKEN": token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := registry.Acquire(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Release()
+	if session.Principal.ID != "human-1" || session.Principal.Kind != core.PrincipalHuman || !session.Principal.Allowed(intake.CapabilityReadResult) {
+		t.Fatalf("principal=%+v", session.Principal)
+	}
+}
+
 func TestConfiguredExternalActorsDisablesA2AWithoutRegistry(t *testing.T) {
 	registry, err := configuredExternalActors(context.Background(), "", testSecrets{})
 	if err != nil || registry != nil {
@@ -55,7 +77,7 @@ func TestConfiguredExternalActorsDisablesA2AWithoutRegistry(t *testing.T) {
 
 func TestConfiguredEffectReconcilersResolveExactServerOwnedStatusChecker(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "reconcilers.json")
-	config := `{"reconcilers":[{"organization_id":"org-1","action":"send","resource":"destination-1","status":"ACTIVE","status_url":"https://status.example/effects","token_ref":"STATUS_TOKEN","authorization_ref":"security-review-2","expires_at":"2099-01-01T00:00:00Z"}]}`
+	config := `{"reconcilers":[{"organization_id":"org-1","action":"send","resource":"destination-1","status":"ACTIVE","status_url":"https://status.example/effects","token_ref":"STATUS_TOKEN","review_ref":"security-review-2","expires_at":"2099-01-01T00:00:00Z"}]}`
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -102,25 +124,43 @@ func TestConfiguredListenAddressIsLoopbackByDefaultAndRemoteIsExplicit(t *testin
 	}
 }
 
-func TestRemoteA2ARequiresAnHTTPSPublicOrigin(t *testing.T) {
+func TestRemoteExposureRequiresTLSAndAnHTTPSPublicOrigin(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		url        string
 		remote     bool
 		a2aEnabled bool
+		tlsEnabled bool
 		wantError  bool
 	}{
 		{name: "loopback HTTP", url: "http://127.0.0.1:8080", a2aEnabled: true},
-		{name: "remote HTTPS", url: "https://agentos.example", remote: true, a2aEnabled: true},
+		{name: "remote HTTPS", url: "https://agentos.example", remote: true, a2aEnabled: true, tlsEnabled: true},
 		{name: "remote HTTP", url: "http://agentos.example", remote: true, a2aEnabled: true, wantError: true},
 		{name: "remote missing origin", remote: true, a2aEnabled: true, wantError: true},
-		{name: "human only remote", remote: true},
+		{name: "TLS listener with HTTP origin", url: "http://127.0.0.1:8080", tlsEnabled: true, wantError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			err := validatePublicURL(test.url, test.remote, test.a2aEnabled)
+			err := validatePublicURL(test.url, test.remote, test.a2aEnabled, test.tlsEnabled)
 			if (err != nil) != test.wantError {
 				t.Fatalf("err=%v wantError=%t", err, test.wantError)
 			}
 		})
+	}
+}
+
+func TestConfiguredTLSFailsClosedForRemoteListeners(t *testing.T) {
+	t.Setenv("AGENTOS_TLS_CERT_FILE", "")
+	t.Setenv("AGENTOS_TLS_KEY_FILE", "")
+	if _, err := configuredTLS(true); err == nil {
+		t.Fatal("remote listener accepted without TLS")
+	}
+	t.Setenv("AGENTOS_TLS_CERT_FILE", "server.crt")
+	if _, err := configuredTLS(false); err == nil {
+		t.Fatal("one-sided TLS configuration was accepted")
+	}
+	t.Setenv("AGENTOS_TLS_KEY_FILE", "server.key")
+	config, err := configuredTLS(true)
+	if err != nil || config == nil || config.MinVersion != tls.VersionTLS13 {
+		t.Fatalf("TLS config=%+v err=%v", config, err)
 	}
 }

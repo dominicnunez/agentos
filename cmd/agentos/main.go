@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -41,31 +42,34 @@ func run() (err error) {
 	defer func() {
 		err = errors.Join(err, l.Close())
 	}()
-	humanToken := os.Getenv("AGENTOS_HUMAN_TOKEN")
-	if len(humanToken) < 32 {
-		return fmt.Errorf("AGENTOS_HUMAN_TOKEN must contain at least 32 characters (fail closed)")
-	}
-	orgID := os.Getenv("AGENTOS_ORGANIZATION_ID")
-	if orgID == "" {
-		orgID = "org-default"
-	}
 	publicURL := os.Getenv("AGENTOS_PUBLIC_URL")
 	listenAddress, remote, err := configuredListenAddress()
 	if err != nil {
 		return err
 	}
-	registry, err := configuredExternalActors(context.Background(), os.Getenv("AGENTOS_A2A_ACTORS_FILE"), secrets.Environment{})
+	tlsConfig, err := configuredTLS(remote)
 	if err != nil {
 		return err
+	}
+	externalActors, err := configuredExternalActors(context.Background(), os.Getenv("AGENTOS_A2A_ACTORS_FILE"), secrets.Environment{})
+	if err != nil {
+		return err
+	}
+	humanActors, err := configuredHumanActors(context.Background(), os.Getenv("AGENTOS_HUMAN_ACTORS_FILE"), secrets.Environment{})
+	if err != nil {
+		return err
+	}
+	if externalActors == nil && humanActors == nil {
+		return fmt.Errorf("at least one reviewed operator registry is required")
 	}
 	reconcilers, err := configuredEffectReconcilers(context.Background(), os.Getenv("AGENTOS_EFFECT_RECONCILERS_FILE"), secrets.Environment{})
 	if err != nil {
 		return err
 	}
-	if registry != nil && registry.HasCredential(humanToken) {
+	if gateway.OperatorRegistriesOverlap(humanActors, externalActors) {
 		return fmt.Errorf("human and external-agent credentials must be distinct")
 	}
-	if err := validatePublicURL(publicURL, remote, registry != nil); err != nil {
+	if err := validatePublicURL(publicURL, remote, externalActors != nil, tlsConfig != nil); err != nil {
 		return err
 	}
 	service := app.New(events.NewGateway(l))
@@ -80,63 +84,76 @@ func run() (err error) {
 		log.Printf("effect requires reconciliation: effect_id=%s task_id=%s reason=%s", item.EffectID, item.TaskID, item.Reason)
 	}
 	operator := intake.New(service)
-	capabilities := []string{intake.CapabilitySubmitWork, intake.CapabilityReadStatus, intake.CapabilityReadResult, intake.CapabilityProvideInput}
-	human := gateway.NewHuman(operator, gateway.HumanActor{ID: "human-primary", OrganizationID: orgID, BearerToken: humanToken, Capabilities: capabilities})
 	mux := http.NewServeMux()
-	mux.Handle("/v1/human/", human)
-	if registry != nil {
-		mux.Handle("/", gateway.NewA2A(operator, registry, publicURL))
+	if humanActors != nil {
+		mux.Handle("/v1/human/", gateway.NewHuman(operator, humanActors))
 	}
-	s := &http.Server{Addr: listenAddress, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: time.Minute}
+	if externalActors != nil {
+		mux.Handle("/", gateway.NewA2A(operator, externalActors, publicURL))
+	}
+	s := &http.Server{Addr: listenAddress, Handler: mux, TLSConfig: tlsConfig, MaxHeaderBytes: 32 << 10, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: time.Minute}
 	log.Printf("Agent OS listening on %s", s.Addr)
+	if tlsConfig != nil {
+		return s.ListenAndServeTLS(os.Getenv("AGENTOS_TLS_CERT_FILE"), os.Getenv("AGENTOS_TLS_KEY_FILE"))
+	}
 	return s.ListenAndServe()
 }
 
+func configuredHumanActors(ctx context.Context, path string, source secrets.Source) (*gateway.HumanActorRegistry, error) {
+	return configuredRegistry(ctx, path, source, "human actor registry", "human actor", gateway.DecodeHumanActorConfig,
+		func(actor gateway.HumanActor) (string, string) { return actor.ID, actor.TokenRef },
+		func(actor *gateway.HumanActor, token string) { actor.BearerToken = token }, gateway.NewHumanActorRegistry)
+}
+
 func configuredEffectReconcilers(ctx context.Context, path string, source secrets.Source) (*effectstatus.HTTPReconcilerRegistry, error) {
+	return configuredRegistry(ctx, path, source, "effect reconciler registry", "effect reconciler", effectstatus.DecodeHTTPReconcilerConfig,
+		func(binding effectstatus.HTTPReconcilerBinding) (string, string) {
+			return fmt.Sprintf("%s/%s/%s", binding.OrganizationID, binding.Action, binding.Resource), binding.TokenRef
+		},
+		func(binding *effectstatus.HTTPReconcilerBinding, token string) { binding.BearerToken = token },
+		func(bindings []effectstatus.HTTPReconcilerBinding) (*effectstatus.HTTPReconcilerRegistry, error) {
+			return effectstatus.NewHTTPReconcilerRegistry(bindings, nil)
+		})
+}
+
+func configuredExternalActors(ctx context.Context, path string, source secrets.Source) (*gateway.ExternalActorRegistry, error) {
+	return configuredRegistry(ctx, path, source, "external actor registry", "external actor", gateway.DecodeExternalActorConfig,
+		func(actor gateway.ExternalActor) (string, string) { return actor.ID, actor.TokenRef },
+		func(actor *gateway.ExternalActor, token string) { actor.BearerToken = token }, gateway.NewExternalActorRegistry)
+}
+
+func configuredRegistry[T, R any](ctx context.Context, path string, source secrets.Source, registryName, entryName string, decode func(io.Reader) ([]T, error), identity func(T) (string, string), set func(*T, string), validate func([]T) (R, error)) (R, error) {
+	var zero R
 	if path == "" {
-		return nil, nil
+		return zero, nil
 	}
-	bindings, err := decodeConfigFile(path, "effect reconciler registry", effectstatus.DecodeHTTPReconcilerConfig)
+	entries, err := decodeConfigFile(path, registryName, decode)
 	if err != nil {
-		return nil, err
+		return zero, err
 	}
-	for i := range bindings {
-		value, err := source.Resolve(ctx, secrets.Ref(bindings[i].TokenRef))
-		if err != nil {
-			return nil, fmt.Errorf("resolve effect reconciler %s/%s/%s credential: %w", bindings[i].OrganizationID, bindings[i].Action, bindings[i].Resource, err)
-		}
-		bindings[i].BearerToken = string(value)
+	if err := resolveRegistryCredentials(ctx, source, entries, identity, set); err != nil {
+		return zero, fmt.Errorf("resolve %s credential: %w", entryName, err)
 	}
-	registry, err := effectstatus.NewHTTPReconcilerRegistry(bindings, nil)
+	registry, err := validate(entries)
 	if err != nil {
-		return nil, fmt.Errorf("validate effect reconciler registry: %w", err)
+		return zero, fmt.Errorf("validate %s: %w", registryName, err)
 	}
 	return registry, nil
 }
 
-func configuredExternalActors(ctx context.Context, path string, source secrets.Source) (*gateway.ExternalActorRegistry, error) {
-	if path == "" {
-		return nil, nil
-	}
-	actors, err := decodeConfigFile(path, "external actor registry", gateway.DecodeExternalActorConfig)
-	if err != nil {
-		return nil, err
-	}
-	for i := range actors {
-		if actors[i].TokenRef == "" {
-			return nil, fmt.Errorf("external actor %q token_ref is required", actors[i].ID)
+func resolveRegistryCredentials[T any](ctx context.Context, source secrets.Source, entries []T, identity func(T) (string, string), set func(*T, string)) error {
+	for index := range entries {
+		name, tokenRef := identity(entries[index])
+		if tokenRef == "" {
+			return fmt.Errorf("%s token_ref is required", name)
 		}
-		value, err := source.Resolve(ctx, secrets.Ref(actors[i].TokenRef))
+		value, err := source.Resolve(ctx, secrets.Ref(tokenRef))
 		if err != nil {
-			return nil, fmt.Errorf("resolve external actor %q credential: %w", actors[i].ID, err)
+			return fmt.Errorf("%s: %w", name, err)
 		}
-		actors[i].BearerToken = string(value)
+		set(&entries[index], string(value))
 	}
-	registry, err := gateway.NewExternalActorRegistry(actors)
-	if err != nil {
-		return nil, fmt.Errorf("validate external actor registry: %w", err)
-	}
-	return registry, nil
+	return nil
 }
 
 func decodeConfigFile[T any](path, name string, decode func(io.Reader) ([]T, error)) ([]T, error) {
@@ -176,7 +193,22 @@ func configuredListenAddress() (string, bool, error) {
 	return address, remote, nil
 }
 
-func validatePublicURL(publicURL string, remote, a2aEnabled bool) error {
+func configuredTLS(remote bool) (*tls.Config, error) {
+	certFile := os.Getenv("AGENTOS_TLS_CERT_FILE")
+	keyFile := os.Getenv("AGENTOS_TLS_KEY_FILE")
+	if (certFile == "") != (keyFile == "") {
+		return nil, fmt.Errorf("AGENTOS_TLS_CERT_FILE and AGENTOS_TLS_KEY_FILE must be configured together")
+	}
+	if certFile == "" {
+		if remote {
+			return nil, fmt.Errorf("remote listening requires TLS certificate and key files")
+		}
+		return nil, nil
+	}
+	return &tls.Config{MinVersion: tls.VersionTLS13}, nil
+}
+
+func validatePublicURL(publicURL string, remote, a2aEnabled, tlsEnabled bool) error {
 	if publicURL == "" {
 		if remote && a2aEnabled {
 			return fmt.Errorf("remote A2A exposure requires AGENTOS_PUBLIC_URL")
@@ -189,6 +221,9 @@ func validatePublicURL(publicURL string, remote, a2aEnabled bool) error {
 	}
 	if remote && parsed.Scheme != "https" {
 		return fmt.Errorf("remote exposure requires an HTTPS AGENTOS_PUBLIC_URL")
+	}
+	if tlsEnabled && parsed.Scheme != "https" {
+		return fmt.Errorf("TLS listeners require an HTTPS AGENTOS_PUBLIC_URL")
 	}
 	return nil
 }

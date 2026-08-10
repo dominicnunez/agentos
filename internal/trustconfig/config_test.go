@@ -27,6 +27,9 @@ func TestDecodeObjectIsStrict(t *testing.T) {
 			t.Fatalf("DecodeObject(%q) succeeded, want error", input)
 		}
 	}
+	if err := DecodeObject(strings.NewReader(`{"name":"trusted"}`+strings.Repeat(" ", registryLimit)), "registry", &target); err == nil {
+		t.Fatal("DecodeObject accepted content beyond the registry limit")
+	}
 }
 
 func TestDecodeEntriesRequiresContent(t *testing.T) {

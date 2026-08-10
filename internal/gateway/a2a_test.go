@@ -90,7 +90,7 @@ func TestA2AFailsClosedWithoutActorCredentialOrCapability(t *testing.T) {
 func TestA2ARejectsInactiveAndOverLimitActorsBeforeIntake(t *testing.T) {
 	service := intake.New(app.New(events.NewGateway(noopLedger{})))
 	revoked := testExternalActor("revoked", "o", testObserverToken, ExternalRoleSubmitter, intake.WorkScopeOwn)
-	revoked.Status = ExternalActorRevoked
+	revoked.Status = OperatorRevoked
 	limited := testExternalActor("limited", "o", testExternalToken, ExternalRoleSubmitter, intake.WorkScopeOwn)
 	limited.MaxConcurrent = 1
 	handler := testA2A(t, service, revoked, limited)
@@ -138,7 +138,7 @@ func TestA2ARejectsNestedAuthorityShapedContent(t *testing.T) {
 	}
 }
 
-func TestA2AOperatorCannotApprovePreparedProtectedEffect(t *testing.T) {
+func TestA2ACannotApproveEffects(t *testing.T) {
 	ctx := context.Background()
 	ledgerStore, err := ledger.Open(":memory:")
 	if err != nil {
@@ -152,14 +152,15 @@ func TestA2AOperatorCannotApprovePreparedProtectedEffect(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), a2aStateInputRequired) {
 		t.Fatalf("protected work submit=%d %s", response.Code, response.Body.String())
 	}
+	taskID := taskIDFromRPC(t, response)
 
 	fingerprint, err := effects.Fingerprint("deploy", "agent-os", map[string]string{"version": "1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-protected", ActorID: "agent-local-org-1", Action: "deploy", Resource: "agent-os", Scope: "org-1", ConsequenceBoundary: core.BoundaryDeployment, Descriptor: "deploy Agent OS", EffectFingerprint: fingerprint, AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1", IdempotencyKey: "deploy-1", ReplayContext: map[string]string{"version": "1"}}
+	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: core.ID(taskID), ActorID: "agent-local-org-1", Action: "deploy", Resource: "agent-os", Scope: "org-1", ConsequenceBoundary: core.BoundaryDeployment, Descriptor: "deploy Agent OS", EffectFingerprint: fingerprint, AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1", IdempotencyKey: "deploy-1", ReplayContext: map[string]string{"version": "1"}}
 	lease := core.CapabilityLease{ID: "lease-1", ActorID: obligation.ActorID, OriginTaskID: obligation.TaskID, Action: obligation.Action, Resource: obligation.Resource, Scope: obligation.Scope}
-	if err := ledgerStore.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "human-approver", "task-protected", nil, nil, "capability_lease", "lease-1", 1, lease); err != nil {
+	if err := ledgerStore.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "human-approver", taskID, nil, nil, "capability_lease", "lease-1", 1, lease); err != nil {
 		t.Fatal(err)
 	}
 	notifier := &boundaryNotifier{}
@@ -169,7 +170,7 @@ func TestA2AOperatorCannotApprovePreparedProtectedEffect(t *testing.T) {
 	if _, err := coordinator.Prepare(ctx, obligation); err != nil {
 		t.Fatal(err)
 	}
-	approval, err := approvalService.Request(ctx, core.HumanApproval{ID: "approval-1", OrganizationID: "org-1", TaskID: "task-protected", EffectObligationID: "effect-1", Action: "deploy", Resource: "agent-os", Boundary: core.BoundaryDeployment, Risk: "HIGH", Urgency: "NORMAL", EffectFingerprint: fingerprint, SingleUse: true})
+	approval, err := approvalService.Request(ctx, core.HumanApproval{ID: "approval-1", OrganizationID: "org-1", TaskID: core.ID(taskID), EffectObligationID: "effect-1", Action: "deploy", Resource: "agent-os", Boundary: core.BoundaryDeployment, Risk: "HIGH", Urgency: "NORMAL", EffectFingerprint: fingerprint, SingleUse: true})
 	if err != nil || approval.Status != core.ApprovalNotified || notifier.calls != 1 {
 		t.Fatalf("approval=%+v notifications=%d err=%v", approval, notifier.calls, err)
 	}
@@ -204,31 +205,32 @@ func TestA2ASendGetAndContinueUseV1TaskContracts(t *testing.T) {
 	handler := testA2A(t, operator, testExternalActor("external-agent", "o", testExternalToken, ExternalRoleOperator, intake.WorkScopeOwn))
 
 	response := serveRPC(handler, testExternalToken, sendMessageBody(t, "rpc-1", "message-1", "r1", "echo hello", nil))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"task":{"id":"task-r1","contextId":"r1"`) || !strings.Contains(response.Body.String(), a2aStateCompleted) || !strings.Contains(response.Body.String(), `"text":"hello"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"contextId":"r1"`) || !strings.Contains(response.Body.String(), a2aStateCompleted) || !strings.Contains(response.Body.String(), `"text":"hello"`) {
 		t.Fatalf("send=%d %s", response.Code, response.Body.String())
 	}
+	taskID := taskIDFromRPC(t, response)
 	if strings.Contains(response.Body.String(), `"events"`) || strings.Contains(response.Body.String(), `"payload"`) || strings.Contains(response.Body.String(), `"summary"`) {
 		t.Fatalf("SendMessage leaked internal ledger shape: %s", response.Body.String())
 	}
 
-	response = serveRPC(handler, testExternalToken, getTaskBody(t, "rpc-2", "task-r1"))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"result":{"id":"task-r1"`) || !strings.Contains(response.Body.String(), `"text":"hello"`) {
+	response = serveRPC(handler, testExternalToken, getTaskBody(t, "rpc-2", taskID))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"result":{"id":"`+taskID+`"`) || !strings.Contains(response.Body.String(), `"text":"hello"`) {
 		t.Fatalf("GetTask=%d %s", response.Code, response.Body.String())
 	}
 
 	observer := testA2A(t, operator, testExternalActor("observer", "o", testObserverToken, ExternalRoleObserver, intake.WorkScopeOrganization))
-	response = serveRPC(observer, testObserverToken, getTaskBody(t, "rpc-3", "task-r1"))
+	response = serveRPC(observer, testObserverToken, getTaskBody(t, "rpc-3", taskID))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), a2aStateCompleted) || strings.Contains(response.Body.String(), `"artifacts"`) || strings.Contains(response.Body.String(), "hello") {
 		t.Fatalf("status-only actor received result: %d %s", response.Code, response.Body.String())
 	}
 	ownReader := testA2A(t, operator, testExternalActor("own-reader", "o", testOwnReaderToken, ExternalRoleResultReader, intake.WorkScopeOwn))
-	response = serveRPC(ownReader, testOwnReaderToken, getTaskBody(t, "rpc-own", "task-r1"))
+	response = serveRPC(ownReader, testOwnReaderToken, getTaskBody(t, "rpc-own", taskID))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-32001`) || strings.Contains(response.Body.String(), "hello") {
 		t.Fatalf("own-scope actor observed another actor's work: %d %s", response.Code, response.Body.String())
 	}
 
 	other := testA2A(t, operator, testExternalActor("other", "other-org", testOtherToken, ExternalRoleObserver, intake.WorkScopeOrganization))
-	response = serveRPC(other, testOtherToken, getTaskBody(t, "rpc-4", "task-r1"))
+	response = serveRPC(other, testOtherToken, getTaskBody(t, "rpc-4", taskID))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-32001`) || strings.Contains(response.Body.String(), "hello") {
 		t.Fatalf("cross-organization result leaked: %d %s", response.Code, response.Body.String())
 	}
@@ -245,10 +247,7 @@ func TestA2ASendGetAndContinueUseV1TaskContracts(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), a2aStateCompleted) || !strings.Contains(response.Body.String(), `"text":"authorized external input persisted"`) {
 		t.Fatalf("continuation=%d %s", response.Code, response.Body.String())
 	}
-	stream, err := ledgerStore.Events(context.Background(), "r2")
-	if err != nil {
-		t.Fatal(err)
-	}
+	stream := gatewayExternalStream(t, ledgerStore, "r2")
 	assertA2AEventOrder(t, stream, "A2A_INPUT_RECEIVED", "TASK_RESUMED", "EXECUTION_STARTED", "TOOL_OUTCOME_RECORDED", "EXECUTION_FINISHED", "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_VERIFIED", "TASK_VERIFIED_COMPLETE")
 	for _, event := range stream {
 		if strings.HasPrefix(event.EventType, "APPROVAL_") || strings.HasPrefix(event.EventType, "CAPABILITY_") || strings.HasPrefix(event.EventType, "EFFECT_") {
@@ -260,14 +259,52 @@ func TestA2ASendGetAndContinueUseV1TaskContracts(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), a2aStateCompleted) {
 		t.Fatalf("idempotent continuation retry=%d %s", response.Code, response.Body.String())
 	}
-	stream, err = ledgerStore.Events(context.Background(), "r2")
-	if err != nil || len(stream) != eventCount {
-		t.Fatalf("retry appended events: count=%d want=%d err=%v", len(stream), eventCount, err)
+	stream = gatewayExternalStream(t, ledgerStore, "r2")
+	if len(stream) != eventCount {
+		t.Fatalf("retry appended events: count=%d want=%d", len(stream), eventCount)
 	}
 	response = serveRPC(handler, testExternalToken, sendMessageBody(t, "rpc-9", "message-9", "r2", "different", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-32602`) {
 		t.Fatalf("conflicting continuation=%d %s", response.Code, response.Body.String())
 	}
+}
+
+func taskIDFromRPC(t *testing.T, response *httptest.ResponseRecorder) string {
+	t.Helper()
+	var envelope struct {
+		Result struct {
+			Task struct {
+				ID string `json:"id"`
+			} `json:"task"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil || envelope.Result.Task.ID == "" {
+		t.Fatalf("response has no task id: %s err=%v", response.Body.String(), err)
+	}
+	return envelope.Result.Task.ID
+}
+
+func gatewayExternalStream(t *testing.T, store *ledger.SQLite, externalRequestID string) []events.Event {
+	t.Helper()
+	all, err := store.Events(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range all {
+		if event.EventType != "INTENT_CREATED" {
+			continue
+		}
+		var payload events.ProjectionEventPayload
+		var intent core.Intent
+		if json.Unmarshal(event.Payload, &payload) == nil && json.Unmarshal(payload.Projection.Value, &intent) == nil && intent.ExternalRequestID == externalRequestID {
+			stream, err := store.Events(context.Background(), event.CorrelationID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return stream
+		}
+	}
+	return nil
 }
 
 func TestA2ARejectsUnsupportedMethodsAndExecutionKinds(t *testing.T) {
@@ -291,6 +328,31 @@ func TestA2ARejectsUnsupportedMethodsAndExecutionKinds(t *testing.T) {
 	}
 }
 
+func TestA2ABoundsAndStrictlyDecodesUntrustedRequests(t *testing.T) {
+	handler := testA2A(t, intake.New(app.New(events.NewGateway(noopLedger{}))), testExternalActor("agent", "org", testExternalToken, ExternalRoleSubmitter, intake.WorkScopeOwn))
+	body := sendMessageBody(t, "rpc-1", "message-1", "request-1", "echo safe", nil)
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+testExternalToken)
+	request.Header.Set("Content-Type", "application/jsonx")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("invalid media type status=%d", response.Code)
+	}
+
+	unknown := strings.Replace(body, `"method":"SendMessage"`, `"method":"SendMessage","unexpected":true`, 1)
+	response = serveRPC(handler, testExternalToken, unknown)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-32600`) {
+		t.Fatalf("unknown field=%d %s", response.Code, response.Body.String())
+	}
+
+	oversized := sendMessageBody(t, "rpc-2", "message-2", "request-2", strings.Repeat("x", (256<<10)+1), nil)
+	response = serveRPC(handler, testExternalToken, oversized)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-32600`) {
+		t.Fatalf("oversized body=%d %s", response.Code, response.Body.String())
+	}
+}
+
 const (
 	testExternalToken  = "external-agent-test-token-00000001"
 	testObserverToken  = "external-agent-test-token-00000002"
@@ -301,8 +363,8 @@ const (
 func testExternalActor(id, organizationID, token string, role ExternalActorRole, scope intake.WorkScope) ExternalActor {
 	expiresAt := time.Now().UTC().Add(time.Hour)
 	return ExternalActor{
-		ID: id, OrganizationID: organizationID, Status: ExternalActorActive, Role: role,
-		WorkScope: scope, AuthorizationRef: "test-authorization", ExpiresAt: &expiresAt,
+		ID: id, OrganizationID: organizationID, Status: OperatorActive, Role: role,
+		WorkScope: scope, TokenRef: "TEST_TOKEN", ReviewRef: "test-review", ExpiresAt: &expiresAt,
 		MaxConcurrent: 4, RequestsPerMinute: 100, BearerToken: token,
 	}
 }

@@ -2,8 +2,11 @@ package intake
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dominicnunez/agentos/internal/app"
@@ -35,7 +38,7 @@ func TestRouterUsesLeastNondeterministicAvailableMechanism(t *testing.T) {
 	}
 }
 
-func TestNaturalLanguageIntakePreservesPrincipalAndRoutingProvenance(t *testing.T) {
+func TestIntakeKeepsSourceProvenance(t *testing.T) {
 	ctx := context.Background()
 	store, err := ledger.Open(":memory:")
 	if err != nil {
@@ -81,7 +84,7 @@ func TestNaturalLanguageIntakePreservesPrincipalAndRoutingProvenance(t *testing.
 	}
 }
 
-func TestHumanAndExternalAgentCanContinueSharedWorkWithoutSharingIdentity(t *testing.T) {
+func TestChannelsShareWorkNotIdentity(t *testing.T) {
 	ctx := context.Background()
 	store, err := ledger.Open(":memory:")
 	if err != nil {
@@ -101,10 +104,7 @@ func TestHumanAndExternalAgentCanContinueSharedWorkWithoutSharingIdentity(t *tes
 	if err != nil || view.State != StateCompleted || view.Result != "authorized external input persisted" {
 		t.Fatalf("external-Agent continuation=%+v err=%v", view, err)
 	}
-	stream, err := store.Events(ctx, "shared")
-	if err != nil {
-		t.Fatal(err)
-	}
+	stream := externalStream(t, store, "shared")
 	var input events.OperatorInputReceivedPayload
 	found := false
 	for _, event := range stream {
@@ -124,9 +124,9 @@ func TestHumanAndExternalAgentCanContinueSharedWorkWithoutSharingIdentity(t *tes
 	if err != nil || view.State != StateCompleted {
 		t.Fatalf("idempotent retry=%+v err=%v", view, err)
 	}
-	stream, err = store.Events(ctx, "shared")
-	if err != nil || len(stream) != eventCount {
-		t.Fatalf("retry appended events=%d want=%d err=%v", len(stream), eventCount, err)
+	stream = externalStream(t, store, "shared")
+	if len(stream) != eventCount {
+		t.Fatalf("retry appended events=%d want=%d", len(stream), eventCount)
 	}
 
 	noInput := externalAgent
@@ -134,6 +134,92 @@ func TestHumanAndExternalAgentCanContinueSharedWorkWithoutSharingIdentity(t *tes
 	_, err = service.Handle(ctx, noInput, Message{ConversationID: "new-block", MessageID: "message-1", Text: "decision", RequestedKind: core.ExecutionHuman})
 	if !errors.Is(err, ErrForbidden) {
 		t.Fatalf("principal without submit capability err=%v", err)
+	}
+}
+
+func TestConversationIdentifiersAreTenantScopedAndTaskIDsAreOpaque(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := New(app.New(events.NewGateway(store)))
+	first := testPrincipal("agent-1", core.PrincipalExternalAgent, ChannelA2A)
+	second := testPrincipal("agent-2", core.PrincipalExternalAgent, ChannelA2A)
+	second.OrganizationID = "org-2"
+
+	firstView, err := service.Handle(context.Background(), first, Message{ConversationID: "shared-public-id", MessageID: "message-1", Text: "echo first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondView, err := service.Handle(context.Background(), second, Message{ConversationID: "shared-public-id", MessageID: "message-1", Text: "echo second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstView.TaskID == secondView.TaskID || strings.Contains(firstView.TaskID, "shared-public-id") || strings.Contains(secondView.TaskID, "shared-public-id") {
+		t.Fatalf("task identifiers are not opaque and tenant-scoped: first=%q second=%q", firstView.TaskID, secondView.TaskID)
+	}
+	if _, err := service.Get(context.Background(), first, secondView.TaskID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-tenant task lookup err=%v", err)
+	}
+}
+
+func TestIntakeBoundsUntrustedIdentifiersAndText(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := New(app.New(events.NewGateway(store)))
+	principal := testPrincipal("agent-1", core.PrincipalExternalAgent, ChannelA2A)
+	for _, message := range []Message{
+		{ConversationID: strings.Repeat("c", 257), MessageID: "message", Text: "echo safe"},
+		{ConversationID: "conversation\nforged", MessageID: "message", Text: "echo safe"},
+		{ConversationID: "conversation", MessageID: strings.Repeat("m", 257), Text: "echo safe"},
+		{ConversationID: "conversation", MessageID: "message", Text: strings.Repeat("x", (64<<10)+1)},
+	} {
+		if _, err := service.Handle(context.Background(), principal, message); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("unbounded message err=%v", err)
+		}
+	}
+}
+
+func TestIntakeGrandfathersOnlyDurablyBoundLegacyConversationIDs(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy-binding.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := New(app.New(events.NewGateway(store)))
+	principal := testPrincipal("agent-1", core.PrincipalExternalAgent, ChannelA2A)
+	message := Message{ConversationID: "canonical-conversation", MessageID: "message-1", Text: "echo legacy"}
+	view, err := service.Handle(ctx, principal, message)
+	if err != nil || view.State != StateCompleted {
+		t.Fatalf("initial work=%+v err=%v", view, err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE external_work SET request_id = ? WHERE organization_id = ? AND request_id = ?`, "case 123", "org-1", message.ConversationID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	message.ConversationID = "case 123"
+	view, err = service.Handle(ctx, principal, message)
+	if err != nil || view.State != StateCompleted || view.ConversationID != message.ConversationID {
+		t.Fatalf("durably bound legacy conversation=%+v err=%v", view, err)
+	}
+	message.ConversationID = "case 456"
+	if _, err := service.Handle(ctx, principal, message); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unbound legacy-shaped conversation err=%v", err)
 	}
 }
 
@@ -183,10 +269,7 @@ func testPrincipal(id string, kind core.PrincipalKind, channel string) Principal
 
 func projectedWork(t *testing.T, store *ledger.SQLite, correlationID string) (core.Intent, core.Task, []events.Event) {
 	t.Helper()
-	stream, err := store.Events(context.Background(), correlationID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	stream := externalStream(t, store, correlationID)
 	var intent core.Intent
 	var task core.Task
 	for _, event := range stream {
@@ -206,6 +289,34 @@ func projectedWork(t *testing.T, store *ledger.SQLite, correlationID string) (co
 		}
 	}
 	return intent, task, stream
+}
+
+func externalStream(t *testing.T, store *ledger.SQLite, externalRequestID string) []events.Event {
+	t.Helper()
+	all, err := store.Events(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	correlationID := ""
+	for _, event := range all {
+		if event.EventType != "INTENT_CREATED" {
+			continue
+		}
+		var payload events.ProjectionEventPayload
+		var intent core.Intent
+		if json.Unmarshal(event.Payload, &payload) == nil && json.Unmarshal(payload.Projection.Value, &intent) == nil && intent.ExternalRequestID == externalRequestID {
+			correlationID = event.CorrelationID
+			break
+		}
+	}
+	if correlationID == "" {
+		return nil
+	}
+	stream, err := store.Events(context.Background(), correlationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stream
 }
 
 func containsEvent(stream []events.Event, eventType string) bool {

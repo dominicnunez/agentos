@@ -37,13 +37,16 @@ jobs:
       - name: Race-tested unit tests
         run: go test -race ./...
 
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
       - name: A2A Agent and human intake interoperability
         env:
           AGENTOS_DB: work/a2a-interop.db
           AGENTOS_A2A_ACTORS_FILE: scripts/testdata/a2a-actors-ci.json
+          AGENTOS_HUMAN_ACTORS_FILE: scripts/testdata/human-actors-ci.json
           AGENTOS_A2A_AGENT_TOKEN: ci-a2a-agent-token-000000000000001
-          AGENTOS_HUMAN_TOKEN: ci-human-operator-token-00000000001
-          AGENTOS_ORGANIZATION_ID: a2a-interop-org
+          AGENTOS_HUMAN_OPERATOR_TOKEN: ci-human-operator-token-00000000001
           AGENTOS_PUBLIC_URL: http://127.0.0.1:8080
         run: |
           go build -o work/agentos ./cmd/agentos
@@ -65,7 +68,7 @@ jobs:
             --token "$AGENTOS_A2A_AGENT_TOKEN"
           python3 scripts/verify-human-intake.py \
             --url http://127.0.0.1:8080 \
-            --token "$AGENTOS_HUMAN_TOKEN"
+            --token "$AGENTOS_HUMAN_OPERATOR_TOKEN"
 
       - name: Architecture boundaries
         run: go tool archguard check --include-tests --profile modular-monolith

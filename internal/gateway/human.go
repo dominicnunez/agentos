@@ -1,8 +1,6 @@
 package gateway
 
 import (
-	"crypto/sha256"
-	"crypto/subtle"
 	"errors"
 	"net/http"
 	"strings"
@@ -12,28 +10,13 @@ import (
 	"github.com/dominicnunez/agentos/internal/intake"
 )
 
-type HumanActor struct {
-	ID             string
-	OrganizationID string
-	BearerToken    string
-	Capabilities   []string
-}
-
 type Human struct {
-	service    *intake.Service
-	principal  intake.Principal
-	tokenHash  [sha256.Size]byte
-	configured bool
+	service *intake.Service
+	actors  *HumanActorRegistry
 }
 
-func NewHuman(service *intake.Service, actor HumanActor) *Human {
-	return &Human{
-		service: service,
-		principal: operatorPrincipal(
-			actor.ID, core.PrincipalHuman, actor.OrganizationID, intake.ChannelHumanDirect, actor.Capabilities, intake.WorkScopeOrganization,
-		),
-		tokenHash: sha256.Sum256([]byte(actor.BearerToken)), configured: actor.BearerToken != "",
-	}
+func NewHuman(service *intake.Service, actors *HumanActorRegistry) *Human {
+	return &Human{service: service, actors: actors}
 }
 
 type humanMessageRequest struct {
@@ -54,25 +37,35 @@ type humanTaskResponse struct {
 
 func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	token, ok := bearerCredential(r.Header.Get("Authorization"))
-	provided := sha256.Sum256([]byte(token))
-	if !ok || !h.configured || h.principal.ID == "" || h.principal.OrganizationID == "" || subtle.ConstantTimeCompare(provided[:], h.tokenHash[:]) != 1 {
+	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authenticated human operator required"})
 		return
 	}
+	session, err := h.actors.Acquire(token)
+	if errors.Is(err, ErrOperatorLimited) {
+		w.Header().Set("Retry-After", "60")
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "human operator request limit reached"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authenticated human operator required"})
+		return
+	}
+	defer session.Release()
 	if r.Method == http.MethodPost && r.URL.Path == "/v1/human/messages" {
-		h.handleMessage(w, r)
+		h.handleMessage(w, r, session.Principal)
 		return
 	}
 	const taskPrefix = "/v1/human/tasks/"
 	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, taskPrefix) && len(r.URL.Path) > len(taskPrefix) {
-		h.handleGetTask(w, r, strings.TrimPrefix(r.URL.Path, taskPrefix))
+		h.handleGetTask(w, r, session.Principal, strings.TrimPrefix(r.URL.Path, taskPrefix))
 		return
 	}
 	http.NotFound(w, r)
 }
 
-func (h *Human) handleMessage(w http.ResponseWriter, r *http.Request) {
-	if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
+func (h *Human) handleMessage(w http.ResponseWriter, r *http.Request, principal intake.Principal) {
+	if !hasJSONContentType(r.Header.Get("Content-Type")) {
 		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "human messages require application/json"})
 		return
 	}
@@ -84,15 +77,15 @@ func (h *Human) handleMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	view, err := h.service.Handle(r.Context(), h.principal, intake.Message{
+	view, err := h.service.Handle(r.Context(), principal, intake.Message{
 		ConversationID: request.ConversationID, MessageID: request.MessageID,
 		Text: request.Text, RequestedKind: request.ExecutionKind,
 	})
 	h.writeView(w, view, err)
 }
 
-func (h *Human) handleGetTask(w http.ResponseWriter, r *http.Request, taskID string) {
-	view, err := h.service.Get(r.Context(), h.principal, taskID)
+func (h *Human) handleGetTask(w http.ResponseWriter, r *http.Request, principal intake.Principal, taskID string) {
+	view, err := h.service.Get(r.Context(), principal, taskID)
 	h.writeView(w, view, err)
 }
 

@@ -83,6 +83,40 @@ func TestAgentExecutionUsesFakeAdapter(t *testing.T) {
 	assertEventOrder(t, r.Events, "EXECUTION_CONTEXT_MANIFESTED", "TOOL_OUTCOME_RECORDED", "INFERENCE_USAGE_RECORDED", "EXECUTION_FINISHED", "RUN_TELEMETRY_RECORDED")
 }
 
+type indexedTaskLedger struct{}
+
+func (indexedTaskLedger) Append(_ context.Context, draft events.TrustedDraft) (events.Event, error) {
+	return events.Event{EventID: "event-1", OrganizationID: draft.OrganizationID, EventType: draft.EventType, TaskID: draft.TaskID, CorrelationID: draft.CorrelationID}, nil
+}
+
+func (indexedTaskLedger) Events(_ context.Context, correlationID string) ([]events.Event, error) {
+	return []events.Event{{EventID: "event-1", OrganizationID: "org-1", EventType: "TASK_CREATED", TaskID: "task-1", CorrelationID: correlationID}}, nil
+}
+
+func (indexedTaskLedger) ResolveExternalWork(context.Context, string, string) (string, bool, error) {
+	return "correlation-1", true, nil
+}
+
+func (indexedTaskLedger) ResolveExternalRequest(context.Context, string, string) (string, bool, error) {
+	return "request-1", true, nil
+}
+
+func (indexedTaskLedger) ResolveExternalTask(context.Context, string, string) (string, string, bool, error) {
+	return "request-1", "correlation-1", true, nil
+}
+
+func (indexedTaskLedger) ReserveExternalWork(context.Context, string, string) (string, error) {
+	return "correlation-1", nil
+}
+
+func TestExternalTaskLookupUsesDurableIndex(t *testing.T) {
+	service := New(events.NewGateway(indexedTaskLedger{}))
+	requestID, stream, err := service.ExternalTaskEvents(context.Background(), "org-1", "task-1")
+	if err != nil || requestID != "request-1" || len(stream) != 1 || stream[0].TaskID != "task-1" {
+		t.Fatalf("request=%q stream=%+v err=%v", requestID, stream, err)
+	}
+}
+
 func TestRejectedRunRecordsTelemetryAndFailsGoal(t *testing.T) {
 	l, err := ledger.Open(":memory:")
 	if err != nil {
@@ -114,7 +148,7 @@ func TestRejectedRunRecordsTelemetryAndFailsGoal(t *testing.T) {
 	}
 }
 
-func TestRunTelemetryAggregatesEveryTaskInCompletedDAG(t *testing.T) {
+func TestRunTelemetryCoversDAG(t *testing.T) {
 	ctx := context.Background()
 	l, err := ledger.Open(":memory:")
 	if err != nil {
@@ -286,7 +320,7 @@ func TestTaskPersistenceFailurePreventsExecutionVisibility(t *testing.T) {
 	}
 }
 
-func TestRecoverRetriesDeterministicWorkAndBlocksUncertainAgentWork(t *testing.T) {
+func TestRecoveryIsDeterministicFirst(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "agentos.db")
 	l, err := ledger.Open(path)
@@ -391,6 +425,7 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 			if err != nil || result.Task.Status != core.TaskBlocked {
 				t.Fatalf("submit=%+v err=%v", result, err)
 			}
+			correlationID := result.Events[0].CorrelationID
 			inputPayload := any(events.OperatorInputReceivedPayload{
 				MessageID: "message-1", Text: "approved task input", SourcePrincipalID: "external-agent",
 				SourcePrincipalKind: string(core.PrincipalExternalAgent), SourceChannel: "A2A",
@@ -403,7 +438,7 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 				EventType:      "A2A_INPUT_RECEIVED",
 				SourceActorID:  "external-agent",
 				TaskID:         string(result.Task.ID),
-				CorrelationID:  "request-1",
+				CorrelationID:  correlationID,
 				Payload:        inputPayload,
 			})
 			if err != nil {
@@ -417,26 +452,26 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 			if test.stage != "input_durable" {
 				task := state.Value
 				task.Status = core.TaskPending
-				if err := service.state.SaveTask(ctx, "org-1", "TASK_RESUMED", "runtime", "request-1", state.Version+1, task, map[string]string{"input_event_ref": inputEvent.EventID}); err != nil {
+				if err := service.state.SaveTask(ctx, "org-1", "TASK_RESUMED", "runtime", correlationID, state.Version+1, task, map[string]string{"input_event_ref": inputEvent.EventID}); err != nil {
 					t.Fatal(err)
 				}
-				state = projections.Versioned[core.Task]{Version: state.Version + 1, CorrelationID: "request-1", Value: task}
+				state = projections.Versioned[core.Task]{Version: state.Version + 1, CorrelationID: correlationID, Value: task}
 			}
 			if test.stage == "completion_verified" {
 				task := state.Value
 				task.Status = core.TaskRunning
-				if err := service.state.SaveTask(ctx, "org-1", "EXECUTION_STARTED", "runtime", "request-1", state.Version+1, task, map[string]string{"input_event_ref": inputEvent.EventID}); err != nil {
+				if err := service.state.SaveTask(ctx, "org-1", "EXECUTION_STARTED", "runtime", correlationID, state.Version+1, task, map[string]string{"input_event_ref": inputEvent.EventID}); err != nil {
 					t.Fatal(err)
 				}
-				state = projections.Versioned[core.Task]{Version: state.Version + 1, CorrelationID: "request-1", Value: task}
+				state = projections.Versioned[core.Task]{Version: state.Version + 1, CorrelationID: correlationID, Value: task}
 				executionID := "external-input-" + inputEvent.EventID
 				now := time.Now().UTC()
 				outcome := core.ToolOutcome{ToolInvocationID: core.ID("a2a-input-" + inputEvent.EventID), ToolID: "a2a.external-input", ToolVersion: "v1", Status: core.OutcomeSucceeded, ObservedEffect: map[string]string{"input_event_ref": inputEvent.EventID}, PostconditionStatus: core.PostconditionVerified, Retryability: core.NotRetryable, StartedAt: now, FinishedAt: now}
 				for _, draft := range []events.TrustedDraft{
-					{OrganizationID: "org-1", EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: outcome, CorrelationID: "request-1"},
-					{OrganizationID: "org-1", EventType: "EXECUTION_FINISHED", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: map[string]any{"status": outcome.Status}, CorrelationID: "request-1"},
-					{OrganizationID: "org-1", EventType: "RESULT_PUBLISHED", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: events.ResultPublishedPayload{Summary: "authorized external input persisted"}, CorrelationID: "request-1"},
-					{OrganizationID: "org-1", EventType: "CANDIDATE_COMPLETE", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: map[string]any{"tool_invocation_id": outcome.ToolInvocationID}, CorrelationID: "request-1"},
+					{OrganizationID: "org-1", EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: outcome, CorrelationID: correlationID},
+					{OrganizationID: "org-1", EventType: "EXECUTION_FINISHED", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: map[string]any{"status": outcome.Status}, CorrelationID: correlationID},
+					{OrganizationID: "org-1", EventType: "RESULT_PUBLISHED", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: events.ResultPublishedPayload{Summary: "authorized external input persisted"}, CorrelationID: correlationID},
+					{OrganizationID: "org-1", EventType: "CANDIDATE_COMPLETE", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: map[string]any{"tool_invocation_id": outcome.ToolInvocationID}, CorrelationID: correlationID},
 				} {
 					if _, err := gateway.PublishTrusted(ctx, draft); err != nil {
 						t.Fatal(err)
@@ -444,7 +479,7 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 				}
 				contract := core.CompletionContract{TaskID: task.ID, TaskVersion: state.Version, Criteria: []core.CompletionCriterion{{ID: "durable-external-input", Assurance: core.AssuranceDeterministic, Required: true}}}
 				detail := completionDetail{Contract: contract, Result: service.completion.Evaluate(contract, outcome)}
-				if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "COMPLETION_VERIFIED", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: detail, CorrelationID: "request-1"}); err != nil {
+				if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "COMPLETION_VERIFIED", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: string(task.ID), Payload: detail, CorrelationID: correlationID}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -458,7 +493,7 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 			if err != nil || snapshot.Tasks[result.Task.ID].Value.Status != core.TaskCompleted {
 				t.Fatalf("recovered task=%+v err=%v", snapshot.Tasks[result.Task.ID], err)
 			}
-			stream, err := gateway.Events(ctx, "request-1")
+			stream, err := gateway.Events(ctx, correlationID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -477,7 +512,7 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 			if _, err := recovered.Recover(ctx); err != nil {
 				t.Fatal(err)
 			}
-			stream, err = gateway.Events(ctx, "request-1")
+			stream, err = gateway.Events(ctx, correlationID)
 			if err != nil || len(stream) != eventCount {
 				t.Fatalf("second recovery appended events: count=%d want=%d err=%v", len(stream), eventCount, err)
 			}
@@ -485,7 +520,7 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 	}
 }
 
-func TestBlockedChildReturnsControlToParentWithoutAuthorityExpansion(t *testing.T) {
+func TestBlockedChildReturnsToParent(t *testing.T) {
 	ctx := context.Background()
 	l, err := ledger.Open(":memory:")
 	if err != nil {
@@ -590,7 +625,7 @@ func TestBlockedChildReturnsControlToParentWithoutAuthorityExpansion(t *testing.
 	}
 }
 
-func TestLateralMessagesSurviveRestartAndSurfaceAtAgentActionBoundary(t *testing.T) {
+func TestLateralMessagesAtActionBoundary(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "agentos.db")
 	l, err := ledger.Open(path)

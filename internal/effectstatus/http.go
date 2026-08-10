@@ -7,9 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/core"
@@ -26,15 +26,15 @@ const (
 )
 
 type HTTPReconcilerBinding struct {
-	OrganizationID   core.ID                 `json:"organization_id"`
-	Action           string                  `json:"action"`
-	Resource         string                  `json:"resource"`
-	Status           ReconcilerBindingStatus `json:"status"`
-	StatusURL        string                  `json:"status_url"`
-	TokenRef         string                  `json:"token_ref"`
-	AuthorizationRef string                  `json:"authorization_ref"`
-	ExpiresAt        *time.Time              `json:"expires_at"`
-	BearerToken      string                  `json:"-"`
+	OrganizationID core.ID                 `json:"organization_id"`
+	Action         string                  `json:"action"`
+	Resource       string                  `json:"resource"`
+	Status         ReconcilerBindingStatus `json:"status"`
+	StatusURL      string                  `json:"status_url"`
+	TokenRef       string                  `json:"token_ref"`
+	ReviewRef      string                  `json:"review_ref"`
+	ExpiresAt      *time.Time              `json:"expires_at"`
+	BearerToken    string                  `json:"-"`
 }
 
 type HTTPReconcilerConfig struct {
@@ -133,7 +133,8 @@ func (r *httpStatusReconciler) Check(ctx context.Context, obligation core.Effect
 	if response.StatusCode != http.StatusOK {
 		return effects.ReconciliationObservation{}, fmt.Errorf("reconciliation status endpoint returned %d", response.StatusCode)
 	}
-	if !strings.HasPrefix(strings.ToLower(response.Header.Get("Content-Type")), "application/json") {
+	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
 		return effects.ReconciliationObservation{}, fmt.Errorf("reconciliation status endpoint must return application/json")
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, reconciliationResponseLimit+1))
@@ -160,8 +161,8 @@ func (r *httpStatusReconciler) Check(ctx context.Context, obligation core.Effect
 }
 
 func validateHTTPReconcilerBinding(binding HTTPReconcilerBinding) error {
-	if binding.OrganizationID == "" || binding.Action == "" || binding.Resource == "" || binding.TokenRef == "" || binding.AuthorizationRef == "" {
-		return fmt.Errorf("organization_id, action, resource, token_ref, and authorization_ref are required")
+	if binding.OrganizationID == "" || binding.Action == "" || binding.Resource == "" || binding.TokenRef == "" || binding.ReviewRef == "" {
+		return fmt.Errorf("organization_id, action, resource, token_ref, and review_ref are required")
 	}
 	if err := trustconfig.ValidateCredentialLifecycle(string(binding.Status), binding.BearerToken, binding.ExpiresAt); err != nil {
 		return err

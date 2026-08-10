@@ -26,6 +26,7 @@ type Submit struct {
 	SourcePrincipalID   core.ID
 	SourcePrincipalKind core.PrincipalKind
 	SourceChannel       string
+	correlationID       string
 }
 
 type Result struct {
@@ -51,6 +52,7 @@ type Service struct {
 	scheduler     workflow.Scheduler
 	deterministic execution.Handler
 	agent         execution.Handler
+	verifier      completion.Verifier
 	completion    completion.Engine
 }
 
@@ -60,6 +62,7 @@ func New(g *events.Gateway) *Service {
 		state:         projections.New(g),
 		deterministic: execution.Deterministic{},
 		agent:         execution.NewAgentExecution(execution.FakeModel{}),
+		verifier:      completion.Verifier{},
 	}
 	g.SetRouteValidator(service)
 	return service
@@ -76,7 +79,14 @@ func (s *Service) ExternalEvents(ctx context.Context, organizationID, requestID 
 	if organizationID == "" || requestID == "" {
 		return nil, fmt.Errorf("organization and request are required")
 	}
-	stream, err := s.gateway.Events(ctx, requestID)
+	correlationID, found, err := s.gateway.ResolveExternalWork(ctx, organizationID, requestID)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	stream, err := s.gateway.Events(ctx, correlationID)
 	if err != nil {
 		return nil, err
 	}
@@ -86,6 +96,42 @@ func (s *Service) ExternalEvents(ctx context.Context, organizationID, requestID 
 		}
 	}
 	return stream, nil
+}
+
+// ExternalTaskEvents resolves an opaque task identifier within one tenant and
+// returns the original external conversation identifier with its event stream.
+func (s *Service) ExternalTaskEvents(ctx context.Context, organizationID, taskID string) (string, []events.Event, error) {
+	if organizationID == "" || taskID == "" {
+		return "", nil, fmt.Errorf("organization and task are required")
+	}
+	requestID, correlationID, found, err := s.gateway.ResolveExternalTask(ctx, organizationID, taskID)
+	if err != nil {
+		return "", nil, err
+	}
+	if !found {
+		return "", nil, nil
+	}
+	stream, err := s.gateway.Events(ctx, correlationID)
+	if err != nil {
+		return "", nil, err
+	}
+	for _, event := range stream {
+		if event.OrganizationID != organizationID {
+			return "", nil, nil
+		}
+	}
+	return requestID, stream, nil
+}
+
+func (s *Service) requireExternalWorkCorrelation(ctx context.Context, organizationID, requestID string) (string, error) {
+	correlationID, found, err := s.gateway.ResolveExternalWork(ctx, organizationID, requestID)
+	if err != nil {
+		return "", err
+	}
+	if found {
+		return correlationID, nil
+	}
+	return "", fmt.Errorf("external request is not registered")
 }
 
 // SendMessage is the lateral Agent-to-Agent/Team/Task path. It deliberately
@@ -285,8 +331,12 @@ func (s *Service) ProvideOperatorInput(ctx context.Context, input OperatorInput)
 	if err != nil {
 		return err
 	}
+	correlationID, err := s.requireExternalWorkCorrelation(ctx, input.OrganizationID, input.RequestID)
+	if err != nil {
+		return err
+	}
 	state, ok := snapshot.Tasks[core.ID(input.TaskID)]
-	if !ok || state.CorrelationID != input.RequestID {
+	if !ok || state.CorrelationID != correlationID {
 		return fmt.Errorf("task is not mapped to this external request")
 	}
 	actualOrganizationID, err := taskOrganization(snapshot, state.Value)
@@ -299,7 +349,7 @@ func (s *Service) ProvideOperatorInput(ctx context.Context, input OperatorInput)
 	if state.Value.ExecutionKind != core.ExecutionHuman {
 		return fmt.Errorf("external input can continue only a HUMAN task")
 	}
-	stream, err := s.gateway.Events(ctx, input.RequestID)
+	stream, err := s.gateway.Events(ctx, correlationID)
 	if err != nil {
 		return err
 	}
@@ -320,7 +370,7 @@ func (s *Service) ProvideOperatorInput(ctx context.Context, input OperatorInput)
 			EventType:      eventType,
 			SourceActorID:  input.PrincipalID,
 			TaskID:         input.TaskID,
-			CorrelationID:  input.RequestID,
+			CorrelationID:  correlationID,
 			Payload: events.OperatorInputReceivedPayload{
 				MessageID: input.MessageID, Text: input.Text, SourcePrincipalID: input.PrincipalID,
 				SourcePrincipalKind: string(input.PrincipalKind), SourceChannel: input.SourceChannel,
@@ -330,7 +380,7 @@ func (s *Service) ProvideOperatorInput(ctx context.Context, input OperatorInput)
 			return err
 		}
 	}
-	if err := s.continueExternalInputTask(ctx, actualOrganizationID, core.ID(input.TaskID), input.RequestID, inputEvent); err != nil {
+	if err := s.continueExternalInputTask(ctx, actualOrganizationID, core.ID(input.TaskID), correlationID, inputEvent); err != nil {
 		return err
 	}
 	return s.reconcileGoals(ctx)
@@ -575,6 +625,18 @@ func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 	if in.SourceChannel == "" {
 		in.SourceChannel = "INTERNAL"
 	}
+	operatorSubmission := in.SourceChannel == "A2A" || in.SourceChannel == "HUMAN_DIRECT"
+	if in.SourceChannel != "INTERNAL" && !operatorSubmission {
+		return Result{}, fmt.Errorf("operator work channel is not supported")
+	}
+	if operatorSubmission && in.MessageID == "" {
+		return Result{}, fmt.Errorf("operator submission message id is required")
+	}
+	correlationID, err := s.gateway.ReserveExternalWork(ctx, in.OrganizationID, in.RequestID)
+	if err != nil {
+		return Result{}, err
+	}
+	in.correlationID = correlationID
 	intent, goal, task, err := s.ensureSubmission(ctx, in)
 	if err != nil {
 		return Result{}, err
@@ -598,12 +660,12 @@ func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 	task = snapshot.Tasks[task.ID].Value
 	run, ok := runs[task.ID]
 	if !ok {
-		run, err = s.readTaskResult(ctx, in.RequestID)
+		run, err = s.readTaskResult(ctx, correlationID)
 		if err != nil {
 			return Result{}, err
 		}
 	}
-	eventStream, err := s.gateway.Events(ctx, in.RequestID)
+	eventStream, err := s.gateway.Events(ctx, correlationID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -625,7 +687,8 @@ func (s *Service) ensureOperatorAcceptance(ctx context.Context, in Submit, taskI
 		MessageID: in.MessageID, SourcePrincipalID: string(in.SourcePrincipalID),
 		SourcePrincipalKind: string(in.SourcePrincipalKind), SourceChannel: in.SourceChannel,
 	}
-	stream, err := s.gateway.Events(ctx, in.RequestID)
+	correlationID := in.correlationID
+	stream, err := s.gateway.Events(ctx, correlationID)
 	if err != nil {
 		return err
 	}
@@ -642,7 +705,7 @@ func (s *Service) ensureOperatorAcceptance(ctx context.Context, in Submit, taskI
 	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
 		OrganizationID: in.OrganizationID, EventType: eventType,
 		SourceActorID: string(in.SourcePrincipalID), TaskID: string(taskID),
-		CorrelationID: in.RequestID, Payload: payload,
+		CorrelationID: correlationID, Payload: payload,
 	}); err != nil {
 		return fmt.Errorf("persist operator work acceptance: %w", err)
 	}
@@ -673,12 +736,13 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 	}
 	now := time.Now().UTC()
 	organizationID := core.ID(in.OrganizationID)
+	correlationID := in.correlationID
 	if existing, ok := snapshot.Organizations[organizationID]; !ok {
 		organization := core.Organization{ID: organizationID, Name: in.OrganizationID, PolicyVersion: "v1", CreatedAt: now}
-		if err := s.state.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", in.RequestID, 1, organization, nil); err != nil {
+		if err := s.state.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", correlationID, 1, organization, nil); err != nil {
 			return core.Intent{}, core.Goal{}, core.Task{}, fmt.Errorf("persist organization: %w", err)
 		}
-		snapshot.Organizations[organizationID] = projections.Versioned[core.Organization]{Version: 1, CorrelationID: in.RequestID, Value: organization}
+		snapshot.Organizations[organizationID] = projections.Versioned[core.Organization]{Version: 1, CorrelationID: correlationID, Value: organization}
 	} else if existing.Value.ID != organizationID {
 		return core.Intent{}, core.Goal{}, core.Task{}, fmt.Errorf("organization projection mismatch")
 	}
@@ -686,41 +750,41 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 	agentID := core.ID("agent-local-" + in.OrganizationID)
 	if existing, ok := snapshot.Agents[agentID]; !ok {
 		agent := core.Agent{ID: agentID, OrganizationID: organizationID, BlueprintVersion: "v1-local-worker", ExecutionProfileVersion: "v1-fake", RuntimeAdapter: "local", Status: "ACTIVE"}
-		if err := s.state.SaveAgent(ctx, "AGENT_CREATED", "runtime", in.RequestID, 1, agent, nil); err != nil {
+		if err := s.state.SaveAgent(ctx, "AGENT_CREATED", "runtime", correlationID, 1, agent, nil); err != nil {
 			return core.Intent{}, core.Goal{}, core.Task{}, fmt.Errorf("persist agent identity: %w", err)
 		}
-		snapshot.Agents[agentID] = projections.Versioned[core.Agent]{Version: 1, CorrelationID: in.RequestID, Value: agent}
+		snapshot.Agents[agentID] = projections.Versioned[core.Agent]{Version: 1, CorrelationID: correlationID, Value: agent}
 	} else if existing.Value.OrganizationID != organizationID {
 		return core.Intent{}, core.Goal{}, core.Task{}, fmt.Errorf("durable agent identity belongs to a different organization")
 	}
 
-	intent := core.Intent{ID: core.ID("intent-" + in.RequestID), OrganizationID: organizationID, OriginalInstruction: in.Statement, NormalizedObjective: in.Statement, HardConstraints: []string{}, ConsequenceBoundaries: []string{}, SourcePrincipalID: in.SourcePrincipalID, SourcePrincipalKind: in.SourcePrincipalKind, SourceChannel: in.SourceChannel, SourceMessageID: in.MessageID, CreatedAt: now}
+	intent := core.Intent{ID: core.ID("intent-" + correlationID), OrganizationID: organizationID, OriginalInstruction: in.Statement, NormalizedObjective: in.Statement, HardConstraints: []string{}, ConsequenceBoundaries: []string{}, SourcePrincipalID: in.SourcePrincipalID, SourcePrincipalKind: in.SourcePrincipalKind, SourceChannel: in.SourceChannel, ExternalRequestID: in.RequestID, SourceMessageID: in.MessageID, CreatedAt: now}
 	if in.SourcePrincipalKind == core.PrincipalHuman {
 		intent.SourceHumanID = in.SourcePrincipalID
 	}
 	if existing, ok := snapshot.Intents[intent.ID]; ok {
-		if existing.Value.OrganizationID != organizationID || existing.Value.OriginalInstruction != in.Statement || existing.Value.SourcePrincipalID != in.SourcePrincipalID || existing.Value.SourcePrincipalKind != in.SourcePrincipalKind || existing.Value.SourceChannel != in.SourceChannel || existing.Value.SourceMessageID != in.MessageID {
+		if existing.Value.OrganizationID != organizationID || existing.Value.OriginalInstruction != in.Statement || existing.Value.SourcePrincipalID != in.SourcePrincipalID || existing.Value.SourcePrincipalKind != in.SourcePrincipalKind || existing.Value.SourceChannel != in.SourceChannel || existing.Value.ExternalRequestID != in.RequestID || existing.Value.SourceMessageID != in.MessageID {
 			return core.Intent{}, core.Goal{}, core.Task{}, fmt.Errorf("request id is already bound to different work")
 		}
 		intent = existing.Value
 	} else {
-		if err := s.state.SaveIntent(ctx, "INTENT_CREATED", "runtime", in.RequestID, 1, intent, nil); err != nil {
+		if err := s.state.SaveIntent(ctx, "INTENT_CREATED", "runtime", correlationID, 1, intent, nil); err != nil {
 			return core.Intent{}, core.Goal{}, core.Task{}, fmt.Errorf("persist intent: %w", err)
 		}
-		snapshot.Intents[intent.ID] = projections.Versioned[core.Intent]{Version: 1, CorrelationID: in.RequestID, Value: intent}
+		snapshot.Intents[intent.ID] = projections.Versioned[core.Intent]{Version: 1, CorrelationID: correlationID, Value: intent}
 	}
 
-	goal := core.Goal{ID: core.ID("goal-" + in.RequestID), IntentID: intent.ID, Objective: in.Statement, Status: "ACTIVE", CreatedAt: now}
+	goal := core.Goal{ID: core.ID("goal-" + correlationID), IntentID: intent.ID, Objective: in.Statement, Status: "ACTIVE", CreatedAt: now}
 	if existing, ok := snapshot.Goals[goal.ID]; ok {
 		if existing.Value.IntentID != intent.ID || existing.Value.Objective != in.Statement {
 			return core.Intent{}, core.Goal{}, core.Task{}, fmt.Errorf("request goal projection does not match submitted work")
 		}
 		goal = existing.Value
 	} else {
-		if err := s.state.SaveGoal(ctx, organizationID, "GOAL_CREATED", "runtime", in.RequestID, 1, goal, nil); err != nil {
+		if err := s.state.SaveGoal(ctx, organizationID, "GOAL_CREATED", "runtime", correlationID, 1, goal, nil); err != nil {
 			return core.Intent{}, core.Goal{}, core.Task{}, fmt.Errorf("persist goal: %w", err)
 		}
-		snapshot.Goals[goal.ID] = projections.Versioned[core.Goal]{Version: 1, CorrelationID: in.RequestID, Value: goal}
+		snapshot.Goals[goal.ID] = projections.Versioned[core.Goal]{Version: 1, CorrelationID: correlationID, Value: goal}
 	}
 
 	policy := core.InferenceForbidden
@@ -728,7 +792,7 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 		policy = core.InferenceAllowed
 	}
 	task := core.Task{
-		ID:                   core.ID("task-" + in.RequestID),
+		ID:                   core.ID("task-" + correlationID),
 		GoalID:               goal.ID,
 		Description:          in.Statement,
 		ExecutionKind:        in.Kind,
@@ -743,7 +807,7 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 			return core.Intent{}, core.Goal{}, core.Task{}, fmt.Errorf("request task projection does not match submitted work")
 		}
 		task = existing.Value
-	} else if err := s.state.SaveTask(ctx, organizationID, "TASK_CREATED", "runtime", in.RequestID, 1, task, nil); err != nil {
+	} else if err := s.state.SaveTask(ctx, organizationID, "TASK_CREATED", "runtime", correlationID, 1, task, nil); err != nil {
 		return core.Intent{}, core.Goal{}, core.Task{}, fmt.Errorf("persist task before scheduling: %w", err)
 	}
 	return intent, goal, task, nil
@@ -870,7 +934,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	}
 
 	executionResult, executionErr := handler.Execute(ctx, executionTask, manifest)
-	outcome := executionResult.Outcome
+	outcome := s.verifier.Verify(executionTask, executionResult.Outcome)
 	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: outcome, CorrelationID: state.CorrelationID}); err != nil {
 		return taskRun{}, fmt.Errorf("persist outcome for task %s: %w", task.ID, err)
 	}

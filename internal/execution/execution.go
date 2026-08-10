@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -31,7 +35,7 @@ func (Deterministic) Execute(_ context.Context, task core.Task, _ core.Execution
 		return Result{Outcome: core.ToolOutcome{ToolInvocationID: core.ID("tool-" + string(task.ID)), ToolID: "builtin.echo", Status: core.OutcomeFailed, PostconditionStatus: core.PostconditionVerified, Retryability: core.NotRetryable, ErrorClass: "unsupported_operation", ErrorDetail: "expected echo prefix", StartedAt: started, FinishedAt: time.Now().UTC()}}, nil
 	}
 	value := strings.TrimPrefix(task.Description, prefix)
-	return Result{Outcome: core.ToolOutcome{ToolInvocationID: core.ID("tool-" + string(task.ID)), ToolID: "builtin.echo", ToolVersion: "v1", Status: core.OutcomeSucceeded, ObservedEffect: value, PostconditionStatus: core.PostconditionVerified, Retryability: core.NotRetryable, StartedAt: started, FinishedAt: time.Now().UTC()}}, nil
+	return Result{Outcome: core.ToolOutcome{ToolInvocationID: core.ID("tool-" + string(task.ID)), ToolID: "builtin.echo", ToolVersion: "v1", Status: core.OutcomeSucceeded, ObservedEffect: value, PostconditionStatus: core.PostconditionNotChecked, Retryability: core.NotRetryable, StartedAt: started, FinishedAt: time.Now().UTC()}}, nil
 }
 
 type ModelAdapter interface {
@@ -64,6 +68,7 @@ type OpenAICompatible struct {
 	Endpoint, Model                           string
 	APIKey                                    func(context.Context) (string, error)
 	Client                                    *http.Client
+	AllowedHosts                              []string
 	PricingKnown                              bool
 	InputCostPerMillion, OutputCostPerMillion float64
 }
@@ -73,9 +78,19 @@ func (a OpenAICompatible) Complete(ctx context.Context, prompt string) (ModelRes
 	if a.Endpoint == "" || a.Model == "" || a.APIKey == nil {
 		return ModelResponse{}, fmt.Errorf("real model adapter is not configured")
 	}
+	endpoint, err := url.Parse(a.Endpoint)
+	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil || endpoint.Fragment != "" {
+		return ModelResponse{}, fmt.Errorf("model endpoint must be an absolute HTTPS URL without user info or fragment")
+	}
+	if !allowedProviderHost(endpoint.Hostname(), a.AllowedHosts) {
+		return ModelResponse{}, fmt.Errorf("model endpoint host is not allowlisted")
+	}
 	key, err := a.APIKey(ctx)
 	if err != nil {
 		return ModelResponse{}, err
+	}
+	if key == "" || strings.TrimSpace(key) != key || strings.ContainsAny(key, "\r\n") {
+		return ModelResponse{}, fmt.Errorf("model credential is invalid")
 	}
 	body, _ := json.Marshal(map[string]any{"model": a.Model, "messages": []map[string]string{{"role": "user", "content": prompt}}})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.Endpoint, bytes.NewReader(body))
@@ -84,10 +99,15 @@ func (a OpenAICompatible) Complete(ctx context.Context, prompt string) (ModelRes
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+key)
-	client := a.Client
-	if client == nil {
-		client = &http.Client{Timeout: 60 * time.Second}
+	baseClient := a.Client
+	if baseClient == nil {
+		baseClient = &http.Client{}
 	}
+	client := *baseClient
+	if client.Timeout <= 0 || client.Timeout > 60*time.Second {
+		client.Timeout = 60 * time.Second
+	}
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := client.Do(req)
 	if err != nil {
 		return ModelResponse{}, err
@@ -97,6 +117,10 @@ func (a OpenAICompatible) Complete(ctx context.Context, prompt string) (ModelRes
 	}()
 	if resp.StatusCode/100 != 2 {
 		return ModelResponse{}, fmt.Errorf("model provider returned %s", resp.Status)
+	}
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		return ModelResponse{}, fmt.Errorf("model provider must return application/json")
 	}
 	var decoded struct {
 		Choices []struct {
@@ -110,8 +134,19 @@ func (a OpenAICompatible) Complete(ctx context.Context, prompt string) (ModelRes
 			TotalTokens      int `json:"total_tokens"`
 		} `json:"usage"`
 	}
-	if err = json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if err != nil {
 		return ModelResponse{}, err
+	}
+	if len(responseBody) > 1<<20 {
+		return ModelResponse{}, fmt.Errorf("model provider response exceeds 1048576 bytes")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(responseBody))
+	if err = decoder.Decode(&decoded); err != nil {
+		return ModelResponse{}, err
+	}
+	if err = decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return ModelResponse{}, fmt.Errorf("model provider returned trailing content")
 	}
 	if len(decoded.Choices) == 0 {
 		return ModelResponse{}, fmt.Errorf("model provider returned no choices")
@@ -143,6 +178,18 @@ func (a OpenAICompatible) Complete(ctx context.Context, prompt string) (ModelRes
 	return ModelResponse{Text: decoded.Choices[0].Message.Content, Usage: usage}, nil
 }
 
+func allowedProviderHost(host string, allowed []string) bool {
+	if host == "" || len(allowed) == 0 {
+		return false
+	}
+	for _, candidate := range allowed {
+		if strings.EqualFold(host, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
 type AgentExecution struct{ model ModelAdapter }
 
 func NewAgentExecution(model ModelAdapter) *AgentExecution { return &AgentExecution{model: model} }
@@ -156,7 +203,7 @@ func (a *AgentExecution) Execute(ctx context.Context, task core.Task, _ core.Exe
 		return Result{Outcome: core.ToolOutcome{ToolInvocationID: core.ID("model-" + string(task.ID)), ToolID: a.model.Name(), Status: core.OutcomeFailed, PostconditionStatus: core.PostconditionNotChecked, Retryability: core.Retryable, ErrorDetail: err.Error(), StartedAt: started, FinishedAt: time.Now().UTC()}}, err
 	}
 	return Result{
-		Outcome:        core.ToolOutcome{ToolInvocationID: core.ID("model-" + string(task.ID)), ToolID: a.model.Name(), Status: core.OutcomeSucceeded, ObservedEffect: response.Text, PostconditionStatus: core.PostconditionVerified, Retryability: core.NotRetryable, StartedAt: started, FinishedAt: time.Now().UTC()},
+		Outcome:        core.ToolOutcome{ToolInvocationID: core.ID("model-" + string(task.ID)), ToolID: a.model.Name(), Status: core.OutcomeSucceeded, ObservedEffect: response.Text, PostconditionStatus: core.PostconditionNotChecked, Retryability: core.NotRetryable, StartedAt: started, FinishedAt: time.Now().UTC()},
 		InferenceUsage: &response.Usage,
 	}, nil
 }

@@ -17,7 +17,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-type SQLite struct{ db *sql.DB }
+type SQLite struct {
+	db                 *sql.DB
+	newWorkCorrelation func() (string, error)
+}
 
 func Open(path string) (*SQLite, error) {
 	db, err := sql.Open("sqlite", path)
@@ -25,7 +28,7 @@ func Open(path string) (*SQLite, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	l := &SQLite{db: db}
+	l := &SQLite{db: db, newWorkCorrelation: randomWorkCorrelation}
 	if err := l.migrate(context.Background()); err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
@@ -51,6 +54,9 @@ CREATE INDEX IF NOT EXISTS records_kind_idx ON records(kind, created_at);`)
 	if err != nil {
 		return err
 	}
+	if err := l.migrateExternalWorkIndex(ctx); err != nil {
+		return err
+	}
 	_, err = l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS inbox (
 recipient_scope TEXT NOT NULL, recipient_id TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE,
 organization_id TEXT NOT NULL, task_id TEXT NOT NULL DEFAULT '', available_at TEXT NOT NULL,
@@ -63,6 +69,81 @@ CREATE INDEX IF NOT EXISTS inbox_available_idx ON inbox(recipient_scope, recipie
 	_, err = l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS consumed_approvals (
 approval_id TEXT PRIMARY KEY, effect_fingerprint TEXT NOT NULL, consumed_at TEXT NOT NULL);`)
 	return err
+}
+
+func (l *SQLite) migrateExternalWorkIndex(ctx context.Context) error {
+	if _, err := l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS external_work (
+organization_id TEXT NOT NULL, request_id TEXT NOT NULL, correlation_id TEXT NOT NULL, intent_id TEXT NOT NULL,
+PRIMARY KEY(organization_id, request_id), UNIQUE(organization_id, correlation_id), UNIQUE(intent_id));
+CREATE TABLE IF NOT EXISTS external_tasks (
+organization_id TEXT NOT NULL, task_id TEXT NOT NULL, correlation_id TEXT NOT NULL,
+PRIMARY KEY(organization_id, task_id));
+CREATE INDEX IF NOT EXISTS external_tasks_correlation_idx ON external_tasks(organization_id, correlation_id);`); err != nil {
+		return fmt.Errorf("create external work index: %w", err)
+	}
+	rows, err := l.db.QueryContext(ctx, `SELECT body FROM records WHERE kind='intent' ORDER BY record_id, version`)
+	if err != nil {
+		return fmt.Errorf("scan intents for external work migration: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	type workBinding struct{ organizationID, requestID, correlationID, intentID string }
+	var bindings []workBinding
+	for rows.Next() {
+		var body []byte
+		if err := rows.Scan(&body); err != nil {
+			return fmt.Errorf("read intent for external work migration: %w", err)
+		}
+		var record events.ProjectionRecord
+		var intent core.Intent
+		if err := json.Unmarshal(body, &record); err != nil {
+			return fmt.Errorf("decode intent record for external work migration: %w", err)
+		}
+		if err := json.Unmarshal(record.Value, &intent); err != nil {
+			return fmt.Errorf("decode intent value for external work migration: %w", err)
+		}
+		requestID := intent.ExternalRequestID
+		if requestID == "" {
+			if intent.SourceChannel != "A2A" && intent.SourceChannel != "HUMAN_DIRECT" {
+				continue
+			}
+			requestID = record.CorrelationID
+		}
+		if intent.OrganizationID == "" || requestID == "" || record.CorrelationID == "" || intent.ID == "" {
+			return fmt.Errorf("external intent %q lacks migration identity", intent.ID)
+		}
+		bindings = append(bindings, workBinding{string(intent.OrganizationID), requestID, record.CorrelationID, string(intent.ID)})
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate intents for external work migration: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close intent migration rows: %w", err)
+	}
+	return l.withTx(ctx, func(tx *sql.Tx) error {
+		for _, binding := range bindings {
+			if err := registerExternalWork(ctx, tx, binding.organizationID, binding.requestID, binding.correlationID, binding.intentID); err != nil {
+				return fmt.Errorf("migrate external work %s/%s: %w", binding.organizationID, binding.requestID, err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO external_tasks(organization_id,task_id,correlation_id)
+SELECT DISTINCT e.organization_id,e.task_id,e.correlation_id
+FROM events e JOIN external_work w ON w.organization_id=e.organization_id AND w.correlation_id=e.correlation_id
+WHERE e.task_id<>''`); err != nil {
+			return fmt.Errorf("migrate external task index: %w", err)
+		}
+		var conflictingTask bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1 FROM events e
+JOIN external_work w ON w.organization_id=e.organization_id AND w.correlation_id=e.correlation_id
+JOIN external_tasks t ON t.organization_id=e.organization_id AND t.task_id=e.task_id
+WHERE e.task_id<>'' AND t.correlation_id<>e.correlation_id)`).Scan(&conflictingTask); err != nil {
+			return fmt.Errorf("verify external task migration: %w", err)
+		}
+		if conflictingTask {
+			return fmt.Errorf("external task is bound to multiple work streams")
+		}
+		return nil
+	})
 }
 
 func (l *SQLite) ensureEventRoutingColumns(ctx context.Context) error {
@@ -154,6 +235,28 @@ func (l *SQLite) AppendProjection(ctx context.Context, draft events.ProjectionDr
 		if _, err = tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, draft.ProjectionKind, draft.RecordID, draft.Version, body, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 			return fmt.Errorf("append projection: %w", err)
 		}
+		if draft.ProjectionKind == "intent" {
+			var intent core.Intent
+			if err := json.Unmarshal(value, &intent); err != nil {
+				return fmt.Errorf("decode intent for external work index: %w", err)
+			}
+			if intent.ExternalRequestID != "" {
+				if err := registerExternalWork(ctx, tx, string(intent.OrganizationID), intent.ExternalRequestID, draft.Event.CorrelationID, string(intent.ID)); err != nil {
+					return err
+				}
+			}
+		}
+		if draft.ProjectionKind == "task" {
+			registered, err := externalWorkRegistered(ctx, tx, draft.Event.OrganizationID, draft.Event.CorrelationID)
+			if err != nil {
+				return err
+			}
+			if registered {
+				if err := registerExternalTask(ctx, tx, draft.Event.OrganizationID, draft.RecordID, draft.Event.CorrelationID); err != nil {
+					return err
+				}
+			}
+		}
 		if eventDraft.RecipientScope != "" || eventDraft.RecipientID != "" {
 			if eventDraft.RecipientScope == "" || eventDraft.RecipientID == "" {
 				return fmt.Errorf("addressed projection recipient is required")
@@ -165,6 +268,128 @@ func (l *SQLite) AppendProjection(ctx context.Context, draft events.ProjectionDr
 		return nil
 	})
 	return event, err
+}
+
+func registerExternalWork(ctx context.Context, tx *sql.Tx, organizationID, requestID, correlationID, intentID string) error {
+	if organizationID == "" || requestID == "" || correlationID == "" || intentID == "" {
+		return fmt.Errorf("complete external work identity is required")
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO external_work(organization_id,request_id,correlation_id,intent_id) VALUES(?,?,?,?)`, organizationID, requestID, correlationID, intentID); err != nil {
+		return fmt.Errorf("register external work: %w", err)
+	}
+	var storedCorrelationID, storedIntentID string
+	if err := tx.QueryRowContext(ctx, `SELECT correlation_id,intent_id FROM external_work WHERE organization_id=? AND request_id=?`, organizationID, requestID).Scan(&storedCorrelationID, &storedIntentID); err != nil {
+		return fmt.Errorf("verify external work registration: %w", err)
+	}
+	if storedCorrelationID != correlationID || storedIntentID != intentID {
+		return fmt.Errorf("external request is already bound to different work")
+	}
+	return nil
+}
+
+func externalWorkRegistered(ctx context.Context, tx *sql.Tx, organizationID, correlationID string) (bool, error) {
+	var registered bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM external_work WHERE organization_id=? AND correlation_id=?)`, organizationID, correlationID).Scan(&registered); err != nil {
+		return false, fmt.Errorf("resolve task work binding: %w", err)
+	}
+	return registered, nil
+}
+
+func registerExternalTask(ctx context.Context, tx *sql.Tx, organizationID, taskID, correlationID string) error {
+	if organizationID == "" || taskID == "" || correlationID == "" {
+		return fmt.Errorf("complete external task identity is required")
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO external_tasks(organization_id,task_id,correlation_id) VALUES(?,?,?)`, organizationID, taskID, correlationID); err != nil {
+		return fmt.Errorf("register external task: %w", err)
+	}
+	var storedCorrelationID string
+	if err := tx.QueryRowContext(ctx, `SELECT correlation_id FROM external_tasks WHERE organization_id=? AND task_id=?`, organizationID, taskID).Scan(&storedCorrelationID); err != nil {
+		return fmt.Errorf("verify external task registration: %w", err)
+	}
+	if storedCorrelationID != correlationID {
+		return fmt.Errorf("external task is already bound to different work")
+	}
+	return nil
+}
+
+func (l *SQLite) ResolveExternalWork(ctx context.Context, organizationID, requestID string) (string, bool, error) {
+	var correlationID string
+	err := l.db.QueryRowContext(ctx, `SELECT correlation_id FROM external_work WHERE organization_id=? AND request_id=?`, organizationID, requestID).Scan(&correlationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return correlationID, err == nil, err
+}
+
+func (l *SQLite) ResolveExternalRequest(ctx context.Context, organizationID, correlationID string) (string, bool, error) {
+	var requestID string
+	err := l.db.QueryRowContext(ctx, `SELECT request_id FROM external_work WHERE organization_id=? AND correlation_id=?`, organizationID, correlationID).Scan(&requestID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return requestID, err == nil, err
+}
+
+func (l *SQLite) ResolveExternalTask(ctx context.Context, organizationID, taskID string) (string, string, bool, error) {
+	var requestID, correlationID string
+	err := l.db.QueryRowContext(ctx, `SELECT w.request_id,t.correlation_id
+FROM external_tasks t JOIN external_work w ON w.organization_id=t.organization_id AND w.correlation_id=t.correlation_id
+WHERE t.organization_id=? AND t.task_id=?`, organizationID, taskID).Scan(&requestID, &correlationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, nil
+	}
+	return requestID, correlationID, err == nil, err
+}
+
+// ReserveExternalWork returns the durable correlation for one tenant/request.
+// New correlations are random and checked against both migrated caller-owned
+// streams and prior reservations before they enter the shared ledger namespace.
+func (l *SQLite) ReserveExternalWork(ctx context.Context, organizationID, requestID string) (string, error) {
+	if organizationID == "" || requestID == "" {
+		return "", fmt.Errorf("organization and request are required")
+	}
+	var correlationID string
+	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		err := tx.QueryRowContext(ctx, `SELECT correlation_id FROM external_work WHERE organization_id=? AND request_id=?`, organizationID, requestID).Scan(&correlationID)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("resolve external work reservation: %w", err)
+		}
+		for range 16 {
+			candidate, err := l.newWorkCorrelation()
+			if err != nil {
+				return err
+			}
+			intentID := "intent-" + candidate
+			var occupied bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1 FROM events WHERE correlation_id=?
+UNION ALL SELECT 1 FROM external_work WHERE correlation_id=?
+UNION ALL SELECT 1 FROM records WHERE (kind='intent' AND record_id=?) OR (kind='goal' AND record_id=?) OR (kind='task' AND record_id=?))`, candidate, candidate, intentID, "goal-"+candidate, "task-"+candidate).Scan(&occupied); err != nil {
+				return fmt.Errorf("check external work namespace: %w", err)
+			}
+			if occupied {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO external_work(organization_id,request_id,correlation_id,intent_id) VALUES(?,?,?,?)`, organizationID, requestID, candidate, intentID); err != nil {
+				return fmt.Errorf("reserve external work: %w", err)
+			}
+			correlationID = candidate
+			return nil
+		}
+		return fmt.Errorf("allocate collision-free external work identity")
+	})
+	return correlationID, err
+}
+
+func randomWorkCorrelation() (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate external work identity: %w", err)
+	}
+	return "w-" + hex.EncodeToString(random[:]), nil
 }
 
 // AuthorizeAndAppendEffectAttempt serializes the latest durable approval,

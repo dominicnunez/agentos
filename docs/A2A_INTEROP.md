@@ -11,7 +11,7 @@ granted to that authenticated principal.
 
 A2A is disabled unless `AGENTOS_A2A_ACTORS_FILE` names a valid, reviewed actor
 registry. Each actor entry binds a unique ID and organization to a role, work
-visibility scope, credential secret reference, authorization reference,
+visibility scope, credential secret reference, deployment review reference,
 expiration, concurrency ceiling, and per-minute request ceiling. The registry
 contains no raw credential. At startup, the adapter resolves each secret,
 validates that credentials and actor IDs are unique, and retains only a
@@ -44,8 +44,10 @@ The gateway exposes only the A2A v1.0 surface:
 - one advertised `JSONRPC` interface with protocol version `1.0`;
 - authenticated JSON-RPC 2.0 `SendMessage` and `GetTask` methods at the
   advertised interface URL;
-- `contextId` as the durable Agent OS work correlation and `messageId` as the
-  continuation-delivery idempotency key.
+- `contextId` as the caller-visible conversation key and `messageId` as the
+  continuation-delivery idempotency key. Agent OS reserves an opaque random
+  internal work key bound to the authenticated organization plus `contextId`,
+  then derives the Task ID only from that reserved key.
 
 The A2A adapter translates into the same principal-aware Intake Service used by
 the direct Human Gateway. This does not make the first-party human API part of
