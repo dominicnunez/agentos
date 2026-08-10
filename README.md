@@ -49,7 +49,7 @@ registry entry is:
 ```
 
 `human-actors.json` uses the same fields, with `role` set to `CONTRIBUTOR`,
-`OBSERVER`, `RESULT_READER`, or `OPERATOR`, `work_scope` set to
+`OBSERVER`, `RESULT_READER`, `OPERATOR`, or the dedicated completion `REVIEWER`, `work_scope` set to
 `ORGANIZATION`, and its own `token_ref`, `review_ref`, expiry, and limits.
 Credentials are resolved from each `token_ref`
 and never stored in a registry file. Each registry is optional, but startup
@@ -105,9 +105,13 @@ tools and response storage, rejects redirects and authority-bearing output, and
 does not retry billable calls automatically. Enabling it requires the existing
 financial and sensitive-data-boundary approvals described in
 [docs/OPENAI_API_PROVIDER.md](docs/OPENAI_API_PROVIDER.md). Real-provider output
-is durably recorded as a completion candidate but remains blocked for an
-approved independent judgment when no runtime verifier exists; model text never
-certifies itself as complete.
+is durably recorded as a completion candidate but remains blocked when no
+runtime verifier exists. Only a dedicated authenticated Human `REVIEWER` can
+decide that exact fingerprinted candidate; model text never certifies itself as
+complete. Keep both real providers disabled until the release-candidate,
+fake-provider security/recovery, bounded live-test-plan, financial-approval, and
+sensitive-data-boundary gates in
+[docs/V1_RELEASE_READINESS.md](docs/V1_RELEASE_READINESS.md) are satisfied.
 
 Direct human natural-language intake uses a distinct authenticated endpoint and
 the same internal router:
@@ -124,6 +128,10 @@ work routes to the current fake `AgentExecution`; the router itself does not use
 an LLM. Human and external-Agent credentials must be distinct. Conversation text never
 constitutes a trusted approval decision.
 
+Completion review uses a separate human-only control; it is not a chat command
+and is not exposed through A2A. See
+[docs/COMPLETION_REVIEW.md](docs/COMPLETION_REVIEW.md).
+
 ## Testing status
 
 The repository is ready to test as an early V1 vertical slice. The automated suite covers the deterministic and fake-agent paths, event-backed projection rebuilds, restart-safe Agent/Team/Task inbox delivery at execution boundaries, pending-task recovery, durable human-approval wait/decision state, fail-closed reconciliation of uncertain attempted effects without blind resend, completion verification, Task DAG readiness, the authenticated A2A and protected-effect boundary, vendor-neutral A2A v1.0 interoperability, exact capability checks, single-use effect approvals, unified per-run operational telemetry, institutional knowledge guards, inference reserves, and deterministic audit checks.
@@ -138,7 +146,7 @@ Deferred: federation, workflow DSLs, semantic/vector memory, Lab, optimizers,
 broad tool ecosystems, production external-effect adapters, and reconciliation
 workers.
 
-See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md), [docs/OPERATOR_INTAKE.md](docs/OPERATOR_INTAKE.md), [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md), [docs/A2A_INTEROP.md](docs/A2A_INTEROP.md), [docs/EFFECT_RECONCILIATION.md](docs/EFFECT_RECONCILIATION.md), [docs/SQLITE_RECOVERY.md](docs/SQLITE_RECOVERY.md), [docs/CODEX_SUBSCRIPTION_PROVIDER.md](docs/CODEX_SUBSCRIPTION_PROVIDER.md), and [docs/OPENAI_API_PROVIDER.md](docs/OPENAI_API_PROVIDER.md).
+See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md), [docs/OPERATOR_INTAKE.md](docs/OPERATOR_INTAKE.md), [docs/COMPLETION_REVIEW.md](docs/COMPLETION_REVIEW.md), [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md), [docs/A2A_INTEROP.md](docs/A2A_INTEROP.md), [docs/EFFECT_RECONCILIATION.md](docs/EFFECT_RECONCILIATION.md), [docs/SQLITE_RECOVERY.md](docs/SQLITE_RECOVERY.md), [docs/CODEX_SUBSCRIPTION_PROVIDER.md](docs/CODEX_SUBSCRIPTION_PROVIDER.md), and [docs/OPENAI_API_PROVIDER.md](docs/OPENAI_API_PROVIDER.md).
 
 ## Authoritative architecture handoff
 

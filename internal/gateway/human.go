@@ -8,6 +8,7 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/intake"
+	"github.com/dominicnunez/agentos/internal/trustconfig"
 )
 
 type Human struct {
@@ -33,6 +34,26 @@ type humanTaskResponse struct {
 	Prompt         string `json:"prompt,omitempty"`
 	Result         string `json:"result,omitempty"`
 	UpdatedAt      string `json:"updated_at,omitempty"`
+}
+
+type humanReviewDecisionRequest struct {
+	ReviewID    string                        `json:"review_id"`
+	Fingerprint string                        `json:"fingerprint"`
+	Decision    core.CompletionReviewDecision `json:"decision"`
+	Feedback    string                        `json:"feedback,omitempty"`
+}
+
+type humanReviewResponse struct {
+	ReviewID     string                     `json:"review_id"`
+	TaskID       string                     `json:"task_id"`
+	TaskVersion  int                        `json:"task_version"`
+	Fingerprint  string                     `json:"fingerprint"`
+	State        string                     `json:"state"`
+	Objective    string                     `json:"objective"`
+	Result       string                     `json:"candidate_result"`
+	Criteria     []core.CompletionCriterion `json:"criteria"`
+	EvidenceRefs []string                   `json:"evidence_refs"`
+	UpdatedAt    string                     `json:"updated_at"`
 }
 
 func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -61,6 +82,23 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleGetTask(w, r, session.Principal, strings.TrimPrefix(r.URL.Path, taskPrefix))
 		return
 	}
+	const reviewPrefix = "/v1/human/reviews/"
+	if strings.HasPrefix(r.URL.Path, reviewPrefix) && len(r.URL.Path) > len(reviewPrefix) {
+		taskID := strings.TrimPrefix(r.URL.Path, reviewPrefix)
+		if strings.Contains(taskID, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			h.handleGetReview(w, r, session.Principal, taskID)
+		case http.MethodPost:
+			h.handleReviewDecision(w, r, session.Principal, taskID)
+		default:
+			http.NotFound(w, r)
+		}
+		return
+	}
 	http.NotFound(w, r)
 }
 
@@ -87,6 +125,46 @@ func (h *Human) handleMessage(w http.ResponseWriter, r *http.Request, principal 
 func (h *Human) handleGetTask(w http.ResponseWriter, r *http.Request, principal intake.Principal, taskID string) {
 	view, err := h.service.Get(r.Context(), principal, taskID)
 	h.writeView(w, view, err)
+}
+
+func (h *Human) handleGetReview(w http.ResponseWriter, r *http.Request, principal intake.Principal, taskID string) {
+	view, err := h.service.GetCompletionReview(r.Context(), principal, taskID)
+	h.writeReviewView(w, view, err)
+}
+
+func (h *Human) handleReviewDecision(w http.ResponseWriter, r *http.Request, principal intake.Principal, taskID string) {
+	if !hasJSONContentType(r.Header.Get("Content-Type")) {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "completion reviews require application/json"})
+		return
+	}
+	defer func() {
+		_ = r.Body.Close()
+	}()
+	var request humanReviewDecisionRequest
+	reader := http.MaxBytesReader(w, r.Body, intake.MaximumReviewFeedbackBytes+4096)
+	if err := trustconfig.DecodeObject(reader, "completion review decision", &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	view, err := h.service.DecideCompletionReview(r.Context(), principal, intake.CompletionReviewDecision{
+		TaskID: taskID, ReviewID: request.ReviewID, Fingerprint: request.Fingerprint,
+		Decision: request.Decision, Feedback: request.Feedback,
+	})
+	h.writeReviewView(w, view, err)
+}
+
+func (h *Human) writeReviewView(w http.ResponseWriter, view intake.CompletionReviewView, err error) {
+	w.Header().Set("Cache-Control", "no-store")
+	if err != nil {
+		h.writeIntakeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, humanReviewResponse{
+		ReviewID: view.ReviewID, TaskID: view.TaskID, TaskVersion: view.TaskVersion,
+		Fingerprint: view.Fingerprint, State: view.State, Objective: view.Objective, Result: view.Result,
+		Criteria: view.Criteria, EvidenceRefs: view.EvidenceRefs,
+		UpdatedAt: view.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	})
 }
 
 func (h *Human) writeView(w http.ResponseWriter, view intake.View, err error) {

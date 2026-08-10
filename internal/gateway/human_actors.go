@@ -17,6 +17,7 @@ const (
 	HumanRoleObserver     HumanRole = "OBSERVER"
 	HumanRoleResultReader HumanRole = "RESULT_READER"
 	HumanRoleOperator     HumanRole = "OPERATOR"
+	HumanRoleReviewer     HumanRole = "REVIEWER"
 )
 
 type HumanActor struct {
@@ -94,7 +95,7 @@ func validateHumanActor(actor HumanActor) error {
 		return fmt.Errorf("work_scope must be ORGANIZATION for a human actor")
 	}
 	if humanCapabilities(actor.Role) == nil {
-		return fmt.Errorf("role must be CONTRIBUTOR, OBSERVER, RESULT_READER, or OPERATOR")
+		return fmt.Errorf("role must be CONTRIBUTOR, OBSERVER, RESULT_READER, OPERATOR, or REVIEWER")
 	}
 	if actor.MaxConcurrent < 1 || actor.MaxConcurrent > 64 {
 		return fmt.Errorf("max_concurrent must be between 1 and 64")
@@ -115,6 +116,8 @@ func humanCapabilities(role HumanRole) []string {
 		return []string{intake.CapabilityReadStatus, intake.CapabilityReadResult}
 	case HumanRoleOperator:
 		return []string{intake.CapabilitySubmitWork, intake.CapabilityReadStatus, intake.CapabilityReadResult, intake.CapabilityProvideInput}
+	case HumanRoleReviewer:
+		return []string{intake.CapabilityReadStatus, intake.CapabilityReviewCompletion}
 	default:
 		return nil
 	}

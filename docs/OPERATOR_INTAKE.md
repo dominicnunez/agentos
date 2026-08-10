@@ -53,6 +53,11 @@ before intake. `review_ref` records deployment review of a trusted bootstrap
 entry; it is not a runtime approval or capability grant. Human and Agent
 registries cannot reuse a credential.
 
+Model completion judgment uses a separate Human control documented in
+[Completion review](COMPLETION_REVIEW.md). Only the dedicated `REVIEWER` role
+can access `/v1/human/reviews/{task-id}`. `OPERATOR` and all external-Agent
+roles remain work-plane identities and cannot finalize a model candidate.
+
 ## A2A intake
 
 An external Agent must implement the A2A v1.0 client capabilities in
@@ -67,7 +72,7 @@ organization identifiers are validated when either reviewed registry is loaded,
 so an unusable identity fails startup instead of authenticating into a gateway
 that will reject every request.
 
-Both channels enforce `read_status`, `read_result`, `provide_input`, and
+Both work channels enforce `read_status`, `read_result`, `provide_input`, and
 `submit_work` independently. `OWN` is the default Agent scope; deliberate
 `ORGANIZATION` scope permits cross-principal access within one organization.
 Internal work keys and task IDs are tenant-scoped and do not expose the
@@ -81,3 +86,7 @@ never emit `APPROVAL_DECIDED`, grant capability, alter policy, or execute a
 consequential effect. Any approval UI must call the separate exact-effect
 approval service through an authenticated trusted control—not reinterpret chat
 text.
+
+Completion review follows that same separation: reviewer decisions bind exact
+ledger evidence and are never inferred from chat. Human review is recorded as
+`HUMAN_JUDGMENT`; it never relabels a ToolOutcome as deterministically verified.

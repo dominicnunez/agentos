@@ -30,6 +30,14 @@ authorization claim.
 
 ## Evidence scope
 
+The verified-completion and restart-continuity rows additionally include
+`TestHumanReviewerFinalizesExactModelCandidate`,
+`TestDedicatedReviewerCanFinalizeButOperatorCannot`, and
+`TestRecoveryFinishesDurableCompletionReviewDecision`. These tests bind human
+judgment to exact evidence, deny ordinary Operator and Agent authority, retain
+unchecked postcondition status, and resume a persisted review decision after
+restart.
+
 - Identity and inbox tests reopen SQLite and compare stored state with replay.
 - Approval and effect tests cover exact fingerprints, acknowledgement versus
   decision, expiry, freeze, revocation, single use, attempt-time authorization,

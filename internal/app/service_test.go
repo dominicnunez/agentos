@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dominicnunez/agentos/internal/completion"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
@@ -141,7 +142,7 @@ func TestAgentExecutionManifestUsesConfiguredModelDescriptor(t *testing.T) {
 	if r.Outcome.ObservedEffect != "configured-model: summarize" {
 		t.Fatalf("provider result was not preserved: %+v", r.Outcome)
 	}
-	assertEventOrder(t, r.Events, "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_REVIEW_REQUIRED", "TASK_BLOCKED")
+	assertEventOrder(t, r.Events, "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_REVIEW_REQUESTED", "TASK_BLOCKED")
 	foundManifest := false
 	for _, event := range r.Events {
 		if event.EventType != "EXECUTION_CONTEXT_MANIFESTED" {
@@ -165,6 +166,320 @@ func TestAgentExecutionManifestUsesConfiguredModelDescriptor(t *testing.T) {
 	}
 	if replayed.Task.Status != core.TaskBlocked || replayed.Completion.Complete || len(replayed.Completion.Reasons) == 0 || len(replayed.Events) != len(r.Events) {
 		t.Fatalf("blocked review did not replay idempotently: before=%+v after=%+v", r, replayed)
+	}
+}
+
+func TestHumanReviewerFinalizesExactModelCandidate(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	service := NewWithModel(events.NewGateway(l), describedModel{})
+	submission := Submit{RequestID: "review-approve", OrganizationID: "org-1", Statement: "summarize", Kind: core.ExecutionAgent}
+	submitted, err := service.Submit(context.Background(), submission)
+	if err != nil || submitted.Task.Status != core.TaskBlocked {
+		t.Fatalf("submitted=%+v err=%v", submitted, err)
+	}
+	view, found, err := service.CompletionReview(context.Background(), "org-1", string(submitted.Task.ID))
+	if err != nil || !found || view.Result != "configured-model: summarize" || len(view.Request.EvidenceRefs) != 3 {
+		t.Fatalf("review=%+v found=%t err=%v", view, found, err)
+	}
+	stream, err := service.Events(context.Background(), submitted.Events[0].CorrelationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("rejects substituted result artifacts", func(t *testing.T) {
+		tampered := append([]events.Event(nil), stream...)
+		for index := range tampered {
+			if tampered[index].EventID != view.Request.EvidenceRefs[1] {
+				continue
+			}
+			tampered[index].ArtifactRefs = []string{"artifact-substituted"}
+			tampered[index].Payload, err = json.Marshal(events.ResultPublishedPayload{Summary: view.Result, ArtifactRefs: tampered[index].ArtifactRefs})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, _, err := reviewEvidence(tampered, view.Request); err == nil {
+			t.Fatal("completion review accepted result artifacts that differ from the tool outcome")
+		}
+	})
+	t.Run("rejects reordered evidence", func(t *testing.T) {
+		tampered := append([]events.Event(nil), stream...)
+		var resultIndex, candidateIndex int
+		for index := range tampered {
+			switch tampered[index].EventID {
+			case view.Request.EvidenceRefs[1]:
+				resultIndex = index
+			case view.Request.EvidenceRefs[2]:
+				candidateIndex = index
+			}
+		}
+		tampered[resultIndex].Sequence, tampered[candidateIndex].Sequence = tampered[candidateIndex].Sequence, tampered[resultIndex].Sequence
+		if _, _, err := reviewEvidence(tampered, view.Request); err == nil {
+			t.Fatal("completion review accepted reordered evidence")
+		}
+	})
+	decided, err := service.ReviewCompletion(context.Background(), reviewInput(view, completion.ReviewApprove, ""))
+	if err != nil || decided.Decision != completion.ReviewApprove {
+		t.Fatalf("decided=%+v err=%v", decided, err)
+	}
+	replayed, err := service.Submit(context.Background(), submission)
+	if err != nil || replayed.Task.Status != core.TaskCompleted || replayed.Goal.Status != "COMPLETED" || !replayed.Completion.Complete {
+		t.Fatalf("reviewed replay=%+v err=%v", replayed, err)
+	}
+	if replayed.Outcome.PostconditionStatus != core.PostconditionNotChecked {
+		t.Fatalf("human judgment was rewritten as deterministic evidence: %+v", replayed.Outcome)
+	}
+	assertEventOrder(t, replayed.Events, "COMPLETION_REVIEW_REQUESTED", "COMPLETION_REVIEW_DECIDED", "COMPLETION_VERIFIED", "TASK_VERIFIED_COMPLETE")
+	for _, event := range replayed.Events {
+		if event.EventType != "COMPLETION_REVIEW_DECIDED" {
+			continue
+		}
+		if event.SourceActorID != "reviewer-1" || event.SourceExecutionID != "" {
+			t.Fatalf("review authority envelope=%+v", event)
+		}
+	}
+}
+
+func TestCompletionReviewRejectsExternalAgentAndStaleEvidence(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	service := NewWithModel(events.NewGateway(l), describedModel{})
+	submitted, err := service.Submit(context.Background(), Submit{RequestID: "review-stale", OrganizationID: "org-1", Statement: "summarize", Kind: core.ExecutionAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, found, err := service.CompletionReview(context.Background(), "org-1", string(submitted.Task.ID))
+	if err != nil || !found {
+		t.Fatalf("review found=%t err=%v", found, err)
+	}
+	external := reviewInput(view, completion.ReviewApprove, "")
+	external.ReviewerKind = core.PrincipalExternalAgent
+	external.SourceChannel = "A2A"
+	if _, err := service.ReviewCompletion(context.Background(), external); err == nil {
+		t.Fatal("external Agent finalized model completion")
+	}
+	stale := reviewInput(view, completion.ReviewApprove, "")
+	stale.Fingerprint = strings.Repeat("0", 64)
+	if _, err := service.ReviewCompletion(context.Background(), stale); err == nil {
+		t.Fatal("stale completion evidence was accepted")
+	}
+	stream, err := service.Events(context.Background(), submitted.Events[0].CorrelationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range stream {
+		if event.EventType == "COMPLETION_REVIEW_DECIDED" {
+			t.Fatal("rejected decision reached the ledger")
+		}
+	}
+}
+
+func TestCompletionReviewSelectsExactTaskInSharedDAGStream(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	correlationID, err := gateway.ReserveExternalWork(ctx, "org-1", "two-reviews")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := projections.New(gateway)
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1"}
+	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintVersion: "v1", ExecutionProfileVersion: "v1", RuntimeAdapter: "test", Status: "ACTIVE"}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "draft two independent updates", NormalizedObjective: "draft two independent updates"}
+	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: "ACTIVE"}
+	first := core.Task{ID: "task-1", GoalID: goal.ID, Description: "Draft the security update.", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	second := core.Task{ID: "task-2", GoalID: goal.ID, Description: "Draft the release update.", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	for _, save := range []func() error{
+		func() error {
+			return repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", correlationID, 1, organization, nil)
+		},
+		func() error {
+			return repository.SaveAgent(ctx, "AGENT_CREATED", "runtime", correlationID, 1, agent, nil)
+		},
+		func() error {
+			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", correlationID, 1, intent, nil)
+		},
+		func() error {
+			return repository.SaveGoal(ctx, organization.ID, "GOAL_CREATED", "runtime", correlationID, 1, goal, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", correlationID, 1, first, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", correlationID, 1, second, nil)
+		},
+	} {
+		if err := save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service := NewWithModel(gateway, describedModel{})
+	if recovered, err := service.Recover(ctx); err != nil || recovered.TasksExecuted != 2 {
+		t.Fatalf("recovery=%+v err=%v", recovered, err)
+	}
+	firstReview, found, err := service.CompletionReview(ctx, "org-1", string(first.ID))
+	if err != nil || !found || firstReview.Request.TaskID != first.ID || firstReview.Request.Objective != first.Description {
+		t.Fatalf("first review=%+v found=%t err=%v", firstReview, found, err)
+	}
+	secondReview, found, err := service.CompletionReview(ctx, "org-1", string(second.ID))
+	if err != nil || !found || secondReview.Request.TaskID != second.ID || secondReview.Request.Objective != second.Description {
+		t.Fatalf("second review=%+v found=%t err=%v", secondReview, found, err)
+	}
+}
+
+func TestRecoveryPreservesPreReviewContractAsBlocked(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1"}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "legacy model work", NormalizedObjective: "legacy model work"}
+	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: "ACTIVE"}
+	task := core.Task{ID: "task-1", GoalID: goal.ID, Description: "legacy model work", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, TaskContractVersion: "1", Status: core.TaskBlocked}
+	for _, save := range []func() error{
+		func() error {
+			return repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "legacy", 1, organization, nil)
+		},
+		func() error { return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "legacy", 1, intent, nil) },
+		func() error {
+			return repository.SaveGoal(ctx, organization.ID, "GOAL_CREATED", "runtime", "legacy", 1, goal, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_BLOCKED", "runtime", "legacy", 1, task, blockedDetail("legacy review event", "manual reconciliation", "the old payload is not completion authority"))
+		},
+	} {
+		if err := save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacy := completionDetail{Contract: core.CompletionContract{TaskID: task.ID, TaskVersion: 1}, Result: completion.Result{Complete: false, Reasons: []string{"independent review required"}}}
+	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "COMPLETION_REVIEW_REQUIRED", SourceActorID: "runtime", TaskID: string(task.ID), Payload: legacy, CorrelationID: "legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := NewWithModel(gateway, describedModel{}).Recover(ctx)
+	if err != nil || recovered.BlockedPreserved != 1 || recovered.TasksExecuted != 0 {
+		t.Fatalf("legacy recovery=%+v err=%v", recovered, err)
+	}
+}
+
+func TestCompletionReviewRevisionIsUntrustedExecutionContext(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	service := NewWithModel(events.NewGateway(l), describedModel{})
+	submission := Submit{RequestID: "review-revise", OrganizationID: "org-1", Statement: "summarize", Kind: core.ExecutionAgent}
+	submitted, err := service.Submit(context.Background(), submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, found, err := service.CompletionReview(context.Background(), "org-1", string(submitted.Task.ID))
+	if err != nil || !found {
+		t.Fatalf("review found=%t err=%v", found, err)
+	}
+	if _, err := service.ReviewCompletion(context.Background(), reviewInput(first, completion.ReviewRevise, "Make the conclusion specific.")); err != nil {
+		t.Fatal(err)
+	}
+	second, found, err := service.CompletionReview(context.Background(), "org-1", string(submitted.Task.ID))
+	if err != nil || !found || second.Request.ID == first.Request.ID || !strings.Contains(second.Result, "Make the conclusion specific.") {
+		t.Fatalf("revised review=%+v found=%t err=%v", second, found, err)
+	}
+	stream, err := service.Events(context.Background(), submitted.Events[0].CorrelationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decisionRef string
+	for _, event := range stream {
+		if event.EventType == "COMPLETION_REVIEW_DECIDED" {
+			decisionRef = event.EventID
+		}
+	}
+	manifested := false
+	for _, event := range stream {
+		if event.EventType != "EXECUTION_CONTEXT_MANIFESTED" {
+			continue
+		}
+		var manifest core.ExecutionContextManifest
+		if json.Unmarshal(event.Payload, &manifest) == nil {
+			for _, ref := range manifest.EventRefs {
+				if ref == decisionRef {
+					manifested = true
+				}
+			}
+		}
+	}
+	if !manifested {
+		t.Fatal("revision decision was not referenced by the next execution manifest")
+	}
+}
+
+func TestRecoveryFinishesDurableCompletionReviewDecision(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "review-recovery.db")
+	l, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := events.NewGateway(l)
+	service := NewWithModel(gateway, describedModel{})
+	submitted, err := service.Submit(context.Background(), Submit{RequestID: "review-recovery", OrganizationID: "org-1", Statement: "summarize", Kind: core.ExecutionAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, found, err := service.CompletionReview(context.Background(), "org-1", string(submitted.Task.ID))
+	if err != nil || !found {
+		t.Fatalf("review found=%t err=%v", found, err)
+	}
+	review := completion.HumanReview{
+		ReviewID: view.Request.ID, OrganizationID: view.Request.OrganizationID, TaskID: view.Request.TaskID,
+		TaskVersion: view.Request.TaskVersion, Fingerprint: view.Request.Fingerprint,
+		Decision: completion.ReviewApprove, ReviewerID: "reviewer-1", Method: core.AssuranceHumanJudgment,
+		EvidenceRefs: append([]string(nil), view.Request.EvidenceRefs...), DecidedAt: time.Now().UTC(),
+	}
+	if _, err := gateway.PublishTrusted(context.Background(), events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "COMPLETION_REVIEW_DECIDED", SourceActorID: "reviewer-1",
+		TaskID: string(submitted.Task.ID), Payload: review, CorrelationID: submitted.Events[0].CorrelationID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	recovered := NewWithModel(events.NewGateway(reopened), describedModel{})
+	if _, err := recovered.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := recovered.Submit(context.Background(), Submit{RequestID: "review-recovery", OrganizationID: "org-1", Statement: "summarize", Kind: core.ExecutionAgent})
+	if err != nil || replayed.Task.Status != core.TaskCompleted || !replayed.Completion.Complete {
+		t.Fatalf("recovered=%+v err=%v", replayed, err)
+	}
+}
+
+func reviewInput(view CompletionReviewView, decision completion.ReviewDecision, feedback string) CompletionReviewInput {
+	return CompletionReviewInput{
+		OrganizationID: string(view.Request.OrganizationID), TaskID: string(view.Request.TaskID),
+		ReviewID: string(view.Request.ID), Fingerprint: view.Request.Fingerprint,
+		Decision: decision, ReviewerID: "reviewer-1", ReviewerKind: core.PrincipalHuman,
+		SourceChannel: "HUMAN_DIRECT", Feedback: feedback,
 	}
 }
 

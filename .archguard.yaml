@@ -172,7 +172,7 @@ policy:
         module: gateway
         tests: true
       to:
-        modules: [app, approvals, effects, events, ledger]
+        modules: [app, approvals, effects, events, execution, ledger]
 
     - name: intake-test-adapter
       from:
