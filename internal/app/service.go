@@ -104,36 +104,21 @@ func (s *Service) ExternalTaskEvents(ctx context.Context, organizationID, taskID
 	if organizationID == "" || taskID == "" {
 		return "", nil, fmt.Errorf("organization and task are required")
 	}
-	snapshot, err := s.state.Load(ctx)
-	if err != nil {
-		return "", nil, err
-	}
-	taskState, ok := snapshot.Tasks[core.ID(taskID)]
-	if !ok {
-		return "", nil, nil
-	}
-	actualOrganizationID, err := taskOrganization(snapshot, taskState.Value)
-	if err != nil {
-		return "", nil, err
-	}
-	if actualOrganizationID != core.ID(organizationID) {
-		return "", nil, nil
-	}
-	requestID, found, err := s.gateway.ResolveExternalRequest(ctx, organizationID, taskState.CorrelationID)
+	requestID, correlationID, found, err := s.gateway.ResolveExternalTask(ctx, organizationID, taskID)
 	if err != nil {
 		return "", nil, err
 	}
 	if !found {
-		goalState, goalFound := snapshot.Goals[taskState.Value.GoalID]
-		intentState, intentFound := snapshot.Intents[goalState.Value.IntentID]
-		if !goalFound || !intentFound || intentState.Value.ExternalRequestID == "" {
-			return "", nil, fmt.Errorf("task external identity is unavailable")
-		}
-		requestID = intentState.Value.ExternalRequestID
+		return "", nil, nil
 	}
-	stream, err := s.gateway.Events(ctx, taskState.CorrelationID)
+	stream, err := s.gateway.Events(ctx, correlationID)
 	if err != nil {
 		return "", nil, err
+	}
+	for _, event := range stream {
+		if event.OrganizationID != organizationID {
+			return "", nil, nil
+		}
 	}
 	return requestID, stream, nil
 }

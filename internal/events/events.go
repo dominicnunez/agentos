@@ -153,6 +153,7 @@ type ProjectionReader interface {
 type ExternalWorkResolver interface {
 	ResolveExternalWork(context.Context, string, string) (string, bool, error)
 	ResolveExternalRequest(context.Context, string, string) (string, bool, error)
+	ResolveExternalTask(context.Context, string, string) (string, string, bool, error)
 }
 type ExternalWorkAllocator interface {
 	ReserveExternalWork(context.Context, string, string) (string, error)
@@ -214,6 +215,14 @@ func (g *Gateway) ResolveExternalRequest(ctx context.Context, organizationID, co
 		return "", false, nil
 	}
 	return resolver.ResolveExternalRequest(ctx, organizationID, correlationID)
+}
+
+func (g *Gateway) ResolveExternalTask(ctx context.Context, organizationID, taskID string) (string, string, bool, error) {
+	resolver, ok := g.ledger.(ExternalWorkResolver)
+	if !ok {
+		return "", "", false, nil
+	}
+	return resolver.ResolveExternalTask(ctx, organizationID, taskID)
 }
 
 func (g *Gateway) ReserveExternalWork(ctx context.Context, organizationID, requestID string) (string, error) {

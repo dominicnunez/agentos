@@ -64,9 +64,10 @@ SQLite maintains a durable work-request index from authenticated organization
 and caller request ID to the authoritative correlation stream. New streams use
 cryptographically random reservations checked against existing correlations;
 caller-controlled legacy IDs and new internal keys never share a namespace.
-Startup
-materializes this index for pre-index V1 ledgers before serving, preserving
-existing work without a runtime legacy lookup path or duplicate submission.
+The same transaction that projects a Task also maintains a tenant/task lookup,
+so status polling does not rebuild unrelated projections. Startup materializes
+both indexes for pre-index V1 ledgers before serving, preserving existing work
+without a runtime legacy lookup path or duplicate submission.
 New operator identifiers must satisfy the bounded canonical format. A
 previously accepted noncanonical conversation, message, or Task identifier is
 grandfathered only when an exact tenant-scoped durable binding or Event already

@@ -83,6 +83,40 @@ func TestAgentExecutionUsesFakeAdapter(t *testing.T) {
 	assertEventOrder(t, r.Events, "EXECUTION_CONTEXT_MANIFESTED", "TOOL_OUTCOME_RECORDED", "INFERENCE_USAGE_RECORDED", "EXECUTION_FINISHED", "RUN_TELEMETRY_RECORDED")
 }
 
+type indexedTaskLedger struct{}
+
+func (indexedTaskLedger) Append(_ context.Context, draft events.TrustedDraft) (events.Event, error) {
+	return events.Event{EventID: "event-1", OrganizationID: draft.OrganizationID, EventType: draft.EventType, TaskID: draft.TaskID, CorrelationID: draft.CorrelationID}, nil
+}
+
+func (indexedTaskLedger) Events(_ context.Context, correlationID string) ([]events.Event, error) {
+	return []events.Event{{EventID: "event-1", OrganizationID: "org-1", EventType: "TASK_CREATED", TaskID: "task-1", CorrelationID: correlationID}}, nil
+}
+
+func (indexedTaskLedger) ResolveExternalWork(context.Context, string, string) (string, bool, error) {
+	return "correlation-1", true, nil
+}
+
+func (indexedTaskLedger) ResolveExternalRequest(context.Context, string, string) (string, bool, error) {
+	return "request-1", true, nil
+}
+
+func (indexedTaskLedger) ResolveExternalTask(context.Context, string, string) (string, string, bool, error) {
+	return "request-1", "correlation-1", true, nil
+}
+
+func (indexedTaskLedger) ReserveExternalWork(context.Context, string, string) (string, error) {
+	return "correlation-1", nil
+}
+
+func TestExternalTaskLookupUsesDurableIndex(t *testing.T) {
+	service := New(events.NewGateway(indexedTaskLedger{}))
+	requestID, stream, err := service.ExternalTaskEvents(context.Background(), "org-1", "task-1")
+	if err != nil || requestID != "request-1" || len(stream) != 1 || stream[0].TaskID != "task-1" {
+		t.Fatalf("request=%q stream=%+v err=%v", requestID, stream, err)
+	}
+}
+
 func TestRejectedRunRecordsTelemetryAndFailsGoal(t *testing.T) {
 	l, err := ledger.Open(":memory:")
 	if err != nil {

@@ -59,6 +59,10 @@ func TestExternalWorkIndexMigratesLegacyCorrelation(t *testing.T) {
 	if err != nil || !found || requestID != "legacy-request" {
 		t.Fatalf("request=%q found=%t err=%v", requestID, found, err)
 	}
+	requestID, taskCorrelationID, found, err := migrated.ResolveExternalTask(context.Background(), "org-1", "task-legacy-request")
+	if err != nil || !found || requestID != "legacy-request" || taskCorrelationID != correlationID {
+		t.Fatalf("task request=%q correlation=%q found=%t err=%v", requestID, taskCorrelationID, found, err)
+	}
 	stream, err := migrated.Events(context.Background(), correlationID)
 	if err != nil || len(stream) != 5 {
 		t.Fatalf("legacy stream=%+v err=%v", stream, err)
