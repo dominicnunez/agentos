@@ -45,9 +45,9 @@ The gateway exposes only the A2A v1.0 surface:
 - authenticated JSON-RPC 2.0 `SendMessage` and `GetTask` methods at the
   advertised interface URL;
 - `contextId` as the caller-visible conversation key and `messageId` as the
-  continuation-delivery idempotency key. Agent OS derives an opaque,
-  tenant-scoped internal work key and task ID from the authenticated
-  organization plus `contextId`.
+  continuation-delivery idempotency key. Agent OS reserves an opaque random
+  internal work key bound to the authenticated organization plus `contextId`,
+  then derives the Task ID only from that reserved key.
 
 The A2A adapter translates into the same principal-aware Intake Service used by
 the direct Human Gateway. This does not make the first-party human API part of

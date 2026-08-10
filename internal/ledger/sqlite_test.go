@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -72,6 +73,41 @@ func TestExternalWorkIndexMigratesLegacyCorrelation(t *testing.T) {
 	after, err := migrated.Events(context.Background(), correlationID)
 	if err != nil || len(after) != len(stream) {
 		t.Fatalf("repeated migration changed legacy work: before=%d after=%d err=%v", len(stream), len(after), err)
+	}
+}
+
+func TestReserveExternalWorkAvoidsLegacyCorrelationNamespace(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "attacker-org", EventType: "LEGACY_EVENT", CorrelationID: "w-collision", Payload: map[string]string{"source": "legacy"}}); err != nil {
+		t.Fatal(err)
+	}
+	candidates := []string{"w-collision", "w-reserved"}
+	next := 0
+	store.newWorkCorrelation = func() (string, error) {
+		if next >= len(candidates) {
+			return "", errors.New("unexpected allocation attempt")
+		}
+		candidate := candidates[next]
+		next++
+		return candidate, nil
+	}
+
+	correlationID, err := store.ReserveExternalWork(ctx, "victim-org", "request-1")
+	if err != nil || correlationID != "w-reserved" {
+		t.Fatalf("reserved correlation=%q err=%v", correlationID, err)
+	}
+	replayed, err := store.ReserveExternalWork(ctx, "victim-org", "request-1")
+	if err != nil || replayed != correlationID || next != len(candidates) {
+		t.Fatalf("replayed reservation=%q attempts=%d err=%v", replayed, next, err)
+	}
+	legacy, err := store.Events(ctx, "w-collision")
+	if err != nil || len(legacy) != 1 || legacy[0].OrganizationID != "attacker-org" {
+		t.Fatalf("legacy stream changed=%+v err=%v", legacy, err)
 	}
 }
 

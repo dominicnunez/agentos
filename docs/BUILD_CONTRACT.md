@@ -60,8 +60,11 @@ alone cannot expose result content. Status and result lookup use opaque,
 tenant-scoped work and task IDs; a mismatched request is indistinguishable from
 an unknown request.
 
-SQLite maintains a durable external-work index from authenticated organization
-and caller request ID to the authoritative correlation stream. Startup
+SQLite maintains a durable work-request index from authenticated organization
+and caller request ID to the authoritative correlation stream. New streams use
+cryptographically random reservations checked against existing correlations;
+caller-controlled legacy IDs and new internal keys never share a namespace.
+Startup
 materializes this index for pre-index V1 ledgers before serving, preserving
 existing work without a runtime legacy lookup path or duplicate submission.
 New operator identifiers must satisfy the bounded canonical format. A

@@ -79,9 +79,12 @@ func (s *Service) ExternalEvents(ctx context.Context, organizationID, requestID 
 	if organizationID == "" || requestID == "" {
 		return nil, fmt.Errorf("organization and request are required")
 	}
-	correlationID, err := s.externalWorkCorrelation(ctx, organizationID, requestID)
+	correlationID, found, err := s.gateway.ResolveExternalWork(ctx, organizationID, requestID)
 	if err != nil {
 		return nil, err
+	}
+	if !found {
+		return nil, nil
 	}
 	stream, err := s.gateway.Events(ctx, correlationID)
 	if err != nil {
@@ -135,7 +138,7 @@ func (s *Service) ExternalTaskEvents(ctx context.Context, organizationID, taskID
 	return requestID, stream, nil
 }
 
-func (s *Service) externalWorkCorrelation(ctx context.Context, organizationID, requestID string) (string, error) {
+func (s *Service) requireExternalWorkCorrelation(ctx context.Context, organizationID, requestID string) (string, error) {
 	correlationID, found, err := s.gateway.ResolveExternalWork(ctx, organizationID, requestID)
 	if err != nil {
 		return "", err
@@ -143,7 +146,7 @@ func (s *Service) externalWorkCorrelation(ctx context.Context, organizationID, r
 	if found {
 		return correlationID, nil
 	}
-	return core.ExternalWorkID(organizationID, requestID), nil
+	return "", fmt.Errorf("external request is not registered")
 }
 
 // SendMessage is the lateral Agent-to-Agent/Team/Task path. It deliberately
@@ -343,7 +346,7 @@ func (s *Service) ProvideOperatorInput(ctx context.Context, input OperatorInput)
 	if err != nil {
 		return err
 	}
-	correlationID, err := s.externalWorkCorrelation(ctx, input.OrganizationID, input.RequestID)
+	correlationID, err := s.requireExternalWorkCorrelation(ctx, input.OrganizationID, input.RequestID)
 	if err != nil {
 		return err
 	}
@@ -637,7 +640,14 @@ func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 	if in.SourceChannel == "" {
 		in.SourceChannel = "INTERNAL"
 	}
-	correlationID, err := s.externalWorkCorrelation(ctx, in.OrganizationID, in.RequestID)
+	operatorSubmission := in.SourceChannel == "A2A" || in.SourceChannel == "HUMAN_DIRECT"
+	if in.SourceChannel != "INTERNAL" && !operatorSubmission {
+		return Result{}, fmt.Errorf("operator work channel is not supported")
+	}
+	if operatorSubmission && in.MessageID == "" {
+		return Result{}, fmt.Errorf("operator submission message id is required")
+	}
+	correlationID, err := s.gateway.ReserveExternalWork(ctx, in.OrganizationID, in.RequestID)
 	if err != nil {
 		return Result{}, err
 	}

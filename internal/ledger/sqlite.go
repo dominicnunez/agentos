@@ -17,7 +17,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-type SQLite struct{ db *sql.DB }
+type SQLite struct {
+	db                 *sql.DB
+	newWorkCorrelation func() (string, error)
+}
 
 func Open(path string) (*SQLite, error) {
 	db, err := sql.Open("sqlite", path)
@@ -25,7 +28,7 @@ func Open(path string) (*SQLite, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	l := &SQLite{db: db}
+	l := &SQLite{db: db, newWorkCorrelation: randomWorkCorrelation}
 	if err := l.migrate(context.Background()); err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
@@ -94,11 +97,11 @@ PRIMARY KEY(organization_id, request_id), UNIQUE(organization_id, correlation_id
 		if err := json.Unmarshal(record.Value, &intent); err != nil {
 			return fmt.Errorf("decode intent value for external work migration: %w", err)
 		}
-		if intent.SourceChannel != "A2A" && intent.SourceChannel != "HUMAN_DIRECT" {
-			continue
-		}
 		requestID := intent.ExternalRequestID
 		if requestID == "" {
+			if intent.SourceChannel != "A2A" && intent.SourceChannel != "HUMAN_DIRECT" {
+				continue
+			}
 			requestID = record.CorrelationID
 		}
 		if intent.OrganizationID == "" || requestID == "" || record.CorrelationID == "" || intent.ID == "" {
@@ -216,7 +219,7 @@ func (l *SQLite) AppendProjection(ctx context.Context, draft events.ProjectionDr
 			if err := json.Unmarshal(value, &intent); err != nil {
 				return fmt.Errorf("decode intent for external work index: %w", err)
 			}
-			if intent.SourceChannel == "A2A" || intent.SourceChannel == "HUMAN_DIRECT" {
+			if intent.ExternalRequestID != "" {
 				if err := registerExternalWork(ctx, tx, string(intent.OrganizationID), intent.ExternalRequestID, draft.Event.CorrelationID, string(intent.ID)); err != nil {
 					return err
 				}
@@ -268,6 +271,57 @@ func (l *SQLite) ResolveExternalRequest(ctx context.Context, organizationID, cor
 		return "", false, nil
 	}
 	return requestID, err == nil, err
+}
+
+// ReserveExternalWork returns the durable correlation for one tenant/request.
+// New correlations are random and checked against both migrated caller-owned
+// streams and prior reservations before they enter the shared ledger namespace.
+func (l *SQLite) ReserveExternalWork(ctx context.Context, organizationID, requestID string) (string, error) {
+	if organizationID == "" || requestID == "" {
+		return "", fmt.Errorf("organization and request are required")
+	}
+	var correlationID string
+	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		err := tx.QueryRowContext(ctx, `SELECT correlation_id FROM external_work WHERE organization_id=? AND request_id=?`, organizationID, requestID).Scan(&correlationID)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("resolve external work reservation: %w", err)
+		}
+		for range 16 {
+			candidate, err := l.newWorkCorrelation()
+			if err != nil {
+				return err
+			}
+			intentID := "intent-" + candidate
+			var occupied bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1 FROM events WHERE correlation_id=?
+UNION ALL SELECT 1 FROM external_work WHERE correlation_id=?
+UNION ALL SELECT 1 FROM records WHERE (kind='intent' AND record_id=?) OR (kind='goal' AND record_id=?) OR (kind='task' AND record_id=?))`, candidate, candidate, intentID, "goal-"+candidate, "task-"+candidate).Scan(&occupied); err != nil {
+				return fmt.Errorf("check external work namespace: %w", err)
+			}
+			if occupied {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO external_work(organization_id,request_id,correlation_id,intent_id) VALUES(?,?,?,?)`, organizationID, requestID, candidate, intentID); err != nil {
+				return fmt.Errorf("reserve external work: %w", err)
+			}
+			correlationID = candidate
+			return nil
+		}
+		return fmt.Errorf("allocate collision-free external work identity")
+	})
+	return correlationID, err
+}
+
+func randomWorkCorrelation() (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate external work identity: %w", err)
+	}
+	return "w-" + hex.EncodeToString(random[:]), nil
 }
 
 // AuthorizeAndAppendEffectAttempt serializes the latest durable approval,

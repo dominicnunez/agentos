@@ -154,6 +154,9 @@ type ExternalWorkResolver interface {
 	ResolveExternalWork(context.Context, string, string) (string, bool, error)
 	ResolveExternalRequest(context.Context, string, string) (string, bool, error)
 }
+type ExternalWorkAllocator interface {
+	ReserveExternalWork(context.Context, string, string) (string, error)
+}
 type InboxReader interface {
 	Inbox(context.Context, string, string) ([]Event, error)
 }
@@ -211,6 +214,14 @@ func (g *Gateway) ResolveExternalRequest(ctx context.Context, organizationID, co
 		return "", false, nil
 	}
 	return resolver.ResolveExternalRequest(ctx, organizationID, correlationID)
+}
+
+func (g *Gateway) ReserveExternalWork(ctx context.Context, organizationID, requestID string) (string, error) {
+	allocator, ok := g.ledger.(ExternalWorkAllocator)
+	if !ok {
+		return "", fmt.Errorf("external work allocator is unavailable")
+	}
+	return allocator.ReserveExternalWork(ctx, organizationID, requestID)
 }
 
 var agentTypes = map[string]bool{"MESSAGE": true, "TASK_BLOCKED": true, "EVIDENCE_PUBLISHED": true, "RESULT_PUBLISHED": true, "CANDIDATE_COMPLETE": true, "KNOWLEDGE_PROPOSED": true, "SKILL_PROPOSED": true}
