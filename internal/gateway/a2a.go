@@ -71,7 +71,10 @@ func decodeWorkContent(w http.ResponseWriter, r *http.Request, target any) error
 	if err := rejectAuthorityFields(envelope); err != nil {
 		return err
 	}
-	if metadata, ok := envelope["metadata"]; ok {
+	for field, metadata := range envelope {
+		if canonicalWorkField(field) != "metadata" {
+			continue
+		}
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(metadata, &fields); err != nil {
 			return fmt.Errorf("metadata must be an object: %w", err)
@@ -85,12 +88,15 @@ func decodeWorkContent(w http.ResponseWriter, r *http.Request, target any) error
 
 func rejectAuthorityFields(fields map[string]json.RawMessage) error {
 	for field := range fields {
-		normalized := strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(field))
-		if _, forbidden := forbiddenAuthorityFields[normalized]; forbidden {
+		if _, forbidden := forbiddenAuthorityFields[canonicalWorkField(field)]; forbidden {
 			return fmt.Errorf("A2A work content cannot carry authority field %q", field)
 		}
 	}
 	return nil
+}
+
+func canonicalWorkField(field string) string {
+	return strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(field))
 }
 
 func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
