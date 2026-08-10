@@ -2,19 +2,19 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
-	"github.com/dominicnunez/agentos/internal/app"
 	"github.com/dominicnunez/agentos/internal/core"
-	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/intake"
 )
 
 const (
 	a2aRoleUser             = "ROLE_USER"
 	a2aRoleAgent            = "ROLE_AGENT"
+	a2aStateWorking         = "TASK_STATE_WORKING"
 	a2aStateInputRequired   = "TASK_STATE_INPUT_REQUIRED"
 	a2aStateCompleted       = "TASK_STATE_COMPLETED"
 	a2aStateFailed          = "TASK_STATE_FAILED"
@@ -22,6 +22,7 @@ const (
 	rpcMethodNotFound       = -32601
 	rpcInvalidParams        = -32602
 	rpcTaskNotFound         = -32001
+	rpcWorkUnavailable      = -32002
 	agentOSExecutionKindKey = "agentos.execution_kind"
 )
 
@@ -123,84 +124,51 @@ func (a *A2A) sendMessage(w http.ResponseWriter, r *http.Request, request jsonRP
 		writeRPCError(w, request.ID, rpcInvalidParams, "one ROLE_USER text/plain message part with messageId and contextId is required")
 		return
 	}
-	kind, err := executionKind(message.Metadata)
+	kind, err := requestedExecutionKind(message.Metadata)
 	if err != nil {
 		writeRPCError(w, request.ID, rpcInvalidParams, err.Error())
 		return
 	}
-	stream, err := a.service.ExternalEvents(r.Context(), a.actor.OrganizationID, message.ContextID)
+	view, err := a.service.Handle(r.Context(), a.principal, intake.Message{
+		ConversationID: message.ContextID, MessageID: message.MessageID,
+		Text: message.Parts[0].Text, RequestedKind: kind,
+	})
 	if err != nil {
-		writeRPCError(w, request.ID, rpcInvalidParams, "work stream is unavailable")
+		a.writeIntakeError(w, request.ID, err)
 		return
 	}
-	if len(stream) == 0 {
-		if !a.allowed("submit_work") {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "capability submit_work required"})
-			return
-		}
-		_, submitErr := a.service.Submit(r.Context(), app.Submit{RequestID: message.ContextID, OrganizationID: a.actor.OrganizationID, Statement: message.Parts[0].Text, Kind: kind})
-		stream, err = a.service.ExternalEvents(r.Context(), a.actor.OrganizationID, message.ContextID)
-		if err != nil || (submitErr != nil && len(stream) == 0) {
-			writeRPCError(w, request.ID, rpcInvalidParams, "work could not be submitted")
-			return
-		}
-	} else if externalState(stream) == a2aStateInputRequired && !matchesOriginalInstruction(stream, message.Parts[0].Text) {
-		if !a.allowed("provide_input") {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "capability provide_input required"})
-			return
-		}
-		taskID := streamTaskID(stream)
-		if taskID == "" {
-			writeRPCError(w, request.ID, rpcInvalidParams, "blocked work has no task mapping")
-			return
-		}
-		if err := a.service.ProvideExternalInput(r.Context(), a.actor.OrganizationID, a.actor.ID, message.ContextID, taskID, message.MessageID, message.Parts[0].Text); err != nil {
-			writeRPCError(w, request.ID, rpcInvalidParams, "input could not continue the task")
-			return
-		}
-		stream, err = a.service.ExternalEvents(r.Context(), a.actor.OrganizationID, message.ContextID)
-		if err != nil {
-			writeRPCError(w, request.ID, rpcInvalidParams, "continued work stream is unavailable")
-			return
-		}
-	} else if externalState(stream) != a2aStateInputRequired {
-		if !matchesOriginalInstruction(stream, message.Parts[0].Text) && !matchesDurableInput(stream, message.MessageID, message.Parts[0].Text) {
-			writeRPCError(w, request.ID, rpcInvalidParams, "contextId is already bound to different work")
-			return
-		}
-	}
-	if streamTaskID(stream) == "" {
-		writeRPCError(w, request.ID, rpcInvalidParams, "work did not create a task")
-		return
-	}
-	writeRPCResult(w, request.ID, sendMessageResponse{Task: projectA2ATask(message.ContextID, stream, a.allowed("read_result"))})
+	writeRPCResult(w, request.ID, sendMessageResponse{Task: projectA2ATask(view)})
 }
 
 func (a *A2A) getTask(w http.ResponseWriter, r *http.Request, request jsonRPCRequest) {
-	if !a.allowed("read_status") {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "capability read_status required"})
-		return
-	}
 	var params getTaskParams
 	if err := json.Unmarshal(request.Params, &params); err != nil || params.ID == "" {
 		writeRPCError(w, request.ID, rpcInvalidParams, "params.id is required")
 		return
 	}
-	contextID := strings.TrimPrefix(params.ID, "task-")
-	stream, err := a.service.ExternalEvents(r.Context(), a.actor.OrganizationID, contextID)
+	view, err := a.service.Get(r.Context(), a.principal, params.ID)
 	if err != nil {
-		writeRPCError(w, request.ID, rpcInvalidParams, "work stream is unavailable")
+		a.writeIntakeError(w, request.ID, err)
 		return
 	}
-	if len(stream) == 0 || streamTaskID(stream) != params.ID {
-		writeRPCError(w, request.ID, rpcTaskNotFound, "task not found")
-		return
-	}
-	writeRPCResult(w, request.ID, projectA2ATask(contextID, stream, a.allowed("read_result")))
+	writeRPCResult(w, request.ID, projectA2ATask(view))
 }
 
-func executionKind(metadata map[string]json.RawMessage) (core.ExecutionKind, error) {
-	kind := core.ExecutionDeterministic
+func (a *A2A) writeIntakeError(w http.ResponseWriter, id json.RawMessage, err error) {
+	switch {
+	case errors.Is(err, intake.ErrForbidden):
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "operator capability required"})
+	case errors.Is(err, intake.ErrNotFound):
+		writeRPCError(w, id, rpcTaskNotFound, "task not found")
+	case errors.Is(err, intake.ErrInvalid), errors.Is(err, intake.ErrConflict):
+		writeRPCError(w, id, rpcInvalidParams, "operator message is invalid or conflicts with durable work")
+	default:
+		writeRPCError(w, id, rpcWorkUnavailable, "operator work is unavailable")
+	}
+}
+
+func requestedExecutionKind(metadata map[string]json.RawMessage) (core.ExecutionKind, error) {
+	var kind core.ExecutionKind
 	for key, raw := range metadata {
 		if key != agentOSExecutionKindKey {
 			continue
@@ -209,14 +177,7 @@ func executionKind(metadata map[string]json.RawMessage) (core.ExecutionKind, err
 			return "", fmt.Errorf("%s must be a string", agentOSExecutionKindKey)
 		}
 	}
-	switch kind {
-	case core.ExecutionDeterministic, core.ExecutionAgent, core.ExecutionHuman:
-		return kind, nil
-	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
-		return "", fmt.Errorf("%s is not a supported execution kind", agentOSExecutionKindKey)
-	default:
-		return "", fmt.Errorf("%s is not a supported execution kind", agentOSExecutionKindKey)
-	}
+	return kind, nil
 }
 
 func validRPCID(id json.RawMessage) bool {
@@ -235,93 +196,37 @@ func validRPCID(id json.RawMessage) bool {
 	}
 }
 
-func projectA2ATask(contextID string, stream []events.Event, includeResult bool) a2aTask {
-	taskID := streamTaskID(stream)
-	task := a2aTask{ID: taskID, ContextID: contextID, Status: a2aTaskStatus{State: externalState(stream)}}
-	if len(stream) > 0 && !stream[len(stream)-1].CreatedAt.IsZero() {
-		task.Status.Timestamp = stream[len(stream)-1].CreatedAt.UTC().Format(time.RFC3339Nano)
+func projectA2ATask(view intake.View) a2aTask {
+	task := a2aTask{ID: view.TaskID, ContextID: view.ConversationID, Status: a2aTaskStatus{State: a2aState(view.State)}}
+	if !view.UpdatedAt.IsZero() {
+		task.Status.Timestamp = view.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	}
-	switch task.Status.State {
-	case a2aStateInputRequired:
-		text := blockedStatusText(stream)
-		task.Status.Message = statusMessage(contextID, taskID, "input-required-"+taskID, text)
-	case a2aStateFailed:
-		task.Status.Message = statusMessage(contextID, taskID, "failed-"+taskID, "Agent OS could not complete the task.")
-	case a2aStateCompleted:
-		if includeResult {
-			if result, ok := publishedResult(stream); ok {
-				task.Artifacts = []a2aArtifact{{ArtifactID: "result-" + taskID, Name: "Agent OS result", Parts: []a2aPart{{Text: result.Summary, MediaType: "text/plain"}}}}
-			}
-		}
+	if view.Prompt != "" {
+		task.Status.Message = statusMessage(view.ConversationID, view.TaskID, "status-"+view.TaskID, view.Prompt)
+	}
+	if view.Result != "" {
+		task.Artifacts = []a2aArtifact{{ArtifactID: "result-" + view.TaskID, Name: "Agent OS result", Parts: []a2aPart{{Text: view.Result, MediaType: "text/plain"}}}}
 	}
 	return task
 }
 
+func a2aState(state string) string {
+	switch state {
+	case intake.StateWorking:
+		return a2aStateWorking
+	case intake.StateInputRequired:
+		return a2aStateInputRequired
+	case intake.StateCompleted:
+		return a2aStateCompleted
+	case intake.StateFailed:
+		return a2aStateFailed
+	default:
+		return a2aStateFailed
+	}
+}
+
 func statusMessage(contextID, taskID, messageID, text string) *a2aMessage {
 	return &a2aMessage{MessageID: messageID, ContextID: contextID, TaskID: taskID, Role: a2aRoleAgent, Parts: []a2aPart{{Text: text, MediaType: "text/plain"}}}
-}
-
-func streamTaskID(stream []events.Event) string {
-	for i := len(stream) - 1; i >= 0; i-- {
-		if stream[i].TaskID != "" {
-			return stream[i].TaskID
-		}
-	}
-	return ""
-}
-
-func matchesOriginalInstruction(stream []events.Event, statement string) bool {
-	for _, event := range stream {
-		if event.EventType != "INTENT_CREATED" {
-			continue
-		}
-		var payload events.ProjectionEventPayload
-		var intent core.Intent
-		if json.Unmarshal(event.Payload, &payload) == nil && json.Unmarshal(payload.Projection.Value, &intent) == nil {
-			return intent.OriginalInstruction == statement
-		}
-	}
-	return false
-}
-
-func matchesDurableInput(stream []events.Event, messageID, text string) bool {
-	for _, event := range stream {
-		if event.EventType != "A2A_INPUT_RECEIVED" {
-			continue
-		}
-		var input events.A2AInputReceivedPayload
-		if json.Unmarshal(event.Payload, &input) == nil {
-			return input.MessageID == messageID && input.Text == text
-		}
-	}
-	return false
-}
-
-func blockedStatusText(stream []events.Event) string {
-	for i := len(stream) - 1; i >= 0; i-- {
-		if stream[i].EventType != "TASK_BLOCKED" {
-			continue
-		}
-		var projection events.ProjectionEventPayload
-		var blocked events.TaskBlockedPayload
-		if json.Unmarshal(stream[i].Payload, &projection) == nil && json.Unmarshal(projection.Detail, &blocked) == nil && blocked.Missing != "" {
-			return blocked.Reason + " Missing: " + blocked.Missing + " Why needed: " + blocked.WhyNeeded
-		}
-	}
-	return "Agent OS requires additional input to continue this task."
-}
-
-func publishedResult(stream []events.Event) (events.ResultPublishedPayload, bool) {
-	for i := len(stream) - 1; i >= 0; i-- {
-		if stream[i].EventType != "RESULT_PUBLISHED" {
-			continue
-		}
-		var result events.ResultPublishedPayload
-		if json.Unmarshal(stream[i].Payload, &result) == nil && result.ValidFor(stream[i].ArtifactRefs) {
-			return result, true
-		}
-	}
-	return events.ResultPublishedPayload{}, false
 }
 
 func writeRPCResult(w http.ResponseWriter, id json.RawMessage, result any) {

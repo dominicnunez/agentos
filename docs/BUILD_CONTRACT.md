@@ -14,7 +14,11 @@
 
 ## First slice
 
-The operator gateway accepts a bounded A2A task, creates an Intent, Goal, and single-node Task DAG, executes either a deterministic handler or a fake-model `AgentExecution`, records each transition, applies the completion engine, and returns terminal task state.
+The shared intake boundary accepts bounded work from either the direct Human
+Gateway or A2A Operator Gateway, creates an Intent, Goal, and single-node Task
+DAG, executes either a deterministic handler or a fake-model `AgentExecution`,
+records each transition, applies the completion engine, and returns terminal
+task state.
 
 The fake adapter is deliberately non-intelligent: it makes the execution seam testable without hiding deterministic work behind an LLM.
 
@@ -35,6 +39,14 @@ replace the example static bearer binding at their ingress boundary and
 explicitly configure a provider adapter. Credentials and A2A wire types remain
 outside core domain objects.
 
+The A2A adapter and first-party Human Gateway translate into one principal-aware
+Intake Service. The Intent records the authenticated principal ID/kind and source
+channel. Known deterministic handlers are selected without inference; otherwise
+unstructured natural-language work uses `AgentExecution` because interpretation
+is justified. Unsupported execution mechanisms fail closed. Direct human chat
+uses a credential distinct from Hermes and is a work/input surface, not a
+trusted approval API.
+
 Task execution publishes a typed `RESULT_PUBLISHED` contract before
 `CANDIDATE_COMPLETE`. Its payload and trusted envelope carry matching Artifact
 references. A2A status includes it only after verified completion and only for
@@ -53,7 +65,7 @@ consequential effect. Continuation phases are keyed by the durable input event;
 delivery retry and startup recovery append only missing phases and reject
 conflicting input.
 
-The A2A work and input surfaces reject authority-shaped fields such as approval,
+The A2A and direct-human work/input surfaces reject authority-shaped fields such as approval,
 capability, authorization, effect-obligation, freeze, and policy overrides.
 Ordinary operator text that claims approval remains untrusted task content. It
 cannot change a prepared `HumanApproval`, and a protected effect remains pending

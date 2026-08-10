@@ -15,6 +15,10 @@ The Operator Gateway exposes only the A2A v1.0 surface:
 - `contextId` as the durable Agent OS work correlation and `messageId` as the
   continuation-delivery idempotency key.
 
+The A2A adapter translates into the same principal-aware Intake Service used by
+the direct Human Gateway. This does not make the first-party human API part of
+A2A and does not weaken A2A protocol isolation.
+
 The gateway does not serve the pre-1.0 discovery alias, legacy method names,
 or custom REST task endpoints. A Hermes upgrade requires updating the immutable
 pin, reviewing protocol and security changes, and passing the real-client

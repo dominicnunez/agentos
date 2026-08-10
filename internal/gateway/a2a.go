@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/dominicnunez/agentos/internal/app"
-	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/core"
+	"github.com/dominicnunez/agentos/internal/intake"
 )
 
 type ExternalActor struct {
@@ -20,12 +20,21 @@ type ExternalActor struct {
 }
 
 type A2A struct {
-	service *app.Service
-	actor   ExternalActor
+	service     *intake.Service
+	principal   intake.Principal
+	publicURL   string
+	bearerToken string
 }
 
-func NewA2A(service *app.Service, actor ExternalActor) *A2A {
-	return &A2A{service: service, actor: actor}
+func NewA2A(service *intake.Service, actor ExternalActor) *A2A {
+	return &A2A{
+		service: service,
+		principal: intake.Principal{
+			ID: actor.ID, Kind: core.PrincipalExternalAgent, OrganizationID: actor.OrganizationID,
+			Channel: intake.ChannelA2A, Capabilities: actor.Capabilities,
+		},
+		publicURL: actor.PublicURL, bearerToken: actor.BearerToken,
+	}
 }
 
 var forbiddenAuthorityFields = map[string]struct{}{
@@ -64,7 +73,7 @@ func rejectAuthorityContent(content any) error {
 	case map[string]any:
 		for field, nested := range value {
 			if _, forbidden := forbiddenAuthorityFields[canonicalWorkField(field)]; forbidden {
-				return fmt.Errorf("A2A work content cannot carry authority field %q", field)
+				return fmt.Errorf("operator work content cannot carry authority field %q", field)
 			}
 			if err := rejectAuthorityContent(nested); err != nil {
 				return err
@@ -93,7 +102,7 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if a.actor.BearerToken == "" || r.Header.Get("Authorization") != "Bearer "+a.actor.BearerToken {
+	if a.principal.ID == "" || a.principal.OrganizationID == "" || a.bearerToken == "" || r.Header.Get("Authorization") != "Bearer "+a.bearerToken {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authenticated external actor required"})
 		return
 	}
@@ -105,8 +114,8 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *A2A) agentCard(r *http.Request) map[string]any {
-	endpoint := strings.TrimRight(a.actor.PublicURL, "/") + "/"
-	if a.actor.PublicURL == "" {
+	endpoint := strings.TrimRight(a.publicURL, "/") + "/"
+	if a.publicURL == "" {
 		scheme := "http"
 		if r.TLS != nil {
 			scheme = "https"
@@ -145,32 +154,6 @@ func (a *A2A) agentCard(r *http.Request) map[string]any {
 		},
 		"security": []map[string][]string{{"bearer": {}}},
 	}
-}
-
-func (a *A2A) allowed(want string) bool {
-	for _, capability := range a.actor.Capabilities {
-		if capability == want {
-			return true
-		}
-	}
-	return false
-}
-
-func externalState(stream []events.Event) string {
-	state := "TASK_STATE_WORKING"
-	for _, event := range stream {
-		switch event.EventType {
-		case "TASK_BLOCKED":
-			state = "TASK_STATE_INPUT_REQUIRED"
-		case "TASK_RESUMED":
-			state = "TASK_STATE_WORKING"
-		case "TASK_VERIFIED_COMPLETE":
-			state = "TASK_STATE_COMPLETED"
-		case "COMPLETION_REJECTED":
-			state = "TASK_STATE_FAILED"
-		}
-	}
-	return state
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

@@ -38,8 +38,18 @@ def main() -> int:
     if "hello-from-hermes" not in reply or "completed" not in reply:
         raise RuntimeError(f"Hermes SendMessage did not receive the completed result:\n{reply}")
 
+    natural_reply = tools.a2a_call(
+        {"agent": "agentos", "message": "draft a concise operator update"}
+    )
+    if "fake-model: draft a concise operator update" not in natural_reply or "completed" not in natural_reply:
+        raise RuntimeError(
+            "Hermes natural-language work did not traverse Agent OS intake:\n"
+            f"{natural_reply}"
+        )
+
     print(discovery)
     print(reply)
+    print(natural_reply)
     return 0
 
 

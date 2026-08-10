@@ -31,3 +31,11 @@ claim.
 
 V1 remains incomplete until every row is covered by the required runtime path and
 adversarial regression test.
+
+In addition to the preserved checklist, `TestNaturalLanguageIntakePreservesPrincipalAndRoutingProvenance`,
+`TestHumanAndHermesCanContinueSharedWorkWithoutSharingIdentity`, and the Human
+Gateway adversarial tests cover the promoted direct-human intake requirement.
+They prove deterministic-first routing, justified AgentExecution fallback,
+cross-channel organizational continuity, exact source provenance, retry
+idempotency, result scoping, and the separation of conversational text from
+trusted approval state.

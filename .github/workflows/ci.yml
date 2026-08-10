@@ -45,10 +45,11 @@ jobs:
       - name: Race-tested unit tests
         run: go test -race ./...
 
-      - name: Hermes v0.20.0 A2A interoperability
+      - name: Hermes v0.20.0 and human intake interoperability
         env:
           AGENTOS_DB: work/hermes-interop.db
           AGENTOS_OPERATOR_TOKEN: hermes-interop-token
+          AGENTOS_HUMAN_TOKEN: human-interop-token
           AGENTOS_ORGANIZATION_ID: hermes-interop-org
           AGENTOS_PUBLIC_URL: http://127.0.0.1:8080
         run: |
@@ -70,6 +71,9 @@ jobs:
             --hermes-root work/hermes-v0.20.0 \
             --url http://127.0.0.1:8080 \
             --token "$AGENTOS_OPERATOR_TOKEN"
+          python3 scripts/verify-human-intake.py \
+            --url http://127.0.0.1:8080 \
+            --token "$AGENTOS_HUMAN_TOKEN"
 
       - name: Architecture boundaries
         run: go tool archguard check --include-tests --profile modular-monolith

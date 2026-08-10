@@ -177,7 +177,7 @@ func Project(correlationID string, stream []events.Event) (Run, error) {
 			run.Blocks++
 		case "TASK_RECOVERED":
 			run.Retries++
-		case "A2A_INPUT_RECEIVED", "APPROVAL_DECIDED":
+		case "A2A_INPUT_RECEIVED", "HUMAN_INPUT_RECEIVED", "APPROVAL_DECIDED":
 			run.HumanInterventions++
 			if event.EventType == "APPROVAL_DECIDED" {
 				var approval core.HumanApproval

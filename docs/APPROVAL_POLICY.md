@@ -28,3 +28,7 @@ reconciliation rather than being blindly replayed.
 
 No production consequential-effect adapter is enabled. The A2A endpoint is
 inbound only and ordinary Hermes operator identity cannot decide approvals.
+The direct Human Gateway is likewise conversational work/input only: even text
+from its authenticated human principal cannot decide an exact-effect approval.
+Approval requires a separate trusted control bound to the authorized human,
+effect fingerprint, scope, and current policy state.

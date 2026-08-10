@@ -28,6 +28,8 @@ modules:
     path: internal/gateway
   - name: inference
     path: internal/inference
+  - name: intake
+    path: internal/intake
   - name: knowledge
     path: internal/knowledge
   - name: ledger
@@ -102,6 +104,12 @@ policy:
       from:
         module: gateway
       to:
+        modules: [core, intake]
+
+    - name: operator-intake
+      from:
+        module: intake
+      to:
         modules: [app, core, events]
 
     - name: knowledge-domain
@@ -154,7 +162,14 @@ policy:
         module: gateway
         tests: true
       to:
-        modules: [approvals, effects, ledger]
+        modules: [app, approvals, effects, events, ledger]
+
+    - name: intake-test-adapter
+      from:
+        module: intake
+        tests: true
+      to:
+        module: ledger
 
     - name: knowledge-test-adapter
       from:

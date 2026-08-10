@@ -388,7 +388,10 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 				SourceActorID:  "hermes",
 				TaskID:         string(result.Task.ID),
 				CorrelationID:  "request-1",
-				Payload:        events.A2AInputReceivedPayload{MessageID: "message-1", Text: "approved task input", SourceExternalActor: "hermes"},
+				Payload: events.OperatorInputReceivedPayload{
+					MessageID: "message-1", Text: "approved task input", SourcePrincipalID: "hermes",
+					SourcePrincipalKind: string(core.PrincipalExternalAgent), SourceChannel: "A2A",
+				},
 			})
 			if err != nil {
 				t.Fatal(err)

@@ -18,10 +18,14 @@ import (
 )
 
 type Submit struct {
-	RequestID      string
-	OrganizationID string
-	Statement      string
-	Kind           core.ExecutionKind
+	RequestID           string
+	OrganizationID      string
+	Statement           string
+	Kind                core.ExecutionKind
+	MessageID           string
+	SourcePrincipalID   core.ID
+	SourcePrincipalKind core.PrincipalKind
+	SourceChannel       string
 }
 
 type Result struct {
@@ -255,41 +259,56 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 	return result, nil
 }
 
-func (s *Service) ProvideExternalInput(ctx context.Context, organizationID, actorID, requestID, taskID, messageID, text string) error {
+type OperatorInput struct {
+	OrganizationID string
+	PrincipalID    string
+	PrincipalKind  core.PrincipalKind
+	SourceChannel  string
+	RequestID      string
+	TaskID         string
+	MessageID      string
+	Text           string
+}
+
+func (s *Service) ProvideOperatorInput(ctx context.Context, input OperatorInput) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if organizationID == "" || actorID == "" || requestID == "" || taskID == "" || messageID == "" || text == "" {
-		return fmt.Errorf("organization, actor, request, task, message, and text are required")
+	if input.OrganizationID == "" || input.PrincipalID == "" || input.PrincipalKind == "" || input.SourceChannel == "" || input.RequestID == "" || input.TaskID == "" || input.MessageID == "" || input.Text == "" {
+		return fmt.Errorf("organization, principal, source, request, task, message, and text are required")
+	}
+	eventType, err := operatorInputEventType(input.SourceChannel)
+	if err != nil {
+		return err
 	}
 	snapshot, err := s.state.Load(ctx)
 	if err != nil {
 		return err
 	}
-	state, ok := snapshot.Tasks[core.ID(taskID)]
-	if !ok || state.CorrelationID != requestID {
+	state, ok := snapshot.Tasks[core.ID(input.TaskID)]
+	if !ok || state.CorrelationID != input.RequestID {
 		return fmt.Errorf("task is not mapped to this external request")
 	}
 	actualOrganizationID, err := taskOrganization(snapshot, state.Value)
 	if err != nil {
 		return err
 	}
-	if actualOrganizationID != core.ID(organizationID) {
+	if actualOrganizationID != core.ID(input.OrganizationID) {
 		return fmt.Errorf("task is not mapped to this external request and organization")
 	}
 	if state.Value.ExecutionKind != core.ExecutionHuman {
 		return fmt.Errorf("external input can continue only a HUMAN task")
 	}
-	stream, err := s.gateway.Events(ctx, requestID)
+	stream, err := s.gateway.Events(ctx, input.RequestID)
 	if err != nil {
 		return err
 	}
-	inputEvent, input, found, err := externalInputForTask(stream, core.ID(taskID))
+	inputEvent, existing, found, err := externalInputForTask(stream, core.ID(input.TaskID))
 	if err != nil {
 		return err
 	}
 	if found {
-		if inputEvent.SourceActorID != actorID || input.SourceExternalActor != actorID || input.MessageID != messageID || input.Text != text {
+		if inputEvent.SourceActorID != input.PrincipalID || existing.SourcePrincipalID != input.PrincipalID || existing.SourcePrincipalKind != string(input.PrincipalKind) || existing.SourceChannel != input.SourceChannel || existing.MessageID != input.MessageID || existing.Text != input.Text {
 			return fmt.Errorf("task already has different durable external input")
 		}
 	} else {
@@ -297,18 +316,21 @@ func (s *Service) ProvideExternalInput(ctx context.Context, organizationID, acto
 			return fmt.Errorf("task is not blocked awaiting external input")
 		}
 		inputEvent, err = s.gateway.PublishTrusted(ctx, events.TrustedDraft{
-			OrganizationID: organizationID,
-			EventType:      "A2A_INPUT_RECEIVED",
-			SourceActorID:  actorID,
-			TaskID:         taskID,
-			CorrelationID:  requestID,
-			Payload:        events.A2AInputReceivedPayload{MessageID: messageID, Text: text, SourceExternalActor: actorID},
+			OrganizationID: input.OrganizationID,
+			EventType:      eventType,
+			SourceActorID:  input.PrincipalID,
+			TaskID:         input.TaskID,
+			CorrelationID:  input.RequestID,
+			Payload: events.OperatorInputReceivedPayload{
+				MessageID: input.MessageID, Text: input.Text, SourcePrincipalID: input.PrincipalID,
+				SourcePrincipalKind: string(input.PrincipalKind), SourceChannel: input.SourceChannel,
+			},
 		})
 		if err != nil {
 			return err
 		}
 	}
-	if err := s.continueExternalInputTask(ctx, actualOrganizationID, core.ID(taskID), requestID, inputEvent); err != nil {
+	if err := s.continueExternalInputTask(ctx, actualOrganizationID, core.ID(input.TaskID), input.RequestID, inputEvent); err != nil {
 		return err
 	}
 	return s.reconcileGoals(ctx)
@@ -318,7 +340,7 @@ func (s *Service) ProvideExternalInput(ctx context.Context, organizationID, acto
 // appends only missing phases. The external actor supplies content; the runtime
 // alone records outcome and completion attestations.
 func (s *Service) continueExternalInputTask(ctx context.Context, organizationID, taskID core.ID, correlationID string, inputEvent events.Event) error {
-	if inputEvent.EventID == "" || inputEvent.EventType != "A2A_INPUT_RECEIVED" || core.ID(inputEvent.TaskID) != taskID {
+	if inputEvent.EventID == "" || !isOperatorInputEvent(inputEvent.EventType) || core.ID(inputEvent.TaskID) != taskID {
 		return fmt.Errorf("valid durable external input event is required")
 	}
 	for {
@@ -345,7 +367,7 @@ func (s *Service) continueExternalInputTask(ctx context.Context, organizationID,
 			continue
 		case core.TaskPending:
 			task.Status = core.TaskRunning
-			detail := map[string]string{"mode": "A2A_HUMAN_INPUT", "input_event_ref": inputEvent.EventID}
+			detail := map[string]string{"mode": "OPERATOR_HUMAN_INPUT", "input_event_ref": inputEvent.EventID}
 			if err := s.state.SaveTask(ctx, organizationID, "EXECUTION_STARTED", "runtime", correlationID, state.Version+1, task, detail); err != nil {
 				return fmt.Errorf("persist external input execution start for task %s: %w", task.ID, err)
 			}
@@ -446,22 +468,37 @@ func (s *Service) publishContinuationEventIfMissing(ctx context.Context, stream 
 	return nil
 }
 
-func externalInputForTask(stream []events.Event, taskID core.ID) (events.Event, events.A2AInputReceivedPayload, bool, error) {
+func externalInputForTask(stream []events.Event, taskID core.ID) (events.Event, events.OperatorInputReceivedPayload, bool, error) {
 	var found events.Event
-	var payload events.A2AInputReceivedPayload
+	var payload events.OperatorInputReceivedPayload
 	for _, event := range stream {
-		if event.EventType != "A2A_INPUT_RECEIVED" || core.ID(event.TaskID) != taskID {
+		if !isOperatorInputEvent(event.EventType) || core.ID(event.TaskID) != taskID {
 			continue
 		}
 		if found.EventID != "" {
-			return events.Event{}, events.A2AInputReceivedPayload{}, false, fmt.Errorf("task has multiple durable external input events")
+			return events.Event{}, events.OperatorInputReceivedPayload{}, false, fmt.Errorf("task has multiple durable external input events")
 		}
-		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.MessageID == "" || payload.Text == "" || payload.SourceExternalActor == "" || payload.SourceExternalActor != event.SourceActorID {
-			return events.Event{}, events.A2AInputReceivedPayload{}, false, fmt.Errorf("durable external input event is invalid")
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.MessageID == "" || payload.Text == "" || payload.SourcePrincipalID == "" || payload.SourcePrincipalKind == "" || payload.SourceChannel == "" || payload.SourcePrincipalID != event.SourceActorID {
+			return events.Event{}, events.OperatorInputReceivedPayload{}, false, fmt.Errorf("durable external input event is invalid")
 		}
 		found = event
 	}
 	return found, payload, found.EventID != "", nil
+}
+
+func operatorInputEventType(channel string) (string, error) {
+	switch channel {
+	case "A2A":
+		return "A2A_INPUT_RECEIVED", nil
+	case "HUMAN_DIRECT":
+		return "HUMAN_INPUT_RECEIVED", nil
+	default:
+		return "", fmt.Errorf("operator input channel is not supported")
+	}
+}
+
+func isOperatorInputEvent(eventType string) bool {
+	return eventType == "A2A_INPUT_RECEIVED" || eventType == "HUMAN_INPUT_RECEIVED"
 }
 
 func continuationEvent(stream []events.Event, eventType string, taskID, executionID core.ID) (events.Event, bool, error) {
@@ -488,8 +525,20 @@ func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 	if in.Kind == "" {
 		in.Kind = core.ExecutionDeterministic
 	}
+	if in.SourcePrincipalID == "" {
+		in.SourcePrincipalID = "runtime"
+	}
+	if in.SourcePrincipalKind == "" {
+		in.SourcePrincipalKind = core.PrincipalRuntime
+	}
+	if in.SourceChannel == "" {
+		in.SourceChannel = "INTERNAL"
+	}
 	intent, goal, task, err := s.ensureSubmission(ctx, in)
 	if err != nil {
+		return Result{}, err
+	}
+	if err := s.ensureOperatorAcceptance(ctx, in, task.ID); err != nil {
 		return Result{}, err
 	}
 	runs, err := s.runReady(ctx)
@@ -518,6 +567,56 @@ func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 		return Result{}, err
 	}
 	return Result{Intent: intent, Goal: goal, Task: task, Outcome: run.Outcome, Completion: run.Completion, Events: eventStream}, run.ExecutionError
+}
+
+func (s *Service) ensureOperatorAcceptance(ctx context.Context, in Submit, taskID core.ID) error {
+	if in.SourceChannel == "INTERNAL" {
+		return nil
+	}
+	if in.MessageID == "" {
+		return fmt.Errorf("operator submission message id is required")
+	}
+	eventType, err := operatorWorkAcceptedEventType(in.SourceChannel)
+	if err != nil {
+		return err
+	}
+	payload := events.OperatorWorkAcceptedPayload{
+		MessageID: in.MessageID, SourcePrincipalID: string(in.SourcePrincipalID),
+		SourcePrincipalKind: string(in.SourcePrincipalKind), SourceChannel: in.SourceChannel,
+	}
+	stream, err := s.gateway.Events(ctx, in.RequestID)
+	if err != nil {
+		return err
+	}
+	for _, event := range stream {
+		if event.EventType != eventType || core.ID(event.TaskID) != taskID {
+			continue
+		}
+		var recorded events.OperatorWorkAcceptedPayload
+		if event.SourceActorID != string(in.SourcePrincipalID) || json.Unmarshal(event.Payload, &recorded) != nil || recorded != payload {
+			return fmt.Errorf("durable operator acceptance conflicts with submission")
+		}
+		return nil
+	}
+	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: in.OrganizationID, EventType: eventType,
+		SourceActorID: string(in.SourcePrincipalID), TaskID: string(taskID),
+		CorrelationID: in.RequestID, Payload: payload,
+	}); err != nil {
+		return fmt.Errorf("persist operator work acceptance: %w", err)
+	}
+	return nil
+}
+
+func operatorWorkAcceptedEventType(channel string) (string, error) {
+	switch channel {
+	case "A2A":
+		return "A2A_WORK_ACCEPTED", nil
+	case "HUMAN_DIRECT":
+		return "HUMAN_WORK_ACCEPTED", nil
+	default:
+		return "", fmt.Errorf("operator work channel is not supported")
+	}
 }
 
 type taskRun struct {
@@ -554,9 +653,12 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 		return core.Intent{}, core.Goal{}, core.Task{}, fmt.Errorf("durable agent identity belongs to a different organization")
 	}
 
-	intent := core.Intent{ID: core.ID("intent-" + in.RequestID), OrganizationID: organizationID, OriginalInstruction: in.Statement, NormalizedObjective: in.Statement, HardConstraints: []string{}, ConsequenceBoundaries: []string{}, CreatedAt: now}
+	intent := core.Intent{ID: core.ID("intent-" + in.RequestID), OrganizationID: organizationID, OriginalInstruction: in.Statement, NormalizedObjective: in.Statement, HardConstraints: []string{}, ConsequenceBoundaries: []string{}, SourcePrincipalID: in.SourcePrincipalID, SourcePrincipalKind: in.SourcePrincipalKind, SourceChannel: in.SourceChannel, SourceMessageID: in.MessageID, CreatedAt: now}
+	if in.SourcePrincipalKind == core.PrincipalHuman {
+		intent.SourceHumanID = in.SourcePrincipalID
+	}
 	if existing, ok := snapshot.Intents[intent.ID]; ok {
-		if existing.Value.OrganizationID != organizationID || existing.Value.OriginalInstruction != in.Statement {
+		if existing.Value.OrganizationID != organizationID || existing.Value.OriginalInstruction != in.Statement || existing.Value.SourcePrincipalID != in.SourcePrincipalID || existing.Value.SourcePrincipalKind != in.SourcePrincipalKind || existing.Value.SourceChannel != in.SourceChannel || existing.Value.SourceMessageID != in.MessageID {
 			return core.Intent{}, core.Goal{}, core.Task{}, fmt.Errorf("request id is already bound to different work")
 		}
 		intent = existing.Value
