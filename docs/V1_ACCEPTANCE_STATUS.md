@@ -1,8 +1,8 @@
 # V1 acceptance status
 
 This matrix tracks the normative checklist in
-`docs/handoff/docs/08_IMPLEMENTATION_ROADMAP_AND_ACCEPTANCE.md`. “Covered” means
-the current bounded behavior has an automated regression test. “Partial” means
+`docs/handoff/docs/08_IMPLEMENTATION_ROADMAP_AND_ACCEPTANCE.md`. â€œCoveredâ€ means
+the current bounded behavior has an automated regression test. â€œPartialâ€ means
 only a supporting seam or narrower case exists. It is not a production-readiness
 claim.
 
@@ -16,7 +16,7 @@ claim.
 | 6 | Child assignment has no unintended positive capability inheritance | Partial | Exact lease matching rejects broader resources; explicit child-assignment coverage remains. |
 | 7 | Human-required action waits for a decision | Covered | `TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision` proves a prepared effect remains unavailable through notification, acknowledgement, restart, unauthorized identity, and mismatched fingerprint until the exact authorized decision is durable. |
 | 8 | Acknowledgement cannot approve | Covered | The same lifecycle test persists `APPROVAL_ACKNOWLEDGED`, verifies no decision timestamp exists, and confirms the effect adapter remains unreachable. |
-| 9 | Freeze/revoke prevents time-of-use action | Partial | `TestCheckRequiresExactUnfrozenLease` covers freeze denial; an integrated effect-time revoke race remains. |
+| 9 | Freeze/revoke prevents time-of-use action | Covered | `TestFreezeAndRevokePreventEffectAtTimeOfUse` prepares an approved effect, then proves a durable organization freeze and a subsequent durable lease revocation each prevent `ATTEMPTED` and keep the adapter unreachable while recording denial traces. |
 | 10 | Agent text cannot forge trusted state | Partial | `TestAgentCannotMintTrustedControlEvent`, `TestMessageEnvelopeUsesAuthenticatedIdentity`, and the lateral-message restart test cover control-event minting and sender spoofing; completion and runtime-attestation forgeries remain. |
 | 11 | Candidate completion cannot bypass Completion Engine | Covered | Vertical-slice event ordering and `TestEvaluateRequiresVerifiedSuccess` require verified structured outcome before terminal completion. |
 | 12 | Duplicate delivery cannot duplicate a consequential effect | Covered | `TestSingleUseApprovalIsConsumedBeforeAdapter` proves confirmed-effect redelivery is idempotent and a single-use decision cannot authorize a second effect; the ledger atomically couples consumption with `ATTEMPTED`. |
