@@ -26,6 +26,13 @@ commit atomically. A confirmed obligation is idempotent on duplicate delivery;
 an interrupted `ATTEMPTED` obligation remains explicitly uncertain for later
 reconciliation rather than being blindly replayed.
 
+At startup, Agent OS discovers interrupted attempts and uses only a configured
+read-only destination status check. Evidence-backed observations may close the
+obligation as `CONFIRMED` or `FAILED`. Missing reconciliation support, lookup
+failure, unknown status, missing evidence, or a changed attempt remains
+`ATTEMPTED` and is surfaced for operator resolution. Reconciliation never
+replays the effect-writing adapter.
+
 No production consequential-effect adapter is enabled. The A2A endpoint is
 inbound only and ordinary external-Agent identity cannot decide approvals.
 The direct Human Gateway is likewise conversational work/input only: even text

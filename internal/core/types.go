@@ -237,25 +237,27 @@ const (
 )
 
 type EffectObligation struct {
-	ID                       ID                `json:"effect_obligation_id"`
-	OrganizationID           ID                `json:"organization_id"`
-	TaskID                   ID                `json:"task_id"`
-	ActorID                  ID                `json:"actor_id"`
-	Action                   string            `json:"action"`
-	Resource                 string            `json:"resource"`
-	Scope                    string            `json:"scope"`
-	ConsequenceBoundary      string            `json:"consequence_boundary,omitempty"`
-	Descriptor               string            `json:"canonical_effect_descriptor"`
-	EffectFingerprint        string            `json:"effect_fingerprint"`
-	AuthorizationRefs        []string          `json:"authorization_refs"`
-	ApprovalRef              string            `json:"approval_ref,omitempty"`
-	IdempotencyKey           string            `json:"idempotency_key"`
-	ReplayContext            map[string]string `json:"replay_context"`
-	Status                   EffectStatus      `json:"status"`
-	AttemptCount             int               `json:"attempt_count"`
-	LastAttemptAt            *time.Time        `json:"last_attempt_at,omitempty"`
-	ConfirmationEvidenceRefs []string          `json:"confirmation_evidence_refs"`
-	CreatedAt                time.Time         `json:"created_at"`
+	ID                         ID                `json:"effect_obligation_id"`
+	OrganizationID             ID                `json:"organization_id"`
+	TaskID                     ID                `json:"task_id"`
+	ActorID                    ID                `json:"actor_id"`
+	Action                     string            `json:"action"`
+	Resource                   string            `json:"resource"`
+	Scope                      string            `json:"scope"`
+	ConsequenceBoundary        string            `json:"consequence_boundary,omitempty"`
+	Descriptor                 string            `json:"canonical_effect_descriptor"`
+	EffectFingerprint          string            `json:"effect_fingerprint"`
+	AuthorizationRefs          []string          `json:"authorization_refs"`
+	ApprovalRef                string            `json:"approval_ref,omitempty"`
+	IdempotencyKey             string            `json:"idempotency_key"`
+	ReplayContext              map[string]string `json:"replay_context"`
+	Status                     EffectStatus      `json:"status"`
+	AttemptCount               int               `json:"attempt_count"`
+	LastAttemptAt              *time.Time        `json:"last_attempt_at,omitempty"`
+	ConfirmationEvidenceRefs   []string          `json:"confirmation_evidence_refs"`
+	ReconciliationEvidenceRefs []string          `json:"reconciliation_evidence_refs,omitempty"`
+	ReconciledAt               *time.Time        `json:"reconciled_at,omitempty"`
+	CreatedAt                  time.Time         `json:"created_at"`
 }
 
 type ApprovalStatus string

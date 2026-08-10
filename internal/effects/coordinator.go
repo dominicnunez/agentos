@@ -92,6 +92,8 @@ func (c *Coordinator) Prepare(ctx context.Context, obligation core.EffectObligat
 	obligation.AttemptCount = 0
 	obligation.LastAttemptAt = nil
 	obligation.ConfirmationEvidenceRefs = nil
+	obligation.ReconciliationEvidenceRefs = nil
+	obligation.ReconciledAt = nil
 	if err := c.record(ctx, obligation, 1); err != nil {
 		return obligation, err
 	}
@@ -187,7 +189,18 @@ func (c *Coordinator) load(ctx context.Context, effectID core.ID) (core.EffectOb
 	if c == nil || c.records == nil || effectID == "" {
 		return core.EffectObligation{}, 0, ErrEffectNotPrepared
 	}
-	rows, err := c.records.Records(ctx, "effect", string(effectID))
+	return loadEffect(ctx, c.records, effectID)
+}
+
+type recordReader interface {
+	Records(context.Context, string, string) ([][]byte, error)
+}
+
+func loadEffect(ctx context.Context, records recordReader, effectID core.ID) (core.EffectObligation, int, error) {
+	if records == nil || effectID == "" {
+		return core.EffectObligation{}, 0, ErrEffectNotPrepared
+	}
+	rows, err := records.Records(ctx, "effect", string(effectID))
 	if err != nil {
 		return core.EffectObligation{}, 0, err
 	}
@@ -236,5 +249,15 @@ func sameEffectIntent(stored, requested core.EffectObligation) bool {
 }
 
 func (c *Coordinator) record(ctx context.Context, o core.EffectObligation, version int) error {
-	return c.records.AppendRecord(ctx, string(o.OrganizationID), "EFFECT_OBLIGATION_TRANSITIONED", "", string(o.TaskID), o.AuthorizationRefs, o.ConfirmationEvidenceRefs, "effect", string(o.ID), version, o)
+	return c.records.AppendRecord(ctx, string(o.OrganizationID), "EFFECT_OBLIGATION_TRANSITIONED", "", string(o.TaskID), o.AuthorizationRefs, effectEvidenceRefs(o), "effect", string(o.ID), version, o)
+}
+
+func effectEvidenceRefs(o core.EffectObligation) []string {
+	refs := slices.Clone(o.ConfirmationEvidenceRefs)
+	for _, ref := range o.ReconciliationEvidenceRefs {
+		if !slices.Contains(refs, ref) {
+			refs = append(refs, ref)
+		}
+	}
+	return refs
 }

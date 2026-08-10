@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/app"
+	"github.com/dominicnunez/agentos/internal/effects"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/gateway"
 	"github.com/dominicnunez/agentos/internal/intake"
@@ -64,6 +65,13 @@ func run() (err error) {
 	service := app.New(events.NewGateway(l))
 	if _, err := service.Recover(context.Background()); err != nil {
 		return fmt.Errorf("recover durable runtime before serving: %w", err)
+	}
+	effectRecovery, err := effects.NewReconciliationService(l).Recover(context.Background(), nil)
+	if err != nil {
+		return fmt.Errorf("recover effect obligations before serving: %w", err)
+	}
+	for _, item := range effectRecovery {
+		log.Printf("effect requires reconciliation: effect_id=%s task_id=%s reason=%s", item.EffectID, item.TaskID, item.Reason)
 	}
 	operator := intake.New(service)
 	capabilities := []string{intake.CapabilitySubmitWork, intake.CapabilityReadStatus, intake.CapabilityReadResult, intake.CapabilityProvideInput}
