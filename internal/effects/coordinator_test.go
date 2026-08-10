@@ -316,4 +316,3 @@ func TestFreezeAndRevokePreventEffectAtTimeOfUse(t *testing.T) {
 		t.Fatalf("time-of-use denials were not durable: traces=%d err=%v", len(traces), err)
 	}
 }
-
