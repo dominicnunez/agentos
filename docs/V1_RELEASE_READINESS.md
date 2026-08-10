@@ -13,7 +13,7 @@ Passing the architecture checklist does not by itself authorize deployment.
 | Operator input robustness | PASS | Strict size-limited decoding, authority-field rejection, adversarial tests, and bounded fuzzing cover the Human and A2A shared work-content boundary. |
 | Binary version identity | PASS | `agentos --version` is linked from the repository `VERSION` value and checked in CI. |
 | Backup and restore | PASS | Native online SQLite backup, integrity/schema verification, no-overwrite restore, and pointer-switch rollback are tested and documented. |
-| Real model provider | PASS | The disabled-by-default Codex subscription adapter pins the reviewed SDK, isolates process and turn state, denies approvals and side effects, bounds execution, and records provider token usage with unknown cost. |
+| Real model providers | PASS | The disabled-by-default Codex subscription adapter confines the reviewed SDK. The separate official OpenAI Responses adapter pins egress, disables provider tools and storage, bounds requests, and resolves a server-owned credential per call. Both record provider tokens with unknown cost; successful output remains blocked for independent completion judgment when no runtime verifier exists. |
 | Approval control | BLOCKED | Requires a separately authenticated exact-effect control and an approved trusted-control design. Chat remains untrusted work content. |
 | Release artifacts | TODO | Produce pinned cross-platform binaries, checksums, SBOMs, and build provenance. |
 | Loopback pilot | PASS | CI restores a live disposable ledger, restarts the runtime, retrieves Human/A2A results, continues blocked work, and checks expiry and revocation. |

@@ -106,7 +106,7 @@ func run(ctx context.Context) (err error) {
 	if err := validatePublicURL(publicURL, remote, externalActors != nil, tlsConfig != nil); err != nil {
 		return err
 	}
-	model, closeModel, err := configuredModel(ctx)
+	model, closeModel, err := configuredModel(ctx, secrets.Environment{})
 	if err != nil {
 		return err
 	}
@@ -141,7 +141,7 @@ func run(ctx context.Context) (err error) {
 	return serve(ctx, s, listener, os.Getenv("AGENTOS_TLS_CERT_FILE"), os.Getenv("AGENTOS_TLS_KEY_FILE"))
 }
 
-func configuredModel(ctx context.Context) (execution.ModelAdapter, func() error, error) {
+func configuredModel(ctx context.Context, source secrets.Source) (execution.ModelAdapter, func() error, error) {
 	provider := os.Getenv("AGENTOS_MODEL_PROVIDER")
 	switch provider {
 	case "", "fake":
@@ -156,8 +156,27 @@ func configuredModel(ctx context.Context) (execution.ModelAdapter, func() error,
 			return nil, nil, fmt.Errorf("configure Codex subscription provider: %w", err)
 		}
 		return adapter, adapter.Close, nil
+	case "openai-api":
+		keyRef := os.Getenv("AGENTOS_OPENAI_API_KEY_REF")
+		if len(keyRef) == 0 || len(keyRef) > 128 || strings.TrimSpace(keyRef) != keyRef || strings.IndexFunc(keyRef, func(character rune) bool { return character < 0x21 || character > 0x7e }) >= 0 {
+			return nil, nil, fmt.Errorf("AGENTOS_OPENAI_API_KEY_REF must name one canonical server-owned secret")
+		}
+		if source == nil {
+			return nil, nil, fmt.Errorf("OpenAI API secret source is required")
+		}
+		adapter, err := execution.NewOpenAIAPI(ctx, execution.OpenAIAPIConfig{
+			Model: os.Getenv("AGENTOS_OPENAI_MODEL"),
+			APIKey: func(resolveCtx context.Context) (string, error) {
+				value, resolveErr := source.Resolve(resolveCtx, secrets.Ref(keyRef))
+				return string(value), resolveErr
+			},
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("configure OpenAI API provider: %w", err)
+		}
+		return adapter, func() error { return nil }, nil
 	default:
-		return nil, nil, fmt.Errorf("AGENTOS_MODEL_PROVIDER must be fake or codex-subscription")
+		return nil, nil, fmt.Errorf("AGENTOS_MODEL_PROVIDER must be fake, codex-subscription, or openai-api")
 	}
 }
 

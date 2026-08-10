@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -30,6 +31,13 @@ type routeValidatorFunc func(context.Context, AddressedRoute) error
 
 func (f routeValidatorFunc) ValidateAddressedRoute(ctx context.Context, route AddressedRoute) error {
 	return f(ctx, route)
+}
+
+func TestInferenceUsageRejectsIntegerOverflow(t *testing.T) {
+	usage := InferenceUsageRecordedPayload{Source: "provider", Provider: "provider", Model: "model", InputTokens: math.MaxInt, OutputTokens: 1, TotalTokens: math.MinInt}
+	if usage.Valid() {
+		t.Fatal("overflowed token usage was accepted")
+	}
 }
 
 func TestAgentCannotMintTrustedStateEvents(t *testing.T) {

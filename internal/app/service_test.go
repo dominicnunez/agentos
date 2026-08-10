@@ -103,6 +103,9 @@ func TestAgentExecutionUsesFakeAdapter(t *testing.T) {
 	if r.Outcome.ObservedEffect != "fake-model: summarize" {
 		t.Fatalf("effect=%q", r.Outcome.ObservedEffect)
 	}
+	if !r.Completion.Complete || r.Task.Status != core.TaskCompleted {
+		t.Fatalf("fake model result was not deterministically verified: %+v", r)
+	}
 	assertEventOrder(t, r.Events, "EXECUTION_CONTEXT_MANIFESTED", "TOOL_OUTCOME_RECORDED", "INFERENCE_USAGE_RECORDED", "EXECUTION_FINISHED", "RUN_TELEMETRY_RECORDED")
 }
 
@@ -126,10 +129,20 @@ func TestAgentExecutionManifestUsesConfiguredModelDescriptor(t *testing.T) {
 			t.Errorf("close ledger: %v", err)
 		}
 	})
-	r, err := NewWithModel(events.NewGateway(l), describedModel{}).Submit(context.Background(), Submit{RequestID: "configured-model", OrganizationID: "o1", Statement: "summarize", Kind: core.ExecutionAgent})
+	service := NewWithModel(events.NewGateway(l), describedModel{})
+	submission := Submit{RequestID: "configured-model", OrganizationID: "o1", Statement: "summarize", Kind: core.ExecutionAgent}
+	r, err := service.Submit(context.Background(), submission)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if r.Task.Status != core.TaskBlocked || r.Goal.Status != "ACTIVE" || r.Completion.Complete {
+		t.Fatalf("unverified model result did not remain blocked: %+v", r)
+	}
+	if r.Outcome.ObservedEffect != "configured-model: summarize" {
+		t.Fatalf("provider result was not preserved: %+v", r.Outcome)
+	}
+	assertEventOrder(t, r.Events, "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_REVIEW_REQUIRED", "TASK_BLOCKED")
+	foundManifest := false
 	for _, event := range r.Events {
 		if event.EventType != "EXECUTION_CONTEXT_MANIFESTED" {
 			continue
@@ -141,9 +154,18 @@ func TestAgentExecutionManifestUsesConfiguredModelDescriptor(t *testing.T) {
 		if manifest.Provider != "codex-subscription" || manifest.Model != "test-model" || manifest.ExecutionProfileVersion != "v1-codex-subscription" {
 			t.Fatalf("manifest=%+v", manifest)
 		}
-		return
+		foundManifest = true
 	}
-	t.Fatal("execution context manifest was not recorded")
+	if !foundManifest {
+		t.Fatal("execution context manifest was not recorded")
+	}
+	replayed, err := service.Submit(context.Background(), submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Task.Status != core.TaskBlocked || replayed.Completion.Complete || len(replayed.Completion.Reasons) == 0 || len(replayed.Events) != len(r.Events) {
+		t.Fatalf("blocked review did not replay idempotently: before=%+v after=%+v", r, replayed)
+	}
 }
 
 type indexedTaskLedger struct{}

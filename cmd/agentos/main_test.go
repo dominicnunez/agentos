@@ -67,7 +67,7 @@ func TestPrintVersionDoesNotStartRuntime(t *testing.T) {
 
 func TestConfiguredModelIsFakeUnlessExplicitlySelected(t *testing.T) {
 	t.Setenv("AGENTOS_MODEL_PROVIDER", "")
-	model, closeModel, err := configuredModel(context.Background())
+	model, closeModel, err := configuredModel(context.Background(), testSecrets{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestConfiguredModelIsFakeUnlessExplicitlySelected(t *testing.T) {
 	}
 
 	t.Setenv("AGENTOS_MODEL_PROVIDER", "unreviewed")
-	if _, _, err := configuredModel(context.Background()); err == nil {
+	if _, _, err := configuredModel(context.Background(), testSecrets{}); err == nil {
 		t.Fatal("unknown provider was accepted")
 	}
 }
@@ -89,8 +89,33 @@ func TestConfiguredCodexProviderFailsClosedWithoutExactFiles(t *testing.T) {
 	t.Setenv("AGENTOS_CODEX_BINARY", "")
 	t.Setenv("AGENTOS_CODEX_CREDENTIALS_FILE", "")
 	t.Setenv("AGENTOS_CODEX_MODEL", "gpt-test")
-	if _, _, err := configuredModel(context.Background()); err == nil {
+	if _, _, err := configuredModel(context.Background(), testSecrets{}); err == nil {
 		t.Fatal("incomplete Codex provider configuration was accepted")
+	}
+}
+
+func TestConfiguredOpenAIAPIProviderUsesNamedServerOwnedSecret(t *testing.T) {
+	t.Setenv("AGENTOS_MODEL_PROVIDER", "openai-api")
+	t.Setenv("AGENTOS_OPENAI_API_KEY_REF", "OPENAI_PROJECT_KEY")
+	t.Setenv("AGENTOS_OPENAI_MODEL", "gpt-test-2026-01-01")
+	model, closeModel, err := configuredModel(context.Background(), testSecrets{"OPENAI_PROJECT_KEY": "test-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if descriptor := model.Descriptor(); descriptor.Provider != "openai-api" || descriptor.Model != "gpt-test-2026-01-01" || descriptor.ExecutionProfileVersion != "v1-openai-responses-model-only" {
+		t.Fatalf("descriptor=%+v", descriptor)
+	}
+	if err := closeModel(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("AGENTOS_OPENAI_API_KEY_REF", "MISSING")
+	if _, _, err := configuredModel(context.Background(), testSecrets{}); err == nil {
+		t.Fatal("unavailable OpenAI API credential was accepted")
+	}
+	t.Setenv("AGENTOS_OPENAI_API_KEY_REF", "")
+	if _, _, err := configuredModel(context.Background(), testSecrets{}); err == nil {
+		t.Fatal("missing OpenAI API credential reference was accepted")
 	}
 }
 

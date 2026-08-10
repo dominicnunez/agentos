@@ -27,10 +27,16 @@ The fake adapter is deliberately non-intelligent: it makes the execution seam te
 The repository includes exact fail-closed capability checks, append-only
 versioned records, provenance-gated institutional knowledge, deterministic audit
 rules, reserve-aware inference selection and normalized usage snapshots, an
-environment-backed `SecretSource`, an HTTPS/host-allowlisted OpenAI-compatible
-model adapter with bounded responses and no redirects, and
+environment-backed `SecretSource`, a confined Codex subscription adapter, a
+fixed-endpoint official OpenAI Responses adapter with bounded responses and no
+redirects, and
 fingerprinted persist-before-effect obligations with distinct attempted and
 confirmed states.
+
+Real-provider output is durably recorded as a result and
+`CANDIDATE_COMPLETE`, but remains `BLOCKED` for approved independent judgment
+when its CompletionContract has no runtime verifier. Nonempty model text is not
+treated as deterministic proof.
 
 The A2A adapter exposes canonical A2A v1.0 Agent Card discovery and authenticated
 JSON-RPC `SendMessage` and `GetTask`, with capability-gated status, result, and
