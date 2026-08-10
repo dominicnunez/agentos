@@ -212,6 +212,8 @@ func executionKind(metadata map[string]json.RawMessage) (core.ExecutionKind, err
 	switch kind {
 	case core.ExecutionDeterministic, core.ExecutionAgent, core.ExecutionHuman:
 		return kind, nil
+	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
+		return "", fmt.Errorf("%s is not a supported execution kind", agentOSExecutionKindKey)
 	default:
 		return "", fmt.Errorf("%s is not a supported execution kind", agentOSExecutionKindKey)
 	}
