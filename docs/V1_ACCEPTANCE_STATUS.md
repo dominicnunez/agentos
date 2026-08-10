@@ -7,26 +7,26 @@ authorization claim.
 
 | # | Requirement | Evidence |
 |---:|---|---|
-| 1 | Durable identity | ✅ `projections: TestIdentitySurvivesRestart` |
-| 2 | Direct lateral messaging | ✅ `app: TestLateralMessagesAtActionBoundary` |
-| 3 | Action-boundary delivery | ✅ `app: TestLateralMessagesAtActionBoundary` |
-| 4 | Atomic message delivery | ✅ `ledger: TestMessageRollbackOnInboxFailure` |
-| 5 | Blocked work returns control | ✅ `app: TestBlockedChildReturnsToParent` |
-| 6 | No implicit authority inheritance | ✅ `authority: TestChildGetsNoParentAuthority` |
-| 7 | Durable approval wait | ✅ `approvals: TestApprovalWaitsAcrossRestart` |
-| 8 | Acknowledgement is not approval | ✅ `approvals: TestApprovalWaitsAcrossRestart` |
-| 9 | Time-of-use revocation | ✅ `effects: TestRevocationBlocksEffect`, `TestApprovalExpiryAtAttempt` |
-| 10 | Untrusted text stays untrusted | ✅ `events: TestAgentCannotForgeState`, `TestEnvelopeUsesAuthenticatedIdentity`, `TestCandidateIsNotVerified` |
-| 11 | Verified completion only | ✅ `completion: TestVerifierOwnsPostconditionTrust`, `TestCompletionRequiresVerification` |
-| 12 | Consequential effects are idempotent | ✅ `effects: TestSingleUseApprovalBeforeEffect` |
-| 13 | Restart continuity | ✅ recovery, approval, and inbox restart suites |
-| 14 | Complete run telemetry | ✅ `telemetry: TestRunTelemetryIsComplete`; `app: TestRunTelemetryCoversDAG` |
-| 15 | Model executions have manifests | ✅ action-boundary manifest assertions |
-| 16 | Tool failures remain failures | ✅ completion postcondition tests |
-| 17 | Deterministic-first recovery | ✅ `app: TestRecoveryIsDeterministicFirst` |
-| 18 | Authorized A2A operation | ✅ live A2A v1.0 CI and gateway conformance suite |
-| 19 | A2A cannot approve effects | ✅ `gateway: TestA2ACannotApproveEffects` |
-| 20 | Durable effect recovery | ✅ `effects: TestEffectSuccessNeedsEvidence` and reconciliation recovery suite |
+| 1 | Durable identity | PASS — [`TestDurableObjectsSurviveRestartAndRebuildFromEvents`](../internal/projections/repository_test.go) |
+| 2 | Direct lateral messaging | PASS — [`TestLateralMessagesAtActionBoundary`](../internal/app/service_test.go) |
+| 3 | Action-boundary delivery | PASS — [`TestLateralMessagesAtActionBoundary`](../internal/app/service_test.go) |
+| 4 | Atomic message delivery | PASS — [`TestMessageRollbackOnInboxFailure`](../internal/ledger/sqlite_test.go) |
+| 5 | Blocked work returns control | PASS — [`TestBlockedChildReturnsToParent`](../internal/app/service_test.go) |
+| 6 | No implicit authority inheritance | PASS — [`TestChildAssignmentDoesNotInheritParentCapability`](../internal/authority/authority_test.go) |
+| 7 | Durable approval wait | PASS — [`TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision`](../internal/approvals/service_test.go) |
+| 8 | Acknowledgement is not approval | PASS — [`TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision`](../internal/approvals/service_test.go) |
+| 9 | Time-of-use revocation | PASS — [`TestRevocationBlocksEffect`](../internal/effects/coordinator_test.go), [`TestApprovalExpiryAtAttempt`](../internal/effects/coordinator_test.go) |
+| 10 | Untrusted text stays untrusted | PASS — [`TestAgentCannotMintTrustedStateEvents`](../internal/events/events_test.go), [`TestMessageEnvelopeUsesAuthenticatedIdentity`](../internal/events/events_test.go), [`TestCandidateCompletionCannotMintVerifiedCompletion`](../internal/events/events_test.go) |
+| 11 | Verified completion only | PASS — [`TestVerifierOwnsPostconditionTrust`](../internal/completion/verifier_test.go), [`TestEvaluateRequiresVerifiedSuccess`](../internal/completion/engine_test.go) |
+| 12 | Consequential effects are idempotent | PASS — [`TestSingleUseApprovalBeforeEffect`](../internal/effects/coordinator_test.go) |
+| 13 | Restart continuity | PASS — [`TestRecoverExecutesPersistedPendingWorkAndPreservesIdentity`](../internal/app/service_test.go), [`TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision`](../internal/approvals/service_test.go), [`TestMessageInboxSurvivesReopenAndObservation`](../internal/ledger/sqlite_test.go) |
+| 14 | Complete run telemetry | PASS — [`TestProjectBuildsCompleteReplayableRunSummary`](../internal/telemetry/telemetry_test.go), [`TestRunTelemetryCoversDAG`](../internal/app/service_test.go) |
+| 15 | Model executions have manifests | PASS — [`TestAgentExecutionUsesFakeAdapter`](../internal/app/service_test.go), [`TestAgentExecutionReturnsSeparateUsageContract`](../internal/execution/execution_test.go) |
+| 16 | Tool failures remain failures | PASS — [`TestRejectedRunRecordsTelemetryAndFailsGoal`](../internal/app/service_test.go), [`TestEvaluateRequiresVerifiedSuccess`](../internal/completion/engine_test.go) |
+| 17 | Deterministic-first recovery | PASS — [`TestRecoveryIsDeterministicFirst`](../internal/app/service_test.go) |
+| 18 | Authorized A2A operation | PASS — live A2A v1.0 CI, [`TestA2ASendGetAndContinueUseV1TaskContracts`](../internal/gateway/a2a_test.go) |
+| 19 | A2A cannot approve effects | PASS — [`TestA2ACannotApproveEffects`](../internal/gateway/a2a_test.go) |
+| 20 | Durable effect recovery | PASS — [`TestEffectSuccessNeedsEvidence`](../internal/effects/coordinator_test.go), [`TestRecoveryConfirmsAttemptedEffectAfterRestartWithoutResend`](../internal/effects/reconciliation_test.go) |
 
 ## Evidence scope
 
