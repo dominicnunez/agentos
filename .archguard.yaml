@@ -36,6 +36,8 @@ modules:
     path: internal/projections
   - name: secrets
     path: internal/secrets
+  - name: telemetry
+    path: internal/telemetry
   - name: workflow
     path: internal/workflow
 
@@ -52,7 +54,7 @@ policy:
       from:
         module: app
       to:
-        modules: [completion, core, events, execution, projections, workflow]
+        modules: [completion, core, events, execution, projections, telemetry, workflow]
 
     - name: approval-domain
       from:
@@ -82,7 +84,13 @@ policy:
       from:
         module: execution
       to:
-        module: core
+        modules: [core, events]
+
+    - name: telemetry-projection
+      from:
+        module: telemetry
+      to:
+        modules: [core, events]
 
     - name: effects-domain
       from:
@@ -169,4 +177,3 @@ analysis:
   table_owners:
     - module: ledger
       tables: [consumed_approvals, events, inbox, records]
-

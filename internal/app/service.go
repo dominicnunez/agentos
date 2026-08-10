@@ -13,6 +13,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/projections"
+	"github.com/dominicnunez/agentos/internal/telemetry"
 	"github.com/dominicnunez/agentos/internal/workflow"
 )
 
@@ -719,9 +720,18 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		}
 	}
 
-	outcome, executionErr := handler.Execute(ctx, executionTask, manifest)
+	executionResult, executionErr := handler.Execute(ctx, executionTask, manifest)
+	outcome := executionResult.Outcome
 	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: outcome, CorrelationID: state.CorrelationID}); err != nil {
 		return taskRun{}, fmt.Errorf("persist outcome for task %s: %w", task.ID, err)
+	}
+	if executionResult.InferenceUsage != nil {
+		if !executionResult.InferenceUsage.Valid() {
+			return taskRun{}, fmt.Errorf("model execution for task %s returned invalid usage telemetry", task.ID)
+		}
+		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "INFERENCE_USAGE_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: executionResult.InferenceUsage, CorrelationID: state.CorrelationID}); err != nil {
+			return taskRun{}, fmt.Errorf("persist inference usage for task %s: %w", task.ID, err)
+		}
 	}
 	for _, batch := range inboxBatches {
 		if len(batch.Events) == 0 {
@@ -870,6 +880,26 @@ func (s *Service) reconcileGoals(ctx context.Context) error {
 			return fmt.Errorf("goal %s references missing intent %s", goalID, state.Value.IntentID)
 		}
 		goal := state.Value
+		stream, err := s.gateway.Events(ctx, correlationID)
+		if err != nil {
+			return fmt.Errorf("load run telemetry source for goal %s: %w", goalID, err)
+		}
+		recordedRun, telemetryRecorded, err := telemetry.Recorded(stream)
+		if err != nil {
+			return fmt.Errorf("validate recorded run telemetry for goal %s: %w", goalID, err)
+		}
+		if telemetryRecorded && (recordedRun.CorrelationID != correlationID || recordedRun.OrganizationID != string(intent.Value.OrganizationID)) {
+			return fmt.Errorf("recorded run telemetry for goal %s crosses its trust boundary", goalID)
+		}
+		if !telemetryRecorded {
+			run, err := telemetry.Project(correlationID, stream)
+			if err != nil {
+				return fmt.Errorf("project run telemetry for goal %s: %w", goalID, err)
+			}
+			if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(intent.Value.OrganizationID), EventType: "RUN_TELEMETRY_RECORDED", SourceActorID: "runtime", Payload: run, CorrelationID: correlationID}); err != nil {
+				return fmt.Errorf("persist run telemetry for goal %s: %w", goalID, err)
+			}
+		}
 		goal.Status = "COMPLETED"
 		if err := s.state.SaveGoal(ctx, intent.Value.OrganizationID, "GOAL_COMPLETED", "runtime", correlationID, state.Version+1, goal, nil); err != nil {
 			return fmt.Errorf("persist completed goal %s: %w", goalID, err)

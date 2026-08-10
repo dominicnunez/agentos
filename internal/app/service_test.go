@@ -13,6 +13,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/ledger"
 	"github.com/dominicnunez/agentos/internal/projections"
+	"github.com/dominicnunez/agentos/internal/telemetry"
 )
 
 func TestVerticalSlice(t *testing.T) {
@@ -29,7 +30,34 @@ func TestVerticalSlice(t *testing.T) {
 	if !r.Completion.Complete || r.Task.Status != core.TaskCompleted || r.Goal.Status != "COMPLETED" {
 		t.Fatalf("unexpected result: %#v", r)
 	}
-	assertEventOrder(t, r.Events, "TASK_CREATED", "EXECUTION_STARTED", "TOOL_OUTCOME_RECORDED", "RESULT_PUBLISHED", "COMPLETION_VERIFIED", "TASK_VERIFIED_COMPLETE")
+	assertEventOrder(t, r.Events, "TASK_CREATED", "EXECUTION_STARTED", "TOOL_OUTCOME_RECORDED", "RESULT_PUBLISHED", "COMPLETION_VERIFIED", "TASK_VERIFIED_COMPLETE", "RUN_TELEMETRY_RECORDED", "GOAL_COMPLETED")
+	var run telemetry.Run
+	telemetryEvents := 0
+	for _, event := range r.Events {
+		if event.EventType != "RUN_TELEMETRY_RECORDED" {
+			continue
+		}
+		telemetryEvents++
+		if err := json.Unmarshal(event.Payload, &run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if telemetryEvents != 1 || run.Outcome != "VERIFIED_COMPLETE" || len(run.ExecutionMechanisms) != 1 || run.ExecutionMechanisms[0].Kind != core.ExecutionDeterministic || run.ToolCalls != 1 || !run.CostComplete {
+		t.Fatalf("run telemetry=%+v events=%d", run, telemetryEvents)
+	}
+	replayed, err := s.Submit(context.Background(), Submit{RequestID: "r1", OrganizationID: "o1", Statement: "echo hello", Kind: core.ExecutionDeterministic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	telemetryEvents = 0
+	for _, event := range replayed.Events {
+		if event.EventType == "RUN_TELEMETRY_RECORDED" {
+			telemetryEvents++
+		}
+	}
+	if telemetryEvents != 1 || len(replayed.Events) != len(r.Events) {
+		t.Fatalf("replay duplicated terminal telemetry: before=%d after=%d telemetry=%d", len(r.Events), len(replayed.Events), telemetryEvents)
+	}
 }
 func TestAgentExecutionUsesFakeAdapter(t *testing.T) {
 	l, err := ledger.Open(":memory:")
@@ -44,6 +72,7 @@ func TestAgentExecutionUsesFakeAdapter(t *testing.T) {
 	if r.Outcome.ObservedEffect != "fake-model: summarize" {
 		t.Fatalf("effect=%q", r.Outcome.ObservedEffect)
 	}
+	assertEventOrder(t, r.Events, "EXECUTION_CONTEXT_MANIFESTED", "TOOL_OUTCOME_RECORDED", "INFERENCE_USAGE_RECORDED", "EXECUTION_FINISHED", "RUN_TELEMETRY_RECORDED")
 }
 
 func TestRecoverExecutesPersistedPendingWorkAndPreservesIdentity(t *testing.T) {
