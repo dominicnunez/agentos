@@ -16,6 +16,7 @@ var (
 	ErrApprovalNotFound        = errors.New("approval not found")
 	ErrApprovalPending         = errors.New("approval decision pending")
 	ErrApprovalDenied          = errors.New("approval denied")
+	ErrApprovalExpired         = errors.New("approval expired")
 	ErrDecisionUnauthorized    = errors.New("human is not authorized for approval boundary")
 	ErrNotificationUnavailable = errors.New("approval notification unavailable")
 	errRecordNotFound          = errors.New("record not found")
@@ -44,6 +45,27 @@ func RequiresHumanApproval(boundary string) (bool, error) {
 		return false, fmt.Errorf("unknown consequence boundary %q", boundary)
 	}
 	return true, nil
+}
+
+// ValidateForEffect checks that the latest durable approval still authorizes
+// this exact effect at the supplied time-of-use boundary.
+func ValidateForEffect(approval core.HumanApproval, obligation core.EffectObligation, now time.Time) error {
+	switch approval.Status {
+	case core.ApprovalPending, core.ApprovalNotified, core.ApprovalAcknowledged, core.ApprovalPendingDecision:
+		return ErrApprovalPending
+	case core.ApprovalDenied:
+		return ErrApprovalDenied
+	case core.ApprovalApproved:
+	default:
+		return fmt.Errorf("unknown approval status %q", approval.Status)
+	}
+	if !approvalMatchesEffect(approval, obligation) {
+		return fmt.Errorf("approval does not authorize exact effect")
+	}
+	if approval.ExpiresAt != nil && !now.Before(*approval.ExpiresAt) {
+		return ErrApprovalExpired
+	}
+	return nil
 }
 
 type Store interface {
@@ -204,7 +226,7 @@ func (s *Service) Decide(ctx context.Context, decision Decision) (core.HumanAppr
 	}
 	now := s.now()
 	if decision.Approve && approval.ExpiresAt != nil && !now.Before(*approval.ExpiresAt) {
-		return approval, fmt.Errorf("approval expired before decision")
+		return approval, ErrApprovalExpired
 	}
 	approval.Status = core.ApprovalDenied
 	if decision.Approve {
@@ -264,10 +286,24 @@ func (s *Service) validatePreparedEffect(ctx context.Context, approval core.Huma
 	if err := json.Unmarshal(body, &obligation); err != nil {
 		return fmt.Errorf("decode prepared effect %s: %w", approval.EffectObligationID, err)
 	}
-	if obligation.Status != core.EffectPending || obligation.ID != approval.EffectObligationID || obligation.ApprovalRef != string(approval.ID) || obligation.OrganizationID != approval.OrganizationID || obligation.TaskID != approval.TaskID || obligation.Action != approval.Action || obligation.Resource != approval.Resource || obligation.ConsequenceBoundary != approval.Boundary || obligation.EffectFingerprint != approval.EffectFingerprint {
+	if obligation.Status != core.EffectPending || !approvalMatchesEffect(approval, obligation) {
 		return fmt.Errorf("approval does not match the prepared effect obligation")
 	}
 	return nil
+}
+
+func approvalMatchesEffect(approval core.HumanApproval, obligation core.EffectObligation) bool {
+	if approval.ID == "" || string(approval.ID) != obligation.ApprovalRef {
+		return false
+	}
+	sameWork := approval.OrganizationID == obligation.OrganizationID &&
+		approval.TaskID == obligation.TaskID &&
+		approval.EffectObligationID == obligation.ID
+	sameEffect := approval.Action == obligation.Action &&
+		approval.Resource == obligation.Resource &&
+		approval.Boundary == obligation.ConsequenceBoundary &&
+		approval.EffectFingerprint == obligation.EffectFingerprint
+	return sameWork && sameEffect
 }
 
 func latestRecord(ctx context.Context, store Store, kind, id string) ([]byte, int, error) {

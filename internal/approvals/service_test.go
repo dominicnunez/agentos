@@ -49,17 +49,25 @@ func TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision(t *testing.
 		ID:                  "effect-1",
 		OrganizationID:      "org-1",
 		TaskID:              "task-1",
+		ActorID:             "actor-1",
 		Action:              "send",
 		Resource:            "customer-1",
+		Scope:               "org-1",
 		ConsequenceBoundary: core.BoundaryPublicExternal,
 		Descriptor:          "send greeting",
 		EffectFingerprint:   fingerprint,
+		AuthorizationRefs:   []string{"lease-1"},
 		ApprovalRef:         "approval-1",
 		IdempotencyKey:      "effect-key-1",
 		ReplayContext:       map[string]string{"body": "hello"},
 	}
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1", Action: "send", Resource: "customer-1", Scope: "org-1"}
+	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "human-approver", "task-1", nil, nil, "capability_lease", "lease-1", 1, lease); err != nil {
+		_ = l.Close()
+		t.Fatal(err)
+	}
 	adapter := &effectAdapter{}
-	coordinator := effects.NewWithApprovals(l, adapter, service)
+	coordinator := effects.New(l, adapter, service)
 	if _, err := coordinator.Prepare(ctx, obligation); err != nil {
 		_ = l.Close()
 		t.Fatal(err)
@@ -107,7 +115,7 @@ func TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision(t *testing.
 	if err != nil || approval.Status != core.ApprovalAcknowledged {
 		t.Fatalf("approval did not survive restart: approval=%+v err=%v", approval, err)
 	}
-	coordinator = effects.NewWithApprovals(l, adapter, service)
+	coordinator = effects.New(l, adapter, service)
 	if _, err := service.BeginDecision(ctx, approval.ID, "hermes-operator"); !errors.Is(err, approvals.ErrDecisionUnauthorized) {
 		t.Fatalf("ordinary Hermes identity entered decision state: %v", err)
 	}
@@ -135,7 +143,7 @@ func TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertEventOrder(t, stream, "APPROVAL_REQUESTED", "APPROVAL_NOTIFIED", "APPROVAL_ACKNOWLEDGED", "APPROVAL_DECISION_STARTED", "APPROVAL_DECIDED", "APPROVAL_CONSUMED", "EFFECT_OBLIGATION_TRANSITIONED")
+	assertEventOrder(t, stream, "APPROVAL_REQUESTED", "APPROVAL_NOTIFIED", "APPROVAL_ACKNOWLEDGED", "APPROVAL_DECISION_STARTED", "APPROVAL_DECIDED", "CAPABILITY_CHECKED", "APPROVAL_CONSUMED", "EFFECT_OBLIGATION_TRANSITIONED")
 }
 
 func TestNotificationFailureRemainsDurablyPending(t *testing.T) {
@@ -151,8 +159,8 @@ func TestNotificationFailureRemainsDurablyPending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", Action: "deploy", Resource: "agent-os", ConsequenceBoundary: core.BoundaryDeployment, Descriptor: "deploy Agent OS", EffectFingerprint: fingerprint, ApprovalRef: "approval-1", IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"version": "1"}}
-	if _, err := effects.NewWithApprovals(l, &effectAdapter{}, service).Prepare(ctx, obligation); err != nil {
+	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", Action: "deploy", Resource: "agent-os", Scope: "org-1", ConsequenceBoundary: core.BoundaryDeployment, Descriptor: "deploy Agent OS", EffectFingerprint: fingerprint, AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1", IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"version": "1"}}
+	if _, err := effects.New(l, &effectAdapter{}, service).Prepare(ctx, obligation); err != nil {
 		_ = l.Close()
 		t.Fatal(err)
 	}
@@ -222,9 +230,9 @@ func TestDeniedDecisionCancelsPreparedEffect(t *testing.T) {
 	authorizer := approvals.StaticAuthorizer{{OrganizationID: "org-1", HumanID: "human-approver", Boundary: core.BoundaryDestructive, Risk: "CRITICAL"}}
 	service := approvals.New(l, &notifier{}, authorizer)
 	adapter := &effectAdapter{}
-	coordinator := effects.NewWithApprovals(l, adapter, service)
+	coordinator := effects.New(l, adapter, service)
 	fingerprint, _ := effects.Fingerprint("delete", "record-1", map[string]string{"permanent": "true"})
-	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", Action: "delete", Resource: "record-1", ConsequenceBoundary: core.BoundaryDestructive, Descriptor: "permanently delete record", EffectFingerprint: fingerprint, ApprovalRef: "approval-1", IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"permanent": "true"}}
+	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", Action: "delete", Resource: "record-1", Scope: "org-1", ConsequenceBoundary: core.BoundaryDestructive, Descriptor: "permanently delete record", EffectFingerprint: fingerprint, AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1", IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"permanent": "true"}}
 	if _, err := coordinator.Prepare(ctx, obligation); err != nil {
 		t.Fatal(err)
 	}

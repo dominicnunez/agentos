@@ -52,3 +52,11 @@ decision must come from a human identity explicitly authorized for the exact
 organization, consequence boundary, and risk. Protected execution reloads that record
 by `ApprovalRef` and revalidates organization, task, action, resource, boundary,
 fingerprint, and expiry before an adapter can run.
+
+Every effect obligation also binds the acting identity, exact scope, and durable
+capability references. Immediately before an adapter can transition the effect
+to `ATTEMPTED`, one SQLite transaction reloads the latest approval, organization
+freeze, and lease records, revalidates them at a shared time-of-use boundary,
+records the authorization trace, and fails closed if authority is missing,
+expired, revoked, frozen, corrupt, or unavailable.
+

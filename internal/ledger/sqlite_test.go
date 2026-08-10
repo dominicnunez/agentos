@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 )
 
@@ -234,20 +235,29 @@ func TestApprovalConsumptionAndAttemptTransitionAreAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = l.Close() })
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1", Action: "send", Resource: "customer-1", Scope: "org-1"}
+	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "human-1", "task-1", nil, nil, "capability_lease", "lease-1", 1, lease); err != nil {
+		t.Fatal(err)
+	}
 	pending := map[string]any{"effect_obligation_id": "effect-1", "status": "PENDING"}
 	if err := l.AppendRecord(ctx, "org-1", "EFFECT_OBLIGATION_TRANSITIONED", "", "task-1", nil, nil, "effect", "effect-1", 1, pending); err != nil {
 		t.Fatal(err)
 	}
+	approval := core.HumanApproval{ID: "approval-1", OrganizationID: "org-1", TaskID: "task-1", EffectObligationID: "effect-1", Action: "send", Resource: "customer-1", Boundary: core.BoundaryPublicExternal, Status: core.ApprovalApproved, EffectFingerprint: "fingerprint-1", SingleUse: true}
+	if err := l.AppendRecord(ctx, "org-1", "APPROVAL_DECIDED", "human-1", "task-1", nil, nil, "approval", "approval-1", 1, approval); err != nil {
+		t.Fatal(err)
+	}
+	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", Action: "send", Resource: "customer-1", Scope: "org-1", ConsequenceBoundary: core.BoundaryPublicExternal, EffectFingerprint: "fingerprint-1", AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1"}
 	if _, err := l.db.ExecContext(ctx, `CREATE TRIGGER fail_effect_attempt BEFORE INSERT ON records WHEN NEW.kind='effect' AND NEW.version=2 BEGIN SELECT RAISE(FAIL, 'injected attempt failure'); END;`); err != nil {
 		t.Fatal(err)
 	}
 	attempted := map[string]any{"effect_obligation_id": "effect-1", "status": "ATTEMPTED"}
-	err = l.ConsumeApprovalAndAppendRecord(ctx, "org-1", "task-1", "approval-1", "fingerprint-1", "effect-1", nil, nil, "effect", "effect-1", 2, attempted)
+	_, err = l.AuthorizeAndAppendEffectAttempt(ctx, obligation, 2, attempted)
 	if err == nil {
 		t.Fatal("injected attempt failure was ignored")
 	}
 	stream, err := l.Events(ctx, "")
-	if err != nil || len(stream) != 1 || stream[0].EventType != "EFFECT_OBLIGATION_TRANSITIONED" {
+	if err != nil || len(stream) != 3 || stream[1].EventType != "EFFECT_OBLIGATION_TRANSITIONED" || stream[2].EventType != "APPROVAL_DECIDED" {
 		t.Fatalf("failed atomic transition left approval consumption: events=%+v err=%v", stream, err)
 	}
 	rows, err := l.Records(ctx, "effect", "effect-1")
@@ -257,10 +267,10 @@ func TestApprovalConsumptionAndAttemptTransitionAreAtomic(t *testing.T) {
 	if _, err := l.db.ExecContext(ctx, `DROP TRIGGER fail_effect_attempt`); err != nil {
 		t.Fatal(err)
 	}
-	if err := l.ConsumeApprovalAndAppendRecord(ctx, "org-1", "task-1", "approval-1", "fingerprint-1", "effect-1", nil, nil, "effect", "effect-1", 2, attempted); err != nil {
+	if _, err := l.AuthorizeAndAppendEffectAttempt(ctx, obligation, 2, attempted); err != nil {
 		t.Fatalf("rolled-back approval could not be retried: %v", err)
 	}
-	if err := l.ConsumeApprovalAndAppendRecord(ctx, "org-1", "task-1", "approval-1", "fingerprint-1", "effect-2", nil, nil, "effect", "effect-2", 1, attempted); err == nil {
+	if _, err := l.AuthorizeAndAppendEffectAttempt(ctx, obligation, 3, attempted); err == nil {
 		t.Fatal("consumed single-use approval was reused")
 	}
 }

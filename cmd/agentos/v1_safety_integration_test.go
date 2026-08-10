@@ -61,6 +61,9 @@ func TestV1SafetyServicesEnforceAndRecordContracts(t *testing.T) {
 	if !trace.Allowed || trace.LeaseID != lease.ID {
 		t.Fatalf("expected exact capability lease to authorize action: %+v", trace)
 	}
+	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "human-1", "task-1", []string{"approval-capability-1"}, nil, "capability_lease", "lease-1", 1, lease); err != nil {
+		t.Fatalf("persist capability lease: %v", err)
+	}
 
 	manager := inference.Manager{Pools: []inference.Pool{
 		{ID: "subscription", Mode: inference.Subscription, Available: false},
@@ -101,13 +104,13 @@ func TestV1SafetyServicesEnforceAndRecordContracts(t *testing.T) {
 	expiresAt := now.Add(time.Hour)
 	approvalService := approvals.New(l, conformanceNotifier{}, approvals.StaticAuthorizer{{OrganizationID: "org-1", HumanID: "human-1", Boundary: core.BoundaryPublicExternal, Risk: "HIGH"}})
 	obligation := core.EffectObligation{
-		ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", Action: "send", Resource: "customer-1",
+		ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", Action: "send", Resource: "customer-1", Scope: "org-1",
 		ConsequenceBoundary: core.BoundaryPublicExternal,
 		Descriptor:          "send greeting", EffectFingerprint: fingerprint, AuthorizationRefs: []string{"lease-1"},
 		ApprovalRef: "approval-1", IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"body": "hello"},
 	}
 	adapter := &conformanceEffectAdapter{}
-	coordinator := effects.NewWithApprovals(l, adapter, approvalService)
+	coordinator := effects.New(l, adapter, approvalService)
 	if _, err := coordinator.Prepare(ctx, obligation); err != nil {
 		t.Fatalf("prepare protected effect obligation: %v", err)
 	}
