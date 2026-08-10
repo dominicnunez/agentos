@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/ledger"
 )
@@ -23,6 +24,14 @@ func (r *approvalReader) Get(context.Context, core.ID) (core.HumanApproval, erro
 	return r.approval, nil
 }
 
+func persistCapability(t *testing.T, l *ledger.SQLite, obligation core.EffectObligation) {
+	t.Helper()
+	lease := core.CapabilityLease{ID: core.ID(obligation.AuthorizationRefs[0]), ActorID: obligation.ActorID, OriginTaskID: obligation.TaskID, Action: obligation.Action, Resource: obligation.Resource, Scope: obligation.Scope}
+	if err := l.AppendRecord(context.Background(), string(obligation.OrganizationID), "CAPABILITY_GRANTED", "human", string(obligation.TaskID), nil, nil, "capability_lease", obligation.AuthorizationRefs[0], 1, lease); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPersistBeforeEffectAndFingerprintApproval(t *testing.T) {
 	l, e := ledger.Open(":memory:")
 	if e != nil {
@@ -31,9 +40,10 @@ func TestPersistBeforeEffectAndFingerprintApproval(t *testing.T) {
 	defer l.Close()
 	a := &adapter{}
 	reader := &approvalReader{}
-	c := NewWithApprovals(l, a, reader)
+	c := New(l, a, reader)
 	fp, _ := Fingerprint("send", "customer", map[string]string{"body": "hi"})
-	o := core.EffectObligation{ID: "e", OrganizationID: "org", TaskID: "task", Action: "send", Resource: "customer", ConsequenceBoundary: core.BoundaryPublicExternal, Descriptor: "send message", EffectFingerprint: fp, ApprovalRef: "approval", IdempotencyKey: "key", ReplayContext: map[string]string{"body": "hi"}}
+	o := core.EffectObligation{ID: "e", OrganizationID: "org", TaskID: "task", ActorID: "actor", Action: "send", Resource: "customer", Scope: "org", ConsequenceBoundary: core.BoundaryPublicExternal, Descriptor: "send message", EffectFingerprint: fp, AuthorizationRefs: []string{"lease"}, ApprovalRef: "approval", IdempotencyKey: "key", ReplayContext: map[string]string{"body": "hi"}}
+	persistCapability(t, l, o)
 	if _, e = c.Prepare(context.Background(), o); e != nil {
 		t.Fatal(e)
 	}
@@ -51,7 +61,7 @@ func TestPersistBeforeEffectAndFingerprintApproval(t *testing.T) {
 		t.Fatalf("versions=%d", len(rows))
 	}
 	events, err := l.Events(context.Background(), "")
-	if err != nil || len(events) != 3 {
+	if err != nil || len(events) != 5 {
 		t.Fatalf("effect transitions were not ledgered: events=%d err=%v", len(events), err)
 	}
 }
@@ -62,12 +72,12 @@ func TestPrepareRejectsFingerprintThatDoesNotBindReplayContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = l.Close() })
-	coordinator := NewWithApprovals(l, &adapter{}, &approvalReader{})
+	coordinator := New(l, &adapter{}, &approvalReader{})
 	safeFingerprint, err := Fingerprint("send", "customer", map[string]string{"body": "safe"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org", TaskID: "task", Action: "send", Resource: "customer", ConsequenceBoundary: core.BoundaryPublicExternal, Descriptor: "send message", EffectFingerprint: safeFingerprint, ApprovalRef: "approval-1", IdempotencyKey: "key-1", ReplayContext: map[string]string{"body": "unapproved"}}
+	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org", TaskID: "task", ActorID: "actor", Action: "send", Resource: "customer", Scope: "org", ConsequenceBoundary: core.BoundaryPublicExternal, Descriptor: "send message", EffectFingerprint: safeFingerprint, AuthorizationRefs: []string{"lease"}, ApprovalRef: "approval-1", IdempotencyKey: "key-1", ReplayContext: map[string]string{"body": "unapproved"}}
 	if _, err = coordinator.Prepare(context.Background(), obligation); err == nil {
 		t.Fatal("mismatched replay context was persisted under an approved fingerprint")
 	}
@@ -84,12 +94,13 @@ func TestUnprotectedEffectsReloadDurableState(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = l.Close() })
 	adapter := &adapter{}
-	coordinator := NewWithApprovals(l, adapter, nil)
+	coordinator := New(l, adapter, nil)
 	fingerprint, err := Fingerprint("cache", "record-1", map[string]string{"value": "ready"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	obligation := core.EffectObligation{ID: "effect-confirmed", OrganizationID: "org", TaskID: "task", Action: "cache", Resource: "record-1", EffectFingerprint: fingerprint, IdempotencyKey: "key-confirmed", ReplayContext: map[string]string{"value": "ready"}}
+	obligation := core.EffectObligation{ID: "effect-confirmed", OrganizationID: "org", TaskID: "task", ActorID: "actor", Action: "cache", Resource: "record-1", Scope: "org", EffectFingerprint: fingerprint, AuthorizationRefs: []string{"lease"}, IdempotencyKey: "key-confirmed", ReplayContext: map[string]string{"value": "ready"}}
+	persistCapability(t, l, obligation)
 	confirmed, err := coordinator.Execute(context.Background(), obligation)
 	if err != nil || confirmed.Status != core.EffectConfirmed || !adapter.called {
 		t.Fatalf("initial unprotected effect failed: result=%+v called=%v err=%v", confirmed, adapter.called, err)
@@ -129,10 +140,11 @@ func TestSingleUseApprovalIsConsumedBeforeAdapter(t *testing.T) {
 	defer l.Close()
 	a := &adapter{}
 	reader := &approvalReader{}
-	c := NewWithApprovals(l, a, reader)
+	c := New(l, a, reader)
 	fp, _ := Fingerprint("send", "customer", map[string]string{"body": "hi"})
 	reader.approval = core.HumanApproval{ID: "approval-1", OrganizationID: "org", TaskID: "task", EffectObligationID: "effect-1", Action: "send", Resource: "customer", Boundary: core.BoundaryPublicExternal, Status: core.ApprovalApproved, EffectFingerprint: fp, SingleUse: true}
-	o := core.EffectObligation{ID: "effect-1", OrganizationID: "org", TaskID: "task", Action: "send", Resource: "customer", ConsequenceBoundary: core.BoundaryPublicExternal, Descriptor: "send message", EffectFingerprint: fp, ApprovalRef: "approval-1", IdempotencyKey: "key-1", ReplayContext: map[string]string{"body": "hi"}}
+	o := core.EffectObligation{ID: "effect-1", OrganizationID: "org", TaskID: "task", ActorID: "actor", Action: "send", Resource: "customer", Scope: "org", ConsequenceBoundary: core.BoundaryPublicExternal, Descriptor: "send message", EffectFingerprint: fp, AuthorizationRefs: []string{"lease"}, ApprovalRef: "approval-1", IdempotencyKey: "key-1", ReplayContext: map[string]string{"body": "hi"}}
+	persistCapability(t, l, o)
 	if _, err = c.Prepare(context.Background(), o); err != nil {
 		t.Fatal(err)
 	}
@@ -161,9 +173,9 @@ func TestProtectedEffectRejectsExpiredApprovalAndUnknownBoundary(t *testing.T) {
 	t.Cleanup(func() { _ = l.Close() })
 	adapter := &adapter{}
 	reader := &approvalReader{}
-	coordinator := NewWithApprovals(l, adapter, reader)
+	coordinator := New(l, adapter, reader)
 	fingerprint, _ := Fingerprint("deploy", "agent-os", map[string]string{"version": "1"})
-	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org", TaskID: "task", Action: "deploy", Resource: "agent-os", ConsequenceBoundary: core.BoundaryDeployment, Descriptor: "deploy Agent OS", EffectFingerprint: fingerprint, ApprovalRef: "approval-1", IdempotencyKey: "key-1", ReplayContext: map[string]string{"version": "1"}}
+	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org", TaskID: "task", ActorID: "actor", Action: "deploy", Resource: "agent-os", Scope: "org", ConsequenceBoundary: core.BoundaryDeployment, Descriptor: "deploy Agent OS", EffectFingerprint: fingerprint, AuthorizationRefs: []string{"lease"}, ApprovalRef: "approval-1", IdempotencyKey: "key-1", ReplayContext: map[string]string{"version": "1"}}
 	if _, err := coordinator.Prepare(context.Background(), obligation); err != nil {
 		t.Fatal(err)
 	}
@@ -188,9 +200,9 @@ func TestInterruptedAttemptIsNotBlindlyReplayed(t *testing.T) {
 	t.Cleanup(func() { _ = l.Close() })
 	adapter := &adapter{}
 	reader := &approvalReader{}
-	coordinator := NewWithApprovals(l, adapter, reader)
+	coordinator := New(l, adapter, reader)
 	fingerprint, _ := Fingerprint("send", "customer", map[string]string{"body": "hi"})
-	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org", TaskID: "task", Action: "send", Resource: "customer", ConsequenceBoundary: core.BoundaryPublicExternal, Descriptor: "send message", EffectFingerprint: fingerprint, ApprovalRef: "approval-1", IdempotencyKey: "key-1", ReplayContext: map[string]string{"body": "hi"}}
+	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org", TaskID: "task", ActorID: "actor", Action: "send", Resource: "customer", Scope: "org", ConsequenceBoundary: core.BoundaryPublicExternal, Descriptor: "send message", EffectFingerprint: fingerprint, AuthorizationRefs: []string{"lease"}, ApprovalRef: "approval-1", IdempotencyKey: "key-1", ReplayContext: map[string]string{"body": "hi"}}
 	pending, err := coordinator.Prepare(context.Background(), obligation)
 	if err != nil {
 		t.Fatal(err)
@@ -203,5 +215,58 @@ func TestInterruptedAttemptIsNotBlindlyReplayed(t *testing.T) {
 	reader.approval = core.HumanApproval{ID: "approval-1", OrganizationID: "org", TaskID: "task", EffectObligationID: "effect-1", Action: "send", Resource: "customer", Boundary: core.BoundaryPublicExternal, Status: core.ApprovalApproved, EffectFingerprint: fingerprint}
 	if _, err := coordinator.Execute(context.Background(), obligation); !errors.Is(err, ErrEffectUncertain) || adapter.called {
 		t.Fatalf("uncertain attempt was replayed: called=%v err=%v", adapter.called, err)
+	}
+}
+
+func TestFreezeAndRevokePreventEffectAtTimeOfUse(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1", Action: "send", Resource: "customer-1", Scope: "org-1"}
+	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "human-1", "task-1", []string{"approval-capability-1"}, nil, "capability_lease", "lease-1", 1, lease); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := Fingerprint("send", "customer-1", map[string]string{"body": "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := &approvalReader{approval: core.HumanApproval{ID: "approval-1", OrganizationID: "org-1", TaskID: "task-1", EffectObligationID: "effect-1", Action: "send", Resource: "customer-1", Boundary: core.BoundaryPublicExternal, Status: core.ApprovalApproved, EffectFingerprint: fingerprint, SingleUse: true}}
+	adapter := &adapter{}
+	coordinator := New(l, adapter, reader)
+	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", Action: "send", Resource: "customer-1", Scope: "org-1", ConsequenceBoundary: core.BoundaryPublicExternal, Descriptor: "send message", EffectFingerprint: fingerprint, AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1", IdempotencyKey: "key-1", ReplayContext: map[string]string{"body": "hello"}}
+	if _, err := coordinator.Prepare(ctx, obligation); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	freeze := authority.FreezeState{OrganizationID: "org-1", Frozen: true, Reason: "incident", UpdatedAt: now}
+	if err := l.AppendRecord(ctx, "org-1", "FREEZE_SET", "human-1", "task-1", nil, nil, "organization_freeze", "org-1", 1, freeze); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Execute(ctx, obligation); !errors.Is(err, ErrEffectUnauthorized) || adapter.called {
+		t.Fatalf("frozen organization reached effect adapter: called=%v err=%v", adapter.called, err)
+	}
+	freeze.Frozen = false
+	freeze.UpdatedAt = now.Add(time.Second)
+	if err := l.AppendRecord(ctx, "org-1", "FREEZE_SET", "human-1", "task-1", nil, nil, "organization_freeze", "org-1", 2, freeze); err != nil {
+		t.Fatal(err)
+	}
+	revokedAt := now.Add(2 * time.Second)
+	lease.RevokedAt = &revokedAt
+	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_REVOKED", "human-1", "task-1", nil, nil, "capability_lease", "lease-1", 2, lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Execute(ctx, obligation); !errors.Is(err, ErrEffectUnauthorized) || adapter.called {
+		t.Fatalf("revoked capability reached effect adapter: called=%v err=%v", adapter.called, err)
+	}
+	effectRows, err := l.Records(ctx, "effect", "effect-1")
+	if err != nil || len(effectRows) != 1 {
+		t.Fatalf("denied effect advanced from pending: versions=%d err=%v", len(effectRows), err)
+	}
+	traces, err := l.Records(ctx, "authorization_trace", "effect-1")
+	if err != nil || len(traces) != 2 {
+		t.Fatalf("time-of-use denials were not durable: traces=%d err=%v", len(traces), err)
 	}
 }
