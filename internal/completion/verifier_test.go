@@ -26,4 +26,10 @@ func TestVerifierOwnsPostconditionTrust(t *testing.T) {
 	if !available || got.PostconditionStatus != core.PostconditionNotChecked {
 		t.Fatalf("mismatched result was verified: %+v", got)
 	}
+
+	reviewCandidate := core.ToolOutcome{ToolID: "fake-review-model/v1", Status: core.OutcomeSucceeded, ObservedEffect: "fake-review-model: work"}
+	got, available = (Verifier{}).Verify(task, reviewCandidate)
+	if available || got.PostconditionStatus != core.PostconditionNotChecked {
+		t.Fatalf("release-test review candidate gained a deterministic verifier: %+v", got)
+	}
 }

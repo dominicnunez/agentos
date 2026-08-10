@@ -15,7 +15,8 @@ Passing the architecture checklist does not by itself authorize deployment.
 | Backup and restore | PASS | Native online SQLite backup, integrity/schema verification, no-overwrite restore, and pointer-switch rollback are tested and documented. |
 | Real model provider implementation | PASS | The disabled-by-default Codex subscription adapter confines the reviewed SDK. The separate official OpenAI Responses adapter pins egress, disables provider tools and storage, bounds requests, and resolves a server-owned credential per call. Both record provider tokens with unknown cost. |
 | Human completion review | PASS | Dedicated `REVIEWER` credentials approve, reject, or revise an exact fingerprinted model candidate. Agent/A2A and ordinary Human work paths cannot decide completion; recovery resumes durable decisions. |
-| Full real-provider live test | BLOCKED | Keep real providers disabled until `v1.0.0-rc.1` artifacts exist, the complete fake-provider loopback/recovery/security suite passes, a bounded live-test plan is approved, and financial plus sensitive-data-boundary approvals are recorded. |
+| Fake-provider release gate | PASS | Process-level CI keeps a no-network model candidate pending across verified backup/restore, denies Agent and ordinary Operator review authority, rejects a stale fingerprint, and accepts plus idempotently replays the exact dedicated-reviewer decision. |
+| Full real-provider live test | BLOCKED | Keep real providers disabled until `v1.0.0-rc.1` artifacts exist, the fake-provider gate above stays green, a bounded live-test plan is approved, and financial plus sensitive-data-boundary approvals are recorded. |
 | Approval control | BLOCKED | Requires a separately authenticated exact-effect control and an approved trusted-control design. Chat remains untrusted work content. |
 | Release artifacts | TODO | Produce pinned cross-platform binaries, checksums, SBOMs, and build provenance. |
 | Loopback pilot | PASS | CI restores a live disposable ledger, restarts the runtime, retrieves Human/A2A results, continues blocked work, and checks expiry and revocation. |
@@ -23,7 +24,7 @@ Passing the architecture checklist does not by itself authorize deployment.
 
 ## Release sequence
 
-1. Complete the fake-provider loopback, recovery, and security release gate.
+1. Keep the fake-provider loopback, recovery, and security release gate green.
 2. Produce reproducible `v1.0.0-rc.1` artifacts.
 3. Approve a bounded real-provider live-test plan and record its financial and
    sensitive-data-boundary decisions before enabling a provider.

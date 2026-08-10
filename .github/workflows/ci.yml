@@ -87,6 +87,7 @@ jobs:
           AGENTOS_PILOT_REVOKED_TOKEN: pilot-revoked-token-000000000000001
           AGENTOS_PILOT_EXPIRED_TOKEN: pilot-expired-token-000000000000001
           AGENTOS_PILOT_HUMAN_TOKEN: pilot-human-token-00000000000000001
+          AGENTOS_PILOT_REVIEWER_TOKEN: pilot-reviewer-token-000000000000001
         run: |
           mkdir -p work/pilot
           go build -o work/agentos ./cmd/agentos
@@ -103,6 +104,7 @@ jobs:
             AGENTOS_DB="$1" \
             AGENTOS_A2A_ACTORS_FILE="$2" \
             AGENTOS_HUMAN_ACTORS_FILE=scripts/testdata/pilot-human.json \
+            AGENTOS_MODEL_PROVIDER=fake-review \
             AGENTOS_LISTEN_ADDR=127.0.0.1:8081 \
             AGENTOS_PUBLIC_URL=http://127.0.0.1:8081 \
             ./work/agentos >work/pilot/server.log 2>&1 &
@@ -127,7 +129,8 @@ jobs:
             --reader-token "$AGENTOS_PILOT_READER_TOKEN" \
             --revoked-token "$AGENTOS_PILOT_REVOKED_TOKEN" \
             --expired-token "$AGENTOS_PILOT_EXPIRED_TOKEN" \
-            --human-token "$AGENTOS_PILOT_HUMAN_TOKEN"
+            --human-token "$AGENTOS_PILOT_HUMAN_TOKEN" \
+            --reviewer-token "$AGENTOS_PILOT_REVIEWER_TOKEN"
           ./work/agentos-recovery backup \
             --database work/pilot/live.db \
             --output work/pilot/backup.db >work/pilot/backup.json
@@ -145,7 +148,8 @@ jobs:
             --reader-token "$AGENTOS_PILOT_READER_TOKEN" \
             --revoked-token "$AGENTOS_PILOT_REVOKED_TOKEN" \
             --expired-token "$AGENTOS_PILOT_EXPIRED_TOKEN" \
-            --human-token "$AGENTOS_PILOT_HUMAN_TOKEN"
+            --human-token "$AGENTOS_PILOT_HUMAN_TOKEN" \
+            --reviewer-token "$AGENTOS_PILOT_REVIEWER_TOKEN"
           stop_pilot
 
       - name: Architecture boundaries
