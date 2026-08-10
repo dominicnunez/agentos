@@ -979,7 +979,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	}
 
 	executionResult, executionErr := handler.Execute(ctx, executionTask, manifest)
-	outcome := s.verifier.Verify(executionTask, executionResult.Outcome)
+	outcome, verifierAvailable := s.verifier.Verify(executionTask, executionResult.Outcome)
 	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: outcome, CorrelationID: state.CorrelationID}); err != nil {
 		return taskRun{}, fmt.Errorf("persist outcome for task %s: %w", task.ID, err)
 	}
@@ -1040,6 +1040,23 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		task.Status = core.TaskCompleted
 		if err := s.state.SaveTask(ctx, organizationID, "TASK_VERIFIED_COMPLETE", "runtime", state.CorrelationID, state.Version+2, task, detail); err != nil {
 			return taskRun{}, fmt.Errorf("persist completed task %s: %w", task.ID, err)
+		}
+	} else if task.ExecutionKind == core.ExecutionAgent && outcome.Status == core.OutcomeSucceeded && !verifierAvailable {
+		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "COMPLETION_REVIEW_REQUIRED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: detail, CorrelationID: state.CorrelationID}); err != nil {
+			return taskRun{}, fmt.Errorf("persist completion review requirement for task %s: %w", task.ID, err)
+		}
+		task.Status = core.TaskBlocked
+		blocked := events.TaskBlockedPayload{
+			Reason:        "the configured model produced a candidate without an independent completion verifier",
+			Missing:       "authorized independent completion judgment against the task contract",
+			WhyNeeded:     "model output is work content and cannot certify its own completion",
+			WorkCompleted: "the provider output, runtime outcome, and completion candidate were durably recorded",
+			RemainingWork: "evaluate the recorded candidate using an approved independent or human judgment path",
+			EvidenceRefs:  []string{resultEvent.EventID},
+		}
+		running := projections.Versioned[core.Task]{Version: state.Version + 1, CorrelationID: state.CorrelationID, Value: task}
+		if err := s.saveBlockedTask(ctx, snapshot, running, organizationID, task, blocked); err != nil {
+			return taskRun{}, fmt.Errorf("persist completion-review block for task %s: %w", task.ID, err)
 		}
 	} else {
 		task.Status = core.TaskFailed
@@ -1185,7 +1202,7 @@ func (s *Service) readTaskResult(ctx context.Context, correlationID string) (tas
 			if err := json.Unmarshal(event.Payload, &result.Outcome); err != nil {
 				return taskRun{}, err
 			}
-		case "COMPLETION_VERIFIED":
+		case "COMPLETION_VERIFIED", "COMPLETION_REVIEW_REQUIRED":
 			var detail completionDetail
 			if err := json.Unmarshal(event.Payload, &detail); err != nil {
 				return taskRun{}, err

@@ -1,15 +1,8 @@
 package execution
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"mime"
-	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -69,137 +62,6 @@ func (FakeModel) Complete(_ context.Context, prompt string) (ModelResponse, erro
 			CostUSD:  &zero,
 		},
 	}, nil
-}
-
-// OpenAICompatible is the V1 real-provider adapter. Credentials are resolved
-// at call time and placed only in the outbound adapter request.
-type OpenAICompatible struct {
-	Endpoint, Model                           string
-	APIKey                                    func(context.Context) (string, error)
-	Client                                    *http.Client
-	AllowedHosts                              []string
-	PricingKnown                              bool
-	InputCostPerMillion, OutputCostPerMillion float64
-}
-
-func (a OpenAICompatible) Name() string { return "openai-compatible/" + a.Model }
-func (a OpenAICompatible) Descriptor() ModelDescriptor {
-	return ModelDescriptor{Provider: "openai-compatible", Model: a.Model, ExecutionProfileVersion: "v1-openai-compatible"}
-}
-func (a OpenAICompatible) Complete(ctx context.Context, prompt string) (ModelResponse, error) {
-	if a.Endpoint == "" || a.Model == "" || a.APIKey == nil {
-		return ModelResponse{}, fmt.Errorf("real model adapter is not configured")
-	}
-	endpoint, err := url.Parse(a.Endpoint)
-	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil || endpoint.Fragment != "" {
-		return ModelResponse{}, fmt.Errorf("model endpoint must be an absolute HTTPS URL without user info or fragment")
-	}
-	if !allowedProviderHost(endpoint.Hostname(), a.AllowedHosts) {
-		return ModelResponse{}, fmt.Errorf("model endpoint host is not allowlisted")
-	}
-	key, err := a.APIKey(ctx)
-	if err != nil {
-		return ModelResponse{}, err
-	}
-	if key == "" || strings.TrimSpace(key) != key || strings.ContainsAny(key, "\r\n") {
-		return ModelResponse{}, fmt.Errorf("model credential is invalid")
-	}
-	body, _ := json.Marshal(map[string]any{"model": a.Model, "messages": []map[string]string{{"role": "user", "content": prompt}}})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.Endpoint, bytes.NewReader(body))
-	if err != nil {
-		return ModelResponse{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+key)
-	baseClient := a.Client
-	if baseClient == nil {
-		baseClient = &http.Client{}
-	}
-	client := *baseClient
-	if client.Timeout <= 0 || client.Timeout > 60*time.Second {
-		client.Timeout = 60 * time.Second
-	}
-	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
-	resp, err := client.Do(req)
-	if err != nil {
-		return ModelResponse{}, err
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-	if resp.StatusCode/100 != 2 {
-		return ModelResponse{}, fmt.Errorf("model provider returned %s", resp.Status)
-	}
-	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		return ModelResponse{}, fmt.Errorf("model provider must return application/json")
-	}
-	var decoded struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-		Usage *struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
-		} `json:"usage"`
-	}
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
-	if err != nil {
-		return ModelResponse{}, err
-	}
-	if len(responseBody) > 1<<20 {
-		return ModelResponse{}, fmt.Errorf("model provider response exceeds 1048576 bytes")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(responseBody))
-	if err = decoder.Decode(&decoded); err != nil {
-		return ModelResponse{}, err
-	}
-	if err = decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return ModelResponse{}, fmt.Errorf("model provider returned trailing content")
-	}
-	if len(decoded.Choices) == 0 {
-		return ModelResponse{}, fmt.Errorf("model provider returned no choices")
-	}
-	if decoded.Usage == nil {
-		return ModelResponse{}, fmt.Errorf("model provider returned no usage")
-	}
-	usage := events.InferenceUsageRecordedPayload{
-		Source:       "provider_response",
-		Provider:     "openai-compatible",
-		Model:        a.Model,
-		InputTokens:  decoded.Usage.PromptTokens,
-		OutputTokens: decoded.Usage.CompletionTokens,
-		TotalTokens:  decoded.Usage.TotalTokens,
-	}
-	if usage.TotalTokens == 0 {
-		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
-	}
-	if a.PricingKnown {
-		if a.InputCostPerMillion < 0 || a.OutputCostPerMillion < 0 {
-			return ModelResponse{}, fmt.Errorf("model pricing cannot be negative")
-		}
-		cost := (float64(usage.InputTokens)*a.InputCostPerMillion + float64(usage.OutputTokens)*a.OutputCostPerMillion) / 1_000_000
-		usage.CostUSD = &cost
-	}
-	if !usage.Valid() {
-		return ModelResponse{}, fmt.Errorf("model provider returned invalid usage")
-	}
-	return ModelResponse{Text: decoded.Choices[0].Message.Content, Usage: usage}, nil
-}
-
-func allowedProviderHost(host string, allowed []string) bool {
-	if host == "" || len(allowed) == 0 {
-		return false
-	}
-	for _, candidate := range allowed {
-		if strings.EqualFold(host, candidate) {
-			return true
-		}
-	}
-	return false
 }
 
 type AgentExecution struct {

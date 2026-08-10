@@ -98,6 +98,17 @@ SDK credential-file, and model settings documented in
 Merely installing Codex or setting its normal user configuration never enables
 external inference in Agent OS.
 
+The official OpenAI Responses API is separately available with
+`AGENTOS_MODEL_PROVIDER=openai-api`, a server-owned API-key reference, and an
+exact model snapshot. The provider has a fixed OpenAI endpoint, disables model
+tools and response storage, rejects redirects and authority-bearing output, and
+does not retry billable calls automatically. Enabling it requires the existing
+financial and sensitive-data-boundary approvals described in
+[docs/OPENAI_API_PROVIDER.md](docs/OPENAI_API_PROVIDER.md). Real-provider output
+is durably recorded as a completion candidate but remains blocked for an
+approved independent judgment when no runtime verifier exists; model text never
+certifies itself as complete.
+
 Direct human natural-language intake uses a distinct authenticated endpoint and
 the same internal router:
 
@@ -127,7 +138,7 @@ Deferred: federation, workflow DSLs, semantic/vector memory, Lab, optimizers,
 broad tool ecosystems, production external-effect adapters, and reconciliation
 workers.
 
-See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md), [docs/OPERATOR_INTAKE.md](docs/OPERATOR_INTAKE.md), [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md), [docs/A2A_INTEROP.md](docs/A2A_INTEROP.md), [docs/EFFECT_RECONCILIATION.md](docs/EFFECT_RECONCILIATION.md), [docs/SQLITE_RECOVERY.md](docs/SQLITE_RECOVERY.md), and [docs/CODEX_SUBSCRIPTION_PROVIDER.md](docs/CODEX_SUBSCRIPTION_PROVIDER.md).
+See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md), [docs/OPERATOR_INTAKE.md](docs/OPERATOR_INTAKE.md), [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md), [docs/A2A_INTEROP.md](docs/A2A_INTEROP.md), [docs/EFFECT_RECONCILIATION.md](docs/EFFECT_RECONCILIATION.md), [docs/SQLITE_RECOVERY.md](docs/SQLITE_RECOVERY.md), [docs/CODEX_SUBSCRIPTION_PROVIDER.md](docs/CODEX_SUBSCRIPTION_PROVIDER.md), and [docs/OPENAI_API_PROVIDER.md](docs/OPENAI_API_PROVIDER.md).
 
 ## Authoritative architecture handoff
 

@@ -75,6 +75,7 @@ type InferenceUsageRecordedPayload struct {
 func (p InferenceUsageRecordedPayload) Valid() bool {
 	return p.Source != "" && p.Provider != "" && p.Model != "" &&
 		p.InputTokens >= 0 && p.OutputTokens >= 0 &&
+		p.TotalTokens >= 0 &&
 		p.TotalTokens == p.InputTokens+p.OutputTokens &&
 		(p.CostUSD == nil || *p.CostUSD >= 0)
 }

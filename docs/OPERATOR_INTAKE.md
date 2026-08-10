@@ -27,8 +27,9 @@ Routing follows the minimal-justified-LLM rule:
 The router is deterministic. The Agent route uses the fake model adapter by
 default so V1 remains testable without a provider credential. A deployment may
 explicitly select the confined Codex subscription adapter described in
-[Codex subscription provider](CODEX_SUBSCRIPTION_PROVIDER.md); intake text does
-not select or reconfigure providers.
+[Codex subscription provider](CODEX_SUBSCRIPTION_PROVIDER.md) or the official
+[OpenAI API provider](OPENAI_API_PROVIDER.md). Intake text does not select or
+reconfigure providers.
 
 ## Direct human API
 
