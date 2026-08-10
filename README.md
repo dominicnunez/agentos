@@ -63,6 +63,11 @@ Interrupted external-effect status checks are separately disabled unless
 [docs/EFFECT_RECONCILIATION.md](docs/EFFECT_RECONCILIATION.md) for its
 read-only protocol and fail-closed configuration.
 
+Online SQLite backup, offline verification, and no-overwrite restore are
+available through `go run ./cmd/agentos-recovery`. See
+[docs/SQLITE_RECOVERY.md](docs/SQLITE_RECOVERY.md) for the tested recovery and
+rollback procedure.
+
 Enable the repository-owned commit and push checks once per checkout:
 
 ```powershell
@@ -113,7 +118,7 @@ Included: core organizational/work objects, task dependencies, deterministic and
 
 Deferred: federation, workflow DSLs, semantic/vector memory, Lab, optimizers, production provider wiring, broad tool ecosystems, production external-effect adapters, and reconciliation workers.
 
-See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md), [docs/OPERATOR_INTAKE.md](docs/OPERATOR_INTAKE.md), [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md), [docs/A2A_INTEROP.md](docs/A2A_INTEROP.md), [docs/EFFECT_RECONCILIATION.md](docs/EFFECT_RECONCILIATION.md), and [docs/CODEX_SUBSCRIPTION_PROVIDER.md](docs/CODEX_SUBSCRIPTION_PROVIDER.md).
+See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md), [docs/OPERATOR_INTAKE.md](docs/OPERATOR_INTAKE.md), [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md), [docs/A2A_INTEROP.md](docs/A2A_INTEROP.md), [docs/EFFECT_RECONCILIATION.md](docs/EFFECT_RECONCILIATION.md), [docs/SQLITE_RECOVERY.md](docs/SQLITE_RECOVERY.md), and [docs/CODEX_SUBSCRIPTION_PROVIDER.md](docs/CODEX_SUBSCRIPTION_PROVIDER.md).
 
 ## Authoritative architecture handoff
 

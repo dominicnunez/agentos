@@ -1,0 +1,16 @@
+{
+  "actors": [
+    {
+      "id": "pilot-human",
+      "organization_id": "pilot-org",
+      "status": "ACTIVE",
+      "role": "OPERATOR",
+      "work_scope": "ORGANIZATION",
+      "token_ref": "AGENTOS_PILOT_HUMAN_TOKEN",
+      "review_ref": "pilot-reviewed-human-v1",
+      "expires_at": "2099-01-01T00:00:00Z",
+      "max_concurrent": 4,
+      "requests_per_minute": 100
+    }
+  ]
+}

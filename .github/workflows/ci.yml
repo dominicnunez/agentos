@@ -80,6 +80,74 @@ jobs:
             --url http://127.0.0.1:8080 \
             --token "$AGENTOS_HUMAN_OPERATOR_TOKEN"
 
+      - name: Disposable backup and restart pilot
+        env:
+          AGENTOS_PILOT_AGENT_TOKEN: pilot-agent-token-00000000000000001
+          AGENTOS_PILOT_READER_TOKEN: pilot-reader-token-0000000000000001
+          AGENTOS_PILOT_REVOKED_TOKEN: pilot-revoked-token-000000000000001
+          AGENTOS_PILOT_EXPIRED_TOKEN: pilot-expired-token-000000000000001
+          AGENTOS_PILOT_HUMAN_TOKEN: pilot-human-token-00000000000000001
+        run: |
+          mkdir -p work/pilot
+          go build -o work/agentos ./cmd/agentos
+          go build -o work/agentos-recovery ./cmd/agentos-recovery
+          pilot_pid=""
+          stop_pilot() {
+            if [ -n "$pilot_pid" ]; then
+              kill -TERM "$pilot_pid" 2>/dev/null || true
+              wait "$pilot_pid" 2>/dev/null || true
+              pilot_pid=""
+            fi
+          }
+          start_pilot() {
+            AGENTOS_DB="$1" \
+            AGENTOS_A2A_ACTORS_FILE="$2" \
+            AGENTOS_HUMAN_ACTORS_FILE=scripts/testdata/pilot-human.json \
+            AGENTOS_LISTEN_ADDR=127.0.0.1:8081 \
+            AGENTOS_PUBLIC_URL=http://127.0.0.1:8081 \
+            ./work/agentos >work/pilot/server.log 2>&1 &
+            pilot_pid=$!
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent http://127.0.0.1:8081/.well-known/agent-card.json >/dev/null; then
+                return
+              fi
+              if [ "$attempt" -eq 30 ]; then
+                cat work/pilot/server.log
+                exit 1
+              fi
+              sleep 1
+            done
+          }
+          trap stop_pilot EXIT
+          start_pilot work/pilot/live.db scripts/testdata/pilot-a2a-seed.json
+          python3 scripts/verify-loopback-pilot.py seed \
+            --url http://127.0.0.1:8081 \
+            --state work/pilot/state.json \
+            --agent-token "$AGENTOS_PILOT_AGENT_TOKEN" \
+            --reader-token "$AGENTOS_PILOT_READER_TOKEN" \
+            --revoked-token "$AGENTOS_PILOT_REVOKED_TOKEN" \
+            --expired-token "$AGENTOS_PILOT_EXPIRED_TOKEN" \
+            --human-token "$AGENTOS_PILOT_HUMAN_TOKEN"
+          ./work/agentos-recovery backup \
+            --database work/pilot/live.db \
+            --output work/pilot/backup.db >work/pilot/backup.json
+          ./work/agentos-recovery verify \
+            --database work/pilot/backup.db >work/pilot/verified.json
+          stop_pilot
+          ./work/agentos-recovery restore \
+            --backup work/pilot/backup.db \
+            --output work/pilot/restored.db >work/pilot/restored.json
+          start_pilot work/pilot/restored.db scripts/testdata/pilot-a2a-restart.json
+          python3 scripts/verify-loopback-pilot.py recover \
+            --url http://127.0.0.1:8081 \
+            --state work/pilot/state.json \
+            --agent-token "$AGENTOS_PILOT_AGENT_TOKEN" \
+            --reader-token "$AGENTOS_PILOT_READER_TOKEN" \
+            --revoked-token "$AGENTOS_PILOT_REVOKED_TOKEN" \
+            --expired-token "$AGENTOS_PILOT_EXPIRED_TOKEN" \
+            --human-token "$AGENTOS_PILOT_HUMAN_TOKEN"
+          stop_pilot
+
       - name: Architecture boundaries
         run: go tool archguard check --include-tests --profile modular-monolith
 

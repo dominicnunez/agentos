@@ -6,3 +6,5 @@
 /.idea/
 /.vscode/
 /work/
+__pycache__/
+*.py[cod]
