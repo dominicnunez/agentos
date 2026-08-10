@@ -459,4 +459,3 @@ func scanEvent(row rowScanner) (events.Event, error) {
 	event.CreatedAt = parsed
 	return event, nil
 }
-
