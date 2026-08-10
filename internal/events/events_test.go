@@ -18,6 +18,8 @@ func (m *memoryLedger) Append(_ context.Context, d TrustedDraft) (Event, error) 
 		RecipientScope:    d.RecipientScope,
 		RecipientID:       d.RecipientID,
 		TaskID:            d.TaskID,
+		AuthorizationRefs: d.AuthorizationRefs,
+		ArtifactRefs:      d.ArtifactRefs,
 	}
 	m.events = append(m.events, e)
 	return e, nil
@@ -123,6 +125,37 @@ func TestCandidateCompletionCannotMintVerifiedCompletion(t *testing.T) {
 	}
 	if event.EventType != "CANDIDATE_COMPLETE" || len(ledger.events) != 1 || ledger.events[0].EventType != "CANDIDATE_COMPLETE" {
 		t.Fatalf("candidate content minted verified completion: event=%+v ledger=%+v", event, ledger.events)
+	}
+}
+
+func TestResultPublishedRequiresCanonicalSummaryAndArtifactRefs(t *testing.T) {
+	ledger := &memoryLedger{}
+	gateway := NewGateway(ledger)
+	valid := Draft{
+		EventType:    "RESULT_PUBLISHED",
+		TaskID:       "task-1",
+		ArtifactRefs: []string{"artifact-1"},
+		Payload:      ResultPublishedPayload{Summary: "verified work product", ArtifactRefs: []string{"artifact-1"}},
+	}
+	event, err := gateway.PublishAgentDraft(context.Background(), "org", "agent", "execution", "correlation", valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.EventType != "RESULT_PUBLISHED" || len(event.ArtifactRefs) != 1 || event.ArtifactRefs[0] != "artifact-1" {
+		t.Fatalf("result envelope=%+v", event)
+	}
+	invalid := valid
+	invalid.Payload = ResultPublishedPayload{Summary: "verified work product", ArtifactRefs: []string{"different"}}
+	if _, err := gateway.PublishAgentDraft(context.Background(), "org", "agent", "execution", "correlation", invalid); err == nil {
+		t.Fatal("mismatched result artifact refs were accepted")
+	}
+	invalid = valid
+	invalid.Payload = ResultPublishedPayload{ArtifactRefs: valid.ArtifactRefs}
+	if _, err := gateway.PublishAgentDraft(context.Background(), "org", "agent", "execution", "correlation", invalid); err == nil {
+		t.Fatal("result without summary was accepted")
+	}
+	if len(ledger.events) != 1 {
+		t.Fatalf("invalid results were persisted: %+v", ledger.events)
 	}
 }
 

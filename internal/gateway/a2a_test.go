@@ -59,7 +59,7 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 	}
 	defer l.Close()
 	service := app.New(events.NewGateway(l))
-	h := NewA2A(service, ExternalActor{ID: "hermes", OrganizationID: "o", BearerToken: "token", Capabilities: []string{"submit_work", "read_status", "provide_input"}})
+	h := NewA2A(service, ExternalActor{ID: "hermes", OrganizationID: "o", BearerToken: "token", Capabilities: []string{"submit_work", "read_status", "read_result", "provide_input"}})
 	body := `{"id":"r1","message":{"role":"user","parts":[{"type":"text","text":"echo hello"}]}}`
 	r := httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer token")
@@ -72,11 +72,33 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer token")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"completed"`) {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"completed"`) || !strings.Contains(w.Body.String(), `"summary":"hello"`) {
 		t.Fatalf("status=%d %s", w.Code, w.Body.String())
 	}
 	if strings.Contains(w.Body.String(), `"events"`) || strings.Contains(w.Body.String(), `"payload"`) {
 		t.Fatalf("status leaked raw ledger data: %s", w.Body.String())
+	}
+	other := NewA2A(service, ExternalActor{ID: "other-operator", OrganizationID: "other-org", BearerToken: "other-token", Capabilities: []string{"submit_work", "read_status", "read_result"}})
+	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(`{"id":"other-request","message":{"role":"user","parts":[{"type":"text","text":"echo private"}]}}`))
+	r.Header.Set("Authorization", "Bearer other-token")
+	w = httptest.NewRecorder()
+	other.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("other submit=%d %s", w.Code, w.Body.String())
+	}
+	r = httptest.NewRequest(http.MethodGet, "/a2a/v1/tasks/r1", nil)
+	r.Header.Set("Authorization", "Bearer other-token")
+	w = httptest.NewRecorder()
+	other.ServeHTTP(w, r)
+	if w.Code != http.StatusNotFound || strings.Contains(w.Body.String(), "hello") || strings.Contains(w.Body.String(), "summary") {
+		t.Fatalf("cross-organization result leaked: status=%d %s", w.Code, w.Body.String())
+	}
+	r = httptest.NewRequest(http.MethodGet, "/a2a/v1/tasks/other-request", nil)
+	r.Header.Set("Authorization", "Bearer token")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusNotFound || strings.Contains(w.Body.String(), "private") || strings.Contains(w.Body.String(), "summary") {
+		t.Fatalf("reverse cross-organization result leaked: status=%d %s", w.Code, w.Body.String())
 	}
 	body = `{"id":"r2","message":{"role":"user","parts":[{"type":"text","text":"human decision"}]},"metadata":{"execution_kind":"HUMAN"}}`
 	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/send", strings.NewReader(body))
@@ -87,6 +109,13 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 		t.Fatalf("blocked submit=%d %s", w.Code, w.Body.String())
 	}
 	unauthorized := NewA2A(service, ExternalActor{ID: "observer", OrganizationID: "o", BearerToken: "observer-token", Capabilities: []string{"read_status"}})
+	r = httptest.NewRequest(http.MethodGet, "/a2a/v1/tasks/r1", nil)
+	r.Header.Set("Authorization", "Bearer observer-token")
+	w = httptest.NewRecorder()
+	unauthorized.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), `"result"`) || strings.Contains(w.Body.String(), `"summary"`) {
+		t.Fatalf("status-only actor received result: status=%d %s", w.Code, w.Body.String())
+	}
 	r = httptest.NewRequest(http.MethodPost, "/a2a/v1/tasks/r2/input", strings.NewReader(`{"task_id":"task-r2","text":"forged"}`))
 	r.Header.Set("Authorization", "Bearer observer-token")
 	w = httptest.NewRecorder()
@@ -98,14 +127,14 @@ func TestA2AStatusAndInputContinuation(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer token")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"completed"`) {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"completed"`) || !strings.Contains(w.Body.String(), `"summary":"authorized external input persisted"`) {
 		t.Fatalf("input=%d %s", w.Code, w.Body.String())
 	}
 	es, err := l.Events(context.Background(), "r2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertA2AEventOrder(t, es, "A2A_INPUT_RECEIVED", "TASK_RESUMED", "EXECUTION_STARTED", "TOOL_OUTCOME_RECORDED", "EXECUTION_FINISHED", "CANDIDATE_COMPLETE", "COMPLETION_VERIFIED", "TASK_VERIFIED_COMPLETE")
+	assertA2AEventOrder(t, es, "A2A_INPUT_RECEIVED", "TASK_RESUMED", "EXECUTION_STARTED", "TOOL_OUTCOME_RECORDED", "EXECUTION_FINISHED", "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_VERIFIED", "TASK_VERIFIED_COMPLETE")
 	for _, event := range es {
 		if strings.HasPrefix(event.EventType, "APPROVAL_") || strings.HasPrefix(event.EventType, "CAPABILITY_") || strings.HasPrefix(event.EventType, "EFFECT_") {
 			t.Fatalf("external input crossed a governance boundary: %+v", event)

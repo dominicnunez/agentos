@@ -59,7 +59,7 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		id := r.URL.Path[len("/a2a/v1/tasks/"):]
-		es, err := a.service.Events(r.Context(), id)
+		es, err := a.service.ExternalEvents(r.Context(), a.actor.OrganizationID, id)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -69,7 +69,7 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		status := projectStatus(id, es)
-		if a.allowed("read_result") {
+		if a.allowed("read_result") && status.State == "completed" {
 			status.Result = projectResult(es)
 		}
 		writeJSON(w, http.StatusOK, status)
@@ -93,13 +93,13 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
-		es, err := a.service.Events(r.Context(), id)
+		es, err := a.service.ExternalEvents(r.Context(), a.actor.OrganizationID, id)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
 		status := projectStatus(id, es)
-		if a.allowed("read_result") {
+		if a.allowed("read_result") && status.State == "completed" {
 			status.Result = projectResult(es)
 		}
 		responseStatus := http.StatusAccepted
@@ -172,14 +172,15 @@ func projectStatus(id string, es []events.Event) externalStatus {
 func projectResult(es []events.Event) any {
 	for i := len(es) - 1; i >= 0; i-- {
 		if es[i].EventType == "RESULT_PUBLISHED" {
-			var result any
-			if json.Unmarshal(es[i].Payload, &result) == nil {
+			var result events.ResultPublishedPayload
+			if json.Unmarshal(es[i].Payload, &result) == nil && result.ValidFor(es[i].ArtifactRefs) {
 				return result
 			}
 		}
 	}
 	return nil
 }
+
 func externalState(es []events.Event) string {
 	state := "working"
 	for _, e := range es {

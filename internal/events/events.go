@@ -34,6 +34,15 @@ type TaskBlockedPayload struct {
 	Urgency       string   `json:"urgency,omitempty"`
 }
 
+type ResultPublishedPayload struct {
+	Summary      string   `json:"summary"`
+	ArtifactRefs []string `json:"artifact_refs,omitempty"`
+}
+
+func (p ResultPublishedPayload) ValidFor(artifactRefs []string) bool {
+	return p.Summary != "" && sameStrings(p.ArtifactRefs, artifactRefs)
+}
+
 type TrustedDraft struct {
 	OrganizationID    string
 	EventType         string
@@ -157,6 +166,12 @@ func (g *Gateway) PublishAgentDraft(ctx context.Context, organizationID, actorID
 	if draft.EventType == "TASK_BLOCKED" && (draft.TaskID == "" || draft.RecipientScope != RecipientTask || draft.RecipientID == "") {
 		return Event{}, fmt.Errorf("task blocked draft requires a source child task and parent task recipient")
 	}
+	if draft.EventType == "RESULT_PUBLISHED" {
+		var result ResultPublishedPayload
+		if draft.TaskID == "" || decodePayload(draft.Payload, &result) != nil || !result.ValidFor(draft.ArtifactRefs) {
+			return Event{}, fmt.Errorf("result published draft requires a task, summary, and matching artifact refs")
+		}
+	}
 	trusted := TrustedDraft{OrganizationID: organizationID, EventType: draft.EventType, SourceActorID: actorID, SourceExecutionID: executionID, RecipientScope: draft.RecipientScope, RecipientID: draft.RecipientID, TaskID: draft.TaskID, ArtifactRefs: draft.ArtifactRefs, Payload: draft.Payload, CorrelationID: correlationID}
 	if err := g.validateAddressed(ctx, trusted, true); err != nil {
 		return Event{}, err
@@ -268,4 +283,16 @@ func decodePayload(value any, target any) error {
 
 func validRecipient(scope string) bool {
 	return scope == RecipientAgent || scope == RecipientTeam || scope == RecipientTask
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
