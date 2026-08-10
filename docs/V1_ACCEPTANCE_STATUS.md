@@ -13,7 +13,7 @@ claim.
 | 3 | Recipient sees message at an action boundary | Covered | The same restart test proves chronologically ordered messages enter the next AgentExecution context and exact manifest event refs before the fake model call. |
 | 4 | Failed persistence never exposes a message | Covered | `TestInboxProjectionFailureRollsBackMessage` forces the inbox write to fail and verifies the transaction leaves neither a ledger event nor inbox availability. |
 | 5 | Blocked worker returns control without authority expansion | Partial | Unsupported execution becomes a durable `TASK_BLOCKED`; parent remediation and adversarial self-escalation coverage remain. |
-| 6 | Child assignment has no unintended positive capability inheritance | Partial | Exact lease matching rejects broader resources; explicit child-assignment coverage remains. |
+| 6 | Child assignment has no unintended positive capability inheritance | Covered | `TestChildAssignmentDoesNotInheritParentCapability` proves that assigning a child Task to the same Agent does not transfer the parent Task's lease; only a lease explicitly originating from the child authorizes its action. |
 | 7 | Human-required action waits for a decision | Covered | `TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision` proves a prepared effect remains unavailable through notification, acknowledgement, restart, unauthorized identity, and mismatched fingerprint until the exact authorized decision is durable. |
 | 8 | Acknowledgement cannot approve | Covered | The same lifecycle test persists `APPROVAL_ACKNOWLEDGED`, verifies no decision timestamp exists, and confirms the effect adapter remains unreachable. |
 | 9 | Freeze/revoke prevents time-of-use action | Covered | `TestFreezeAndRevokePreventEffectAtTimeOfUse` proves durable freeze and revocation prevent `ATTEMPTED`; `TestApprovalExpiryIsRecheckedInsideAttemptTransaction` proves stale preflight approval state cannot bypass transaction-time expiry. Both keep the adapter unreachable. |
@@ -31,4 +31,3 @@ claim.
 
 V1 remains incomplete until every row is covered by the required runtime path and
 adversarial regression test.
-
