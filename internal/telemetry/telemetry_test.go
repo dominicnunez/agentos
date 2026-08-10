@@ -11,8 +11,10 @@ import (
 
 func TestProjectBuildsCompleteReplayableRunSummary(t *testing.T) {
 	started := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
-	task := core.Task{ID: "task-1", ExecutionKind: core.ExecutionAgent}
+	task := core.Task{ID: "task-1", ExecutionKind: core.ExecutionAgent, Status: core.TaskPending}
 	projection := events.ProjectionEventPayload{Projection: events.ProjectionRecord{ProjectionKind: "task", RecordID: "task-1", Version: 1, Value: jsonBody(t, task)}}
+	task.Status = core.TaskCompleted
+	completedProjection := events.ProjectionEventPayload{Projection: events.ProjectionRecord{ProjectionKind: "task", RecordID: "task-1", Version: 2, Value: jsonBody(t, task)}}
 	cost := 0.125
 	stream := []events.Event{
 		testEvent(t, "e1", "TASK_CREATED", "task-1", "", started, projection),
@@ -27,7 +29,7 @@ func TestProjectBuildsCompleteReplayableRunSummary(t *testing.T) {
 		testEvent(t, "e10", "CAPABILITY_DENIED", "task-1", "", started.Add(9*time.Second), map[string]string{"reason": "missing"}),
 		testEvent(t, "e11", "RESULT_PUBLISHED", "task-1", "execution-1", started.Add(10*time.Second), events.ResultPublishedPayload{Summary: "done", ArtifactRefs: []string{"artifact-1"}}),
 		testEvent(t, "e12", "COMPLETION_VERIFIED", "task-1", "", started.Add(11*time.Second), map[string]bool{"complete": true}),
-		testEvent(t, "e13", "TASK_VERIFIED_COMPLETE", "task-1", "", started.Add(12*time.Second), map[string]string{"status": "COMPLETED"}),
+		testEvent(t, "e13", "TASK_VERIFIED_COMPLETE", "task-1", "", started.Add(12*time.Second), completedProjection),
 	}
 	stream[10].ArtifactRefs = []string{"artifact-1"}
 

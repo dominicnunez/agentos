@@ -81,9 +81,10 @@ records the authorization trace, and fails closed if authority is missing,
 expired, revoked, frozen, corrupt, or unavailable.
 
 Terminal work records one typed `RUN_TELEMETRY_RECORDED` Event Contract before
-the goal completes. The telemetry module deterministically projects the run's
-authoritative event stream into verified outcome, execution mechanisms, wall
-time, provider/model/token/cost use, tool calls, messages, blocks, retries,
-human interventions, safety denials, and completion evidence. Unknown provider
-cost remains explicitly incomplete rather than being reported as zero. Replay
+the goal enters `COMPLETED` or `FAILED`. The telemetry module deterministically
+projects every Task in the run's authoritative Event Contract stream into
+verified or rejected outcome, execution mechanisms, wall time,
+provider/model/token/cost use, tool calls, messages, blocks, retries, human
+interventions, safety denials, and completion evidence. Unknown provider cost
+remains explicitly incomplete rather than being reported as zero. Replay
 validates an existing contract and never appends a duplicate.

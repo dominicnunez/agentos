@@ -87,8 +87,8 @@ func Project(correlationID string, stream []events.Event) (Run, error) {
 	mechanisms := make(map[core.ExecutionKind]int)
 	modelIndexes := make(map[string]int)
 	artifactRefs := make(map[string]struct{})
+	taskStatuses := make(map[string]core.TaskStatus)
 	var terminalAt time.Time
-	terminalSeen := false
 
 	for _, event := range stream {
 		if event.CorrelationID != "" && event.CorrelationID != correlationID {
@@ -109,6 +109,12 @@ func Project(correlationID string, stream []events.Event) (Run, error) {
 				return Run{}, fmt.Errorf("event %s has an invalid task projection", event.EventID)
 			}
 			taskKinds[string(task.ID)] = task.ExecutionKind
+			taskStatuses[string(task.ID)] = task.Status
+			if task.Status == core.TaskCompleted || task.Status == core.TaskFailed {
+				if terminalAt.IsZero() || event.CreatedAt.After(terminalAt) {
+					terminalAt = event.CreatedAt
+				}
+			}
 		}
 
 		switch event.EventType {
@@ -189,24 +195,22 @@ func Project(correlationID string, stream []events.Event) (Run, error) {
 			for _, ref := range event.ArtifactRefs {
 				artifactRefs[ref] = struct{}{}
 			}
-			if event.EventType == "COMPLETION_REJECTED" {
-				if terminalSeen {
-					return Run{}, fmt.Errorf("run contains duplicate terminal outcomes")
-				}
-				terminalSeen = true
-				run.Outcome = "REJECTED"
-				terminalAt = event.CreatedAt
-			}
-		case "TASK_VERIFIED_COMPLETE":
-			if terminalSeen {
-				return Run{}, fmt.Errorf("run contains duplicate terminal outcomes")
-			}
-			terminalSeen = true
-			run.Outcome = "VERIFIED_COMPLETE"
-			terminalAt = event.CreatedAt
 		}
 	}
-	if run.OrganizationID == "" || run.Outcome == "" || terminalAt.IsZero() {
+	if len(taskStatuses) == 0 {
+		return Run{}, fmt.Errorf("run has no task contracts")
+	}
+	run.Outcome = "VERIFIED_COMPLETE"
+	for taskID, status := range taskStatuses {
+		switch status {
+		case core.TaskCompleted:
+		case core.TaskFailed:
+			run.Outcome = "REJECTED"
+		default:
+			return Run{}, fmt.Errorf("task %s is not terminal", taskID)
+		}
+	}
+	if run.OrganizationID == "" || terminalAt.IsZero() {
 		return Run{}, fmt.Errorf("run is not terminal and cannot be summarized")
 	}
 	run.FinishedAt = terminalAt

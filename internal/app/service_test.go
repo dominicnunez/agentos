@@ -75,6 +75,98 @@ func TestAgentExecutionUsesFakeAdapter(t *testing.T) {
 	assertEventOrder(t, r.Events, "EXECUTION_CONTEXT_MANIFESTED", "TOOL_OUTCOME_RECORDED", "INFERENCE_USAGE_RECORDED", "EXECUTION_FINISHED", "RUN_TELEMETRY_RECORDED")
 }
 
+func TestRejectedRunRecordsTelemetryAndFailsGoal(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	r, err := New(events.NewGateway(l)).Submit(context.Background(), Submit{RequestID: "rejected", OrganizationID: "org-1", Statement: "unsupported", Kind: core.ExecutionDeterministic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Task.Status != core.TaskFailed || r.Goal.Status != "FAILED" || r.Completion.Complete {
+		t.Fatalf("rejected run=%+v", r)
+	}
+	assertEventOrder(t, r.Events, "COMPLETION_REJECTED", "RUN_TELEMETRY_RECORDED", "GOAL_FAILED")
+	var run telemetry.Run
+	for _, event := range r.Events {
+		if event.EventType == "RUN_TELEMETRY_RECORDED" {
+			if err := json.Unmarshal(event.Payload, &run); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if run.Outcome != "REJECTED" || run.ToolCalls != 1 {
+		t.Fatalf("rejected telemetry=%+v", run)
+	}
+}
+
+func TestRunTelemetryAggregatesEveryTaskInCompletedDAG(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1"}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "two steps", NormalizedObjective: "two steps"}
+	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: "two steps", Status: "ACTIVE"}
+	first := core.Task{ID: "task-1", GoalID: goal.ID, Description: "echo first", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
+	second := core.Task{ID: "task-2", GoalID: goal.ID, Description: "echo second", DependsOn: []core.ID{first.ID}, ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
+	for _, save := range []func() error{
+		func() error {
+			return repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "request-1", 1, organization, nil)
+		},
+		func() error {
+			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "request-1", 1, intent, nil)
+		},
+		func() error {
+			return repository.SaveGoal(ctx, organization.ID, "GOAL_CREATED", "runtime", "request-1", 1, goal, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "request-1", 1, first, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "request-1", 1, second, nil)
+		},
+	} {
+		if err := save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recovery, err := New(gateway).Recover(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovery.TasksExecuted != 2 {
+		t.Fatalf("recovery=%+v", recovery)
+	}
+	stream, err := l.Events(ctx, "request-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedTasks := 0
+	telemetryEvents := 0
+	var run telemetry.Run
+	for _, event := range stream {
+		switch event.EventType {
+		case "TASK_VERIFIED_COMPLETE":
+			completedTasks++
+		case "RUN_TELEMETRY_RECORDED":
+			telemetryEvents++
+			if err := json.Unmarshal(event.Payload, &run); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if completedTasks != 2 || telemetryEvents != 1 || run.Outcome != "VERIFIED_COMPLETE" || len(run.ExecutionMechanisms) != 1 || run.ExecutionMechanisms[0].Count != 2 {
+		t.Fatalf("completed=%d telemetry=%d run=%+v", completedTasks, telemetryEvents, run)
+	}
+}
+
 func TestRecoverExecutesPersistedPendingWorkAndPreservesIdentity(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "agentos.db")

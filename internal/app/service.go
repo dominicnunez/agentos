@@ -857,22 +857,24 @@ func (s *Service) reconcileGoals(ctx context.Context) error {
 		if state.Value.Status != "ACTIVE" {
 			continue
 		}
-		allComplete := false
+		hasTasks := false
+		allComplete := true
+		allTerminal := true
 		correlationID := state.CorrelationID
 		for _, task := range snapshot.Tasks {
 			if task.Value.GoalID != goalID {
 				continue
 			}
-			if !allComplete {
-				allComplete = true
-			}
+			hasTasks = true
 			if task.Value.Status != core.TaskCompleted {
 				allComplete = false
-				break
+			}
+			if task.Value.Status != core.TaskCompleted && task.Value.Status != core.TaskFailed {
+				allTerminal = false
 			}
 			correlationID = task.CorrelationID
 		}
-		if !allComplete {
+		if !hasTasks || !allTerminal {
 			continue
 		}
 		intent, ok := snapshot.Intents[state.Value.IntentID]
@@ -900,9 +902,14 @@ func (s *Service) reconcileGoals(ctx context.Context) error {
 				return fmt.Errorf("persist run telemetry for goal %s: %w", goalID, err)
 			}
 		}
+		goalEventType := "GOAL_COMPLETED"
 		goal.Status = "COMPLETED"
-		if err := s.state.SaveGoal(ctx, intent.Value.OrganizationID, "GOAL_COMPLETED", "runtime", correlationID, state.Version+1, goal, nil); err != nil {
-			return fmt.Errorf("persist completed goal %s: %w", goalID, err)
+		if !allComplete {
+			goalEventType = "GOAL_FAILED"
+			goal.Status = "FAILED"
+		}
+		if err := s.state.SaveGoal(ctx, intent.Value.OrganizationID, goalEventType, "runtime", correlationID, state.Version+1, goal, nil); err != nil {
+			return fmt.Errorf("persist terminal goal %s: %w", goalID, err)
 		}
 	}
 	return nil
