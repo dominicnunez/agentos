@@ -45,9 +45,12 @@ attestation.
 The dedicated release-artifact workflow builds the complete output twice in
 parallel with normal CI, compares it byte for byte, verifies every checksum,
 inspects archive content and metadata, and runs both native binaries' version
-commands. It has read-only repository permission and does not upload or
-publish artifacts. Each of the two builds uses its own fresh Go module and
-build caches; no release cache is restored, shared between builds, or saved.
+commands. It then unpacks the Linux amd64 archive and runs the complete
+loopback intake, completion-review, approval-isolation, backup, restore,
+restart, expiry, and revocation pilot from those packaged binaries. It has
+read-only repository permission and does not upload or publish artifacts. Each
+of the two builds uses its own fresh Go module and build caches; no release
+cache is restored, shared between builds, or saved.
 macOS and Windows packages are outside the V1 support boundary.
 
 ## Publication boundary

@@ -34,12 +34,12 @@ def request_json(url: str, token: str, body: dict | None = None) -> dict:
 
 def expect_http_error(
     url: str, token: str, expected_status: int, body: dict | None = None
-) -> None:
+) -> tuple[bytes, dict[str, str]]:
     try:
         request_json(url, token, body)
     except urllib.error.HTTPError as error:
         if error.code == expected_status:
-            return
+            return error.read(), dict(error.headers.items())
         raise RuntimeError(
             f"expected HTTP {expected_status}, received HTTP {error.code}"
         ) from error
@@ -48,6 +48,53 @@ def expect_http_error(
 
 def expect_unauthorized(url: str, token: str, body: dict) -> None:
     expect_http_error(url, token, 401, body)
+
+
+def verify_approval_control_isolation(args: argparse.Namespace) -> None:
+    missing = args.control_url.rstrip("/") + "/v1/control/approvals/missing"
+    control_body, control_headers = expect_http_error(
+        missing, args.approval_token, 404
+    )
+    if (
+        control_headers.get("Content-Type") != "application/json"
+        or control_headers.get("Cache-Control") != "no-store"
+        or json.loads(control_body.decode("utf-8"))
+        != {"error": "approval not found"}
+    ):
+        raise RuntimeError("approval control returned an ambiguous route response")
+    for token in (args.agent_token, args.human_token, args.reviewer_token):
+        expect_http_error(missing, token, 401)
+    work_body, work_headers = expect_http_error(
+        args.url.rstrip("/") + "/v1/control/approvals/missing",
+        args.approval_token,
+        404,
+    )
+    if (
+        not work_headers.get("Content-Type", "").startswith("text/plain")
+        or work_body != b"404 page not found\n"
+    ):
+        raise RuntimeError("approval control may be mounted on the work listener")
+    expect_http_error(
+        args.control_url.rstrip("/") + "/v1/human/messages",
+        args.human_token,
+        404,
+        {
+            "conversation_id": "control-is-not-intake",
+            "message_id": "message-1",
+            "text": "echo rejected",
+        },
+    )
+    expect_http_error(
+        args.control_url.rstrip("/") + "/",
+        args.agent_token,
+        404,
+        {
+            "jsonrpc": "2.0",
+            "id": "control-is-not-a2a",
+            "method": "GetTask",
+            "params": {"id": "missing"},
+        },
+    )
 
 
 def a2a_send(url: str, token: str, rpc_id: str, message_id: str, context_id: str, text: str, kind: str = "") -> dict:
@@ -124,6 +171,7 @@ def write_state(path: Path, state: dict) -> None:
 
 
 def seed(args: argparse.Namespace) -> None:
+    verify_approval_control_isolation(args)
     deterministic = a2a_send(
         args.url, args.agent_token, "pilot-rpc-1", "pilot-agent-message-1",
         "pilot-agent-completed", "echo durable-agent-result",
@@ -208,6 +256,7 @@ def seed(args: argparse.Namespace) -> None:
 
 
 def recover(args: argparse.Namespace) -> None:
+    verify_approval_control_isolation(args)
     state = json.loads(args.state.read_text(encoding="utf-8"))
     deterministic = a2a_get(args.url, args.reader_token, "pilot-rpc-4", state["agent_completed_task"])
     if deterministic.get("status", {}).get("state") != "TASK_STATE_COMPLETED" or task_text(deterministic) != "durable-agent-result":
@@ -278,6 +327,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("phase", choices=("seed", "recover"))
     parser.add_argument("--url", required=True)
+    parser.add_argument("--control-url", required=True)
     parser.add_argument("--state", required=True, type=Path)
     parser.add_argument("--agent-token", required=True)
     parser.add_argument("--reader-token", required=True)
@@ -285,6 +335,7 @@ def main() -> int:
     parser.add_argument("--expired-token", required=True)
     parser.add_argument("--human-token", required=True)
     parser.add_argument("--reviewer-token", required=True)
+    parser.add_argument("--approval-token", required=True)
     args = parser.parse_args()
     if args.phase == "seed":
         seed(args)

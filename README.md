@@ -150,6 +150,10 @@ The repository is ready to test as an early V1 vertical slice. The automated sui
 
 This is not a full V1 release sign-off. [docs/V1_ACCEPTANCE_STATUS.md](docs/V1_ACCEPTANCE_STATUS.md) maps the normative architecture checklist to automated evidence; [docs/V1_RELEASE_READINESS.md](docs/V1_RELEASE_READINESS.md) tracks the separate operational release gates, and [docs/RELEASE.md](docs/RELEASE.md) defines reproducible artifacts and their publication boundary.
 
+The V1 security model, trust boundaries, residual risks, and reporting path are
+documented in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and
+[SECURITY.md](SECURITY.md).
+
 ## Scope
 
 Included: core organizational/work objects, task dependencies, deterministic and agent execution paths, event gateway and ledger, durable addressed messages and inboxes, execution manifests, structured tool outcomes, completion contracts, an inbound A2A boundary, exact capability checks, durable effect-bound human approvals, versioned knowledge and inference seams, and fingerprinted persist-before-effect coordination.
@@ -158,7 +162,7 @@ Deferred: federation, workflow DSLs, semantic/vector memory, Lab, optimizers,
 broad tool ecosystems, production external-effect adapters, and reconciliation
 workers.
 
-See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md), [docs/OPERATOR_INTAKE.md](docs/OPERATOR_INTAKE.md), [docs/COMPLETION_REVIEW.md](docs/COMPLETION_REVIEW.md), [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md), [docs/APPROVAL_CONTROL.md](docs/APPROVAL_CONTROL.md), [docs/A2A_INTEROP.md](docs/A2A_INTEROP.md), [docs/EFFECT_RECONCILIATION.md](docs/EFFECT_RECONCILIATION.md), [docs/SQLITE_RECOVERY.md](docs/SQLITE_RECOVERY.md), [docs/CODEX_SUBSCRIPTION_PROVIDER.md](docs/CODEX_SUBSCRIPTION_PROVIDER.md), and [docs/OPENAI_API_PROVIDER.md](docs/OPENAI_API_PROVIDER.md).
+See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md), [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), [docs/OPERATOR_INTAKE.md](docs/OPERATOR_INTAKE.md), [docs/COMPLETION_REVIEW.md](docs/COMPLETION_REVIEW.md), [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md), [docs/APPROVAL_CONTROL.md](docs/APPROVAL_CONTROL.md), [docs/A2A_INTEROP.md](docs/A2A_INTEROP.md), [docs/EFFECT_RECONCILIATION.md](docs/EFFECT_RECONCILIATION.md), [docs/SQLITE_RECOVERY.md](docs/SQLITE_RECOVERY.md), [docs/CODEX_SUBSCRIPTION_PROVIDER.md](docs/CODEX_SUBSCRIPTION_PROVIDER.md), and [docs/OPENAI_API_PROVIDER.md](docs/OPENAI_API_PROVIDER.md).
 
 ## Authoritative architecture handoff
 

@@ -21,7 +21,7 @@ Passing the architecture checklist does not by itself authorize deployment.
 | Release artifact pipeline | READY | A separate read-only workflow builds Linux amd64 and arm64 artifacts twice, checks byte reproducibility, verifies both commands on the native Linux runner, and emits checksums, per-target CycloneDX SBOMs, plus deterministic in-toto provenance. Nothing is uploaded or published. |
 | Distribution license | BLOCKED | The repository has no `LICENSE` file. Record the legal distribution policy before publishing V1 binaries. |
 | Published release artifacts | BLOCKED | Requires the distribution decision, explicit public-release approval, immutable `v1.0.0-rc.1` tag, GitHub-signed attestations, and checksummed asset upload. |
-| Loopback pilot | PASS | CI restores a live disposable ledger, restarts the runtime, retrieves Human/A2A results, continues blocked work, and checks expiry and revocation. |
+| Packaged Linux pilot | PASS | CI unpacks the reproducible Linux amd64 archive and uses those binaries to restore a disposable ledger, restart the runtime, retrieve Human/A2A results, continue blocked work, exercise completion review and approval-listener isolation, reject cross-channel credential reuse, and check expiry plus revocation. |
 | Consequential effects | DISABLED | No production effect-writing adapter is enabled. Keep disabled through the initial pilot. |
 
 ## Release sequence

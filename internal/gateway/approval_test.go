@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,6 +80,57 @@ func TestApprovalControlRejectsWorkCredentialsNonExactAuthorityAndUntrustedField
 				t.Fatalf("status=%d want=%d body=%s", response.Code, test.want, response.Body.String())
 			}
 		})
+	}
+}
+
+func TestApprovalControlRejectsMalformedRequestsWithoutChangingState(t *testing.T) {
+	handler, fingerprint := newApprovalControlFixture(t)
+	initialResponse := approvalRequest(t, handler, http.MethodGet, "/v1/control/approvals/approval-1", testApprovalToken, "")
+	var initialView approvalControlResponse
+	if initialResponse.Code != http.StatusOK {
+		t.Fatalf("initial inspect status=%d body=%s", initialResponse.Code, initialResponse.Body.String())
+	}
+	if err := json.Unmarshal(initialResponse.Body.Bytes(), &initialView); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name, method, path, token, contentType, body string
+		want                                         int
+	}{
+		{name: "missing credential", method: http.MethodGet, path: "/v1/control/approvals/approval-1", want: http.StatusUnauthorized},
+		{name: "unknown operation", method: http.MethodPost, path: "/v1/control/approvals/approval-1/approve", token: testApprovalToken, contentType: "application/json", body: `{}`, want: http.StatusNotFound},
+		{name: "wrong method", method: http.MethodPut, path: "/v1/control/approvals/approval-1/acknowledge", token: testApprovalToken, contentType: "application/json", body: `{}`, want: http.StatusNotFound},
+		{name: "wrong content type", method: http.MethodPost, path: "/v1/control/approvals/approval-1/acknowledge", token: testApprovalToken, contentType: "text/plain", body: `{}`, want: http.StatusUnsupportedMediaType},
+		{name: "trailing object", method: http.MethodPost, path: "/v1/control/approvals/approval-1/acknowledge", token: testApprovalToken, contentType: "application/json", body: `{"effect_fingerprint":"` + fingerprint + `"}{}`, want: http.StatusBadRequest},
+		{name: "oversized body", method: http.MethodPost, path: "/v1/control/approvals/approval-1/acknowledge", token: testApprovalToken, contentType: "application/json", body: `{"effect_fingerprint":"` + strings.Repeat("a", 4<<10) + `"}`, want: http.StatusBadRequest},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequestWithContext(t.Context(), test.method, test.path, strings.NewReader(test.body))
+			if test.token != "" {
+				request.Header.Set("Authorization", "Bearer "+test.token)
+			}
+			if test.contentType != "" {
+				request.Header.Set("Content-Type", test.contentType)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.want {
+				t.Fatalf("status=%d want=%d body=%s", response.Code, test.want, response.Body.String())
+			}
+		})
+	}
+
+	response := approvalRequest(t, handler, http.MethodGet, "/v1/control/approvals/approval-1", testApprovalToken, "")
+	var view approvalControlResponse
+	if response.Code != http.StatusOK {
+		t.Fatalf("inspect status=%d body=%s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.Status != initialView.Status {
+		t.Fatalf("rejected request changed approval state from %s to %s", initialView.Status, view.Status)
 	}
 }
 
