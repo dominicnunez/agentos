@@ -15,6 +15,51 @@ resulting Intent durably records that provenance. The runtime appends a
 channel-specific `HUMAN_WORK_ACCEPTED` or `A2A_WORK_ACCEPTED` Event Contract
 before execution.
 
+## Startup configuration
+
+Agent OS refuses to start unless at least one authenticated operator gateway is
+configured. Set `AGENTOS_HUMAN_ACTORS_FILE` for direct Human access,
+`AGENTOS_A2A_ACTORS_FILE` for A2A-compatible Agent access, or both. Each file is
+a reviewed local registry with this structure:
+
+```json
+{
+  "actors": [
+    {
+      "id": "operator-1",
+      "organization_id": "organization-1",
+      "status": "ACTIVE",
+      "role": "OPERATOR",
+      "work_scope": "ORGANIZATION",
+      "token_ref": "AGENTOS_OPERATOR_TOKEN",
+      "review_ref": "deployment-review-1",
+      "expires_at": "2030-12-31T23:59:59Z",
+      "max_concurrent": 4,
+      "requests_per_minute": 60
+    }
+  ]
+}
+```
+
+This example is a Human registry. Before use, replace every example identity,
+review reference, limit, and expiry with values approved for the deployment.
+Set the environment variable named by `token_ref` to a unique bearer credential
+of at least 32 characters; the credential itself never belongs in the registry
+or source control. For this example, set `AGENTOS_HUMAN_ACTORS_FILE` to the
+registry path and set `AGENTOS_OPERATOR_TOKEN` in the runtime environment before
+running `make run` or the packaged `agentos` executable.
+
+An A2A registry uses the same lifecycle, rate, credential-reference, and review
+fields, but its roles and work scope follow the exact schema in
+[A2A interoperability](A2A_INTEROP.md). Human and A2A credentials must be
+distinct. Keep the default loopback listener unless remote access is required.
+For a non-loopback listener, set `AGENTOS_LISTEN_ADDR` to the intended
+`host:port`, set `AGENTOS_ALLOW_REMOTE=true`, and set both
+`AGENTOS_TLS_CERT_FILE` and `AGENTOS_TLS_KEY_FILE`. When A2A is enabled, also
+set `AGENTOS_PUBLIC_URL` to the externally reachable HTTPS origin. Agent OS
+rejects incomplete TLS settings, remote plaintext, and remote A2A exposure
+without that HTTPS public URL.
+
 ## Routing
 
 Routing follows the minimal-justified-LLM rule:
@@ -46,6 +91,32 @@ reconfigure providers.
 `GET /v1/human/tasks/{task-id}` returns the narrow authorized Task view. The
 same message endpoint continues blocked `HUMAN` work when a new message uses
 the same conversation ID. Message IDs are persisted for retry idempotency.
+
+With the example Human registry and the default loopback listener running, this
+request verifies authenticated intake without placing the credential in the
+command or source control:
+
+```sh
+printf 'Authorization: Bearer %s\n' "$AGENTOS_OPERATOR_TOKEN" | \
+curl --fail --silent --show-error \
+  --request POST http://127.0.0.1:8080/v1/human/messages \
+  --header 'Content-Type: application/json' \
+  --header @- \
+  --data '{"conversation_id":"setup-verification","message_id":"message-1","text":"echo ready"}'
+```
+
+The response is HTTP 200 with a generated task ID and timestamp, plus these
+stable values:
+
+```json
+{
+  "task_id": "<generated-task-id>",
+  "conversation_id": "setup-verification",
+  "state": "COMPLETED",
+  "result": "ready",
+  "updated_at": "<RFC3339 timestamp>"
+}
+```
 
 Human identities come only from the reviewed `AGENTOS_HUMAN_ACTORS_FILE`
 registry. Roles, expiry, concurrency, and request-rate limits are enforced
