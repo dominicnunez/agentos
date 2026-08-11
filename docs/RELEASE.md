@@ -90,4 +90,4 @@ tag.
 
 Release publication does not authorize deployment, consequential effects, or a
 real model provider. Those gates remain separate in
-[V1_RELEASE_READINESS.md](V1_RELEASE_READINESS.md).
+[V1_RELEASE_READINESS.md](development/V1_RELEASE_READINESS.md).

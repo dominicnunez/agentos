@@ -1,184 +1,87 @@
 # Agent OS
 
-Agent OS is an event-driven runtime for durable artificial organizations. This repository builds Agent OS V1 from the smallest useful vertical slice:
+Agent OS is a system for creating and operating artificial organizations: persistent groups of people and AI agents that can pursue shared goals, divide responsibility, coordinate work, and carry organizational context forward over time.
 
-```text
-Human --> Human Gateway --+
-                           +--> shared Intake Router --> Intent --> Goal --> Task DAG
-Agent -----A2A Gateway ----+                              |          |
-                                                          +--> Event Gateway --> SQLite ledger
-                                                                     |
-                                                 deterministic handler or AgentExecution
-                                                                     |
-                                                             Completion Engine
-```
+A typical AI agent is one worker, usually operating within one conversation or task. Agent OS is the organizational layer around those workers. It gives the organization continuity, shared work, roles, oversight, and a governed way to act as one whole.
 
-The runtime is a Go modular monolith. Internal modules communicate through versioned event contracts, not A2A. SQLite is the authoritative append-only event ledger. Durable Organization, Team, Agent, Intent, Goal, Task, and recipient-inbox projections survive restart. LLM execution is explicit and limited to tasks whose `model_inference_policy` permits it.
+![A symmetrical artificial organization represented as a living circuit-board city](docs/images/agent-os-artificial-organization-v3.png)
 
-## Quick start
+## Why Agent OS?
 
-Requires Go 1.26.5.
+- Continuity beyond a conversation: goals, responsibilities, decisions, and results remain part of the organization instead of disappearing with an agent session.
+- Governance before action: authority is distinct from language, and consequential work passes through explicit capabilities and approval boundaries.
+- Flexible participation: users can interact directly with Agent OS or through an A2A-compatible Agent, with both paths entering the same authenticated, governed organization.
+
+## Task Boundaries
+
+Agent OS requires the appropriate approval for actions involving:
+
+- financial commitments
+- physical-world effects
+- public or external communication
+- destructive or irreversible operations
+- expansion of a sensitive-data boundary
+- privilege, capability, or trust expansion
+- legal or binding commitments
+- ordinary Agent OS deployment
+- trusted-core or security changes
+
+Approval is checked again at the consequential-effect boundary. Missing, expired, mismatched, or unanswered approval fails closed.
+
+## Install Agent OS
+
+Agent OS releases support Linux. Binary packages will be published on [GitHub Releases](https://github.com/dominicnunez/agentos/releases) after release approval.
+
+To build Agent OS from Git, install Go 1.26.5 and Git, then run:
 
 ```sh
-go test ./...
-AGENTOS_A2A_ACTORS_FILE=./a2a-actors.json \
-AGENTOS_A2A_AGENT_TOKEN=replace-with-at-least-32-random-characters \
-AGENTOS_HUMAN_ACTORS_FILE=./human-actors.json \
-AGENTOS_HUMAN_OPERATOR_TOKEN=replace-with-another-32-character-secret \
-go run ./cmd/agentos
+git clone https://github.com/dominicnunez/agentos.git
+cd agentos
+make test
 ```
 
-`a2a-actors.json` is a trusted deployment input. A minimal least-privilege
-registry entry is:
+Before starting Agent OS, configure at least one authenticated Human or A2A gateway and its environment-backed credential by following the [operator intake guide](docs/OPERATOR_INTAKE.md). Agent OS fails closed when neither gateway is configured. Then run `make run`.
+
+The committed `Makefile` provides repeatable project commands for developers, automation, and CI. It contains no credentials or machine-specific configuration.
+
+## Documentation
+
+Operator, integration, security, recovery, provider, release, and development documentation is indexed in [`docs/`](docs/README.md).
+
+## Contributions
+
+Issues are welcome. Report vulnerabilities privately through [`SECURITY.md`](SECURITY.md), not through a public issue.
+
+External code contributions and pull requests are not currently accepted. Contributor governance will be established deliberately before outside code is incorporated.
+
+## Instructions for AI LLMs setting up Agent OS
 
 ```json
 {
-  "actors": [{
-    "id": "assistant-agent",
-    "organization_id": "org-default",
-    "status": "ACTIVE",
-    "role": "COLLABORATOR",
-    "work_scope": "OWN",
-    "token_ref": "AGENTOS_A2A_AGENT_TOKEN",
-    "review_ref": "reviewed-config-1",
-    "expires_at": "2027-01-01T00:00:00Z",
-    "max_concurrent": 2,
-    "requests_per_minute": 30
-  }]
+  "purpose": "Install, configure, and verify Agent OS for the human operator.",
+  "release_page": "https://github.com/dominicnunez/agentos/releases",
+  "operator_documentation_url_template": "https://github.com/dominicnunez/agentos/blob/{release_tag}/docs/OPERATOR_INTAKE.md",
+  "platform": "Linux",
+  "installation": [
+    "Use the immutable release version selected by the human operator.",
+    "Confirm that the selected release contains published Linux binary assets; stop if the assets are absent.",
+    "Determine the Linux system architecture.",
+    "Download the matching Agent OS archive from the selected GitHub release.",
+    "Download the accompanying checksum and provenance files.",
+    "Verify the archive against its published checksum and GitHub artifact attestation before extracting it.",
+    "Extract Agent OS into the location selected by the human operator.",
+    "Read the packaged README.",
+    "Replace {release_tag} in operator_documentation_url_template with the exact immutable release tag, then read that tagged operator guide.",
+    "Create the required local configuration using the schema and examples in that exact tagged operator guide.",
+    "Keep credentials, identity records, tokens, and machine-specific configuration outside the installation directory and source control.",
+    "Start Agent OS using the packaged executable and documented configuration after the human operator authorizes deployment."
+  ],
+  "verification": [
+    "The downloaded archive matches its published checksum.",
+    "Agent OS starts without configuration errors and listens on its configured endpoint.",
+    "An authenticated gateway request receives the expected response.",
+    "The SQLite event ledger initializes successfully.",
+    "No credentials are written to logs or stored in source-controlled files."
+  ]
 }
 ```
-
-`human-actors.json` uses the same fields, with `role` set to `CONTRIBUTOR`,
-`OBSERVER`, `RESULT_READER`, `OPERATOR`, or the dedicated completion `REVIEWER`, `work_scope` set to
-`ORGANIZATION`, and its own `token_ref`, `review_ref`, expiry, and limits.
-Credentials are resolved from each `token_ref`
-and never stored in a registry file. Each registry is optional, but startup
-requires at least one. The server listens on `127.0.0.1:8080` by default.
-Remote binding additionally requires `AGENTOS_ALLOW_REMOTE=true`, an HTTPS
-`AGENTOS_PUBLIC_URL`, and both `AGENTOS_TLS_CERT_FILE` and
-`AGENTOS_TLS_KEY_FILE`; remote plaintext is rejected.
-
-Interrupted external-effect status checks are separately disabled unless
-`AGENTOS_EFFECT_RECONCILERS_FILE` names an exact-scope HTTPS registry. See
-[docs/EFFECT_RECONCILIATION.md](docs/EFFECT_RECONCILIATION.md) for its
-read-only protocol and fail-closed configuration.
-
-Online SQLite backup, offline verification, and no-overwrite restore are
-available through `go run ./cmd/agentos-recovery`. See
-[docs/SQLITE_RECOVERY.md](docs/SQLITE_RECOVERY.md) for the tested recovery and
-rollback procedure.
-
-Enable the repository-owned commit and push checks once per checkout:
-
-```powershell
-.\scripts\install-git-hooks.cmd
-```
-
-On Unix-like systems, run `./scripts/install-git-hooks.sh` instead. The commit hook checks staged-diff integrity, formatting, tests, and architecture boundaries. The push hook adds module consistency, build, vet, pinned GolangCI-Lint and `govulncheck` passes, and an advisory Gallow audit. GitHub Actions independently enforces the same checks, race-tests the unit suite, and publishes Gallow findings on pull requests. First runs download the pinned tools through the Go toolchain.
-
-Set `AGENTOS_PUBLIC_URL` to the reachable origin; non-loopback deployments must
-use HTTPS. Then submit a minimal A2A v1.0 JSON-RPC task:
-
-```sh
-curl -X POST http://localhost:8080/ \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer replace-with-at-least-32-random-characters' \
-  -d '{"jsonrpc":"2.0","id":"rpc-1","method":"SendMessage","params":{"message":{"messageId":"message-1","role":"ROLE_USER","parts":[{"text":"echo hello","mediaType":"text/plain"}]}}}'
-```
-
-Agent OS generates and returns `contextId` when the initial message omits it.
-Initial retries with the same authenticated principal and `messageId` are
-idempotent. A continuation must include the returned `taskId`; when it also
-supplies `contextId`, that value must match durable task state.
-
-The current deterministic handler supports `echo <text>`. The optional
-[execution-kind extension](https://github.com/dominicnunez/agentos-a2a-go/blob/main/spec/execution-kind-v1.md)
-uses the official A2A `Message.Extensions` and `Message.Metadata` fields. It is
-an untrusted routing hint and grants no authority. The Apache-2.0
-[`agentos-a2a-go`](https://github.com/dominicnunez/agentos-a2a-go) module
-provides the encoding helper and official-SDK reference client. Runtime data
-defaults to `agentos.db`.
-
-The confined Codex subscription provider is available only when explicitly
-selected with `AGENTOS_MODEL_PROVIDER=codex-subscription` and the exact binary,
-SDK credential-file, and model settings documented in
-[docs/CODEX_SUBSCRIPTION_PROVIDER.md](docs/CODEX_SUBSCRIPTION_PROVIDER.md).
-Merely installing Codex or setting its normal user configuration never enables
-external inference in Agent OS.
-
-The official OpenAI Responses API is separately available with
-`AGENTOS_MODEL_PROVIDER=openai-api`, a server-owned API-key reference, and an
-exact model snapshot. The provider has a fixed OpenAI endpoint, disables model
-tools and response storage, rejects redirects and authority-bearing output, and
-does not retry billable calls automatically. Enabling it requires the existing
-financial and sensitive-data-boundary approvals described in
-[docs/OPENAI_API_PROVIDER.md](docs/OPENAI_API_PROVIDER.md). Real-provider output
-is durably recorded as a completion candidate but remains blocked when no
-runtime verifier exists. Only a dedicated authenticated Human `REVIEWER` can
-decide that exact fingerprinted candidate; model text never certifies itself as
-complete. Keep both real providers disabled until the release-candidate,
-fake-provider security/recovery, bounded live-test-plan, financial-approval, and
-sensitive-data-boundary gates in
-[docs/V1_RELEASE_READINESS.md](docs/V1_RELEASE_READINESS.md) are satisfied.
-
-Release/security testing may explicitly select
-`AGENTOS_MODEL_PROVIDER=fake-review`. This loopback-only adapter performs no
-network access, fails startup on a remote listener, and deliberately has no
-deterministic completion verifier. The backup/restart pilot can therefore
-exercise the dedicated reviewer path without a provider credential or charge.
-It is test evidence, not a real model provider.
-
-Direct human natural-language intake uses a distinct authenticated endpoint and
-the same internal router:
-
-```sh
-curl -X POST http://localhost:8080/v1/human/messages \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer replace-with-another-32-character-secret' \
-  -d '{"conversation_id":"human-1","message_id":"message-1","text":"draft a concise release update"}'
-```
-
-Registered `echo` work stays deterministic. Other unstructured natural-language
-work routes to the current fake `AgentExecution`; the router itself does not use
-an LLM. Human and external-Agent credentials must be distinct. Conversation text never
-constitutes a trusted approval decision.
-
-Exact-effect approval decisions use a disabled-by-default listener with a
-separate reviewed principal registry. It is not a natural-language or A2A
-surface, and it reloads the complete current effect from the ledger before each
-transition. See [docs/APPROVAL_CONTROL.md](docs/APPROVAL_CONTROL.md).
-
-Completion review uses a separate human-only control; it is not a chat command
-and is not exposed through A2A. See
-[docs/COMPLETION_REVIEW.md](docs/COMPLETION_REVIEW.md).
-
-## Testing status
-
-The repository is ready to test as an early V1 vertical slice. The automated suite covers the deterministic and fake-agent paths, event-backed projection rebuilds, restart-safe Agent/Team/Task inbox delivery at execution boundaries, pending-task recovery, durable human-approval wait/decision state, fail-closed reconciliation of uncertain attempted effects without blind resend, completion verification, Task DAG readiness, the authenticated A2A and protected-effect boundary, vendor-neutral A2A v1.0 interoperability, exact capability checks, single-use effect approvals, unified per-run operational telemetry, institutional knowledge guards, inference reserves, and deterministic audit checks.
-
-This is not a full V1 release sign-off. [docs/V1_ACCEPTANCE_STATUS.md](docs/V1_ACCEPTANCE_STATUS.md) maps the normative architecture checklist to automated evidence; [docs/V1_RELEASE_READINESS.md](docs/V1_RELEASE_READINESS.md) tracks the separate operational release gates, and [docs/RELEASE.md](docs/RELEASE.md) defines reproducible artifacts and their publication boundary.
-
-The V1 security model, trust boundaries, residual risks, and reporting path are
-documented in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and
-[SECURITY.md](SECURITY.md).
-
-## Scope
-
-Included: core organizational/work objects, task dependencies, deterministic and agent execution paths, event gateway and ledger, durable addressed messages and inboxes, execution manifests, structured tool outcomes, completion contracts, an inbound A2A boundary, exact capability checks, durable effect-bound human approvals, versioned knowledge and inference seams, and fingerprinted persist-before-effect coordination.
-
-Deferred: federation, workflow DSLs, semantic/vector memory, Lab, optimizers,
-broad tool ecosystems, production external-effect adapters, and reconciliation
-workers.
-
-See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md), [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), [docs/OPERATOR_INTAKE.md](docs/OPERATOR_INTAKE.md), [docs/COMPLETION_REVIEW.md](docs/COMPLETION_REVIEW.md), [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md), [docs/APPROVAL_CONTROL.md](docs/APPROVAL_CONTROL.md), [docs/A2A_INTEROP.md](docs/A2A_INTEROP.md), [docs/EFFECT_RECONCILIATION.md](docs/EFFECT_RECONCILIATION.md), [docs/SQLITE_RECOVERY.md](docs/SQLITE_RECOVERY.md), [docs/CODEX_SUBSCRIPTION_PROVIDER.md](docs/CODEX_SUBSCRIPTION_PROVIDER.md), and [docs/OPENAI_API_PROVIDER.md](docs/OPENAI_API_PROVIDER.md).
-
-## License and contributions
-
-Copyright 2026 Dominic Nunez. Agent OS is licensed under
-[`AGPL-3.0-only`](LICENSE), not “or later.” External code contributions are not
-currently accepted; issues may be opened under the policy in
-[CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Authoritative architecture handoff
-
-The complete, unmodified original AI coding handoff is preserved in [docs/handoff/](docs/handoff/README.md). Its manifest remains at [docs/handoff/MANIFEST.json](docs/handoff/MANIFEST.json) for byte-level integrity verification.
