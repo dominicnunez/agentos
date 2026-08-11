@@ -2,184 +2,142 @@ package gateway
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"time"
+	"iter"
+	"strings"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/dominicnunez/agentos-a2a-go/executionkind"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/intake"
 )
 
 const (
-	a2aRoleUser             = "ROLE_USER"
-	a2aRoleAgent            = "ROLE_AGENT"
-	a2aStateWorking         = "TASK_STATE_WORKING"
-	a2aStateInputRequired   = "TASK_STATE_INPUT_REQUIRED"
-	a2aStateCompleted       = "TASK_STATE_COMPLETED"
-	a2aStateFailed          = "TASK_STATE_FAILED"
-	rpcInvalidRequest       = -32600
-	rpcMethodNotFound       = -32601
-	rpcInvalidParams        = -32602
-	rpcTaskNotFound         = -32001
-	rpcWorkUnavailable      = -32002
-	agentOSExecutionKindKey = "agentos.execution_kind"
+	a2aRoleUser           = string(a2a.MessageRoleUser)
+	a2aStateInputRequired = string(a2a.TaskStateInputRequired)
+	a2aStateCompleted     = string(a2a.TaskStateCompleted)
 )
 
-type jsonRPCRequest struct {
+type strictJSONRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params"`
 }
 
-type jsonRPCResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Result  any             `json:"result,omitempty"`
-	Error   *jsonRPCError   `json:"error,omitempty"`
+type strictSendMessageRequest struct {
+	Tenant        string            `json:"tenant,omitempty"`
+	Configuration *json.RawMessage  `json:"configuration,omitempty"`
+	Message       *strictA2AMessage `json:"message"`
+	Metadata      map[string]any    `json:"metadata,omitempty"`
 }
 
-type jsonRPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+type strictGetTaskRequest struct {
+	Tenant        string `json:"tenant,omitempty"`
+	ID            string `json:"id"`
+	HistoryLength *int   `json:"historyLength,omitempty"`
 }
 
-type sendMessageParams struct {
-	Message a2aMessage `json:"message"`
+type strictA2AMessage struct {
+	MessageID      string          `json:"messageId"`
+	ContextID      string          `json:"contextId,omitempty"`
+	Extensions     []string        `json:"extensions,omitempty"`
+	Metadata       map[string]any  `json:"metadata,omitempty"`
+	Parts          []strictA2APart `json:"parts"`
+	ReferenceTasks []string        `json:"referenceTaskIds,omitempty"`
+	Role           string          `json:"role"`
+	TaskID         string          `json:"taskId,omitempty"`
 }
 
-type getTaskParams struct {
-	ID string `json:"id"`
+type strictA2APart struct {
+	Text      *string         `json:"text,omitempty"`
+	Raw       json.RawMessage `json:"raw,omitempty"`
+	Data      json.RawMessage `json:"data,omitempty"`
+	URL       string          `json:"url,omitempty"`
+	Filename  string          `json:"filename,omitempty"`
+	MediaType string          `json:"mediaType,omitempty"`
+	Metadata  map[string]any  `json:"metadata,omitempty"`
 }
 
-type a2aMessage struct {
-	MessageID string                     `json:"messageId"`
-	ContextID string                     `json:"contextId"`
-	TaskID    string                     `json:"taskId,omitempty"`
-	Role      string                     `json:"role"`
-	Parts     []a2aPart                  `json:"parts"`
-	Metadata  map[string]json.RawMessage `json:"metadata,omitempty"`
-}
-
-type a2aPart struct {
-	Text      string `json:"text"`
-	MediaType string `json:"mediaType,omitempty"`
-}
-
-type a2aTask struct {
-	ID        string        `json:"id"`
-	ContextID string        `json:"contextId"`
-	Status    a2aTaskStatus `json:"status"`
-	Artifacts []a2aArtifact `json:"artifacts,omitempty"`
-}
-
-type a2aTaskStatus struct {
-	State     string      `json:"state"`
-	Message   *a2aMessage `json:"message,omitempty"`
-	Timestamp string      `json:"timestamp,omitempty"`
-}
-
-type a2aArtifact struct {
-	ArtifactID string    `json:"artifactId"`
-	Name       string    `json:"name,omitempty"`
-	Parts      []a2aPart `json:"parts"`
-}
-
-type sendMessageResponse struct {
-	Task a2aTask `json:"task"`
-}
-
-func (a *A2A) serveJSONRPC(w http.ResponseWriter, r *http.Request, principal intake.Principal) {
-	defer func() {
-		_ = r.Body.Close()
-	}()
-	var request jsonRPCRequest
-	if err := decodeWorkContent(w, r, &request); err != nil {
-		writeRPCError(w, json.RawMessage("null"), rpcInvalidRequest, err.Error())
-		return
+func validateA2ARequest(body []byte) error {
+	var envelope strictJSONRPCRequest
+	if err := decodeStrictJSON(body, &envelope); err != nil {
+		return err
 	}
-	if request.JSONRPC != "2.0" || !validRPCID(request.ID) || request.Method == "" {
-		writeRPCError(w, json.RawMessage("null"), rpcInvalidRequest, "valid JSON-RPC 2.0 id and method are required")
-		return
+	if envelope.JSONRPC != "2.0" || !validRPCID(envelope.ID) || envelope.Method == "" {
+		return errors.New("valid JSON-RPC 2.0 id and method are required")
 	}
-	switch request.Method {
+	switch envelope.Method {
 	case "SendMessage":
-		a.sendMessage(w, r, request, principal)
+		return validateSendMessageParams(envelope.Params)
 	case "GetTask":
-		a.getTask(w, r, request, principal)
+		return validateGetTaskParams(envelope.Params)
 	default:
-		writeRPCError(w, request.ID, rpcMethodNotFound, "A2A method is not supported")
+		return nil
 	}
 }
 
-func (a *A2A) sendMessage(w http.ResponseWriter, r *http.Request, request jsonRPCRequest, principal intake.Principal) {
-	var params sendMessageParams
-	if err := decodeStrictRaw(request.Params, &params); err != nil {
-		writeRPCError(w, request.ID, rpcInvalidParams, "params.message is required")
-		return
+func validateSendMessageParams(raw json.RawMessage) error {
+	var params strictSendMessageRequest
+	if err := decodeStrictJSON(raw, &params); err != nil {
+		return fmt.Errorf("invalid SendMessage parameters: %w", err)
+	}
+	if params.Tenant != "" || params.Configuration != nil || len(params.Metadata) != 0 {
+		return errors.New("tenant, configuration, and request metadata are outside the V1 boundary")
 	}
 	message := params.Message
-	if message.MessageID == "" || message.ContextID == "" || message.Role != a2aRoleUser || len(message.Parts) != 1 || message.Parts[0].Text == "" || len(message.Metadata) > 16 || (message.Parts[0].MediaType != "" && message.Parts[0].MediaType != "text/plain") {
-		writeRPCError(w, request.ID, rpcInvalidParams, "one ROLE_USER text/plain message part with messageId and contextId is required")
-		return
+	if message == nil || message.MessageID == "" || message.Role != a2aRoleUser || len(message.Parts) != 1 || len(message.ReferenceTasks) != 0 {
+		return errors.New("one ROLE_USER text message with messageId is required")
 	}
-	kind, err := requestedExecutionKind(message.Metadata)
-	if err != nil {
-		writeRPCError(w, request.ID, rpcInvalidParams, err.Error())
-		return
+	if len(message.Extensions) > 1 || len(message.Metadata) > 1 {
+		return errors.New("only the execution-kind extension is supported")
 	}
-	view, err := a.service.Handle(r.Context(), principal, intake.Message{
-		ConversationID: message.ContextID, MessageID: message.MessageID,
-		Text: message.Parts[0].Text, RequestedKind: kind,
-	})
-	if err != nil {
-		a.writeIntakeError(w, request.ID, err)
-		return
-	}
-	writeRPCResult(w, request.ID, sendMessageResponse{Task: projectA2ATask(view)})
-}
-
-func (a *A2A) getTask(w http.ResponseWriter, r *http.Request, request jsonRPCRequest, principal intake.Principal) {
-	var params getTaskParams
-	if err := decodeStrictRaw(request.Params, &params); err != nil || params.ID == "" {
-		writeRPCError(w, request.ID, rpcInvalidParams, "params.id is required")
-		return
-	}
-	view, err := a.service.Get(r.Context(), principal, params.ID)
-	if err != nil {
-		a.writeIntakeError(w, request.ID, err)
-		return
-	}
-	writeRPCResult(w, request.ID, projectA2ATask(view))
-}
-
-func (a *A2A) writeIntakeError(w http.ResponseWriter, id json.RawMessage, err error) {
-	switch {
-	case errors.Is(err, intake.ErrForbidden):
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "operator capability required"})
-	case errors.Is(err, intake.ErrNotFound):
-		writeRPCError(w, id, rpcTaskNotFound, "task not found")
-	case errors.Is(err, intake.ErrInvalid), errors.Is(err, intake.ErrConflict):
-		writeRPCError(w, id, rpcInvalidParams, "operator message is invalid or conflicts with durable work")
-	default:
-		writeRPCError(w, id, rpcWorkUnavailable, "operator work is unavailable")
-	}
-}
-
-func requestedExecutionKind(metadata map[string]json.RawMessage) (core.ExecutionKind, error) {
-	var kind core.ExecutionKind
-	for key, raw := range metadata {
-		if key != agentOSExecutionKindKey {
-			continue
-		}
-		if err := json.Unmarshal(raw, &kind); err != nil {
-			return "", fmt.Errorf("%s must be a string", agentOSExecutionKindKey)
+	for _, extension := range message.Extensions {
+		if extension != executionkind.URI {
+			return errors.New("message declares an unsupported extension")
 		}
 	}
-	return kind, nil
+	for key := range message.Metadata {
+		if key != executionkind.URI {
+			return errors.New("message contains unsupported metadata")
+		}
+	}
+	part := message.Parts[0]
+	if part.Text == nil || strings.TrimSpace(*part.Text) == "" || len(part.Raw) != 0 || len(part.Data) != 0 || part.URL != "" || part.Filename != "" || len(part.Metadata) != 0 || (part.MediaType != "" && part.MediaType != "text/plain") {
+		return errors.New("one non-empty text/plain part is required")
+	}
+	return nil
+}
+
+func validateGetTaskParams(raw json.RawMessage) error {
+	var params strictGetTaskRequest
+	if err := decodeStrictJSON(raw, &params); err != nil {
+		return fmt.Errorf("invalid GetTask parameters: %w", err)
+	}
+	if params.ID == "" || params.Tenant != "" || params.HistoryLength != nil {
+		return errors.New("GetTask supports only a non-empty id in V1")
+	}
+	return nil
+}
+
+func decodeStrictJSON(raw []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("content must contain one JSON object")
+	}
+	return nil
 }
 
 func validRPCID(id json.RawMessage) bool {
@@ -187,66 +145,192 @@ func validRPCID(id json.RawMessage) bool {
 		return false
 	}
 	var value any
-	if err := json.Unmarshal(id, &value); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(id))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
 		return false
 	}
 	switch value.(type) {
-	case string, float64:
+	case string, json.Number:
 		return true
 	default:
 		return false
 	}
 }
 
-func decodeStrictRaw(raw json.RawMessage, target any) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return fmt.Errorf("content must contain one JSON object")
-	}
-	return nil
+type a2aRequestHandler struct {
+	service *intake.Service
 }
 
-func projectA2ATask(view intake.View) a2aTask {
-	task := a2aTask{ID: view.TaskID, ContextID: view.ConversationID, Status: a2aTaskStatus{State: a2aState(view.State)}}
+var _ a2asrv.RequestHandler = (*a2aRequestHandler)(nil)
+
+func (h *a2aRequestHandler) SendMessage(ctx context.Context, request *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {
+	principal, ok := a2aPrincipalFrom(ctx)
+	if !ok {
+		return nil, a2a.ErrUnauthenticated
+	}
+	if request == nil || request.Message == nil || len(request.Message.Parts) != 1 {
+		return nil, a2a.ErrInvalidParams
+	}
+	message := request.Message
+	contextID := message.ContextID
+	if message.TaskID != "" {
+		durable, err := h.service.Get(ctx, principal, string(message.TaskID))
+		if err != nil {
+			return nil, intakeA2AError(err)
+		}
+		if contextID != "" && contextID != durable.ConversationID {
+			return nil, a2a.NewError(a2a.ErrInvalidParams, "contextId does not match durable task state")
+		}
+		contextID = durable.ConversationID
+	} else if contextID == "" {
+		contextID = generatedA2AContextID(principal, message.ID)
+	}
+	kind, present, err := executionkind.Get(message)
+	if err != nil {
+		return nil, a2a.NewError(a2a.ErrInvalidParams, "execution-kind extension is invalid")
+	}
+	requestedKind := core.ExecutionKind("")
+	if present {
+		requestedKind = core.ExecutionKind(kind)
+	}
+	view, err := h.service.Handle(ctx, principal, intake.Message{
+		ConversationID: contextID,
+		TaskID:         string(message.TaskID),
+		MessageID:      message.ID,
+		Text:           message.Parts[0].Text(),
+		RequestedKind:  requestedKind,
+	})
+	if err != nil {
+		return nil, intakeA2AError(err)
+	}
+	return projectA2ATask(view), nil
+}
+
+func generatedA2AContextID(principal intake.Principal, messageID string) string {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("agentos-a2a-context-v1\x00"))
+	_, _ = hash.Write([]byte(principal.OrganizationID))
+	_, _ = hash.Write([]byte{'\x00'})
+	_, _ = hash.Write([]byte(principal.ID))
+	_, _ = hash.Write([]byte{'\x00'})
+	_, _ = hash.Write([]byte(messageID))
+	return "ctx-" + base64.RawURLEncoding.EncodeToString(hash.Sum(nil))
+}
+
+func (h *a2aRequestHandler) GetTask(ctx context.Context, request *a2a.GetTaskRequest) (*a2a.Task, error) {
+	principal, ok := a2aPrincipalFrom(ctx)
+	if !ok {
+		return nil, a2a.ErrUnauthenticated
+	}
+	if request == nil || request.ID == "" {
+		return nil, a2a.ErrInvalidParams
+	}
+	view, err := h.service.Get(ctx, principal, string(request.ID))
+	if err != nil {
+		return nil, intakeA2AError(err)
+	}
+	return projectA2ATask(view), nil
+}
+
+func intakeA2AError(err error) error {
+	switch {
+	case errors.Is(err, intake.ErrForbidden):
+		return a2a.NewError(a2a.ErrUnauthorized, "operator capability required")
+	case errors.Is(err, intake.ErrNotFound):
+		return a2a.ErrTaskNotFound
+	case errors.Is(err, intake.ErrInvalid), errors.Is(err, intake.ErrConflict):
+		return a2a.NewError(a2a.ErrInvalidParams, "operator message is invalid or conflicts with durable work")
+	default:
+		return a2a.NewError(a2a.ErrServerError, "operator work is unavailable")
+	}
+}
+
+func projectA2ATask(view intake.View) *a2a.Task {
+	task := &a2a.Task{
+		ID:        a2a.TaskID(view.TaskID),
+		ContextID: view.ConversationID,
+		Status:    a2a.TaskStatus{State: a2aState(view.State)},
+	}
 	if !view.UpdatedAt.IsZero() {
-		task.Status.Timestamp = view.UpdatedAt.UTC().Format(time.RFC3339Nano)
+		updatedAt := view.UpdatedAt.UTC()
+		task.Status.Timestamp = &updatedAt
 	}
 	if view.Prompt != "" {
 		task.Status.Message = statusMessage(view.ConversationID, view.TaskID, "status-"+view.TaskID, view.Prompt)
 	}
 	if view.Result != "" {
-		task.Artifacts = []a2aArtifact{{ArtifactID: "result-" + view.TaskID, Name: "Agent OS result", Parts: []a2aPart{{Text: view.Result, MediaType: "text/plain"}}}}
+		part := a2a.NewTextPart(view.Result)
+		part.MediaType = "text/plain"
+		task.Artifacts = []*a2a.Artifact{{
+			ID: a2a.ArtifactID("result-" + view.TaskID), Name: "Agent OS result", Parts: a2a.ContentParts{part},
+		}}
 	}
 	return task
 }
 
-func a2aState(state string) string {
+func a2aState(state string) a2a.TaskState {
 	switch state {
 	case intake.StateWorking:
-		return a2aStateWorking
+		return a2a.TaskStateWorking
 	case intake.StateInputRequired:
-		return a2aStateInputRequired
+		return a2a.TaskStateInputRequired
 	case intake.StateCompleted:
-		return a2aStateCompleted
+		return a2a.TaskStateCompleted
 	case intake.StateFailed:
-		return a2aStateFailed
+		return a2a.TaskStateFailed
 	default:
-		return a2aStateFailed
+		return a2a.TaskStateFailed
 	}
 }
 
-func statusMessage(contextID, taskID, messageID, text string) *a2aMessage {
-	return &a2aMessage{MessageID: messageID, ContextID: contextID, TaskID: taskID, Role: a2aRoleAgent, Parts: []a2aPart{{Text: text, MediaType: "text/plain"}}}
+func statusMessage(contextID, taskID, messageID, text string) *a2a.Message {
+	part := a2a.NewTextPart(text)
+	part.MediaType = "text/plain"
+	return &a2a.Message{
+		ID: messageID, ContextID: contextID, TaskID: a2a.TaskID(taskID),
+		Role: a2a.MessageRoleAgent, Parts: a2a.ContentParts{part},
+	}
 }
 
-func writeRPCResult(w http.ResponseWriter, id json.RawMessage, result any) {
-	writeJSON(w, http.StatusOK, jsonRPCResponse{JSONRPC: "2.0", ID: id, Result: result})
+func (*a2aRequestHandler) ListTasks(context.Context, *a2a.ListTasksRequest) (*a2a.ListTasksResponse, error) {
+	return nil, a2a.ErrUnsupportedOperation
 }
 
-func writeRPCError(w http.ResponseWriter, id json.RawMessage, code int, message string) {
-	writeJSON(w, http.StatusOK, jsonRPCResponse{JSONRPC: "2.0", ID: id, Error: &jsonRPCError{Code: code, Message: message}})
+func (*a2aRequestHandler) CancelTask(context.Context, *a2a.CancelTaskRequest) (*a2a.Task, error) {
+	return nil, a2a.ErrUnsupportedOperation
+}
+
+func (*a2aRequestHandler) SubscribeToTask(context.Context, *a2a.SubscribeToTaskRequest) iter.Seq2[a2a.Event, error] {
+	return unsupportedA2AStream()
+}
+
+func (*a2aRequestHandler) SendStreamingMessage(context.Context, *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+	return unsupportedA2AStream()
+}
+
+func unsupportedA2AStream() iter.Seq2[a2a.Event, error] {
+	return func(yield func(a2a.Event, error) bool) {
+		yield(nil, a2a.ErrUnsupportedOperation)
+	}
+}
+
+func (*a2aRequestHandler) GetTaskPushConfig(context.Context, *a2a.GetTaskPushConfigRequest) (*a2a.PushConfig, error) {
+	return nil, a2a.ErrPushNotificationNotSupported
+}
+
+func (*a2aRequestHandler) ListTaskPushConfigs(context.Context, *a2a.ListTaskPushConfigRequest) (*a2a.ListTaskPushConfigResponse, error) {
+	return nil, a2a.ErrPushNotificationNotSupported
+}
+
+func (*a2aRequestHandler) CreateTaskPushConfig(context.Context, *a2a.PushConfig) (*a2a.PushConfig, error) {
+	return nil, a2a.ErrPushNotificationNotSupported
+}
+
+func (*a2aRequestHandler) DeleteTaskPushConfig(context.Context, *a2a.DeleteTaskPushConfigRequest) error {
+	return a2a.ErrPushNotificationNotSupported
+}
+
+func (*a2aRequestHandler) GetExtendedAgentCard(context.Context, *a2a.GetExtendedAgentCardRequest) (*a2a.AgentCard, error) {
+	return nil, a2a.ErrExtendedCardNotConfigured
 }

@@ -2,27 +2,41 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/dominicnunez/agentos-a2a-go/executionkind"
 	"github.com/dominicnunez/agentos/internal/intake"
-	"github.com/dominicnunez/agentos/internal/trustconfig"
 )
+
+const maximumA2ARequestBytes = 256 << 10
 
 type A2A struct {
 	service   *intake.Service
 	actors    *ExternalActorRegistry
 	publicURL string
 	version   string
+	transport http.Handler
 }
 
 func NewA2A(service *intake.Service, actors *ExternalActorRegistry, publicURL, version string) *A2A {
-	return &A2A{service: service, actors: actors, publicURL: publicURL, version: version}
+	handler := &a2aRequestHandler{service: service}
+	return &A2A{
+		service: service, actors: actors, publicURL: publicURL, version: version,
+		transport: a2asrv.NewJSONRPCHandler(handler, a2asrv.WithTransportPanicHandler(func(any) error {
+			return a2a.ErrInternalError
+		})),
+	}
 }
 
 var forbiddenAuthorityFields = map[string]struct{}{
@@ -41,24 +55,32 @@ var forbiddenAuthorityFields = map[string]struct{}{
 	"unfreeze":           {},
 }
 
-func decodeWorkContent(w http.ResponseWriter, r *http.Request, target any) error {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 256<<10))
+func readA2AContent(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maximumA2ARequestBytes))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var content any
-	if err := json.Unmarshal(body, &content); err != nil {
-		return err
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := decoder.Decode(&content); err != nil {
+		return nil, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, errors.New("A2A request must contain one JSON object")
 	}
 	if err := rejectAuthorityContent(content); err != nil {
-		return err
+		return nil, err
 	}
-	return trustconfig.DecodeObject(bytes.NewReader(body), "operator work content", target)
+	if err := validateA2ARequest(body); err != nil {
+		return nil, err
+	}
+	return body, nil
 }
 
-func hasJSONContentType(value string) bool {
-	mediaType, _, err := mime.ParseMediaType(value)
-	return err == nil && mediaType == "application/json"
+func hasExactJSONContentType(value string) bool {
+	mediaType, parameters, err := mime.ParseMediaType(value)
+	return err == nil && strings.EqualFold(mediaType, "application/json") && len(parameters) == 0
 }
 
 func rejectAuthorityContent(content any) error {
@@ -88,7 +110,12 @@ func canonicalWorkField(field string) string {
 
 func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet && r.URL.Path == "/.well-known/agent-card.json" {
-		writeJSON(w, http.StatusOK, a.agentCard(r))
+		card, err := a.agentCard(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Agent Card endpoint is not configured"})
+			return
+		}
+		writeJSON(w, http.StatusOK, card)
 		return
 	}
 	if r.Method != http.MethodPost || r.URL.Path != "/" {
@@ -96,7 +123,7 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token, ok := bearerCredential(r.Header.Get("Authorization"))
-	if !ok {
+	if !ok || a.actors == nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authenticated external actor required"})
 		return
 	}
@@ -111,11 +138,18 @@ func (a *A2A) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer session.Release()
-	if !hasJSONContentType(r.Header.Get("Content-Type")) {
-		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "A2A JSON-RPC requires application/json"})
+	if !hasExactJSONContentType(r.Header.Get("Content-Type")) {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "A2A JSON-RPC requires exactly application/json"})
 		return
 	}
-	a.serveJSONRPC(w, r, session.Principal)
+	body, err := readA2AContent(w, r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid A2A request"})
+		return
+	}
+	ctx := withA2APrincipal(r.Context(), session.Principal)
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	a.transport.ServeHTTP(w, r.WithContext(ctx))
 }
 
 func bearerCredential(header string) (string, bool) {
@@ -127,47 +161,61 @@ func bearerCredential(header string) (string, bool) {
 	return token, token != "" && !strings.ContainsAny(token, " \t\r\n")
 }
 
-func (a *A2A) agentCard(r *http.Request) map[string]any {
+func (a *A2A) agentCard(r *http.Request) (a2a.AgentCard, error) {
 	endpoint := strings.TrimRight(a.publicURL, "/") + "/"
 	if a.publicURL == "" {
+		parsedHost, err := url.Parse("//" + r.Host)
+		if err != nil || parsedHost.Hostname() == "" || parsedHost.User != nil ||
+			parsedHost.Path != "" || parsedHost.RawQuery != "" || parsedHost.Fragment != "" {
+			return a2a.AgentCard{}, errors.New("request host is invalid")
+		}
+		hostname := parsedHost.Hostname()
+		address := net.ParseIP(hostname)
+		if !strings.EqualFold(hostname, "localhost") && (address == nil || !address.IsLoopback()) {
+			return a2a.AgentCard{}, errors.New("request host is not loopback")
+		}
 		scheme := "http"
 		if r.TLS != nil {
 			scheme = "https"
 		}
 		endpoint = scheme + "://" + r.Host + "/"
 	}
-	return map[string]any{
-		"name":        "Agent OS Operator Gateway",
-		"description": "Inbound work-level gateway for Agent OS V1",
-		"version":     a.version,
-		"provider": map[string]string{
-			"organization": "Agent OS",
-			"url":          endpoint,
-		},
-		"supportedInterfaces": []map[string]string{{
-			"url":             endpoint,
-			"protocolBinding": "JSONRPC",
-			"protocolVersion": "1.0",
+	bearer := a2a.SecuritySchemeName("bearer")
+	return a2a.AgentCard{
+		Name:        "Agent OS Operator Gateway",
+		Description: "Inbound work-level gateway for Agent OS V1",
+		Version:     a.version,
+		Provider:    &a2a.AgentProvider{Org: "Agent OS", URL: endpoint},
+		SupportedInterfaces: []*a2a.AgentInterface{{
+			URL: endpoint, ProtocolBinding: a2a.TransportProtocolJSONRPC, ProtocolVersion: a2a.Version,
 		}},
-		"capabilities": map[string]bool{
-			"streaming":              false,
-			"pushNotifications":      false,
-			"stateTransitionHistory": false,
-			"extendedAgentCard":      false,
-		},
-		"defaultInputModes":  []string{"text/plain"},
-		"defaultOutputModes": []string{"text/plain"},
-		"skills": []map[string]any{{
-			"id":          "submit-work",
-			"name":        "Submit organizational work",
-			"description": "Submit or continue bounded organizational work through Agent OS.",
-			"tags":        []string{"agent-os", "operator"},
+		Capabilities: a2a.AgentCapabilities{Extensions: []a2a.AgentExtension{{
+			URI: executionkind.URI, Required: false,
+			Description: "Optional untrusted execution-routing hint; it grants no authority.",
+		}}},
+		DefaultInputModes:  []string{"text/plain"},
+		DefaultOutputModes: []string{"text/plain"},
+		Skills: []a2a.AgentSkill{{
+			ID: "submit-work", Name: "Submit organizational work",
+			Description: "Submit or continue bounded organizational work through Agent OS.",
+			Tags:        []string{"agent-os", "operator"},
 		}},
-		"securitySchemes": map[string]any{
-			"bearer": map[string]string{"type": "http", "scheme": "bearer"},
+		SecuritySchemes: a2a.NamedSecuritySchemes{
+			bearer: a2a.HTTPAuthSecurityScheme{Scheme: "bearer", Description: "Reviewed external-Agent bearer credential."},
 		},
-		"security": []map[string][]string{{"bearer": {}}},
-	}
+		SecurityRequirements: a2a.SecurityRequirementsOptions{{bearer: {}}},
+	}, nil
+}
+
+type a2aPrincipalContextKey struct{}
+
+func withA2APrincipal(ctx context.Context, principal intake.Principal) context.Context {
+	return context.WithValue(ctx, a2aPrincipalContextKey{}, principal)
+}
+
+func a2aPrincipalFrom(ctx context.Context) (intake.Principal, bool) {
+	principal, ok := ctx.Value(a2aPrincipalContextKey{}).(intake.Principal)
+	return principal, ok
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

@@ -82,13 +82,21 @@ use HTTPS. Then submit a minimal A2A v1.0 JSON-RPC task:
 ```sh
 curl -X POST http://localhost:8080/ \
   -H 'Content-Type: application/json' \
-	-H 'Authorization: Bearer replace-with-at-least-32-random-characters' \
-	-d '{"jsonrpc":"2.0","id":"rpc-1","method":"SendMessage","params":{"message":{"messageId":"message-1","contextId":"request-1","role":"ROLE_USER","parts":[{"text":"echo hello","mediaType":"text/plain"}]}}}'
+  -H 'Authorization: Bearer replace-with-at-least-32-random-characters' \
+  -d '{"jsonrpc":"2.0","id":"rpc-1","method":"SendMessage","params":{"message":{"messageId":"message-1","role":"ROLE_USER","parts":[{"text":"echo hello","mediaType":"text/plain"}]}}}'
 ```
 
-The current deterministic handler supports `echo <text>`. The optional A2A
-Message metadata entry `"agentos.execution_kind":"AGENT"` exercises the fake
-model adapter; `HUMAN` exercises blocked-input continuation. Runtime data
+Agent OS generates and returns `contextId` when the initial message omits it.
+Initial retries with the same authenticated principal and `messageId` are
+idempotent. A continuation must include the returned `taskId`; when it also
+supplies `contextId`, that value must match durable task state.
+
+The current deterministic handler supports `echo <text>`. The optional
+[execution-kind extension](https://github.com/dominicnunez/agentos-a2a-go/blob/main/spec/execution-kind-v1.md)
+uses the official A2A `Message.Extensions` and `Message.Metadata` fields. It is
+an untrusted routing hint and grants no authority. The Apache-2.0
+[`agentos-a2a-go`](https://github.com/dominicnunez/agentos-a2a-go) module
+provides the encoding helper and official-SDK reference client. Runtime data
 defaults to `agentos.db`.
 
 The confined Codex subscription provider is available only when explicitly
@@ -163,6 +171,13 @@ broad tool ecosystems, production external-effect adapters, and reconciliation
 workers.
 
 See [docs/BUILD_CONTRACT.md](docs/BUILD_CONTRACT.md), [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), [docs/OPERATOR_INTAKE.md](docs/OPERATOR_INTAKE.md), [docs/COMPLETION_REVIEW.md](docs/COMPLETION_REVIEW.md), [docs/APPROVAL_POLICY.md](docs/APPROVAL_POLICY.md), [docs/APPROVAL_CONTROL.md](docs/APPROVAL_CONTROL.md), [docs/A2A_INTEROP.md](docs/A2A_INTEROP.md), [docs/EFFECT_RECONCILIATION.md](docs/EFFECT_RECONCILIATION.md), [docs/SQLITE_RECOVERY.md](docs/SQLITE_RECOVERY.md), [docs/CODEX_SUBSCRIPTION_PROVIDER.md](docs/CODEX_SUBSCRIPTION_PROVIDER.md), and [docs/OPENAI_API_PROVIDER.md](docs/OPENAI_API_PROVIDER.md).
+
+## License and contributions
+
+Copyright 2026 Dominic Nunez. Agent OS is licensed under
+[`AGPL-3.0-only`](LICENSE), not “or later.” External code contributions are not
+currently accepted; issues may be opened under the policy in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Authoritative architecture handoff
 

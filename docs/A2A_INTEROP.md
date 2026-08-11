@@ -44,23 +44,46 @@ The gateway exposes only the A2A v1.0 surface:
 - one advertised `JSONRPC` interface with protocol version `1.0`;
 - authenticated JSON-RPC 2.0 `SendMessage` and `GetTask` methods at the
   advertised interface URL;
-- `contextId` as the caller-visible conversation key and `messageId` as the
-  continuation-delivery idempotency key. Agent OS reserves an opaque random
-  internal work key bound to the authenticated organization plus `contextId`,
-  then derives the Task ID only from that reserved key.
+- an optional Apache-2.0 execution-kind extension identified by
+  `https://github.com/dominicnunez/agentos-a2a-go/blob/main/spec/execution-kind-v1.md`;
+- server-generated `contextId` when an initial message omits it, with a stable
+  value derived from the authenticated organization, actor, and `messageId` so
+  the same initial delivery remains idempotent across restart;
+- a `SUBMITTER` receives a stable acceptance receipt containing only its task
+  and context identifiers. An exact retry by that same authenticated principal
+  returns the receipt without granting `read_status` or exposing later state;
+- continuation only by durable `taskId`. A supplied continuation `contextId`
+  must match the task; a different message in an existing context without
+  `taskId` is rejected.
 
 The A2A adapter translates into the same principal-aware Intake Service used by
 the direct Human Gateway. This does not make the first-party human API part of
 A2A and does not weaken A2A protocol isolation.
 
-The gateway does not serve the pre-1.0 discovery alias, legacy method names, or
-custom REST task endpoints. Protocol changes require review of the wire and
-security boundaries plus a passing interoperability job before merge.
+Execution-kind metadata is an untrusted routing hint. It grants no identity,
+authority, approval, capability, completion status, or effect permission. The
+legacy `agentos.execution_kind` metadata key is not accepted.
 
-CI uses a dependency-free A2A v1.0 client fixture against a live Agent OS
-process. It verifies discovery plus deterministic and adaptive natural-language
-work. Go conformance tests cover blocked-input continuation, status/result
-capability separation, organization isolation, replay idempotency, and
-authority-field rejection. Adversarial coverage also checks weak or duplicate
-credentials, unknown roles/config fields, actor expiry/revocation, request
-limits, and own-work isolation.
+The gateway uses the official `a2aproject/a2a-go/v2` v2.4.0 message, task,
+Agent Card, JSON-RPC client, and JSON-RPC server contracts. Agent OS retains a
+boundary wrapper for authentication, actor lookup, organization and scope
+enforcement, limits, exact media type and body bounds, strict supported-input
+decoding, authority-field rejection, and private principal injection. SQLite
+and Agent OS Event Contracts remain authoritative; the SDK task store is not
+used.
+
+The gateway does not serve the pre-1.0 discovery alias, legacy method names,
+custom REST task endpoints, list, cancel, streaming, push, subscription, or
+extended-card capabilities. Unsupported official methods return standard A2A
+errors and cannot create ledger events. Protocol changes require review of the
+wire and security boundaries plus a passing interoperability job before merge.
+
+CI uses the official A2A Go client for Agent Card discovery, authenticated
+submission, generated contexts, `GetTask`, deterministic and adaptive work,
+blocked-task continuation, restart, and unsupported-method checks. A separate
+dependency-free live-process fixture keeps the executable boundary test small.
+Go conformance tests also cover status/result capability separation,
+organization isolation, replay conflicts, and authority-field rejection.
+Adversarial coverage checks weak or duplicate credentials, unknown
+roles/config fields, actor expiry/revocation, request limits, and own-work
+isolation.

@@ -65,6 +65,7 @@ func (p Principal) Allowed(capability string) bool {
 
 type Message struct {
 	ConversationID string
+	TaskID         string
 	MessageID      string
 	Text           string
 	RequestedKind  core.ExecutionKind
@@ -138,11 +139,15 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 	if err := validateMessageContent(message); err != nil {
 		return View{}, err
 	}
+	submissionReceiptOnly := false
 	stream, err := s.app.ExternalEvents(ctx, principal.OrganizationID, message.ConversationID)
 	if err != nil {
 		return View{}, fmt.Errorf("%w: load work stream", ErrUnavailable)
 	}
 	if len(stream) == 0 {
+		if message.TaskID != "" {
+			return View{}, fmt.Errorf("%w: continuation task does not match durable work", ErrConflict)
+		}
 		if err := ValidateIdentifier("conversation", message.ConversationID); err != nil {
 			return View{}, err
 		}
@@ -165,6 +170,7 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 		if err != nil || (submitErr != nil && submitted.Task.ID == "") {
 			return View{}, fmt.Errorf("%w: submit work", ErrUnavailable)
 		}
+		submissionReceiptOnly = !principal.Allowed(CapabilityReadStatus)
 	} else {
 		initial, err := authorizedInitialWork(principal, stream)
 		if err != nil {
@@ -172,6 +178,27 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 		}
 		initialIDMatches := initial.MessageID == message.MessageID
 		initialReplay := initialIDMatches && initial.Text == message.Text
+		if initialReplay && !principal.Allowed(CapabilityReadStatus) {
+			if !principal.Allowed(CapabilitySubmitWork) || !initial.matches(principal) {
+				return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
+			}
+			submissionReceiptOnly = true
+		}
+		durableTaskID := streamTaskID(stream)
+		if durableTaskID == "" {
+			return View{}, fmt.Errorf("%w: work has no durable task", ErrUnavailable)
+		}
+		if principal.Channel == ChannelA2A {
+			if initialReplay {
+				if message.TaskID != "" && message.TaskID != durableTaskID {
+					return View{}, fmt.Errorf("%w: initial retry task does not match durable work", ErrConflict)
+				}
+			} else if message.TaskID == "" {
+				return View{}, fmt.Errorf("%w: continuation requires task identifier", ErrConflict)
+			} else if message.TaskID != durableTaskID {
+				return View{}, fmt.Errorf("%w: continuation task does not match durable work", ErrConflict)
+			}
+		}
 		durableInputReplay := matchesDurableInput(stream, principal, message)
 		if err := ValidateIdentifier("message", message.MessageID); err != nil && !initialReplay && !durableInputReplay {
 			return View{}, err
@@ -181,11 +208,11 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 		}
 		switch externalState(stream) {
 		case StateInputRequired:
-			if initialReplay {
+			if initialReplay && !submissionReceiptOnly {
 				if !principal.Allowed(CapabilityReadStatus) {
 					return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
 				}
-			} else {
+			} else if !initialReplay {
 				if !principal.Allowed(CapabilityProvideInput) {
 					return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityProvideInput)
 				}
@@ -210,7 +237,7 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 			if !initialReplay && !durableInputReplay {
 				return View{}, fmt.Errorf("%w: conversation is bound to different work", ErrConflict)
 			}
-			if !principal.Allowed(CapabilityReadStatus) {
+			if !principal.Allowed(CapabilityReadStatus) && !submissionReceiptOnly {
 				return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
 			}
 		default:
@@ -219,6 +246,9 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 	}
 	if streamTaskID(stream) == "" {
 		return View{}, fmt.Errorf("%w: work did not create a task", ErrUnavailable)
+	}
+	if submissionReceiptOnly {
+		return projectSubmissionReceipt(message.ConversationID, stream), nil
 	}
 	return projectView(message.ConversationID, stream, principal.Allowed(CapabilityReadResult)), nil
 }
@@ -391,6 +421,17 @@ func projectView(conversationID string, stream []events.Event, includeResult boo
 	return view
 }
 
+func projectSubmissionReceipt(conversationID string, stream []events.Event) View {
+	view := View{TaskID: streamTaskID(stream), ConversationID: conversationID, State: StateWorking}
+	for _, event := range stream {
+		if event.EventType == "INTENT_CREATED" {
+			view.UpdatedAt = event.CreatedAt
+			break
+		}
+	}
+	return view
+}
+
 func externalState(stream []events.Event) string {
 	state := StateWorking
 	for _, event := range stream {
@@ -419,7 +460,15 @@ func streamTaskID(stream []events.Event) string {
 
 type initialWork struct {
 	Message
-	PrincipalID core.ID
+	PrincipalID   core.ID
+	PrincipalKind core.PrincipalKind
+	Channel       string
+}
+
+func (work initialWork) matches(principal Principal) bool {
+	return work.PrincipalID == core.ID(principal.ID) &&
+		work.PrincipalKind == principal.Kind &&
+		work.Channel == principal.Channel
 }
 
 func initialMessage(stream []events.Event) (initialWork, bool) {
@@ -433,7 +482,12 @@ func initialMessage(stream []events.Event) (initialWork, bool) {
 			if intent.SourceMessageID == "" || intent.OriginalInstruction == "" {
 				return initialWork{}, false
 			}
-			return initialWork{Message: Message{MessageID: intent.SourceMessageID, Text: intent.OriginalInstruction}, PrincipalID: intent.SourcePrincipalID}, true
+			return initialWork{
+				Message:       Message{MessageID: intent.SourceMessageID, Text: intent.OriginalInstruction},
+				PrincipalID:   intent.SourcePrincipalID,
+				PrincipalKind: intent.SourcePrincipalKind,
+				Channel:       intent.SourceChannel,
+			}, true
 		}
 	}
 	return initialWork{}, false

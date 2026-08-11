@@ -36,6 +36,16 @@ SEMVER = re.compile(
 )
 BUILD_FLAGS = ("-mod=readonly", "-trimpath", "-buildvcs=false")
 LINK_FLAGS = "-s -w -buildid="
+LICENSE_NAME = re.compile(
+    r"^(?:LICEN[CS]E|COPYING)(?:$|[._-])", re.IGNORECASE
+)
+SUPPLEMENTAL_NOTICE_NAME = re.compile(
+    r"^(?:NOTICE|COPYRIGHT)(?:$|[._-])", re.IGNORECASE
+)
+MAX_LICENSE_BYTES = 2 << 20
+MAX_DEPENDENCY_SOURCE_FILE_BYTES = 64 << 20
+MAX_DEPENDENCY_SOURCE_BYTES = 512 << 20
+AGPL3_SHA256 = "d8a6cc31abc16b6748c7a21f21611f5a1ec33f67d22ca23d7da1c19b95496bee"
 
 
 def command(
@@ -51,6 +61,17 @@ def command(
         stderr=subprocess.PIPE if capture else None,
     )
     return result.stdout if capture else ""
+
+
+def command_bytes(args: list[str]) -> bytes:
+    result = subprocess.run(
+        args,
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.stdout
 
 
 def canonical_version(path: Path) -> str:
@@ -189,8 +210,165 @@ def target_modules(goos: str, goarch: str, version: str) -> list[dict]:
             module_version = module.get("Version")
             if not isinstance(module_version, str) or not module_version:
                 raise RuntimeError(f"compiled module {path!r} has no immutable version")
-        modules[path] = {"path": path, "version": module_version}
+        directory = module.get("Dir")
+        if not isinstance(directory, str) or not directory:
+            raise RuntimeError(f"compiled module {path!r} has no source directory")
+        record = {"path": path, "version": module_version, "directory": directory}
+        previous = modules.get(path)
+        if previous is not None and previous != record:
+            raise RuntimeError(f"compiled module {path!r} resolved inconsistently")
+        modules[path] = record
     return sorted(modules.values(), key=lambda item: (item["path"], item["version"]))
+
+
+def compiled_modules(version: str) -> list[dict]:
+    modules: dict[str, dict] = {}
+    for goos, goarch in TARGETS:
+        for module in target_modules(goos, goarch, version):
+            previous = modules.get(module["path"])
+            if previous is not None and previous != module:
+                raise RuntimeError(
+                    f"compiled module {module['path']!r} differs across targets"
+                )
+            modules[module["path"]] = module
+    return sorted(modules.values(), key=lambda item: (item["path"], item["version"]))
+
+
+def third_party_component_path(path: str, version: str) -> str:
+    segments = path.split("/")
+    if any(not segment or segment in {".", ".."} for segment in segments):
+        raise RuntimeError(f"compiled module path is unsafe: {path!r}")
+    encoded = "/".join(quote(segment, safe="._-") for segment in segments)
+    return f"THIRD_PARTY_LICENSES/{encoded}@{quote(version, safe='._-+')}"
+
+
+def third_party_licenses(modules: list[dict], version: str, commit: str) -> dict[str, tuple[bytes, int]]:
+    files: dict[str, tuple[bytes, int]] = {}
+    manifest_modules: list[dict] = []
+    for module in modules:
+        if module["path"] == "github.com/dominicnunez/agentos":
+            continue
+        directory = Path(module["directory"])
+        if not directory.is_dir():
+            raise RuntimeError(
+                f"compiled module {module['path']!r} source directory is unavailable"
+            )
+        evidence: list[Path] = []
+        license_evidence: list[Path] = []
+        for candidate in sorted(directory.iterdir(), key=lambda item: item.name):
+            if not candidate.is_file() or candidate.is_symlink():
+                continue
+            if LICENSE_NAME.match(candidate.name):
+                license_evidence.append(candidate)
+                evidence.append(candidate)
+            elif SUPPLEMENTAL_NOTICE_NAME.match(candidate.name):
+                evidence.append(candidate)
+        if not license_evidence:
+            raise RuntimeError(
+                f"compiled module {module['path']} {module['version']} lacks root license evidence"
+            )
+        component = third_party_component_path(module["path"], module["version"])
+        bundled_names: list[str] = []
+        for evidence_file in evidence:
+            content = evidence_file.read_bytes()
+            if not content or len(content) > MAX_LICENSE_BYTES:
+                raise RuntimeError(
+                    f"license evidence {evidence_file} is empty or exceeds {MAX_LICENSE_BYTES} bytes"
+                )
+            destination = f"{component}/{evidence_file.name}"
+            if destination in files:
+                raise RuntimeError(f"duplicate bundled license path {destination!r}")
+            files[destination] = (content, 0o644)
+            bundled_names.append(destination.removeprefix("THIRD_PARTY_LICENSES/"))
+        manifest_modules.append(
+            {
+                "licenseFiles": bundled_names,
+                "path": module["path"],
+                "purl": module_purl(module["path"], module["version"]),
+                "version": module["version"],
+            }
+        )
+    if not manifest_modules:
+        raise RuntimeError("release binaries unexpectedly have no third-party modules")
+    manifest = {
+        "generatedFrom": {
+            "commit": commit,
+            "repository": REPOSITORY,
+            "tag": "v" + version,
+        },
+        "modules": manifest_modules,
+        "schemaVersion": 1,
+    }
+    files["THIRD_PARTY_LICENSES/manifest.json"] = (
+        (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+        0o644,
+    )
+    return files
+
+
+def dependency_source_files(modules: list[dict]) -> dict[str, tuple[bytes, int]]:
+    required = {
+        (module["path"], module["version"])
+        for module in modules
+        if module["path"] != "github.com/dominicnunez/agentos"
+    }
+    if not required:
+        raise RuntimeError("release binaries unexpectedly have no external modules")
+    with tempfile.TemporaryDirectory(prefix="agentos-vendor-") as temporary:
+        vendor = Path(temporary) / "vendor"
+        command(
+            ["go", "mod", "vendor", "-o", str(vendor)],
+            env=build_environment(),
+        )
+        modules_path = vendor / "modules.txt"
+        if not modules_path.is_file() or modules_path.is_symlink():
+            raise RuntimeError("Go did not produce a regular vendor/modules.txt")
+        vendored: set[tuple[str, str]] = set()
+        for line in modules_path.read_text(encoding="utf-8").splitlines():
+            if not line.startswith("# "):
+                continue
+            fields = line.split()
+            if len(fields) >= 3:
+                vendored.add((fields[1], fields[2]))
+        missing = sorted(required - vendored)
+        if missing:
+            formatted = ", ".join(f"{path}@{version}" for path, version in missing)
+            raise RuntimeError(
+                "vendored source omits modules compiled into release binaries: "
+                + formatted
+            )
+
+        files: dict[str, tuple[bytes, int]] = {}
+        total_bytes = 0
+        for candidate in sorted(
+            vendor.rglob("*"), key=lambda item: item.relative_to(vendor).as_posix()
+        ):
+            if candidate.is_symlink():
+                raise RuntimeError(f"vendored source contains a symlink: {candidate}")
+            if candidate.is_dir():
+                continue
+            if not candidate.is_file():
+                raise RuntimeError(
+                    f"vendored source contains a non-regular entry: {candidate}"
+                )
+            content = candidate.read_bytes()
+            if len(content) > MAX_DEPENDENCY_SOURCE_FILE_BYTES:
+                raise RuntimeError(
+                    f"vendored source file exceeds {MAX_DEPENDENCY_SOURCE_FILE_BYTES} bytes: "
+                    f"{candidate}"
+                )
+            total_bytes += len(content)
+            if total_bytes > MAX_DEPENDENCY_SOURCE_BYTES:
+                raise RuntimeError(
+                    f"vendored source exceeds {MAX_DEPENDENCY_SOURCE_BYTES} bytes"
+                )
+            relative = candidate.relative_to(vendor).as_posix()
+            if relative.startswith("/") or ".." in Path(relative).parts:
+                raise RuntimeError(f"vendored source path is unsafe: {relative!r}")
+            files[f"vendor/{relative}"] = (content, 0o644)
+    if "vendor/modules.txt" not in files:
+        raise RuntimeError("vendored source is empty")
+    return files
 
 
 def cyclone_dx(
@@ -261,6 +439,60 @@ def build_binary(
         ],
         env=environment,
     )
+
+
+def source_notice(version: str, commit: str) -> bytes:
+    return (
+        "# Agent OS corresponding source\n\n"
+        f"- Repository: {REPOSITORY}\n"
+        f"- Commit: `{commit}`\n"
+        f"- Immutable release tag: `v{version}`\n"
+        f"- Corresponding-source archive: `agentos_{version}_source.tar.gz`\n"
+        "- License: `AGPL-3.0-only`\n\n"
+        "The release tag must resolve to the commit above when the release is "
+        "published. The source archive is generated deterministically from that "
+        "commit and contains the complete tracked source, this notice, and an "
+        "exact vendored source tree for the external Go modules needed to build "
+        "and test the release without network access.\n"
+    ).encode("utf-8")
+
+
+def tracked_source_files(source_md: bytes) -> dict[str, tuple[bytes, int]]:
+    records = command_bytes(["git", "ls-files", "--stage", "-z"])
+    files: dict[str, tuple[bytes, int]] = {}
+    for raw_record in records.split(b"\x00"):
+        if not raw_record:
+            continue
+        try:
+            metadata, raw_name = raw_record.split(b"\t", 1)
+            mode_text, object_id, stage = metadata.decode("ascii").split(" ")
+            name = raw_name.decode("utf-8")
+        except (UnicodeDecodeError, ValueError) as error:
+            raise RuntimeError("Git returned an invalid tracked-file record") from error
+        if stage != "0" or not re.fullmatch(r"[0-9a-f]{40,64}", object_id):
+            raise RuntimeError(f"tracked source entry {name!r} is not a normal stage-0 file")
+        if mode_text not in {"100644", "100755"}:
+            raise RuntimeError(
+                f"tracked source entry {name!r} has unsupported mode {mode_text!r}"
+            )
+        path = ROOT / name
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError(f"tracked source entry {name!r} is not a regular file")
+        normalized = Path(name).as_posix()
+        if normalized.startswith("/") or ".." in Path(normalized).parts:
+            raise RuntimeError(f"tracked source entry is unsafe: {name!r}")
+        files[normalized] = (
+            command_bytes(["git", "cat-file", "blob", object_id]),
+            int(mode_text[-3:], 8),
+        )
+    if not files:
+        raise RuntimeError("source commit contains no tracked files")
+    if "SOURCE.md" in files:
+        raise RuntimeError("SOURCE.md is generated by the release builder and must not be tracked")
+    if any(name == "vendor" or name.startswith("vendor/") for name in files):
+        raise RuntimeError("vendor is generated by the release builder and must not be tracked")
+    files["SOURCE.md"] = (source_md, 0o644)
+    return files
 
 
 def tar_gzip(path: Path, root_name: str, files: dict[str, tuple[bytes, int]], epoch: int) -> None:
@@ -400,6 +632,18 @@ def main() -> int:
     dependency_environment = build_environment()
     command(["go", "mod", "download"], env=dependency_environment)
     command(["go", "mod", "verify"], env=dependency_environment)
+    source_md = source_notice(version, commit)
+    source_files = tracked_source_files(source_md)
+    license = source_files.get("LICENSE")
+    if license is None or hashlib.sha256(license[0]).hexdigest() != AGPL3_SHA256:
+        raise RuntimeError("LICENSE must contain the unmodified AGPLv3 text")
+    license_bytes = license[0]
+    module_records = compiled_modules(version)
+    vendored_sources = dependency_source_files(module_records)
+    if source_files.keys() & vendored_sources.keys():
+        raise RuntimeError("vendored dependency source collides with tracked source")
+    source_files.update(vendored_sources)
+    bundled_licenses = third_party_licenses(module_records, version, commit)
     output.mkdir(parents=True, exist_ok=False)
     host_goos = command(
         ["go", "env", "GOOS"], env=build_environment(), capture=True
@@ -409,6 +653,23 @@ def main() -> int:
     ).strip()
 
     produced: list[Path] = []
+    source_md_path = output / "SOURCE.md"
+    source_md_path.write_bytes(source_md)
+    produced.append(source_md_path)
+    source_root = f"agentos_{version}_source"
+    source_archive = output / f"{source_root}.tar.gz"
+    tar_gzip(source_archive, source_root, source_files, epoch)
+    verify_archive(source_archive, source_root, source_files, epoch)
+    produced.append(source_archive)
+    license_root = f"agentos_{version}_third-party-licenses"
+    license_archive = output / f"{license_root}.tar.gz"
+    standalone_licenses = {
+        name.removeprefix("THIRD_PARTY_LICENSES/"): value
+        for name, value in bundled_licenses.items()
+    }
+    tar_gzip(license_archive, license_root, standalone_licenses, epoch)
+    verify_archive(license_archive, license_root, standalone_licenses, epoch)
+    produced.append(license_archive)
     with tempfile.TemporaryDirectory(prefix="agentos-release-") as temporary:
         staging = Path(temporary)
         for goos, goarch in TARGETS:
@@ -416,9 +677,12 @@ def main() -> int:
             target_dir = staging / target
             target_dir.mkdir()
             packaged: dict[str, tuple[bytes, int]] = {
-                "README.md": ((ROOT / "README.md").read_bytes(), 0o644),
-                "VERSION": (version_file.read_bytes(), 0o644),
+                "LICENSE": (license_bytes, 0o644),
+                "README.md": (source_files["README.md"][0], 0o644),
+                "SOURCE.md": (source_md, 0o644),
+                "VERSION": (source_files["VERSION"][0], 0o644),
             }
+            packaged.update(bundled_licenses)
             for binary_name, package in BINARIES:
                 filename = binary_name
                 binary = target_dir / filename
@@ -434,6 +698,15 @@ def main() -> int:
             archive_path = output / (root_name + ".tar.gz")
             tar_gzip(archive_path, root_name, packaged, epoch)
             verify_archive(archive_path, root_name, packaged, epoch)
+            for required in (
+                "LICENSE",
+                "SOURCE.md",
+                "THIRD_PARTY_LICENSES/manifest.json",
+            ):
+                if required not in packaged:
+                    raise RuntimeError(
+                        f"binary package {archive_path.name} lacks required {required}"
+                    )
             produced.append(archive_path)
 
             if (goos, goarch) == (host_goos, host_goarch):

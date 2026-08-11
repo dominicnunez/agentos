@@ -33,14 +33,31 @@ Each package contains:
 
 - `agentos`;
 - `agentos-recovery`;
+- the complete `AGPL-3.0-only` `LICENSE`;
+- `SOURCE.md`, identifying the repository, exact commit, and immutable release
+  tag;
+- `THIRD_PARTY_LICENSES/`, containing a deterministic manifest and root license
+  evidence for every external Go module compiled into either supported target;
 - `README.md` and `VERSION`; and
 - the target's CycloneDX 1.6 module SBOM.
 
-The output directory also contains every target SBOM, `SHA256SUMS`, and one
-deterministic in-toto/SLSA provenance statement. The statement records the
-source commit, build parameters, target matrix, exact Go and Python builder
-versions, and subjects. It is build metadata, not a signature or GitHub
-attestation.
+The output directory also contains a deterministic corresponding-source
+archive, a standalone deterministic third-party-license bundle, `SOURCE.md`,
+every target SBOM, `SHA256SUMS`, and one deterministic in-toto/SLSA provenance
+statement. The source archive contains the exact tracked Agent OS source and a
+generated `vendor/` tree with the source of every external Go module needed to
+build and test the release. The source and license archives are checksum and
+provenance subjects. The statement records the source commit, build parameters,
+target matrix, exact Go and Python builder versions, and subjects. It is build
+metadata, not a signature or GitHub attestation.
+
+The builder derives the license bundle from the packages that Go reports as
+compiled into the release commands. It fails closed if an external compiled
+module has no discoverable root license evidence, if a binary package omits
+the Agent OS license, source notice, or third-party manifest, or if any archive
+content or metadata is not reproducible. Release CI extracts the corresponding
+source archive on Linux, disables module-network access, and runs its complete
+test suite from the delivered vendored dependency source.
 
 The dedicated release-artifact workflow builds the complete output twice in
 parallel with normal CI, compares it byte for byte, verifies every checksum,
@@ -59,9 +76,8 @@ The builder does not create tags, releases, attestations, or deployments.
 Publishing `v1.0.0-rc.1` is a separate public/external and trusted-release
 decision. Before publication:
 
-1. record a distribution-license decision; this repository currently has no
-   `LICENSE` file;
-2. confirm required CI is green on the exact `main` commit;
+1. confirm required CI is green on the exact `main` commit;
+2. obtain final software-licensing review for the `AGPL-3.0-only` distribution;
 3. approve the immutable `v1.0.0-rc.1` tag and public GitHub release;
 4. rebuild from that tag and compare it with the approved commit output;
 5. generate GitHub-signed artifact attestations with minimal workflow

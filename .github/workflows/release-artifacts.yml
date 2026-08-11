@@ -47,6 +47,33 @@ jobs:
             "$RUNNER_TEMP/agentos-release-a" \
             "$RUNNER_TEMP/agentos-release-b"
 
+      - name: Verify packaged licenses and corresponding source
+        env:
+          GOCACHE: ${{ runner.temp }}/agentos-source-gocache
+          GOMODCACHE: ${{ runner.temp }}/agentos-source-gomodcache
+        run: |
+          version=$(tr -d '\r\n' < VERSION)
+          for target in linux_amd64 linux_arm64; do
+            archive="$RUNNER_TEMP/agentos-release-a/agentos_${version}_${target}.tar.gz"
+            root="agentos_${version}_${target}"
+            listing=$(tar --list --gzip --file "$archive")
+            grep --fixed-strings --line-regexp "$root/LICENSE" <<<"$listing"
+            grep --fixed-strings --line-regexp "$root/SOURCE.md" <<<"$listing"
+            grep --fixed-strings --line-regexp \
+              "$root/THIRD_PARTY_LICENSES/manifest.json" <<<"$listing"
+          done
+          source_directory="$RUNNER_TEMP/agentos-source"
+          source_root="$source_directory/agentos_${version}_source"
+          mkdir "$source_directory"
+          tar --extract --gzip \
+            --file "$RUNNER_TEMP/agentos-release-a/agentos_${version}_source.tar.gz" \
+            --directory "$source_directory"
+          test -f "$source_root/LICENSE"
+          test -f "$source_root/SOURCE.md"
+          test -f "$source_root/vendor/modules.txt"
+          cd "$source_root"
+          GOPROXY=off GOSUMDB=off go test -mod=vendor ./...
+
       - name: Pilot packaged Linux amd64 binaries
         env:
           AGENTOS_PILOT_AGENT_TOKEN: pilot-agent-token-00000000000000001

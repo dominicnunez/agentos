@@ -78,6 +78,12 @@ Both work channels enforce `read_status`, `read_result`, `provide_input`, and
 Internal work keys and task IDs are tenant-scoped and do not expose the
 caller-supplied conversation ID.
 
+For A2A, an initial message may omit `contextId`; Agent OS returns a durable
+generated context. Continuing blocked work requires the returned `taskId`, and
+any supplied `contextId` must match that durable task. The execution-kind
+extension is only a routing hint and never modifies the authenticated
+principal or its capabilities.
+
 ## Authority boundary
 
 Both adapters reject authority-shaped structured fields before persistence.

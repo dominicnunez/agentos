@@ -10,6 +10,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+EXECUTION_KIND_URI = "https://github.com/dominicnunez/agentos-a2a-go/blob/main/spec/execution-kind-v1.md"
+
 
 def request_json_response(
     url: str, token: str, body: dict | None = None
@@ -97,15 +99,29 @@ def verify_approval_control_isolation(args: argparse.Namespace) -> None:
     )
 
 
-def a2a_send(url: str, token: str, rpc_id: str, message_id: str, context_id: str, text: str, kind: str = "") -> dict:
+def a2a_send(
+    url: str,
+    token: str,
+    rpc_id: str,
+    message_id: str,
+    text: str,
+    *,
+    context_id: str = "",
+    task_id: str = "",
+    kind: str = "",
+) -> dict:
     message: dict = {
         "messageId": message_id,
-        "contextId": context_id,
         "role": "ROLE_USER",
         "parts": [{"text": text, "mediaType": "text/plain"}],
     }
+    if context_id:
+        message["contextId"] = context_id
+    if task_id:
+        message["taskId"] = task_id
     if kind:
-        message["metadata"] = {"agentos.execution_kind": kind}
+        message["extensions"] = [EXECUTION_KIND_URI]
+        message["metadata"] = {EXECUTION_KIND_URI: {"kind": kind}}
     envelope = request_json(
         url.rstrip("/") + "/",
         token,
@@ -174,13 +190,13 @@ def seed(args: argparse.Namespace) -> None:
     verify_approval_control_isolation(args)
     deterministic = a2a_send(
         args.url, args.agent_token, "pilot-rpc-1", "pilot-agent-message-1",
-        "pilot-agent-completed", "echo durable-agent-result",
+        "echo durable-agent-result", kind="DETERMINISTIC",
     )
     if deterministic.get("status", {}).get("state") != "TASK_STATE_COMPLETED" or task_text(deterministic) != "durable-agent-result":
         raise RuntimeError(f"seed A2A result is invalid: {deterministic}")
     blocked_agent = a2a_send(
         args.url, args.agent_token, "pilot-rpc-2", "pilot-agent-message-2",
-        "pilot-agent-blocked", "request operator input", "HUMAN",
+        "request operator input", kind="HUMAN",
     )
     if blocked_agent.get("status", {}).get("state") != "TASK_STATE_INPUT_REQUIRED":
         raise RuntimeError(f"seed A2A task did not block: {blocked_agent}")
@@ -231,9 +247,14 @@ def seed(args: argparse.Namespace) -> None:
 
     revocable = a2a_send(
         args.url, args.revoked_token, "pilot-rpc-3", "pilot-revocable-message-1",
-        "pilot-revocable", "echo pre-revocation",
+        "echo pre-revocation", kind="DETERMINISTIC",
     )
-    if revocable.get("status", {}).get("state") != "TASK_STATE_COMPLETED":
+    if (
+        revocable.get("status", {}).get("state") != "TASK_STATE_WORKING"
+        or not revocable.get("id")
+        or not revocable.get("contextId")
+        or revocable.get("artifacts")
+    ):
         raise RuntimeError(f"revocable credential was not active during seed: {revocable}")
     expect_unauthorized(
         args.url.rstrip("/") + "/", args.expired_token,
@@ -245,12 +266,14 @@ def seed(args: argparse.Namespace) -> None:
         {
             "agent_completed_task": deterministic["id"],
             "agent_blocked_task": blocked_agent["id"],
+            "agent_blocked_context": blocked_agent["contextId"],
             "human_completed_task": completed_human["task_id"],
             "human_blocked_task": blocked_human["task_id"],
             "review_task": pending_review["task_id"],
             "review_id": review["review_id"],
             "review_fingerprint": review["fingerprint"],
             "review_objective": review_objective,
+            "revocable_task": revocable["id"],
         },
     )
 
@@ -261,6 +284,9 @@ def recover(args: argparse.Namespace) -> None:
     deterministic = a2a_get(args.url, args.reader_token, "pilot-rpc-4", state["agent_completed_task"])
     if deterministic.get("status", {}).get("state") != "TASK_STATE_COMPLETED" or task_text(deterministic) != "durable-agent-result":
         raise RuntimeError(f"recovered A2A result is invalid: {deterministic}")
+    revocable = a2a_get(args.url, args.reader_token, "pilot-rpc-revocable", state["revocable_task"])
+    if revocable.get("status", {}).get("state") != "TASK_STATE_COMPLETED" or task_text(revocable) != "pre-revocation":
+        raise RuntimeError(f"revocable submission was not durably accepted: {revocable}")
     completed_human = request_json(
         args.url.rstrip("/") + "/v1/human/tasks/" + state["human_completed_task"], args.human_token
     )
@@ -306,7 +332,9 @@ def recover(args: argparse.Namespace) -> None:
 
     continued_agent = a2a_send(
         args.url, args.agent_token, "pilot-rpc-5", "pilot-agent-message-3",
-        "pilot-agent-blocked", "authorized continuation after restore",
+        "authorized continuation after restore",
+        context_id=state["agent_blocked_context"],
+        task_id=state["agent_blocked_task"],
     )
     if continued_agent.get("id") != state["agent_blocked_task"] or continued_agent.get("status", {}).get("state") != "TASK_STATE_COMPLETED":
         raise RuntimeError(f"A2A continuation failed after restore: {continued_agent}")
@@ -317,7 +345,7 @@ def recover(args: argparse.Namespace) -> None:
     if continued_human.get("task_id") != state["human_blocked_task"] or continued_human.get("state") != "COMPLETED":
         raise RuntimeError(f"Human continuation failed after restore: {continued_human}")
 
-    probe = {"jsonrpc": "2.0", "id": "pilot-revoked", "method": "GetTask", "params": {"id": state["agent_completed_task"]}}
+    probe = {"jsonrpc": "2.0", "id": "pilot-revoked", "method": "GetTask", "params": {"id": state["revocable_task"]}}
     expect_unauthorized(args.url.rstrip("/") + "/", args.revoked_token, probe)
     expect_unauthorized(args.url.rstrip("/") + "/", args.expired_token, probe)
     print(json.dumps({"status": "PASS", "recovered": state}, sort_keys=True))

@@ -100,7 +100,8 @@ func TestChannelsShareWorkNotIdentity(t *testing.T) {
 	if err != nil || view.State != StateInputRequired || view.Prompt == "" {
 		t.Fatalf("blocked human work=%+v err=%v", view, err)
 	}
-	view, err = service.Handle(ctx, externalAgent, Message{ConversationID: "shared", MessageID: "agent-message-1", Text: "Use September 15", RequestedKind: core.ExecutionHuman})
+	taskID := view.TaskID
+	view, err = service.Handle(ctx, externalAgent, Message{ConversationID: "shared", TaskID: taskID, MessageID: "agent-message-1", Text: "Use September 15", RequestedKind: core.ExecutionHuman})
 	if err != nil || view.State != StateCompleted || view.Result != "authorized external input persisted" {
 		t.Fatalf("external-Agent continuation=%+v err=%v", view, err)
 	}
@@ -120,7 +121,7 @@ func TestChannelsShareWorkNotIdentity(t *testing.T) {
 		t.Fatalf("continuation provenance=%+v found=%t", input, found)
 	}
 	eventCount := len(stream)
-	view, err = service.Handle(ctx, externalAgent, Message{ConversationID: "shared", MessageID: "agent-message-1", Text: "Use September 15"})
+	view, err = service.Handle(ctx, externalAgent, Message{ConversationID: "shared", TaskID: taskID, MessageID: "agent-message-1", Text: "Use September 15"})
 	if err != nil || view.State != StateCompleted {
 		t.Fatalf("idempotent retry=%+v err=%v", view, err)
 	}
@@ -240,7 +241,7 @@ func TestIntakeUsesDurableMessageIDsForContinuationAndReplayAuthorization(t *tes
 	if err != nil || view.State != StateInputRequired {
 		t.Fatalf("blocked work=%+v err=%v", view, err)
 	}
-	view, err = service.Handle(ctx, externalAgent, Message{ConversationID: "same-text", MessageID: "continuation-message", Text: repeatedText})
+	view, err = service.Handle(ctx, externalAgent, Message{ConversationID: "same-text", TaskID: view.TaskID, MessageID: "continuation-message", Text: repeatedText})
 	if err != nil || view.State != StateCompleted {
 		t.Fatalf("same-text continuation=%+v err=%v", view, err)
 	}
@@ -248,11 +249,18 @@ func TestIntakeUsesDurableMessageIDsForContinuationAndReplayAuthorization(t *tes
 	submitOnly := human
 	submitOnly.Capabilities = []string{CapabilitySubmitWork}
 	message := Message{ConversationID: "read-guard", MessageID: "submission", Text: "echo private status"}
-	if _, err := service.Handle(ctx, submitOnly, message); err != nil {
+	receipt, err := service.Handle(ctx, submitOnly, message)
+	if err != nil || receipt.TaskID == "" || receipt.State != StateWorking || receipt.Result != "" || receipt.Prompt != "" {
 		t.Fatalf("initial submission failed: %v", err)
 	}
-	if _, err := service.Handle(ctx, submitOnly, message); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("existing-work replay without read capability err=%v", err)
+	retry, err := service.Handle(ctx, submitOnly, message)
+	if err != nil || retry != receipt {
+		t.Fatalf("submission receipt retry=%+v want=%+v err=%v", retry, receipt, err)
+	}
+	otherSubmitter := submitOnly
+	otherSubmitter.ID = "human-2"
+	if _, err := service.Handle(ctx, otherSubmitter, message); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("different submitter replay err=%v", err)
 	}
 }
 
