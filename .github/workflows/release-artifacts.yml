@@ -46,3 +46,24 @@ jobs:
           diff --recursive --no-dereference \
             "$RUNNER_TEMP/agentos-release-a" \
             "$RUNNER_TEMP/agentos-release-b"
+
+      - name: Pilot packaged Linux amd64 binaries
+        env:
+          AGENTOS_PILOT_AGENT_TOKEN: pilot-agent-token-00000000000000001
+          AGENTOS_PILOT_READER_TOKEN: pilot-reader-token-0000000000000001
+          AGENTOS_PILOT_REVOKED_TOKEN: pilot-revoked-token-000000000000001
+          AGENTOS_PILOT_EXPIRED_TOKEN: pilot-expired-token-000000000000001
+          AGENTOS_PILOT_HUMAN_TOKEN: pilot-human-token-00000000000000001
+          AGENTOS_PILOT_REVIEWER_TOKEN: pilot-reviewer-token-000000000000001
+          AGENTOS_PILOT_APPROVAL_TOKEN: pilot-approval-token-00000000000001
+        run: |
+          version=$(tr -d '\r\n' < VERSION)
+          package_directory="$RUNNER_TEMP/agentos-package"
+          package_root="$package_directory/agentos_${version}_linux_amd64"
+          archive="$RUNNER_TEMP/agentos-release-a/agentos_${version}_linux_amd64.tar.gz"
+          mkdir "$package_directory"
+          tar --extract --gzip --file "$archive" --directory "$package_directory"
+          ./scripts/run-loopback-pilot.sh \
+            "$package_root/agentos" \
+            "$package_root/agentos-recovery" \
+            "$RUNNER_TEMP/agentos-packaged-pilot"
