@@ -24,7 +24,7 @@ authorization claim.
 | 15 | Model executions have manifests | PASS — [`TestAgentExecutionUsesFakeAdapter`](../internal/app/service_test.go), [`TestAgentExecutionReturnsSeparateUsageContract`](../internal/execution/execution_test.go) |
 | 16 | Tool failures remain failures | PASS — [`TestRejectedRunRecordsTelemetryAndFailsGoal`](../internal/app/service_test.go), [`TestEvaluateRequiresVerifiedSuccess`](../internal/completion/engine_test.go) |
 | 17 | Deterministic-first recovery | PASS — [`TestRecoveryIsDeterministicFirst`](../internal/app/service_test.go) |
-| 18 | Authorized A2A operation | PASS — live A2A v1.0 CI, [`TestA2ASendGetAndContinueUseV1TaskContracts`](../internal/gateway/a2a_test.go) |
+| 18 | Authorized A2A operation | PASS — live A2A v1.0 CI, [`TestA2ASendGetAndContinueUseV1TaskContracts`](../internal/gateway/a2a_test.go), [`TestOfficialA2AClientUsesDurableAgentOSState`](../internal/gateway/a2a_official_test.go) |
 | 19 | A2A cannot approve effects | PASS — [`TestA2ACannotApproveEffects`](../internal/gateway/a2a_test.go) |
 | 20 | Durable effect recovery | PASS — [`TestEffectSuccessNeedsEvidence`](../internal/effects/coordinator_test.go), [`TestRecoveryConfirmsAttemptedEffectAfterRestartWithoutResend`](../internal/effects/reconciliation_test.go) |
 

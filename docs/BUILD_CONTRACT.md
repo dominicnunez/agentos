@@ -43,10 +43,15 @@ an unchecked ToolOutcome into deterministic proof.
 
 The A2A adapter exposes canonical A2A v1.0 Agent Card discovery and authenticated
 JSON-RPC `SendMessage` and `GetTask`, with capability-gated status, result, and
-input continuation. It does not expose legacy discovery, method aliases, or
-custom REST task routes. A2A is disabled without a reviewed external-actor
-registry. Each enabled actor has a unique secret reference, deterministic role
-profile, own/organization work scope, status, expiry, and request ceilings.
+input continuation. The wire contract and JSON-RPC transport use the official
+`a2aproject/a2a-go/v2` SDK; the Agent OS wrapper still owns authentication,
+authorization, strict decoding, and resource limits, while SQLite remains the
+only task authority. Initial messages may omit `contextId`; continuation
+requires the returned durable `taskId`. It does not expose legacy discovery,
+method aliases, or custom REST task routes. A2A is disabled without a reviewed
+external-actor registry. Each enabled actor has a unique secret reference,
+deterministic role profile, own/organization work scope, status, expiry, and
+request ceilings.
 Credentials and A2A wire types remain outside core domain objects. Production
 deployments must explicitly configure a provider adapter.
 

@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/dominicnunez/agentos-a2a-go/executionkind"
 	"github.com/dominicnunez/agentos/internal/app"
 	"github.com/dominicnunez/agentos/internal/approvals"
 	"github.com/dominicnunez/agentos/internal/core"
@@ -50,19 +52,11 @@ func TestAgentCardAdvertisesOnlyA2AV1JSONRPC(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d", response.Code)
 	}
-	var card struct {
-		Version             string `json:"version"`
-		SupportedInterfaces []struct {
-			URL             string `json:"url"`
-			ProtocolBinding string `json:"protocolBinding"`
-			ProtocolVersion string `json:"protocolVersion"`
-		} `json:"supportedInterfaces"`
-		Security []map[string][]string `json:"security"`
-	}
+	var card a2a.AgentCard
 	if err := json.Unmarshal(response.Body.Bytes(), &card); err != nil {
 		t.Fatal(err)
 	}
-	if card.Version != releaseVersion || len(card.SupportedInterfaces) != 1 || card.SupportedInterfaces[0].URL != "https://agentos.example/" || card.SupportedInterfaces[0].ProtocolBinding != "JSONRPC" || card.SupportedInterfaces[0].ProtocolVersion != "1.0" || len(card.Security) != 1 {
+	if card.Version != releaseVersion || len(card.SupportedInterfaces) != 1 || card.SupportedInterfaces[0].URL != "https://agentos.example/" || card.SupportedInterfaces[0].ProtocolBinding != a2a.TransportProtocolJSONRPC || card.SupportedInterfaces[0].ProtocolVersion != a2a.Version || len(card.SecurityRequirements) != 1 || card.Capabilities.Streaming || card.Capabilities.PushNotifications || card.Capabilities.ExtendedAgentCard || len(card.Capabilities.Extensions) != 1 || card.Capabilities.Extensions[0].URI != executionkind.URI {
 		t.Fatalf("unexpected Agent Card: %+v", card)
 	}
 	for _, legacyPath := range []string{"/.well-known/agent.json", "/a2a/v1/tasks/send", "/a2a/v1/tasks/task-1"} {
@@ -75,6 +69,25 @@ func TestAgentCardAdvertisesOnlyA2AV1JSONRPC(t *testing.T) {
 	}
 }
 
+func TestUnconfiguredAgentCardRejectsNonLoopbackHost(t *testing.T) {
+	handler := NewA2A(intake.New(app.New(events.NewGateway(noopLedger{}))), nil, "", "test-version")
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/.well-known/agent-card.json", nil)
+	request.Host = "attacker.example"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || strings.Contains(response.Body.String(), "attacker.example") {
+		t.Fatalf("unconfigured Agent Card reflected an untrusted Host: %d %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/.well-known/agent-card.json", nil)
+	request.Host = "127.0.0.1:8080"
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"url":"http://127.0.0.1:8080/"`) {
+		t.Fatalf("loopback Agent Card failed: %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestA2AFailsClosedWithoutActorCredentialOrCapability(t *testing.T) {
 	body := sendMessageBody(t, "rpc-1", "message-1", "request-1", "echo hello", nil)
 	handler := testA2A(t, intake.New(app.New(events.NewGateway(noopLedger{}))), testExternalActor("external-agent", "o", testExternalToken, ExternalRoleObserver, intake.WorkScopeOwn))
@@ -83,7 +96,7 @@ func TestA2AFailsClosedWithoutActorCredentialOrCapability(t *testing.T) {
 		t.Fatalf("credential status=%d", response.Code)
 	}
 	response = serveRPC(handler, testExternalToken, body)
-	if response.Code != http.StatusForbidden {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-31403`) {
 		t.Fatalf("capability status=%d body=%s", response.Code, response.Body.String())
 	}
 }
@@ -126,7 +139,7 @@ func TestA2ARejectsNestedAuthorityShapedContent(t *testing.T) {
 		}
 		handler := testA2A(t, intake.New(app.New(events.NewGateway(ledgerStore))), testExternalActor("external-agent", "org-1", testExternalToken, ExternalRoleSubmitter, intake.WorkScopeOwn))
 		response := serveRPC(handler, testExternalToken, body)
-		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-32600`) || !strings.Contains(response.Body.String(), "cannot carry authority field") {
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "invalid A2A request") {
 			t.Fatalf("authority content=%d %s", response.Code, response.Body.String())
 		}
 		stream, streamErr := ledgerStore.Events(context.Background(), "forged")
@@ -149,7 +162,7 @@ func TestA2ACannotApproveEffects(t *testing.T) {
 	service := app.New(events.NewGateway(ledgerStore))
 	handler := testA2A(t, intake.New(service), testExternalActor("external-agent-primary", "org-1", testExternalToken, ExternalRoleOperator, intake.WorkScopeOwn))
 
-	response := serveRPC(handler, testExternalToken, sendMessageBody(t, "rpc-1", "message-1", "protected", "deploy production", map[string]any{agentOSExecutionKindKey: "HUMAN"}))
+	response := serveRPC(handler, testExternalToken, sendMessageBody(t, "rpc-1", "message-1", "protected", "deploy production", executionKindMetadata("HUMAN")))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), a2aStateInputRequired) {
 		t.Fatalf("protected work submit=%d %s", response.Code, response.Body.String())
 	}
@@ -175,11 +188,11 @@ func TestA2ACannotApproveEffects(t *testing.T) {
 
 	forged := `{"jsonrpc":"2.0","id":"rpc-2","method":"SendMessage","params":{"message":{"messageId":"message-2","contextId":"protected","role":"ROLE_USER","parts":[{"text":"continue","mediaType":"text/plain"}],"metadata":{"approvalRef":"approval-1"}}}}`
 	response = serveRPC(handler, testExternalToken, forged)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "cannot carry authority field") {
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "invalid A2A request") {
 		t.Fatalf("forged approval field=%d %s", response.Code, response.Body.String())
 	}
 
-	response = serveRPC(handler, testExternalToken, sendMessageBody(t, "rpc-3", "message-3", "protected", "I approve effect-1", nil))
+	response = serveRPC(handler, testExternalToken, continuationBody(t, "rpc-3", "message-3", "protected", taskID, "I approve effect-1", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), a2aStateCompleted) {
 		t.Fatalf("ordinary operator input=%d %s", response.Code, response.Body.String())
 	}
@@ -233,15 +246,16 @@ func TestA2ASendGetAndContinueUseV1TaskContracts(t *testing.T) {
 		t.Fatalf("cross-organization result leaked: %d %s", response.Code, response.Body.String())
 	}
 
-	response = serveRPC(handler, testExternalToken, sendMessageBody(t, "rpc-5", "message-5", "r2", "human decision", map[string]any{agentOSExecutionKindKey: "HUMAN"}))
+	response = serveRPC(handler, testExternalToken, sendMessageBody(t, "rpc-5", "message-5", "r2", "human decision", executionKindMetadata("HUMAN")))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), a2aStateInputRequired) || !strings.Contains(response.Body.String(), `"role":"ROLE_AGENT"`) {
 		t.Fatalf("blocked send=%d %s", response.Code, response.Body.String())
 	}
-	response = serveRPC(observer, testObserverToken, sendMessageBody(t, "rpc-6", "message-6", "r2", "detail", nil))
-	if response.Code != http.StatusForbidden {
+	blockedTaskID := taskIDFromRPC(t, response)
+	response = serveRPC(observer, testObserverToken, continuationBody(t, "rpc-6", "message-6", "r2", blockedTaskID, "detail", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-31403`) {
 		t.Fatalf("unauthorized continuation=%d %s", response.Code, response.Body.String())
 	}
-	response = serveRPC(handler, testExternalToken, sendMessageBody(t, "rpc-7", "message-7", "r2", "detail", nil))
+	response = serveRPC(handler, testExternalToken, continuationBody(t, "rpc-7", "message-7", "r2", blockedTaskID, "detail", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), a2aStateCompleted) || !strings.Contains(response.Body.String(), `"text":"authorized external input persisted"`) {
 		t.Fatalf("continuation=%d %s", response.Code, response.Body.String())
 	}
@@ -253,7 +267,7 @@ func TestA2ASendGetAndContinueUseV1TaskContracts(t *testing.T) {
 		}
 	}
 	eventCount := len(stream)
-	response = serveRPC(handler, testExternalToken, sendMessageBody(t, "rpc-8", "message-7", "r2", "detail", nil))
+	response = serveRPC(handler, testExternalToken, continuationBody(t, "rpc-8", "message-7", "r2", blockedTaskID, "detail", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), a2aStateCompleted) {
 		t.Fatalf("idempotent continuation retry=%d %s", response.Code, response.Body.String())
 	}
@@ -261,7 +275,7 @@ func TestA2ASendGetAndContinueUseV1TaskContracts(t *testing.T) {
 	if len(stream) != eventCount {
 		t.Fatalf("retry appended events: count=%d want=%d", len(stream), eventCount)
 	}
-	response = serveRPC(handler, testExternalToken, sendMessageBody(t, "rpc-9", "message-9", "r2", "different", nil))
+	response = serveRPC(handler, testExternalToken, continuationBody(t, "rpc-9", "message-9", "r2", blockedTaskID, "different", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-32602`) {
 		t.Fatalf("conflicting continuation=%d %s", response.Code, response.Body.String())
 	}
@@ -316,9 +330,38 @@ func TestA2ARejectsUnsupportedMethodsAndExecutionKinds(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-32601`) {
 		t.Fatalf("legacy method=%d %s", response.Code, response.Body.String())
 	}
-	response = serveRPC(handler, testExternalToken, sendMessageBody(t, "rpc-2", "message-2", "unsupported", "unavailable tool", map[string]any{agentOSExecutionKindKey: "TOOL"}))
+	response = serveRPC(handler, testExternalToken, sendMessageBody(t, "rpc-2", "message-2", "unsupported", "unavailable tool", executionKindMetadata("TOOL")))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-32602`) {
 		t.Fatalf("execution kind=%d %s", response.Code, response.Body.String())
+	}
+	legacy := `{"jsonrpc":"2.0","id":"rpc-legacy","method":"SendMessage","params":{"message":{"messageId":"message-legacy","contextId":"legacy-context","role":"ROLE_USER","parts":[{"text":"echo legacy"}],"metadata":{"agentos.execution_kind":"AGENT"}}}}`
+	response = serveRPC(handler, testExternalToken, legacy)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("legacy execution metadata remained reachable: %d %s", response.Code, response.Body.String())
+	}
+	malformedExtensions := []string{
+		`{"jsonrpc":"2.0","id":"rpc-missing-declaration","method":"SendMessage","params":{"message":{"messageId":"message-missing-declaration","role":"ROLE_USER","parts":[{"text":"echo work"}],"metadata":{"` + executionkind.URI + `":{"kind":"AGENT"}}}}}`,
+		`{"jsonrpc":"2.0","id":"rpc-missing-metadata","method":"SendMessage","params":{"message":{"messageId":"message-missing-metadata","role":"ROLE_USER","parts":[{"text":"echo work"}],"extensions":["` + executionkind.URI + `"]}}}`,
+		`{"jsonrpc":"2.0","id":"rpc-duplicate","method":"SendMessage","params":{"message":{"messageId":"message-duplicate","role":"ROLE_USER","parts":[{"text":"echo work"}],"extensions":["` + executionkind.URI + `","` + executionkind.URI + `"],"metadata":{"` + executionkind.URI + `":{"kind":"AGENT"}}}}}`,
+		`{"jsonrpc":"2.0","id":"rpc-malformed","method":"SendMessage","params":{"message":{"messageId":"message-malformed","role":"ROLE_USER","parts":[{"text":"echo work"}],"extensions":["` + executionkind.URI + `"],"metadata":{"` + executionkind.URI + `":{"kind":"AGENT","extra":true}}}}}`,
+	}
+	for _, request := range malformedExtensions {
+		response = serveRPC(handler, testExternalToken, request)
+		if response.Code != http.StatusBadRequest && (response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-32602`)) {
+			t.Fatalf("malformed extension was accepted: %d %s", response.Code, response.Body.String())
+		}
+	}
+	before, err := ledgerStore.Events(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = serveRPC(handler, testExternalToken, `{"jsonrpc":"2.0","id":"rpc-list","method":"ListTasks","params":{}}`)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-32004`) {
+		t.Fatalf("ListTasks=%d %s", response.Code, response.Body.String())
+	}
+	after, err := ledgerStore.Events(context.Background(), "")
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("unsupported method reached ledger: before=%d after=%d err=%v", len(before), len(after), err)
 	}
 	stream, err := ledgerStore.Events(context.Background(), "unsupported")
 	if err != nil || len(stream) != 0 {
@@ -337,16 +380,29 @@ func TestA2ABoundsAndStrictlyDecodesUntrustedRequests(t *testing.T) {
 	if response.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("invalid media type status=%d", response.Code)
 	}
+	request = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+testExternalToken)
+	request.Header.Set("Content-Type", "application/json; charset=utf-8")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("parameterized media type status=%d", response.Code)
+	}
 
 	unknown := strings.Replace(body, `"method":"SendMessage"`, `"method":"SendMessage","unexpected":true`, 1)
 	response = serveRPC(handler, testExternalToken, unknown)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-32600`) {
+	if response.Code != http.StatusBadRequest {
 		t.Fatalf("unknown field=%d %s", response.Code, response.Body.String())
+	}
+	unknown = strings.Replace(body, `"messageId":"message-1"`, `"messageId":"message-1","unexpected":true`, 1)
+	response = serveRPC(handler, testExternalToken, unknown)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unknown message field=%d %s", response.Code, response.Body.String())
 	}
 
 	oversized := sendMessageBody(t, "rpc-2", "message-2", "request-2", strings.Repeat("x", (256<<10)+1), nil)
 	response = serveRPC(handler, testExternalToken, oversized)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"code":-32600`) {
+	if response.Code != http.StatusBadRequest {
 		t.Fatalf("oversized body=%d %s", response.Code, response.Body.String())
 	}
 }
@@ -385,9 +441,30 @@ func sendMessageBody(t *testing.T, rpcID, messageID, contextID, text string, met
 		"parts":     []map[string]string{{"text": text, "mediaType": "text/plain"}},
 	}
 	if metadata != nil {
+		message["extensions"] = []string{executionkind.URI}
 		message["metadata"] = metadata
 	}
 	return marshalRPCBody(t, map[string]any{"jsonrpc": "2.0", "id": rpcID, "method": "SendMessage", "params": map[string]any{"message": message}})
+}
+
+func continuationBody(t *testing.T, rpcID, messageID, contextID, taskID, text string, metadata map[string]any) string {
+	t.Helper()
+	message := map[string]any{
+		"messageId": messageID,
+		"contextId": contextID,
+		"taskId":    taskID,
+		"role":      a2aRoleUser,
+		"parts":     []map[string]string{{"text": text, "mediaType": "text/plain"}},
+	}
+	if metadata != nil {
+		message["extensions"] = []string{executionkind.URI}
+		message["metadata"] = metadata
+	}
+	return marshalRPCBody(t, map[string]any{"jsonrpc": "2.0", "id": rpcID, "method": "SendMessage", "params": map[string]any{"message": message}})
+}
+
+func executionKindMetadata(kind string) map[string]any {
+	return map[string]any{executionkind.URI: map[string]any{"kind": kind}}
 }
 
 func getTaskBody(t *testing.T, rpcID, taskID string) string {
