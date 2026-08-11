@@ -16,15 +16,15 @@ A typical AI agent is one worker, usually operating within one conversation or t
 
 Agent OS requires the appropriate approval for actions involving:
 
-- financial commitments;
-- physical-world effects;
-- public or external communication;
-- destructive or irreversible operations;
-- expansion of a sensitive-data boundary;
-- privilege, capability, or trust expansion;
-- legal or binding commitments;
-- ordinary Agent OS deployment;
-- trusted-core or security changes.
+- financial commitments
+- physical-world effects
+- public or external communication
+- destructive or irreversible operations
+- expansion of a sensitive-data boundary
+- privilege, capability, or trust expansion
+- legal or binding commitments
+- ordinary Agent OS deployment
+- trusted-core or security changes
 
 Approval is checked again at the consequential-effect boundary. Missing, expired, mismatched, or unanswered approval fails closed.
 
