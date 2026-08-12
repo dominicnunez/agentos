@@ -482,15 +482,13 @@ func (s *Service) continueHumanCompletionTask(ctx context.Context, organizationI
 		case core.TaskFailed:
 			return fmt.Errorf("user completion cannot advance failed task %s", task.ID)
 		case core.TaskBlocked:
-			task.Status = core.TaskPending
 			detail := map[string]string{"reason": "structured user completion received", "completion_event_ref": completionEvent.EventID}
-			if err := s.state.SaveTask(ctx, organizationID, "TASK_RESUMED", "runtime", correlationID, state.Version+1, task, detail); err != nil {
+			if err := s.advanceInputContinuation(ctx, organizationID, correlationID, state, detail); err != nil {
 				return err
 			}
 		case core.TaskPending:
-			task.Status = core.TaskRunning
 			detail := map[string]string{"mode": "STRUCTURED_HUMAN_COMPLETION", "completion_event_ref": completionEvent.EventID}
-			if err := s.state.SaveTask(ctx, organizationID, "EXECUTION_STARTED", "runtime", correlationID, state.Version+1, task, detail); err != nil {
+			if err := s.advanceInputContinuation(ctx, organizationID, correlationID, state, detail); err != nil {
 				return err
 			}
 		case core.TaskRunning:
@@ -672,16 +670,14 @@ func (s *Service) continueExternalInputTask(ctx context.Context, organizationID,
 		case core.TaskFailed:
 			return fmt.Errorf("external input continuation cannot advance failed task %s", task.ID)
 		case core.TaskBlocked:
-			task.Status = core.TaskPending
 			detail := map[string]string{"reason": "authorized external input received", "input_event_ref": inputEvent.EventID}
-			if err := s.state.SaveTask(ctx, organizationID, "TASK_RESUMED", "runtime", correlationID, state.Version+1, task, detail); err != nil {
+			if err := s.advanceInputContinuation(ctx, organizationID, correlationID, state, detail); err != nil {
 				return err
 			}
 			continue
 		case core.TaskPending:
-			task.Status = core.TaskRunning
 			detail := map[string]string{"mode": "OPERATOR_HUMAN_INPUT", "input_event_ref": inputEvent.EventID}
-			if err := s.state.SaveTask(ctx, organizationID, "EXECUTION_STARTED", "runtime", correlationID, state.Version+1, task, detail); err != nil {
+			if err := s.advanceInputContinuation(ctx, organizationID, correlationID, state, detail); err != nil {
 				return fmt.Errorf("persist external input execution start for task %s: %w", task.ID, err)
 			}
 			continue
@@ -691,6 +687,31 @@ func (s *Service) continueExternalInputTask(ctx context.Context, organizationID,
 			return fmt.Errorf("external input continuation cannot advance task in status %s", task.Status)
 		}
 	}
+}
+
+// advanceInputContinuation owns only the durable BLOCKED -> PENDING and
+// PENDING -> RUNNING edges shared by structured user completion and authorized
+// external input. Each caller retains its own event validation, terminal-state
+// handling, details, outcomes, and completion rules.
+func (s *Service) advanceInputContinuation(ctx context.Context, organizationID core.ID, correlationID string, state projections.Versioned[core.Task], detail map[string]string) error {
+	if organizationID == "" || correlationID == "" || state.CorrelationID != correlationID || state.Value.ExecutionKind != core.ExecutionHuman {
+		return fmt.Errorf("valid user-operated input continuation state is required")
+	}
+	task := state.Value
+	eventType := ""
+	switch task.Status {
+	case core.TaskBlocked:
+		task.Status = core.TaskPending
+		eventType = "TASK_RESUMED"
+	case core.TaskPending:
+		task.Status = core.TaskRunning
+		eventType = "EXECUTION_STARTED"
+	case core.TaskRunning, core.TaskCompleted, core.TaskFailed:
+		return fmt.Errorf("input continuation cannot advance task in status %s", task.Status)
+	default:
+		return fmt.Errorf("input continuation cannot advance task in status %s", task.Status)
+	}
+	return s.state.SaveTask(ctx, organizationID, eventType, "runtime", correlationID, state.Version+1, task, detail)
 }
 
 func (s *Service) finishExternalInputTask(ctx context.Context, organizationID core.ID, state projections.Versioned[core.Task], inputEvent events.Event) error {

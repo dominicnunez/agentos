@@ -920,6 +920,63 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestAdvanceInputContinuationRejectsInvalidStateWithoutEvents(t *testing.T) {
+	ctx := t.Context()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	service := New(events.NewGateway(l))
+	valid := projections.Versioned[core.Task]{
+		Version:       1,
+		CorrelationID: "request-1",
+		Value: core.Task{
+			ID: "task-1", ExecutionKind: core.ExecutionHuman, Status: core.TaskBlocked,
+		},
+	}
+	tests := []struct {
+		name          string
+		organization  core.ID
+		correlationID string
+		state         projections.Versioned[core.Task]
+	}{
+		{name: "missing organization", correlationID: "request-1", state: valid},
+		{name: "mismatched correlation", organization: "org-1", correlationID: "different", state: valid},
+		{name: "non-user task", organization: "org-1", correlationID: "request-1", state: func() projections.Versioned[core.Task] {
+			state := valid
+			state.Value.ExecutionKind = core.ExecutionAgent
+			return state
+		}()},
+		{name: "running task", organization: "org-1", correlationID: "request-1", state: func() projections.Versioned[core.Task] {
+			state := valid
+			state.Value.Status = core.TaskRunning
+			return state
+		}()},
+		{name: "completed task", organization: "org-1", correlationID: "request-1", state: func() projections.Versioned[core.Task] {
+			state := valid
+			state.Value.Status = core.TaskCompleted
+			return state
+		}()},
+		{name: "failed task", organization: "org-1", correlationID: "request-1", state: func() projections.Versioned[core.Task] {
+			state := valid
+			state.Value.Status = core.TaskFailed
+			return state
+		}()},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := service.advanceInputContinuation(ctx, test.organization, test.correlationID, test.state, map[string]string{"input_event_ref": "event-1"}); err == nil {
+				t.Fatal("invalid input continuation state was accepted")
+			}
+		})
+	}
+	stream, err := l.Events(ctx, "request-1")
+	if err != nil || len(stream) != 0 {
+		t.Fatalf("rejected transition appended events: count=%d err=%v", len(stream), err)
+	}
+}
+
 func TestBlockedChildReturnsToParent(t *testing.T) {
 	ctx := context.Background()
 	l, err := ledger.Open(":memory:")
