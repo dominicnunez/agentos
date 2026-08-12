@@ -295,7 +295,7 @@ func installSystemRuntime(ctx context.Context, config bootstrap.Config, serviceC
 	if err := prepareSystemDirectory(config.Paths.RuntimeDir, 0, 0, 0o711); err != nil {
 		return err
 	}
-	if err := prepareSystemWorkspace(config.Paths.Workspace, config.Owner, serviceGID); err != nil {
+	if err := prepareSystemWorkspace(config.Paths.Workspace, config.Owner, serviceUID, serviceGID); err != nil {
 		return err
 	}
 	if err := installExecutable("/usr/local/bin/agentos"); err != nil {
@@ -356,6 +356,10 @@ func prepareSystemDirectory(path string, uid, gid int, mode os.FileMode) error {
 	if err := rejectSymlinkDirectoryChain(path); err != nil {
 		return err
 	}
+	parent := filepath.Dir(path)
+	if err := validateSystemWorkspaceParents(parent, owner.UID, serviceUID); err != nil {
+		return err
+	}
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return fmt.Errorf("system path %s must be a directory, not a link", path)
@@ -372,7 +376,7 @@ func prepareSystemDirectory(path string, uid, gid int, mode os.FileMode) error {
 	return os.Chmod(path, mode)
 }
 
-func prepareSystemWorkspace(path string, owner bootstrap.Owner, serviceGID int) error {
+func prepareSystemWorkspace(path string, owner bootstrap.Owner, serviceUID, serviceGID int) error {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == string(filepath.Separator) {
 		return fmt.Errorf("workspace is invalid")
 	}
@@ -397,7 +401,6 @@ func prepareSystemWorkspace(path string, owner bootstrap.Owner, serviceGID int) 
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	parent := filepath.Dir(path)
 	parentInfo, err := os.Lstat(parent)
 	if errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("workspace parent %s must already exist", parent)
@@ -415,6 +418,31 @@ func prepareSystemWorkspace(path string, owner bootstrap.Owner, serviceGID int) 
 		return err
 	}
 	return os.Chmod(path, 0o770)
+}
+
+func validateSystemWorkspaceParents(path string, ownerUID, serviceUID int) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || ownerUID < 0 || serviceUID < 0 {
+		return fmt.Errorf("workspace parent chain is invalid")
+	}
+	current := string(filepath.Separator)
+	for _, component := range strings.Split(strings.TrimPrefix(path, string(filepath.Separator)), string(filepath.Separator)) {
+		if component == "" {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("workspace parent %s must already exist", current)
+		}
+		if err != nil {
+			return err
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm()&0o022 != 0 || (int(stat.Uid) != 0 && int(stat.Uid) != ownerUID && int(stat.Uid) != serviceUID) {
+			return fmt.Errorf("workspace parent %s must be a non-writable directory owned by root, the configured Linux user, or the service", current)
+		}
+	}
+	return nil
 }
 
 func rejectSymlinkDirectoryChain(path string) error {
