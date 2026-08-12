@@ -48,7 +48,10 @@ func (Scheduler) RemediationReady(tasks map[core.ID]core.Task) ([]core.Task, err
 				continue
 			case core.TaskBlocked:
 				blockedDependency = true
+			case core.TaskPending, core.TaskRunning, core.TaskFailed:
+				eligible = false
 			default:
+				// Unknown durable states are never eligible for execution.
 				eligible = false
 			}
 		}
