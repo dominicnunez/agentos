@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	sdk "github.com/dominicnunez/codex-sdk-go/appserver"
+	protocol "github.com/dominicnunez/codex-sdk-go/appserver/protocol"
 )
 
 func TestCodexSubscriptionAppliesFailClosedRunProfile(t *testing.T) {
@@ -193,6 +194,32 @@ func TestCodexSubscriptionValidatesTrustedFilePaths(t *testing.T) {
 		if err := validateCodexConfig(CodexSubscriptionConfig{BinaryPath: link, CredentialsPath: credentials, Model: "gpt-test"}); err == nil {
 			t.Fatal("symlinked binary was accepted")
 		}
+	}
+}
+
+func TestCodexSubscriptionListsBoundedVisibleModels(t *testing.T) {
+	next := "page-2"
+	adapter := &CodexSubscription{
+		runPermit: make(chan struct{}, 1),
+		models: func(_ context.Context, params protocol.ModelListParams) (protocol.ModelListResponse, error) {
+			if params.Cursor == nil {
+				return protocol.ModelListResponse{Data: []protocol.Model{
+					{Model: "gpt-visible", DisplayName: "Visible"},
+					{Model: "gpt-hidden", DisplayName: "Hidden", Hidden: true},
+				}, NextCursor: &next}, nil
+			}
+			return protocol.ModelListResponse{Data: []protocol.Model{
+				{Model: "gpt-default", DisplayName: "Default", IsDefault: true},
+				{Model: "gpt-visible", DisplayName: "Duplicate"},
+			}}, nil
+		},
+	}
+	choices, err := adapter.AvailableModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(choices) != 2 || choices[0].ID != "gpt-default" || !choices[0].Default || choices[1].ID != "gpt-visible" {
+		t.Fatalf("choices=%+v", choices)
 	}
 }
 

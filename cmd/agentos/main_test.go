@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dominicnunez/agentos/internal/bootstrap"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/intake"
 	"github.com/dominicnunez/agentos/internal/secrets"
@@ -65,66 +66,9 @@ func TestPrintVersionDoesNotStartRuntime(t *testing.T) {
 	}
 }
 
-func TestConfiguredModelIsFakeUnlessExplicitlySelected(t *testing.T) {
-	t.Setenv("AGENTOS_MODEL_PROVIDER", "")
-	model, closeModel, err := configuredModel(context.Background(), testSecrets{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if descriptor := model.Descriptor(); descriptor.Provider != "fake" {
-		t.Fatalf("descriptor=%+v", descriptor)
-	}
-	if err := closeModel(); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("AGENTOS_MODEL_PROVIDER", "fake-review")
-	model, closeModel, err = configuredModel(context.Background(), testSecrets{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if descriptor := model.Descriptor(); descriptor.Provider != "fake-review" || descriptor.Model != "fake-review-model/v1" || descriptor.ExecutionProfileVersion != "v1-fake-review" {
-		t.Fatalf("descriptor=%+v", descriptor)
-	}
-	if err := closeModel(); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("AGENTOS_MODEL_PROVIDER", "unreviewed")
-	if _, _, err := configuredModel(context.Background(), testSecrets{}); err == nil {
-		t.Fatal("unknown provider was accepted")
-	}
-}
-
-func TestConfiguredCodexProviderFailsClosedWithoutExactFiles(t *testing.T) {
-	t.Setenv("AGENTOS_MODEL_PROVIDER", "codex-subscription")
-	t.Setenv("AGENTOS_CODEX_BINARY", "")
-	t.Setenv("AGENTOS_CODEX_CREDENTIALS_FILE", "")
-	t.Setenv("AGENTOS_CODEX_MODEL", "gpt-test")
-	if _, _, err := configuredModel(context.Background(), testSecrets{}); err == nil {
-		t.Fatal("incomplete Codex provider configuration was accepted")
-	}
-}
-
-func TestFakeReviewProviderIsRestrictedToLoopback(t *testing.T) {
-	if err := validateModelExposure("fake-review", false); err != nil {
-		t.Fatal(err)
-	}
-	if err := validateModelExposure("fake-review", true); err == nil {
-		t.Fatal("fake-review provider was accepted for remote exposure")
-	}
-	for _, provider := range []string{"", "fake", "codex-subscription", "openai-api"} {
-		if err := validateModelExposure(provider, true); err != nil {
-			t.Fatalf("provider %q was rejected by the fake-review exposure guard: %v", provider, err)
-		}
-	}
-}
-
-func TestConfiguredOpenAIAPIProviderUsesNamedServerOwnedSecret(t *testing.T) {
-	t.Setenv("AGENTOS_MODEL_PROVIDER", "openai-api")
-	t.Setenv("AGENTOS_OPENAI_API_KEY_REF", "OPENAI_PROJECT_KEY")
-	t.Setenv("AGENTOS_OPENAI_MODEL", "gpt-test-2026-01-01")
-	model, closeModel, err := configuredModel(context.Background(), testSecrets{"OPENAI_PROJECT_KEY": "test-secret"})
+func TestConfiguredProviderRequiresTypedRealProviderAndServerOwnedSecret(t *testing.T) {
+	provider := bootstrap.Provider{Kind: bootstrap.ProviderOpenAIAPI, Model: "gpt-test-2026-01-01", SecretRef: "OPENAI_PROJECT_KEY"}
+	model, closeModel, err := configuredProvider(context.Background(), provider, t.TempDir(), testSecrets{"OPENAI_PROJECT_KEY": "test-secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,56 +79,22 @@ func TestConfiguredOpenAIAPIProviderUsesNamedServerOwnedSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Setenv("AGENTOS_OPENAI_API_KEY_REF", "MISSING")
-	if _, _, err := configuredModel(context.Background(), testSecrets{}); err == nil {
+	provider.SecretRef = "MISSING"
+	if _, _, err := configuredProvider(context.Background(), provider, t.TempDir(), testSecrets{}); err == nil {
 		t.Fatal("unavailable OpenAI API credential was accepted")
 	}
-	t.Setenv("AGENTOS_OPENAI_API_KEY_REF", "")
-	if _, _, err := configuredModel(context.Background(), testSecrets{}); err == nil {
-		t.Fatal("missing OpenAI API credential reference was accepted")
+	provider.Kind = "fake"
+	if _, _, err := configuredProvider(context.Background(), provider, t.TempDir(), testSecrets{}); err == nil {
+		t.Fatal("fake provider was accepted by production runtime")
 	}
 }
 
-func TestConfiguredHumanActorsResolvesReviewedRole(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "human-actors.json")
-	config := `{"actors":[{"id":"human-1","organization_id":"org-1","status":"ACTIVE","role":"OPERATOR","work_scope":"ORGANIZATION","token_ref":"HUMAN_1_TOKEN","review_ref":"security-review-2","expires_at":"2099-01-01T00:00:00Z","max_concurrent":2,"requests_per_minute":30}]}`
-	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	const token = "configured-human-operator-token-00001"
-	registry, err := configuredHumanActors(context.Background(), path, testSecrets{"HUMAN_1_TOKEN": token})
-	if err != nil {
-		t.Fatal(err)
-	}
-	session, err := registry.Acquire(token)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer session.Release()
-	if session.Principal.ID != "human-1" || session.Principal.Kind != core.PrincipalHuman || !session.Principal.Allowed(intake.CapabilityReadResult) {
-		t.Fatalf("principal=%+v", session.Principal)
-	}
-}
-
-func TestConfiguredApprovalActorsResolveExactDecisionGrant(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "approval-actors.json")
-	config := `{"actors":[{"id":"approver-1","organization_id":"org-1","status":"ACTIVE","token_ref":"APPROVAL_TOKEN","review_ref":"security-review-3","expires_at":"2099-01-01T00:00:00Z","max_concurrent":2,"requests_per_minute":30,"grants":[{"boundary":"AGENT_OS_DEPLOYMENT","risk":"HIGH"}]}]}`
-	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	const token = "configured-approval-control-token-001"
-	registry, err := configuredApprovalActors(context.Background(), path, testSecrets{"APPROVAL_TOKEN": token})
-	if err != nil {
-		t.Fatal(err)
-	}
-	session, err := registry.Acquire(token)
-	if err != nil {
-		t.Fatal(err)
-	}
-	session.Release()
-	approval := core.HumanApproval{OrganizationID: "org-1", Boundary: core.BoundaryDeployment, Risk: "HIGH"}
-	if session.Principal.ID != "approver-1" || session.Principal.Kind != core.PrincipalHuman || len(session.Principal.Capabilities) != 0 || !registry.CanDecide(context.Background(), approval, "approver-1") {
-		t.Fatalf("approval principal=%+v", session.Principal)
+func TestRuntimeCredentialDirectoryFailsClosed(t *testing.T) {
+	directory := t.TempDir()
+	t.Setenv("CREDENTIALS_DIRECTORY", directory)
+	want := filepath.Join(directory, "a2a-actors.json")
+	if got := runtimeCredentialFile("/configured/actors.json", "a2a-actors.json"); got != want {
+		t.Fatalf("runtime credential path=%q want=%q", got, want)
 	}
 }
 
@@ -222,59 +132,17 @@ func TestConfiguredEffectReconcilersDisableChecksWithoutRegistry(t *testing.T) {
 	}
 }
 
-func TestConfiguredListenAddressIsLoopbackByDefaultAndRemoteIsExplicit(t *testing.T) {
-	t.Setenv("AGENTOS_LISTEN_ADDR", "")
-	t.Setenv("AGENTOS_ALLOW_REMOTE", "")
-	address, remote, err := configuredListenAddress()
+func TestConfiguredA2AAddressIsLoopbackByDefaultAndRemoteIsExplicit(t *testing.T) {
+	address, remote, err := configuredA2AAddress(bootstrap.A2A{})
 	if err != nil || address != "127.0.0.1:8080" || remote {
 		t.Fatalf("default address=%q remote=%t err=%v", address, remote, err)
 	}
-	t.Setenv("AGENTOS_LISTEN_ADDR", "0.0.0.0:8080")
-	if _, _, err := configuredListenAddress(); err == nil {
+	if _, _, err := configuredA2AAddress(bootstrap.A2A{ListenAddress: "0.0.0.0:8080"}); err == nil {
 		t.Fatal("remote listener was enabled implicitly")
 	}
-	t.Setenv("AGENTOS_ALLOW_REMOTE", "true")
-	address, remote, err = configuredListenAddress()
+	address, remote, err = configuredA2AAddress(bootstrap.A2A{ListenAddress: "0.0.0.0:8080", AllowRemote: true})
 	if err != nil || address != "0.0.0.0:8080" || !remote {
 		t.Fatalf("explicit address=%q remote=%t err=%v", address, remote, err)
-	}
-	t.Setenv("AGENTOS_ALLOW_REMOTE", "1")
-	if _, _, err := configuredListenAddress(); err == nil {
-		t.Fatal("noncanonical remote-listener switch was accepted")
-	}
-}
-
-func TestConfiguredApprovalControlIsLoopbackAndTLSFailsClosedRemotely(t *testing.T) {
-	t.Setenv("AGENTOS_CONTROL_LISTEN_ADDR", "")
-	t.Setenv("AGENTOS_CONTROL_ALLOW_REMOTE", "")
-	t.Setenv("AGENTOS_CONTROL_TLS_CERT_FILE", "")
-	t.Setenv("AGENTOS_CONTROL_TLS_KEY_FILE", "")
-	address, remote, err := configuredControlListenAddress()
-	if err != nil || address != "127.0.0.1:8082" || remote {
-		t.Fatalf("default control address=%q remote=%t err=%v", address, remote, err)
-	}
-	if approvalControlEnvironmentConfigured() {
-		t.Fatal("empty control environment enabled the listener")
-	}
-	t.Setenv("AGENTOS_CONTROL_LISTEN_ADDR", "0.0.0.0:8082")
-	if _, _, err := configuredControlListenAddress(); err == nil {
-		t.Fatal("remote approval control was enabled implicitly")
-	}
-	t.Setenv("AGENTOS_CONTROL_ALLOW_REMOTE", "true")
-	if _, remote, err = configuredControlListenAddress(); err != nil || !remote {
-		t.Fatalf("explicit remote control listener remote=%t err=%v", remote, err)
-	}
-	if _, err := configuredControlTLS(true); err == nil {
-		t.Fatal("remote approval control accepted plaintext")
-	}
-	t.Setenv("AGENTOS_CONTROL_TLS_CERT_FILE", "control.crt")
-	t.Setenv("AGENTOS_CONTROL_TLS_KEY_FILE", "control.key")
-	config, err := configuredControlTLS(true)
-	if err != nil || config == nil || config.MinVersion != tls.VersionTLS13 {
-		t.Fatalf("control TLS config=%+v err=%v", config, err)
-	}
-	if !approvalControlEnvironmentConfigured() {
-		t.Fatal("explicit control environment was not detected")
 	}
 }
 
@@ -303,17 +171,13 @@ func TestRemoteExposureRequiresTLSAndAnHTTPSPublicOrigin(t *testing.T) {
 }
 
 func TestConfiguredTLSFailsClosedForRemoteListeners(t *testing.T) {
-	t.Setenv("AGENTOS_TLS_CERT_FILE", "")
-	t.Setenv("AGENTOS_TLS_KEY_FILE", "")
-	if _, err := configuredTLS(true); err == nil {
+	if _, err := configuredTLSValues(true, "", ""); err == nil {
 		t.Fatal("remote listener accepted without TLS")
 	}
-	t.Setenv("AGENTOS_TLS_CERT_FILE", "server.crt")
-	if _, err := configuredTLS(false); err == nil {
+	if _, err := configuredTLSValues(false, "server.crt", ""); err == nil {
 		t.Fatal("one-sided TLS configuration was accepted")
 	}
-	t.Setenv("AGENTOS_TLS_KEY_FILE", "server.key")
-	config, err := configuredTLS(true)
+	config, err := configuredTLSValues(true, "server.crt", "server.key")
 	if err != nil || config == nil || config.MinVersion != tls.VersionTLS13 {
 		t.Fatalf("TLS config=%+v err=%v", config, err)
 	}

@@ -44,17 +44,28 @@ The Agent OS service now accepts a configured `ModelAdapter` and derives each
 previous fake-provider hard-coding and is the integration seam for the secured
 Codex adapter.
 
-## Deployment configuration
+## Setup
 
-The provider remains disabled by default. Selecting it requires all four exact
-settings:
+Select `Codex subscription` during `agentos` setup. Agent OS discovers the
+launching account's Codex executable and credential file when possible. Every
+detected choice is shown in a scrollable picker, with manual path entry last.
+Paths must resolve to bounded regular files and the credential file cannot be
+group- or world-readable. Agent OS requires that credential source to belong to
+the verified setup account and confirms that the inspected file is still the
+file it opened before reading it. In system mode, the resolved executable must
+be root-owned, not group- or world-writable, service-readable, and outside user
+and temporary directories. This prevents the restricted service from executing
+a binary that the configured owner can replace after setup.
 
-- `AGENTOS_MODEL_PROVIDER=codex-subscription`
-- `AGENTOS_CODEX_BINARY` set to an absolute, clean path to a reviewed regular
-  Codex binary (symlinks are rejected)
-- `AGENTOS_CODEX_CREDENTIALS_FILE` set to an absolute, clean path to an SDK
-  credential file (symlinks and group/world-readable Unix files are rejected)
-- `AGENTOS_CODEX_MODEL` set to the exact model identifier
+After authenticating the confined app-server, setup retrieves the subscription's
+visible model list and presents it as a picker. The selected model and reviewed
+binary path are stored in non-secret Agent OS configuration. Agent OS imports
+the credential into an authenticated encrypted state file, keeps its encryption
+key in a separate systemd encrypted credential, and materializes a private
+temporary file only while the provider process runs. Rotated credentials are
+sealed back into state before the refresh is accepted. The original
+provider-owned credential path is not retained in Agent OS configuration, and
+credential material is never copied into the repository, workspace, or logs.
 
 The app-server receives a fresh isolated home and a minimal child environment.
 Each inference receives a fresh empty working directory, `never` approval,

@@ -99,6 +99,7 @@ type Task struct {
 	AssigneeID           ID                   `json:"assignee_id,omitempty"`
 	RuntimeHandlerRef    string               `json:"runtime_handler_ref,omitempty"`
 	TaskContractVersion  string               `json:"task_contract_version"`
+	CompletionContract   *CompletionContract  `json:"completion_contract,omitempty"`
 	Status               TaskStatus           `json:"status"`
 }
 
@@ -132,11 +133,40 @@ type CompletionCriterion struct {
 	Assurance   Assurance `json:"assurance"`
 	Required    bool      `json:"required"`
 }
+type CompletionFieldRequirement struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	MinBytes    int    `json:"min_bytes"`
+	MaxBytes    int    `json:"max_bytes"`
+}
+type ArtifactRequirement struct {
+	Role       string   `json:"role"`
+	MediaTypes []string `json:"media_types"`
+	MinCount   int      `json:"min_count"`
+	MaxCount   int      `json:"max_count"`
+}
 type CompletionContract struct {
-	TaskID            ID                    `json:"task_id"`
-	TaskVersion       int                   `json:"task_version"`
-	Criteria          []CompletionCriterion `json:"criteria"`
-	RequiredArtifacts []string              `json:"required_artifacts,omitempty"`
+	TaskID               ID                           `json:"task_id"`
+	TaskVersion          int                          `json:"task_version"`
+	Criteria             []CompletionCriterion        `json:"criteria"`
+	RequiredFields       []CompletionFieldRequirement `json:"required_fields,omitempty"`
+	ArtifactRequirements []ArtifactRequirement        `json:"artifact_requirements,omitempty"`
+	RequiredArtifacts    []string                     `json:"required_artifacts,omitempty"`
+}
+type ArtifactEvidence struct {
+	Ref       string `json:"ref"`
+	Role      string `json:"role"`
+	Name      string `json:"name"`
+	MediaType string `json:"media_type"`
+	SHA256    string `json:"sha256"`
+	Size      int64  `json:"size"`
+	Origin    string `json:"origin"`
+	Trust     string `json:"trust"`
+}
+type HumanTaskSubmission struct {
+	MessageID string             `json:"message_id"`
+	Fields    map[string]string  `json:"fields"`
+	Artifacts []ArtifactEvidence `json:"artifacts,omitempty"`
 }
 type MaterializationState string
 

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -14,7 +15,8 @@ const approvalPathPrefix = "/v1/control/approvals/"
 
 type ApprovalControl struct {
 	service *approvals.Service
-	actors  *ApprovalActorRegistry
+	owner   LocalHuman
+	limits  *localHumanLimits
 }
 
 type approvalMutationRequest struct {
@@ -48,35 +50,37 @@ type approvalControlResponse struct {
 	ExpiresAt                 string              `json:"expires_at,omitempty"`
 }
 
-func NewApprovalControl(service *approvals.Service, actors *ApprovalActorRegistry) *ApprovalControl {
-	return &ApprovalControl{service: service, actors: actors}
+func NewApprovalControl(service *approvals.Service, owner LocalHuman) (*ApprovalControl, error) {
+	if service == nil || owner.UID < 0 || owner.ID == "" || owner.OrganizationID == "" {
+		return nil, fmt.Errorf("local approval service, Linux UID, identity, and organization are required")
+	}
+	return &ApprovalControl{service: service, owner: owner, limits: &localHumanLimits{slots: make(chan struct{}, 4), requestsPerMinute: 60}}, nil
 }
 
 func (c *ApprovalControl) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	token, ok := bearerCredential(r.Header.Get("Authorization"))
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authenticated approval principal required"})
-		return
-	}
-	session, err := c.actors.Acquire(token)
+	_, release, err := (&Human{owner: c.owner, limits: c.limits}).acquire(r.Context())
 	if errors.Is(err, ErrOperatorLimited) {
 		w.Header().Set("Retry-After", "60")
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "approval control request limit reached"})
 		return
 	}
 	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authenticated approval principal required"})
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "local user owner required"})
 		return
 	}
-	defer session.Release()
+	defer release()
 
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/control/approvals" {
+		c.list(w, r, c.owner.ID)
+		return
+	}
 	approvalID, operation, ok := approvalRoute(r.URL.Path)
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	humanID := core.ID(session.Principal.ID)
+	humanID := c.owner.ID
 	switch {
 	case r.Method == http.MethodGet && operation == "":
 		c.inspect(w, r, approvalID, humanID)
@@ -89,6 +93,19 @@ func (c *ApprovalControl) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (c *ApprovalControl) list(w http.ResponseWriter, r *http.Request, humanID core.ID) {
+	contexts, err := c.service.PendingDecisionContexts(r.Context(), humanID)
+	if err != nil {
+		writeApprovalError(w, err)
+		return
+	}
+	responses := make([]approvalControlResponse, 0, len(contexts))
+	for _, decisionContext := range contexts {
+		responses = append(responses, approvalResponse(decisionContext))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"approvals": responses})
 }
 
 func (c *ApprovalControl) inspect(w http.ResponseWriter, r *http.Request, approvalID, humanID core.ID) {

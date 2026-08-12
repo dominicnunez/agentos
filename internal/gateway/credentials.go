@@ -49,10 +49,6 @@ type credentialRegistry struct {
 	now          func() time.Time
 }
 
-type credentialSource interface {
-	operatorCredentials() *credentialRegistry
-}
-
 type OperatorSession struct {
 	Principal intake.Principal
 	actor     *credentialRegistration
@@ -110,42 +106,6 @@ func (r *credentialRegistry) hasCredential(token string) bool {
 	}
 	_, ok := r.byCredential[sha256.Sum256([]byte(token))]
 	return ok
-}
-
-// OperatorRegistriesOverlap detects credential or principal-ID reuse across
-// independently authorized ingress channels without retaining plaintext
-// credentials. Each channel must represent a distinct security principal even
-// when one person operates several of them.
-func OperatorRegistriesOverlap(registries ...credentialSource) bool {
-	for left := 0; left < len(registries); left++ {
-		leftCredentials := registries[left].operatorCredentials()
-		if leftCredentials == nil {
-			continue
-		}
-		for right := left + 1; right < len(registries); right++ {
-			rightCredentials := registries[right].operatorCredentials()
-			if rightCredentials != nil && credentialRegistriesOverlap(leftCredentials, rightCredentials) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func credentialRegistriesOverlap(left, right *credentialRegistry) bool {
-	identities := make(map[string]struct{}, len(left.byCredential))
-	for credential, registration := range left.byCredential {
-		if _, exists := right.byCredential[credential]; exists {
-			return true
-		}
-		identities[registration.principal.ID] = struct{}{}
-	}
-	for _, registration := range right.byCredential {
-		if _, exists := identities[registration.principal.ID]; exists {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *OperatorSession) Release() {

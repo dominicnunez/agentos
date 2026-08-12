@@ -18,6 +18,8 @@ import (
 
 type approvalNotifier struct{}
 
+const testApprovalToken = "local-owner-test-marker"
+
 func (approvalNotifier) Notify(context.Context, core.HumanApproval) error { return nil }
 
 func TestApprovalControlShowsTrustedEffectAndEnforcesLifecycle(t *testing.T) {
@@ -66,11 +68,9 @@ func TestApprovalControlRejectsWorkCredentialsNonExactAuthorityAndUntrustedField
 		name, token, body string
 		want              int
 	}{
-		{name: "operator credential", token: testHumanToken, body: `{"effect_fingerprint":"` + fingerprint + `"}`, want: http.StatusUnauthorized},
-		{name: "reviewer credential", token: testReviewerToken, body: `{"effect_fingerprint":"` + fingerprint + `"}`, want: http.StatusUnauthorized},
 		{name: "Agent credential", token: testExternalToken, body: `{"effect_fingerprint":"` + fingerprint + `"}`, want: http.StatusUnauthorized},
-		{name: "cross organization", token: "other-organization-approval-token-001", body: `{"effect_fingerprint":"` + fingerprint + `"}`, want: http.StatusNotFound},
-		{name: "wrong risk", token: "wrong-risk-approval-control-token-01", body: `{"effect_fingerprint":"` + fingerprint + `"}`, want: http.StatusNotFound},
+		{name: "different local user", token: "other-organization-approval-token-001", body: `{"effect_fingerprint":"` + fingerprint + `"}`, want: http.StatusUnauthorized},
+		{name: "network credential", token: "wrong-risk-approval-control-token-01", body: `{"effect_fingerprint":"` + fingerprint + `"}`, want: http.StatusUnauthorized},
 		{name: "stale fingerprint", token: testApprovalToken, body: `{"effect_fingerprint":"stale"}`, want: http.StatusConflict},
 		{name: "authority field", token: testApprovalToken, body: `{"effect_fingerprint":"` + fingerprint + `","organization_id":"org-1"}`, want: http.StatusBadRequest},
 	} {
@@ -108,7 +108,7 @@ func TestApprovalControlRejectsMalformedRequestsWithoutChangingState(t *testing.
 		t.Run(test.name, func(t *testing.T) {
 			request := httptest.NewRequestWithContext(t.Context(), test.method, test.path, strings.NewReader(test.body))
 			if test.token != "" {
-				request.Header.Set("Authorization", "Bearer "+test.token)
+				request = request.WithContext(ContextWithPeerUID(request.Context(), 1000))
 			}
 			if test.contentType != "" {
 				request.Header.Set("Content-Type", test.contentType)
@@ -142,15 +142,6 @@ func newApprovalControlFixture(t *testing.T) (http.Handler, string) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	expires := time.Now().UTC().Add(time.Hour)
-	actors := []ApprovalActor{
-		{ID: "approver-1", OrganizationID: "org-1", Status: OperatorActive, TokenRef: "APPROVAL", ReviewRef: "review-1", ExpiresAt: &expires, MaxConcurrent: 2, RequestsPerMinute: 100, BearerToken: testApprovalToken, Grants: []ApprovalGrant{{Boundary: core.BoundaryPublicExternal, Risk: "HIGH"}}},
-		{ID: "approver-2", OrganizationID: "org-2", Status: OperatorActive, TokenRef: "OTHER_ORG", ReviewRef: "review-2", ExpiresAt: &expires, MaxConcurrent: 2, RequestsPerMinute: 100, BearerToken: "other-organization-approval-token-001", Grants: []ApprovalGrant{{Boundary: core.BoundaryPublicExternal, Risk: "HIGH"}}},
-		{ID: "approver-3", OrganizationID: "org-1", Status: OperatorActive, TokenRef: "WRONG_RISK", ReviewRef: "review-3", ExpiresAt: &expires, MaxConcurrent: 2, RequestsPerMinute: 100, BearerToken: "wrong-risk-approval-control-token-01", Grants: []ApprovalGrant{{Boundary: core.BoundaryPublicExternal, Risk: "LOW"}}},
-	}
-	registry, err := NewApprovalActorRegistry(actors)
-	if err != nil {
-		t.Fatal(err)
-	}
 	effect := core.EffectObligation{
 		ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "agent-1",
 		Action: "send", Resource: "public-channel", Scope: "org-1", ConsequenceBoundary: core.BoundaryPublicExternal,
@@ -161,7 +152,8 @@ func newApprovalControlFixture(t *testing.T) (http.Handler, string) {
 	if err := store.AppendRecord(t.Context(), "org-1", "EFFECT_OBLIGATION_PREPARED", "agent-1", "task-1", nil, nil, "effect", "effect-1", 1, effect); err != nil {
 		t.Fatal(err)
 	}
-	service := approvals.New(store, approvalNotifier{}, registry)
+	owner := LocalHuman{UID: 1000, ID: "local-uid-1000", OrganizationID: "org-1"}
+	service := approvals.New(store, approvalNotifier{}, approvals.OwnerAuthorizer{OrganizationID: "org-1", HumanID: owner.ID})
 	if _, err := service.Request(t.Context(), core.HumanApproval{
 		ID: "approval-1", OrganizationID: "org-1", TaskID: "task-1", EffectObligationID: "effect-1",
 		Action: "send", Resource: "public-channel", Boundary: core.BoundaryPublicExternal,
@@ -169,13 +161,20 @@ func newApprovalControlFixture(t *testing.T) (http.Handler, string) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return NewApprovalControl(service, registry), fingerprint
+	control, err := NewApprovalControl(service, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return control, fingerprint
 }
 
 func approvalRequest(t *testing.T, handler http.Handler, method, path, token, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	request := httptest.NewRequestWithContext(t.Context(), method, path, bytes.NewBufferString(body))
-	request.Header.Set("Authorization", "Bearer "+token)
+	uid := 1000
+	if token != testApprovalToken {
+		uid = 1001
+	}
+	request := httptest.NewRequestWithContext(ContextWithPeerUID(t.Context(), uid), method, path, bytes.NewBufferString(body))
 	if method == http.MethodPost {
 		request.Header.Set("Content-Type", "application/json")
 	}

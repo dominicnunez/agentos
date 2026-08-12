@@ -32,17 +32,26 @@ Approval is checked again at the consequential-effect boundary. Missing, expired
 
 Agent OS releases support Linux. Binary packages will be published on [GitHub Releases](https://github.com/dominicnunez/agentos/releases) after release approval.
 
-To build Agent OS from Git, install Go 1.26.5 and Git, then run:
+Download the Linux archive for your architecture from GitHub Releases, extract
+it, and install the executable:
 
 ```sh
-git clone https://github.com/dominicnunez/agentos.git
-cd agentos
-make test
+sudo install -m 0755 agentos /usr/local/bin/agentos
+sudo install -m 0755 agentos-recovery /usr/local/bin/agentos-recovery
+agentos
 ```
 
-Before starting Agent OS, configure at least one authenticated Human or A2A gateway and its environment-backed credential by following the [operator intake guide](docs/OPERATOR_INTAKE.md). Agent OS fails closed when neither gateway is configured. Then run `make run`.
+The first run starts resumable setup. System installation is the default and
+uses the verified Linux account that launched the command, including root when
+root starts it directly. Setup requests administrator access when needed,
+creates standard Linux service and data locations, and requires one tested
+model provider before Agent OS can run. Use `agentos init --user` for an
+installation owned and run entirely by the current account.
 
-The committed `Makefile` provides repeatable project commands for developers, automation, and CI. It contains no credentials or machine-specific configuration.
+After setup, `agentos` opens the organization console. `agentos doctor` performs
+a read-only health check of configuration, credentials, service state, the
+private user gateway, and SQLite ledger integrity. In system mode, run
+`sudo agentos doctor` for the full service-private credential and ledger checks.
 
 ## Documentation
 
@@ -58,29 +67,31 @@ External code contributions and pull requests are not currently accepted. Contri
 
 ```json
 {
-  "purpose": "Install, configure, and verify Agent OS for the human operator.",
+  "purpose": "Install, configure, and verify Agent OS for the user.",
   "release_page": "https://github.com/dominicnunez/agentos/releases",
   "operator_documentation_url_template": "https://github.com/dominicnunez/agentos/blob/{release_tag}/docs/OPERATOR_INTAKE.md",
   "platform": "Linux",
   "installation": [
-    "Use the immutable release version selected by the human operator.",
+    "Use the immutable release version selected by the user.",
     "Confirm that the selected release contains published Linux binary assets; stop if the assets are absent.",
     "Determine the Linux system architecture.",
     "Download the matching Agent OS archive from the selected GitHub release.",
     "Download the accompanying checksum and provenance files.",
     "Verify the archive against its published checksum and GitHub artifact attestation before extracting it.",
-    "Extract Agent OS into the location selected by the human operator.",
-    "Read the packaged README.",
+    "Extract the selected Linux archive.",
+    "Install the agentos executable at /usr/local/bin/agentos.",
+    "Read the packaged README and the exact tagged operator guide.",
     "Replace {release_tag} in operator_documentation_url_template with the exact immutable release tag, then read that tagged operator guide.",
-    "Create the required local configuration using the schema and examples in that exact tagged operator guide.",
-    "Keep credentials, identity records, tokens, and machine-specific configuration outside the installation directory and source control.",
-    "Start Agent OS using the packaged executable and documented configuration after the human operator authorizes deployment."
+    "Run agentos for default system setup or agentos init --user only when the user selected user mode.",
+    "Complete the resumable setup, including one tested model provider.",
+    "Run agentos doctor and report every blocking result without bypassing it."
   ],
   "verification": [
     "The downloaded archive matches its published checksum.",
-    "Agent OS starts without configuration errors and listens on its configured endpoint.",
-    "An authenticated gateway request receives the expected response.",
-    "The SQLite event ledger initializes successfully.",
+    "Setup reaches the ready stage.",
+    "The private user gateway is owned by the configured Linux account and is not exposed as a TCP port.",
+    "The configured provider passes its setup connection check.",
+    "The SQLite event ledger passes the read-only integrity check after first service start.",
     "No credentials are written to logs or stored in source-controlled files."
   ]
 }

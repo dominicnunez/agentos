@@ -1,35 +1,39 @@
 # V1 release readiness
 
-This is the operational release gate for Agent OS V1. It complements the
-architecture evidence in [V1_ACCEPTANCE_STATUS.md](V1_ACCEPTANCE_STATUS.md).
-Passing the architecture checklist does not by itself authorize deployment.
+This operational gate complements the architecture evidence in
+[V1_ACCEPTANCE_STATUS.md](V1_ACCEPTANCE_STATUS.md). Passing the architecture
+checklist does not authorize deployment or publication.
 
 | Gate | Status | Evidence or next action |
 |---|---|---|
 | Architecture acceptance | PASS | All 20 V1 requirements have linked automated evidence. |
-| Required CI | PASS | Build, vet, lint, race tests, vulnerability scan, architecture checks, interoperability, and advisory dead-code analysis run on pushes and pull requests. |
-| Controlled startup | PASS | At least one reviewed operator registry is required; remote exposure fails closed without explicit TLS configuration. |
-| Graceful shutdown | PASS | Process signals cancel the runtime context, stop HTTP intake, drain active requests within a bounded timeout, and close SQLite. |
-| Operator input robustness | PASS | Strict size-limited decoding, authority-field rejection, adversarial tests, and bounded fuzzing cover the Human and A2A shared work-content boundary. |
-| Binary version identity | PASS | Both `agentos --version` and `agentos-recovery --version` are linked from the repository `VERSION` value and checked in CI. |
-| Backup and restore | PASS | Native online SQLite backup, integrity/schema verification, no-overwrite restore, and pointer-switch rollback are tested and documented. |
-| Real model provider implementation | PASS | The disabled-by-default Codex subscription adapter confines the reviewed SDK. The separate official OpenAI Responses adapter pins egress, disables provider tools and storage, bounds requests, and resolves a server-owned credential per call. Both record provider tokens with unknown cost. |
-| Human completion review | PASS | Dedicated `REVIEWER` credentials approve, reject, or revise an exact fingerprinted model candidate. Agent/A2A and ordinary Human work paths cannot decide completion; recovery resumes durable decisions. |
-| Fake-provider release gate | PASS | Process-level CI keeps a no-network model candidate pending across verified backup/restore, denies Agent and ordinary Operator review authority, rejects a stale fingerprint, and accepts plus idempotently replays the exact dedicated-reviewer decision. |
-| Full real-provider live test | BLOCKED | Keep real providers disabled until `v1.0.0-rc.1` artifacts exist, the fake-provider gate above stays green, a bounded live-test plan is approved, and financial plus sensitive-data-boundary approvals are recorded. |
-| Approval control | PASS | A separate disabled-by-default listener uses distinct reviewed credentials, exact organization/boundary/risk grants, strict non-language operations, complete ledger-sourced effect context, current-effect revalidation, and fail-closed expiry and fingerprint checks. Chat and A2A remain untrusted work content. |
-| Release artifact pipeline | READY | A separate read-only workflow builds Linux amd64 and arm64 artifacts twice, checks byte reproducibility, verifies both commands on the native Linux runner, emits checksums, per-target CycloneDX SBOMs, deterministic corresponding source with vendored external module source, compiled-module license evidence, and in-toto provenance, then tests the source archive offline on Linux. Nothing is uploaded or published. |
-| Distribution license | PASS | Agent OS is `AGPL-3.0-only`, with Dominic Nunez as the initial copyright holder. Binary packages include the license, exact source identity, corresponding-source archive reference, and deterministic third-party license evidence. |
-| Published release artifacts | BLOCKED | Requires final software-licensing review, explicit public-release approval, immutable `v1.0.0-rc.1` tag, GitHub-signed attestations, and checksummed asset upload. |
-| Packaged Linux pilot | PASS | CI unpacks the reproducible Linux amd64 archive and uses those binaries to restore a disposable ledger, restart the runtime, retrieve Human/A2A results, continue blocked work, exercise completion review and approval-listener isolation, reject cross-channel credential reuse, and check expiry plus revocation. |
-| Consequential effects | DISABLED | No production effect-writing adapter is enabled. Keep disabled through the initial pilot. |
+| Required CI | PASS | Build, vet, lint, race tests, vulnerability scanning, architecture checks, interoperability, and advisory dead-code analysis run on pushes and pull requests. |
+| Resumable initialization | PARTIAL | System-default and current-account user modes, stable paths, setup checkpoints, provider discovery, and service installation are implemented. Complete a clean Linux VM installation test before a release candidate. |
+| Controlled startup | PASS | The runtime refuses incomplete configuration and requires exactly one validated real provider. A2A remains disabled without a reviewed Agent registry. |
+| Private user access | PARTIAL | The HTTP-shaped user and approval boundaries run only over a mode-`0600` Unix socket and verify kernel peer UID. Runtime and credential directories enforce exact ownership, modes, and symlink-safe paths; systemd services use umask `0077`. Complete process-level root-owner and ordinary-user tests on Linux. |
+| Graceful shutdown | PASS | Process signals cancel the runtime context, stop intake, drain active requests within a bounded timeout, and close SQLite. |
+| Input robustness | PASS | Strict size-limited decoding, authority-field rejection, adversarial tests, and bounded fuzzing cover local user and A2A work content. |
+| Binary version identity | PASS | Both commands receive the repository `VERSION` at build time and are checked in CI. |
+| Backup and restore | PASS | Native online SQLite backup, integrity and schema verification, no-overwrite restore, and pointer-switch rollback are tested and documented. |
+| Real model provider implementation | PASS | Codex subscription and official OpenAI Responses adapters use bounded model-only contracts. OpenAI requires an exact dated snapshot and encrypted service credential; rotating Codex credentials use authenticated encrypted state with a separately protected key. |
+| First-provider setup | PARTIAL | Setup enumerates available models and tests the selected provider before readiness. Complete a bounded live setup test for each provider after the separate financial and sensitive-data approvals. |
+| Structured user completion | PASS | Required fields and files are enforced by a durable CompletionContract; content-addressed artifacts are bounded, sniffed, origin-bound, and treated as untrusted. |
+| Completion review | PASS | The configured local owner can approve, reject, or revise an exact fingerprinted model candidate through the private control boundary; Agent and A2A content cannot decide completion. |
+| Approval control | PASS | The local owner sees ledger-sourced exact-effect context; acknowledgement, decision, expiry, and time-of-use fingerprint checks remain separate and fail closed. |
+| Release artifact pipeline | READY | A read-only workflow builds Linux amd64 and arm64 artifacts twice, checks reproducibility, embeds license/source/dependency evidence, tests corresponding source offline, and emits checksums, SBOMs, and provenance. Nothing is published. |
+| Distribution license | PASS | Agent OS is `AGPL-3.0-only`, with Dominic Nunez as the initial copyright holder. |
+| Packaged Linux smoke test | PASS | CI unpacks the Linux amd64 archive, verifies both binary versions, and confirms diagnostics reject an uninitialized machine. |
+| Full installed Linux test | TODO | Exercise system and user setup, restart, private UID access, provider replacement, diagnostics, backup/restore, and service persistence on a disposable Linux host. |
+| Full real-provider live test | BLOCKED | Wait for requirements to be met and a bounded test plan with the required financial and sensitive-data-boundary approvals. |
+| Published release artifacts | BLOCKED | Requires final software-licensing review, public-release approval, immutable tag, signed attestations, and checksummed asset upload. |
+| Consequential effects | DISABLED | No production effect-writing adapter is enabled. Keep disabled through the initial release testing. |
 
-## Release sequence
+## Next release sequence
 
-1. Keep the fake-provider loopback, recovery, and security release gate green.
-2. Obtain final software-licensing review and approve publication of the
-   immutable `v1.0.0-rc.1` artifacts and signed attestations.
-3. Approve a bounded real-provider live-test plan and record its financial and
-   sensitive-data-boundary decisions before enabling a provider.
-4. Consider one reversible external effect only after the release candidate is
-   stable and reconciliation evidence is demonstrated.
+1. Keep CI and architecture evidence green.
+2. Complete disposable Linux installation tests for system mode, user mode, and
+   direct-root ownership.
+3. Test each real provider only after its separate approvals and prerequisites
+   are recorded.
+4. Perform final security and licensing reviews before approving and publishing
+   an immutable release candidate.

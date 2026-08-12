@@ -54,53 +54,16 @@ jobs:
       - name: Vulnerability scan
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
-      - name: A2A Agent and human intake interoperability
-        env:
-          AGENTOS_DB: work/a2a-interop.db
-          AGENTOS_A2A_ACTORS_FILE: scripts/testdata/a2a-actors-ci.json
-          AGENTOS_HUMAN_ACTORS_FILE: scripts/testdata/human-actors-ci.json
-          AGENTOS_A2A_AGENT_TOKEN: ci-a2a-agent-token-000000000000001
-          AGENTOS_HUMAN_OPERATOR_TOKEN: ci-human-operator-token-00000000001
-          AGENTOS_PUBLIC_URL: http://127.0.0.1:8080
+      - name: Linux binary boundary
         run: |
-          go build -o work/agentos ./cmd/agentos
-          ./work/agentos >work/a2a-interop.log 2>&1 &
-          server_pid=$!
-          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8080/.well-known/agent-card.json >/dev/null; then
-              break
-            fi
-            if [ "$attempt" -eq 30 ]; then
-              cat work/a2a-interop.log
-              exit 1
-            fi
-            sleep 1
-          done
-          python3 scripts/verify-a2a-interop.py \
-            --url http://127.0.0.1:8080 \
-            --token "$AGENTOS_A2A_AGENT_TOKEN"
-          python3 scripts/verify-human-intake.py \
-            --url http://127.0.0.1:8080 \
-            --token "$AGENTOS_HUMAN_OPERATOR_TOKEN"
-
-      - name: Disposable backup and restart pilot
-        env:
-          AGENTOS_PILOT_AGENT_TOKEN: pilot-agent-token-00000000000000001
-          AGENTOS_PILOT_READER_TOKEN: pilot-reader-token-0000000000000001
-          AGENTOS_PILOT_REVOKED_TOKEN: pilot-revoked-token-000000000000001
-          AGENTOS_PILOT_EXPIRED_TOKEN: pilot-expired-token-000000000000001
-          AGENTOS_PILOT_HUMAN_TOKEN: pilot-human-token-00000000000000001
-          AGENTOS_PILOT_REVIEWER_TOKEN: pilot-reviewer-token-000000000000001
-          AGENTOS_PILOT_APPROVAL_TOKEN: pilot-approval-token-00000000000001
-        run: |
-          mkdir -p work
-          go build -o work/agentos ./cmd/agentos
-          go build -o work/agentos-recovery ./cmd/agentos-recovery
-          ./scripts/run-loopback-pilot.sh \
-            "$PWD/work/agentos" \
-            "$PWD/work/agentos-recovery" \
-            "$PWD/work/pilot"
+          version=$(tr -d '\r\n' < VERSION)
+          go build -ldflags "-X main.version=$version" -o work/agentos ./cmd/agentos
+          test "$(./work/agentos --version)" = "$version"
+          if ./work/agentos doctor >work/doctor.log 2>&1; then
+            echo "doctor unexpectedly accepted an uninitialized machine"
+            exit 1
+          fi
+          grep --fixed-strings "No valid installation" work/doctor.log
 
       - name: Architecture boundaries
         run: go tool archguard check --include-tests --profile modular-monolith

@@ -25,7 +25,7 @@ func FuzzOperatorWorkContent(f *testing.F) {
 		if len(body) > 300<<10 {
 			return
 		}
-		request := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/human/messages", bytes.NewReader(body))
+		request := httptest.NewRequestWithContext(context.Background(), "POST", "/v1/user/messages", bytes.NewReader(body))
 		response := httptest.NewRecorder()
 		var decoded humanMessageRequest
 		if err := decodeWorkContent(response, request, &decoded); err != nil {

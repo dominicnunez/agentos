@@ -84,7 +84,7 @@ func TestIntakeKeepsSourceProvenance(t *testing.T) {
 	}
 }
 
-func TestChannelsShareWorkNotIdentity(t *testing.T) {
+func TestChannelsShareWorkButAgentCannotCompleteUserTask(t *testing.T) {
 	ctx := context.Background()
 	store, err := ledger.Open(":memory:")
 	if err != nil {
@@ -102,32 +102,18 @@ func TestChannelsShareWorkNotIdentity(t *testing.T) {
 	}
 	taskID := view.TaskID
 	view, err = service.Handle(ctx, externalAgent, Message{ConversationID: "shared", TaskID: taskID, MessageID: "agent-message-1", Text: "Use September 15", RequestedKind: core.ExecutionHuman})
-	if err != nil || view.State != StateCompleted || view.Result != "authorized external input persisted" {
-		t.Fatalf("external-Agent continuation=%+v err=%v", view, err)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("external Agent completed a structured user task: view=%+v err=%v", view, err)
 	}
 	stream := externalStream(t, store, "shared")
-	var input events.OperatorInputReceivedPayload
-	found := false
 	for _, event := range stream {
-		if event.EventType != "A2A_INPUT_RECEIVED" {
-			continue
+		if event.EventType == "A2A_INPUT_RECEIVED" {
+			t.Fatalf("rejected Agent continuation reached the ledger: %+v", event)
 		}
-		if err := json.Unmarshal(event.Payload, &input); err != nil {
-			t.Fatal(err)
-		}
-		found = true
 	}
-	if !found || input.SourcePrincipalID != "external-agent-1" || input.SourcePrincipalKind != string(core.PrincipalExternalAgent) || input.SourceChannel != ChannelA2A || input.MessageID != "agent-message-1" {
-		t.Fatalf("continuation provenance=%+v found=%t", input, found)
-	}
-	eventCount := len(stream)
-	view, err = service.Handle(ctx, externalAgent, Message{ConversationID: "shared", TaskID: taskID, MessageID: "agent-message-1", Text: "Use September 15"})
-	if err != nil || view.State != StateCompleted {
-		t.Fatalf("idempotent retry=%+v err=%v", view, err)
-	}
-	stream = externalStream(t, store, "shared")
-	if len(stream) != eventCount {
-		t.Fatalf("retry appended events=%d want=%d", len(stream), eventCount)
+	shared, err := service.Get(ctx, externalAgent, taskID)
+	if err != nil || shared.State != StateInputRequired {
+		t.Fatalf("authorized Agent could not observe blocked shared work: view=%+v err=%v", shared, err)
 	}
 
 	noInput := externalAgent
@@ -242,8 +228,8 @@ func TestIntakeUsesDurableMessageIDsForContinuationAndReplayAuthorization(t *tes
 		t.Fatalf("blocked work=%+v err=%v", view, err)
 	}
 	view, err = service.Handle(ctx, externalAgent, Message{ConversationID: "same-text", TaskID: view.TaskID, MessageID: "continuation-message", Text: repeatedText})
-	if err != nil || view.State != StateCompleted {
-		t.Fatalf("same-text continuation=%+v err=%v", view, err)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("same-text Agent continuation completed a user task: view=%+v err=%v", view, err)
 	}
 
 	submitOnly := human

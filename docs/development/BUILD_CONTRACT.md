@@ -14,13 +14,14 @@
 
 ## First slice
 
-The shared intake boundary accepts bounded work from either the direct Human
-Gateway or A2A Operator Gateway, creates an Intent, Goal, and single-node Task
-DAG, executes either a deterministic handler or a fake-model `AgentExecution`,
+The shared intake boundary accepts bounded work from either the private user
+gateway or A2A Operator Gateway, creates an Intent, Goal, and single-node Task
+DAG, executes either a deterministic handler or a configured `AgentExecution`,
 records each transition, applies the completion engine, and returns terminal
 task state.
 
-The fake adapter is deliberately non-intelligent: it makes the execution seam testable without hiding deterministic work behind an LLM.
+The fake adapter is test-only and deliberately non-intelligent: it makes the
+execution seam testable without becoming a production provider.
 
 ## Implemented V1 seams
 
@@ -35,10 +36,10 @@ confirmed states.
 
 Real-provider output is durably recorded as a result and
 `CANDIDATE_COMPLETE`, but remains `BLOCKED` when its CompletionContract has no
-runtime verifier. A dedicated authenticated Human `REVIEWER` may approve,
-reject, or request revision against a fingerprinted set of exact evidence
-events. External Agents and ordinary Human operators cannot decide completion.
-Human judgment remains `HUMAN_JUDGMENT`; it never turns nonempty model text or
+runtime verifier. The verified local owner may approve, reject, or request
+revision against a fingerprinted set of exact evidence events. External Agents
+cannot decide completion.
+User judgment remains `HUMAN_JUDGMENT`; it never turns nonempty model text or
 an unchecked ToolOutcome into deterministic proof.
 
 The A2A adapter exposes canonical A2A v1.0 Agent Card discovery and authenticated
@@ -55,16 +56,16 @@ request ceilings.
 Credentials and A2A wire types remain outside core domain objects. Production
 deployments must explicitly configure a provider adapter.
 
-The A2A adapter and first-party Human Gateway translate into one principal-aware
+The A2A adapter and first-party user gateway translate into one principal-aware
 Intake Service. The Intent records the authenticated principal ID/kind and source
 channel. Known deterministic handlers are selected without inference; otherwise
 unstructured natural-language work uses `AgentExecution` because interpretation
-is justified. Unsupported execution mechanisms fail closed. Direct human chat
-uses a reviewed role registry distinct from external Agents and is a work/input
-surface, not a trusted approval API. Both registries enforce credential expiry,
-concurrency, and request rates before intake, and cross-channel credential reuse
-fails startup. Non-loopback listeners require an explicit remote switch, TLS
-1.3 certificate and key files, and an HTTPS public origin.
+is justified. Unsupported execution mechanisms fail closed. Local user access
+uses an owner-only Unix socket and Linux peer credentials, with no bearer token
+or user actor registry. A2A retains its reviewed Agent registry, credential
+lifecycle, concurrency, and request limits. Non-loopback A2A requires an
+explicit remote switch, TLS 1.3 certificate and key files, and an HTTPS public
+origin.
 
 Task execution publishes a typed `RESULT_PUBLISHED` contract before
 `CANDIDATE_COMPLETE`. Its payload and trusted envelope carry matching Artifact
@@ -87,8 +88,8 @@ previously accepted noncanonical conversation, message, or Task identifier is
 grandfathered only when an exact tenant-scoped durable binding or Event already
 exists; the same shape cannot create new work or new input.
 
-Authorized external input for a blocked `HUMAN` Task is persisted with its A2A
-`messageId` before the
+Authorized external input for an A2A-originated blocked `HUMAN` Task is
+persisted with its A2A `messageId` before the
 Task resumes. The runtime then records a deterministic structured outcome and
 uses the Completion Engine to verify the Task; the external actor cannot mint a
 completion event. Input does not make unavailable tool work or uncertain
@@ -97,11 +98,11 @@ consequential effect. Continuation phases are keyed by the durable input event;
 delivery retry and startup recovery append only missing phases and reject
 conflicting input.
 
-The A2A and direct-human work/input surfaces reject authority-shaped fields such as approval,
+The A2A and private-user work/input surfaces reject authority-shaped fields such as approval,
 capability, authorization, effect-obligation, freeze, and policy overrides.
 Ordinary operator text that claims approval remains untrusted task content. It
 cannot change a prepared `HumanApproval`, and a protected effect remains pending
-with its adapter unreachable until the separately authorized human lifecycle
+with its adapter unreachable until the separately authorized user lifecycle
 records an exact decision.
 
 Durable organization/work projections now commit atomically with their
@@ -119,10 +120,10 @@ event references. A blocked child emits a typed `TASK_BLOCKED` contract to its
 parent Task without granting or otherwise changing authority; the payload
 describes the unmet requirement rather than an authority transition.
 
-Human-required effects persist their complete obligation before notification.
+Approval-required effects persist their complete obligation before notification.
 Approval notification, acknowledgement, pending-decision, approval, and denial
 are versioned durable records. Acknowledgement has no authority effect, and a
-decision must come from a human identity explicitly authorized for the exact
+decision must come from a user identity explicitly authorized for the exact
 organization, consequence boundary, and risk. Protected execution reloads that record
 by `ApprovalRef` and revalidates organization, task, actor, action, resource,
 scope, boundary, descriptor, authorization references, approval reference,
@@ -150,7 +151,7 @@ Terminal work records one typed `RUN_TELEMETRY_RECORDED` Event Contract before
 the goal enters `COMPLETED` or `FAILED`. The telemetry module deterministically
 projects every Task in the run's authoritative Event Contract stream into
 verified or rejected outcome, execution mechanisms, wall time,
-provider/model/token/cost use, tool calls, messages, blocks, retries, human
+provider/model/token/cost use, tool calls, messages, blocks, retries, user
 interventions, safety denials, and completion evidence. Unknown provider cost
 remains explicitly incomplete rather than being reported as zero. Replay
 validates an existing contract and never appends a duplicate.

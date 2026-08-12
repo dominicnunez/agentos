@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -35,9 +36,10 @@ const (
 // subscription-backed Codex inference. Both paths must be absolute and point
 // to regular, non-symlink files so startup never falls back to ambient state.
 type CodexSubscriptionConfig struct {
-	BinaryPath      string
-	CredentialsPath string
-	Model           string
+	BinaryPath         string
+	CredentialsPath    string
+	Model              string
+	PersistCredentials func([]byte) error
 }
 
 // CodexSubscription runs bounded, model-only Codex turns. It owns one isolated
@@ -46,6 +48,7 @@ type CodexSubscriptionConfig struct {
 type CodexSubscription struct {
 	model       string
 	run         codexRun
+	models      func(context.Context, protocol.ModelListParams) (protocol.ModelListResponse, error)
 	close       func() error
 	isolatedDir string
 	runPermit   chan struct{}
@@ -109,9 +112,15 @@ func NewCodexSubscription(ctx context.Context, config CodexSubscriptionConfig) (
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("start isolated Codex app-server: %w", err), cleanup())
 	}
-	closeProcess := func() error { return errors.Join(process.Close(), cleanup()) }
-
 	var credentialsMu sync.Mutex
+	closeProcess := func() error {
+		closeErr := process.Close()
+		credentialsMu.Lock()
+		creds = auth.Credentials{}
+		credentialsMu.Unlock()
+		return errors.Join(closeErr, cleanup())
+	}
+
 	process.Client.SetApprovalHandlers(protocol.ApprovalHandlers{
 		OnChatgptAuthTokensRefresh: func(refreshCtx context.Context, _ protocol.ChatgptAuthTokensRefreshParams) (protocol.ChatgptAuthTokensRefreshResponse, error) {
 			credentialsMu.Lock()
@@ -120,8 +129,18 @@ func NewCodexSubscription(ctx context.Context, config CodexSubscriptionConfig) (
 			if refreshErr != nil {
 				return protocol.ChatgptAuthTokensRefreshResponse{}, refreshErr
 			}
-			if refreshErr = auth.SaveCredentials(config.CredentialsPath, refreshed); refreshErr != nil {
-				return protocol.ChatgptAuthTokensRefreshResponse{}, refreshErr
+			if config.PersistCredentials == nil {
+				refreshErr = auth.SaveCredentials(config.CredentialsPath, refreshed)
+			} else {
+				var encoded []byte
+				encoded, refreshErr = json.Marshal(refreshed)
+				if refreshErr == nil {
+					refreshErr = config.PersistCredentials(encoded)
+				}
+				clear(encoded)
+			}
+			if refreshErr != nil {
+				return protocol.ChatgptAuthTokensRefreshResponse{}, fmt.Errorf("persist refreshed Codex credential: %w", refreshErr)
 			}
 			creds = refreshed
 			return protocol.ChatgptAuthTokensRefreshResponse{
@@ -149,10 +168,86 @@ func NewCodexSubscription(ctx context.Context, config CodexSubscriptionConfig) (
 	return &CodexSubscription{
 		model:       config.Model,
 		run:         sdkStreamRun(process, protocolErrors),
+		models:      process.Client.Model.List,
 		close:       closeProcess,
 		isolatedDir: isolatedDir,
 		runPermit:   make(chan struct{}, 1),
 	}, nil
+}
+
+type ModelChoice struct {
+	ID          string
+	DisplayName string
+	Default     bool
+}
+
+// AvailableModels returns the authenticated subscription's visible picker
+// models. It is used during setup; it does not grant the runtime model-routing
+// authority or enable Codex tools.
+func (a *CodexSubscription) AvailableModels(ctx context.Context) ([]ModelChoice, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("context is required")
+	}
+	if a == nil || a.models == nil || a.runPermit == nil {
+		return nil, fmt.Errorf("Codex model discovery is unavailable")
+	}
+	if err := acquireCodexPermit(ctx, a.runPermit); err != nil {
+		return nil, err
+	}
+	defer func() { <-a.runPermit }()
+	const maximumPages = 20
+	limit := uint32(100)
+	var cursor *string
+	seenCursors := make(map[string]struct{})
+	seenModels := make(map[string]struct{})
+	choices := make([]ModelChoice, 0)
+	for page := 0; page < maximumPages; page++ {
+		response, err := a.models(ctx, protocol.ModelListParams{Cursor: cursor, Limit: &limit})
+		if err != nil {
+			return nil, fmt.Errorf("list Codex models: %w", err)
+		}
+		for _, model := range response.Data {
+			id := strings.TrimSpace(model.Model)
+			if model.Hidden || id == "" || id != model.Model || len(id) > codexMaximumModelBytes || strings.ContainsAny(id, "\r\n\t ") {
+				continue
+			}
+			if _, exists := seenModels[id]; exists {
+				continue
+			}
+			seenModels[id] = struct{}{}
+			choices = append(choices, ModelChoice{ID: id, DisplayName: strings.TrimSpace(model.DisplayName), Default: model.IsDefault})
+		}
+		if response.NextCursor == nil || *response.NextCursor == "" {
+			break
+		}
+		if _, exists := seenCursors[*response.NextCursor]; exists {
+			return nil, fmt.Errorf("Codex model pagination repeated a cursor")
+		}
+		seenCursors[*response.NextCursor] = struct{}{}
+		cursor = response.NextCursor
+		if page == maximumPages-1 {
+			return nil, fmt.Errorf("Codex model list exceeds the setup safety limit")
+		}
+	}
+	if len(choices) == 0 {
+		return nil, fmt.Errorf("Codex returned no selectable models")
+	}
+	sort.SliceStable(choices, func(left, right int) bool {
+		if choices[left].Default != choices[right].Default {
+			return choices[left].Default
+		}
+		return choices[left].DisplayName < choices[right].DisplayName
+	})
+	return choices, nil
+}
+
+func acquireCodexPermit(ctx context.Context, permit chan struct{}) error {
+	select {
+	case permit <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func codexLoginConfig() login.Config {
@@ -388,15 +483,16 @@ func validateRegularAbsoluteFile(path, name string) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return fmt.Errorf("%s path must identify a regular, non-symlink file", name)
 	}
+	if runtime.GOOS == "windows" {
+		// Agent OS V1 deployment is Linux-only. Lstat still rejects a direct
+		// Windows symlink, while parent traversal is enforced on Linux.
+		return nil
+	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", name, err)
 	}
-	pathsEqual := resolved == path
-	if runtime.GOOS == "windows" {
-		pathsEqual = strings.EqualFold(resolved, path)
-	}
-	if !pathsEqual {
+	if resolved != path {
 		return fmt.Errorf("%s path must not traverse a symlink", name)
 	}
 	if name == "Codex credentials" && runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {

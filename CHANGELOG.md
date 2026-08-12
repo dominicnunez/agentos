@@ -11,8 +11,13 @@ Target: `1.0.0-rc.1`
 
 - Durable organizations, intents, goals, Task DAGs, Agent identities, bounded
   executions, and append-only Event Contracts over SQLite.
-- Authenticated Human and A2A v1.0 work, status, result, and continuation
-  boundaries with tenant-scoped capability roles.
+- Private Linux user and authenticated A2A v1.0 work, status, result, and
+  continuation boundaries with tenant-scoped capability roles.
+- Resumable Linux setup with system mode by default, stable filesystem paths,
+  caller-bound ownership, required provider discovery and testing, encrypted
+  OpenAI credentials, a private Unix-socket console, and read-only diagnostics.
+- Structured user-task completion with required fields, bounded
+  content-addressed artifact evidence, and terminal-safe rendering.
 - Deterministic execution, fake Agent execution, structured ToolOutcomes,
   ExecutionContextManifests, and explicit CompletionContracts.
 - Dedicated reviewer decisions for unverified model candidates, including
@@ -26,10 +31,9 @@ Target: `1.0.0-rc.1`
 
 - Exact-effect approval, expiry, revocation, freeze, single-use, and
   attempt-time authorization checks.
-- Strict operator registries, role isolation, rate and concurrency limits,
-  remote TLS requirements, bounded decoding, and authority-shaped input
-  rejection.
-- Credential-free reviewer recovery testing with a loopback-only fake model.
+- Kernel-provided local peer identity, owner-only exact-effect controls, strict
+  Agent registries, role isolation, rate and concurrency limits, remote TLS
+  requirements, bounded decoding, and authority-shaped input rejection.
 
 ### Operations
 

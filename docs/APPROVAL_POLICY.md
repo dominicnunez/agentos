@@ -1,48 +1,32 @@
-# Human approval baseline
+# User approval baseline
 
-The runtime must require appropriately scoped human approval for:
+The runtime requires appropriately scoped user approval for:
 
 - financial actions;
 - physical-world effects;
-- public or external communication/action;
+- public or external communication or action;
 - destructive or irreversible effects;
 - expansion of a sensitive-data boundary;
-- privilege or trust expansion;
+- privilege, capability, or trust expansion;
 - legal or binding commitments;
-- ordinary Agent OS deployment; and
+- ordinary Agent OS deployment;
 - trusted-core or security changes.
 
-Unanswered decisions fail closed. Approval must bind the exact effect fingerprint, arguments, task, expiry, and single-use status where applicable. Approval of an effect never grants broader authority.
+Unanswered decisions fail closed. Approval binds the exact effect fingerprint,
+arguments, task, expiry, and single-use status where applicable. Approval of
+one effect never grants broader authority.
 
-The V1 lifecycle is durable: `PENDING -> NOTIFIED -> ACKNOWLEDGED ->
-PENDING_DECISION -> APPROVED | DENIED`. Acknowledgement records attention only.
-Decision authority is matched exactly to human identity, organization,
-consequence boundary, and risk. Urgency controls attention only. Unknown
-boundaries and unavailable authority fail closed.
-
-Before notification, the runtime persists a replay-complete `EffectObligation`
-in `PENDING`. Single-use approval consumption and the transition to `ATTEMPTED`
-commit atomically. A confirmed obligation is idempotent on duplicate delivery;
-an interrupted `ATTEMPTED` obligation remains explicitly uncertain for later
-reconciliation rather than being blindly replayed.
+Before requesting attention, the runtime persists a replay-complete
+EffectObligation in `PENDING`. Single-use approval consumption and transition
+to `ATTEMPTED` commit atomically. A confirmed obligation is idempotent on
+duplicate delivery. An interrupted `ATTEMPTED` obligation remains explicitly
+uncertain and is never blindly replayed.
 
 At startup, Agent OS discovers interrupted attempts and uses only a configured
-read-only destination status check. Evidence-backed observations may close the
+read-only destination status check. Evidence-backed observations may close an
 obligation as `CONFIRMED` or `FAILED`. Missing reconciliation support, lookup
 failure, unknown status, missing evidence, or a changed attempt remains
-`ATTEMPTED` and is surfaced for operator resolution. Reconciliation never
-replays the effect-writing adapter.
+`ATTEMPTED` for operator resolution.
 
-No production consequential-effect adapter is enabled. The A2A endpoint is
-inbound only and ordinary external-Agent identity cannot decide approvals.
-The direct Human Gateway is likewise conversational work/input only: even text
-from its authenticated human principal cannot decide an exact-effect approval.
-Approval requires a separate trusted control bound to the authorized human,
-effect fingerprint, scope, and current policy state.
-
-The V1 control is documented in [APPROVAL_CONTROL.md](APPROVAL_CONTROL.md). It
-uses a separate listener and reviewed credential registry. Grants match the
-organization, consequence boundary, and risk exactly; no wildcard or inherited
-authority exists. Every mutation reloads the current prepared effect from the
-ledger. Human work, completion-review, and A2A identities are rejected, and
-identity or credential reuse across those channels prevents startup.
+No natural-language work channel can decide an approval. The local console uses
+the separate exact-effect control described in [Approval control](APPROVAL_CONTROL.md).
