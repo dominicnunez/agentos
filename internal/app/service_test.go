@@ -115,6 +115,7 @@ func TestAgentExecutionUsesFakeAdapter(t *testing.T) {
 
 type organizationLoopModel struct {
 	prompts []string
+	plan    string
 }
 
 func (*organizationLoopModel) Name() string { return "fake-model/v1" }
@@ -125,7 +126,10 @@ func (m *organizationLoopModel) Complete(_ context.Context, prompt string) (exec
 	m.prompts = append(m.prompts, prompt)
 	text := "fake-model: " + prompt
 	if strings.HasPrefix(prompt, "You are the bounded Agent OS Task-DAG planner.") {
-		text = `{"tasks":[{"key":"research","description":"research the accepted objective","execution_kind":"AGENT","model_inference_policy":"REQUIRED","depends_on":[]}]}`
+		text = m.plan
+		if text == "" {
+			text = `{"tasks":[{"key":"research","description":"research the accepted objective","execution_kind":"AGENT","model_inference_policy":"REQUIRED","depends_on":[]}]}`
+		}
 	}
 	return execution.ModelResponse{Text: text, Usage: events.InferenceUsageRecordedPayload{Source: "fake", Provider: "fake", Model: "fake-model/v1"}}, nil
 }
@@ -297,13 +301,14 @@ func TestChildCompletionReviewStaysInternalAndWakesRoot(t *testing.T) {
 	}
 }
 
-type failingExecutionModel struct{}
+type failingExecutionModel struct{ calls int }
 
-func (failingExecutionModel) Name() string { return "failing-model/v1" }
-func (failingExecutionModel) Descriptor() execution.ModelDescriptor {
+func (*failingExecutionModel) Name() string { return "failing-model/v1" }
+func (*failingExecutionModel) Descriptor() execution.ModelDescriptor {
 	return execution.ModelDescriptor{Provider: "failing", Model: "failing-model/v1", ExecutionProfileVersion: "v1-failing"}
 }
-func (failingExecutionModel) Complete(context.Context, string) (execution.ModelResponse, error) {
+func (m *failingExecutionModel) Complete(context.Context, string) (execution.ModelResponse, error) {
+	m.calls++
 	return execution.ModelResponse{}, errors.New("provider failed")
 }
 
@@ -315,7 +320,8 @@ func TestFailedChildTerminalizesRootAndGoal(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = l.Close() })
 	planningModel := &organizationLoopModel{}
-	service := NewWithModelAndPlanner(events.NewGateway(l), failingExecutionModel{}, newOrganizationPlanner(t, planningModel))
+	executionModel := &failingExecutionModel{}
+	service := NewWithModelAndPlanner(events.NewGateway(l), executionModel, newOrganizationPlanner(t, planningModel))
 	result, err := service.Submit(ctx, Submit{RequestID: "failed-child", OrganizationID: "org-1", Statement: "prepare a briefing", Kind: core.ExecutionAgent})
 	if err != nil {
 		t.Fatal(err)
@@ -331,6 +337,43 @@ func TestFailedChildTerminalizesRootAndGoal(t *testing.T) {
 	}
 	if !foundDependencyFailure {
 		t.Fatal("root failure did not record its failed dependency contract")
+	}
+}
+
+func TestFailedRootStopsIndependentSiblingBeforeExecution(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	planningModel := &organizationLoopModel{plan: `{"tasks":[{"key":"a-fail","description":"first work","execution_kind":"AGENT","model_inference_policy":"REQUIRED","depends_on":[]},{"key":"z-unused","description":"unnecessary work","execution_kind":"AGENT","model_inference_policy":"REQUIRED","depends_on":[]}]}`}
+	executionModel := &failingExecutionModel{}
+	service := NewWithModelAndPlanner(events.NewGateway(l), executionModel, newOrganizationPlanner(t, planningModel))
+	result, err := service.Submit(ctx, Submit{RequestID: "stop-sibling", OrganizationID: "org-1", Statement: "prepare a briefing", Kind: core.ExecutionAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executionModel.calls != 1 || result.Task.Status != core.TaskFailed || result.Goal.Status != "FAILED" {
+		t.Fatalf("model calls=%d root=%+v goal=%+v", executionModel.calls, result.Task, result.Goal)
+	}
+	snapshot, err := projections.New(events.NewGateway(l)).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goalFailedSibling := false
+	for _, state := range snapshot.Tasks {
+		if state.Value.ParentID == result.Task.ID && state.Value.Status != core.TaskFailed {
+			t.Fatalf("nonterminal sibling survived failed root: %+v", state.Value)
+		}
+	}
+	for _, event := range result.Events {
+		if event.EventType == "TASK_GOAL_FAILED" {
+			goalFailedSibling = true
+		}
+	}
+	if !goalFailedSibling {
+		t.Fatal("failed root did not record sibling terminalization")
 	}
 }
 

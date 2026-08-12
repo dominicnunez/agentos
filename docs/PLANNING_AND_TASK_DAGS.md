@@ -34,9 +34,11 @@ change policy, expand capabilities, or certify completion.
 
 A failed dependency deterministically terminalizes every affected pending or
 blocked dependent through `TASK_DEPENDENCY_FAILED`; failure then propagates to
-the runtime root and Goal instead of leaving work active forever. The event's
-stable `DEPENDENCY_FAILED` code and exact failed Task IDs are machine contract
-data, independent of user-facing language.
+the runtime root and Goal instead of leaving work active forever. Once the
+root fails, remaining nonterminal sibling work is stopped through
+`TASK_GOAL_FAILED` before another Task is selected. The events' stable codes
+and exact Task IDs are machine contract data, independent of user-facing
+language.
 
 The externally visible A2A Task is always the runtime-owned root. Internal
 child IDs are not registered for external lookup, and their intermediate

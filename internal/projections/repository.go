@@ -260,8 +260,12 @@ func validateSnapshot(snapshot Snapshot) error {
 		if err := validateIdentity("goal", id, state.Value.ID); err != nil {
 			return err
 		}
-		if _, ok := snapshot.Intents[state.Value.IntentID]; !ok {
+		intent, ok := snapshot.Intents[state.Value.IntentID]
+		if !ok {
 			return fmt.Errorf("goal %s references missing intent %s", id, state.Value.IntentID)
+		}
+		if state.CorrelationID == "" || intent.CorrelationID != state.CorrelationID {
+			return fmt.Errorf("goal %s crosses its intent correlation boundary", id)
 		}
 	}
 	for id, state := range snapshot.Tasks {
@@ -272,6 +276,9 @@ func validateSnapshot(snapshot Snapshot) error {
 		goal, ok := snapshot.Goals[task.GoalID]
 		if !ok {
 			return fmt.Errorf("task %s references missing goal %s", id, task.GoalID)
+		}
+		if state.CorrelationID == "" || goal.CorrelationID != state.CorrelationID {
+			return fmt.Errorf("task %s crosses its goal correlation boundary", id)
 		}
 		intent := snapshot.Intents[goal.Value.IntentID]
 		switch task.AssigneeType {
@@ -288,6 +295,18 @@ func validateSnapshot(snapshot Snapshot) error {
 			}
 		default:
 			return fmt.Errorf("task %s has unsupported assignee type %s", id, task.AssigneeType)
+		}
+		if task.ParentID != "" {
+			parent, ok := snapshot.Tasks[task.ParentID]
+			if !ok || parent.Value.GoalID != task.GoalID || parent.CorrelationID != state.CorrelationID || task.ParentID == id {
+				return fmt.Errorf("task %s references invalid parent %s", id, task.ParentID)
+			}
+		}
+		for _, dependencyID := range task.DependsOn {
+			dependency, ok := snapshot.Tasks[dependencyID]
+			if !ok || dependency.Value.GoalID != task.GoalID || dependency.CorrelationID != state.CorrelationID || dependencyID == id {
+				return fmt.Errorf("task %s references invalid dependency %s", id, dependencyID)
+			}
 		}
 	}
 	return nil

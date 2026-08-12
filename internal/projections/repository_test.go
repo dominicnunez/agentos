@@ -84,3 +84,60 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 		t.Fatalf("latest task state not restored: %+v", loaded.Tasks[task.ID])
 	}
 }
+
+func TestSnapshotRejectsCrossBoundaryTaskGraph(t *testing.T) {
+	tests := map[string]func(Snapshot){
+		"goal correlation": func(snapshot Snapshot) {
+			goal := snapshot.Goals["goal-1"]
+			goal.CorrelationID = "other"
+			snapshot.Goals["goal-1"] = goal
+		},
+		"task correlation": func(snapshot Snapshot) {
+			task := snapshot.Tasks["task-1"]
+			task.CorrelationID = "other"
+			snapshot.Tasks["task-1"] = task
+		},
+		"cross-goal dependency": func(snapshot Snapshot) {
+			task := snapshot.Tasks["task-1"]
+			task.Value.DependsOn = []core.ID{"task-2"}
+			snapshot.Tasks["task-1"] = task
+		},
+		"cross-goal parent": func(snapshot Snapshot) {
+			task := snapshot.Tasks["task-1"]
+			task.Value.ParentID = "task-2"
+			snapshot.Tasks["task-1"] = task
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			snapshot := validBoundarySnapshot()
+			mutate(snapshot)
+			if err := validateSnapshot(snapshot); err == nil {
+				t.Fatal("cross-boundary graph was accepted")
+			}
+		})
+	}
+}
+
+func validBoundarySnapshot() Snapshot {
+	organizations := map[core.ID]Versioned[core.Organization]{
+		"org-1": {CorrelationID: "work-1", Value: core.Organization{ID: "org-1"}},
+		"org-2": {CorrelationID: "work-2", Value: core.Organization{ID: "org-2"}},
+	}
+	intents := map[core.ID]Versioned[core.Intent]{
+		"intent-1": {CorrelationID: "work-1", Value: core.Intent{ID: "intent-1", OrganizationID: "org-1"}},
+		"intent-2": {CorrelationID: "work-2", Value: core.Intent{ID: "intent-2", OrganizationID: "org-2"}},
+	}
+	goals := map[core.ID]Versioned[core.Goal]{
+		"goal-1": {CorrelationID: "work-1", Value: core.Goal{ID: "goal-1", IntentID: "intent-1"}},
+		"goal-2": {CorrelationID: "work-2", Value: core.Goal{ID: "goal-2", IntentID: "intent-2"}},
+	}
+	tasks := map[core.ID]Versioned[core.Task]{
+		"task-1": {CorrelationID: "work-1", Value: core.Task{ID: "task-1", GoalID: "goal-1"}},
+		"task-2": {CorrelationID: "work-2", Value: core.Task{ID: "task-2", GoalID: "goal-2"}},
+	}
+	return Snapshot{
+		Organizations: organizations, Teams: map[core.ID]Versioned[core.Team]{}, Agents: map[core.ID]Versioned[core.Agent]{},
+		Intents: intents, Goals: goals, Tasks: tasks,
+	}
+}

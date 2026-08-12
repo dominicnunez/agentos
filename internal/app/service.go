@@ -1667,6 +1667,13 @@ func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {
 		for id, state := range snapshot.Tasks {
 			tasks[id] = state.Value
 		}
+		terminalized, err := s.failTasksAfterRootFailure(ctx, snapshot, tasks)
+		if err != nil {
+			return nil, err
+		}
+		if terminalized {
+			continue
+		}
 		failed, err := s.scheduler.FailedDependencyBlocked(tasks)
 		if err != nil {
 			return nil, fmt.Errorf("validate durable task graph failures: %w", err)
@@ -1706,20 +1713,72 @@ func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {
 			}
 			remediation = true
 		}
-		for _, task := range ready {
-			state := snapshot.Tasks[task.ID]
-			run, err := s.executeTask(ctx, snapshot, state, remediation)
-			if err != nil {
-				return nil, err
-			}
-			runs[task.ID] = run
+		// Execute one Task, then reload authoritative state before choosing
+		// more work. A failure may make the root and remaining siblings
+		// unnecessary, and scheduling from a stale snapshot would waste work.
+		task := ready[0]
+		state := snapshot.Tasks[task.ID]
+		run, err := s.executeTask(ctx, snapshot, state, remediation)
+		if err != nil {
+			return nil, err
 		}
+		runs[task.ID] = run
 	}
 }
 
 type dependencyFailureDetail struct {
 	Code                string    `json:"code"`
 	FailedDependencyIDs []core.ID `json:"failed_dependency_ids"`
+}
+
+type rootFailureDetail struct {
+	Code             string  `json:"code"`
+	FailedRootTaskID core.ID `json:"failed_root_task_id"`
+}
+
+// failTasksAfterRootFailure terminalizes remaining work in a Goal whose exact
+// runtime-owned root has failed. Continuing independent siblings cannot make
+// that Goal succeed and may spend money or create avoidable external risk.
+func (s *Service) failTasksAfterRootFailure(ctx context.Context, snapshot projections.Snapshot, tasks map[core.ID]core.Task) (bool, error) {
+	failedRoots := make(map[core.ID]core.ID)
+	for taskID, state := range snapshot.Tasks {
+		task := state.Value
+		if task.ParentID == "" && task.Status == core.TaskFailed && taskID == core.ID("task-"+state.CorrelationID) {
+			failedRoots[task.GoalID] = taskID
+		}
+	}
+	if len(failedRoots) == 0 {
+		return false, nil
+	}
+	terminalized := false
+	for _, state := range sortedTaskStates(snapshot.Tasks) {
+		task := state.Value
+		rootID, failed := failedRoots[task.GoalID]
+		if !failed || task.ID == rootID {
+			continue
+		}
+		switch task.Status {
+		case core.TaskCompleted, core.TaskFailed:
+			continue
+		case core.TaskPending, core.TaskBlocked:
+		case core.TaskRunning:
+			return false, fmt.Errorf("failed Goal contains uncertain running task %s", task.ID)
+		default:
+			return false, fmt.Errorf("failed Goal contains task %s with unknown status %s", task.ID, task.Status)
+		}
+		organizationID, err := taskOrganization(snapshot, task)
+		if err != nil {
+			return false, err
+		}
+		task.Status = core.TaskFailed
+		detail := rootFailureDetail{Code: "GOAL_ROOT_FAILED", FailedRootTaskID: rootID}
+		if err := s.state.SaveTask(ctx, organizationID, "TASK_GOAL_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); err != nil {
+			return false, fmt.Errorf("terminalize task %s after root failure: %w", task.ID, err)
+		}
+		tasks[task.ID] = task
+		terminalized = true
+	}
+	return terminalized, nil
 }
 
 func failedDependencyIDs(task core.Task, tasks map[core.ID]core.Task) []core.ID {
