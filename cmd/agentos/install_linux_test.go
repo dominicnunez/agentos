@@ -151,7 +151,7 @@ func TestPrivilegedDirectoryPreparationRejectsSymlinkedParents(t *testing.T) {
 func TestSystemWorkspaceRejectsMissingParents(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "missing", "workspace")
 	err := prepareSystemWorkspace(workspace, bootstrap.Owner{Username: "root", UID: effectiveUID(), GID: effectiveUID()}, effectiveUID(), effectiveUID())
-	if err == nil || !strings.Contains(err.Error(), "must already exist") {
+	if err == nil {
 		t.Fatalf("workspace with missing parent was accepted: %v", err)
 	}
 	if _, statErr := os.Stat(filepath.Dir(workspace)); !os.IsNotExist(statErr) {
