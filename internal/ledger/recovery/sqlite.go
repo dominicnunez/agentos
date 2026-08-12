@@ -69,19 +69,15 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	if err != nil {
 		return Result{}, err
 	}
-	db, err := sql.Open("sqlite", sqliteFileURI(resolved, true))
+	db, err := openReadOnlySQLite(ctx, resolved)
 	if err != nil {
-		return Result{}, fmt.Errorf("open recovery database: %w", err)
+		return Result{}, fmt.Errorf("open recovery database read-only: %w", err)
 	}
-	db.SetMaxOpenConns(1)
 	defer func() {
 		if db != nil {
 			finalErr = errors.Join(finalErr, db.Close())
 		}
 	}()
-	if _, err := db.ExecContext(ctx, `PRAGMA query_only=ON`); err != nil {
-		return Result{}, fmt.Errorf("make recovery verification read-only: %w", err)
-	}
 	if err := verifyIntegrity(ctx, db); err != nil {
 		return Result{}, err
 	}
@@ -204,19 +200,15 @@ func clone(ctx context.Context, source, destination string) (result Result, fina
 		}
 	}()
 
-	db, err := sql.Open("sqlite", sqliteFileURI(resolvedSource, true))
+	db, err := openReadOnlySQLite(ctx, resolvedSource)
 	if err != nil {
-		return Result{}, fmt.Errorf("open backup source: %w", err)
+		return Result{}, fmt.Errorf("open backup source read-only: %w", err)
 	}
-	db.SetMaxOpenConns(1)
 	defer func() {
 		if db != nil {
 			finalErr = errors.Join(finalErr, db.Close())
 		}
 	}()
-	if _, err := db.ExecContext(ctx, `PRAGMA query_only=ON`); err != nil {
-		return Result{}, fmt.Errorf("make backup source read-only: %w", err)
-	}
 	connection, err := db.Conn(ctx)
 	if err != nil {
 		return Result{}, fmt.Errorf("acquire backup source connection: %w", err)
@@ -349,6 +341,18 @@ func sqliteFileURI(path string, readOnly bool) string {
 		uri.RawQuery = query.Encode()
 	}
 	return uri.String()
+}
+
+func openReadOnlySQLite(ctx context.Context, path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", sqliteFileURI(path, true))
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.ExecContext(ctx, `PRAGMA query_only=ON`); err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
+	return db, nil
 }
 
 func samePath(left, right string) bool {

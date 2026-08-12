@@ -213,6 +213,23 @@ func TestRecoveryEscapesSQLiteDSNCharacters(t *testing.T) {
 	}
 }
 
+func TestOpenReadOnlySQLiteRejectsWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	writable := createTestLedger(t, path)
+	if err := writable.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openReadOnlySQLite(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.ExecContext(t.Context(), `INSERT INTO events(event_id,payload) VALUES('forbidden','write')`); err == nil {
+		t.Fatal("read-only recovery connection accepted a write")
+	}
+}
+
 func createTestLedger(t *testing.T, path string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)

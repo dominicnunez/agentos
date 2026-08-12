@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/dominicnunez/agentos/internal/modelid"
 )
 
 const ConfigVersion = 1
@@ -203,7 +205,7 @@ func (p Provider) Validate() error {
 		if !validCredentialRef(p.SecretRef) {
 			return fmt.Errorf("OpenAI API secret reference is invalid")
 		}
-		if !hasDatedSnapshot(p.Model) {
+		if !validModelIdentifier(p.Model) || !modelid.HasDatedSnapshot(p.Model) {
 			return fmt.Errorf("OpenAI API model must identify an exact dated snapshot")
 		}
 		if p.CodexBinary != "" || p.CodexCredential != "" {
@@ -314,26 +316,6 @@ func validCredentialRef(name string) bool {
 		return false
 	}
 	return true
-}
-
-func hasDatedSnapshot(model string) bool {
-	if model == "" || len(model) > 128 || strings.TrimSpace(model) != model || strings.ContainsAny(model, "\r\n\t ") {
-		return false
-	}
-	const dateLength = len("2006-01-02")
-	for start := 0; start+dateLength <= len(model); start++ {
-		end := start + dateLength
-		if start > 0 && model[start-1] != '-' && model[start-1] != ':' {
-			continue
-		}
-		if end < len(model) && model[end] != ':' {
-			continue
-		}
-		if _, err := time.Parse("2006-01-02", model[start:end]); err == nil {
-			return true
-		}
-	}
-	return false
 }
 
 func validatePaths(paths Paths) error {
