@@ -343,6 +343,8 @@ func (s *Service) PendingDecisionContexts(ctx context.Context, humanID core.ID) 
 		}
 		switch approval.Status {
 		case core.ApprovalPending, core.ApprovalNotified, core.ApprovalAcknowledged, core.ApprovalPendingDecision:
+		case core.ApprovalApproved, core.ApprovalDenied:
+			continue
 		default:
 			continue
 		}

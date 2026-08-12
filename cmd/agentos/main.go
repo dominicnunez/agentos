@@ -69,7 +69,7 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 		return err
 	}
 	if err := config.ValidateReady(); err != nil {
-		return fmt.Errorf("Agent OS is not ready: %w", err)
+		return fmt.Errorf("agent OS is not ready: %w", err)
 	}
 	if err := validateRuntimeBoundary(config); err != nil {
 		return fmt.Errorf("runtime boundary is unsafe: %w", err)
@@ -170,7 +170,7 @@ func configuredProvider(ctx context.Context, provider bootstrap.Provider, runtim
 	switch provider.Kind {
 	case bootstrap.ProviderCodexSubscription:
 		if source == nil || !filepath.IsAbs(runtimeDir) {
-			return nil, nil, fmt.Errorf("Codex sealed credential source and runtime directory are required")
+			return nil, nil, fmt.Errorf("codex sealed credential source and runtime directory are required")
 		}
 		encodedKey, err := source.Resolve(ctx, secrets.Ref(provider.SecretRef))
 		if err != nil {
@@ -179,7 +179,7 @@ func configuredProvider(ctx context.Context, provider bootstrap.Provider, runtim
 		key, err := base64.StdEncoding.DecodeString(string(encodedKey))
 		if err != nil || len(key) != 32 {
 			clear(key)
-			return nil, nil, fmt.Errorf("Codex credential key is invalid")
+			return nil, nil, fmt.Errorf("codex credential key is invalid")
 		}
 		credential, err := secrets.OpenSealedFile(provider.CodexCredential, "codex-auth-v1", key)
 		if err != nil {
@@ -194,7 +194,7 @@ func configuredProvider(ctx context.Context, provider bootstrap.Provider, runtim
 		}
 		if info, err := os.Lstat(credentialDirectory); err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			clear(key)
-			return nil, nil, fmt.Errorf("Codex runtime credential directory is invalid")
+			return nil, nil, fmt.Errorf("codex runtime credential directory is invalid")
 		}
 		temporary, err := os.CreateTemp(credentialDirectory, ".codex-auth-*")
 		if err != nil {

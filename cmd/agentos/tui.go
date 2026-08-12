@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -39,7 +40,7 @@ func runTUI(ctx context.Context, _ string, config bootstrap.Config, input *os.Fi
 			return err
 		}
 		line, err := reader.ReadString('\n')
-		if err != nil && !(err == io.EOF && line != "") {
+		if err != nil && (!errors.Is(err, io.EOF) || line == "") {
 			return err
 		}
 		line = canonicalInput(line)

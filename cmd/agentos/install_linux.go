@@ -99,7 +99,7 @@ func invokingSystemOwner(ctx context.Context) (bootstrap.Owner, error) {
 func canonicalCodexBinary(mode bootstrap.Mode, path string) (string, error) {
 	path = filepath.Clean(path)
 	if !filepath.IsAbs(path) {
-		return "", fmt.Errorf("Codex path must be absolute")
+		return "", fmt.Errorf("codex path must be absolute")
 	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
@@ -107,7 +107,7 @@ func canonicalCodexBinary(mode bootstrap.Mode, path string) (string, error) {
 	}
 	info, err := os.Lstat(resolved)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || info.Size() <= 0 || info.Size() > 512<<20 {
-		return "", fmt.Errorf("Codex path must resolve to a bounded executable regular file")
+		return "", fmt.Errorf("codex path must resolve to a bounded executable regular file")
 	}
 	if mode != bootstrap.ModeSystem {
 		return resolved, nil
@@ -333,7 +333,7 @@ func prepareSystemProviderState(config bootstrap.Config, serviceUID, serviceGID 
 	}
 	relative, err := filepath.Rel(config.Paths.StateDir, provider.CodexCredential)
 	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("Codex credential store must remain inside the Agent OS state directory")
+		return fmt.Errorf("codex credential store must remain inside the Agent OS state directory")
 	}
 	directory := filepath.Dir(provider.CodexCredential)
 	if err := prepareSystemDirectory(directory, serviceUID, serviceGID, 0o700); err != nil {
@@ -341,7 +341,7 @@ func prepareSystemProviderState(config bootstrap.Config, serviceUID, serviceGID 
 	}
 	info, err := os.Lstat(provider.CodexCredential)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("Codex credential store must be a regular file")
+		return fmt.Errorf("codex credential store must be a regular file")
 	}
 	if err := os.Chown(provider.CodexCredential, serviceUID, serviceGID); err != nil {
 		return err
@@ -492,16 +492,16 @@ func ensureServiceAccount(ctx context.Context) error {
 	uid, uidErr := strconv.Atoi(fields[2])
 	gid, gidErr := strconv.Atoi(fields[3])
 	if uidErr != nil || gidErr != nil || uid <= 0 || gid <= 0 {
-		return fmt.Errorf("Agent OS service account identity is invalid")
+		return fmt.Errorf("agent OS service account identity is invalid")
 	}
 	group, err := exec.CommandContext(ctx, "/usr/bin/getent", "group", strconv.Itoa(gid)).Output()
 	groupFields := strings.Split(strings.TrimSpace(string(group)), ":")
 	if err != nil || len(groupFields) != 4 || groupFields[0] != "agentos" || groupFields[2] != strconv.Itoa(gid) || strings.TrimSpace(groupFields[3]) != "" {
-		return fmt.Errorf("Agent OS service group is invalid")
+		return fmt.Errorf("agent OS service group is invalid")
 	}
 	groups, err := exec.CommandContext(ctx, "/usr/bin/id", "-G", "agentos").Output()
 	if err != nil || strings.TrimSpace(string(groups)) != strconv.Itoa(gid) {
-		return fmt.Errorf("Agent OS service account must not have supplementary groups")
+		return fmt.Errorf("agent OS service account must not have supplementary groups")
 	}
 	return nil
 }

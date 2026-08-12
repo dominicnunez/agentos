@@ -206,7 +206,7 @@ func (u *terminalUI) secret(label string) ([]byte, error) {
 	return value, nil
 }
 
-func errorsIsEOFWithData(err error, value string) bool { return err == io.EOF && value != "" }
+func errorsIsEOFWithData(err error, value string) bool { return errors.Is(err, io.EOF) && value != "" }
 
 func safeTerminalText(value string) string {
 	return strings.Map(func(character rune) rune {

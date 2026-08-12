@@ -371,7 +371,7 @@ func writeDoctor(output io.Writer, checks []doctorCheck, asJSON, blocked bool) e
 		}
 	}
 	if blocked {
-		return fmt.Errorf("Agent OS has blocking health findings")
+		return fmt.Errorf("agent OS has blocking health findings")
 	}
 	return nil
 }

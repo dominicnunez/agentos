@@ -189,7 +189,7 @@ func (a *CodexSubscription) AvailableModels(ctx context.Context) ([]ModelChoice,
 		return nil, fmt.Errorf("context is required")
 	}
 	if a == nil || a.models == nil || a.runPermit == nil {
-		return nil, fmt.Errorf("Codex model discovery is unavailable")
+		return nil, fmt.Errorf("codex model discovery is unavailable")
 	}
 	if err := acquireCodexPermit(ctx, a.runPermit); err != nil {
 		return nil, err
@@ -221,16 +221,16 @@ func (a *CodexSubscription) AvailableModels(ctx context.Context) ([]ModelChoice,
 			break
 		}
 		if _, exists := seenCursors[*response.NextCursor]; exists {
-			return nil, fmt.Errorf("Codex model pagination repeated a cursor")
+			return nil, fmt.Errorf("codex model pagination repeated a cursor")
 		}
 		seenCursors[*response.NextCursor] = struct{}{}
 		cursor = response.NextCursor
 		if page == maximumPages-1 {
-			return nil, fmt.Errorf("Codex model list exceeds the setup safety limit")
+			return nil, fmt.Errorf("codex model list exceeds the setup safety limit")
 		}
 	}
 	if len(choices) == 0 {
-		return nil, fmt.Errorf("Codex returned no selectable models")
+		return nil, fmt.Errorf("codex returned no selectable models")
 	}
 	sort.SliceStable(choices, func(left, right int) bool {
 		if choices[left].Default != choices[right].Default {

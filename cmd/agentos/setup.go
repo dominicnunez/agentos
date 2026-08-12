@@ -30,7 +30,7 @@ func nowUTC() time.Time { return time.Now().UTC() }
 
 func runInit(ctx context.Context, mode bootstrap.Mode, resume bool, input *os.File, output io.Writer) error {
 	if runtime.GOOS != "linux" {
-		return fmt.Errorf("Agent OS V1 setup is supported on Linux")
+		return fmt.Errorf("agent OS V1 setup is supported on Linux")
 	}
 	ui := newTerminalUI(input, output)
 	completed, err := ensureInitPrivileges(ctx, mode, ui)
@@ -263,7 +263,7 @@ func collectCodexProvider(ctx context.Context, config bootstrap.Config, ui *term
 	credential = filepath.Clean(credential)
 	adapter, err := execution.NewCodexSubscription(ctx, execution.CodexSubscriptionConfig{BinaryPath: binary, CredentialsPath: credential, Model: "model-discovery"})
 	if err != nil {
-		return bootstrap.Provider{}, fmt.Errorf("Codex connection test failed: %w", err)
+		return bootstrap.Provider{}, fmt.Errorf("codex connection test failed: %w", err)
 	}
 	choices, err := adapter.AvailableModels(ctx)
 	if err != nil {

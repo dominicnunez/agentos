@@ -155,7 +155,7 @@ func activatedHumanListener(path string, ownerUID int) (net.Listener, bool, erro
 		return nil, false, nil
 	}
 	if fds != 1 {
-		return nil, true, fmt.Errorf("Agent OS requires exactly one activated user socket")
+		return nil, true, fmt.Errorf("agent OS requires exactly one activated user socket")
 	}
 	file := os.NewFile(3, "agentos-user.socket")
 	if file == nil {

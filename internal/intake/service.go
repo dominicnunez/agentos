@@ -281,7 +281,7 @@ func (s *Service) CompleteHumanTask(ctx context.Context, principal Principal, ta
 		OrganizationID: principal.OrganizationID, PrincipalID: principal.ID, SourceChannel: principal.Channel,
 		RequestID: conversationID, TaskID: taskID, Submission: submission,
 	}); err != nil {
-		return View{}, fmt.Errorf("%w: %v", ErrConflict, err)
+		return View{}, fmt.Errorf("%w: %w", ErrConflict, err)
 	}
 	stream, err = s.app.ExternalEvents(ctx, principal.OrganizationID, conversationID)
 	if err != nil {

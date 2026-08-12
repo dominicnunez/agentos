@@ -211,7 +211,7 @@ func (p Provider) Validate() error {
 		}
 	case ProviderCodexSubscription:
 		if !validModelIdentifier(p.Model) || !canonicalAbsolutePath(p.CodexBinary) || !canonicalAbsolutePath(p.CodexCredential) || !validCredentialRef(p.SecretRef) {
-			return fmt.Errorf("Codex model, binary, sealed credential store, and key reference are required")
+			return fmt.Errorf("codex model, binary, sealed credential store, and key reference are required")
 		}
 	default:
 		return fmt.Errorf("provider must be codex-subscription or openai-api")
@@ -235,7 +235,7 @@ func validateA2A(config A2A) error {
 		return fmt.Errorf("A2A listen port is invalid")
 	}
 	parsedIP := net.ParseIP(host)
-	remote := host == "" || !(strings.EqualFold(host, "localhost") || parsedIP != nil && parsedIP.IsLoopback())
+	remote := host == "" || (!strings.EqualFold(host, "localhost") && (parsedIP == nil || !parsedIP.IsLoopback()))
 	if remote && !config.AllowRemote {
 		return fmt.Errorf("remote A2A listening must be enabled explicitly")
 	}
