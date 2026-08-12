@@ -32,11 +32,23 @@ manifest records those exact Event IDs. Result summaries and artifacts remain
 untrusted work evidence; they cannot authorize effects, approve requests,
 change policy, expand capabilities, or certify completion.
 
+A failed dependency deterministically terminalizes every affected pending or
+blocked dependent through `TASK_DEPENDENCY_FAILED`; failure then propagates to
+the runtime root and Goal instead of leaving work active forever. The event's
+stable `DEPENDENCY_FAILED` code and exact failed Task IDs are machine contract
+data, independent of user-facing language.
+
 The externally visible A2A Task is always the runtime-owned root. Internal
 child IDs are not registered for external lookup, and their intermediate
-status or result cannot replace the root Task's public state.
+status or result cannot replace the root Task's public state. Authenticated
+local completion control resolves child Tasks through a separate
+organization-scoped projection path, so required reviews remain possible
+without expanding the A2A address space.
 
 Real model outputs without a registered deterministic verifier still require
-an independent completion judgment. A child that cannot proceed emits a
-typed blocked-work contract to its parent; the scheduler never treats blocked
-work as completed or lets the parent inherit missing authority.
+an independent completion judgment. A pending review prevents parent
+remediation from substituting model judgment for that review. Approval wakes
+newly eligible dependents immediately; rejection follows the deterministic
+failure path. Other child work that cannot proceed emits a typed blocked-work
+contract to its parent, and the scheduler never treats blocked work as
+completed or lets the parent inherit missing authority.

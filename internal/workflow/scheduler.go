@@ -60,6 +60,29 @@ func (Scheduler) RemediationReady(tasks map[core.ID]core.Task) ([]core.Task, err
 	return ready, nil
 }
 
+// FailedDependencyBlocked returns non-terminal tasks that can no longer run
+// because at least one declared dependency failed. The application records
+// the terminal transition; the scheduler remains deterministic and read-only.
+func (Scheduler) FailedDependencyBlocked(tasks map[core.ID]core.Task) ([]core.Task, error) {
+	if err := validate(tasks); err != nil {
+		return nil, err
+	}
+	blocked := make([]core.Task, 0)
+	for _, task := range tasks {
+		if task.Status != core.TaskPending && task.Status != core.TaskBlocked {
+			continue
+		}
+		for _, dependencyID := range task.DependsOn {
+			if tasks[dependencyID].Status == core.TaskFailed {
+				blocked = append(blocked, task)
+				break
+			}
+		}
+	}
+	sort.Slice(blocked, func(i, j int) bool { return blocked[i].ID < blocked[j].ID })
+	return blocked, nil
+}
+
 func validate(tasks map[core.ID]core.Task) error {
 	for id, task := range tasks {
 		for _, dependency := range task.DependsOn {

@@ -656,7 +656,7 @@ func streamTask(stream []events.Event) (core.Task, bool) {
 			continue
 		}
 		switch stream[index].EventType {
-		case "TASK_CREATED", "TASK_BLOCKED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED":
+		case "TASK_CREATED", "TASK_BLOCKED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED":
 		default:
 			continue
 		}
@@ -694,7 +694,7 @@ func externalState(stream []events.Event) string {
 			state = StateWorking
 		case "TASK_VERIFIED_COMPLETE":
 			state = StateCompleted
-		case "COMPLETION_REJECTED":
+		case "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED":
 			state = StateFailed
 		}
 	}

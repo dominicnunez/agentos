@@ -154,6 +154,41 @@ func (s *Service) ExternalTaskEvents(ctx context.Context, organizationID, taskID
 	return requestID, stream, nil
 }
 
+// internalTaskEvents resolves any durable Task through organization-scoped
+// projections. It is intentionally separate from the root-only external task
+// index so local, authenticated control paths can review child work without
+// making child identities addressable through A2A.
+func (s *Service) internalTaskEvents(ctx context.Context, organizationID, taskID string) ([]events.Event, error) {
+	if organizationID == "" || taskID == "" {
+		return nil, fmt.Errorf("organization and task are required")
+	}
+	snapshot, err := s.state.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	state, ok := snapshot.Tasks[core.ID(taskID)]
+	if !ok {
+		return nil, nil
+	}
+	actualOrganizationID, err := taskOrganization(snapshot, state.Value)
+	if err != nil {
+		return nil, err
+	}
+	if actualOrganizationID != core.ID(organizationID) {
+		return nil, nil
+	}
+	stream, err := s.gateway.Events(ctx, state.CorrelationID)
+	if err != nil {
+		return nil, err
+	}
+	for _, event := range stream {
+		if event.OrganizationID != organizationID {
+			return nil, fmt.Errorf("internal task stream crosses its organization boundary")
+		}
+	}
+	return stream, nil
+}
+
 func (s *Service) requireExternalWorkCorrelation(ctx context.Context, organizationID, requestID string) (string, error) {
 	correlationID, found, err := s.gateway.ResolveExternalWork(ctx, organizationID, requestID)
 	if err != nil {
@@ -1323,7 +1358,8 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 		return *recorded, nil
 	}
 
-	descriptor, usesModel := s.planner.Descriptor()
+	descriptor, modelCapable := s.planner.Descriptor()
+	usesModel := modelCapable && requestedKind == core.ExecutionAgent
 	inputRefs, err := planningInputRefs(stream, intent, draft)
 	if err != nil {
 		return core.Plan{}, err
@@ -1631,6 +1667,26 @@ func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {
 		for id, state := range snapshot.Tasks {
 			tasks[id] = state.Value
 		}
+		failed, err := s.scheduler.FailedDependencyBlocked(tasks)
+		if err != nil {
+			return nil, fmt.Errorf("validate durable task graph failures: %w", err)
+		}
+		if len(failed) > 0 {
+			for _, task := range failed {
+				state := snapshot.Tasks[task.ID]
+				organizationID, err := taskOrganization(snapshot, task)
+				if err != nil {
+					return nil, err
+				}
+				dependencyIDs := failedDependencyIDs(task, tasks)
+				task.Status = core.TaskFailed
+				detail := dependencyFailureDetail{Code: "DEPENDENCY_FAILED", FailedDependencyIDs: dependencyIDs}
+				if err := s.state.SaveTask(ctx, organizationID, "TASK_DEPENDENCY_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); err != nil {
+					return nil, fmt.Errorf("persist failed-dependency state for task %s: %w", task.ID, err)
+				}
+			}
+			continue
+		}
 		ready, err := s.scheduler.Ready(tasks)
 		if err != nil {
 			return nil, fmt.Errorf("validate durable task graph: %w", err)
@@ -1640,6 +1696,10 @@ func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {
 			ready, err = s.scheduler.RemediationReady(tasks)
 			if err != nil {
 				return nil, fmt.Errorf("validate durable remediation graph: %w", err)
+			}
+			ready, err = s.actionableRemediation(ctx, snapshot, ready)
+			if err != nil {
+				return nil, err
 			}
 			if len(ready) == 0 {
 				return runs, nil
@@ -1655,6 +1715,68 @@ func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {
 			runs[task.ID] = run
 		}
 	}
+}
+
+type dependencyFailureDetail struct {
+	Code                string    `json:"code"`
+	FailedDependencyIDs []core.ID `json:"failed_dependency_ids"`
+}
+
+func failedDependencyIDs(task core.Task, tasks map[core.ID]core.Task) []core.ID {
+	ids := make([]core.ID, 0, len(task.DependsOn))
+	for _, dependencyID := range task.DependsOn {
+		if tasks[dependencyID].Status == core.TaskFailed {
+			ids = append(ids, dependencyID)
+		}
+	}
+	return ids
+}
+
+// actionableRemediation prevents a parent Agent from substituting its own
+// judgment for a pending independent completion review. Once that review is
+// durably decided, the ordinary scheduler path can proceed or propagate the
+// rejected dependency without an unrelated submission or restart.
+func (s *Service) actionableRemediation(ctx context.Context, snapshot projections.Snapshot, candidates []core.Task) ([]core.Task, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	pendingByCorrelation := make(map[string]map[core.ID]struct{})
+	actionable := make([]core.Task, 0, len(candidates))
+	for _, task := range candidates {
+		state, ok := snapshot.Tasks[task.ID]
+		if !ok {
+			return nil, fmt.Errorf("remediation candidate %s has no durable projection", task.ID)
+		}
+		pending, cached := pendingByCorrelation[state.CorrelationID]
+		if !cached {
+			stream, err := s.gateway.Events(ctx, state.CorrelationID)
+			if err != nil {
+				return nil, fmt.Errorf("load remediation review state: %w", err)
+			}
+			requests, decisions, err := completionReviewRecords(stream)
+			if err != nil {
+				return nil, fmt.Errorf("validate remediation review state: %w", err)
+			}
+			pending = make(map[core.ID]struct{})
+			for reviewID, request := range requests {
+				if _, decided := decisions[reviewID]; !decided {
+					pending[request.TaskID] = struct{}{}
+				}
+			}
+			pendingByCorrelation[state.CorrelationID] = pending
+		}
+		awaitingIndependentReview := false
+		for _, dependencyID := range task.DependsOn {
+			if _, waiting := pending[dependencyID]; waiting {
+				awaitingIndependentReview = true
+				break
+			}
+		}
+		if !awaitingIndependentReview {
+			actionable = append(actionable, task)
+		}
+	}
+	return actionable, nil
 }
 
 func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot, state projections.Versioned[core.Task], remediation bool) (taskRun, error) {

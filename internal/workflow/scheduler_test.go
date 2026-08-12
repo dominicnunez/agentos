@@ -60,3 +60,19 @@ func TestRemediationReadyRejectsUnrelatedOrUnfinishedDependencies(t *testing.T) 
 		t.Fatalf("unexpected remediation ready=%v", ready)
 	}
 }
+
+func TestFailedDependencyBlockedReturnsPendingAndRemediationTasks(t *testing.T) {
+	tasks := map[core.ID]core.Task{
+		"failed":  {ID: "failed", Status: core.TaskFailed},
+		"pending": {ID: "pending", Status: core.TaskPending, DependsOn: []core.ID{"failed"}},
+		"blocked": {ID: "blocked", Status: core.TaskBlocked, DependsOn: []core.ID{"failed"}},
+		"done":    {ID: "done", Status: core.TaskCompleted, DependsOn: []core.ID{"failed"}},
+	}
+	blocked, err := (Scheduler{}).FailedDependencyBlocked(tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocked) != 2 || blocked[0].ID != "blocked" || blocked[1].ID != "pending" {
+		t.Fatalf("failed-dependency tasks=%v", blocked)
+	}
+}

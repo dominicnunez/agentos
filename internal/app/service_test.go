@@ -141,6 +141,37 @@ func (m organizationPlanningModel) CompleteText(ctx context.Context, prompt stri
 	return planning.TextCompletion{Text: response.Text, Usage: response.Usage}, err
 }
 
+func newOrganizationPlanner(t *testing.T, model *organizationLoopModel) planning.Planner {
+	t.Helper()
+	planner, err := planning.NewModelPlanner(organizationPlanningModel{model: model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return planner
+}
+
+func TestModelCapablePlannerSkipsInferenceForExactWork(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	model := &organizationLoopModel{}
+	service := NewWithModelAndPlanner(events.NewGateway(l), model, newOrganizationPlanner(t, model))
+	result, err := service.Submit(context.Background(), Submit{RequestID: "exact-no-planning-model", OrganizationID: "org-1", Statement: "echo exact", Kind: core.ExecutionDeterministic})
+	if err != nil || result.Task.Status != core.TaskCompleted {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(model.prompts) != 0 {
+		t.Fatalf("exact work used model prompts=%+v", model.prompts)
+	}
+	for _, event := range result.Events {
+		if event.EventType == "PLANNING_CONTEXT_MANIFESTED" || event.EventType == "INFERENCE_USAGE_RECORDED" {
+			t.Fatalf("exact work recorded model use: %+v", event)
+		}
+	}
+}
+
 func TestAcceptedIntentBecomesDurableTaskDAGWithDependencyEvidence(t *testing.T) {
 	ctx := context.Background()
 	l, err := ledger.Open(":memory:")
@@ -149,10 +180,7 @@ func TestAcceptedIntentBecomesDurableTaskDAGWithDependencyEvidence(t *testing.T)
 	}
 	t.Cleanup(func() { _ = l.Close() })
 	model := &organizationLoopModel{}
-	planner, err := planning.NewModelPlanner(organizationPlanningModel{model: model})
-	if err != nil {
-		t.Fatal(err)
-	}
+	planner := newOrganizationPlanner(t, model)
 	service := NewWithModelAndPlanner(events.NewGateway(l), model, planner)
 	submission := Submit{RequestID: "organization-loop", OrganizationID: "org-1", Statement: "prepare a verified briefing", Kind: core.ExecutionAgent}
 	result, err := service.Submit(ctx, submission)
@@ -213,6 +241,96 @@ func TestAcceptedIntentBecomesDurableTaskDAGWithDependencyEvidence(t *testing.T)
 	replayed, err := restarted.Submit(ctx, submission)
 	if err != nil || replayed.Task.ID != result.Task.ID || len(model.prompts) != calls || len(replayed.Events) != len(result.Events) {
 		t.Fatalf("replay=%+v calls=%d want=%d err=%v", replayed, len(model.prompts), calls, err)
+	}
+}
+
+func TestChildCompletionReviewStaysInternalAndWakesRoot(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	planningModel := &organizationLoopModel{}
+	service := NewWithModelAndPlanner(events.NewGateway(l), describedModel{}, newOrganizationPlanner(t, planningModel))
+	submission := Submit{RequestID: "child-review", OrganizationID: "org-1", Statement: "prepare a reviewed briefing", Kind: core.ExecutionAgent}
+	submitted, err := service.Submit(ctx, submission)
+	if err != nil || submitted.Task.Status != core.TaskPending || submitted.Goal.Status != "ACTIVE" {
+		t.Fatalf("submitted=%+v err=%v", submitted, err)
+	}
+	snapshot, err := projections.New(events.NewGateway(l)).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var child core.Task
+	for _, state := range snapshot.Tasks {
+		if state.Value.ParentID == submitted.Task.ID {
+			child = state.Value
+		}
+	}
+	if child.ID == "" || child.Status != core.TaskBlocked {
+		t.Fatalf("child=%+v", child)
+	}
+	if _, stream, err := service.ExternalTaskEvents(ctx, "org-1", string(child.ID)); err != nil || len(stream) != 0 {
+		t.Fatalf("child crossed external lookup boundary: events=%d err=%v", len(stream), err)
+	}
+	if _, found, err := service.CompletionReview(ctx, "other-org", string(child.ID)); err != nil || found {
+		t.Fatalf("cross-organization child review found=%t err=%v", found, err)
+	}
+	childReview, found, err := service.CompletionReview(ctx, "org-1", string(child.ID))
+	if err != nil || !found || childReview.Request.TaskID != child.ID {
+		t.Fatalf("child review=%+v found=%t err=%v", childReview, found, err)
+	}
+	if _, err := service.ReviewCompletion(ctx, reviewInput(childReview, completion.ReviewApprove, "")); err != nil {
+		t.Fatal(err)
+	}
+	rootReview, found, err := service.CompletionReview(ctx, "org-1", string(submitted.Task.ID))
+	if err != nil || !found || rootReview.Request.TaskID != submitted.Task.ID {
+		t.Fatalf("root review=%+v found=%t err=%v", rootReview, found, err)
+	}
+	if _, err := service.ReviewCompletion(ctx, reviewInput(rootReview, completion.ReviewApprove, "")); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := service.Submit(ctx, submission)
+	if err != nil || replayed.Task.Status != core.TaskCompleted || replayed.Goal.Status != "COMPLETED" {
+		t.Fatalf("replayed=%+v err=%v", replayed, err)
+	}
+}
+
+type failingExecutionModel struct{}
+
+func (failingExecutionModel) Name() string { return "failing-model/v1" }
+func (failingExecutionModel) Descriptor() execution.ModelDescriptor {
+	return execution.ModelDescriptor{Provider: "failing", Model: "failing-model/v1", ExecutionProfileVersion: "v1-failing"}
+}
+func (failingExecutionModel) Complete(context.Context, string) (execution.ModelResponse, error) {
+	return execution.ModelResponse{}, errors.New("provider failed")
+}
+
+func TestFailedChildTerminalizesRootAndGoal(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	planningModel := &organizationLoopModel{}
+	service := NewWithModelAndPlanner(events.NewGateway(l), failingExecutionModel{}, newOrganizationPlanner(t, planningModel))
+	result, err := service.Submit(ctx, Submit{RequestID: "failed-child", OrganizationID: "org-1", Statement: "prepare a briefing", Kind: core.ExecutionAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Task.Status != core.TaskFailed || result.Goal.Status != "FAILED" {
+		t.Fatalf("root=%+v goal=%+v", result.Task, result.Goal)
+	}
+	foundDependencyFailure := false
+	for _, event := range result.Events {
+		if event.EventType == "TASK_DEPENDENCY_FAILED" && event.TaskID == string(result.Task.ID) {
+			foundDependencyFailure = true
+		}
+	}
+	if !foundDependencyFailure {
+		t.Fatal("root failure did not record its failed dependency contract")
 	}
 }
 

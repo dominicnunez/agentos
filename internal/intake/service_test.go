@@ -45,24 +45,11 @@ func TestExternalViewProjectsOnlyRuntimeRootTask(t *testing.T) {
 	rootID := "task-root"
 	childID := "task-root-child"
 	started := time.Date(2026, time.August, 12, 12, 0, 0, 0, time.UTC)
-	projection := func(eventType string, task core.Task, at time.Time) events.Event {
-		value, err := json.Marshal(task)
-		if err != nil {
-			t.Fatal(err)
-		}
-		payload, err := json.Marshal(events.ProjectionEventPayload{Projection: events.ProjectionRecord{
-			ProjectionKind: projections.KindTask, RecordID: string(task.ID), Version: 1, CorrelationID: "work-1", Value: value,
-		}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return events.Event{EventType: eventType, TaskID: string(task.ID), Payload: payload, CreatedAt: at}
-	}
 	stream := []events.Event{
 		{EventType: "INTAKE_MESSAGE_RECORDED", TaskID: rootID, CreatedAt: started},
-		projection("TASK_CREATED", core.Task{ID: core.ID(rootID), Status: core.TaskPending}, started.Add(time.Second)),
-		projection("TASK_CREATED", core.Task{ID: core.ID(childID), ParentID: core.ID(rootID), Status: core.TaskPending}, started.Add(2*time.Second)),
-		projection("TASK_BLOCKED", core.Task{ID: core.ID(childID), ParentID: core.ID(rootID), Status: core.TaskBlocked}, started.Add(3*time.Second)),
+		taskProjectionEvent(t, "TASK_CREATED", core.Task{ID: core.ID(rootID), Status: core.TaskPending}, started.Add(time.Second)),
+		taskProjectionEvent(t, "TASK_CREATED", core.Task{ID: core.ID(childID), ParentID: core.ID(rootID), Status: core.TaskPending}, started.Add(2*time.Second)),
+		taskProjectionEvent(t, "TASK_BLOCKED", core.Task{ID: core.ID(childID), ParentID: core.ID(rootID), Status: core.TaskBlocked}, started.Add(3*time.Second)),
 		{EventType: "RESULT_PUBLISHED", TaskID: childID, Payload: json.RawMessage(`{"summary":"internal result"}`), CreatedAt: started.Add(4 * time.Second)},
 	}
 	view := projectView("work-1", stream, true)
@@ -71,12 +58,41 @@ func TestExternalViewProjectsOnlyRuntimeRootTask(t *testing.T) {
 	}
 	stream = append(stream,
 		events.Event{EventType: "RESULT_PUBLISHED", TaskID: rootID, Payload: json.RawMessage(`{"summary":"public root result"}`), CreatedAt: started.Add(5 * time.Second)},
-		projection("TASK_VERIFIED_COMPLETE", core.Task{ID: core.ID(rootID), Status: core.TaskCompleted}, started.Add(6*time.Second)),
+		taskProjectionEvent(t, "TASK_VERIFIED_COMPLETE", core.Task{ID: core.ID(rootID), Status: core.TaskCompleted}, started.Add(6*time.Second)),
 	)
 	view = projectView("work-1", stream, true)
 	if view.State != StateCompleted || view.Result != "public root result" || !view.UpdatedAt.Equal(started.Add(6*time.Second)) {
 		t.Fatalf("root result projection=%+v", view)
 	}
+}
+
+func TestExternalViewProjectsRootDependencyFailure(t *testing.T) {
+	started := time.Now().UTC()
+	rootID := "task-work-1"
+	stream := []events.Event{
+		{EventType: "INTAKE_MESSAGE_RECORDED", TaskID: rootID, CreatedAt: started},
+		taskProjectionEvent(t, "TASK_CREATED", core.Task{ID: core.ID(rootID), Status: core.TaskPending}, started.Add(time.Second)),
+		taskProjectionEvent(t, "TASK_DEPENDENCY_FAILED", core.Task{ID: core.ID(rootID), Status: core.TaskFailed}, started.Add(2*time.Second)),
+	}
+	view := projectView("work-1", stream, true)
+	if view.State != StateFailed || !view.UpdatedAt.Equal(started.Add(2*time.Second)) {
+		t.Fatalf("dependency failure view=%+v", view)
+	}
+}
+
+func taskProjectionEvent(t *testing.T, eventType string, task core.Task, at time.Time) events.Event {
+	t.Helper()
+	value, err := json.Marshal(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(events.ProjectionEventPayload{Projection: events.ProjectionRecord{
+		ProjectionKind: projections.KindTask, RecordID: string(task.ID), Version: 1, CorrelationID: "work-1", Value: value,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events.Event{EventType: eventType, TaskID: string(task.ID), Payload: payload, CreatedAt: at}
 }
 
 func TestIntakeKeepsSourceProvenance(t *testing.T) {
