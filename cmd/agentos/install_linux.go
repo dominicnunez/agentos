@@ -356,10 +356,6 @@ func prepareSystemDirectory(path string, uid, gid int, mode os.FileMode) error {
 	if err := rejectSymlinkDirectoryChain(path); err != nil {
 		return err
 	}
-	parent := filepath.Dir(path)
-	if err := validateSystemWorkspaceParents(parent, owner.UID, serviceUID); err != nil {
-		return err
-	}
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return fmt.Errorf("system path %s must be a directory, not a link", path)
@@ -381,6 +377,10 @@ func prepareSystemWorkspace(path string, owner bootstrap.Owner, serviceUID, serv
 		return fmt.Errorf("workspace is invalid")
 	}
 	if err := rejectSymlinkDirectoryChain(path); err != nil {
+		return err
+	}
+	parent := filepath.Dir(path)
+	if err := validateSystemWorkspaceParents(parent, owner.UID, serviceUID); err != nil {
 		return err
 	}
 	if info, err := os.Lstat(path); err == nil {
