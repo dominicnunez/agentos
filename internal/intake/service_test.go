@@ -79,6 +79,29 @@ func TestExternalViewProjectsRootDependencyFailure(t *testing.T) {
 	}
 }
 
+func TestExternalViewProjectsPlanningAndRemediationFailures(t *testing.T) {
+	started := time.Now().UTC()
+	rootID := "task-work-1"
+	base := []events.Event{{EventType: "INTAKE_MESSAGE_RECORDED", TaskID: rootID, CreatedAt: started}}
+
+	planning := append([]events.Event(nil), base...)
+	planning = append(planning, events.Event{EventType: "GOAL_PLANNING_FAILED", CreatedAt: started.Add(time.Second)})
+	view := projectView("work-1", planning, true)
+	if view.State != StateFailed || !view.UpdatedAt.Equal(started.Add(time.Second)) {
+		t.Fatalf("planning failure view=%+v", view)
+	}
+
+	remediation := append([]events.Event(nil), base...)
+	remediation = append(remediation,
+		taskProjectionEvent(t, "TASK_CREATED", core.Task{ID: core.ID(rootID), Status: core.TaskPending}, started.Add(time.Second)),
+		taskProjectionEvent(t, "TASK_REMEDIATION_FAILED", core.Task{ID: core.ID(rootID), Status: core.TaskFailed}, started.Add(2*time.Second)),
+	)
+	view = projectView("work-1", remediation, true)
+	if view.State != StateFailed || !view.UpdatedAt.Equal(started.Add(2*time.Second)) {
+		t.Fatalf("remediation failure view=%+v", view)
+	}
+}
+
 func taskProjectionEvent(t *testing.T, eventType string, task core.Task, at time.Time) events.Event {
 	t.Helper()
 	value, err := json.Marshal(task)

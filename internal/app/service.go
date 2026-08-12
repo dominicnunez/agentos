@@ -55,6 +55,12 @@ type RecoveryResult struct {
 	PlansMaterialized int `json:"plans_materialized"`
 }
 
+type planningFailureDetail struct {
+	Code             string `json:"code"`
+	Reason           string `json:"reason"`
+	EvidenceEventRef string `json:"evidence_event_ref,omitempty"`
+}
+
 type Service struct {
 	permit           chan struct{}
 	gateway          *events.Gateway
@@ -436,9 +442,11 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 	return result, nil
 }
 
-// recoverValidatedPlans closes only the crash window after a validated Plan
-// reached the ledger and before its atomic Task batch committed. It never
-// repeats an interrupted model-planning call during startup.
+// recoverValidatedPlans closes the crash windows on either side of durable
+// Plan creation. A validated Plan is materialized without inference. Planning
+// that never reached a model context may be resumed; an interrupted model turn
+// is terminalized fail closed because replay could duplicate cost or choose a
+// different graph.
 func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projections.Snapshot) (int, error) {
 	goalIDs := make([]core.ID, 0, len(snapshot.Goals))
 	for goalID := range snapshot.Goals {
@@ -470,14 +478,18 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 			return 0, err
 		}
 		hasDurablePlan := false
+		planningAttemptRef := ""
 		for _, event := range stream {
 			if event.EventType == "PLAN_CREATED" {
 				hasDurablePlan = true
-				break
 			}
-		}
-		if !hasDurablePlan {
-			continue
+			if event.EventType == "PLANNING_CONTEXT_MANIFESTED" {
+				var planningContext events.PlanningContextPayload
+				if json.Unmarshal(event.Payload, &planningContext) != nil || planningContext.IntentID != string(intentState.Value.ID) || planningContext.IntentFingerprint != intentState.Value.AcceptedFingerprint {
+					return 0, fmt.Errorf("goal %s has invalid durable planning context", goalID)
+				}
+				planningAttemptRef = event.EventID
+			}
 		}
 		intent := intentState.Value
 		in := Submit{
@@ -486,6 +498,12 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 			SourceChannel: intent.SourceChannel, correlationID: goalState.CorrelationID,
 		}
 		if intent.SourceChannel == "INTERNAL" {
+			if !hasDurablePlan {
+				if err := s.failPlanningGoal(ctx, intent.OrganizationID, goalState, "PLANNING_RECOVERY_IDENTITY_INCOMPLETE", "planning could not be resumed because the requested execution kind was not durably recoverable", planningAttemptRef); err != nil {
+					return 0, err
+				}
+				continue
+			}
 			var plan core.Plan
 			for _, event := range stream {
 				if event.EventType == "PLAN_CREATED" && json.Unmarshal(event.Payload, &plan) == nil {
@@ -509,9 +527,26 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		if in.RequestID == "" || in.OrganizationID == "" || in.Statement == "" || in.Kind == "" || in.SourcePrincipalID == "" || in.SourcePrincipalKind == "" || in.SourceChannel == "" {
 			return 0, fmt.Errorf("recover planned goal %s: durable submission identity is incomplete", goalID)
 		}
+		if !hasDurablePlan && in.Kind == core.ExecutionAgent && planningAttemptRef != "" {
+			if err := s.failPlanningGoal(ctx, intent.OrganizationID, goalState, "PLANNING_INTERRUPTED", "an adaptive planning attempt ended without a validated durable plan and was not replayed", planningAttemptRef); err != nil {
+				return 0, err
+			}
+			continue
+		}
 		_, _, root, err := s.ensureSubmission(ctx, in)
 		if err != nil {
-			return 0, fmt.Errorf("recover Task DAG for goal %s: %w", goalID, err)
+			current, loadErr := s.state.Load(ctx)
+			if loadErr != nil {
+				return 0, fmt.Errorf("recover Task DAG for goal %s: %w", goalID, err)
+			}
+			currentGoal, ok := current.Goals[goalID]
+			if !ok || currentGoal.Value.Status != "ACTIVE" {
+				return 0, fmt.Errorf("recover Task DAG for goal %s: %w", goalID, err)
+			}
+			if failErr := s.failPlanningGoal(ctx, intent.OrganizationID, currentGoal, "PLANNING_RECOVERY_FAILED", "safe planning recovery did not produce a validated durable plan", ""); failErr != nil {
+				return 0, fmt.Errorf("recover Task DAG for goal %s: %v; persist failure: %w", goalID, err, failErr)
+			}
+			continue
 		}
 		if err := s.ensureOperatorAcceptance(ctx, in, root.ID); err != nil {
 			return 0, fmt.Errorf("recover operator acceptance for goal %s: %w", goalID, err)
@@ -519,6 +554,19 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		materialized++
 	}
 	return materialized, nil
+}
+
+func (s *Service) failPlanningGoal(ctx context.Context, organizationID core.ID, state projections.Versioned[core.Goal], code, reason, evidenceRef string) error {
+	if organizationID == "" || state.CorrelationID == "" || state.Value.Status != "ACTIVE" || code == "" || reason == "" {
+		return fmt.Errorf("complete active planning-failure state is required")
+	}
+	goal := state.Value
+	goal.Status = "FAILED"
+	detail := planningFailureDetail{Code: code, Reason: reason, EvidenceEventRef: evidenceRef}
+	if err := s.state.SaveGoal(ctx, organizationID, "GOAL_PLANNING_FAILED", "runtime", state.CorrelationID, state.Version+1, goal, detail); err != nil {
+		return fmt.Errorf("persist planning failure for goal %s: %w", goal.ID, err)
+	}
+	return nil
 }
 
 type OperatorInput struct {
@@ -1746,10 +1794,7 @@ func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {
 		if err != nil {
 			return nil, fmt.Errorf("load scheduler state: %w", err)
 		}
-		tasks := make(map[core.ID]core.Task, len(snapshot.Tasks))
-		for id, state := range snapshot.Tasks {
-			tasks[id] = state.Value
-		}
+		tasks := taskValues(snapshot.Tasks)
 		terminalized, err := s.failTasksAfterRootFailure(ctx, snapshot, tasks)
 		if err != nil {
 			return nil, err
@@ -1768,7 +1813,7 @@ func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {
 				if err != nil {
 					return nil, err
 				}
-				dependencyIDs := failedDependencyIDs(task, tasks)
+				dependencyIDs := dependencyIDsWithStatus(task, tasks, core.TaskFailed)
 				task.Status = core.TaskFailed
 				detail := dependencyFailureDetail{Code: "DEPENDENCY_FAILED", FailedDependencyIDs: dependencyIDs}
 				if err := s.state.SaveTask(ctx, organizationID, "TASK_DEPENDENCY_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); err != nil {
@@ -1819,6 +1864,11 @@ type rootFailureDetail struct {
 	FailedRootTaskID core.ID `json:"failed_root_task_id"`
 }
 
+type remediationFailureDetail struct {
+	Code                 string    `json:"code"`
+	BlockedDependencyIDs []core.ID `json:"blocked_dependency_ids"`
+}
+
 // failTasksAfterRootFailure terminalizes remaining work in a Goal whose exact
 // runtime-owned root has failed. Continuing independent siblings cannot make
 // that Goal succeed and may spend money or create avoidable external risk.
@@ -1864,14 +1914,22 @@ func (s *Service) failTasksAfterRootFailure(ctx context.Context, snapshot projec
 	return terminalized, nil
 }
 
-func failedDependencyIDs(task core.Task, tasks map[core.ID]core.Task) []core.ID {
+func dependencyIDsWithStatus(task core.Task, tasks map[core.ID]core.Task, status core.TaskStatus) []core.ID {
 	ids := make([]core.ID, 0, len(task.DependsOn))
 	for _, dependencyID := range task.DependsOn {
-		if tasks[dependencyID].Status == core.TaskFailed {
+		if tasks[dependencyID].Status == status {
 			ids = append(ids, dependencyID)
 		}
 	}
 	return ids
+}
+
+func taskValues(states map[core.ID]projections.Versioned[core.Task]) map[core.ID]core.Task {
+	tasks := make(map[core.ID]core.Task, len(states))
+	for id, state := range states {
+		tasks[id] = state.Value
+	}
+	return tasks
 }
 
 // actionableRemediation prevents a parent Agent from substituting its own
@@ -2080,6 +2138,14 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		return taskRun{}, fmt.Errorf("persist execution finish for task %s: %w", task.ID, err)
 	}
 	if remediation {
+		if task.ParentID == "" {
+			task.Status = core.TaskFailed
+			detail := remediationFailureDetail{Code: "REMEDIATION_UNRESOLVED", BlockedDependencyIDs: dependencyIDsWithStatus(task, taskValues(snapshot.Tasks), core.TaskBlocked)}
+			if err := s.state.SaveTask(ctx, organizationID, "TASK_REMEDIATION_FAILED", "runtime", state.CorrelationID, state.Version+2, task, detail); err != nil {
+				return taskRun{}, fmt.Errorf("persist unresolved root remediation for task %s: %w", task.ID, err)
+			}
+			return taskRun{Outcome: outcome, ExecutionError: executionErr}, nil
+		}
 		task.Status = core.TaskBlocked
 		detail := events.TaskBlockedPayload{
 			Reason:        "a dependency remains blocked after the bounded remediation pass",

@@ -1106,6 +1106,161 @@ func TestTaskPersistenceFailurePreventsExecutionVisibility(t *testing.T) {
 	}
 }
 
+type recoveryPlanner struct{ calls int }
+
+func (*recoveryPlanner) Descriptor() (planning.Descriptor, bool) {
+	return planning.Descriptor{PromptVersion: "recovery-test-v1", Provider: "fake", Model: "fake-model/v1", ExecutionProfileVersion: "v1-fake"}, true
+}
+
+func (p *recoveryPlanner) Build(_ context.Context, draft core.IntentDraft, kind core.ExecutionKind) (planning.Result, error) {
+	p.calls++
+	usage := events.InferenceUsageRecordedPayload{Source: "test", Provider: "fake", Model: "fake-model/v1"}
+	return planning.Result{Tasks: []core.PlanTask{{
+		Key: "root", Description: draft.Objective, ExecutionKind: kind,
+		ModelInferencePolicy: core.InferenceAllowed, DependsOn: []string{},
+	}}, Usage: &usage}, nil
+}
+
+func TestRecoveryDoesNotReplayInterruptedAdaptivePlanning(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	goal, draft := seedAcceptedGoalWithoutPlan(t, gateway, "planning-interrupted")
+	contextEvent, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "PLANNING_CONTEXT_MANIFESTED", SourceActorID: "runtime",
+		SourceExecutionID: "planning-plan-planning-interrupted-attempt-1", TaskID: "task-planning-interrupted", CorrelationID: "planning-interrupted",
+		Payload: events.PlanningContextPayload{
+			PlanID: "plan-planning-interrupted", IntentID: "intent-planning-interrupted", IntentFingerprint: draft.Fingerprint,
+			PromptVersion: "recovery-test-v1", Provider: "fake", Model: "fake-model/v1", ExecutionProfileVersion: "v1-fake",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	planner := &recoveryPlanner{}
+	service := NewWithModelAndPlanner(gateway, execution.FakeModel{}, planner)
+	if _, err := service.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if planner.calls != 0 {
+		t.Fatalf("interrupted adaptive planning was replayed %d times", planner.calls)
+	}
+	snapshot, err := service.state.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Goals[goal.ID].Value.Status != "FAILED" || len(snapshot.Tasks) != 0 {
+		t.Fatalf("interrupted planning remained executable: goal=%+v tasks=%+v", snapshot.Goals[goal.ID], snapshot.Tasks)
+	}
+	stream, err := gateway.Events(ctx, "planning-interrupted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range stream {
+		if event.EventType != "GOAL_PLANNING_FAILED" {
+			continue
+		}
+		var projection events.ProjectionEventPayload
+		var detail planningFailureDetail
+		if json.Unmarshal(event.Payload, &projection) != nil || json.Unmarshal(projection.Detail, &detail) != nil || detail.Code != "PLANNING_INTERRUPTED" || detail.EvidenceEventRef != contextEvent.EventID {
+			t.Fatalf("planning failure evidence=%+v", detail)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("interrupted planning was not durably terminalized")
+	}
+}
+
+func TestRecoveryResumesPlanningBeforeAnyAdaptiveTurn(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	goal, _ := seedAcceptedGoalWithoutPlan(t, gateway, "planning-safe-resume")
+	planner := &recoveryPlanner{}
+	service := NewWithModelAndPlanner(gateway, execution.FakeModel{}, planner)
+	recovery, err := service.Recover(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planner.calls != 1 || recovery.PlansMaterialized != 1 {
+		t.Fatalf("safe planning recovery=%+v calls=%d", recovery, planner.calls)
+	}
+	snapshot, err := service.state.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Goals[goal.ID].Value.Status != "COMPLETED" || len(snapshot.Tasks) != 1 {
+		t.Fatalf("safe planning recovery did not complete: goal=%+v tasks=%+v", snapshot.Goals[goal.ID], snapshot.Tasks)
+	}
+}
+
+func seedAcceptedGoalWithoutPlan(t *testing.T, gateway *events.Gateway, correlationID string) (core.Goal, core.IntentDraft) {
+	t.Helper()
+	ctx := context.Background()
+	draft := core.IntentDraft{
+		ID: core.ID("intent-draft-" + correlationID), OrganizationID: "org-1", Version: 1,
+		Status: core.IntentStatusReadyForReview, RequestedExecutionKind: core.ExecutionAgent,
+		Objective: "complete accepted work", Context: []core.IntentValue{},
+		Deliverables:       []core.IntentValue{{Value: "completed work", Origin: "USER"}},
+		CompletionCriteria: []core.IntentValue{{Value: "the work is complete", Origin: "USER"}},
+		Constraints:        []core.IntentValue{}, ResolvedDecisions: []core.IntentDecision{}, ConsequenceCandidates: []string{}, MissingUserInputs: []core.IntentValue{}, CreatedAt: time.Unix(1, 0).UTC(),
+	}
+	fingerprint, err := core.FingerprintIntentDraft(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft.Fingerprint = fingerprint
+	repository := projections.New(gateway)
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1"}
+	intent := core.Intent{
+		ID: core.ID("intent-" + correlationID), OrganizationID: organization.ID,
+		OriginalInstruction: "complete accepted work", NormalizedObjective: draft.Objective,
+		SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceHumanID: "user-1",
+		SourceChannel: "HUMAN_DIRECT", ExternalRequestID: correlationID, SourceMessageID: "message-1",
+		Context: draft.Context, Deliverables: draft.Deliverables, CompletionCriteria: draft.CompletionCriteria,
+		ResolvedDecisions: draft.ResolvedDecisions, AcceptedFingerprint: draft.Fingerprint,
+	}
+	goal := core.Goal{ID: core.ID("goal-" + correlationID), IntentID: intent.ID, Objective: draft.Objective, Status: "ACTIVE"}
+	for _, save := range []func() error{
+		func() error {
+			return repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", correlationID, 1, organization, nil)
+		},
+		func() error {
+			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", correlationID, 1, intent, nil)
+		},
+		func() error {
+			return repository.SaveGoal(ctx, organization.ID, "GOAL_CREATED", "runtime", correlationID, 1, goal, nil)
+		},
+	} {
+		if err := save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_DRAFTED", SourceActorID: "runtime", TaskID: "task-" + correlationID, CorrelationID: correlationID,
+		Payload: events.IntentDraftedPayload{SourceMessageID: "message-1", Draft: draft, Reply: "Review intent."},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-" + correlationID, CorrelationID: correlationID,
+		Payload: events.IntentConfirmedPayload{IntentID: string(draft.ID), Version: draft.Version, Fingerprint: draft.Fingerprint, ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return goal, draft
+}
+
 func TestRecoveryIsDeterministicFirst(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "agentos.db")
@@ -1377,8 +1532,8 @@ func TestBlockedChildReturnsToParent(t *testing.T) {
 	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintVersion: "v1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE"}
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "complete governed work", NormalizedObjective: "complete governed work"}
 	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: "complete governed work", Status: "ACTIVE"}
-	child := core.Task{ID: "task-child", GoalID: goal.ID, ParentID: "task-parent", Description: "use unavailable tool", ExecutionKind: core.ExecutionTool, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
-	parent := core.Task{ID: "task-parent", GoalID: goal.ID, Description: "govern child remediation", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{child.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	child := core.Task{ID: "task-child", GoalID: goal.ID, ParentID: "task-request-1", Description: "use unavailable tool", ExecutionKind: core.ExecutionTool, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	parent := core.Task{ID: "task-request-1", GoalID: goal.ID, Description: "govern child remediation", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{child.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
 	for _, save := range []func() error{
 		func() error {
 			return repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "request-1", 1, organization, nil)
@@ -1413,8 +1568,8 @@ func TestBlockedChildReturnsToParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Tasks[child.ID].Value.Status != core.TaskBlocked || snapshot.Tasks[parent.ID].Value.Status != core.TaskBlocked {
-		t.Fatalf("blocked child or governing parent state changed unexpectedly: child=%+v parent=%+v", snapshot.Tasks[child.ID], snapshot.Tasks[parent.ID])
+	if snapshot.Tasks[child.ID].Value.Status != core.TaskFailed || snapshot.Tasks[parent.ID].Value.Status != core.TaskFailed || snapshot.Goals[goal.ID].Value.Status != "FAILED" {
+		t.Fatalf("unresolved root remediation did not terminalize the Goal: child=%+v parent=%+v goal=%+v", snapshot.Tasks[child.ID], snapshot.Tasks[parent.ID], snapshot.Goals[goal.ID])
 	}
 	if err := service.ValidateAddressedRoute(ctx, events.AddressedRoute{OrganizationID: string(organization.ID), EventType: "TASK_BLOCKED", SourceActorID: string(agent.ID), ValidateSource: true, RecipientScope: events.RecipientTask, RecipientID: string(child.ID), TaskID: string(child.ID)}); err == nil {
 		t.Fatal("blocked child could route its escalation somewhere other than its parent")
@@ -1435,6 +1590,7 @@ func TestBlockedChildReturnsToParent(t *testing.T) {
 	}
 	var blockedEvent events.Event
 	var parentManifest core.ExecutionContextManifest
+	var remediationFailure remediationFailureDetail
 	observed := false
 	for _, event := range stream {
 		if strings.HasPrefix(event.EventType, "CAPABILITY_") || strings.HasPrefix(event.EventType, "APPROVAL_") {
@@ -1451,6 +1607,12 @@ func TestBlockedChildReturnsToParent(t *testing.T) {
 		if event.EventType == "INBOX_EVENTS_OBSERVED" && event.TaskID == string(parent.ID) {
 			observed = true
 		}
+		if event.EventType == "TASK_REMEDIATION_FAILED" && event.TaskID == string(parent.ID) {
+			var projection events.ProjectionEventPayload
+			if json.Unmarshal(event.Payload, &projection) != nil || json.Unmarshal(projection.Detail, &remediationFailure) != nil {
+				t.Fatal("invalid remediation failure contract")
+			}
+		}
 	}
 	if blockedEvent.EventID == "" || len(blockedEvent.AuthorizationRefs) != 0 {
 		t.Fatalf("blocked work gained authority or lost its upward route: %+v", blockedEvent)
@@ -1465,6 +1627,9 @@ func TestBlockedChildReturnsToParent(t *testing.T) {
 	}
 	if !observed || len(parentManifest.EventRefs) != 1 || parentManifest.EventRefs[0] != blockedEvent.EventID {
 		t.Fatalf("parent did not receive a bounded remediation pass: manifest=%+v observed=%v blocked=%+v", parentManifest, observed, blockedEvent)
+	}
+	if remediationFailure.Code != "REMEDIATION_UNRESOLVED" || !slices.Equal(remediationFailure.BlockedDependencyIDs, []core.ID{child.ID}) {
+		t.Fatalf("unresolved remediation contract=%+v", remediationFailure)
 	}
 }
 
@@ -1482,9 +1647,9 @@ func TestDeepBlockedDependencyReachesActionableRoot(t *testing.T) {
 	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintVersion: "v1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE"}
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "complete governed work", NormalizedObjective: "complete governed work"}
 	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: "complete governed work", Status: "ACTIVE"}
-	blocked := core.Task{ID: "task-a", GoalID: goal.ID, ParentID: "task-root", Description: "use unavailable tool", ExecutionKind: core.ExecutionTool, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
-	middle := core.Task{ID: "task-b", GoalID: goal.ID, ParentID: "task-root", Description: "interpret blocked dependency", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{blocked.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
-	root := core.Task{ID: "task-root", GoalID: goal.ID, Description: "govern remediation", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{middle.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	blocked := core.Task{ID: "task-a", GoalID: goal.ID, ParentID: "task-deep-block", Description: "use unavailable tool", ExecutionKind: core.ExecutionTool, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	middle := core.Task{ID: "task-b", GoalID: goal.ID, ParentID: "task-deep-block", Description: "interpret blocked dependency", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{blocked.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	root := core.Task{ID: "task-deep-block", GoalID: goal.ID, Description: "govern remediation", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{middle.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
 	for _, save := range []func() error{
 		func() error {
 			return repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "deep-block", 1, organization, nil)
@@ -1521,9 +1686,12 @@ func TestDeepBlockedDependencyReachesActionableRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, taskID := range []core.ID{blocked.ID, middle.ID, root.ID} {
-		if snapshot.Tasks[taskID].Value.Status != core.TaskBlocked {
+		if snapshot.Tasks[taskID].Value.Status != core.TaskFailed {
 			t.Fatalf("task %s status=%s", taskID, snapshot.Tasks[taskID].Value.Status)
 		}
+	}
+	if snapshot.Goals[goal.ID].Value.Status != "FAILED" {
+		t.Fatalf("unresolved deep remediation goal=%+v", snapshot.Goals[goal.ID])
 	}
 	stream, err := gateway.Events(ctx, "deep-block")
 	if err != nil {

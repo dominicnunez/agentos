@@ -38,6 +38,13 @@ disconnect or expired request deadline cannot cancel outcome persistence and
 strand a Task as `RUNNING`. The scheduler reloads authoritative state after
 each selected Task before choosing more work.
 
+Recovery resumes planning only when the ledger proves that no adaptive
+planning context was manifested. A validated durable Plan is materialized
+without another inference call. An interrupted model-planning attempt is not
+replayed: the Goal records `GOAL_PLANNING_FAILED` with a stable code and becomes
+terminal so accepted work cannot remain silently active or duplicate provider
+cost.
+
 A failed dependency deterministically terminalizes every affected pending or
 blocked dependent through `TASK_DEPENDENCY_FAILED`; failure then propagates to
 the runtime root and Goal instead of leaving work active forever. Once the
@@ -64,6 +71,12 @@ contract to its accountable parent. When a deeper DAG dependent is the next
 actionable Task, the runtime supplies that exact same-goal blocked contract as
 bounded evidence. The scheduler never treats blocked work as completed or lets
 another Task inherit missing authority.
+
+A bounded remediation pass may report and route a child block, but it cannot
+invent a DAG mutation or treat the dependency as complete. When an Agent root
+has no governing parent and the block remains unresolved, the runtime records
+`TASK_REMEDIATION_FAILED`, fails the root, and terminalizes the Goal rather than
+advertising an input request that no authorized V1 transition can consume.
 
 Intent, Goal, and Task projection histories keep one immutable correlation
 boundary across every version. Rebuild fails closed if any historical record

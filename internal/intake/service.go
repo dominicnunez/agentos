@@ -652,7 +652,7 @@ func ValidateIdentifier(name, value string) error {
 func projectView(conversationID string, stream []events.Event, includeResult bool) View {
 	view := View{TaskID: streamTaskID(stream), ConversationID: conversationID, State: externalState(stream)}
 	for _, event := range stream {
-		if event.TaskID == view.TaskID {
+		if event.TaskID == view.TaskID || event.EventType == "GOAL_PLANNING_FAILED" {
 			view.UpdatedAt = event.CreatedAt
 		}
 	}
@@ -684,7 +684,7 @@ func streamTask(stream []events.Event) (core.Task, bool) {
 			continue
 		}
 		switch stream[index].EventType {
-		case "TASK_CREATED", "TASK_BLOCKED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED":
+		case "TASK_CREATED", "TASK_BLOCKED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED":
 		default:
 			continue
 		}
@@ -712,6 +712,10 @@ func externalState(stream []events.Event) string {
 	state := StateWorking
 	rootID := streamTaskID(stream)
 	for _, event := range stream {
+		if event.EventType == "GOAL_PLANNING_FAILED" {
+			state = StateFailed
+			continue
+		}
 		if rootID == "" || event.TaskID != rootID {
 			continue
 		}
@@ -722,7 +726,7 @@ func externalState(stream []events.Event) string {
 			state = StateWorking
 		case "TASK_VERIFIED_COMPLETE":
 			state = StateCompleted
-		case "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED":
+		case "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED":
 			state = StateFailed
 		}
 	}
