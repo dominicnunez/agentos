@@ -22,12 +22,13 @@ to deploy or publish.
 | 13 | Restart continuity | PASS - [`TestRecoverExecutesPersistedPendingWorkAndPreservesIdentity`](../../internal/app/service_test.go), [`TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision`](../../internal/approvals/service_test.go), [`TestMessageInboxSurvivesReopenAndObservation`](../../internal/ledger/sqlite_test.go) |
 | 14 | Complete run telemetry | PASS - [`TestProjectBuildsCompleteReplayableRunSummary`](../../internal/telemetry/telemetry_test.go), [`TestRunTelemetryCoversDAG`](../../internal/app/service_test.go) |
 | 15 | Model executions have manifests | PASS - [`TestAgentExecutionUsesFakeAdapter`](../../internal/app/service_test.go), [`TestAgentExecutionReturnsSeparateUsageContract`](../../internal/execution/execution_test.go) |
-| 16 | Tool failures remain failures | PASS - [`TestRejectedRunRecordsTelemetryAndFailsGoal`](../../internal/app/service_test.go), [`TestEvaluateRequiresVerifiedSuccess`](../../internal/completion/engine_test.go) |
+| 16 | Tool failures remain failures | PASS - [`TestAgentExecutionRejectsMismatchedProviderUsageIdentity`](../../internal/execution/execution_test.go), [`TestUnavailableDeterministicWorkIsRejectedBeforeExecution`](../../internal/app/service_test.go), [`TestEvaluateRequiresVerifiedSuccess`](../../internal/completion/engine_test.go) |
 | 17 | Deterministic-first recovery | PASS - [`TestRecoveryIsDeterministicFirst`](../../internal/app/service_test.go) |
 | 18 | Authorized A2A operation | PASS - [`TestA2ASendGetAndContinueUseV1TaskContracts`](../../internal/gateway/a2a_test.go), [`TestOfficialA2AClientUsesDurableAgentOSState`](../../internal/gateway/a2a_official_test.go) |
 | 19 | A2A cannot approve effects | PASS - [`TestA2ACannotApproveEffects`](../../internal/gateway/a2a_test.go) |
 | 20 | Durable effect recovery | PASS - [`TestEffectSuccessNeedsEvidence`](../../internal/effects/coordinator_test.go), [`TestRecoveryConfirmsAttemptedEffectAfterRestartWithoutResend`](../../internal/effects/reconciliation_test.go) |
 | 21 | Confirmed semantic intake | PASS - [`TestModelNormalizerRequiresCompleteStrictIntent`](../../internal/intake/normalizer_test.go), [`TestIntentNormalizationManifestsModelUseAndReplaysWithoutInference`](../../internal/intake/service_test.go), [`TestIntentNormalizationRetryCompletesAnInterruptedDraftOnce`](../../internal/intake/service_test.go), [`TestIntentConversationLimitsRejectBeforeAppending`](../../internal/intake/service_test.go), [`TestIntentConfirmationCannotRacePastANewerMessage`](../../internal/intake/service_test.go), [`TestUnconfirmedIntentResumesAfterServiceRestart`](../../internal/intake/service_test.go), [`TestOfficialA2AClientUsesDurableAgentOSState`](../../internal/gateway/a2a_official_test.go) |
+| 22 | Bounded durable planning | PASS - [`TestModelPlannerRejectsUntrustedGraphExpansion`](../../internal/planning/planner_test.go), [`TestAcceptedIntentBecomesDurableTaskDAGWithDependencyEvidence`](../../internal/app/service_test.go), [`TestProjectionBatchRollsBackCompleteTaskGraph`](../../internal/ledger/sqlite_test.go), [`TestChildTaskIsNotExternallyAddressable`](../../internal/ledger/sqlite_test.go) |
 
 ## Evidence scope
 
@@ -45,6 +46,9 @@ persisted review decision after restart.
 - Gateway tests cover UID-authenticated local intake, authenticated A2A intake,
   replay, capability roles, visibility, lifecycle and request limits, tenant
   isolation, and rejection of authority-shaped content.
+- Planning tests cover no-inference exact work, closed schemas, task ceilings,
+  unsupported execution, unknown dependencies, cycles, atomic graph admission,
+  durable replay, dependency evidence selection, and A2A root isolation.
 
 ## Operational supplement
 

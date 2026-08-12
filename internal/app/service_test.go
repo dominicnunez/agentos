@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	"github.com/dominicnunez/agentos/internal/planning"
 	"github.com/dominicnunez/agentos/internal/projections"
 	"github.com/dominicnunez/agentos/internal/telemetry"
 )
@@ -101,13 +103,117 @@ func TestAgentExecutionUsesFakeAdapter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Outcome.ObservedEffect != "fake-model: summarize" {
+	observed, ok := r.Outcome.ObservedEffect.(string)
+	if !ok || !strings.HasPrefix(observed, "fake-model: Execute only this accepted Agent OS Intent.") || !strings.Contains(observed, `"objective":"summarize"`) {
 		t.Fatalf("effect=%q", r.Outcome.ObservedEffect)
 	}
 	if !r.Completion.Complete || r.Task.Status != core.TaskCompleted {
 		t.Fatalf("fake model result was not deterministically verified: %+v", r)
 	}
 	assertEventOrder(t, r.Events, "EXECUTION_CONTEXT_MANIFESTED", "TOOL_OUTCOME_RECORDED", "INFERENCE_USAGE_RECORDED", "EXECUTION_FINISHED", "RUN_TELEMETRY_RECORDED")
+}
+
+type organizationLoopModel struct {
+	prompts []string
+}
+
+func (*organizationLoopModel) Name() string { return "fake-model/v1" }
+func (*organizationLoopModel) Descriptor() execution.ModelDescriptor {
+	return execution.ModelDescriptor{Provider: "fake", Model: "fake-model/v1", ExecutionProfileVersion: "v1-fake"}
+}
+func (m *organizationLoopModel) Complete(_ context.Context, prompt string) (execution.ModelResponse, error) {
+	m.prompts = append(m.prompts, prompt)
+	text := "fake-model: " + prompt
+	if strings.HasPrefix(prompt, "You are the bounded Agent OS Task-DAG planner.") {
+		text = `{"tasks":[{"key":"research","description":"research the accepted objective","execution_kind":"AGENT","model_inference_policy":"REQUIRED","depends_on":[]}]}`
+	}
+	return execution.ModelResponse{Text: text, Usage: events.InferenceUsageRecordedPayload{Source: "fake", Provider: "fake", Model: "fake-model/v1"}}, nil
+}
+
+type organizationPlanningModel struct{ model *organizationLoopModel }
+
+func (m organizationPlanningModel) Descriptor() planning.Descriptor {
+	descriptor := m.model.Descriptor()
+	return planning.Descriptor{Provider: descriptor.Provider, Model: descriptor.Model, ExecutionProfileVersion: descriptor.ExecutionProfileVersion}
+}
+func (m organizationPlanningModel) CompleteText(ctx context.Context, prompt string) (planning.TextCompletion, error) {
+	response, err := m.model.Complete(ctx, prompt)
+	return planning.TextCompletion{Text: response.Text, Usage: response.Usage}, err
+}
+
+func TestAcceptedIntentBecomesDurableTaskDAGWithDependencyEvidence(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	model := &organizationLoopModel{}
+	planner, err := planning.NewModelPlanner(organizationPlanningModel{model: model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewWithModelAndPlanner(events.NewGateway(l), model, planner)
+	submission := Submit{RequestID: "organization-loop", OrganizationID: "org-1", Statement: "prepare a verified briefing", Kind: core.ExecutionAgent}
+	result, err := service.Submit(ctx, submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Task.ID == "" || result.Task.ParentID != "" || result.Task.Status != core.TaskCompleted || result.Goal.Status != "COMPLETED" {
+		t.Fatalf("root result=%+v goal=%+v", result.Task, result.Goal)
+	}
+	if len(model.prompts) != 3 {
+		t.Fatalf("model calls=%d prompts=%+v", len(model.prompts), model.prompts)
+	}
+	assertEventOrder(t, result.Events, "INTENT_CREATED", "PLAN_CREATED", "TASK_CREATED", "EXECUTION_STARTED", "RESULT_PUBLISHED", "TASK_VERIFIED_COMPLETE", "EXECUTION_STARTED", "RESULT_PUBLISHED", "TASK_VERIFIED_COMPLETE", "GOAL_COMPLETED")
+
+	snapshot, err := projections.New(events.NewGateway(l)).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var child core.Task
+	for _, state := range snapshot.Tasks {
+		if state.Value.ParentID == result.Task.ID {
+			child = state.Value
+		}
+	}
+	if child.ID == "" || len(result.Task.DependsOn) != 1 || result.Task.DependsOn[0] != child.ID || child.Status != core.TaskCompleted {
+		t.Fatalf("root=%+v child=%+v", result.Task, child)
+	}
+	var childResultEvent string
+	var rootManifest core.ExecutionContextManifest
+	var plan core.Plan
+	for _, event := range result.Events {
+		switch {
+		case event.EventType == "RESULT_PUBLISHED" && core.ID(event.TaskID) == child.ID:
+			childResultEvent = event.EventID
+		case event.EventType == "EXECUTION_CONTEXT_MANIFESTED" && core.ID(event.TaskID) == result.Task.ID:
+			if err := json.Unmarshal(event.Payload, &rootManifest); err != nil {
+				t.Fatal(err)
+			}
+		case event.EventType == "PLAN_CREATED":
+			if err := json.Unmarshal(event.Payload, &plan); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if childResultEvent == "" || !slices.Contains(rootManifest.EventRefs, childResultEvent) {
+		t.Fatalf("child result=%q root manifest=%+v", childResultEvent, rootManifest)
+	}
+	observed, ok := result.Outcome.ObservedEffect.(string)
+	if !ok || !strings.Contains(observed, childResultEvent) || !strings.Contains(observed, "Runtime-selected dependency evidence") {
+		t.Fatalf("root execution omitted bounded dependency evidence: %q", result.Outcome.ObservedEffect)
+	}
+	if plan.IntentFingerprint == "" || plan.IntentFingerprint != result.Intent.AcceptedFingerprint || plan.Fingerprint == "" {
+		t.Fatalf("plan=%+v intent=%+v", plan, result.Intent)
+	}
+
+	calls := len(model.prompts)
+	restarted := NewWithModelAndPlanner(events.NewGateway(l), model, planner)
+	replayed, err := restarted.Submit(ctx, submission)
+	if err != nil || replayed.Task.ID != result.Task.ID || len(model.prompts) != calls || len(replayed.Events) != len(result.Events) {
+		t.Fatalf("replay=%+v calls=%d want=%d err=%v", replayed, len(model.prompts), calls, err)
+	}
 }
 
 type describedModel struct{}
@@ -139,7 +245,8 @@ func TestAgentExecutionManifestUsesConfiguredModelDescriptor(t *testing.T) {
 	if r.Task.Status != core.TaskBlocked || r.Goal.Status != "ACTIVE" || r.Completion.Complete {
 		t.Fatalf("unverified model result did not remain blocked: %+v", r)
 	}
-	if r.Outcome.ObservedEffect != "configured-model: summarize" {
+	observed, ok := r.Outcome.ObservedEffect.(string)
+	if !ok || !strings.HasPrefix(observed, "configured-model: Execute only this accepted Agent OS Intent.") || !strings.Contains(observed, `"objective":"summarize"`) {
 		t.Fatalf("provider result was not preserved: %+v", r.Outcome)
 	}
 	assertEventOrder(t, r.Events, "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_REVIEW_REQUESTED", "TASK_BLOCKED")
@@ -182,7 +289,7 @@ func TestHumanReviewerFinalizesExactModelCandidate(t *testing.T) {
 		t.Fatalf("submitted=%+v err=%v", submitted, err)
 	}
 	view, found, err := service.CompletionReview(context.Background(), "org-1", string(submitted.Task.ID))
-	if err != nil || !found || view.Result != "configured-model: summarize" || len(view.Request.EvidenceRefs) != 3 {
+	if err != nil || !found || !strings.HasPrefix(view.Result, "configured-model: Execute only this accepted Agent OS Intent.") || !strings.Contains(view.Result, `"objective":"summarize"`) || len(view.Request.EvidenceRefs) != 3 {
 		t.Fatalf("review=%+v found=%t err=%v", view, found, err)
 	}
 	stream, err := service.Events(context.Background(), submitted.Events[0].CorrelationID)
@@ -533,7 +640,7 @@ func TestExternalTaskLookupUsesDurableIndex(t *testing.T) {
 	}
 }
 
-func TestRejectedRunRecordsTelemetryAndFailsGoal(t *testing.T) {
+func TestUnavailableDeterministicWorkIsRejectedBeforeExecution(t *testing.T) {
 	l, err := ledger.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -543,24 +650,18 @@ func TestRejectedRunRecordsTelemetryAndFailsGoal(t *testing.T) {
 			t.Errorf("close ledger: %v", err)
 		}
 	})
-	r, err := New(events.NewGateway(l)).Submit(context.Background(), Submit{RequestID: "rejected", OrganizationID: "org-1", Statement: "unsupported", Kind: core.ExecutionDeterministic})
+	_, err = New(events.NewGateway(l)).Submit(context.Background(), Submit{RequestID: "rejected", OrganizationID: "org-1", Statement: "unsupported", Kind: core.ExecutionDeterministic})
+	if err == nil || !strings.Contains(err.Error(), "no registered handler") {
+		t.Fatalf("submit error=%v", err)
+	}
+	stream, err := l.Events(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Task.Status != core.TaskFailed || r.Goal.Status != "FAILED" || r.Completion.Complete {
-		t.Fatalf("rejected run=%+v", r)
-	}
-	assertEventOrder(t, r.Events, "COMPLETION_REJECTED", "RUN_TELEMETRY_RECORDED", "GOAL_FAILED")
-	var run telemetry.Run
-	for _, event := range r.Events {
-		if event.EventType == "RUN_TELEMETRY_RECORDED" {
-			if err := json.Unmarshal(event.Payload, &run); err != nil {
-				t.Fatal(err)
-			}
+	for _, event := range stream {
+		if event.EventType == "TASK_CREATED" || event.EventType == "EXECUTION_STARTED" || event.EventType == "TOOL_OUTCOME_RECORDED" {
+			t.Fatalf("unavailable deterministic operation crossed execution admission: %+v", event)
 		}
-	}
-	if run.Outcome != "REJECTED" || run.ToolCalls != 1 {
-		t.Fatalf("rejected telemetry=%+v", run)
 	}
 }
 
@@ -1145,6 +1246,14 @@ func TestLateralMessagesAtActionBoundary(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	dependencyResult, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: string(organization.ID), EventType: "RESULT_PUBLISHED", SourceActorID: "runtime",
+		TaskID: string(sourceTask.ID), CorrelationID: "request-1", Payload: events.ResultPublishedPayload{Summary: "prepared handoff"},
+	})
+	if err != nil {
+		_ = l.Close()
+		t.Fatal(err)
+	}
 	routes := []struct {
 		scope string
 		id    string
@@ -1226,8 +1335,9 @@ func TestLateralMessagesAtActionBoundary(t *testing.T) {
 			}
 		}
 	}
-	if strings.Join(manifest.EventRefs, ",") != strings.Join(messageIDs, ",") {
-		t.Fatalf("manifest event refs=%v want=%v", manifest.EventRefs, messageIDs)
+	expectedRefs := append(messageIDs, dependencyResult.EventID)
+	if strings.Join(manifest.EventRefs, ",") != strings.Join(expectedRefs, ",") {
+		t.Fatalf("manifest event refs=%v want=%v", manifest.EventRefs, expectedRefs)
 	}
 	observed, ok := outcome.ObservedEffect.(string)
 	if !ok {
@@ -1253,6 +1363,10 @@ func (f failTaskProjection) AppendProjection(ctx context.Context, draft events.P
 		return events.Event{}, errProjectionWrite
 	}
 	return f.SQLite.AppendProjection(ctx, draft)
+}
+
+func (f failTaskProjection) AppendProjections(context.Context, []events.ProjectionDraft) ([]events.Event, error) {
+	return nil, errProjectionWrite
 }
 
 func assertEventOrder(t *testing.T, stream []events.Event, expected ...string) {

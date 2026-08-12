@@ -66,6 +66,29 @@ func (r *Repository) SaveTask(ctx context.Context, organizationID core.ID, event
 	return r.save(ctx, string(organizationID), eventType, actorID, string(value.ID), correlationID, KindTask, value.ID, version, value, detail)
 }
 
+// SaveNewTasks atomically creates a complete Task DAG. Every Task starts at
+// version one; later transitions continue through SaveTask.
+func (r *Repository) SaveNewTasks(ctx context.Context, organizationID core.ID, actorID, correlationID string, values []core.Task) error {
+	if r == nil || r.gateway == nil || organizationID == "" || actorID == "" || correlationID == "" || len(values) == 0 {
+		return fmt.Errorf("complete Task-DAG projection identity is required")
+	}
+	drafts := make([]events.ProjectionDraft, 0, len(values))
+	for _, value := range values {
+		if value.ID == "" {
+			return fmt.Errorf("Task-DAG projection contains an empty task identity")
+		}
+		drafts = append(drafts, events.ProjectionDraft{
+			Event: events.TrustedDraft{
+				OrganizationID: string(organizationID), EventType: "TASK_CREATED", SourceActorID: actorID,
+				TaskID: string(value.ID), CorrelationID: correlationID,
+			},
+			ProjectionKind: KindTask, RecordID: string(value.ID), Version: 1, Value: value,
+		})
+	}
+	_, err := r.gateway.PublishProjections(ctx, drafts)
+	return err
+}
+
 // SaveBlockedTask atomically persists the blocked child projection and makes
 // the same Event Contract available to its parent Task for remediation.
 func (r *Repository) SaveBlockedTask(ctx context.Context, organizationID core.ID, actorID, correlationID string, version int, value core.Task, detail events.TaskBlockedPayload, parentTaskID core.ID) error {

@@ -403,6 +403,12 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 	} else if found && requestedKind == "" {
 		requestedKind = previous.Draft.RequestedExecutionKind
 	}
+	if requestedKind == "" {
+		requestedKind, err = s.router.Route(Message{Text: normalized.Candidate.Objective})
+		if err != nil {
+			return View{}, err
+		}
+	}
 	status := core.IntentStatusAwaitingInput
 	if normalized.State == normalizationReady {
 		status = core.IntentStatusReadyForReview
@@ -617,8 +623,10 @@ func ValidateIdentifier(name, value string) error {
 
 func projectView(conversationID string, stream []events.Event, includeResult bool) View {
 	view := View{TaskID: streamTaskID(stream), ConversationID: conversationID, State: externalState(stream)}
-	if len(stream) > 0 {
-		view.UpdatedAt = stream[len(stream)-1].CreatedAt
+	for _, event := range stream {
+		if event.TaskID == view.TaskID {
+			view.UpdatedAt = event.CreatedAt
+		}
 	}
 	if view.State == StateInputRequired {
 		view.Prompt = blockedStatusText(stream)
@@ -639,7 +647,14 @@ func projectView(conversationID string, stream []events.Event, includeResult boo
 }
 
 func streamTask(stream []events.Event) (core.Task, bool) {
+	rootID := streamTaskID(stream)
+	if rootID == "" {
+		return core.Task{}, false
+	}
 	for index := len(stream) - 1; index >= 0; index-- {
+		if stream[index].TaskID != rootID {
+			continue
+		}
 		switch stream[index].EventType {
 		case "TASK_CREATED", "TASK_BLOCKED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED":
 		default:
@@ -667,7 +682,11 @@ func projectSubmissionReceipt(conversationID string, stream []events.Event) View
 
 func externalState(stream []events.Event) string {
 	state := StateWorking
+	rootID := streamTaskID(stream)
 	for _, event := range stream {
+		if rootID == "" || event.TaskID != rootID {
+			continue
+		}
 		switch event.EventType {
 		case "TASK_BLOCKED":
 			state = StateInputRequired
@@ -683,9 +702,21 @@ func externalState(stream []events.Event) string {
 }
 
 func streamTaskID(stream []events.Event) string {
-	for i := len(stream) - 1; i >= 0; i-- {
-		if stream[i].TaskID != "" {
-			return stream[i].TaskID
+	for _, event := range stream {
+		if event.EventType == "INTAKE_MESSAGE_RECORDED" && event.TaskID != "" {
+			return event.TaskID
+		}
+	}
+	// Internal callers do not have an intake event. Select only a root Task
+	// projection; child DAG nodes are never an external task identity.
+	for _, event := range stream {
+		if event.EventType != "TASK_CREATED" {
+			continue
+		}
+		var projection events.ProjectionEventPayload
+		var task core.Task
+		if json.Unmarshal(event.Payload, &projection) == nil && json.Unmarshal(projection.Projection.Value, &task) == nil && task.ID != "" && task.ParentID == "" {
+			return string(task.ID)
 		}
 	}
 	return ""
@@ -939,8 +970,9 @@ func matchesDurableInput(stream []events.Event, principal Principal, message Mes
 }
 
 func blockedStatusText(stream []events.Event) string {
+	rootID := streamTaskID(stream)
 	for i := len(stream) - 1; i >= 0; i-- {
-		if stream[i].EventType != "TASK_BLOCKED" {
+		if stream[i].EventType != "TASK_BLOCKED" || stream[i].TaskID != rootID {
 			continue
 		}
 		var projection events.ProjectionEventPayload
@@ -953,8 +985,9 @@ func blockedStatusText(stream []events.Event) string {
 }
 
 func publishedResult(stream []events.Event) (events.ResultPublishedPayload, bool) {
+	rootID := streamTaskID(stream)
 	for i := len(stream) - 1; i >= 0; i-- {
-		if stream[i].EventType != "RESULT_PUBLISHED" {
+		if stream[i].EventType != "RESULT_PUBLISHED" || stream[i].TaskID != rootID {
 			continue
 		}
 		var result events.ResultPublishedPayload

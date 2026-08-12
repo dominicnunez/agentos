@@ -218,6 +218,59 @@ func TestProjectionVersionConflictRollsBackItsEvent(t *testing.T) {
 	}
 }
 
+func TestProjectionBatchRollsBackCompleteTaskGraph(t *testing.T) {
+	ctx := context.Background()
+	l, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	drafts := []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", TaskID: "task-1", CorrelationID: "request-1"}, ProjectionKind: "task", RecordID: "task-1", Version: 1, Value: core.Task{ID: "task-1"}},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", TaskID: "task-1", CorrelationID: "request-1"}, ProjectionKind: "task", RecordID: "task-1", Version: 1, Value: core.Task{ID: "task-1"}},
+	}
+	if _, err := l.AppendProjections(ctx, drafts); err == nil {
+		t.Fatal("conflicting Task-DAG batch was accepted")
+	}
+	stream, err := l.Events(ctx, "request-1")
+	if err != nil || len(stream) != 0 {
+		t.Fatalf("failed Task-DAG batch left events=%+v err=%v", stream, err)
+	}
+	records, err := l.Records(ctx, "task", "task-1")
+	if err != nil || len(records) != 0 {
+		t.Fatalf("failed Task-DAG batch left records=%d err=%v", len(records), err)
+	}
+}
+
+func TestChildTaskIsNotExternallyAddressable(t *testing.T) {
+	ctx := context.Background()
+	l, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	correlationID, err := l.ReserveExternalWork(ctx, "org-1", "request-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootID := "task-" + correlationID
+	childID := rootID + "-child"
+	drafts := []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", TaskID: childID, CorrelationID: correlationID}, ProjectionKind: "task", RecordID: childID, Version: 1, Value: core.Task{ID: core.ID(childID), ParentID: core.ID(rootID)}},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", TaskID: rootID, CorrelationID: correlationID}, ProjectionKind: "task", RecordID: rootID, Version: 1, Value: core.Task{ID: core.ID(rootID)}},
+	}
+	if _, err := l.AppendProjections(ctx, drafts); err != nil {
+		t.Fatal(err)
+	}
+	requestID, resolved, found, err := l.ResolveExternalTask(ctx, "org-1", rootID)
+	if err != nil || !found || requestID != "request-1" || resolved != correlationID {
+		t.Fatalf("root resolution request=%q correlation=%q found=%v err=%v", requestID, resolved, found, err)
+	}
+	if _, _, found, err := l.ResolveExternalTask(ctx, "org-1", childID); err != nil || found {
+		t.Fatalf("internal child became externally addressable: found=%v err=%v", found, err)
+	}
+}
+
 func TestMessageInboxSurvivesReopenAndObservation(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "agentos.db")

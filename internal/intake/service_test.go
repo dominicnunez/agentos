@@ -15,6 +15,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	"github.com/dominicnunez/agentos/internal/projections"
 )
 
 func TestRouterUsesLeastNondeterministicAvailableMechanism(t *testing.T) {
@@ -37,6 +38,44 @@ func TestRouterUsesLeastNondeterministicAvailableMechanism(t *testing.T) {
 				t.Fatalf("route=%s err=%v want=%s err=%v", got, err, test.want, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestExternalViewProjectsOnlyRuntimeRootTask(t *testing.T) {
+	rootID := "task-root"
+	childID := "task-root-child"
+	started := time.Date(2026, time.August, 12, 12, 0, 0, 0, time.UTC)
+	projection := func(eventType string, task core.Task, at time.Time) events.Event {
+		value, err := json.Marshal(task)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, err := json.Marshal(events.ProjectionEventPayload{Projection: events.ProjectionRecord{
+			ProjectionKind: projections.KindTask, RecordID: string(task.ID), Version: 1, CorrelationID: "work-1", Value: value,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return events.Event{EventType: eventType, TaskID: string(task.ID), Payload: payload, CreatedAt: at}
+	}
+	stream := []events.Event{
+		{EventType: "INTAKE_MESSAGE_RECORDED", TaskID: rootID, CreatedAt: started},
+		projection("TASK_CREATED", core.Task{ID: core.ID(rootID), Status: core.TaskPending}, started.Add(time.Second)),
+		projection("TASK_CREATED", core.Task{ID: core.ID(childID), ParentID: core.ID(rootID), Status: core.TaskPending}, started.Add(2*time.Second)),
+		projection("TASK_BLOCKED", core.Task{ID: core.ID(childID), ParentID: core.ID(rootID), Status: core.TaskBlocked}, started.Add(3*time.Second)),
+		{EventType: "RESULT_PUBLISHED", TaskID: childID, Payload: json.RawMessage(`{"summary":"internal result"}`), CreatedAt: started.Add(4 * time.Second)},
+	}
+	view := projectView("work-1", stream, true)
+	if view.TaskID != rootID || view.State != StateWorking || view.Result != "" || !view.UpdatedAt.Equal(started.Add(time.Second)) {
+		t.Fatalf("child state leaked through root view: %+v", view)
+	}
+	stream = append(stream,
+		events.Event{EventType: "RESULT_PUBLISHED", TaskID: rootID, Payload: json.RawMessage(`{"summary":"public root result"}`), CreatedAt: started.Add(5 * time.Second)},
+		projection("TASK_VERIFIED_COMPLETE", core.Task{ID: core.ID(rootID), Status: core.TaskCompleted}, started.Add(6*time.Second)),
+	)
+	view = projectView("work-1", stream, true)
+	if view.State != StateCompleted || view.Result != "public root result" || !view.UpdatedAt.Equal(started.Add(6*time.Second)) {
+		t.Fatalf("root result projection=%+v", view)
 	}
 }
 
