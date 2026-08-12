@@ -141,6 +141,36 @@ func TestDecodeKindRejectsHistoricalCorrelationChange(t *testing.T) {
 	}
 }
 
+func TestRebuildRejectsProjectionCorrelationMismatch(t *testing.T) {
+	value, err := json.Marshal(core.Task{ID: "task-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(events.ProjectionEventPayload{Projection: events.ProjectionRecord{
+		ProjectionKind: KindTask, RecordID: "task-1", Version: 1,
+		CorrelationID: "work-a", Value: value,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := New(events.NewGateway(replayLedger{stream: []events.Event{{
+		EventID: "evt-1", CorrelationID: "work-b", Payload: payload,
+	}}}))
+	if _, err := repository.Rebuild(context.Background()); err == nil {
+		t.Fatal("event-to-projection correlation mismatch was accepted")
+	}
+}
+
+type replayLedger struct{ stream []events.Event }
+
+func (replayLedger) Append(context.Context, events.TrustedDraft) (events.Event, error) {
+	return events.Event{}, nil
+}
+
+func (l replayLedger) Events(context.Context, string) ([]events.Event, error) {
+	return l.stream, nil
+}
+
 func validBoundarySnapshot() Snapshot {
 	organizations := map[core.ID]Versioned[core.Organization]{
 		"org-1": {CorrelationID: "work-1", Value: core.Organization{ID: "org-1"}},

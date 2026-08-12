@@ -148,6 +148,9 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.Projection.ProjectionKind == "" {
 			continue
 		}
+		if payload.Projection.CorrelationID != event.CorrelationID {
+			return Snapshot{}, fmt.Errorf("event %s projection %s has a mismatched correlation boundary", event.EventID, payload.Projection.RecordID)
+		}
 		body, err := json.Marshal(payload.Projection)
 		if err != nil {
 			return Snapshot{}, err
