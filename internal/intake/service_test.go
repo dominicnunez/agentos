@@ -15,7 +15,6 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/ledger"
-	"github.com/dominicnunez/agentos/internal/projections"
 )
 
 func TestRouterUsesLeastNondeterministicAvailableMechanism(t *testing.T) {
@@ -87,7 +86,7 @@ func taskProjectionEvent(t *testing.T, eventType string, task core.Task, at time
 		t.Fatal(err)
 	}
 	payload, err := json.Marshal(events.ProjectionEventPayload{Projection: events.ProjectionRecord{
-		ProjectionKind: projections.KindTask, RecordID: string(task.ID), Version: 1, CorrelationID: "work-1", Value: value,
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 1, CorrelationID: "work-1", Value: value,
 	}})
 	if err != nil {
 		t.Fatal(err)
