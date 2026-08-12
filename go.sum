@@ -6,8 +6,8 @@ github.com/dominicnunez/archguard v0.0.0-20260521162903-d94aba3763e6 h1:sz2k36Gd
 github.com/dominicnunez/archguard v0.0.0-20260521162903-d94aba3763e6/go.mod h1:YCIZe7klL4ogIVD1oa2uSQy0HUF94NENTG/m856zV4w=
 github.com/dominicnunez/codex-sdk-go v0.0.0-20260810152213-366b1935433f h1:VKnc82aTCodnO2N8kLT8v1NH+YXyHf8nvKa96cGsiy4=
 github.com/dominicnunez/codex-sdk-go v0.0.0-20260810152213-366b1935433f/go.mod h1:3GyrpQ+CAX9sy8okzRLEctglWG7Q5S/s4xW+2Dgeu+Q=
-github.com/dominicnunez/gallow v0.0.0-20260520183017-3603a0a4bf96 h1:WluYculP4KCkpsId0idaFlujAyw3C8EnnhnGF0JULV4=
-github.com/dominicnunez/gallow v0.0.0-20260520183017-3603a0a4bf96/go.mod h1:nYjYNbrfGYP/hPF8TlRpj9S1JaOqK/tkFSTTy9MWiko=
+github.com/dominicnunez/gallow v0.0.0-20260812025106-46597b484a86 h1:rQU7ydyWLjltQlhzfvi/ioHsJK7Dh/k/MvB15IZbLWk=
+github.com/dominicnunez/gallow v0.0.0-20260812025106-46597b484a86/go.mod h1:nYjYNbrfGYP/hPF8TlRpj9S1JaOqK/tkFSTTy9MWiko=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=

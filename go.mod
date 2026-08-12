@@ -17,7 +17,7 @@ require (
 
 require (
 	github.com/dominicnunez/archguard v0.0.0-20260521162903-d94aba3763e6 // indirect
-	github.com/dominicnunez/gallow v0.0.0-20260520183017-3603a0a4bf96 // indirect
+	github.com/dominicnunez/gallow v0.0.0-20260812025106-46597b484a86 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
