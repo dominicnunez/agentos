@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/artifacts"
@@ -18,7 +17,7 @@ import (
 type Human struct {
 	service   *intake.Service
 	owner     LocalHuman
-	limits    *localHumanLimits
+	access    *localUserAccess
 	artifacts *artifacts.Store
 }
 
@@ -51,7 +50,7 @@ func NewHuman(service *intake.Service, owner LocalHuman, stores ...artifacts.Sto
 	if owner.MaxConcurrent < 1 || owner.MaxConcurrent > 64 || owner.RequestsPerMinute < 1 || owner.RequestsPerMinute > 10_000 {
 		return nil, fmt.Errorf("local user request limits are invalid")
 	}
-	human := &Human{service: service, owner: owner, limits: &localHumanLimits{slots: make(chan struct{}, owner.MaxConcurrent), requestsPerMinute: owner.RequestsPerMinute}}
+	human := &Human{service: service, owner: owner, access: newLocalUserAccess(owner.UID, owner.MaxConcurrent, owner.RequestsPerMinute)}
 	if len(stores) > 1 {
 		return nil, fmt.Errorf("only one artifact store may be configured")
 	}
@@ -59,14 +58,6 @@ func NewHuman(service *intake.Service, owner LocalHuman, stores ...artifacts.Sto
 		human.artifacts = &stores[0]
 	}
 	return human, nil
-}
-
-type localHumanLimits struct {
-	slots             chan struct{}
-	requestsPerMinute int
-	mu                sync.Mutex
-	windowStart       time.Time
-	requests          int
 }
 
 type humanMessageRequest struct {
@@ -113,17 +104,12 @@ type humanReviewResponse struct {
 }
 
 func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	principal, release, err := h.acquire(r.Context())
-	if errors.Is(err, ErrOperatorLimited) {
-		w.Header().Set("Retry-After", "60")
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "user request limit reached"})
-		return
-	}
-	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "local user owner required"})
+	release, ok := acquireLocalUserRequest(w, r, h.access, "user request limit reached")
+	if !ok {
 		return
 	}
 	defer release()
+	principal := h.principal()
 	if r.Method == http.MethodPost && r.URL.Path == "/v1/user/messages" {
 		h.handleMessage(w, r, principal)
 		return
@@ -201,34 +187,11 @@ func (h *Human) handleTaskCompletion(w http.ResponseWriter, r *http.Request, pri
 	h.writeView(w, view, err)
 }
 
-func (h *Human) acquire(ctx context.Context) (intake.Principal, func(), error) {
-	uid, ok := ctx.Value(peerUIDContextKey{}).(int)
-	if !ok || uid != h.owner.UID {
-		return intake.Principal{}, nil, ErrOperatorUnauthorized
-	}
-	select {
-	case h.limits.slots <- struct{}{}:
-	default:
-		return intake.Principal{}, nil, ErrOperatorLimited
-	}
-	now := time.Now().UTC()
-	h.limits.mu.Lock()
-	if h.limits.windowStart.IsZero() || now.Sub(h.limits.windowStart) >= time.Minute {
-		h.limits.windowStart = now
-		h.limits.requests = 0
-	}
-	if h.limits.requests >= h.limits.requestsPerMinute {
-		h.limits.mu.Unlock()
-		<-h.limits.slots
-		return intake.Principal{}, nil, ErrOperatorLimited
-	}
-	h.limits.requests++
-	h.limits.mu.Unlock()
-	principal := operatorPrincipal(string(h.owner.ID), core.PrincipalHuman, string(h.owner.OrganizationID), intake.ChannelHumanDirect, []string{
+func (h *Human) principal() intake.Principal {
+	return operatorPrincipal(string(h.owner.ID), core.PrincipalHuman, string(h.owner.OrganizationID), intake.ChannelHumanDirect, []string{
 		intake.CapabilitySubmitWork, intake.CapabilityReadStatus, intake.CapabilityReadResult,
 		intake.CapabilityProvideInput, intake.CapabilityReviewCompletion,
 	}, intake.WorkScopeOrganization)
-	return principal, func() { <-h.limits.slots }, nil
 }
 
 func (h *Human) handleMessage(w http.ResponseWriter, r *http.Request, principal intake.Principal) {

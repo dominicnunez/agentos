@@ -16,7 +16,7 @@ const approvalPathPrefix = "/v1/control/approvals/"
 type ApprovalControl struct {
 	service *approvals.Service
 	owner   LocalHuman
-	limits  *localHumanLimits
+	access  *localUserAccess
 }
 
 type approvalMutationRequest struct {
@@ -54,19 +54,13 @@ func NewApprovalControl(service *approvals.Service, owner LocalHuman) (*Approval
 	if service == nil || owner.UID < 0 || owner.ID == "" || owner.OrganizationID == "" {
 		return nil, fmt.Errorf("local approval service, Linux UID, identity, and organization are required")
 	}
-	return &ApprovalControl{service: service, owner: owner, limits: &localHumanLimits{slots: make(chan struct{}, 4), requestsPerMinute: 60}}, nil
+	return &ApprovalControl{service: service, owner: owner, access: newLocalUserAccess(owner.UID, 4, 60)}, nil
 }
 
 func (c *ApprovalControl) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	_, release, err := (&Human{owner: c.owner, limits: c.limits}).acquire(r.Context())
-	if errors.Is(err, ErrOperatorLimited) {
-		w.Header().Set("Retry-After", "60")
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "approval control request limit reached"})
-		return
-	}
-	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "local user owner required"})
+	release, ok := acquireLocalUserRequest(w, r, c.access, "approval control request limit reached")
+	if !ok {
 		return
 	}
 	defer release()

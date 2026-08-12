@@ -38,6 +38,8 @@ modules:
     path: internal/intake
   - name: knowledge
     path: internal/knowledge
+  - name: modelid
+    path: internal/modelid
   - name: ledger
     path: internal/ledger
   - name: projections
@@ -100,7 +102,13 @@ policy:
       from:
         module: execution
       to:
-        modules: [core, events]
+        modules: [core, events, modelid]
+
+    - name: bootstrap-model-identifiers
+      from:
+        module: bootstrap
+      to:
+        module: modelid
 
     - name: telemetry-projection
       from:

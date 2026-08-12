@@ -214,51 +214,18 @@ func collectProvider(ctx context.Context, config bootstrap.Config, input *os.Fil
 
 func collectCodexProvider(ctx context.Context, config bootstrap.Config, ui *terminalUI) (bootstrap.Provider, error) {
 	binaryOptions := detectedCodexBinaries(config)
-	var binary string
-	var err error
-	if len(binaryOptions) == 0 {
-		binary, err = ui.line("Codex path:", true)
-		if err != nil {
-			return bootstrap.Provider{}, err
-		}
-	} else {
-		binaryOptions = append(binaryOptions, "Enter another path...")
-		selected, selectErr := ui.selectOne("Select Codex:", binaryOptions)
-		if selectErr != nil {
-			return bootstrap.Provider{}, selectErr
-		}
-		binary = binaryOptions[selected]
-		if selected == len(binaryOptions)-1 {
-			binary, err = ui.line("Codex path:", true)
-			if err != nil {
-				return bootstrap.Provider{}, err
-			}
-		}
+	binary, err := selectDetectedPath(ui, "Select Codex:", "Codex path:", binaryOptions)
+	if err != nil {
+		return bootstrap.Provider{}, err
 	}
 	binary, err = canonicalCodexBinary(config.Mode, binary)
 	if err != nil {
 		return bootstrap.Provider{}, err
 	}
 	credentialOptions := detectedCodexCredentials(config.Owner)
-	var credential string
-	if len(credentialOptions) == 0 {
-		credential, err = ui.line("Credential path:", true)
-		if err != nil {
-			return bootstrap.Provider{}, err
-		}
-	} else {
-		credentialOptions = append(credentialOptions, "Enter another path...")
-		selected, selectErr := ui.selectOne("Select Codex credential:", credentialOptions)
-		if selectErr != nil {
-			return bootstrap.Provider{}, selectErr
-		}
-		credential = credentialOptions[selected]
-		if selected == len(credentialOptions)-1 {
-			credential, err = ui.line("Credential path:", true)
-			if err != nil {
-				return bootstrap.Provider{}, err
-			}
-		}
+	credential, err := selectDetectedPath(ui, "Select Codex credential:", "Credential path:", credentialOptions)
+	if err != nil {
+		return bootstrap.Provider{}, err
 	}
 	credential = filepath.Clean(credential)
 	adapter, err := execution.NewCodexSubscription(ctx, execution.CodexSubscriptionConfig{BinaryPath: binary, CredentialsPath: credential, Model: "model-discovery"})
@@ -336,6 +303,29 @@ func collectCodexProvider(ctx context.Context, config bootstrap.Config, ui *term
 		return bootstrap.Provider{}, err
 	}
 	return provider, nil
+}
+
+type pathSetupUI interface {
+	selectOne(string, []string) (int, error)
+	line(string, bool) (string, error)
+}
+
+func selectDetectedPath(ui pathSetupUI, selectLabel, inputLabel string, detected []string) (string, error) {
+	if len(detected) == 0 {
+		return ui.line(inputLabel, true)
+	}
+	options := append(append([]string{}, detected...), "Enter another path...")
+	selected, err := ui.selectOne(selectLabel, options)
+	if err != nil {
+		return "", err
+	}
+	if selected < 0 || selected >= len(options) {
+		return "", fmt.Errorf("path selection is invalid")
+	}
+	if selected == len(detected) {
+		return ui.line(inputLabel, true)
+	}
+	return detected[selected], nil
 }
 
 func collectOpenAIProvider(ctx context.Context, config bootstrap.Config, ui *terminalUI) (bootstrap.Provider, error) {

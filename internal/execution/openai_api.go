@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/modelid"
 )
 
 const (
@@ -287,27 +288,10 @@ func validateOpenAIModel(model string) error {
 	if len(model) == 0 || len(model) > openAIMaximumModelBytes || strings.TrimSpace(model) != model || !canonicalASCII(model, openAIMaximumModelBytes) {
 		return fmt.Errorf("OpenAI API model must be a canonical identifier of at most %d bytes", openAIMaximumModelBytes)
 	}
-	if !hasOpenAISnapshotDate(model) {
+	if !modelid.HasDatedSnapshot(model) {
 		return fmt.Errorf("OpenAI API model must identify an exact dated snapshot")
 	}
 	return nil
-}
-
-func hasOpenAISnapshotDate(model string) bool {
-	const dateLength = len("2006-01-02")
-	for start := range len(model) - dateLength + 1 {
-		end := start + dateLength
-		if start > 0 && model[start-1] != '-' && model[start-1] != ':' {
-			continue
-		}
-		if end < len(model) && model[end] != ':' {
-			continue
-		}
-		if _, err := time.Parse("2006-01-02", model[start:end]); err == nil {
-			return true
-		}
-	}
-	return false
 }
 
 func validateOpenAIKey(key string) error {
