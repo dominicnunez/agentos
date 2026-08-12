@@ -15,10 +15,17 @@
 ## First slice
 
 The shared intake boundary accepts bounded work from either the private user
-gateway or A2A Operator Gateway, creates an Intent, Goal, and single-node Task
-DAG, executes either a deterministic handler or a configured `AgentExecution`,
+gateway or A2A Operator Gateway, creates an Intent, Goal, and single-node or
+bounded multi-node Task DAG, executes either a deterministic handler or a configured `AgentExecution`,
 records each transition, applies the completion engine, and returns terminal
 task state.
+
+Exact registered work stays on a no-inference planning path. For adaptive
+work, the configured provider may propose child Tasks, but the runtime validates
+the closed graph schema, adds the integration root, binds the Plan to the exact
+confirmed Intent fingerprint, and commits the complete Task set atomically.
+Only the root is externally addressable. Downstream executions receive exact
+runtime-selected dependency result events as untrusted evidence.
 
 The fake adapter is test-only and deliberately non-intelligent: it makes the
 execution seam testable without becoming a production provider.

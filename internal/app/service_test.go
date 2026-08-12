@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	"github.com/dominicnunez/agentos/internal/planning"
 	"github.com/dominicnunez/agentos/internal/projections"
 	"github.com/dominicnunez/agentos/internal/telemetry"
 )
@@ -101,13 +103,378 @@ func TestAgentExecutionUsesFakeAdapter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Outcome.ObservedEffect != "fake-model: summarize" {
+	observed, ok := r.Outcome.ObservedEffect.(string)
+	if !ok || !strings.HasPrefix(observed, "fake-model: Execute only this accepted Agent OS Intent.") || !strings.Contains(observed, `"objective":"summarize"`) {
 		t.Fatalf("effect=%q", r.Outcome.ObservedEffect)
 	}
 	if !r.Completion.Complete || r.Task.Status != core.TaskCompleted {
 		t.Fatalf("fake model result was not deterministically verified: %+v", r)
 	}
 	assertEventOrder(t, r.Events, "EXECUTION_CONTEXT_MANIFESTED", "TOOL_OUTCOME_RECORDED", "INFERENCE_USAGE_RECORDED", "EXECUTION_FINISHED", "RUN_TELEMETRY_RECORDED")
+}
+
+type organizationLoopModel struct {
+	prompts []string
+	plan    string
+}
+
+func (*organizationLoopModel) Name() string { return "fake-model/v1" }
+func (*organizationLoopModel) Descriptor() execution.ModelDescriptor {
+	return execution.ModelDescriptor{Provider: "fake", Model: "fake-model/v1", ExecutionProfileVersion: "v1-fake"}
+}
+func (m *organizationLoopModel) Complete(_ context.Context, prompt string) (execution.ModelResponse, error) {
+	m.prompts = append(m.prompts, prompt)
+	text := "fake-model: " + prompt
+	if strings.HasPrefix(prompt, "You are the bounded Agent OS Task-DAG planner.") {
+		text = m.plan
+		if text == "" {
+			text = `{"tasks":[{"key":"research","description":"research the accepted objective","execution_kind":"AGENT","model_inference_policy":"REQUIRED","depends_on":[]}]}`
+		}
+	}
+	return execution.ModelResponse{Text: text, Usage: events.InferenceUsageRecordedPayload{Source: "fake", Provider: "fake", Model: "fake-model/v1"}}, nil
+}
+
+type organizationPlanningModel struct{ model *organizationLoopModel }
+
+func (m organizationPlanningModel) Descriptor() planning.Descriptor {
+	descriptor := m.model.Descriptor()
+	return planning.Descriptor{Provider: descriptor.Provider, Model: descriptor.Model, ExecutionProfileVersion: descriptor.ExecutionProfileVersion}
+}
+func (m organizationPlanningModel) CompleteText(ctx context.Context, prompt string) (planning.TextCompletion, error) {
+	response, err := m.model.Complete(ctx, prompt)
+	return planning.TextCompletion{Text: response.Text, Usage: response.Usage}, err
+}
+
+func newOrganizationPlanner(t *testing.T, model *organizationLoopModel) planning.Planner {
+	t.Helper()
+	planner, err := planning.NewModelPlanner(organizationPlanningModel{model: model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return planner
+}
+
+type delayedOrganizationModel struct{}
+
+func (delayedOrganizationModel) Name() string { return "fake-model/v1" }
+func (delayedOrganizationModel) Descriptor() execution.ModelDescriptor {
+	return execution.ModelDescriptor{Provider: "fake", Model: "fake-model/v1", ExecutionProfileVersion: "v1-fake"}
+}
+func (delayedOrganizationModel) Complete(ctx context.Context, prompt string) (execution.ModelResponse, error) {
+	select {
+	case <-time.After(20 * time.Millisecond):
+	case <-ctx.Done():
+		return execution.ModelResponse{}, ctx.Err()
+	}
+	text := "fake-model: " + prompt
+	if strings.HasPrefix(prompt, "You are the bounded Agent OS Task-DAG planner.") {
+		text = `{"tasks":[]}`
+	}
+	return execution.ModelResponse{Text: text, Usage: events.InferenceUsageRecordedPayload{
+		Source: "test", Provider: "fake", Model: "fake-model/v1",
+	}}, nil
+}
+
+type delayedPlanningModel struct{ model delayedOrganizationModel }
+
+func (m delayedPlanningModel) Descriptor() planning.Descriptor {
+	descriptor := m.model.Descriptor()
+	return planning.Descriptor{Provider: descriptor.Provider, Model: descriptor.Model, ExecutionProfileVersion: descriptor.ExecutionProfileVersion}
+}
+func (m delayedPlanningModel) CompleteText(ctx context.Context, prompt string) (planning.TextCompletion, error) {
+	response, err := m.model.Complete(ctx, prompt)
+	return planning.TextCompletion{Text: response.Text, Usage: response.Usage}, err
+}
+
+func TestAcceptedWorkOutlivesRequestDeadlineWithBoundedTurns(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	model := delayedOrganizationModel{}
+	planner, err := planning.NewModelPlanner(delayedPlanningModel{model: model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewWithModelAndPlanner(events.NewGateway(l), model, planner)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	result, err := service.Submit(ctx, Submit{RequestID: "deadline-isolation", OrganizationID: "org-1", Statement: "prepare bounded work", Kind: core.ExecutionAgent})
+	if err != nil || result.Task.Status != core.TaskCompleted || result.Goal.Status != "COMPLETED" {
+		t.Fatalf("result=%+v goal=%+v err=%v", result.Task, result.Goal, err)
+	}
+}
+
+type timeoutExecutionModel struct{}
+
+func (timeoutExecutionModel) Name() string { return "timeout-model/v1" }
+func (timeoutExecutionModel) Descriptor() execution.ModelDescriptor {
+	return execution.ModelDescriptor{Provider: "timeout", Model: "timeout-model/v1", ExecutionProfileVersion: "v1-timeout"}
+}
+func (timeoutExecutionModel) Complete(ctx context.Context, _ string) (execution.ModelResponse, error) {
+	<-ctx.Done()
+	return execution.ModelResponse{}, ctx.Err()
+}
+
+func TestTimedOutProviderTurnPersistsTerminalFailure(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	service := NewWithModel(events.NewGateway(l), timeoutExecutionModel{})
+	service.modelTurnTimeout = 5 * time.Millisecond
+	result, err := service.Submit(context.Background(), Submit{RequestID: "turn-timeout", OrganizationID: "org-1", Statement: "bounded work", Kind: core.ExecutionAgent})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("execution error=%v", err)
+	}
+	if result.Task.Status != core.TaskFailed || result.Goal.Status != "FAILED" {
+		t.Fatalf("task=%+v goal=%+v", result.Task, result.Goal)
+	}
+	if !hasEventType(result.Events, "EXECUTION_FINISHED") || !hasEventType(result.Events, "COMPLETION_REJECTED") {
+		t.Fatalf("timed-out turn lacked durable terminal events: %+v", result.Events)
+	}
+}
+
+func hasEventType(stream []events.Event, eventType string) bool {
+	for _, event := range stream {
+		if event.EventType == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+func TestModelCapablePlannerSkipsInferenceForExactWork(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	model := &organizationLoopModel{}
+	service := NewWithModelAndPlanner(events.NewGateway(l), model, newOrganizationPlanner(t, model))
+	result, err := service.Submit(context.Background(), Submit{RequestID: "exact-no-planning-model", OrganizationID: "org-1", Statement: "echo exact", Kind: core.ExecutionDeterministic})
+	if err != nil || result.Task.Status != core.TaskCompleted {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(model.prompts) != 0 {
+		t.Fatalf("exact work used model prompts=%+v", model.prompts)
+	}
+	for _, event := range result.Events {
+		if event.EventType == "PLANNING_CONTEXT_MANIFESTED" || event.EventType == "INFERENCE_USAGE_RECORDED" {
+			t.Fatalf("exact work recorded model use: %+v", event)
+		}
+	}
+}
+
+func TestAcceptedIntentBecomesDurableTaskDAGWithDependencyEvidence(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	model := &organizationLoopModel{}
+	planner := newOrganizationPlanner(t, model)
+	service := NewWithModelAndPlanner(events.NewGateway(l), model, planner)
+	submission := Submit{RequestID: "organization-loop", OrganizationID: "org-1", Statement: "prepare a verified briefing", Kind: core.ExecutionAgent}
+	result, err := service.Submit(ctx, submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Task.ID == "" || result.Task.ParentID != "" || result.Task.Status != core.TaskCompleted || result.Goal.Status != "COMPLETED" {
+		t.Fatalf("root result=%+v goal=%+v", result.Task, result.Goal)
+	}
+	if len(model.prompts) != 3 {
+		t.Fatalf("model calls=%d prompts=%+v", len(model.prompts), model.prompts)
+	}
+	assertEventOrder(t, result.Events, "INTENT_CREATED", "PLAN_CREATED", "TASK_CREATED", "EXECUTION_STARTED", "RESULT_PUBLISHED", "TASK_VERIFIED_COMPLETE", "EXECUTION_STARTED", "RESULT_PUBLISHED", "TASK_VERIFIED_COMPLETE", "GOAL_COMPLETED")
+
+	snapshot, err := projections.New(events.NewGateway(l)).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var child core.Task
+	for _, state := range snapshot.Tasks {
+		if state.Value.ParentID == result.Task.ID {
+			child = state.Value
+		}
+	}
+	if child.ID == "" || len(result.Task.DependsOn) != 1 || result.Task.DependsOn[0] != child.ID || child.Status != core.TaskCompleted {
+		t.Fatalf("root=%+v child=%+v", result.Task, child)
+	}
+	var childResultEvent string
+	var rootManifest core.ExecutionContextManifest
+	var plan core.Plan
+	for _, event := range result.Events {
+		switch {
+		case event.EventType == "RESULT_PUBLISHED" && core.ID(event.TaskID) == child.ID:
+			childResultEvent = event.EventID
+		case event.EventType == "EXECUTION_CONTEXT_MANIFESTED" && core.ID(event.TaskID) == result.Task.ID:
+			if err := json.Unmarshal(event.Payload, &rootManifest); err != nil {
+				t.Fatal(err)
+			}
+		case event.EventType == "PLAN_CREATED":
+			if err := json.Unmarshal(event.Payload, &plan); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if childResultEvent == "" || !slices.Contains(rootManifest.EventRefs, childResultEvent) {
+		t.Fatalf("child result=%q root manifest=%+v", childResultEvent, rootManifest)
+	}
+	observed, ok := result.Outcome.ObservedEffect.(string)
+	if !ok || !strings.Contains(observed, childResultEvent) || !strings.Contains(observed, "Runtime-selected dependency evidence") {
+		t.Fatalf("root execution omitted bounded dependency evidence: %q", result.Outcome.ObservedEffect)
+	}
+	if plan.IntentFingerprint == "" || plan.IntentFingerprint != result.Intent.AcceptedFingerprint || plan.Fingerprint == "" {
+		t.Fatalf("plan=%+v intent=%+v", plan, result.Intent)
+	}
+
+	calls := len(model.prompts)
+	restarted := NewWithModelAndPlanner(events.NewGateway(l), model, planner)
+	replayed, err := restarted.Submit(ctx, submission)
+	if err != nil || replayed.Task.ID != result.Task.ID || len(model.prompts) != calls || len(replayed.Events) != len(result.Events) {
+		t.Fatalf("replay=%+v calls=%d want=%d err=%v", replayed, len(model.prompts), calls, err)
+	}
+}
+
+func TestChildCompletionReviewStaysInternalAndWakesRoot(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	planningModel := &organizationLoopModel{}
+	service := NewWithModelAndPlanner(events.NewGateway(l), describedModel{}, newOrganizationPlanner(t, planningModel))
+	submission := Submit{RequestID: "child-review", OrganizationID: "org-1", Statement: "prepare a reviewed briefing", Kind: core.ExecutionAgent}
+	submitted, err := service.Submit(ctx, submission)
+	if err != nil || submitted.Task.Status != core.TaskPending || submitted.Goal.Status != "ACTIVE" {
+		t.Fatalf("submitted=%+v err=%v", submitted, err)
+	}
+	snapshot, err := projections.New(events.NewGateway(l)).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var child core.Task
+	for _, state := range snapshot.Tasks {
+		if state.Value.ParentID == submitted.Task.ID {
+			child = state.Value
+		}
+	}
+	if child.ID == "" || child.Status != core.TaskBlocked {
+		t.Fatalf("child=%+v", child)
+	}
+	page, err := service.PendingCompletionReviews(ctx, "org-1", "", 10)
+	if err != nil || len(page.Reviews) != 1 || page.Reviews[0].Request.TaskID != child.ID || page.NextAfter != "" {
+		t.Fatalf("pending reviews=%+v err=%v", page, err)
+	}
+	otherPage, err := service.PendingCompletionReviews(ctx, "other-org", "", 10)
+	if err != nil || len(otherPage.Reviews) != 0 {
+		t.Fatalf("cross-organization reviews=%+v err=%v", otherPage, err)
+	}
+	if _, stream, err := service.ExternalTaskEvents(ctx, "org-1", string(child.ID)); err != nil || len(stream) != 0 {
+		t.Fatalf("child crossed external lookup boundary: events=%d err=%v", len(stream), err)
+	}
+	if _, found, err := service.CompletionReview(ctx, "other-org", string(child.ID)); err != nil || found {
+		t.Fatalf("cross-organization child review found=%t err=%v", found, err)
+	}
+	childReview, found, err := service.CompletionReview(ctx, "org-1", string(child.ID))
+	if err != nil || !found || childReview.Request.TaskID != child.ID {
+		t.Fatalf("child review=%+v found=%t err=%v", childReview, found, err)
+	}
+	if _, err := service.ReviewCompletion(ctx, reviewInput(childReview, completion.ReviewApprove, "")); err != nil {
+		t.Fatal(err)
+	}
+	rootReview, found, err := service.CompletionReview(ctx, "org-1", string(submitted.Task.ID))
+	if err != nil || !found || rootReview.Request.TaskID != submitted.Task.ID {
+		t.Fatalf("root review=%+v found=%t err=%v", rootReview, found, err)
+	}
+	if _, err := service.ReviewCompletion(ctx, reviewInput(rootReview, completion.ReviewApprove, "")); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := service.Submit(ctx, submission)
+	if err != nil || replayed.Task.Status != core.TaskCompleted || replayed.Goal.Status != "COMPLETED" {
+		t.Fatalf("replayed=%+v err=%v", replayed, err)
+	}
+}
+
+type failingExecutionModel struct{ calls int }
+
+func (*failingExecutionModel) Name() string { return "failing-model/v1" }
+func (*failingExecutionModel) Descriptor() execution.ModelDescriptor {
+	return execution.ModelDescriptor{Provider: "failing", Model: "failing-model/v1", ExecutionProfileVersion: "v1-failing"}
+}
+func (m *failingExecutionModel) Complete(context.Context, string) (execution.ModelResponse, error) {
+	m.calls++
+	return execution.ModelResponse{}, errors.New("provider failed")
+}
+
+func TestFailedChildTerminalizesRootAndGoal(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	planningModel := &organizationLoopModel{}
+	executionModel := &failingExecutionModel{}
+	service := NewWithModelAndPlanner(events.NewGateway(l), executionModel, newOrganizationPlanner(t, planningModel))
+	result, err := service.Submit(ctx, Submit{RequestID: "failed-child", OrganizationID: "org-1", Statement: "prepare a briefing", Kind: core.ExecutionAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Task.Status != core.TaskFailed || result.Goal.Status != "FAILED" {
+		t.Fatalf("root=%+v goal=%+v", result.Task, result.Goal)
+	}
+	foundDependencyFailure := false
+	for _, event := range result.Events {
+		if event.EventType == "TASK_DEPENDENCY_FAILED" && event.TaskID == string(result.Task.ID) {
+			foundDependencyFailure = true
+		}
+	}
+	if !foundDependencyFailure {
+		t.Fatal("root failure did not record its failed dependency contract")
+	}
+}
+
+func TestFailedRootStopsIndependentSiblingBeforeExecution(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	planningModel := &organizationLoopModel{plan: `{"tasks":[{"key":"a-fail","description":"first work","execution_kind":"AGENT","model_inference_policy":"REQUIRED","depends_on":[]},{"key":"z-unused","description":"unnecessary work","execution_kind":"AGENT","model_inference_policy":"REQUIRED","depends_on":[]}]}`}
+	executionModel := &failingExecutionModel{}
+	service := NewWithModelAndPlanner(events.NewGateway(l), executionModel, newOrganizationPlanner(t, planningModel))
+	result, err := service.Submit(ctx, Submit{RequestID: "stop-sibling", OrganizationID: "org-1", Statement: "prepare a briefing", Kind: core.ExecutionAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executionModel.calls != 1 || result.Task.Status != core.TaskFailed || result.Goal.Status != "FAILED" {
+		t.Fatalf("model calls=%d root=%+v goal=%+v", executionModel.calls, result.Task, result.Goal)
+	}
+	snapshot, err := projections.New(events.NewGateway(l)).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goalFailedSibling := false
+	for _, state := range snapshot.Tasks {
+		if state.Value.ParentID == result.Task.ID && state.Value.Status != core.TaskFailed {
+			t.Fatalf("nonterminal sibling survived failed root: %+v", state.Value)
+		}
+	}
+	for _, event := range result.Events {
+		if event.EventType == "TASK_GOAL_FAILED" {
+			goalFailedSibling = true
+		}
+	}
+	if !goalFailedSibling {
+		t.Fatal("failed root did not record sibling terminalization")
+	}
 }
 
 type describedModel struct{}
@@ -139,7 +506,8 @@ func TestAgentExecutionManifestUsesConfiguredModelDescriptor(t *testing.T) {
 	if r.Task.Status != core.TaskBlocked || r.Goal.Status != "ACTIVE" || r.Completion.Complete {
 		t.Fatalf("unverified model result did not remain blocked: %+v", r)
 	}
-	if r.Outcome.ObservedEffect != "configured-model: summarize" {
+	observed, ok := r.Outcome.ObservedEffect.(string)
+	if !ok || !strings.HasPrefix(observed, "configured-model: Execute only this accepted Agent OS Intent.") || !strings.Contains(observed, `"objective":"summarize"`) {
 		t.Fatalf("provider result was not preserved: %+v", r.Outcome)
 	}
 	assertEventOrder(t, r.Events, "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_REVIEW_REQUESTED", "TASK_BLOCKED")
@@ -182,7 +550,7 @@ func TestHumanReviewerFinalizesExactModelCandidate(t *testing.T) {
 		t.Fatalf("submitted=%+v err=%v", submitted, err)
 	}
 	view, found, err := service.CompletionReview(context.Background(), "org-1", string(submitted.Task.ID))
-	if err != nil || !found || view.Result != "configured-model: summarize" || len(view.Request.EvidenceRefs) != 3 {
+	if err != nil || !found || !strings.HasPrefix(view.Result, "configured-model: Execute only this accepted Agent OS Intent.") || !strings.Contains(view.Result, `"objective":"summarize"`) || len(view.Request.EvidenceRefs) != 3 {
 		t.Fatalf("review=%+v found=%t err=%v", view, found, err)
 	}
 	stream, err := service.Events(context.Background(), submitted.Events[0].CorrelationID)
@@ -533,7 +901,7 @@ func TestExternalTaskLookupUsesDurableIndex(t *testing.T) {
 	}
 }
 
-func TestRejectedRunRecordsTelemetryAndFailsGoal(t *testing.T) {
+func TestUnavailableDeterministicWorkIsRejectedBeforeExecution(t *testing.T) {
 	l, err := ledger.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -543,24 +911,18 @@ func TestRejectedRunRecordsTelemetryAndFailsGoal(t *testing.T) {
 			t.Errorf("close ledger: %v", err)
 		}
 	})
-	r, err := New(events.NewGateway(l)).Submit(context.Background(), Submit{RequestID: "rejected", OrganizationID: "org-1", Statement: "unsupported", Kind: core.ExecutionDeterministic})
+	_, err = New(events.NewGateway(l)).Submit(context.Background(), Submit{RequestID: "rejected", OrganizationID: "org-1", Statement: "unsupported", Kind: core.ExecutionDeterministic})
+	if err == nil || !strings.Contains(err.Error(), "no registered handler") {
+		t.Fatalf("submit error=%v", err)
+	}
+	stream, err := l.Events(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Task.Status != core.TaskFailed || r.Goal.Status != "FAILED" || r.Completion.Complete {
-		t.Fatalf("rejected run=%+v", r)
-	}
-	assertEventOrder(t, r.Events, "COMPLETION_REJECTED", "RUN_TELEMETRY_RECORDED", "GOAL_FAILED")
-	var run telemetry.Run
-	for _, event := range r.Events {
-		if event.EventType == "RUN_TELEMETRY_RECORDED" {
-			if err := json.Unmarshal(event.Payload, &run); err != nil {
-				t.Fatal(err)
-			}
+	for _, event := range stream {
+		if event.EventType == "TASK_CREATED" || event.EventType == "EXECUTION_STARTED" || event.EventType == "TOOL_OUTCOME_RECORDED" {
+			t.Fatalf("unavailable deterministic operation crossed execution admission: %+v", event)
 		}
-	}
-	if run.Outcome != "REJECTED" || run.ToolCalls != 1 {
-		t.Fatalf("rejected telemetry=%+v", run)
 	}
 }
 
@@ -734,6 +1096,325 @@ func TestTaskPersistenceFailurePreventsExecutionVisibility(t *testing.T) {
 	if err != nil || len(records) != 0 {
 		t.Fatalf("task projection became visible: records=%d err=%v", len(records), err)
 	}
+	recovery, err := New(events.NewGateway(l)).Recover(ctx)
+	if err != nil || recovery.PlansMaterialized != 1 || recovery.TasksExecuted != 1 {
+		t.Fatalf("durable Plan recovery=%+v err=%v", recovery, err)
+	}
+	records, err = l.Records(ctx, projections.KindTask, "")
+	if err != nil || len(records) != 3 {
+		t.Fatalf("recovered task versions=%d err=%v", len(records), err)
+	}
+}
+
+type recoveryPlanner struct{ calls int }
+
+func (*recoveryPlanner) Descriptor() (planning.Descriptor, bool) {
+	return planning.Descriptor{PromptVersion: "recovery-test-v1", Provider: "fake", Model: "fake-model/v1", ExecutionProfileVersion: "v1-fake"}, true
+}
+
+func (p *recoveryPlanner) Build(_ context.Context, draft core.IntentDraft, kind core.ExecutionKind) (planning.Result, error) {
+	p.calls++
+	usage := events.InferenceUsageRecordedPayload{Source: "test", Provider: "fake", Model: "fake-model/v1"}
+	return planning.Result{Tasks: []core.PlanTask{{
+		Key: "root", Description: draft.Objective, ExecutionKind: kind,
+		ModelInferencePolicy: core.InferenceAllowed, DependsOn: []string{},
+	}}, Usage: &usage}, nil
+}
+
+type failingPlanningPlanner struct{ calls int }
+
+func (*failingPlanningPlanner) Descriptor() (planning.Descriptor, bool) {
+	return planning.Descriptor{PromptVersion: "failure-test-v1", Provider: "fake", Model: "fake-model/v1", ExecutionProfileVersion: "v1-fake"}, true
+}
+
+func (p *failingPlanningPlanner) Build(context.Context, core.IntentDraft, core.ExecutionKind) (planning.Result, error) {
+	p.calls++
+	cost := 0.01
+	usage := events.InferenceUsageRecordedPayload{
+		Source: "test", Provider: "fake", Model: "fake-model/v1",
+		InputTokens: 4, OutputTokens: 1, TotalTokens: 5, CostUSD: &cost,
+	}
+	return planning.Result{Usage: &usage}, errors.New("planner returned unusable output")
+}
+
+func TestPlanningFailureDoesNotReplayAndRecordsTelemetryBeforeGoalFailure(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	planner := &failingPlanningPlanner{}
+	service := NewWithModelAndPlanner(events.NewGateway(l), execution.FakeModel{}, planner)
+	submission := Submit{RequestID: "planning-failure", OrganizationID: "org-1", Statement: "perform adaptive work", Kind: core.ExecutionAgent}
+	if _, err := service.Submit(ctx, submission); err == nil {
+		t.Fatal("failed planning attempt was accepted")
+	}
+	if _, err := service.Submit(ctx, submission); err == nil {
+		t.Fatal("failed planning attempt retry was accepted")
+	}
+	if planner.calls != 1 {
+		t.Fatalf("failed planning attempt was invoked %d times", planner.calls)
+	}
+	stream, err := service.ExternalEvents(ctx, submission.OrganizationID, submission.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEventOrder(t, stream, "PLANNING_CONTEXT_MANIFESTED", "INFERENCE_USAGE_RECORDED", "PLANNING_FAILED", "RUN_TELEMETRY_RECORDED", "GOAL_PLANNING_FAILED")
+	counts := make(map[string]int)
+	var run telemetry.Run
+	var failureEventID string
+	for _, event := range stream {
+		counts[event.EventType]++
+		switch event.EventType {
+		case "PLANNING_FAILED":
+			failureEventID = event.EventID
+		case "RUN_TELEMETRY_RECORDED":
+			if err := json.Unmarshal(event.Payload, &run); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, eventType := range []string{"PLANNING_CONTEXT_MANIFESTED", "PLANNING_FAILED", "RUN_TELEMETRY_RECORDED", "GOAL_PLANNING_FAILED"} {
+		if counts[eventType] != 1 {
+			t.Fatalf("%s count=%d stream=%+v", eventType, counts[eventType], stream)
+		}
+	}
+	if run.Outcome != "PLANNING_FAILED" || len(run.ModelUses) != 1 || run.ModelUses[0].TotalTokens != 5 || !slices.Contains(run.CompletionEvidenceEventRefs, failureEventID) {
+		t.Fatalf("planning-failure telemetry=%+v failure_event=%s", run, failureEventID)
+	}
+	snapshot, err := service.state.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Goals) != 1 || len(snapshot.Tasks) != 0 {
+		t.Fatalf("failed planning goals=%+v tasks=%+v", snapshot.Goals, snapshot.Tasks)
+	}
+	for _, state := range snapshot.Goals {
+		if state.Value.Status != "FAILED" {
+			t.Fatalf("failed planning state=%+v", state)
+		}
+	}
+}
+
+func TestDeterministicPlanningRejectionTerminalizesImmediately(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	service := New(events.NewGateway(l))
+	submission := Submit{RequestID: "deterministic-rejection", OrganizationID: "org-1", Statement: "unsupported exact operation", Kind: core.ExecutionDeterministic}
+	if _, err := service.Submit(ctx, submission); err == nil {
+		t.Fatal("unsupported deterministic work was accepted")
+	}
+	if _, err := service.Submit(ctx, submission); err == nil {
+		t.Fatal("terminal planning rejection was accepted on retry")
+	}
+	stream, err := service.ExternalEvents(ctx, submission.OrganizationID, submission.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEventOrder(t, stream, "PLANNING_FAILED", "RUN_TELEMETRY_RECORDED", "GOAL_PLANNING_FAILED")
+	counts := make(map[string]int)
+	var detail planningFailureDetail
+	for _, event := range stream {
+		counts[event.EventType]++
+		if event.EventType == "GOAL_PLANNING_FAILED" {
+			var projection events.ProjectionEventPayload
+			if json.Unmarshal(event.Payload, &projection) != nil || json.Unmarshal(projection.Detail, &detail) != nil {
+				t.Fatal("invalid deterministic planning-failure contract")
+			}
+		}
+	}
+	if counts["PLANNING_FAILED"] != 1 || counts["RUN_TELEMETRY_RECORDED"] != 1 || counts["GOAL_PLANNING_FAILED"] != 1 || detail.Code != "PLANNING_REJECTED" {
+		t.Fatalf("planning events=%+v detail=%+v", counts, detail)
+	}
+}
+
+func TestRecoveryFinishesRecordedPlanningFailureWithoutRewritingItsDecision(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	planner := &failingPlanningPlanner{}
+	store := &failPlanningGoalProjection{SQLite: l}
+	service := NewWithModelAndPlanner(events.NewGateway(store), execution.FakeModel{}, planner)
+	submission := Submit{RequestID: "planning-failure-recovery", OrganizationID: "org-1", Statement: "perform adaptive work", Kind: core.ExecutionAgent}
+	if _, err := service.Submit(ctx, submission); !errors.Is(err, errPlanningGoalProjection) {
+		t.Fatalf("injected terminal projection error=%v", err)
+	}
+	stream, err := service.ExternalEvents(ctx, submission.OrganizationID, submission.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasEventType(stream, "PLANNING_FAILED") || !hasEventType(stream, "RUN_TELEMETRY_RECORDED") || hasEventType(stream, "GOAL_PLANNING_FAILED") {
+		t.Fatalf("unexpected pre-recovery failure state=%+v", stream)
+	}
+	recoveryPlanner := &recoveryPlanner{}
+	recovered := NewWithModelAndPlanner(events.NewGateway(l), execution.FakeModel{}, recoveryPlanner)
+	if _, err := recovered.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if recoveryPlanner.calls != 0 {
+		t.Fatalf("recovery replayed planning %d times", recoveryPlanner.calls)
+	}
+	stream, err = recovered.ExternalEvents(ctx, submission.OrganizationID, submission.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := make(map[string]int)
+	for _, event := range stream {
+		counts[event.EventType]++
+	}
+	for _, eventType := range []string{"PLANNING_FAILED", "RUN_TELEMETRY_RECORDED", "GOAL_PLANNING_FAILED"} {
+		if counts[eventType] != 1 {
+			t.Fatalf("%s count=%d stream=%+v", eventType, counts[eventType], stream)
+		}
+	}
+}
+
+func TestRecoveryDoesNotReplayInterruptedAdaptivePlanning(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	goal, draft := seedAcceptedGoalWithoutPlan(t, gateway, "planning-interrupted")
+	contextEvent, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "PLANNING_CONTEXT_MANIFESTED", SourceActorID: "runtime",
+		SourceExecutionID: "planning-plan-planning-interrupted-attempt-1", TaskID: "task-planning-interrupted", CorrelationID: "planning-interrupted",
+		Payload: events.PlanningContextPayload{
+			PlanID: "plan-planning-interrupted", IntentID: "intent-planning-interrupted", IntentFingerprint: draft.Fingerprint,
+			PromptVersion: "recovery-test-v1", Provider: "fake", Model: "fake-model/v1", ExecutionProfileVersion: "v1-fake",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	planner := &recoveryPlanner{}
+	service := NewWithModelAndPlanner(gateway, execution.FakeModel{}, planner)
+	if _, err := service.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if planner.calls != 0 {
+		t.Fatalf("interrupted adaptive planning was replayed %d times", planner.calls)
+	}
+	snapshot, err := service.state.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Goals[goal.ID].Value.Status != "FAILED" || len(snapshot.Tasks) != 0 {
+		t.Fatalf("interrupted planning remained executable: goal=%+v tasks=%+v", snapshot.Goals[goal.ID], snapshot.Tasks)
+	}
+	stream, err := gateway.Events(ctx, "planning-interrupted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range stream {
+		if event.EventType != "GOAL_PLANNING_FAILED" {
+			continue
+		}
+		var projection events.ProjectionEventPayload
+		var detail planningFailureDetail
+		if json.Unmarshal(event.Payload, &projection) != nil || json.Unmarshal(projection.Detail, &detail) != nil || detail.Code != "PLANNING_INTERRUPTED" || detail.EvidenceEventRef != contextEvent.EventID {
+			t.Fatalf("planning failure evidence=%+v", detail)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("interrupted planning was not durably terminalized")
+	}
+}
+
+func TestRecoveryResumesPlanningBeforeAnyAdaptiveTurn(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	goal, _ := seedAcceptedGoalWithoutPlan(t, gateway, "planning-safe-resume")
+	planner := &recoveryPlanner{}
+	service := NewWithModelAndPlanner(gateway, execution.FakeModel{}, planner)
+	recovery, err := service.Recover(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planner.calls != 1 || recovery.PlansMaterialized != 1 {
+		t.Fatalf("safe planning recovery=%+v calls=%d", recovery, planner.calls)
+	}
+	snapshot, err := service.state.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Goals[goal.ID].Value.Status != "COMPLETED" || len(snapshot.Tasks) != 1 {
+		t.Fatalf("safe planning recovery did not complete: goal=%+v tasks=%+v", snapshot.Goals[goal.ID], snapshot.Tasks)
+	}
+}
+
+func seedAcceptedGoalWithoutPlan(t *testing.T, gateway *events.Gateway, correlationID string) (core.Goal, core.IntentDraft) {
+	t.Helper()
+	ctx := context.Background()
+	draft := core.IntentDraft{
+		ID: core.ID("intent-draft-" + correlationID), OrganizationID: "org-1", Version: 1,
+		Status: core.IntentStatusReadyForReview, RequestedExecutionKind: core.ExecutionAgent,
+		Objective: "complete accepted work", Context: []core.IntentValue{},
+		Deliverables:       []core.IntentValue{{Value: "completed work", Origin: "USER"}},
+		CompletionCriteria: []core.IntentValue{{Value: "the work is complete", Origin: "USER"}},
+		Constraints:        []core.IntentValue{}, ResolvedDecisions: []core.IntentDecision{}, ConsequenceCandidates: []string{}, MissingUserInputs: []core.IntentValue{}, CreatedAt: time.Unix(1, 0).UTC(),
+	}
+	fingerprint, err := core.FingerprintIntentDraft(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft.Fingerprint = fingerprint
+	repository := projections.New(gateway)
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1"}
+	intent := core.Intent{
+		ID: core.ID("intent-" + correlationID), OrganizationID: organization.ID,
+		OriginalInstruction: "complete accepted work", NormalizedObjective: draft.Objective,
+		SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceHumanID: "user-1",
+		SourceChannel: "HUMAN_DIRECT", ExternalRequestID: correlationID, SourceMessageID: "message-1",
+		Context: draft.Context, Deliverables: draft.Deliverables, CompletionCriteria: draft.CompletionCriteria,
+		ResolvedDecisions: draft.ResolvedDecisions, AcceptedFingerprint: draft.Fingerprint,
+	}
+	goal := core.Goal{ID: core.ID("goal-" + correlationID), IntentID: intent.ID, Objective: draft.Objective, Status: "ACTIVE"}
+	for _, save := range []func() error{
+		func() error {
+			return repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", correlationID, 1, organization, nil)
+		},
+		func() error {
+			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", correlationID, 1, intent, nil)
+		},
+		func() error {
+			return repository.SaveGoal(ctx, organization.ID, "GOAL_CREATED", "runtime", correlationID, 1, goal, nil)
+		},
+	} {
+		if err := save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_DRAFTED", SourceActorID: "runtime", TaskID: "task-" + correlationID, CorrelationID: correlationID,
+		Payload: events.IntentDraftedPayload{SourceMessageID: "message-1", Draft: draft, Reply: "Review intent."},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-" + correlationID, CorrelationID: correlationID,
+		Payload: events.IntentConfirmedPayload{IntentID: string(draft.ID), Version: draft.Version, Fingerprint: draft.Fingerprint, ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return goal, draft
 }
 
 func TestRecoveryIsDeterministicFirst(t *testing.T) {
@@ -1007,8 +1688,8 @@ func TestBlockedChildReturnsToParent(t *testing.T) {
 	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintVersion: "v1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE"}
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "complete governed work", NormalizedObjective: "complete governed work"}
 	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: "complete governed work", Status: "ACTIVE"}
-	child := core.Task{ID: "task-child", GoalID: goal.ID, ParentID: "task-parent", Description: "use unavailable tool", ExecutionKind: core.ExecutionTool, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
-	parent := core.Task{ID: "task-parent", GoalID: goal.ID, Description: "govern child remediation", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{child.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	child := core.Task{ID: "task-child", GoalID: goal.ID, ParentID: "task-request-1", Description: "use unavailable tool", ExecutionKind: core.ExecutionTool, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	parent := core.Task{ID: "task-request-1", GoalID: goal.ID, Description: "govern child remediation", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{child.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
 	for _, save := range []func() error{
 		func() error {
 			return repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "request-1", 1, organization, nil)
@@ -1043,8 +1724,8 @@ func TestBlockedChildReturnsToParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Tasks[child.ID].Value.Status != core.TaskBlocked || snapshot.Tasks[parent.ID].Value.Status != core.TaskBlocked {
-		t.Fatalf("blocked child or governing parent state changed unexpectedly: child=%+v parent=%+v", snapshot.Tasks[child.ID], snapshot.Tasks[parent.ID])
+	if snapshot.Tasks[child.ID].Value.Status != core.TaskFailed || snapshot.Tasks[parent.ID].Value.Status != core.TaskFailed || snapshot.Goals[goal.ID].Value.Status != "FAILED" {
+		t.Fatalf("unresolved root remediation did not terminalize the Goal: child=%+v parent=%+v goal=%+v", snapshot.Tasks[child.ID], snapshot.Tasks[parent.ID], snapshot.Goals[goal.ID])
 	}
 	if err := service.ValidateAddressedRoute(ctx, events.AddressedRoute{OrganizationID: string(organization.ID), EventType: "TASK_BLOCKED", SourceActorID: string(agent.ID), ValidateSource: true, RecipientScope: events.RecipientTask, RecipientID: string(child.ID), TaskID: string(child.ID)}); err == nil {
 		t.Fatal("blocked child could route its escalation somewhere other than its parent")
@@ -1065,6 +1746,7 @@ func TestBlockedChildReturnsToParent(t *testing.T) {
 	}
 	var blockedEvent events.Event
 	var parentManifest core.ExecutionContextManifest
+	var remediationFailure remediationFailureDetail
 	observed := false
 	for _, event := range stream {
 		if strings.HasPrefix(event.EventType, "CAPABILITY_") || strings.HasPrefix(event.EventType, "APPROVAL_") {
@@ -1081,6 +1763,12 @@ func TestBlockedChildReturnsToParent(t *testing.T) {
 		if event.EventType == "INBOX_EVENTS_OBSERVED" && event.TaskID == string(parent.ID) {
 			observed = true
 		}
+		if event.EventType == "TASK_REMEDIATION_FAILED" && event.TaskID == string(parent.ID) {
+			var projection events.ProjectionEventPayload
+			if json.Unmarshal(event.Payload, &projection) != nil || json.Unmarshal(projection.Detail, &remediationFailure) != nil {
+				t.Fatal("invalid remediation failure contract")
+			}
+		}
 	}
 	if blockedEvent.EventID == "" || len(blockedEvent.AuthorizationRefs) != 0 {
 		t.Fatalf("blocked work gained authority or lost its upward route: %+v", blockedEvent)
@@ -1095,6 +1783,90 @@ func TestBlockedChildReturnsToParent(t *testing.T) {
 	}
 	if !observed || len(parentManifest.EventRefs) != 1 || parentManifest.EventRefs[0] != blockedEvent.EventID {
 		t.Fatalf("parent did not receive a bounded remediation pass: manifest=%+v observed=%v blocked=%+v", parentManifest, observed, blockedEvent)
+	}
+	if remediationFailure.Code != "REMEDIATION_UNRESOLVED" || !slices.Equal(remediationFailure.BlockedDependencyIDs, []core.ID{child.ID}) {
+		t.Fatalf("unresolved remediation contract=%+v", remediationFailure)
+	}
+}
+
+func TestDeepBlockedDependencyReachesActionableRoot(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	service := New(gateway)
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1"}
+	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintVersion: "v1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE"}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "complete governed work", NormalizedObjective: "complete governed work"}
+	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: "complete governed work", Status: "ACTIVE"}
+	blocked := core.Task{ID: "task-a", GoalID: goal.ID, ParentID: "task-deep-block", Description: "use unavailable tool", ExecutionKind: core.ExecutionTool, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	middle := core.Task{ID: "task-b", GoalID: goal.ID, ParentID: "task-deep-block", Description: "interpret blocked dependency", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{blocked.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	root := core.Task{ID: "task-deep-block", GoalID: goal.ID, Description: "govern remediation", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{middle.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	for _, save := range []func() error{
+		func() error {
+			return repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "deep-block", 1, organization, nil)
+		},
+		func() error {
+			return repository.SaveAgent(ctx, "AGENT_CREATED", "runtime", "deep-block", 1, agent, nil)
+		},
+		func() error {
+			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "deep-block", 1, intent, nil)
+		},
+		func() error {
+			return repository.SaveGoal(ctx, organization.ID, "GOAL_CREATED", "runtime", "deep-block", 1, goal, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "deep-block", 1, root, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "deep-block", 1, middle, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "deep-block", 1, blocked, nil)
+		},
+	} {
+		if err := save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recovered, err := service.Recover(ctx)
+	if err != nil || recovered.TasksExecuted != 3 {
+		t.Fatalf("recovery=%+v err=%v", recovered, err)
+	}
+	snapshot, err := repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, taskID := range []core.ID{blocked.ID, middle.ID, root.ID} {
+		if snapshot.Tasks[taskID].Value.Status != core.TaskFailed {
+			t.Fatalf("task %s status=%s", taskID, snapshot.Tasks[taskID].Value.Status)
+		}
+	}
+	if snapshot.Goals[goal.ID].Value.Status != "FAILED" {
+		t.Fatalf("unresolved deep remediation goal=%+v", snapshot.Goals[goal.ID])
+	}
+	stream, err := gateway.Events(ctx, "deep-block")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blockedEventID string
+	var middleManifest core.ExecutionContextManifest
+	for _, event := range stream {
+		if event.EventType == "TASK_BLOCKED" && event.TaskID == string(blocked.ID) {
+			blockedEventID = event.EventID
+		}
+		if event.EventType == "EXECUTION_CONTEXT_MANIFESTED" && event.TaskID == string(middle.ID) {
+			if err := json.Unmarshal(event.Payload, &middleManifest); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if blockedEventID == "" || !slices.Contains(middleManifest.EventRefs, blockedEventID) {
+		t.Fatalf("middle task did not receive deep block evidence: block=%q manifest=%+v", blockedEventID, middleManifest)
 	}
 }
 
@@ -1144,6 +1916,14 @@ func TestLateralMessagesAtActionBoundary(t *testing.T) {
 			_ = l.Close()
 			t.Fatal(err)
 		}
+	}
+	dependencyResult, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: string(organization.ID), EventType: "RESULT_PUBLISHED", SourceActorID: "runtime",
+		TaskID: string(sourceTask.ID), CorrelationID: "request-1", Payload: events.ResultPublishedPayload{Summary: "prepared handoff"},
+	})
+	if err != nil {
+		_ = l.Close()
+		t.Fatal(err)
 	}
 	routes := []struct {
 		scope string
@@ -1226,8 +2006,9 @@ func TestLateralMessagesAtActionBoundary(t *testing.T) {
 			}
 		}
 	}
-	if strings.Join(manifest.EventRefs, ",") != strings.Join(messageIDs, ",") {
-		t.Fatalf("manifest event refs=%v want=%v", manifest.EventRefs, messageIDs)
+	expectedRefs := append(messageIDs, dependencyResult.EventID)
+	if strings.Join(manifest.EventRefs, ",") != strings.Join(expectedRefs, ",") {
+		t.Fatalf("manifest event refs=%v want=%v", manifest.EventRefs, expectedRefs)
 	}
 	observed, ok := outcome.ObservedEffect.(string)
 	if !ok {
@@ -1246,6 +2027,17 @@ func TestLateralMessagesAtActionBoundary(t *testing.T) {
 
 var errProjectionWrite = errors.New("injected task projection failure")
 
+var errPlanningGoalProjection = errors.New("injected planning Goal projection failure")
+
+type failPlanningGoalProjection struct{ *ledger.SQLite }
+
+func (f *failPlanningGoalProjection) AppendProjection(ctx context.Context, draft events.ProjectionDraft) (events.Event, error) {
+	if draft.Event.EventType == "GOAL_PLANNING_FAILED" {
+		return events.Event{}, errPlanningGoalProjection
+	}
+	return f.SQLite.AppendProjection(ctx, draft)
+}
+
 type failTaskProjection struct{ *ledger.SQLite }
 
 func (f failTaskProjection) AppendProjection(ctx context.Context, draft events.ProjectionDraft) (events.Event, error) {
@@ -1253,6 +2045,10 @@ func (f failTaskProjection) AppendProjection(ctx context.Context, draft events.P
 		return events.Event{}, errProjectionWrite
 	}
 	return f.SQLite.AppendProjection(ctx, draft)
+}
+
+func (f failTaskProjection) AppendProjections(context.Context, []events.ProjectionDraft) ([]events.Event, error) {
+	return nil, errProjectionWrite
 }
 
 func assertEventOrder(t *testing.T, stream []events.Event, expected ...string) {

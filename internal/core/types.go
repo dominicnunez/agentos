@@ -94,6 +94,7 @@ type Intent struct {
 	Deliverables          []IntentValue    `json:"deliverables"`
 	CompletionCriteria    []IntentValue    `json:"completion_criteria"`
 	ResolvedDecisions     []IntentDecision `json:"resolved_decisions"`
+	AcceptedFingerprint   string           `json:"accepted_fingerprint,omitempty"`
 	CreatedAt             time.Time        `json:"created_at"`
 }
 type Goal struct {
@@ -132,6 +133,27 @@ const (
 	InferenceAllowed   ModelInferencePolicy = "ALLOWED_IF_JUSTIFIED"
 	InferenceRequired  ModelInferencePolicy = "REQUIRED"
 )
+
+type PlanTask struct {
+	Key                  string               `json:"key"`
+	Description          string               `json:"description"`
+	ExecutionKind        ExecutionKind        `json:"execution_kind"`
+	ModelInferencePolicy ModelInferencePolicy `json:"model_inference_policy"`
+	DependsOn            []string             `json:"depends_on"`
+}
+
+// Plan is a runtime-validated Task-DAG contract bound to one exact accepted
+// Intent. It is coordination data, not authority: tasks still pass through
+// assignment, capability, consequence, effect, and completion boundaries.
+type Plan struct {
+	ID                ID         `json:"id"`
+	IntentID          ID         `json:"intent_id"`
+	IntentFingerprint string     `json:"intent_fingerprint"`
+	Version           int        `json:"version"`
+	Tasks             []PlanTask `json:"tasks"`
+	Fingerprint       string     `json:"fingerprint"`
+	CreatedAt         time.Time  `json:"created_at"`
+}
 
 type Task struct {
 	ID                   ID                   `json:"id"`

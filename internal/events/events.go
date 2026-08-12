@@ -69,11 +69,12 @@ type OperatorWorkAcceptedPayload struct {
 }
 
 type IntakeMessageRecordedPayload struct {
-	MessageID           string `json:"message_id"`
-	Text                string `json:"text"`
-	SourcePrincipalID   string `json:"source_principal_id"`
-	SourcePrincipalKind string `json:"source_principal_kind"`
-	SourceChannel       string `json:"source_channel"`
+	MessageID              string             `json:"message_id"`
+	Text                   string             `json:"text"`
+	SourcePrincipalID      string             `json:"source_principal_id"`
+	SourcePrincipalKind    string             `json:"source_principal_kind"`
+	SourceChannel          string             `json:"source_channel"`
+	RequestedExecutionKind core.ExecutionKind `json:"requested_execution_kind,omitempty"`
 }
 
 type IntentDraftedPayload struct {
@@ -99,6 +100,20 @@ type IntentConfirmedPayload struct {
 	ConfirmingActorKind string `json:"confirming_actor_kind"`
 	SourceChannel       string `json:"source_channel"`
 	MessageID           string `json:"message_id"`
+}
+
+// PlanningContextPayload records the exact trusted model identity and accepted
+// Intent event/fingerprint supplied to one planning attempt. Planning output is
+// still untrusted until the runtime validates and records a Plan.
+type PlanningContextPayload struct {
+	PlanID                  string   `json:"plan_id"`
+	IntentID                string   `json:"intent_id"`
+	IntentFingerprint       string   `json:"intent_fingerprint"`
+	PromptVersion           string   `json:"prompt_version"`
+	Provider                string   `json:"provider"`
+	Model                   string   `json:"model"`
+	ExecutionProfileVersion string   `json:"execution_profile_version"`
+	InputEventRefs          []string `json:"input_event_refs"`
 }
 
 func (p ResultPublishedPayload) ValidFor(artifactRefs []string) bool {
@@ -209,6 +224,9 @@ type Reader interface {
 }
 type ProjectionAppender interface {
 	AppendProjection(context.Context, ProjectionDraft) (Event, error)
+}
+type ProjectionBatchAppender interface {
+	AppendProjections(context.Context, []ProjectionDraft) ([]Event, error)
 }
 type ProjectionReader interface {
 	Records(context.Context, string, string) ([][]byte, error)
@@ -346,6 +364,28 @@ func (g *Gateway) PublishProjection(ctx context.Context, draft ProjectionDraft) 
 		return Event{}, fmt.Errorf("event ledger does not support durable projections")
 	}
 	return store.AppendProjection(ctx, draft)
+}
+
+// PublishProjections atomically admits a closed set of trusted projection
+// transitions. It is used for Task-DAG creation so a restart can never observe
+// a graph with only some of its dependency nodes.
+func (g *Gateway) PublishProjections(ctx context.Context, drafts []ProjectionDraft) ([]Event, error) {
+	if len(drafts) == 0 {
+		return nil, fmt.Errorf("at least one projection is required")
+	}
+	for _, draft := range drafts {
+		if draft.Event.EventType == "" || draft.ProjectionKind == "" || draft.RecordID == "" || draft.Version < 1 {
+			return nil, fmt.Errorf("event type, projection kind, record id, and positive version are required")
+		}
+		if err := g.validateAddressed(ctx, draft.Event, false); err != nil {
+			return nil, err
+		}
+	}
+	store, ok := g.ledger.(ProjectionBatchAppender)
+	if !ok {
+		return nil, fmt.Errorf("event ledger does not support atomic projection batches")
+	}
+	return store.AppendProjections(ctx, drafts)
 }
 func (g *Gateway) ProjectionRecords(ctx context.Context, kind, id string) ([][]byte, error) {
 	store, ok := g.ledger.(ProjectionReader)

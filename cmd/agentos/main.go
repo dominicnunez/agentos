@@ -32,6 +32,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/gateway"
 	"github.com/dominicnunez/agentos/internal/intake"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	"github.com/dominicnunez/agentos/internal/planning"
 	"github.com/dominicnunez/agentos/internal/secrets"
 )
 
@@ -111,7 +112,11 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 	defer func() {
 		err = errors.Join(err, closeModel())
 	}()
-	service := app.NewWithModel(events.NewGateway(l), model)
+	planner, err := planning.NewModelPlanner(planningModel{adapter: model})
+	if err != nil {
+		return err
+	}
+	service := app.NewWithModelAndPlanner(events.NewGateway(l), model, planner)
 	if _, err := service.Recover(ctx); err != nil {
 		return fmt.Errorf("recover durable runtime before serving: %w", err)
 	}
@@ -168,6 +173,24 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 }
 
 type intakeModel struct{ adapter execution.ModelAdapter }
+
+type planningModel struct{ adapter execution.ModelAdapter }
+
+func (m planningModel) Descriptor() planning.Descriptor {
+	descriptor := m.adapter.Descriptor()
+	return planning.Descriptor{
+		Provider: descriptor.Provider, Model: descriptor.Model,
+		ExecutionProfileVersion: descriptor.ExecutionProfileVersion,
+	}
+}
+
+func (m planningModel) CompleteText(ctx context.Context, prompt string) (planning.TextCompletion, error) {
+	response, err := m.adapter.Complete(ctx, prompt)
+	if err != nil {
+		return planning.TextCompletion{}, err
+	}
+	return planning.TextCompletion{Text: response.Text, Usage: response.Usage}, nil
+}
 
 func (m intakeModel) Descriptor() intake.NormalizerDescriptor {
 	descriptor := m.adapter.Descriptor()

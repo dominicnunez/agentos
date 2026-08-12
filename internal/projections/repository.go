@@ -66,6 +66,29 @@ func (r *Repository) SaveTask(ctx context.Context, organizationID core.ID, event
 	return r.save(ctx, string(organizationID), eventType, actorID, string(value.ID), correlationID, KindTask, value.ID, version, value, detail)
 }
 
+// SaveNewTasks atomically creates a complete Task DAG. Every Task starts at
+// version one; later transitions continue through SaveTask.
+func (r *Repository) SaveNewTasks(ctx context.Context, organizationID core.ID, actorID, correlationID string, values []core.Task) error {
+	if r == nil || r.gateway == nil || organizationID == "" || actorID == "" || correlationID == "" || len(values) == 0 {
+		return fmt.Errorf("complete Task-DAG projection identity is required")
+	}
+	drafts := make([]events.ProjectionDraft, 0, len(values))
+	for _, value := range values {
+		if value.ID == "" {
+			return fmt.Errorf("Task-DAG projection contains an empty task identity")
+		}
+		drafts = append(drafts, events.ProjectionDraft{
+			Event: events.TrustedDraft{
+				OrganizationID: string(organizationID), EventType: "TASK_CREATED", SourceActorID: actorID,
+				TaskID: string(value.ID), CorrelationID: correlationID,
+			},
+			ProjectionKind: KindTask, RecordID: string(value.ID), Version: 1, Value: value,
+		})
+	}
+	_, err := r.gateway.PublishProjections(ctx, drafts)
+	return err
+}
+
 // SaveBlockedTask atomically persists the blocked child projection and makes
 // the same Event Contract available to its parent Task for remediation.
 func (r *Repository) SaveBlockedTask(ctx context.Context, organizationID core.ID, actorID, correlationID string, version int, value core.Task, detail events.TaskBlockedPayload, parentTaskID core.ID) error {
@@ -125,6 +148,9 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.Projection.ProjectionKind == "" {
 			continue
 		}
+		if payload.Projection.CorrelationID != event.CorrelationID {
+			return Snapshot{}, fmt.Errorf("event %s projection %s has a mismatched correlation boundary", event.EventID, payload.Projection.RecordID)
+		}
 		body, err := json.Marshal(payload.Projection)
 		if err != nil {
 			return Snapshot{}, err
@@ -156,22 +182,22 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 		Goals:         make(map[core.ID]Versioned[core.Goal]),
 		Tasks:         make(map[core.ID]Versioned[core.Task]),
 	}
-	if err := decodeKind(records[KindOrganization], snapshot.Organizations); err != nil {
+	if err := decodeKind(records[KindOrganization], snapshot.Organizations, false); err != nil {
 		return Snapshot{}, fmt.Errorf("decode organizations: %w", err)
 	}
-	if err := decodeKind(records[KindTeam], snapshot.Teams); err != nil {
+	if err := decodeKind(records[KindTeam], snapshot.Teams, false); err != nil {
 		return Snapshot{}, fmt.Errorf("decode teams: %w", err)
 	}
-	if err := decodeKind(records[KindAgent], snapshot.Agents); err != nil {
+	if err := decodeKind(records[KindAgent], snapshot.Agents, false); err != nil {
 		return Snapshot{}, fmt.Errorf("decode agents: %w", err)
 	}
-	if err := decodeKind(records[KindIntent], snapshot.Intents); err != nil {
+	if err := decodeKind(records[KindIntent], snapshot.Intents, true); err != nil {
 		return Snapshot{}, fmt.Errorf("decode intents: %w", err)
 	}
-	if err := decodeKind(records[KindGoal], snapshot.Goals); err != nil {
+	if err := decodeKind(records[KindGoal], snapshot.Goals, true); err != nil {
 		return Snapshot{}, fmt.Errorf("decode goals: %w", err)
 	}
-	if err := decodeKind(records[KindTask], snapshot.Tasks); err != nil {
+	if err := decodeKind(records[KindTask], snapshot.Tasks, true); err != nil {
 		return Snapshot{}, fmt.Errorf("decode tasks: %w", err)
 	}
 	if err := validateSnapshot(snapshot); err != nil {
@@ -180,7 +206,7 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 	return snapshot, nil
 }
 
-func decodeKind[T any](bodies [][]byte, target map[core.ID]Versioned[T]) error {
+func decodeKind[T any](bodies [][]byte, target map[core.ID]Versioned[T], correlationStable bool) error {
 	for _, body := range bodies {
 		var record events.ProjectionRecord
 		if err := json.Unmarshal(body, &record); err != nil {
@@ -194,6 +220,14 @@ func decodeKind[T any](bodies [][]byte, target map[core.ID]Versioned[T]) error {
 		}
 		if record.Version != wantVersion {
 			return fmt.Errorf("record %s version %d follows %d", id, record.Version, previous.Version)
+		}
+		if correlationStable {
+			if record.CorrelationID == "" {
+				return fmt.Errorf("record %s version %d has no correlation boundary", id, record.Version)
+			}
+			if exists && record.CorrelationID != previous.CorrelationID {
+				return fmt.Errorf("record %s changes correlation boundary at version %d", id, record.Version)
+			}
 		}
 		var value T
 		if err := json.Unmarshal(record.Value, &value); err != nil {
@@ -237,8 +271,12 @@ func validateSnapshot(snapshot Snapshot) error {
 		if err := validateIdentity("goal", id, state.Value.ID); err != nil {
 			return err
 		}
-		if _, ok := snapshot.Intents[state.Value.IntentID]; !ok {
+		intent, ok := snapshot.Intents[state.Value.IntentID]
+		if !ok {
 			return fmt.Errorf("goal %s references missing intent %s", id, state.Value.IntentID)
+		}
+		if state.CorrelationID == "" || intent.CorrelationID != state.CorrelationID {
+			return fmt.Errorf("goal %s crosses its intent correlation boundary", id)
 		}
 	}
 	for id, state := range snapshot.Tasks {
@@ -249,6 +287,9 @@ func validateSnapshot(snapshot Snapshot) error {
 		goal, ok := snapshot.Goals[task.GoalID]
 		if !ok {
 			return fmt.Errorf("task %s references missing goal %s", id, task.GoalID)
+		}
+		if state.CorrelationID == "" || goal.CorrelationID != state.CorrelationID {
+			return fmt.Errorf("task %s crosses its goal correlation boundary", id)
 		}
 		intent := snapshot.Intents[goal.Value.IntentID]
 		switch task.AssigneeType {
@@ -265,6 +306,18 @@ func validateSnapshot(snapshot Snapshot) error {
 			}
 		default:
 			return fmt.Errorf("task %s has unsupported assignee type %s", id, task.AssigneeType)
+		}
+		if task.ParentID != "" {
+			parent, ok := snapshot.Tasks[task.ParentID]
+			if !ok || parent.Value.GoalID != task.GoalID || parent.CorrelationID != state.CorrelationID || task.ParentID == id {
+				return fmt.Errorf("task %s references invalid parent %s", id, task.ParentID)
+			}
+		}
+		for _, dependencyID := range task.DependsOn {
+			dependency, ok := snapshot.Tasks[dependencyID]
+			if !ok || dependency.Value.GoalID != task.GoalID || dependency.CorrelationID != state.CorrelationID || dependencyID == id {
+				return fmt.Errorf("task %s references invalid dependency %s", id, dependencyID)
+			}
 		}
 	}
 	return nil

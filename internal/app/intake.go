@@ -18,6 +18,7 @@ type IntakeMessage struct {
 	SourcePrincipalID   core.ID
 	SourcePrincipalKind core.PrincipalKind
 	SourceChannel       string
+	RequestedKind       core.ExecutionKind
 }
 
 type IntentConfirmation struct {
@@ -70,7 +71,7 @@ func (s *Service) RecordIntakeMessage(ctx context.Context, in IntakeMessage) ([]
 	if err != nil {
 		return nil, err
 	}
-	payload := events.IntakeMessageRecordedPayload{MessageID: in.MessageID, Text: in.Text, SourcePrincipalID: string(in.SourcePrincipalID), SourcePrincipalKind: string(in.SourcePrincipalKind), SourceChannel: in.SourceChannel}
+	payload := events.IntakeMessageRecordedPayload{MessageID: in.MessageID, Text: in.Text, SourcePrincipalID: string(in.SourcePrincipalID), SourcePrincipalKind: string(in.SourcePrincipalKind), SourceChannel: in.SourceChannel, RequestedExecutionKind: in.RequestedKind}
 	for _, event := range stream {
 		if event.EventType == "INTENT_CONFIRMED" {
 			return nil, fmt.Errorf("confirmed intent cannot accept more intake messages")

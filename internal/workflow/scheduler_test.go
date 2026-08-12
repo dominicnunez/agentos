@@ -46,6 +46,21 @@ func TestRemediationReadyReturnsParentOfBlockedChild(t *testing.T) {
 	}
 }
 
+func TestRemediationReadyFollowsDependencyGraphBeyondParentEdge(t *testing.T) {
+	tasks := map[core.ID]core.Task{
+		"blocked": {ID: "blocked", ParentID: "root", Status: core.TaskBlocked},
+		"middle":  {ID: "middle", ParentID: "root", Status: core.TaskPending, DependsOn: []core.ID{"blocked"}},
+		"root":    {ID: "root", Status: core.TaskPending, DependsOn: []core.ID{"middle"}},
+	}
+	ready, err := (Scheduler{}).RemediationReady(tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ready) != 1 || ready[0].ID != "middle" {
+		t.Fatalf("deep remediation ready=%v", ready)
+	}
+}
+
 func TestRemediationReadyRejectsUnrelatedOrUnfinishedDependencies(t *testing.T) {
 	tasks := map[core.ID]core.Task{
 		"blocked": {ID: "blocked", Status: core.TaskBlocked},
@@ -58,5 +73,21 @@ func TestRemediationReadyRejectsUnrelatedOrUnfinishedDependencies(t *testing.T) 
 	}
 	if len(ready) != 0 {
 		t.Fatalf("unexpected remediation ready=%v", ready)
+	}
+}
+
+func TestFailedDependencyBlockedReturnsPendingAndRemediationTasks(t *testing.T) {
+	tasks := map[core.ID]core.Task{
+		"failed":  {ID: "failed", Status: core.TaskFailed},
+		"pending": {ID: "pending", Status: core.TaskPending, DependsOn: []core.ID{"failed"}},
+		"blocked": {ID: "blocked", Status: core.TaskBlocked, DependsOn: []core.ID{"failed"}},
+		"done":    {ID: "done", Status: core.TaskCompleted, DependsOn: []core.ID{"failed"}},
+	}
+	blocked, err := (Scheduler{}).FailedDependencyBlocked(tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocked) != 2 || blocked[0].ID != "blocked" || blocked[1].ID != "pending" {
+		t.Fatalf("failed-dependency tasks=%v", blocked)
 	}
 }

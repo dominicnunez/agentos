@@ -27,11 +27,15 @@ and marks that feedback as untrusted content in the next execution context.
 ## Private user control
 
 ```text
+GET  /v1/user/reviews?after={task-id}&limit={1..100}
 GET  /v1/user/reviews/{task-id}
 POST /v1/user/reviews/{task-id}
 ```
 
-The GET response supplies the review ID, Task version, objective, fingerprint,
+The collection GET returns pending organization-scoped reviews in stable Task
+ID order, including internal child Tasks that remain unavailable through A2A.
+The default page size is 50; `next_after` is present when another page exists.
+The Task GET supplies the review ID, Task version, objective, fingerprint,
 candidate, criteria, and evidence event references. A decision body is:
 
 ```json

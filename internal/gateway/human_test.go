@@ -180,6 +180,14 @@ func TestLocalOwnerCanFinalizeExactCompletionReview(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &task); err != nil || task.TaskID == "" {
 		t.Fatalf("task response=%s err=%v", response.Body.String(), err)
 	}
+	response = serveHuman(handler, http.MethodGet, "/v1/user/reviews?limit=1", testOwnerMarker, "")
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("review list=%d %s", response.Code, response.Body.String())
+	}
+	var reviewList intake.CompletionReviewList
+	if err := json.Unmarshal(response.Body.Bytes(), &reviewList); err != nil || len(reviewList.Reviews) != 1 || reviewList.Reviews[0].TaskID != task.TaskID {
+		t.Fatalf("review list=%s err=%v", response.Body.String(), err)
+	}
 	response = serveHuman(handler, http.MethodGet, "/v1/user/reviews/"+task.TaskID, testOwnerMarker, "")
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"objective":"draft a release update"`) || !strings.Contains(response.Body.String(), `"candidate_result":"candidate: Execute only this accepted Agent OS Intent.`) {
 		t.Fatalf("review fetch=%d %s", response.Code, response.Body.String())
@@ -187,7 +195,7 @@ func TestLocalOwnerCanFinalizeExactCompletionReview(t *testing.T) {
 	if response.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("review response cache control=%q", response.Header().Get("Cache-Control"))
 	}
-	var review humanReviewResponse
+	var review intake.CompletionReviewView
 	if err := json.Unmarshal(response.Body.Bytes(), &review); err != nil || review.ReviewID == "" || len(review.EvidenceRefs) != 3 {
 		t.Fatalf("review response=%s err=%v", response.Body.String(), err)
 	}
@@ -219,7 +227,7 @@ func TestReviewerEndpointRejectsStaleFingerprintWithoutLedgerDecision(t *testing
 		t.Fatal(err)
 	}
 	response = serveHuman(handler, http.MethodGet, "/v1/user/reviews/"+task.TaskID, testOwnerMarker, "")
-	var review humanReviewResponse
+	var review intake.CompletionReviewView
 	if err := json.Unmarshal(response.Body.Bytes(), &review); err != nil {
 		t.Fatal(err)
 	}

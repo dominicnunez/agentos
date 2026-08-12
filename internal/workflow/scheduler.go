@@ -26,10 +26,10 @@ func (Scheduler) Ready(tasks map[core.ID]core.Task) ([]core.Task, error) {
 	return ready, nil
 }
 
-// RemediationReady finds pending parent tasks whose ordinary dependency path
-// is blocked by one or more direct children. Every other dependency must be
-// complete. The runtime uses this separate path to let the parent observe the
-// blocked-work contract without pretending the child completed.
+// RemediationReady finds pending tasks whose ordinary dependency path is
+// blocked. Every other dependency must be complete. ParentID expresses the
+// accountability route for a block, while DependsOn remains the authoritative
+// execution graph; requiring both edges to match can strand deeper DAGs.
 func (Scheduler) RemediationReady(tasks map[core.ID]core.Task) ([]core.Task, error) {
 	if err := validate(tasks); err != nil {
 		return nil, err
@@ -39,25 +39,51 @@ func (Scheduler) RemediationReady(tasks map[core.ID]core.Task) ([]core.Task, err
 		if task.Status != core.TaskPending {
 			continue
 		}
-		blockedChild := false
+		blockedDependency := false
 		eligible := len(task.DependsOn) > 0
 		for _, dependencyID := range task.DependsOn {
 			dependency := tasks[dependencyID]
-			switch {
-			case dependency.Status == core.TaskCompleted:
+			switch dependency.Status {
+			case core.TaskCompleted:
 				continue
-			case dependency.Status == core.TaskBlocked && dependency.ParentID == task.ID:
-				blockedChild = true
+			case core.TaskBlocked:
+				blockedDependency = true
+			case core.TaskPending, core.TaskRunning, core.TaskFailed:
+				eligible = false
 			default:
+				// Unknown durable states are never eligible for execution.
 				eligible = false
 			}
 		}
-		if eligible && blockedChild {
+		if eligible && blockedDependency {
 			ready = append(ready, task)
 		}
 	}
 	sort.Slice(ready, func(i, j int) bool { return ready[i].ID < ready[j].ID })
 	return ready, nil
+}
+
+// FailedDependencyBlocked returns non-terminal tasks that can no longer run
+// because at least one declared dependency failed. The application records
+// the terminal transition; the scheduler remains deterministic and read-only.
+func (Scheduler) FailedDependencyBlocked(tasks map[core.ID]core.Task) ([]core.Task, error) {
+	if err := validate(tasks); err != nil {
+		return nil, err
+	}
+	blocked := make([]core.Task, 0)
+	for _, task := range tasks {
+		if task.Status != core.TaskPending && task.Status != core.TaskBlocked {
+			continue
+		}
+		for _, dependencyID := range task.DependsOn {
+			if tasks[dependencyID].Status == core.TaskFailed {
+				blocked = append(blocked, task)
+				break
+			}
+		}
+	}
+	sort.Slice(blocked, func(i, j int) bool { return blocked[i].ID < blocked[j].ID })
+	return blocked, nil
 }
 
 func validate(tasks map[core.ID]core.Task) error {

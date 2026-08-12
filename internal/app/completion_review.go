@@ -42,6 +42,54 @@ type candidateCompletePayload struct {
 	ArtifactRefs     []string `json:"artifact_refs"`
 }
 
+type CompletionReviewPage struct {
+	Reviews   []CompletionReviewView
+	NextAfter core.ID
+}
+
+// PendingCompletionReviews exposes only review contracts for one organization
+// through the local control surface. Internal child Tasks remain absent from
+// the external A2A task index.
+func (s *Service) PendingCompletionReviews(ctx context.Context, organizationID string, after core.ID, limit int) (CompletionReviewPage, error) {
+	if organizationID == "" || limit < 1 || limit > 100 {
+		return CompletionReviewPage{}, fmt.Errorf("organization and review page limit are required")
+	}
+	if err := s.acquire(ctx); err != nil {
+		return CompletionReviewPage{}, err
+	}
+	defer s.release()
+	snapshot, err := s.state.Load(ctx)
+	if err != nil {
+		return CompletionReviewPage{}, err
+	}
+	page := CompletionReviewPage{Reviews: make([]CompletionReviewView, 0, limit)}
+	for _, state := range sortedTaskStates(snapshot.Tasks) {
+		if state.Value.ID <= after {
+			continue
+		}
+		owner, err := taskOrganization(snapshot, state.Value)
+		if err != nil {
+			return CompletionReviewPage{}, err
+		}
+		if owner != core.ID(organizationID) {
+			continue
+		}
+		view, found, err := s.completionReviewLocked(ctx, organizationID, string(state.Value.ID))
+		if err != nil {
+			return CompletionReviewPage{}, err
+		}
+		if !found {
+			continue
+		}
+		if len(page.Reviews) == limit {
+			page.NextAfter = page.Reviews[len(page.Reviews)-1].Request.TaskID
+			break
+		}
+		page.Reviews = append(page.Reviews, view)
+	}
+	return page, nil
+}
+
 func (s *Service) CompletionReview(ctx context.Context, organizationID, taskID string) (CompletionReviewView, bool, error) {
 	if err := s.acquire(ctx); err != nil {
 		return CompletionReviewView{}, false, err
@@ -51,7 +99,7 @@ func (s *Service) CompletionReview(ctx context.Context, organizationID, taskID s
 }
 
 func (s *Service) completionReviewLocked(ctx context.Context, organizationID, taskID string) (CompletionReviewView, bool, error) {
-	_, stream, err := s.ExternalTaskEvents(ctx, organizationID, taskID)
+	stream, err := s.internalTaskEvents(ctx, organizationID, taskID)
 	if err != nil || len(stream) == 0 {
 		return CompletionReviewView{}, false, err
 	}
@@ -101,7 +149,7 @@ func (s *Service) ReviewCompletion(ctx context.Context, input CompletionReviewIn
 		return CompletionReviewView{}, fmt.Errorf("completion review requires an authenticated human-direct principal")
 	}
 
-	_, stream, err := s.ExternalTaskEvents(ctx, input.OrganizationID, input.TaskID)
+	stream, err := s.internalTaskEvents(ctx, input.OrganizationID, input.TaskID)
 	if err != nil {
 		return CompletionReviewView{}, err
 	}
@@ -159,10 +207,8 @@ func (s *Service) ReviewCompletion(ctx context.Context, input CompletionReviewIn
 	if err := s.continueCompletionReview(ctx, request, review, decisionEvent); err != nil {
 		return CompletionReviewView{}, err
 	}
-	if review.Decision == completion.ReviewRevise {
-		if _, err := s.runReady(ctx); err != nil {
-			return CompletionReviewView{}, err
-		}
+	if _, err := s.runReady(ctx); err != nil {
+		return CompletionReviewView{}, err
 	}
 	if err := s.reconcileGoals(ctx); err != nil {
 		return CompletionReviewView{}, err
@@ -176,7 +222,7 @@ func (s *Service) continueCompletionReview(ctx context.Context, request completi
 	if decisionEvent.EventID == "" || decisionEvent.EventType != "COMPLETION_REVIEW_DECIDED" || decisionEvent.SourceActorID != string(review.ReviewerID) || decisionEvent.TaskID != string(request.TaskID) || !review.ValidFor(request) {
 		return fmt.Errorf("valid durable completion review decision is required")
 	}
-	_, stream, err := s.ExternalTaskEvents(ctx, string(request.OrganizationID), string(request.TaskID))
+	stream, err := s.internalTaskEvents(ctx, string(request.OrganizationID), string(request.TaskID))
 	if err != nil || len(stream) == 0 {
 		return fmt.Errorf("reload completion review stream: %w", err)
 	}

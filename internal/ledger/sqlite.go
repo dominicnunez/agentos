@@ -128,11 +128,14 @@ CREATE INDEX IF NOT EXISTS external_tasks_correlation_idx ON external_tasks(orga
 				return fmt.Errorf("migrate external work %s/%s: %w", binding.organizationID, binding.requestID, err)
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO external_tasks(organization_id,task_id,correlation_id)
-SELECT DISTINCT e.organization_id,e.task_id,e.correlation_id
-FROM events e JOIN external_work w ON w.organization_id=e.organization_id AND w.correlation_id=e.correlation_id
-WHERE e.task_id<>''`); err != nil {
-			return fmt.Errorf("migrate external task index: %w", err)
+		// Rebuild rather than append so rows created by the former all-task
+		// migration are removed. Only runtime-owned roots cross the A2A boundary.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM external_tasks`); err != nil {
+			return fmt.Errorf("clear external task index: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO external_tasks(organization_id,task_id,correlation_id)
+SELECT organization_id,'task-' || correlation_id,correlation_id FROM external_work`); err != nil {
+			return fmt.Errorf("migrate external root task index: %w", err)
 		}
 		var conflictingTask bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
@@ -205,72 +208,104 @@ func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, ac
 // rebuildable projection record. The event payload includes the full record so
 // the records table can be regenerated from the append-only ledger.
 func (l *SQLite) AppendProjection(ctx context.Context, draft events.ProjectionDraft) (events.Event, error) {
-	if draft.Event.EventType == "" || draft.ProjectionKind == "" || draft.RecordID == "" || draft.Version < 1 {
-		return events.Event{}, fmt.Errorf("event type, projection kind, record id, and positive version are required")
-	}
-	value, err := json.Marshal(draft.Value)
+	appended, err := l.AppendProjections(ctx, []events.ProjectionDraft{draft})
 	if err != nil {
-		return events.Event{}, fmt.Errorf("encode projection value: %w", err)
+		return events.Event{}, err
 	}
-	record := events.ProjectionRecord{
-		ProjectionKind: draft.ProjectionKind,
-		RecordID:       draft.RecordID,
-		Version:        draft.Version,
-		CorrelationID:  draft.Event.CorrelationID,
-		Value:          value,
+	return appended[0], nil
+}
+
+// AppendProjections commits a closed projection set and all authoritative
+// events in one SQLite transaction.
+func (l *SQLite) AppendProjections(ctx context.Context, drafts []events.ProjectionDraft) ([]events.Event, error) {
+	if len(drafts) == 0 {
+		return nil, fmt.Errorf("at least one projection is required")
 	}
-	body, err := json.Marshal(record)
-	if err != nil {
-		return events.Event{}, fmt.Errorf("encode projection record: %w", err)
+	type preparedProjection struct {
+		draft      events.ProjectionDraft
+		eventDraft events.TrustedDraft
+		body       []byte
+		intent     *core.Intent
+		task       *core.Task
 	}
-	detail, err := json.Marshal(draft.Event.Payload)
-	if err != nil {
-		return events.Event{}, fmt.Errorf("encode projection event detail: %w", err)
-	}
-	eventDraft := draft.Event
-	eventDraft.Payload = events.ProjectionEventPayload{Projection: record, Detail: detail}
-	var event events.Event
-	err = l.withTx(ctx, func(tx *sql.Tx) error {
-		event, err = appendEvent(ctx, tx, eventDraft)
+	prepared := make([]preparedProjection, 0, len(drafts))
+	for _, draft := range drafts {
+		if draft.Event.EventType == "" || draft.ProjectionKind == "" || draft.RecordID == "" || draft.Version < 1 {
+			return nil, fmt.Errorf("event type, projection kind, record id, and positive version are required")
+		}
+		value, err := json.Marshal(draft.Value)
 		if err != nil {
-			return err
+			return nil, fmt.Errorf("encode projection value: %w", err)
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, draft.ProjectionKind, draft.RecordID, draft.Version, body, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-			return fmt.Errorf("append projection: %w", err)
+		record := events.ProjectionRecord{ProjectionKind: draft.ProjectionKind, RecordID: draft.RecordID, Version: draft.Version, CorrelationID: draft.Event.CorrelationID, Value: value}
+		body, err := json.Marshal(record)
+		if err != nil {
+			return nil, fmt.Errorf("encode projection record: %w", err)
 		}
-		if draft.ProjectionKind == "intent" {
+		detail, err := json.Marshal(draft.Event.Payload)
+		if err != nil {
+			return nil, fmt.Errorf("encode projection event detail: %w", err)
+		}
+		eventDraft := draft.Event
+		eventDraft.Payload = events.ProjectionEventPayload{Projection: record, Detail: detail}
+		item := preparedProjection{draft: draft, eventDraft: eventDraft, body: body}
+		switch draft.ProjectionKind {
+		case "intent":
 			var intent core.Intent
 			if err := json.Unmarshal(value, &intent); err != nil {
-				return fmt.Errorf("decode intent for external work index: %w", err)
+				return nil, fmt.Errorf("decode intent for external work index: %w", err)
 			}
-			if intent.ExternalRequestID != "" {
-				if err := registerExternalWork(ctx, tx, string(intent.OrganizationID), intent.ExternalRequestID, draft.Event.CorrelationID, string(intent.ID)); err != nil {
-					return err
-				}
+			item.intent = &intent
+		case "task":
+			var task core.Task
+			if err := json.Unmarshal(value, &task); err != nil {
+				return nil, fmt.Errorf("decode task for external work index: %w", err)
 			}
+			item.task = &task
 		}
-		if draft.ProjectionKind == "task" {
-			registered, err := externalWorkRegistered(ctx, tx, draft.Event.OrganizationID, draft.Event.CorrelationID)
+		prepared = append(prepared, item)
+	}
+	appended := make([]events.Event, 0, len(prepared))
+	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		for _, item := range prepared {
+			event, err := appendEvent(ctx, tx, item.eventDraft)
 			if err != nil {
 				return err
 			}
-			if registered {
-				if err := registerExternalTask(ctx, tx, draft.Event.OrganizationID, draft.RecordID, draft.Event.CorrelationID); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, item.draft.ProjectionKind, item.draft.RecordID, item.draft.Version, item.body, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+				return fmt.Errorf("append projection: %w", err)
+			}
+			if item.intent != nil && item.intent.ExternalRequestID != "" {
+				if err := registerExternalWork(ctx, tx, string(item.intent.OrganizationID), item.intent.ExternalRequestID, item.draft.Event.CorrelationID, string(item.intent.ID)); err != nil {
 					return err
 				}
 			}
-		}
-		if eventDraft.RecipientScope != "" || eventDraft.RecipientID != "" {
-			if eventDraft.RecipientScope == "" || eventDraft.RecipientID == "" {
-				return fmt.Errorf("addressed projection recipient is required")
+			// Only the runtime-owned root is an externally addressable A2A Task.
+			// Internal DAG nodes never cross the gateway boundary.
+			if item.task != nil && item.task.ParentID == "" {
+				registered, err := externalWorkRegistered(ctx, tx, item.draft.Event.OrganizationID, item.draft.Event.CorrelationID)
+				if err != nil {
+					return err
+				}
+				if registered {
+					if err := registerExternalTask(ctx, tx, item.draft.Event.OrganizationID, item.draft.RecordID, item.draft.Event.CorrelationID); err != nil {
+						return err
+					}
+				}
 			}
-			if err := projectInbox(ctx, tx, event); err != nil {
-				return err
+			if item.eventDraft.RecipientScope != "" || item.eventDraft.RecipientID != "" {
+				if item.eventDraft.RecipientScope == "" || item.eventDraft.RecipientID == "" {
+					return fmt.Errorf("addressed projection recipient is required")
+				}
+				if err := projectInbox(ctx, tx, event); err != nil {
+					return err
+				}
 			}
+			appended = append(appended, event)
 		}
 		return nil
 	})
-	return event, err
+	return appended, err
 }
 
 func registerExternalWork(ctx context.Context, tx *sql.Tx, organizationID, requestID, correlationID, intentID string) error {

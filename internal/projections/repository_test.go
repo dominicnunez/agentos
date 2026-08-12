@@ -2,6 +2,7 @@ package projections
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -82,5 +83,113 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 	}
 	if loaded.Tasks[task.ID].Version != 2 || loaded.Tasks[task.ID].Value.Status != core.TaskRunning {
 		t.Fatalf("latest task state not restored: %+v", loaded.Tasks[task.ID])
+	}
+}
+
+func TestSnapshotRejectsCrossBoundaryTaskGraph(t *testing.T) {
+	tests := map[string]func(Snapshot){
+		"goal correlation": func(snapshot Snapshot) {
+			goal := snapshot.Goals["goal-1"]
+			goal.CorrelationID = "other"
+			snapshot.Goals["goal-1"] = goal
+		},
+		"task correlation": func(snapshot Snapshot) {
+			task := snapshot.Tasks["task-1"]
+			task.CorrelationID = "other"
+			snapshot.Tasks["task-1"] = task
+		},
+		"cross-goal dependency": func(snapshot Snapshot) {
+			task := snapshot.Tasks["task-1"]
+			task.Value.DependsOn = []core.ID{"task-2"}
+			snapshot.Tasks["task-1"] = task
+		},
+		"cross-goal parent": func(snapshot Snapshot) {
+			task := snapshot.Tasks["task-1"]
+			task.Value.ParentID = "task-2"
+			snapshot.Tasks["task-1"] = task
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			snapshot := validBoundarySnapshot()
+			mutate(snapshot)
+			if err := validateSnapshot(snapshot); err == nil {
+				t.Fatal("cross-boundary graph was accepted")
+			}
+		})
+	}
+}
+
+func TestDecodeKindRejectsHistoricalCorrelationChange(t *testing.T) {
+	records := make([][]byte, 0, 3)
+	for version, correlationID := range []string{"work-a", "work-b", "work-a"} {
+		value, err := json.Marshal(core.Task{ID: "task-1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := json.Marshal(events.ProjectionRecord{
+			ProjectionKind: KindTask, RecordID: "task-1", Version: version + 1,
+			CorrelationID: correlationID, Value: value,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		records = append(records, body)
+	}
+	if err := decodeKind(records, map[core.ID]Versioned[core.Task]{}, true); err == nil {
+		t.Fatal("historical correlation change was accepted")
+	}
+}
+
+func TestRebuildRejectsProjectionCorrelationMismatch(t *testing.T) {
+	value, err := json.Marshal(core.Task{ID: "task-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(events.ProjectionEventPayload{Projection: events.ProjectionRecord{
+		ProjectionKind: KindTask, RecordID: "task-1", Version: 1,
+		CorrelationID: "work-a", Value: value,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := New(events.NewGateway(replayLedger{stream: []events.Event{{
+		EventID: "evt-1", CorrelationID: "work-b", Payload: payload,
+	}}}))
+	if _, err := repository.Rebuild(context.Background()); err == nil {
+		t.Fatal("event-to-projection correlation mismatch was accepted")
+	}
+}
+
+type replayLedger struct{ stream []events.Event }
+
+func (replayLedger) Append(context.Context, events.TrustedDraft) (events.Event, error) {
+	return events.Event{}, nil
+}
+
+func (l replayLedger) Events(context.Context, string) ([]events.Event, error) {
+	return l.stream, nil
+}
+
+func validBoundarySnapshot() Snapshot {
+	organizations := map[core.ID]Versioned[core.Organization]{
+		"org-1": {CorrelationID: "work-1", Value: core.Organization{ID: "org-1"}},
+		"org-2": {CorrelationID: "work-2", Value: core.Organization{ID: "org-2"}},
+	}
+	intents := map[core.ID]Versioned[core.Intent]{
+		"intent-1": {CorrelationID: "work-1", Value: core.Intent{ID: "intent-1", OrganizationID: "org-1"}},
+		"intent-2": {CorrelationID: "work-2", Value: core.Intent{ID: "intent-2", OrganizationID: "org-2"}},
+	}
+	goals := map[core.ID]Versioned[core.Goal]{
+		"goal-1": {CorrelationID: "work-1", Value: core.Goal{ID: "goal-1", IntentID: "intent-1"}},
+		"goal-2": {CorrelationID: "work-2", Value: core.Goal{ID: "goal-2", IntentID: "intent-2"}},
+	}
+	tasks := map[core.ID]Versioned[core.Task]{
+		"task-1": {CorrelationID: "work-1", Value: core.Task{ID: "task-1", GoalID: "goal-1"}},
+		"task-2": {CorrelationID: "work-2", Value: core.Task{ID: "task-2", GoalID: "goal-2"}},
+	}
+	return Snapshot{
+		Organizations: organizations, Teams: map[core.ID]Versioned[core.Team]{}, Agents: map[core.ID]Versioned[core.Agent]{},
+		Intents: intents, Goals: goals, Tasks: tasks,
 	}
 }

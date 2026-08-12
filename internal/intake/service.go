@@ -89,16 +89,21 @@ type View struct {
 }
 
 type CompletionReviewView struct {
-	ReviewID     string
-	TaskID       string
-	TaskVersion  int
-	Fingerprint  string
-	State        string
-	Objective    string
-	Result       string
-	Criteria     []core.CompletionCriterion
-	EvidenceRefs []string
-	UpdatedAt    time.Time
+	ReviewID     string                     `json:"review_id"`
+	TaskID       string                     `json:"task_id"`
+	TaskVersion  int                        `json:"task_version"`
+	Fingerprint  string                     `json:"fingerprint"`
+	State        string                     `json:"state"`
+	Objective    string                     `json:"objective"`
+	Result       string                     `json:"candidate_result"`
+	Criteria     []core.CompletionCriterion `json:"criteria"`
+	EvidenceRefs []string                   `json:"evidence_refs"`
+	UpdatedAt    time.Time                  `json:"updated_at"`
+}
+
+type CompletionReviewList struct {
+	Reviews   []CompletionReviewView `json:"reviews"`
+	NextAfter string                 `json:"next_after,omitempty"`
 }
 
 type CompletionReviewDecision struct {
@@ -356,7 +361,7 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 	stream, err := s.app.RecordIntakeMessage(ctx, app.IntakeMessage{
 		RequestID: message.ConversationID, OrganizationID: principal.OrganizationID,
 		MessageID: message.MessageID, Text: message.Text, SourcePrincipalID: core.ID(principal.ID),
-		SourcePrincipalKind: principal.Kind, SourceChannel: principal.Channel,
+		SourcePrincipalKind: principal.Kind, SourceChannel: principal.Channel, RequestedKind: message.RequestedKind,
 	})
 	if err != nil {
 		return View{}, fmt.Errorf("%w: record intake message", ErrConflict)
@@ -397,11 +402,15 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 	if usesModel != (normalized.Usage != nil) {
 		return View{}, fmt.Errorf("%w: intent normalizer model usage contract is inconsistent", ErrUnavailable)
 	}
-	requestedKind := message.RequestedKind
-	if previous, found, previousErr := latestIntentPayload(stream); previousErr != nil {
-		return View{}, fmt.Errorf("%w: load previous intent draft", ErrUnavailable)
-	} else if found && requestedKind == "" {
-		requestedKind = previous.Draft.RequestedExecutionKind
+	requestedKind, err := explicitRequestedKind(stream)
+	if err != nil {
+		return View{}, fmt.Errorf("%w: load explicit execution route", ErrUnavailable)
+	}
+	if requestedKind == "" {
+		requestedKind, err = s.router.Route(Message{Text: normalized.Candidate.Objective})
+		if err != nil {
+			return View{}, err
+		}
 	}
 	status := core.IntentStatusAwaitingInput
 	if normalized.State == normalizationReady {
@@ -425,6 +434,23 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 		return View{}, fmt.Errorf("%w: persist intent draft", ErrUnavailable)
 	}
 	return projectIntentView(message.ConversationID, stream, draft, normalized.Reply), nil
+}
+
+func explicitRequestedKind(stream []events.Event) (core.ExecutionKind, error) {
+	var requested core.ExecutionKind
+	for _, event := range stream {
+		if event.EventType != "INTAKE_MESSAGE_RECORDED" {
+			continue
+		}
+		var message events.IntakeMessageRecordedPayload
+		if err := json.Unmarshal(event.Payload, &message); err != nil {
+			return "", err
+		}
+		if message.RequestedExecutionKind != "" {
+			requested = message.RequestedExecutionKind
+		}
+	}
+	return requested, nil
 }
 
 func (s *Service) CompleteHumanTask(ctx context.Context, principal Principal, taskID string, submission core.HumanTaskSubmission) (View, error) {
@@ -507,6 +533,29 @@ func (s *Service) GetCompletionReview(ctx context.Context, principal Principal, 
 		return CompletionReviewView{}, ErrNotFound
 	}
 	return projectCompletionReview(view, "PENDING"), nil
+}
+
+func (s *Service) ListCompletionReviews(ctx context.Context, principal Principal, after string, limit int) (CompletionReviewList, error) {
+	if err := validateCompletionReviewer(principal); err != nil {
+		return CompletionReviewList{}, err
+	}
+	if after != "" {
+		if err := ValidateIdentifier("review cursor", after); err != nil {
+			return CompletionReviewList{}, err
+		}
+	}
+	if limit < 1 || limit > 100 {
+		return CompletionReviewList{}, fmt.Errorf("%w: review page limit must be between 1 and 100", ErrInvalid)
+	}
+	page, err := s.app.PendingCompletionReviews(ctx, principal.OrganizationID, core.ID(after), limit)
+	if err != nil {
+		return CompletionReviewList{}, fmt.Errorf("%w: list completion reviews", ErrUnavailable)
+	}
+	result := CompletionReviewList{Reviews: make([]CompletionReviewView, 0, len(page.Reviews)), NextAfter: string(page.NextAfter)}
+	for _, view := range page.Reviews {
+		result.Reviews = append(result.Reviews, projectCompletionReview(view, "PENDING"))
+	}
+	return result, nil
 }
 
 func (s *Service) DecideCompletionReview(ctx context.Context, principal Principal, decision CompletionReviewDecision) (CompletionReviewView, error) {
@@ -617,8 +666,10 @@ func ValidateIdentifier(name, value string) error {
 
 func projectView(conversationID string, stream []events.Event, includeResult bool) View {
 	view := View{TaskID: streamTaskID(stream), ConversationID: conversationID, State: externalState(stream)}
-	if len(stream) > 0 {
-		view.UpdatedAt = stream[len(stream)-1].CreatedAt
+	for _, event := range stream {
+		if event.TaskID == view.TaskID || event.EventType == "GOAL_PLANNING_FAILED" {
+			view.UpdatedAt = event.CreatedAt
+		}
 	}
 	if view.State == StateInputRequired {
 		view.Prompt = blockedStatusText(stream)
@@ -639,9 +690,16 @@ func projectView(conversationID string, stream []events.Event, includeResult boo
 }
 
 func streamTask(stream []events.Event) (core.Task, bool) {
+	rootID := streamTaskID(stream)
+	if rootID == "" {
+		return core.Task{}, false
+	}
 	for index := len(stream) - 1; index >= 0; index-- {
+		if stream[index].TaskID != rootID {
+			continue
+		}
 		switch stream[index].EventType {
-		case "TASK_CREATED", "TASK_BLOCKED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED":
+		case "TASK_CREATED", "TASK_BLOCKED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED":
 		default:
 			continue
 		}
@@ -667,7 +725,15 @@ func projectSubmissionReceipt(conversationID string, stream []events.Event) View
 
 func externalState(stream []events.Event) string {
 	state := StateWorking
+	rootID := streamTaskID(stream)
 	for _, event := range stream {
+		if event.EventType == "GOAL_PLANNING_FAILED" {
+			state = StateFailed
+			continue
+		}
+		if rootID == "" || event.TaskID != rootID {
+			continue
+		}
 		switch event.EventType {
 		case "TASK_BLOCKED":
 			state = StateInputRequired
@@ -675,7 +741,7 @@ func externalState(stream []events.Event) string {
 			state = StateWorking
 		case "TASK_VERIFIED_COMPLETE":
 			state = StateCompleted
-		case "COMPLETION_REJECTED":
+		case "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED":
 			state = StateFailed
 		}
 	}
@@ -683,9 +749,21 @@ func externalState(stream []events.Event) string {
 }
 
 func streamTaskID(stream []events.Event) string {
-	for i := len(stream) - 1; i >= 0; i-- {
-		if stream[i].TaskID != "" {
-			return stream[i].TaskID
+	for _, event := range stream {
+		if event.EventType == "INTAKE_MESSAGE_RECORDED" && event.TaskID != "" {
+			return event.TaskID
+		}
+	}
+	// Internal callers do not have an intake event. Select only a root Task
+	// projection; child DAG nodes are never an external task identity.
+	for _, event := range stream {
+		if event.EventType != "TASK_CREATED" {
+			continue
+		}
+		var projection events.ProjectionEventPayload
+		var task core.Task
+		if json.Unmarshal(event.Payload, &projection) == nil && json.Unmarshal(projection.Projection.Value, &task) == nil && task.ID != "" && task.ParentID == "" {
+			return string(task.ID)
 		}
 	}
 	return ""
@@ -803,8 +881,11 @@ func replayedIntentView(conversationID string, principal Principal, message Mess
 		if payload.MessageID != message.MessageID {
 			continue
 		}
-		if payload.Text != message.Text || payload.SourcePrincipalID != principal.ID || payload.SourcePrincipalKind != string(principal.Kind) || payload.SourceChannel != principal.Channel {
+		if payload.SourcePrincipalID != principal.ID || payload.SourcePrincipalKind != string(principal.Kind) || payload.SourceChannel != principal.Channel {
 			return View{}, false, fmt.Errorf("%w: intake replay does not match its authenticated source", ErrForbidden)
+		}
+		if payload.Text != message.Text || payload.RequestedExecutionKind != message.RequestedKind {
+			return View{}, false, fmt.Errorf("%w: intake message id is already bound to different input", ErrConflict)
 		}
 		found = true
 	}
@@ -939,8 +1020,9 @@ func matchesDurableInput(stream []events.Event, principal Principal, message Mes
 }
 
 func blockedStatusText(stream []events.Event) string {
+	rootID := streamTaskID(stream)
 	for i := len(stream) - 1; i >= 0; i-- {
-		if stream[i].EventType != "TASK_BLOCKED" {
+		if stream[i].EventType != "TASK_BLOCKED" || stream[i].TaskID != rootID {
 			continue
 		}
 		var projection events.ProjectionEventPayload
@@ -953,8 +1035,9 @@ func blockedStatusText(stream []events.Event) string {
 }
 
 func publishedResult(stream []events.Event) (events.ResultPublishedPayload, bool) {
+	rootID := streamTaskID(stream)
 	for i := len(stream) - 1; i >= 0; i-- {
-		if stream[i].EventType != "RESULT_PUBLISHED" {
+		if stream[i].EventType != "RESULT_PUBLISHED" || stream[i].TaskID != rootID {
 			continue
 		}
 		var result events.ResultPublishedPayload

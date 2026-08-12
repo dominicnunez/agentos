@@ -40,6 +40,83 @@ func TestRouterUsesLeastNondeterministicAvailableMechanism(t *testing.T) {
 	}
 }
 
+func TestExternalViewProjectsOnlyRuntimeRootTask(t *testing.T) {
+	rootID := "task-root"
+	childID := "task-root-child"
+	started := time.Date(2026, time.August, 12, 12, 0, 0, 0, time.UTC)
+	stream := []events.Event{
+		{EventType: "INTAKE_MESSAGE_RECORDED", TaskID: rootID, CreatedAt: started},
+		taskProjectionEvent(t, "TASK_CREATED", core.Task{ID: core.ID(rootID), Status: core.TaskPending}, started.Add(time.Second)),
+		taskProjectionEvent(t, "TASK_CREATED", core.Task{ID: core.ID(childID), ParentID: core.ID(rootID), Status: core.TaskPending}, started.Add(2*time.Second)),
+		taskProjectionEvent(t, "TASK_BLOCKED", core.Task{ID: core.ID(childID), ParentID: core.ID(rootID), Status: core.TaskBlocked}, started.Add(3*time.Second)),
+		{EventType: "RESULT_PUBLISHED", TaskID: childID, Payload: json.RawMessage(`{"summary":"internal result"}`), CreatedAt: started.Add(4 * time.Second)},
+	}
+	view := projectView("work-1", stream, true)
+	if view.TaskID != rootID || view.State != StateWorking || view.Result != "" || !view.UpdatedAt.Equal(started.Add(time.Second)) {
+		t.Fatalf("child state leaked through root view: %+v", view)
+	}
+	stream = append(stream,
+		events.Event{EventType: "RESULT_PUBLISHED", TaskID: rootID, Payload: json.RawMessage(`{"summary":"public root result"}`), CreatedAt: started.Add(5 * time.Second)},
+		taskProjectionEvent(t, "TASK_VERIFIED_COMPLETE", core.Task{ID: core.ID(rootID), Status: core.TaskCompleted}, started.Add(6*time.Second)),
+	)
+	view = projectView("work-1", stream, true)
+	if view.State != StateCompleted || view.Result != "public root result" || !view.UpdatedAt.Equal(started.Add(6*time.Second)) {
+		t.Fatalf("root result projection=%+v", view)
+	}
+}
+
+func TestExternalViewProjectsRootDependencyFailure(t *testing.T) {
+	started := time.Now().UTC()
+	rootID := "task-work-1"
+	stream := []events.Event{
+		{EventType: "INTAKE_MESSAGE_RECORDED", TaskID: rootID, CreatedAt: started},
+		taskProjectionEvent(t, "TASK_CREATED", core.Task{ID: core.ID(rootID), Status: core.TaskPending}, started.Add(time.Second)),
+		taskProjectionEvent(t, "TASK_DEPENDENCY_FAILED", core.Task{ID: core.ID(rootID), Status: core.TaskFailed}, started.Add(2*time.Second)),
+	}
+	view := projectView("work-1", stream, true)
+	if view.State != StateFailed || !view.UpdatedAt.Equal(started.Add(2*time.Second)) {
+		t.Fatalf("dependency failure view=%+v", view)
+	}
+}
+
+func TestExternalViewProjectsPlanningAndRemediationFailures(t *testing.T) {
+	started := time.Now().UTC()
+	rootID := "task-work-1"
+	base := []events.Event{{EventType: "INTAKE_MESSAGE_RECORDED", TaskID: rootID, CreatedAt: started}}
+
+	planning := append([]events.Event(nil), base...)
+	planning = append(planning, events.Event{EventType: "GOAL_PLANNING_FAILED", CreatedAt: started.Add(time.Second)})
+	view := projectView("work-1", planning, true)
+	if view.State != StateFailed || !view.UpdatedAt.Equal(started.Add(time.Second)) {
+		t.Fatalf("planning failure view=%+v", view)
+	}
+
+	remediation := append([]events.Event(nil), base...)
+	remediation = append(remediation,
+		taskProjectionEvent(t, "TASK_CREATED", core.Task{ID: core.ID(rootID), Status: core.TaskPending}, started.Add(time.Second)),
+		taskProjectionEvent(t, "TASK_REMEDIATION_FAILED", core.Task{ID: core.ID(rootID), Status: core.TaskFailed}, started.Add(2*time.Second)),
+	)
+	view = projectView("work-1", remediation, true)
+	if view.State != StateFailed || !view.UpdatedAt.Equal(started.Add(2*time.Second)) {
+		t.Fatalf("remediation failure view=%+v", view)
+	}
+}
+
+func taskProjectionEvent(t *testing.T, eventType string, task core.Task, at time.Time) events.Event {
+	t.Helper()
+	value, err := json.Marshal(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(events.ProjectionEventPayload{Projection: events.ProjectionRecord{
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 1, CorrelationID: "work-1", Value: value,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events.Event{EventType: eventType, TaskID: string(task.ID), Payload: payload, CreatedAt: at}
+}
+
 func TestIntakeKeepsSourceProvenance(t *testing.T) {
 	ctx := context.Background()
 	store, err := ledger.Open(":memory:")
@@ -355,6 +432,11 @@ func TestIntentNormalizationManifestsModelUseAndReplaysWithoutInference(t *testi
 	if err != nil || replayed.Intent == nil || replayed.Intent.Fingerprint != first.Intent.Fingerprint {
 		t.Fatalf("replay=%+v err=%v", replayed, err)
 	}
+	changedRoute := message
+	changedRoute.RequestedKind = core.ExecutionHuman
+	if _, err := service.Handle(ctx, principal, changedRoute); !errors.Is(err, ErrConflict) {
+		t.Fatalf("same message id changed its requested execution kind: %v", err)
+	}
 	stream = externalStream(t, store, message.ConversationID)
 	if countEvents(stream, "INTENT_NORMALIZATION_CONTEXT_MANIFESTED") != 1 || countEvents(stream, "INFERENCE_USAGE_RECORDED") != 1 || countEvents(stream, "INTENT_DRAFTED") != 1 {
 		t.Fatalf("replay repeated model work: %+v", stream)
@@ -504,6 +586,59 @@ func TestIntentConversationByteLimitRejectsBeforeAppending(t *testing.T) {
 	stream := externalStream(t, store, conversationID)
 	if countEvents(stream, "INTAKE_MESSAGE_RECORDED") != 2 {
 		t.Fatalf("rejected bytes reached ledger: %d", countEvents(stream, "INTAKE_MESSAGE_RECORDED"))
+	}
+}
+
+type clarificationRoutingNormalizer struct{}
+
+func (clarificationRoutingNormalizer) Descriptor() (NormalizerDescriptor, bool) {
+	return NormalizerDescriptor{}, false
+}
+
+func (clarificationRoutingNormalizer) Normalize(_ context.Context, turns []ConversationTurn) (Normalization, error) {
+	latest := turns[len(turns)-1]
+	value := core.IntentValue{Value: latest.Text, Origin: "EXPLICIT", SourceMessageID: latest.MessageID}
+	if len(turns) == 1 {
+		return Normalization{
+			State: normalizationNeedsInput, Reply: "Provide the final objective.",
+			Candidate: IntentCandidate{Objective: "echo provisional", MissingUserInputs: []core.IntentValue{{Value: "final objective", Origin: "DEFAULT"}}},
+		}, nil
+	}
+	return Normalization{
+		State: normalizationReady, Reply: "Review this intent.",
+		Candidate: IntentCandidate{Objective: latest.Text, Deliverables: []core.IntentValue{value}, CompletionCriteria: []core.IntentValue{value}},
+	}, nil
+}
+
+func TestClarificationReroutesOnlyInferredExecutionKind(t *testing.T) {
+	tests := []struct {
+		name      string
+		explicit  core.ExecutionKind
+		objective string
+		want      core.ExecutionKind
+	}{
+		{name: "inferred route follows revised objective", objective: "draft the final report", want: core.ExecutionAgent},
+		{name: "explicit route remains operator selected", explicit: core.ExecutionHuman, objective: "echo final answer", want: core.ExecutionHuman},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := ledger.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			service := NewWithNormalizer(app.New(events.NewGateway(store)), clarificationRoutingNormalizer{})
+			principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+			first, err := service.Handle(ctx, principal, Message{ConversationID: "reroute-kind", MessageID: "message-1", Text: "provisional request", RequestedKind: test.explicit})
+			if err != nil || first.State != StateInputRequired {
+				t.Fatalf("first=%+v err=%v", first, err)
+			}
+			second, err := service.Handle(ctx, principal, Message{ConversationID: "reroute-kind", TaskID: first.TaskID, MessageID: "message-2", Text: test.objective})
+			if err != nil || second.State != StateAwaitingConfirmation || second.Intent == nil || second.Intent.RequestedExecutionKind != test.want {
+				t.Fatalf("second=%+v err=%v want kind=%s", second, err, test.want)
+			}
+		})
 	}
 }
 

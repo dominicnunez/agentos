@@ -40,6 +40,10 @@ modules:
     path: internal/knowledge
   - name: modelid
     path: internal/modelid
+  - name: modeloutput
+    path: internal/modeloutput
+  - name: planning
+    path: internal/planning
   - name: ledger
     path: internal/ledger
   - name: projections
@@ -66,7 +70,7 @@ policy:
       from:
         module: app
       to:
-        modules: [completion, core, events, execution, projections, telemetry, workflow]
+        modules: [completion, core, events, execution, planning, projections, telemetry, workflow]
 
     - name: artifact-domain
       from:
@@ -138,7 +142,7 @@ policy:
       from:
         module: intake
       to:
-        modules: [app, core, events]
+        modules: [app, core, events, modeloutput]
 
     - name: knowledge-domain
       from:
@@ -163,6 +167,12 @@ policy:
         module: projections
       to:
         modules: [core, events]
+
+    - name: planning-domain
+      from:
+        module: planning
+      to:
+        modules: [core, events, modeloutput]
 
     - name: workflow-domain
       from:

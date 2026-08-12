@@ -80,16 +80,32 @@ message is appended.
 
 The console presents the complete Intent for review. `/confirm` binds the
 current Linux user to the exact Intent version and SHA-256 fingerprint. Only
-then may Agent OS create the Goal and executable Task state. An unfinished
+then may Agent OS create the Goal and executable Task state. The confirmed
+Intent is fingerprint-bound to a runtime-validated Plan. Exact deterministic
+work skips planning inference; adaptive work may use the configured provider
+to propose the smallest useful Task DAG. The complete graph is committed
+atomically before scheduling, and model output cannot introduce authority or
+new execution mechanisms. An unfinished
 conversation is recovered from SQLite when the console restarts. Confirmation
 means Agent OS understood the requested work; it is never approval for a
 financial, public, destructive, privileged, legal, deployment, or other
 consequential effect.
 
+An execution kind explicitly selected by the submitting user or Agent remains
+bound to the intake conversation. When no kind was explicitly selected, Agent
+OS reruns deterministic-first routing after every clarification against the
+latest normalized objective; an inferred route from an earlier incomplete
+draft is never treated as an operator choice.
+
 `/user-task <instruction>` creates work that must wait for structured user
 completion. `/complete <task-id>` collects every required field and file from
 the Task's durable CompletionContract. A self-reported "done" message cannot
 complete that Task.
+
+`/reviews` lists pending completion judgments, including internal planned
+Tasks that are intentionally absent from A2A lookup. The console binds a
+decision to the exact evidence fingerprint and states explicitly that judging
+candidate completion does not approve a consequential effect.
 
 The local HTTP-shaped routes are private implementation boundaries carried over
 the Unix socket:
@@ -99,6 +115,7 @@ the Unix socket:
 - `POST /v1/user/intents/{conversation-id}/confirm`
 - `GET /v1/user/tasks/{task-id}`
 - `POST /v1/user/tasks/{task-id}/completion`
+- `GET /v1/user/reviews?after={task-id}&limit={1..100}`
 - `GET|POST /v1/user/reviews/{task-id}`
 - `GET /v1/control/approvals`
 - exact-effect approval operations beneath `/v1/control/approvals/{id}`
@@ -129,7 +146,12 @@ public URL. The local user socket remains separate.
 ## Routing and authority
 
 Routing uses registered deterministic handlers first. Adaptive inference is
-used separately for bounded Intent normalization and Agent execution. The
+used separately for bounded Intent normalization, Task-DAG planning when it
+adds value, and Agent execution. Planning records its exact input events and
+model identity, reuses a valid durable Plan on retry, and keeps internal child
+Tasks outside the A2A lookup boundary. Startup rebuilds the external task index
+from each work stream's runtime-owned root identity and removes stale child
+bindings left by older migrations. The
 accepted structured Intent—not the raw conversation alone—is supplied to the
 execution boundary. Intake text cannot select a provider, grant a capability,
 decide an approval, or alter a CompletionContract.
