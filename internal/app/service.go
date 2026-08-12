@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -544,7 +545,8 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 				return 0, fmt.Errorf("recover Task DAG for goal %s: %w", goalID, err)
 			}
 			if failErr := s.failPlanningGoal(ctx, intent.OrganizationID, currentGoal, "PLANNING_RECOVERY_FAILED", "safe planning recovery did not produce a validated durable plan", ""); failErr != nil {
-				return 0, fmt.Errorf("recover Task DAG for goal %s: %v; persist failure: %w", goalID, err, failErr)
+				combined := errors.Join(err, fmt.Errorf("persist planning failure: %w", failErr))
+				return 0, fmt.Errorf("recover Task DAG for goal %s: %w", goalID, combined)
 			}
 			continue
 		}
