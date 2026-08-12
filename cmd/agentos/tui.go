@@ -51,7 +51,7 @@ func runTUI(ctx context.Context, _ string, config bootstrap.Config, input *os.Fi
 	} else if !errors.Is(activeErr, errLocalGatewayNotFound) {
 		return activeErr
 	}
-	if _, err := fmt.Fprintln(output, "Agent OS\n\n[Work]  Approvals  Agents  System\nType work in natural language. Commands: /confirm /user-task /complete /approvals /agents /system /quit"); err != nil {
+	if _, err := fmt.Fprintln(output, "Agent OS\n\n[Work]  Approvals  Agents  System\nType work in natural language. Commands: /confirm /user-task /complete /reviews /approvals /agents /system /quit"); err != nil {
 		return err
 	}
 	for {
@@ -71,6 +71,10 @@ func runTUI(ctx context.Context, _ string, config bootstrap.Config, input *os.Fi
 		case "/approvals":
 			if err := console.approvals(ctx, reader, output); err != nil {
 				_, _ = fmt.Fprintf(output, "Approvals unavailable: %s\n", safeTerminalLine(err.Error()))
+			}
+		case "/reviews":
+			if err := console.completionReviews(ctx, reader, output); err != nil {
+				_, _ = fmt.Fprintf(output, "Reviews unavailable: %s\n", safeTerminalLine(err.Error()))
 			}
 		case "/agents":
 			_, _ = fmt.Fprintln(output, "Agents\nDurable Agent roster views will appear here; this console never reads internal storage directly.")
@@ -269,6 +273,81 @@ type tuiApproval struct {
 	ExpiresAt                 string            `json:"expires_at"`
 }
 
+func (c *tuiClient) completionReviews(ctx context.Context, reader *bufio.Reader, output io.Writer) error {
+	var inbox intake.CompletionReviewList
+	if err := c.request(ctx, http.MethodGet, "/v1/user/reviews?limit=100", nil, &inbox); err != nil {
+		return err
+	}
+	if len(inbox.Reviews) == 0 {
+		_, err := fmt.Fprintln(output, "Completion reviews\nNo pending reviews.")
+		return err
+	}
+	_, _ = fmt.Fprintln(output, "Completion reviews")
+	for index, review := range inbox.Reviews {
+		_, _ = fmt.Fprintf(output, "%d. %s - %s\n", index+1, safeTerminalLine(review.TaskID), safeTerminalLine(review.Objective))
+	}
+	if inbox.NextAfter != "" {
+		_, _ = fmt.Fprintln(output, "More pending reviews are available through the local user gateway.")
+	}
+	index, selected, err := readSelection(reader, output, "Select review number, or press Enter to return: ", len(inbox.Reviews))
+	if err != nil || !selected {
+		return err
+	}
+	review := inbox.Reviews[index]
+	short := review.Fingerprint
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	_, _ = fmt.Fprintf(output, "\nCompletion review\nTask: %s\nObjective: %s\nCandidate:\n%s\n\nDone when\n", safeTerminalLine(review.TaskID), safeTerminalText(review.Objective), safeTerminalText(review.Result))
+	for _, criterion := range review.Criteria {
+		_, _ = fmt.Fprintf(output, "- %s\n", safeTerminalText(criterion.Description))
+	}
+	_, _ = fmt.Fprintln(output, "\nEvidence")
+	for _, ref := range review.EvidenceRefs {
+		_, _ = fmt.Fprintf(output, "- %s\n", safeTerminalLine(ref))
+	}
+	_, _ = fmt.Fprintf(output, "Fingerprint: %s\n", safeTerminalLine(review.Fingerprint))
+	_, _ = fmt.Fprintln(output, "\nThis judgment verifies the recorded candidate only. It does not approve any consequential effect.")
+	_, _ = fmt.Fprintf(output, "Type %q, %q, or %q; press Enter to cancel: ", "APPROVE "+short, "REJECT "+short, "REVISE "+short)
+	decision, err := reader.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	decision = canonicalInput(decision)
+	if decision == "" {
+		return nil
+	}
+	requested := ""
+	switch decision {
+	case "APPROVE " + short:
+		requested = string(core.CompletionReviewApprove)
+	case "REJECT " + short:
+		requested = string(core.CompletionReviewReject)
+	case "REVISE " + short:
+		requested = string(core.CompletionReviewRevise)
+	default:
+		return fmt.Errorf("confirmation did not match the completion evidence")
+	}
+	mutation := map[string]string{"review_id": review.ReviewID, "fingerprint": review.Fingerprint, "decision": requested}
+	if requested == string(core.CompletionReviewRevise) {
+		_, _ = fmt.Fprint(output, "Revision feedback: ")
+		feedback, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		feedback = strings.TrimRight(feedback, "\r\n")
+		if canonicalInput(feedback) == "" {
+			return fmt.Errorf("revision feedback is required")
+		}
+		mutation["feedback"] = feedback
+	}
+	if err := c.request(ctx, http.MethodPost, "/v1/user/reviews/"+review.TaskID, mutation, &review); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(output, "Completion review %s.\n", strings.ToLower(requested))
+	return err
+}
+
 func (c *tuiClient) approvals(ctx context.Context, reader *bufio.Reader, output io.Writer) error {
 	var inbox struct {
 		Approvals []tuiApproval `json:"approvals"`
@@ -284,20 +363,11 @@ func (c *tuiClient) approvals(ctx context.Context, reader *bufio.Reader, output 
 	for index, approval := range inbox.Approvals {
 		_, _ = fmt.Fprintf(output, "%d. %s %s - %s - %s - %s\n", index+1, safeTerminalLine(approval.Action), safeTerminalLine(approval.Resource), safeTerminalLine(approval.Boundary), safeTerminalLine(approval.Risk), safeTerminalLine(string(approval.Status)))
 	}
-	_, _ = fmt.Fprint(output, "Select approval number, or press Enter to return: ")
-	line, err := reader.ReadString('\n')
-	if err != nil {
+	index, selected, err := readSelection(reader, output, "Select approval number, or press Enter to return: ", len(inbox.Approvals))
+	if err != nil || !selected {
 		return err
 	}
-	line = canonicalInput(line)
-	if line == "" {
-		return nil
-	}
-	var index int
-	if _, err := fmt.Sscanf(line, "%d", &index); err != nil || index < 1 || index > len(inbox.Approvals) {
-		return fmt.Errorf("selection is invalid")
-	}
-	approval := inbox.Approvals[index-1]
+	approval := inbox.Approvals[index]
 	short := approval.EffectFingerprint
 	if len(short) > 12 {
 		short = short[:12]
@@ -348,6 +418,23 @@ func (c *tuiClient) approvals(ctx context.Context, reader *bufio.Reader, output 
 	}
 	_, err = fmt.Fprintf(output, "Approval %s.\n", strings.ToLower(decision))
 	return err
+}
+
+func readSelection(reader *bufio.Reader, output io.Writer, prompt string, count int) (int, bool, error) {
+	_, _ = fmt.Fprint(output, prompt)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return 0, false, err
+	}
+	line = canonicalInput(line)
+	if line == "" {
+		return 0, false, nil
+	}
+	var index int
+	if _, err := fmt.Sscanf(line, "%d", &index); err != nil || index < 1 || index > count {
+		return 0, false, fmt.Errorf("selection is invalid")
+	}
+	return index - 1, true, nil
 }
 
 func (c *tuiClient) request(ctx context.Context, method, path string, body, target any) error {

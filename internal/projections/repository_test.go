@@ -2,6 +2,7 @@ package projections
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -116,6 +117,27 @@ func TestSnapshotRejectsCrossBoundaryTaskGraph(t *testing.T) {
 				t.Fatal("cross-boundary graph was accepted")
 			}
 		})
+	}
+}
+
+func TestDecodeKindRejectsHistoricalCorrelationChange(t *testing.T) {
+	records := make([][]byte, 0, 3)
+	for version, correlationID := range []string{"work-a", "work-b", "work-a"} {
+		value, err := json.Marshal(core.Task{ID: "task-1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := json.Marshal(events.ProjectionRecord{
+			ProjectionKind: KindTask, RecordID: "task-1", Version: version + 1,
+			CorrelationID: correlationID, Value: value,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		records = append(records, body)
+	}
+	if err := decodeKind(records, map[core.ID]Versioned[core.Task]{}, true); err == nil {
+		t.Fatal("historical correlation change was accepted")
 	}
 }
 

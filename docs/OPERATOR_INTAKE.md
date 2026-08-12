@@ -96,6 +96,11 @@ completion. `/complete <task-id>` collects every required field and file from
 the Task's durable CompletionContract. A self-reported "done" message cannot
 complete that Task.
 
+`/reviews` lists pending completion judgments, including internal planned
+Tasks that are intentionally absent from A2A lookup. The console binds a
+decision to the exact evidence fingerprint and states explicitly that judging
+candidate completion does not approve a consequential effect.
+
 The local HTTP-shaped routes are private implementation boundaries carried over
 the Unix socket:
 
@@ -104,6 +109,7 @@ the Unix socket:
 - `POST /v1/user/intents/{conversation-id}/confirm`
 - `GET /v1/user/tasks/{task-id}`
 - `POST /v1/user/tasks/{task-id}/completion`
+- `GET /v1/user/reviews?after={task-id}&limit={1..100}`
 - `GET|POST /v1/user/reviews/{task-id}`
 - `GET /v1/control/approvals`
 - exact-effect approval operations beneath `/v1/control/approvals/{id}`

@@ -32,6 +32,12 @@ manifest records those exact Event IDs. Result summaries and artifacts remain
 untrusted work evidence; they cannot authorize effects, approve requests,
 change policy, expand capabilities, or certify completion.
 
+Planning and each AgentExecution use separate bounded provider turns. Once an
+operator's Intent confirmation has been accepted and made durable, a client
+disconnect or expired request deadline cannot cancel outcome persistence and
+strand a Task as `RUNNING`. The scheduler reloads authoritative state after
+each selected Task before choosing more work.
+
 A failed dependency deterministically terminalizes every affected pending or
 blocked dependent through `TASK_DEPENDENCY_FAILED`; failure then propagates to
 the runtime root and Goal instead of leaving work active forever. Once the
@@ -45,12 +51,20 @@ child IDs are not registered for external lookup, and their intermediate
 status or result cannot replace the root Task's public state. Authenticated
 local completion control resolves child Tasks through a separate
 organization-scoped projection path, so required reviews remain possible
-without expanding the A2A address space.
+without expanding the A2A address space. The local review list is paginated so
+the operator can discover pending internal review IDs without knowing them in
+advance.
 
 Real model outputs without a registered deterministic verifier still require
 an independent completion judgment. A pending review prevents parent
 remediation from substituting model judgment for that review. Approval wakes
 newly eligible dependents immediately; rejection follows the deterministic
 failure path. Other child work that cannot proceed emits a typed blocked-work
-contract to its parent, and the scheduler never treats blocked work as
-completed or lets the parent inherit missing authority.
+contract to its accountable parent. When a deeper DAG dependent is the next
+actionable Task, the runtime supplies that exact same-goal blocked contract as
+bounded evidence. The scheduler never treats blocked work as completed or lets
+another Task inherit missing authority.
+
+Intent, Goal, and Task projection histories keep one immutable correlation
+boundary across every version. Rebuild fails closed if any historical record
+crosses that boundary, even if a later version changes it back.

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -96,19 +97,6 @@ type humanReviewDecisionRequest struct {
 	Feedback    string                        `json:"feedback,omitempty"`
 }
 
-type humanReviewResponse struct {
-	ReviewID     string                     `json:"review_id"`
-	TaskID       string                     `json:"task_id"`
-	TaskVersion  int                        `json:"task_version"`
-	Fingerprint  string                     `json:"fingerprint"`
-	State        string                     `json:"state"`
-	Objective    string                     `json:"objective"`
-	Result       string                     `json:"candidate_result"`
-	Criteria     []core.CompletionCriterion `json:"criteria"`
-	EvidenceRefs []string                   `json:"evidence_refs"`
-	UpdatedAt    string                     `json:"updated_at"`
-}
-
 func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	release, ok := acquireLocalUserRequest(w, r, h.access, "user request limit reached")
 	if !ok {
@@ -150,6 +138,10 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	const reviewPrefix = "/v1/user/reviews/"
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/user/reviews" {
+		h.handleListReviews(w, r, principal)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, reviewPrefix) && len(r.URL.Path) > len(reviewPrefix) {
 		taskID := strings.TrimPrefix(r.URL.Path, reviewPrefix)
 		if strings.Contains(taskID, "/") {
@@ -261,6 +253,32 @@ func (h *Human) handleGetReview(w http.ResponseWriter, r *http.Request, principa
 	h.writeReviewView(w, view, err)
 }
 
+func (h *Human) handleListReviews(w http.ResponseWriter, r *http.Request, principal intake.Principal) {
+	query := r.URL.Query()
+	for key, values := range query {
+		if (key != "after" && key != "limit") || len(values) != 1 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "review list query is invalid"})
+			return
+		}
+	}
+	limit := 50
+	if raw := query.Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "review list limit is invalid"})
+			return
+		}
+		limit = parsed
+	}
+	page, err := h.service.ListCompletionReviews(r.Context(), principal, query.Get("after"), limit)
+	w.Header().Set("Cache-Control", "no-store")
+	if err != nil {
+		h.writeIntakeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
 func (h *Human) handleReviewDecision(w http.ResponseWriter, r *http.Request, principal intake.Principal, taskID string) {
 	if !hasJSONContentType(r.Header.Get("Content-Type")) {
 		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "completion reviews require application/json"})
@@ -288,12 +306,7 @@ func (h *Human) writeReviewView(w http.ResponseWriter, view intake.CompletionRev
 		h.writeIntakeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, humanReviewResponse{
-		ReviewID: view.ReviewID, TaskID: view.TaskID, TaskVersion: view.TaskVersion,
-		Fingerprint: view.Fingerprint, State: view.State, Objective: view.Objective, Result: view.Result,
-		Criteria: view.Criteria, EvidenceRefs: view.EvidenceRefs,
-		UpdatedAt: view.UpdatedAt.UTC().Format(time.RFC3339Nano),
-	})
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (h *Human) writeView(w http.ResponseWriter, view intake.View, err error) {

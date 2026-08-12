@@ -154,6 +154,98 @@ func newOrganizationPlanner(t *testing.T, model *organizationLoopModel) planning
 	return planner
 }
 
+type delayedOrganizationModel struct{}
+
+func (delayedOrganizationModel) Name() string { return "fake-model/v1" }
+func (delayedOrganizationModel) Descriptor() execution.ModelDescriptor {
+	return execution.ModelDescriptor{Provider: "fake", Model: "fake-model/v1", ExecutionProfileVersion: "v1-fake"}
+}
+func (delayedOrganizationModel) Complete(ctx context.Context, prompt string) (execution.ModelResponse, error) {
+	select {
+	case <-time.After(20 * time.Millisecond):
+	case <-ctx.Done():
+		return execution.ModelResponse{}, ctx.Err()
+	}
+	text := "fake-model: " + prompt
+	if strings.HasPrefix(prompt, "You are the bounded Agent OS Task-DAG planner.") {
+		text = `{"tasks":[]}`
+	}
+	return execution.ModelResponse{Text: text, Usage: events.InferenceUsageRecordedPayload{
+		Source: "test", Provider: "fake", Model: "fake-model/v1",
+	}}, nil
+}
+
+type delayedPlanningModel struct{ model delayedOrganizationModel }
+
+func (m delayedPlanningModel) Descriptor() planning.Descriptor {
+	descriptor := m.model.Descriptor()
+	return planning.Descriptor{Provider: descriptor.Provider, Model: descriptor.Model, ExecutionProfileVersion: descriptor.ExecutionProfileVersion}
+}
+func (m delayedPlanningModel) CompleteText(ctx context.Context, prompt string) (planning.TextCompletion, error) {
+	response, err := m.model.Complete(ctx, prompt)
+	return planning.TextCompletion{Text: response.Text, Usage: response.Usage}, err
+}
+
+func TestAcceptedWorkOutlivesRequestDeadlineWithBoundedTurns(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	model := delayedOrganizationModel{}
+	planner, err := planning.NewModelPlanner(delayedPlanningModel{model: model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewWithModelAndPlanner(events.NewGateway(l), model, planner)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	result, err := service.Submit(ctx, Submit{RequestID: "deadline-isolation", OrganizationID: "org-1", Statement: "prepare bounded work", Kind: core.ExecutionAgent})
+	if err != nil || result.Task.Status != core.TaskCompleted || result.Goal.Status != "COMPLETED" {
+		t.Fatalf("result=%+v goal=%+v err=%v", result.Task, result.Goal, err)
+	}
+}
+
+type timeoutExecutionModel struct{}
+
+func (timeoutExecutionModel) Name() string { return "timeout-model/v1" }
+func (timeoutExecutionModel) Descriptor() execution.ModelDescriptor {
+	return execution.ModelDescriptor{Provider: "timeout", Model: "timeout-model/v1", ExecutionProfileVersion: "v1-timeout"}
+}
+func (timeoutExecutionModel) Complete(ctx context.Context, _ string) (execution.ModelResponse, error) {
+	<-ctx.Done()
+	return execution.ModelResponse{}, ctx.Err()
+}
+
+func TestTimedOutProviderTurnPersistsTerminalFailure(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	service := NewWithModel(events.NewGateway(l), timeoutExecutionModel{})
+	service.modelTurnTimeout = 5 * time.Millisecond
+	result, err := service.Submit(context.Background(), Submit{RequestID: "turn-timeout", OrganizationID: "org-1", Statement: "bounded work", Kind: core.ExecutionAgent})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("execution error=%v", err)
+	}
+	if result.Task.Status != core.TaskFailed || result.Goal.Status != "FAILED" {
+		t.Fatalf("task=%+v goal=%+v", result.Task, result.Goal)
+	}
+	if !hasEventType(result.Events, "EXECUTION_FINISHED") || !hasEventType(result.Events, "COMPLETION_REJECTED") {
+		t.Fatalf("timed-out turn lacked durable terminal events: %+v", result.Events)
+	}
+}
+
+func hasEventType(stream []events.Event, eventType string) bool {
+	for _, event := range stream {
+		if event.EventType == eventType {
+			return true
+		}
+	}
+	return false
+}
+
 func TestModelCapablePlannerSkipsInferenceForExactWork(t *testing.T) {
 	l, err := ledger.Open(":memory:")
 	if err != nil {
@@ -274,6 +366,14 @@ func TestChildCompletionReviewStaysInternalAndWakesRoot(t *testing.T) {
 	}
 	if child.ID == "" || child.Status != core.TaskBlocked {
 		t.Fatalf("child=%+v", child)
+	}
+	page, err := service.PendingCompletionReviews(ctx, "org-1", "", 10)
+	if err != nil || len(page.Reviews) != 1 || page.Reviews[0].Request.TaskID != child.ID || page.NextAfter != "" {
+		t.Fatalf("pending reviews=%+v err=%v", page, err)
+	}
+	otherPage, err := service.PendingCompletionReviews(ctx, "other-org", "", 10)
+	if err != nil || len(otherPage.Reviews) != 0 {
+		t.Fatalf("cross-organization reviews=%+v err=%v", otherPage, err)
 	}
 	if _, stream, err := service.ExternalTaskEvents(ctx, "org-1", string(child.ID)); err != nil || len(stream) != 0 {
 		t.Fatalf("child crossed external lookup boundary: events=%d err=%v", len(stream), err)
@@ -1365,6 +1465,84 @@ func TestBlockedChildReturnsToParent(t *testing.T) {
 	}
 	if !observed || len(parentManifest.EventRefs) != 1 || parentManifest.EventRefs[0] != blockedEvent.EventID {
 		t.Fatalf("parent did not receive a bounded remediation pass: manifest=%+v observed=%v blocked=%+v", parentManifest, observed, blockedEvent)
+	}
+}
+
+func TestDeepBlockedDependencyReachesActionableRoot(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	service := New(gateway)
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1"}
+	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintVersion: "v1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE"}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "complete governed work", NormalizedObjective: "complete governed work"}
+	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: "complete governed work", Status: "ACTIVE"}
+	blocked := core.Task{ID: "task-a", GoalID: goal.ID, ParentID: "task-root", Description: "use unavailable tool", ExecutionKind: core.ExecutionTool, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	middle := core.Task{ID: "task-b", GoalID: goal.ID, ParentID: "task-root", Description: "interpret blocked dependency", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{blocked.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	root := core.Task{ID: "task-root", GoalID: goal.ID, Description: "govern remediation", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{middle.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	for _, save := range []func() error{
+		func() error {
+			return repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "deep-block", 1, organization, nil)
+		},
+		func() error {
+			return repository.SaveAgent(ctx, "AGENT_CREATED", "runtime", "deep-block", 1, agent, nil)
+		},
+		func() error {
+			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "deep-block", 1, intent, nil)
+		},
+		func() error {
+			return repository.SaveGoal(ctx, organization.ID, "GOAL_CREATED", "runtime", "deep-block", 1, goal, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "deep-block", 1, root, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "deep-block", 1, middle, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "deep-block", 1, blocked, nil)
+		},
+	} {
+		if err := save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recovered, err := service.Recover(ctx)
+	if err != nil || recovered.TasksExecuted != 3 {
+		t.Fatalf("recovery=%+v err=%v", recovered, err)
+	}
+	snapshot, err := repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, taskID := range []core.ID{blocked.ID, middle.ID, root.ID} {
+		if snapshot.Tasks[taskID].Value.Status != core.TaskBlocked {
+			t.Fatalf("task %s status=%s", taskID, snapshot.Tasks[taskID].Value.Status)
+		}
+	}
+	stream, err := gateway.Events(ctx, "deep-block")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blockedEventID string
+	var middleManifest core.ExecutionContextManifest
+	for _, event := range stream {
+		if event.EventType == "TASK_BLOCKED" && event.TaskID == string(blocked.ID) {
+			blockedEventID = event.EventID
+		}
+		if event.EventType == "EXECUTION_CONTEXT_MANIFESTED" && event.TaskID == string(middle.ID) {
+			if err := json.Unmarshal(event.Payload, &middleManifest); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if blockedEventID == "" || !slices.Contains(middleManifest.EventRefs, blockedEventID) {
+		t.Fatalf("middle task did not receive deep block evidence: block=%q manifest=%+v", blockedEventID, middleManifest)
 	}
 }
 

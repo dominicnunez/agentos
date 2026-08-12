@@ -179,22 +179,22 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 		Goals:         make(map[core.ID]Versioned[core.Goal]),
 		Tasks:         make(map[core.ID]Versioned[core.Task]),
 	}
-	if err := decodeKind(records[KindOrganization], snapshot.Organizations); err != nil {
+	if err := decodeKind(records[KindOrganization], snapshot.Organizations, false); err != nil {
 		return Snapshot{}, fmt.Errorf("decode organizations: %w", err)
 	}
-	if err := decodeKind(records[KindTeam], snapshot.Teams); err != nil {
+	if err := decodeKind(records[KindTeam], snapshot.Teams, false); err != nil {
 		return Snapshot{}, fmt.Errorf("decode teams: %w", err)
 	}
-	if err := decodeKind(records[KindAgent], snapshot.Agents); err != nil {
+	if err := decodeKind(records[KindAgent], snapshot.Agents, false); err != nil {
 		return Snapshot{}, fmt.Errorf("decode agents: %w", err)
 	}
-	if err := decodeKind(records[KindIntent], snapshot.Intents); err != nil {
+	if err := decodeKind(records[KindIntent], snapshot.Intents, true); err != nil {
 		return Snapshot{}, fmt.Errorf("decode intents: %w", err)
 	}
-	if err := decodeKind(records[KindGoal], snapshot.Goals); err != nil {
+	if err := decodeKind(records[KindGoal], snapshot.Goals, true); err != nil {
 		return Snapshot{}, fmt.Errorf("decode goals: %w", err)
 	}
-	if err := decodeKind(records[KindTask], snapshot.Tasks); err != nil {
+	if err := decodeKind(records[KindTask], snapshot.Tasks, true); err != nil {
 		return Snapshot{}, fmt.Errorf("decode tasks: %w", err)
 	}
 	if err := validateSnapshot(snapshot); err != nil {
@@ -203,7 +203,7 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 	return snapshot, nil
 }
 
-func decodeKind[T any](bodies [][]byte, target map[core.ID]Versioned[T]) error {
+func decodeKind[T any](bodies [][]byte, target map[core.ID]Versioned[T], correlationStable bool) error {
 	for _, body := range bodies {
 		var record events.ProjectionRecord
 		if err := json.Unmarshal(body, &record); err != nil {
@@ -217,6 +217,14 @@ func decodeKind[T any](bodies [][]byte, target map[core.ID]Versioned[T]) error {
 		}
 		if record.Version != wantVersion {
 			return fmt.Errorf("record %s version %d follows %d", id, record.Version, previous.Version)
+		}
+		if correlationStable {
+			if record.CorrelationID == "" {
+				return fmt.Errorf("record %s version %d has no correlation boundary", id, record.Version)
+			}
+			if exists && record.CorrelationID != previous.CorrelationID {
+				return fmt.Errorf("record %s changes correlation boundary at version %d", id, record.Version)
+			}
 		}
 		var value T
 		if err := json.Unmarshal(record.Value, &value); err != nil {

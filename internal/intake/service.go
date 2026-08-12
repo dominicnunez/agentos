@@ -89,16 +89,21 @@ type View struct {
 }
 
 type CompletionReviewView struct {
-	ReviewID     string
-	TaskID       string
-	TaskVersion  int
-	Fingerprint  string
-	State        string
-	Objective    string
-	Result       string
-	Criteria     []core.CompletionCriterion
-	EvidenceRefs []string
-	UpdatedAt    time.Time
+	ReviewID     string                     `json:"review_id"`
+	TaskID       string                     `json:"task_id"`
+	TaskVersion  int                        `json:"task_version"`
+	Fingerprint  string                     `json:"fingerprint"`
+	State        string                     `json:"state"`
+	Objective    string                     `json:"objective"`
+	Result       string                     `json:"candidate_result"`
+	Criteria     []core.CompletionCriterion `json:"criteria"`
+	EvidenceRefs []string                   `json:"evidence_refs"`
+	UpdatedAt    time.Time                  `json:"updated_at"`
+}
+
+type CompletionReviewList struct {
+	Reviews   []CompletionReviewView `json:"reviews"`
+	NextAfter string                 `json:"next_after,omitempty"`
 }
 
 type CompletionReviewDecision struct {
@@ -513,6 +518,29 @@ func (s *Service) GetCompletionReview(ctx context.Context, principal Principal, 
 		return CompletionReviewView{}, ErrNotFound
 	}
 	return projectCompletionReview(view, "PENDING"), nil
+}
+
+func (s *Service) ListCompletionReviews(ctx context.Context, principal Principal, after string, limit int) (CompletionReviewList, error) {
+	if err := validateCompletionReviewer(principal); err != nil {
+		return CompletionReviewList{}, err
+	}
+	if after != "" {
+		if err := ValidateIdentifier("review cursor", after); err != nil {
+			return CompletionReviewList{}, err
+		}
+	}
+	if limit < 1 || limit > 100 {
+		return CompletionReviewList{}, fmt.Errorf("%w: review page limit must be between 1 and 100", ErrInvalid)
+	}
+	page, err := s.app.PendingCompletionReviews(ctx, principal.OrganizationID, core.ID(after), limit)
+	if err != nil {
+		return CompletionReviewList{}, fmt.Errorf("%w: list completion reviews", ErrUnavailable)
+	}
+	result := CompletionReviewList{Reviews: make([]CompletionReviewView, 0, len(page.Reviews)), NextAfter: string(page.NextAfter)}
+	for _, view := range page.Reviews {
+		result.Reviews = append(result.Reviews, projectCompletionReview(view, "PENDING"))
+	}
+	return result, nil
 }
 
 func (s *Service) DecideCompletionReview(ctx context.Context, principal Principal, decision CompletionReviewDecision) (CompletionReviewView, error) {

@@ -42,6 +42,54 @@ type candidateCompletePayload struct {
 	ArtifactRefs     []string `json:"artifact_refs"`
 }
 
+type CompletionReviewPage struct {
+	Reviews   []CompletionReviewView
+	NextAfter core.ID
+}
+
+// PendingCompletionReviews exposes only review contracts for one organization
+// through the local control surface. Internal child Tasks remain absent from
+// the external A2A task index.
+func (s *Service) PendingCompletionReviews(ctx context.Context, organizationID string, after core.ID, limit int) (CompletionReviewPage, error) {
+	if organizationID == "" || limit < 1 || limit > 100 {
+		return CompletionReviewPage{}, fmt.Errorf("organization and review page limit are required")
+	}
+	if err := s.acquire(ctx); err != nil {
+		return CompletionReviewPage{}, err
+	}
+	defer s.release()
+	snapshot, err := s.state.Load(ctx)
+	if err != nil {
+		return CompletionReviewPage{}, err
+	}
+	page := CompletionReviewPage{Reviews: make([]CompletionReviewView, 0, limit)}
+	for _, state := range sortedTaskStates(snapshot.Tasks) {
+		if state.Value.ID <= after {
+			continue
+		}
+		owner, err := taskOrganization(snapshot, state.Value)
+		if err != nil {
+			return CompletionReviewPage{}, err
+		}
+		if owner != core.ID(organizationID) {
+			continue
+		}
+		view, found, err := s.completionReviewLocked(ctx, organizationID, string(state.Value.ID))
+		if err != nil {
+			return CompletionReviewPage{}, err
+		}
+		if !found {
+			continue
+		}
+		if len(page.Reviews) == limit {
+			page.NextAfter = page.Reviews[len(page.Reviews)-1].Request.TaskID
+			break
+		}
+		page.Reviews = append(page.Reviews, view)
+	}
+	return page, nil
+}
+
 func (s *Service) CompletionReview(ctx context.Context, organizationID, taskID string) (CompletionReviewView, bool, error) {
 	if err := s.acquire(ctx); err != nil {
 		return CompletionReviewView{}, false, err
