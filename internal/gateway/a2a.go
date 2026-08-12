@@ -189,10 +189,10 @@ func (a *A2A) agentCard(r *http.Request) (a2a.AgentCard, error) {
 		SupportedInterfaces: []*a2a.AgentInterface{{
 			URL: endpoint, ProtocolBinding: a2a.TransportProtocolJSONRPC, ProtocolVersion: a2a.Version,
 		}},
-		Capabilities: a2a.AgentCapabilities{Extensions: []a2a.AgentExtension{{
-			URI: executionkind.URI, Required: false,
-			Description: "Optional untrusted execution-routing hint; it grants no authority.",
-		}}},
+		Capabilities: a2a.AgentCapabilities{Extensions: []a2a.AgentExtension{
+			{URI: executionkind.URI, Required: false, Description: "Optional untrusted execution-routing hint; it grants no authority."},
+			{URI: intentConfirmationURI, Required: false, Description: "Version-bound confirmation of a reviewed Agent OS Intent; it grants no effect authority."},
+		}},
 		DefaultInputModes:  []string{"text/plain"},
 		DefaultOutputModes: []string{"text/plain"},
 		Skills: []a2a.AgentSkill{{

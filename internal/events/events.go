@@ -68,6 +68,39 @@ type OperatorWorkAcceptedPayload struct {
 	SourceChannel       string `json:"source_channel"`
 }
 
+type IntakeMessageRecordedPayload struct {
+	MessageID           string `json:"message_id"`
+	Text                string `json:"text"`
+	SourcePrincipalID   string `json:"source_principal_id"`
+	SourcePrincipalKind string `json:"source_principal_kind"`
+	SourceChannel       string `json:"source_channel"`
+}
+
+type IntentDraftedPayload struct {
+	SourceMessageID string           `json:"source_message_id"`
+	Draft           core.IntentDraft `json:"draft"`
+	Reply           string           `json:"reply"`
+}
+
+type IntentNormalizationContextPayload struct {
+	SourceMessageID         string   `json:"source_message_id"`
+	PromptVersion           string   `json:"prompt_version"`
+	Provider                string   `json:"provider"`
+	Model                   string   `json:"model"`
+	ExecutionProfileVersion string   `json:"execution_profile_version"`
+	InputEventRefs          []string `json:"input_event_refs"`
+}
+
+type IntentConfirmedPayload struct {
+	IntentID            string `json:"intent_id"`
+	Version             int    `json:"version"`
+	Fingerprint         string `json:"fingerprint"`
+	ConfirmingActorID   string `json:"confirming_actor_id"`
+	ConfirmingActorKind string `json:"confirming_actor_kind"`
+	SourceChannel       string `json:"source_channel"`
+	MessageID           string `json:"message_id"`
+}
+
 func (p ResultPublishedPayload) ValidFor(artifactRefs []string) bool {
 	return p.Summary != "" && sameStrings(p.ArtifactRefs, artifactRefs)
 }
@@ -149,6 +182,25 @@ type Event struct {
 	Payload           json.RawMessage `json:"payload"`
 	CorrelationID     string          `json:"-"`
 }
+
+// LatestPayload decodes the newest event of a requested contract type. It is
+// the shared, bounded replay primitive for projections that only need the most
+// recent value of an event contract.
+func LatestPayload[T any](stream []Event, eventType string) (T, bool, error) {
+	var zero T
+	for index := len(stream) - 1; index >= 0; index-- {
+		if stream[index].EventType != eventType {
+			continue
+		}
+		var payload T
+		if err := json.Unmarshal(stream[index].Payload, &payload); err != nil {
+			return zero, false, err
+		}
+		return payload, true, nil
+	}
+	return zero, false, nil
+}
+
 type Appender interface {
 	Append(context.Context, TrustedDraft) (Event, error)
 }
@@ -165,6 +217,9 @@ type ExternalWorkResolver interface {
 	ResolveExternalWork(context.Context, string, string) (string, bool, error)
 	ResolveExternalRequest(context.Context, string, string) (string, bool, error)
 	ResolveExternalTask(context.Context, string, string) (string, string, bool, error)
+}
+type ActiveIntakeResolver interface {
+	ResolveActiveIntake(context.Context, string, string, string, string) (string, string, bool, error)
 }
 type ExternalWorkAllocator interface {
 	ReserveExternalWork(context.Context, string, string) (string, error)
@@ -234,6 +289,14 @@ func (g *Gateway) ResolveExternalTask(ctx context.Context, organizationID, taskI
 		return "", "", false, nil
 	}
 	return resolver.ResolveExternalTask(ctx, organizationID, taskID)
+}
+
+func (g *Gateway) ResolveActiveIntake(ctx context.Context, organizationID, principalID, principalKind, sourceChannel string) (string, string, bool, error) {
+	resolver, ok := g.ledger.(ActiveIntakeResolver)
+	if !ok {
+		return "", "", false, nil
+	}
+	return resolver.ResolveActiveIntake(ctx, organizationID, principalID, principalKind, sourceChannel)
 }
 
 func (g *Gateway) ReserveExternalWork(ctx context.Context, organizationID, requestID string) (string, error) {

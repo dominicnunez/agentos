@@ -25,6 +25,8 @@ import (
 
 type tuiClient struct{ http *http.Client }
 
+var errLocalGatewayNotFound = errors.New("local gateway resource not found")
+
 func runTUI(ctx context.Context, _ string, config bootstrap.Config, input *os.File, output io.Writer) error {
 	client, err := localHTTPClient(config)
 	if err != nil {
@@ -32,7 +34,24 @@ func runTUI(ctx context.Context, _ string, config bootstrap.Config, input *os.Fi
 	}
 	console := &tuiClient{http: client}
 	reader := bufio.NewReader(input)
-	if _, err := fmt.Fprintln(output, "Agent OS\n\n[Work]  Approvals  Agents  System\nType work in natural language. Commands: /user-task /complete /approvals /agents /system /quit"); err != nil {
+	conversationID := ""
+	var currentIntent *core.IntentDraft
+	var active tuiTask
+	if activeErr := console.request(ctx, http.MethodGet, "/v1/user/intents/active", nil, &active); activeErr == nil {
+		conversationID = active.ConversationID
+		_, _ = fmt.Fprintln(output, "Resuming unfinished intake.")
+		if active.Prompt != "" {
+			_, _ = fmt.Fprintln(output, safeTerminalText(active.Prompt))
+		}
+		if active.Intent != nil && active.State == intake.StateAwaitingConfirmation {
+			currentIntent = active.Intent
+			printIntentReview(output, *active.Intent)
+			_, _ = fmt.Fprintln(output, "\nType /confirm to begin planning, or continue the discussion.")
+		}
+	} else if !errors.Is(activeErr, errLocalGatewayNotFound) {
+		return activeErr
+	}
+	if _, err := fmt.Fprintln(output, "Agent OS\n\n[Work]  Approvals  Agents  System\nType work in natural language. Commands: /confirm /user-task /complete /approvals /agents /system /quit"); err != nil {
 		return err
 	}
 	for {
@@ -57,6 +76,19 @@ func runTUI(ctx context.Context, _ string, config bootstrap.Config, input *os.Fi
 			_, _ = fmt.Fprintln(output, "Agents\nDurable Agent roster views will appear here; this console never reads internal storage directly.")
 		case "/system":
 			_, _ = fmt.Fprintln(output, "System\nRun `agentos doctor` for the read-only health report.")
+		case "/confirm":
+			if conversationID == "" || currentIntent == nil {
+				_, _ = fmt.Fprintln(output, "No reviewable Intent is active.")
+				continue
+			}
+			confirmationID := "confirmation-" + currentIntent.Fingerprint
+			var confirmed tuiTask
+			if confirmErr := console.request(ctx, http.MethodPost, "/v1/user/intents/"+conversationID+"/confirm", map[string]string{"message_id": confirmationID, "fingerprint": currentIntent.Fingerprint}, &confirmed); confirmErr != nil {
+				_, _ = fmt.Fprintf(output, "Confirmation unavailable: %s\n", safeTerminalLine(confirmErr.Error()))
+				continue
+			}
+			_, _ = fmt.Fprintf(output, "Task %s - %s\n", confirmed.TaskID, confirmed.State)
+			conversationID, currentIntent = "", nil
 		default:
 			if line == "/complete" || line == "/user-task" {
 				_, _ = fmt.Fprintln(output, "A task description or task identity is required.")
@@ -72,9 +104,11 @@ func runTUI(ctx context.Context, _ string, config bootstrap.Config, input *os.Fi
 			if idErr != nil {
 				return idErr
 			}
-			conversationID, idErr := randomID("user")
-			if idErr != nil {
-				return idErr
+			if conversationID == "" {
+				conversationID, idErr = randomID("user")
+				if idErr != nil {
+					return idErr
+				}
 			}
 			var response tuiTask
 			request := map[string]any{"conversation_id": conversationID, "message_id": messageID, "text": line}
@@ -90,6 +124,26 @@ func runTUI(ctx context.Context, _ string, config bootstrap.Config, input *os.Fi
 			if response.Prompt != "" {
 				_, _ = fmt.Fprintln(output, safeTerminalText(response.Prompt))
 			}
+			currentIntent = nil
+			if response.Intent != nil && response.State == intake.StateAwaitingConfirmation {
+				currentIntent = response.Intent
+				printIntentReview(output, *response.Intent)
+				_, _ = fmt.Fprint(output, "\nType CONFIRM to begin planning, or press Enter to continue discussing: ")
+				decision, readErr := reader.ReadString('\n')
+				if readErr != nil {
+					return readErr
+				}
+				if canonicalInput(decision) == "CONFIRM" {
+					confirmationID := "confirmation-" + response.Intent.Fingerprint
+					if confirmErr := console.request(ctx, http.MethodPost, "/v1/user/intents/"+conversationID+"/confirm", map[string]string{"message_id": confirmationID, "fingerprint": response.Intent.Fingerprint}, &response); confirmErr != nil {
+						_, _ = fmt.Fprintf(output, "Confirmation unavailable: %s\n", safeTerminalLine(confirmErr.Error()))
+						continue
+					}
+					_, _ = fmt.Fprintf(output, "Task %s - %s\n", response.TaskID, response.State)
+					conversationID = ""
+					currentIntent = nil
+				}
+			}
 			if response.CompletionContract != nil {
 				_, _ = fmt.Fprintf(output, "Use /complete %s when every required item is ready.\n", response.TaskID)
 			}
@@ -102,10 +156,46 @@ func runTUI(ctx context.Context, _ string, config bootstrap.Config, input *os.Fi
 
 type tuiTask struct {
 	TaskID             string                   `json:"task_id"`
+	ConversationID     string                   `json:"conversation_id"`
 	State              string                   `json:"state"`
 	Prompt             string                   `json:"prompt"`
 	Result             string                   `json:"result"`
 	CompletionContract *core.CompletionContract `json:"completion_contract"`
+	Intent             *core.IntentDraft        `json:"intent"`
+}
+
+func printIntentReview(output io.Writer, draft core.IntentDraft) {
+	_, _ = fmt.Fprintf(output, "\nProposed work\n\nOutcome\n%s\n", safeTerminalText(draft.Objective))
+	printIntentValues(output, "Context", draft.Context)
+	printIntentValues(output, "Deliverables", draft.Deliverables)
+	printIntentValues(output, "Done when", draft.CompletionCriteria)
+	printIntentValues(output, "Requirements", draft.Constraints)
+	if len(draft.ResolvedDecisions) > 0 {
+		_, _ = fmt.Fprintln(output, "\nDecisions")
+		for _, decision := range draft.ResolvedDecisions {
+			_, _ = fmt.Fprintf(output, "- %s: %s\n", safeTerminalLine(decision.Subject), safeTerminalText(decision.Value))
+		}
+	}
+	if len(draft.ConsequenceCandidates) > 0 {
+		_, _ = fmt.Fprintln(output, "\nPotential task boundaries")
+		for _, boundary := range draft.ConsequenceCandidates {
+			_, _ = fmt.Fprintf(output, "- %s\n", safeTerminalLine(boundary))
+		}
+	}
+	if draft.RequestedExecutionKind != "" {
+		_, _ = fmt.Fprintf(output, "\nRequested execution: %s\n", safeTerminalLine(string(draft.RequestedExecutionKind)))
+	}
+	_, _ = fmt.Fprintf(output, "\nIntent version %d  Fingerprint %s\n", draft.Version, draft.Fingerprint)
+}
+
+func printIntentValues(output io.Writer, heading string, values []core.IntentValue) {
+	if len(values) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(output, "\n%s\n", heading)
+	for _, value := range values {
+		_, _ = fmt.Fprintf(output, "- %s\n", safeTerminalText(value.Value))
+	}
 }
 
 func (c *tuiClient) completeHumanTask(ctx context.Context, taskID string, reader *bufio.Reader, output io.Writer) error {
@@ -283,6 +373,9 @@ func (c *tuiClient) request(ctx context.Context, method, path string, body, targ
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
+		if response.StatusCode == http.StatusNotFound {
+			return errLocalGatewayNotFound
+		}
 		return fmt.Errorf("local gateway returned HTTP %d", response.StatusCode)
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 1<<20))

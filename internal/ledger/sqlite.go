@@ -47,6 +47,9 @@ CREATE INDEX IF NOT EXISTS events_correlation_idx ON events(correlation_id, sequ
 	if err := l.ensureEventRoutingColumns(ctx); err != nil {
 		return err
 	}
+	if _, err := l.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS events_intake_actor_idx ON events(organization_id,event_type,source_actor_id,sequence)`); err != nil {
+		return err
+	}
 	_, err = l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS records (
 kind TEXT NOT NULL, record_id TEXT NOT NULL, version INTEGER NOT NULL, body BLOB NOT NULL,
 created_at TEXT NOT NULL, PRIMARY KEY(kind, record_id, version));
@@ -341,6 +344,26 @@ WHERE t.organization_id=? AND t.task_id=?`, organizationID, taskID).Scan(&reques
 	return requestID, correlationID, err == nil, err
 }
 
+func (l *SQLite) ResolveActiveIntake(ctx context.Context, organizationID, principalID, principalKind, sourceChannel string) (string, string, bool, error) {
+	var requestID, correlationID string
+	err := l.db.QueryRowContext(ctx, `SELECT w.request_id,e.correlation_id
+FROM events e JOIN external_work w ON w.organization_id=e.organization_id AND w.correlation_id=e.correlation_id
+WHERE e.organization_id=? AND e.event_type='INTAKE_MESSAGE_RECORDED' AND e.source_actor_id=?
+AND json_extract(CAST(e.payload AS TEXT),'$.source_principal_kind')=?
+AND json_extract(CAST(e.payload AS TEXT),'$.source_channel')=?
+AND NOT EXISTS (
+  SELECT 1 FROM events confirmed
+  WHERE confirmed.organization_id=e.organization_id
+    AND confirmed.correlation_id=e.correlation_id
+    AND confirmed.event_type='INTENT_CONFIRMED'
+)
+ORDER BY e.sequence DESC LIMIT 1`, organizationID, principalID, principalKind, sourceChannel).Scan(&requestID, &correlationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, nil
+	}
+	return requestID, correlationID, err == nil, err
+}
+
 // ReserveExternalWork returns the durable correlation for one tenant/request.
 // New correlations are random and checked against both migrated caller-owned
 // streams and prior reservations before they enter the shared ledger namespace.
@@ -375,6 +398,9 @@ UNION ALL SELECT 1 FROM records WHERE (kind='intent' AND record_id=?) OR (kind='
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO external_work(organization_id,request_id,correlation_id,intent_id) VALUES(?,?,?,?)`, organizationID, requestID, candidate, intentID); err != nil {
 				return fmt.Errorf("reserve external work: %w", err)
+			}
+			if err := registerExternalTask(ctx, tx, organizationID, "task-"+candidate, candidate); err != nil {
+				return fmt.Errorf("reserve external task identity: %w", err)
 			}
 			correlationID = candidate
 			return nil

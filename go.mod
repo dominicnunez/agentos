@@ -9,7 +9,7 @@ tool (
 
 require (
 	github.com/a2aproject/a2a-go/v2 v2.4.0
-	github.com/dominicnunez/agentos-a2a-go v0.1.0
+	github.com/dominicnunez/agentos-a2a-go v0.2.0
 	github.com/dominicnunez/codex-sdk-go v0.0.0-20260810152213-366b1935433f
 	golang.org/x/sys v0.45.0
 	modernc.org/sqlite v1.38.2

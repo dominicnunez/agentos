@@ -122,7 +122,11 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 	for _, item := range effectRecovery {
 		log.Printf("effect requires reconciliation: effect_id=%s task_id=%s reason=%s", item.EffectID, item.TaskID, item.Reason)
 	}
-	operator := intake.New(service)
+	normalizer, err := intake.NewModelNormalizer(intakeModel{adapter: model})
+	if err != nil {
+		return err
+	}
+	operator := intake.NewWithNormalizer(service, normalizer)
 	owner := gateway.LocalHuman{
 		UID: config.Owner.UID, ID: core.ID("local-uid-" + strconv.Itoa(config.Owner.UID)),
 		OrganizationID: core.ID(config.Organization),
@@ -161,6 +165,24 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 		bindings = append(bindings, serverBinding{server: a2aServer, listener: a2aListener, certFile: tlsCertFile, keyFile: tlsKeyFile})
 	}
 	return serveAll(ctx, bindings)
+}
+
+type intakeModel struct{ adapter execution.ModelAdapter }
+
+func (m intakeModel) Descriptor() intake.NormalizerDescriptor {
+	descriptor := m.adapter.Descriptor()
+	return intake.NormalizerDescriptor{
+		Provider: descriptor.Provider, Model: descriptor.Model,
+		ExecutionProfileVersion: descriptor.ExecutionProfileVersion,
+	}
+}
+
+func (m intakeModel) CompleteText(ctx context.Context, prompt string) (intake.TextCompletion, error) {
+	response, err := m.adapter.Complete(ctx, prompt)
+	if err != nil {
+		return intake.TextCompletion{}, err
+	}
+	return intake.TextCompletion{Text: response.Text, Usage: response.Usage}, nil
 }
 
 func configuredProvider(ctx context.Context, provider bootstrap.Provider, runtimeDir string, source secrets.Source) (execution.ModelAdapter, func() error, error) {

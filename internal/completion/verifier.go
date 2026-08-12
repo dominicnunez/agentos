@@ -28,7 +28,11 @@ func (Verifier) Verify(task core.Task, outcome core.ToolOutcome) (core.ToolOutco
 			return outcome, true
 		}
 		value, ok := outcome.ObservedEffect.(string)
-		verified = ok && task.ExecutionKind == core.ExecutionAgent && value == "fake-model: "+task.Description
+		expected := task.Description
+		if task.ExecutionBrief != "" {
+			expected = task.ExecutionBrief
+		}
+		verified = ok && task.ExecutionKind == core.ExecutionAgent && value == "fake-model: "+expected
 	default:
 		return outcome, false
 	}
