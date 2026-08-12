@@ -91,6 +91,12 @@ means Agent OS understood the requested work; it is never approval for a
 financial, public, destructive, privileged, legal, deployment, or other
 consequential effect.
 
+An execution kind explicitly selected by the submitting user or Agent remains
+bound to the intake conversation. When no kind was explicitly selected, Agent
+OS reruns deterministic-first routing after every clarification against the
+latest normalized objective; an inferred route from an earlier incomplete
+draft is never treated as an operator choice.
+
 `/user-task <instruction>` creates work that must wait for structured user
 completion. `/complete <task-id>` collects every required field and file from
 the Task's durable CompletionContract. A self-reported "done" message cannot
@@ -143,7 +149,9 @@ Routing uses registered deterministic handlers first. Adaptive inference is
 used separately for bounded Intent normalization, Task-DAG planning when it
 adds value, and Agent execution. Planning records its exact input events and
 model identity, reuses a valid durable Plan on retry, and keeps internal child
-Tasks outside the A2A lookup boundary. The
+Tasks outside the A2A lookup boundary. Startup rebuilds the external task index
+from each work stream's runtime-owned root identity and removes stale child
+bindings left by older migrations. The
 accepted structured Intent—not the raw conversation alone—is supplied to the
 execution boundary. Intake text cannot select a provider, grant a capability,
 decide an approval, or alter a CompletionContract.

@@ -584,6 +584,59 @@ func TestIntentConversationByteLimitRejectsBeforeAppending(t *testing.T) {
 	}
 }
 
+type clarificationRoutingNormalizer struct{}
+
+func (clarificationRoutingNormalizer) Descriptor() (NormalizerDescriptor, bool) {
+	return NormalizerDescriptor{}, false
+}
+
+func (clarificationRoutingNormalizer) Normalize(_ context.Context, turns []ConversationTurn) (Normalization, error) {
+	latest := turns[len(turns)-1]
+	value := core.IntentValue{Value: latest.Text, Origin: "EXPLICIT", SourceMessageID: latest.MessageID}
+	if len(turns) == 1 {
+		return Normalization{
+			State: normalizationNeedsInput, Reply: "Provide the final objective.",
+			Candidate: IntentCandidate{Objective: "echo provisional", MissingUserInputs: []core.IntentValue{{Value: "final objective", Origin: "DEFAULT"}}},
+		}, nil
+	}
+	return Normalization{
+		State: normalizationReady, Reply: "Review this intent.",
+		Candidate: IntentCandidate{Objective: latest.Text, Deliverables: []core.IntentValue{value}, CompletionCriteria: []core.IntentValue{value}},
+	}, nil
+}
+
+func TestClarificationReroutesOnlyInferredExecutionKind(t *testing.T) {
+	tests := []struct {
+		name      string
+		explicit  core.ExecutionKind
+		objective string
+		want      core.ExecutionKind
+	}{
+		{name: "inferred route follows revised objective", objective: "draft the final report", want: core.ExecutionAgent},
+		{name: "explicit route remains operator selected", explicit: core.ExecutionHuman, objective: "echo final answer", want: core.ExecutionHuman},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := ledger.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			service := NewWithNormalizer(app.New(events.NewGateway(store)), clarificationRoutingNormalizer{})
+			principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+			first, err := service.Handle(ctx, principal, Message{ConversationID: "reroute-kind", MessageID: "message-1", Text: "provisional request", RequestedKind: test.explicit})
+			if err != nil || first.State != StateInputRequired {
+				t.Fatalf("first=%+v err=%v", first, err)
+			}
+			second, err := service.Handle(ctx, principal, Message{ConversationID: "reroute-kind", TaskID: first.TaskID, MessageID: "message-2", Text: test.objective})
+			if err != nil || second.State != StateAwaitingConfirmation || second.Intent == nil || second.Intent.RequestedExecutionKind != test.want {
+				t.Fatalf("second=%+v err=%v want kind=%s", second, err, test.want)
+			}
+		})
+	}
+}
+
 type stagedNormalizer struct {
 	calls         int
 	secondStarted chan struct{}

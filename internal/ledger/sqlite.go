@@ -128,11 +128,14 @@ CREATE INDEX IF NOT EXISTS external_tasks_correlation_idx ON external_tasks(orga
 				return fmt.Errorf("migrate external work %s/%s: %w", binding.organizationID, binding.requestID, err)
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO external_tasks(organization_id,task_id,correlation_id)
-SELECT DISTINCT e.organization_id,e.task_id,e.correlation_id
-FROM events e JOIN external_work w ON w.organization_id=e.organization_id AND w.correlation_id=e.correlation_id
-WHERE e.task_id<>''`); err != nil {
-			return fmt.Errorf("migrate external task index: %w", err)
+		// Rebuild rather than append so rows created by the former all-task
+		// migration are removed. Only runtime-owned roots cross the A2A boundary.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM external_tasks`); err != nil {
+			return fmt.Errorf("clear external task index: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO external_tasks(organization_id,task_id,correlation_id)
+SELECT organization_id,'task-' || correlation_id,correlation_id FROM external_work`); err != nil {
+			return fmt.Errorf("migrate external root task index: %w", err)
 		}
 		var conflictingTask bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(

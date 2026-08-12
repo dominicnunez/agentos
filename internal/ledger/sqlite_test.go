@@ -244,11 +244,11 @@ func TestProjectionBatchRollsBackCompleteTaskGraph(t *testing.T) {
 
 func TestChildTaskIsNotExternallyAddressable(t *testing.T) {
 	ctx := context.Background()
-	l, err := Open(":memory:")
+	path := filepath.Join(t.TempDir(), "agentos.db")
+	l, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = l.Close() })
 	correlationID, err := l.ReserveExternalWork(ctx, "org-1", "request-1")
 	if err != nil {
 		t.Fatal(err)
@@ -268,6 +268,25 @@ func TestChildTaskIsNotExternallyAddressable(t *testing.T) {
 	}
 	if _, _, found, err := l.ResolveExternalTask(ctx, "org-1", childID); err != nil || found {
 		t.Fatalf("internal child became externally addressable: found=%v err=%v", found, err)
+	}
+	// Simulate a row created by the former startup migration and prove the next
+	// startup repairs the durable boundary rather than preserving stale access.
+	if _, err := l.db.ExecContext(ctx, `INSERT INTO external_tasks(organization_id,task_id,correlation_id) VALUES(?,?,?)`, "org-1", childID, correlationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	l, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	if _, _, found, err := l.ResolveExternalTask(ctx, "org-1", childID); err != nil || found {
+		t.Fatalf("startup migration preserved an externally addressable child: found=%v err=%v", found, err)
+	}
+	if requestID, resolved, found, err := l.ResolveExternalTask(ctx, "org-1", rootID); err != nil || !found || requestID != "request-1" || resolved != correlationID {
+		t.Fatalf("startup migration lost root addressability: request=%q correlation=%q found=%v err=%v", requestID, resolved, found, err)
 	}
 }
 

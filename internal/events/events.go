@@ -69,11 +69,12 @@ type OperatorWorkAcceptedPayload struct {
 }
 
 type IntakeMessageRecordedPayload struct {
-	MessageID           string `json:"message_id"`
-	Text                string `json:"text"`
-	SourcePrincipalID   string `json:"source_principal_id"`
-	SourcePrincipalKind string `json:"source_principal_kind"`
-	SourceChannel       string `json:"source_channel"`
+	MessageID              string             `json:"message_id"`
+	Text                   string             `json:"text"`
+	SourcePrincipalID      string             `json:"source_principal_id"`
+	SourcePrincipalKind    string             `json:"source_principal_kind"`
+	SourceChannel          string             `json:"source_channel"`
+	RequestedExecutionKind core.ExecutionKind `json:"requested_execution_kind,omitempty"`
 }
 
 type IntentDraftedPayload struct {

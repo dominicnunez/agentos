@@ -361,7 +361,7 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 	stream, err := s.app.RecordIntakeMessage(ctx, app.IntakeMessage{
 		RequestID: message.ConversationID, OrganizationID: principal.OrganizationID,
 		MessageID: message.MessageID, Text: message.Text, SourcePrincipalID: core.ID(principal.ID),
-		SourcePrincipalKind: principal.Kind, SourceChannel: principal.Channel,
+		SourcePrincipalKind: principal.Kind, SourceChannel: principal.Channel, RequestedKind: message.RequestedKind,
 	})
 	if err != nil {
 		return View{}, fmt.Errorf("%w: record intake message", ErrConflict)
@@ -402,11 +402,9 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 	if usesModel != (normalized.Usage != nil) {
 		return View{}, fmt.Errorf("%w: intent normalizer model usage contract is inconsistent", ErrUnavailable)
 	}
-	requestedKind := message.RequestedKind
-	if previous, found, previousErr := latestIntentPayload(stream); previousErr != nil {
-		return View{}, fmt.Errorf("%w: load previous intent draft", ErrUnavailable)
-	} else if found && requestedKind == "" {
-		requestedKind = previous.Draft.RequestedExecutionKind
+	requestedKind, err := explicitRequestedKind(stream)
+	if err != nil {
+		return View{}, fmt.Errorf("%w: load explicit execution route", ErrUnavailable)
 	}
 	if requestedKind == "" {
 		requestedKind, err = s.router.Route(Message{Text: normalized.Candidate.Objective})
@@ -436,6 +434,23 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 		return View{}, fmt.Errorf("%w: persist intent draft", ErrUnavailable)
 	}
 	return projectIntentView(message.ConversationID, stream, draft, normalized.Reply), nil
+}
+
+func explicitRequestedKind(stream []events.Event) (core.ExecutionKind, error) {
+	var requested core.ExecutionKind
+	for _, event := range stream {
+		if event.EventType != "INTAKE_MESSAGE_RECORDED" {
+			continue
+		}
+		var message events.IntakeMessageRecordedPayload
+		if err := json.Unmarshal(event.Payload, &message); err != nil {
+			return "", err
+		}
+		if message.RequestedExecutionKind != "" {
+			requested = message.RequestedExecutionKind
+		}
+	}
+	return requested, nil
 }
 
 func (s *Service) CompleteHumanTask(ctx context.Context, principal Principal, taskID string, submission core.HumanTaskSubmission) (View, error) {
