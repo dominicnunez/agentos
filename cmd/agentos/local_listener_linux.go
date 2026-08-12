@@ -91,6 +91,9 @@ func listenLocalHuman(ctx context.Context, path string, ownerUID, ownerGID int) 
 }
 
 func validateRuntimeBoundary(config bootstrap.Config) error {
+	if err := validateUserRuntimeBase(config); err != nil {
+		return err
+	}
 	socketDirectoryUID := config.Owner.UID
 	socketDirectoryMode := os.FileMode(0o700)
 	if config.Mode == bootstrap.ModeSystem {

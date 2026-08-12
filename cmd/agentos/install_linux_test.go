@@ -91,6 +91,23 @@ func TestEnsureOwnedRuntimeDirectoryRejectsBroadModesAndLinks(t *testing.T) {
 	}
 }
 
+func TestUserRuntimeBaseMustBePrivateAndOwned(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "runtime")
+	if err := os.Mkdir(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := bootstrap.NewConfig(bootstrap.ModeUser, bootstrap.Owner{Username: "owner", UID: effectiveUID(), GID: effectiveUID()}, bootstrap.Paths{RuntimeDir: filepath.Join(base, "agentos")}, time.Now())
+	if err := validateUserRuntimeBase(config); err != nil {
+		t.Fatalf("private owned runtime base was rejected: %v", err)
+	}
+	if err := os.Chmod(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateUserRuntimeBase(config); err == nil {
+		t.Fatal("broad user runtime base was accepted")
+	}
+}
+
 func TestReadSetupCredentialRequiresPrivateOwnedStableFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "auth.json")
 	if err := os.WriteFile(path, []byte(`{"tokens":{"access_token":"test"}}`), 0o600); err != nil {

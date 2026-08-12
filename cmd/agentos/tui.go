@@ -26,7 +26,7 @@ import (
 type tuiClient struct{ http *http.Client }
 
 func runTUI(ctx context.Context, _ string, config bootstrap.Config, input *os.File, output io.Writer) error {
-	client, err := localHTTPClient(config.Paths.UserSocket)
+	client, err := localHTTPClient(config)
 	if err != nil {
 		return err
 	}

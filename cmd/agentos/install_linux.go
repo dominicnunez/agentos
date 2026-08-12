@@ -445,6 +445,9 @@ func installUserRuntime(ctx context.Context, config bootstrap.Config, serviceCho
 	if effectiveUID() != config.Owner.UID {
 		return fmt.Errorf("user installation must run as its configured Linux owner")
 	}
+	if err := validateUserRuntimeBase(config); err != nil {
+		return err
+	}
 	current, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -480,6 +483,18 @@ func installUserRuntime(ctx context.Context, config bootstrap.Config, serviceCho
 	default:
 		return nil
 	}
+}
+
+func validateUserRuntimeBase(config bootstrap.Config) error {
+	if config.Mode != bootstrap.ModeUser {
+		return nil
+	}
+	base := filepath.Dir(config.Paths.RuntimeDir)
+	uid, mode, err := fileOwner(base)
+	if err != nil || mode&os.ModeSymlink != 0 || !mode.IsDir() || uid != config.Owner.UID || mode.Perm() != 0o700 {
+		return fmt.Errorf("user runtime base must be a private directory owned by the configured Linux user")
+	}
+	return nil
 }
 
 func ensureServiceAccount(ctx context.Context) error {
