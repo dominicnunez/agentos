@@ -43,10 +43,10 @@ func (Scheduler) RemediationReady(tasks map[core.ID]core.Task) ([]core.Task, err
 		eligible := len(task.DependsOn) > 0
 		for _, dependencyID := range task.DependsOn {
 			dependency := tasks[dependencyID]
-			switch {
-			case dependency.Status == core.TaskCompleted:
+			switch dependency.Status {
+			case core.TaskCompleted:
 				continue
-			case dependency.Status == core.TaskBlocked:
+			case core.TaskBlocked:
 				blockedDependency = true
 			default:
 				eligible = false
