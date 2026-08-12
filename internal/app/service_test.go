@@ -1121,6 +1121,162 @@ func (p *recoveryPlanner) Build(_ context.Context, draft core.IntentDraft, kind 
 	}}, Usage: &usage}, nil
 }
 
+type failingPlanningPlanner struct{ calls int }
+
+func (*failingPlanningPlanner) Descriptor() (planning.Descriptor, bool) {
+	return planning.Descriptor{PromptVersion: "failure-test-v1", Provider: "fake", Model: "fake-model/v1", ExecutionProfileVersion: "v1-fake"}, true
+}
+
+func (p *failingPlanningPlanner) Build(context.Context, core.IntentDraft, core.ExecutionKind) (planning.Result, error) {
+	p.calls++
+	cost := 0.01
+	usage := events.InferenceUsageRecordedPayload{
+		Source: "test", Provider: "fake", Model: "fake-model/v1",
+		InputTokens: 4, OutputTokens: 1, TotalTokens: 5, CostUSD: &cost,
+	}
+	return planning.Result{Usage: &usage}, errors.New("planner returned unusable output")
+}
+
+func TestPlanningFailureDoesNotReplayAndRecordsTelemetryBeforeGoalFailure(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	planner := &failingPlanningPlanner{}
+	service := NewWithModelAndPlanner(events.NewGateway(l), execution.FakeModel{}, planner)
+	submission := Submit{RequestID: "planning-failure", OrganizationID: "org-1", Statement: "perform adaptive work", Kind: core.ExecutionAgent}
+	if _, err := service.Submit(ctx, submission); err == nil {
+		t.Fatal("failed planning attempt was accepted")
+	}
+	if _, err := service.Submit(ctx, submission); err == nil {
+		t.Fatal("failed planning attempt retry was accepted")
+	}
+	if planner.calls != 1 {
+		t.Fatalf("failed planning attempt was invoked %d times", planner.calls)
+	}
+	stream, err := service.ExternalEvents(ctx, submission.OrganizationID, submission.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEventOrder(t, stream, "PLANNING_CONTEXT_MANIFESTED", "INFERENCE_USAGE_RECORDED", "PLANNING_FAILED", "RUN_TELEMETRY_RECORDED", "GOAL_PLANNING_FAILED")
+	counts := make(map[string]int)
+	var run telemetry.Run
+	var failureEventID string
+	for _, event := range stream {
+		counts[event.EventType]++
+		switch event.EventType {
+		case "PLANNING_FAILED":
+			failureEventID = event.EventID
+		case "RUN_TELEMETRY_RECORDED":
+			if err := json.Unmarshal(event.Payload, &run); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, eventType := range []string{"PLANNING_CONTEXT_MANIFESTED", "PLANNING_FAILED", "RUN_TELEMETRY_RECORDED", "GOAL_PLANNING_FAILED"} {
+		if counts[eventType] != 1 {
+			t.Fatalf("%s count=%d stream=%+v", eventType, counts[eventType], stream)
+		}
+	}
+	if run.Outcome != "PLANNING_FAILED" || len(run.ModelUses) != 1 || run.ModelUses[0].TotalTokens != 5 || !slices.Contains(run.CompletionEvidenceEventRefs, failureEventID) {
+		t.Fatalf("planning-failure telemetry=%+v failure_event=%s", run, failureEventID)
+	}
+	snapshot, err := service.state.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Goals) != 1 || len(snapshot.Tasks) != 0 {
+		t.Fatalf("failed planning goals=%+v tasks=%+v", snapshot.Goals, snapshot.Tasks)
+	}
+	for _, state := range snapshot.Goals {
+		if state.Value.Status != "FAILED" {
+			t.Fatalf("failed planning state=%+v", state)
+		}
+	}
+}
+
+func TestDeterministicPlanningRejectionTerminalizesImmediately(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	service := New(events.NewGateway(l))
+	submission := Submit{RequestID: "deterministic-rejection", OrganizationID: "org-1", Statement: "unsupported exact operation", Kind: core.ExecutionDeterministic}
+	if _, err := service.Submit(ctx, submission); err == nil {
+		t.Fatal("unsupported deterministic work was accepted")
+	}
+	if _, err := service.Submit(ctx, submission); err == nil {
+		t.Fatal("terminal planning rejection was accepted on retry")
+	}
+	stream, err := service.ExternalEvents(ctx, submission.OrganizationID, submission.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEventOrder(t, stream, "PLANNING_FAILED", "RUN_TELEMETRY_RECORDED", "GOAL_PLANNING_FAILED")
+	counts := make(map[string]int)
+	var detail planningFailureDetail
+	for _, event := range stream {
+		counts[event.EventType]++
+		if event.EventType == "GOAL_PLANNING_FAILED" {
+			var projection events.ProjectionEventPayload
+			if json.Unmarshal(event.Payload, &projection) != nil || json.Unmarshal(projection.Detail, &detail) != nil {
+				t.Fatal("invalid deterministic planning-failure contract")
+			}
+		}
+	}
+	if counts["PLANNING_FAILED"] != 1 || counts["RUN_TELEMETRY_RECORDED"] != 1 || counts["GOAL_PLANNING_FAILED"] != 1 || detail.Code != "PLANNING_REJECTED" {
+		t.Fatalf("planning events=%+v detail=%+v", counts, detail)
+	}
+}
+
+func TestRecoveryFinishesRecordedPlanningFailureWithoutRewritingItsDecision(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	planner := &failingPlanningPlanner{}
+	store := &failPlanningGoalProjection{SQLite: l}
+	service := NewWithModelAndPlanner(events.NewGateway(store), execution.FakeModel{}, planner)
+	submission := Submit{RequestID: "planning-failure-recovery", OrganizationID: "org-1", Statement: "perform adaptive work", Kind: core.ExecutionAgent}
+	if _, err := service.Submit(ctx, submission); !errors.Is(err, errPlanningGoalProjection) {
+		t.Fatalf("injected terminal projection error=%v", err)
+	}
+	stream, err := service.ExternalEvents(ctx, submission.OrganizationID, submission.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasEventType(stream, "PLANNING_FAILED") || !hasEventType(stream, "RUN_TELEMETRY_RECORDED") || hasEventType(stream, "GOAL_PLANNING_FAILED") {
+		t.Fatalf("unexpected pre-recovery failure state=%+v", stream)
+	}
+	recoveryPlanner := &recoveryPlanner{}
+	recovered := NewWithModelAndPlanner(events.NewGateway(l), execution.FakeModel{}, recoveryPlanner)
+	if _, err := recovered.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if recoveryPlanner.calls != 0 {
+		t.Fatalf("recovery replayed planning %d times", recoveryPlanner.calls)
+	}
+	stream, err = recovered.ExternalEvents(ctx, submission.OrganizationID, submission.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := make(map[string]int)
+	for _, event := range stream {
+		counts[event.EventType]++
+	}
+	for _, eventType := range []string{"PLANNING_FAILED", "RUN_TELEMETRY_RECORDED", "GOAL_PLANNING_FAILED"} {
+		if counts[eventType] != 1 {
+			t.Fatalf("%s count=%d stream=%+v", eventType, counts[eventType], stream)
+		}
+	}
+}
+
 func TestRecoveryDoesNotReplayInterruptedAdaptivePlanning(t *testing.T) {
 	ctx := context.Background()
 	l, err := ledger.Open(":memory:")
@@ -1870,6 +2026,17 @@ func TestLateralMessagesAtActionBoundary(t *testing.T) {
 }
 
 var errProjectionWrite = errors.New("injected task projection failure")
+
+var errPlanningGoalProjection = errors.New("injected planning Goal projection failure")
+
+type failPlanningGoalProjection struct{ *ledger.SQLite }
+
+func (f *failPlanningGoalProjection) AppendProjection(ctx context.Context, draft events.ProjectionDraft) (events.Event, error) {
+	if draft.Event.EventType == "GOAL_PLANNING_FAILED" {
+		return events.Event{}, errPlanningGoalProjection
+	}
+	return f.SQLite.AppendProjection(ctx, draft)
+}
 
 type failTaskProjection struct{ *ledger.SQLite }
 

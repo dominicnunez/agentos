@@ -62,6 +62,19 @@ type planningFailureDetail struct {
 	EvidenceEventRef string `json:"evidence_event_ref,omitempty"`
 }
 
+type planningAttemptError struct {
+	EvidenceEventRef string
+	Err              error
+}
+
+func (e *planningAttemptError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *planningAttemptError) Unwrap() error {
+	return e.Err
+}
+
 type Service struct {
 	permit           chan struct{}
 	gateway          *events.Gateway
@@ -528,12 +541,6 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		if in.RequestID == "" || in.OrganizationID == "" || in.Statement == "" || in.Kind == "" || in.SourcePrincipalID == "" || in.SourcePrincipalKind == "" || in.SourceChannel == "" {
 			return 0, fmt.Errorf("recover planned goal %s: durable submission identity is incomplete", goalID)
 		}
-		if !hasDurablePlan && in.Kind == core.ExecutionAgent && planningAttemptRef != "" {
-			if err := s.failPlanningGoal(ctx, intent.OrganizationID, goalState, "PLANNING_INTERRUPTED", "an adaptive planning attempt ended without a validated durable plan and was not replayed", planningAttemptRef); err != nil {
-				return 0, err
-			}
-			continue
-		}
 		_, _, root, err := s.ensureSubmission(ctx, in)
 		if err != nil {
 			current, loadErr := s.state.Load(ctx)
@@ -541,6 +548,9 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 				return 0, fmt.Errorf("recover Task DAG for goal %s: %w", goalID, err)
 			}
 			currentGoal, ok := current.Goals[goalID]
+			if ok && currentGoal.Value.Status == "FAILED" {
+				continue
+			}
 			if !ok || currentGoal.Value.Status != "ACTIVE" {
 				return 0, fmt.Errorf("recover Task DAG for goal %s: %w", goalID, err)
 			}
@@ -562,13 +572,84 @@ func (s *Service) failPlanningGoal(ctx context.Context, organizationID core.ID, 
 	if organizationID == "" || state.CorrelationID == "" || state.Value.Status != "ACTIVE" || code == "" || reason == "" {
 		return fmt.Errorf("complete active planning-failure state is required")
 	}
+	persistCtx := context.WithoutCancel(ctx)
+	stream, err := s.gateway.Events(persistCtx, state.CorrelationID)
+	if err != nil {
+		return fmt.Errorf("load planning-failure state for goal %s: %w", state.Value.ID, err)
+	}
+	detail := planningFailureDetail{Code: code, Reason: reason, EvidenceEventRef: evidenceRef}
+	failureEvent, found, err := recordedPlanningFailure(stream)
+	if err != nil {
+		return fmt.Errorf("validate planning-failure state for goal %s: %w", state.Value.ID, err)
+	}
+	if found {
+		var recorded planningFailureDetail
+		if failureEvent.OrganizationID != string(organizationID) || failureEvent.CorrelationID != state.CorrelationID || json.Unmarshal(failureEvent.Payload, &recorded) != nil {
+			return fmt.Errorf("planning failure for goal %s crosses its durable trust boundary", state.Value.ID)
+		}
+		// A crash may occur after the failure contract is recorded but before
+		// telemetry or the Goal projection is written. That durable decision is
+		// authoritative; recovery resumes it instead of inventing a new reason.
+		detail = recorded
+		evidenceRef = recorded.EvidenceEventRef
+	} else {
+		failureEvent, err = s.gateway.PublishTrusted(persistCtx, events.TrustedDraft{
+			OrganizationID: string(organizationID), EventType: "PLANNING_FAILED", SourceActorID: "runtime",
+			Payload: detail, CorrelationID: state.CorrelationID,
+		})
+		if err != nil {
+			return fmt.Errorf("persist planning-failure evidence for goal %s: %w", state.Value.ID, err)
+		}
+		stream = append(stream, failureEvent)
+	}
+	recordedRun, telemetryRecorded, err := telemetry.Recorded(stream)
+	if err != nil {
+		return fmt.Errorf("validate planning-failure telemetry for goal %s: %w", state.Value.ID, err)
+	}
+	if telemetryRecorded {
+		if recordedRun.CorrelationID != state.CorrelationID || recordedRun.OrganizationID != string(organizationID) || recordedRun.Outcome != "PLANNING_FAILED" || !slices.Contains(recordedRun.CompletionEvidenceEventRefs, failureEvent.EventID) {
+			return fmt.Errorf("planning-failure telemetry for goal %s conflicts with its durable state", state.Value.ID)
+		}
+	} else {
+		evidenceRefs := []string{failureEvent.EventID}
+		if evidenceRef != "" {
+			evidenceRefs = append(evidenceRefs, evidenceRef)
+		}
+		run, err := telemetry.ProjectPlanningFailure(state.CorrelationID, stream, time.Now().UTC(), evidenceRefs...)
+		if err != nil {
+			return fmt.Errorf("project planning-failure telemetry for goal %s: %w", state.Value.ID, err)
+		}
+		if _, err := s.gateway.PublishTrusted(persistCtx, events.TrustedDraft{
+			OrganizationID: string(organizationID), EventType: "RUN_TELEMETRY_RECORDED", SourceActorID: "runtime",
+			Payload: run, CorrelationID: state.CorrelationID,
+		}); err != nil {
+			return fmt.Errorf("persist planning-failure telemetry for goal %s: %w", state.Value.ID, err)
+		}
+	}
 	goal := state.Value
 	goal.Status = "FAILED"
-	detail := planningFailureDetail{Code: code, Reason: reason, EvidenceEventRef: evidenceRef}
-	if err := s.state.SaveGoal(ctx, organizationID, "GOAL_PLANNING_FAILED", "runtime", state.CorrelationID, state.Version+1, goal, detail); err != nil {
+	if err := s.state.SaveGoal(persistCtx, organizationID, "GOAL_PLANNING_FAILED", "runtime", state.CorrelationID, state.Version+1, goal, detail); err != nil {
 		return fmt.Errorf("persist planning failure for goal %s: %w", goal.ID, err)
 	}
 	return nil
+}
+
+func recordedPlanningFailure(stream []events.Event) (events.Event, bool, error) {
+	var recorded events.Event
+	for _, event := range stream {
+		if event.EventType != "PLANNING_FAILED" {
+			continue
+		}
+		if recorded.EventID != "" {
+			return events.Event{}, false, fmt.Errorf("run contains duplicate planning-failure contracts")
+		}
+		var detail planningFailureDetail
+		if event.EventID == "" || json.Unmarshal(event.Payload, &detail) != nil || detail.Code == "" || detail.Reason == "" {
+			return events.Event{}, false, fmt.Errorf("planning-failure contract is invalid")
+		}
+		recorded = event
+	}
+	return recorded, recorded.EventID != "", nil
 }
 
 type OperatorInput struct {
@@ -1326,6 +1407,22 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 
 	plan, err := s.ensurePlan(ctx, organizationID, correlationID, intent, acceptedDraft, in.Kind)
 	if err != nil {
+		var attemptErr *planningAttemptError
+		if goal.Status == "ACTIVE" {
+			code := "PLANNING_REJECTED"
+			reason := "the accepted Intent did not produce an admissible durable Task graph"
+			evidenceRef := ""
+			if errors.As(err, &attemptErr) {
+				code = "PLANNING_INTERRUPTED"
+				reason = "an adaptive planning attempt ended without a validated durable plan and was not replayed"
+				evidenceRef = attemptErr.EvidenceEventRef
+			}
+			state := snapshot.Goals[goal.ID]
+			failErr := s.failPlanningGoal(ctx, organizationID, state, code, reason, evidenceRef)
+			if failErr != nil {
+				err = errors.Join(err, fmt.Errorf("persist planning failure: %w", failErr))
+			}
+		}
 		return core.Intent{}, core.Goal{}, core.Task{}, err
 	}
 	task, err := s.ensurePlanTasks(ctx, organizationID, correlationID, snapshot, goal, agentID, acceptedDraft, plan, intent.SourcePrincipalKind == core.PrincipalHuman)
@@ -1399,6 +1496,11 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	if err != nil {
 		return core.Plan{}, fmt.Errorf("load durable planning state: %w", err)
 	}
+	if _, failed, err := recordedPlanningFailure(stream); err != nil {
+		return core.Plan{}, fmt.Errorf("validate durable planning failure: %w", err)
+	} else if failed {
+		return core.Plan{}, fmt.Errorf("planning is already durably terminal")
+	}
 	var recorded *core.Plan
 	for _, event := range stream {
 		if event.EventType != "PLAN_CREATED" {
@@ -1428,26 +1530,36 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	if err != nil {
 		return core.Plan{}, err
 	}
-	executionID := core.ID("")
-	if usesModel {
-		attempt := 1
-		for _, event := range stream {
-			if event.EventType == "PLANNING_CONTEXT_MANIFESTED" {
-				attempt++
-			}
+	attemptRef, attempted, attemptStateErr := recordedPlanningAttempt(stream, planID, intent, draft, inputRefs)
+	if attempted {
+		if attemptStateErr == nil {
+			attemptStateErr = fmt.Errorf("adaptive planning attempt has no validated durable plan")
 		}
-		executionID = core.ID(fmt.Sprintf("planning-%s-attempt-%d", planID, attempt))
+		return core.Plan{}, &planningAttemptError{EvidenceEventRef: attemptRef, Err: attemptStateErr}
+	}
+	executionID := core.ID("")
+	planningContextRef := ""
+	if usesModel {
+		executionID = core.ID(fmt.Sprintf("planning-%s-attempt-1", planID))
 		contextPayload := events.PlanningContextPayload{
 			PlanID: string(planID), IntentID: string(intent.ID), IntentFingerprint: draft.Fingerprint,
 			PromptVersion: descriptor.PromptVersion, Provider: descriptor.Provider, Model: descriptor.Model,
 			ExecutionProfileVersion: descriptor.ExecutionProfileVersion, InputEventRefs: inputRefs,
 		}
-		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
+		contextEvent, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
 			OrganizationID: string(organizationID), EventType: "PLANNING_CONTEXT_MANIFESTED", SourceActorID: "runtime",
 			SourceExecutionID: string(executionID), TaskID: "task-" + correlationID, Payload: contextPayload, CorrelationID: correlationID,
-		}); err != nil {
+		})
+		if err != nil {
 			return core.Plan{}, fmt.Errorf("persist planning context: %w", err)
 		}
+		planningContextRef = contextEvent.EventID
+	}
+	attemptFailure := func(err error) error {
+		if planningContextRef == "" {
+			return err
+		}
+		return &planningAttemptError{EvidenceEventRef: planningContextRef, Err: err}
 	}
 
 	turnCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.modelTurnTimeout)
@@ -1455,20 +1567,20 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	cancel()
 	if result.Usage != nil {
 		if !usesModel || !result.Usage.Valid() || result.Usage.Provider != descriptor.Provider || result.Usage.Model != descriptor.Model {
-			return core.Plan{}, fmt.Errorf("planner returned usage outside its declared model boundary")
+			return core.Plan{}, attemptFailure(fmt.Errorf("planner returned usage outside its declared model boundary"))
 		}
 		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
 			OrganizationID: string(organizationID), EventType: "INFERENCE_USAGE_RECORDED", SourceActorID: "runtime",
 			SourceExecutionID: string(executionID), TaskID: "task-" + correlationID, Payload: result.Usage, CorrelationID: correlationID,
 		}); err != nil {
-			return core.Plan{}, fmt.Errorf("persist planning inference usage: %w", err)
+			return core.Plan{}, attemptFailure(fmt.Errorf("persist planning inference usage: %w", err))
 		}
 	}
 	if buildErr != nil {
-		return core.Plan{}, fmt.Errorf("build bounded Task DAG: %w", buildErr)
+		return core.Plan{}, attemptFailure(fmt.Errorf("build bounded Task DAG: %w", buildErr))
 	}
 	if usesModel && result.Usage == nil {
-		return core.Plan{}, fmt.Errorf("model planner omitted inference usage")
+		return core.Plan{}, attemptFailure(fmt.Errorf("model planner omitted inference usage"))
 	}
 	plan := core.Plan{
 		ID: planID, IntentID: intent.ID, IntentFingerprint: draft.Fingerprint, Version: 1,
@@ -1476,18 +1588,39 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	}
 	plan.Fingerprint, err = core.FingerprintPlan(plan)
 	if err != nil {
-		return core.Plan{}, fmt.Errorf("fingerprint durable plan: %w", err)
+		return core.Plan{}, attemptFailure(fmt.Errorf("fingerprint durable plan: %w", err))
 	}
 	if err := validateDurablePlan(plan, planID, intent, draft, requestedKind); err != nil {
-		return core.Plan{}, err
+		return core.Plan{}, attemptFailure(err)
 	}
 	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
 		OrganizationID: string(organizationID), EventType: "PLAN_CREATED", SourceActorID: "runtime",
 		SourceExecutionID: string(executionID), TaskID: "task-" + correlationID, Payload: plan, CorrelationID: correlationID,
 	}); err != nil {
-		return core.Plan{}, fmt.Errorf("persist validated Task DAG: %w", err)
+		return core.Plan{}, attemptFailure(fmt.Errorf("persist validated Task DAG: %w", err))
 	}
 	return plan, nil
+}
+
+func recordedPlanningAttempt(stream []events.Event, planID core.ID, intent core.Intent, draft core.IntentDraft, inputRefs []string) (string, bool, error) {
+	attemptRef := ""
+	for _, event := range stream {
+		if event.EventType != "PLANNING_CONTEXT_MANIFESTED" {
+			continue
+		}
+		if attemptRef != "" {
+			return attemptRef, true, fmt.Errorf("durable planning state contains multiple unfinished attempts")
+		}
+		attemptRef = event.EventID
+		var manifest events.PlanningContextPayload
+		if event.EventID == "" || event.SourceExecutionID == "" || event.TaskID != "task-"+event.CorrelationID ||
+			json.Unmarshal(event.Payload, &manifest) != nil || manifest.PlanID != string(planID) || manifest.IntentID != string(intent.ID) ||
+			manifest.IntentFingerprint != draft.Fingerprint || manifest.PromptVersion == "" || manifest.Provider == "" || manifest.Model == "" ||
+			manifest.ExecutionProfileVersion == "" || !slices.Equal(manifest.InputEventRefs, inputRefs) {
+			return attemptRef, true, fmt.Errorf("durable planning context does not match the accepted Intent")
+		}
+	}
+	return attemptRef, attemptRef != "", nil
 }
 
 func planningInputRefs(stream []events.Event, intent core.Intent, draft core.IntentDraft) ([]string, error) {

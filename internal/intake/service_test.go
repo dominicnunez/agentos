@@ -432,6 +432,11 @@ func TestIntentNormalizationManifestsModelUseAndReplaysWithoutInference(t *testi
 	if err != nil || replayed.Intent == nil || replayed.Intent.Fingerprint != first.Intent.Fingerprint {
 		t.Fatalf("replay=%+v err=%v", replayed, err)
 	}
+	changedRoute := message
+	changedRoute.RequestedKind = core.ExecutionHuman
+	if _, err := service.Handle(ctx, principal, changedRoute); !errors.Is(err, ErrConflict) {
+		t.Fatalf("same message id changed its requested execution kind: %v", err)
+	}
 	stream = externalStream(t, store, message.ConversationID)
 	if countEvents(stream, "INTENT_NORMALIZATION_CONTEXT_MANIFESTED") != 1 || countEvents(stream, "INFERENCE_USAGE_RECORDED") != 1 || countEvents(stream, "INTENT_DRAFTED") != 1 {
 		t.Fatalf("replay repeated model work: %+v", stream)

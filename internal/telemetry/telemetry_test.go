@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 	"time"
 
@@ -52,6 +53,35 @@ func TestRunTelemetryIsComplete(t *testing.T) {
 	}
 	if len(run.CompletionEvidenceEventRefs) != 4 || len(run.CompletionEvidenceArtifactRefs) != 1 || run.CompletionEvidenceArtifactRefs[0] != "artifact-1" {
 		t.Fatalf("completion evidence=%+v", run)
+	}
+}
+
+func TestPlanningFailureTelemetryCapturesUsageTimingAndEvidence(t *testing.T) {
+	started := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	cost := 0.025
+	stream := []events.Event{
+		testEvent(t, "e1", "INTENT_CONFIRMED", "task-request-1", "", started, map[string]string{"status": "accepted"}),
+		testEvent(t, "e2", "PLANNING_CONTEXT_MANIFESTED", "task-request-1", "planning-1", started.Add(time.Second), events.PlanningContextPayload{
+			PlanID: "plan-request-1", IntentID: "intent-request-1", IntentFingerprint: "fingerprint",
+			PromptVersion: "prompt-v1", Provider: "provider", Model: "model", ExecutionProfileVersion: "profile-v1",
+		}),
+		testEvent(t, "e3", "INFERENCE_USAGE_RECORDED", "task-request-1", "planning-1", started.Add(2*time.Second), events.InferenceUsageRecordedPayload{
+			Source: "provider_response", Provider: "provider", Model: "model", InputTokens: 10, OutputTokens: 2, TotalTokens: 12, CostUSD: &cost,
+		}),
+		testEvent(t, "e4", "PLANNING_FAILED", "", "", started.Add(3*time.Second), map[string]string{"code": "PLANNING_INTERRUPTED", "reason": "invalid output"}),
+	}
+	run, err := ProjectPlanningFailure("request-1", stream, started.Add(4*time.Second), "e4", "e2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Outcome != "PLANNING_FAILED" || run.WallTimeMilliseconds != 4_000 || run.StartedAt != started || run.FinishedAt != started.Add(4*time.Second) {
+		t.Fatalf("planning-failure timing=%+v", run)
+	}
+	if len(run.ModelUses) != 1 || run.ModelUses[0].ExecutionID != "planning-1" || run.ModelUses[0].TotalTokens != 12 || !run.CostComplete || run.TotalCostUSD != cost {
+		t.Fatalf("planning-failure model usage=%+v run=%+v", run.ModelUses, run)
+	}
+	if !slices.Equal(run.CompletionEvidenceEventRefs, []string{"e4", "e2"}) {
+		t.Fatalf("planning-failure evidence=%+v", run.CompletionEvidenceEventRefs)
 	}
 }
 

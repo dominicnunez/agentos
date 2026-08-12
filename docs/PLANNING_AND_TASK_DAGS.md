@@ -38,12 +38,18 @@ disconnect or expired request deadline cannot cancel outcome persistence and
 strand a Task as `RUNNING`. The scheduler reloads authoritative state after
 each selected Task before choosing more work.
 
-Recovery resumes planning only when the ledger proves that no adaptive
-planning context was manifested. A validated durable Plan is materialized
-without another inference call. An interrupted model-planning attempt is not
-replayed: the Goal records `GOAL_PLANNING_FAILED` with a stable code and becomes
-terminal so accepted work cannot remain silently active or duplicate provider
-cost.
+Planning resumes only when the ledger proves that no adaptive planning context
+was manifested. A validated durable Plan is materialized without another
+inference call. Once a model context exists, every error, timeout, malformed
+result, or failed Plan write is a non-replayable planning attempt in both the
+running process and startup recovery. Agent OS durably records the failure,
+then `RUN_TELEMETRY_RECORDED` with timing, available provider usage, and exact
+failure evidence, and only then terminalizes the Goal through
+`GOAL_PLANNING_FAILED`. A crash between those steps resumes the existing
+failure decision instead of invoking the provider or inventing a different
+reason. Planning rejected before a model turn, including an unsupported exact
+operation, follows the same telemetry-before-terminal transition and is not
+silently left active.
 
 A failed dependency deterministically terminalizes every affected pending or
 blocked dependent through `TASK_DEPENDENCY_FAILED`; failure then propagates to

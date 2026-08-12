@@ -881,8 +881,11 @@ func replayedIntentView(conversationID string, principal Principal, message Mess
 		if payload.MessageID != message.MessageID {
 			continue
 		}
-		if payload.Text != message.Text || payload.SourcePrincipalID != principal.ID || payload.SourcePrincipalKind != string(principal.Kind) || payload.SourceChannel != principal.Channel {
+		if payload.SourcePrincipalID != principal.ID || payload.SourcePrincipalKind != string(principal.Kind) || payload.SourceChannel != principal.Channel {
 			return View{}, false, fmt.Errorf("%w: intake replay does not match its authenticated source", ErrForbidden)
+		}
+		if payload.Text != message.Text || payload.RequestedExecutionKind != message.RequestedKind {
+			return View{}, false, fmt.Errorf("%w: intake message id is already bound to different input", ErrConflict)
 		}
 		found = true
 	}
