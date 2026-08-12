@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/dominicnunez/agentos/internal/core"
 )
 
 const SchemaVersion = 2
@@ -49,6 +51,14 @@ type OperatorInputReceivedPayload struct {
 	SourcePrincipalID   string `json:"source_principal_id"`
 	SourcePrincipalKind string `json:"source_principal_kind"`
 	SourceChannel       string `json:"source_channel"`
+}
+
+type HumanTaskCompletionSubmittedPayload struct {
+	MessageID         string                  `json:"message_id"`
+	Fields            map[string]string       `json:"fields"`
+	Artifacts         []core.ArtifactEvidence `json:"artifacts,omitempty"`
+	SourcePrincipalID string                  `json:"source_principal_id"`
+	SourceChannel     string                  `json:"source_channel"`
 }
 
 type OperatorWorkAcceptedPayload struct {

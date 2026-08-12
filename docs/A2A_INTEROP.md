@@ -9,13 +9,24 @@ granted to that authenticated principal.
 
 ## Authorized external Agents
 
-A2A is disabled unless `AGENTOS_A2A_ACTORS_FILE` names a valid, reviewed actor
-registry. Each actor entry binds a unique ID and organization to a role, work
+A2A is disabled unless `a2a.actors_file` in the Agent OS configuration names a
+valid, reviewed actor registry. The registry, server TLS certificate, and
+server TLS private key must be regular, non-symlink files confined beneath the
+protected Agent OS configuration directory and owned by the installation
+authority. Each actor entry binds a unique ID and organization to a role, work
 visibility scope, credential secret reference, deployment review reference,
 expiration, concurrency ceiling, and per-minute request ceiling. The registry
 contains no raw credential. At startup, the adapter resolves each secret,
 validates that credentials and actor IDs are unique, and retains only a
 credential digest.
+
+For service installations, each `token_ref` names a separately provisioned
+systemd encrypted credential beneath the Agent OS configuration directory.
+The generated service unit verifies those sources and imports the reviewed
+registry, TLS material, and exact token references into systemd's private
+runtime credential directory. Missing, duplicated, unsafe, over-permissive,
+misowned, or provider-conflicting sources prevent installation or startup; raw
+bearer values never belong in the registry JSON.
 
 The deterministic role profiles are:
 
@@ -34,7 +45,7 @@ trusted configuration; an A2A message cannot claim or alter it.
 `OWN` scope restricts status, results, and continuation to work initially
 submitted by the same registered actor. `ORGANIZATION` scope deliberately
 allows the granted read/input capabilities across that actor's organization.
-Use `OWN` unless cross-operator collaboration is an explicit human policy
+Use `OWN` unless cross-operator collaboration is an explicit user policy
 decision. Unknown, suspended, revoked, expired, over-rate, and over-concurrency
 actors fail closed before their content reaches intake.
 
@@ -57,7 +68,7 @@ The gateway exposes only the A2A v1.0 surface:
   `taskId` is rejected.
 
 The A2A adapter translates into the same principal-aware Intake Service used by
-the direct Human Gateway. This does not make the first-party human API part of
+the private user gateway. This does not make the first-party user API part of
 A2A and does not weaken A2A protocol isolation.
 
 Execution-kind metadata is an untrusted routing hint. It grants no identity,
@@ -80,9 +91,8 @@ wire and security boundaries plus a passing interoperability job before merge.
 
 CI uses the official A2A Go client for Agent Card discovery, authenticated
 submission, generated contexts, `GetTask`, deterministic and adaptive work,
-blocked-task continuation, restart, and unsupported-method checks. A separate
-dependency-free live-process fixture keeps the executable boundary test small.
-Go conformance tests also cover status/result capability separation,
+blocked-task continuation, and unsupported-method checks. Go conformance tests
+also cover status/result capability separation,
 organization isolation, replay conflicts, and authority-field rejection.
 Adversarial coverage checks weak or duplicate credentials, unknown
 roles/config fields, actor expiry/revocation, request limits, and own-work

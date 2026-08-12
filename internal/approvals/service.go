@@ -41,6 +41,8 @@ var decisionLevels = map[string]struct{}{
 	"CRITICAL": {},
 }
 
+const maximumInboxDecisionContexts = 1000
+
 // RequiresHumanApproval recognizes the closed V1 consequence-boundary set.
 // Unknown non-empty boundaries fail closed instead of silently becoming
 // unprotected work.
@@ -88,6 +90,10 @@ type Store interface {
 	Records(context.Context, string, string) ([][]byte, error)
 }
 
+type latestRecordStore interface {
+	LatestRecords(context.Context, string) ([][]byte, error)
+}
+
 type Notifier interface {
 	Notify(context.Context, core.HumanApproval) error
 }
@@ -112,6 +118,19 @@ func (a StaticAuthorizer) CanDecide(_ context.Context, approval core.HumanApprov
 		}
 	}
 	return false
+}
+
+// OwnerAuthorizer is the V1 local-owner policy. The transport must first prove
+// the configured Linux UID; this authorizer then confines decisions to that
+// owner and organization. Exact effect, boundary, risk, expiry, and state are
+// still revalidated by Service at decision time.
+type OwnerAuthorizer struct {
+	OrganizationID core.ID
+	HumanID        core.ID
+}
+
+func (a OwnerAuthorizer) CanDecide(_ context.Context, approval core.HumanApproval, humanID core.ID) bool {
+	return a.OrganizationID != "" && a.HumanID != "" && approval.OrganizationID == a.OrganizationID && humanID == a.HumanID
 }
 
 type Service struct {
@@ -302,6 +321,52 @@ func (s *Service) DecisionContext(ctx context.Context, approvalID, humanID core.
 		return DecisionContext{}, err
 	}
 	return DecisionContext{Approval: approval, Effect: obligation}, nil
+}
+
+// PendingDecisionContexts returns current, exactly authorized approval work for
+// the local inbox. Every mutation still reloads the individual record.
+func (s *Service) PendingDecisionContexts(ctx context.Context, humanID core.ID) ([]DecisionContext, error) {
+	store, ok := s.store.(latestRecordStore)
+	if !ok {
+		return nil, fmt.Errorf("approval inbox is unavailable")
+	}
+	bodies, err := store.LatestRecords(ctx, "approval")
+	if err != nil {
+		return nil, err
+	}
+	capacity := len(bodies)
+	if capacity > maximumInboxDecisionContexts {
+		capacity = maximumInboxDecisionContexts
+	}
+	contexts := make([]DecisionContext, 0, capacity)
+	for _, body := range bodies {
+		var approval core.HumanApproval
+		if err := json.Unmarshal(body, &approval); err != nil {
+			return nil, fmt.Errorf("decode approval inbox: %w", err)
+		}
+		switch approval.Status {
+		case core.ApprovalPending, core.ApprovalNotified, core.ApprovalAcknowledged, core.ApprovalPendingDecision:
+		case core.ApprovalApproved, core.ApprovalDenied:
+			continue
+		default:
+			continue
+		}
+		if err := s.authorizeDecision(ctx, humanID, approval); err != nil {
+			continue
+		}
+		if err := s.validateUnexpired(approval); err != nil {
+			continue
+		}
+		effect, err := s.preparedEffect(ctx, approval)
+		if err != nil {
+			return nil, err
+		}
+		contexts = append(contexts, DecisionContext{Approval: approval, Effect: effect})
+		if len(contexts) > maximumInboxDecisionContexts {
+			return nil, fmt.Errorf("approval inbox exceeds the V1 safety limit")
+		}
+	}
+	return contexts, nil
 }
 
 func (s *Service) load(ctx context.Context, approvalID core.ID) (core.HumanApproval, int, error) {

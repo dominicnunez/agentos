@@ -12,6 +12,7 @@
   ],
   "rules": {
     "complexity": "off",
+    "duplicate-code": "off",
     "test-only-dependency": "off"
   }
 }

@@ -40,27 +40,22 @@ completion candidate, then leaves the task `BLOCKED` when no independent
 verifier exists for its CompletionContract. It emits
 `COMPLETION_REVIEW_REQUESTED` instead of converting nonempty model text into
 deterministic proof. The output can become verified completion only through an
-authenticated Human `REVIEWER` decision bound to the exact recorded evidence.
+authenticated user decision bound to the exact recorded evidence.
 That path is described in [Completion review](COMPLETION_REVIEW.md); it records
 `HUMAN_JUDGMENT` and never changes the ToolOutcome into deterministic proof.
 
-## Configuration
+## Setup
 
-Select the provider with three exact settings:
+Select `OpenAI API` during `agentos` setup. The key is entered through a
+no-echo terminal prompt. Agent OS uses it to retrieve the account's available
+dated model snapshots, presents those snapshots in a scrollable picker, and
+verifies the selected model without making an inference request.
 
-- `AGENTOS_MODEL_PROVIDER=openai-api`
-- `AGENTOS_OPENAI_API_KEY_REF` set to the name of a server-owned environment
-  secret, normally `OPENAI_API_KEY`
-- `AGENTOS_OPENAI_MODEL` set to an exact pinned model snapshot
-
-For example:
-
-```powershell
-$env:AGENTOS_MODEL_PROVIDER = "openai-api"
-$env:AGENTOS_OPENAI_API_KEY_REF = "OPENAI_API_KEY"
-$env:OPENAI_API_KEY = "<project-scoped key>"
-$env:AGENTOS_OPENAI_MODEL = "<reviewed model snapshot>"
-```
+The key is then encrypted with systemd credentials. Configuration stores only
+the fixed credential reference and selected dated model snapshot. The key is
+not placed in an environment file, command line, workspace, logs, or JSON
+configuration. Agent OS refuses to run if the encrypted credential or exact
+snapshot is missing.
 
 Use a project-scoped service-account key with only the required model access;
 do not use an organization admin key. OpenAI recommends server-side key loading
@@ -76,8 +71,8 @@ Enabling it for a deployment requires the established approvals for:
   and
 - every sensitive-data class that will cross from Agent OS to OpenAI.
 
-An unanswered decision fails closed: keep the fake or confined subscription
-provider selected. `store: false` prevents application-state storage of the
+An unanswered decision fails closed: keep the confined subscription provider
+selected. `store: false` prevents application-state storage of the
 Response object, but it is not a promise of zero provider retention. Review the
 current OpenAI
 [data controls](https://platform.openai.com/docs/models/default-usage-policies-by-endpoint)

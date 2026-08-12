@@ -8,10 +8,14 @@ packages:
 modules:
   - name: app
     path: internal/app
+  - name: artifacts
+    path: internal/artifacts
   - name: approvals
     path: internal/approvals
   - name: audit
     path: internal/audit
+  - name: bootstrap
+    path: internal/bootstrap
   - name: authority
     path: internal/authority
   - name: completion
@@ -61,6 +65,12 @@ policy:
         module: app
       to:
         modules: [completion, core, events, execution, projections, telemetry, workflow]
+
+    - name: artifact-domain
+      from:
+        module: artifacts
+      to:
+        module: core
 
     - name: approval-domain
       from:
@@ -114,7 +124,7 @@ policy:
       from:
         module: gateway
       to:
-        modules: [approvals, core, intake, trustconfig]
+        modules: [approvals, artifacts, core, intake, trustconfig]
 
     - name: operator-intake
       from:
@@ -133,6 +143,12 @@ policy:
         module: ledger
       to:
         modules: [approvals, authority, core, events]
+
+    - name: event-contract-domain
+      from:
+        module: events
+      to:
+        module: core
 
     - name: projection-domain
       from:

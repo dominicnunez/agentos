@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/completion"
@@ -291,6 +292,23 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 			if err != nil {
 				return RecoveryResult{}, err
 			}
+			completionEvent, completionPayload, completionFound, err := humanCompletionForTask(stream, state.Value.ID)
+			if err != nil {
+				return RecoveryResult{}, err
+			}
+			if completionFound {
+				if state.Value.Status == core.TaskPending {
+					result.PendingFound++
+				}
+				if state.Value.Status == core.TaskRunning {
+					result.RunningRecovered++
+				}
+				if err := s.continueHumanCompletionTask(ctx, organizationID, state.Value.ID, state.CorrelationID, completionEvent, completionPayload); err != nil {
+					return RecoveryResult{}, fmt.Errorf("recover user completion for task %s: %w", state.Value.ID, err)
+				}
+				continuedInputs++
+				continue
+			}
 			inputEvent, _, found, err := externalInputForTask(stream, state.Value.ID)
 			if err != nil {
 				return RecoveryResult{}, err
@@ -365,6 +383,200 @@ type OperatorInput struct {
 	Text           string
 }
 
+type HumanCompletionInput struct {
+	OrganizationID string
+	PrincipalID    string
+	SourceChannel  string
+	RequestID      string
+	TaskID         string
+	Submission     core.HumanTaskSubmission
+}
+
+func (s *Service) ProvideHumanCompletion(ctx context.Context, input HumanCompletionInput) error {
+	if err := s.acquire(ctx); err != nil {
+		return err
+	}
+	defer s.release()
+	if input.OrganizationID == "" || input.PrincipalID == "" || input.SourceChannel != "HUMAN_DIRECT" || input.RequestID == "" || input.TaskID == "" || input.Submission.MessageID == "" {
+		return fmt.Errorf("organization, local user principal, request, task, and submission identity are required")
+	}
+	snapshot, err := s.state.Load(ctx)
+	if err != nil {
+		return err
+	}
+	correlationID, err := s.requireExternalWorkCorrelation(ctx, input.OrganizationID, input.RequestID)
+	if err != nil {
+		return err
+	}
+	state, ok := snapshot.Tasks[core.ID(input.TaskID)]
+	if !ok || state.CorrelationID != correlationID || state.Value.ExecutionKind != core.ExecutionHuman || state.Value.CompletionContract == nil {
+		return fmt.Errorf("task is not a structured user task for this request")
+	}
+	actualOrganizationID, err := taskOrganization(snapshot, state.Value)
+	if err != nil || actualOrganizationID != core.ID(input.OrganizationID) {
+		return fmt.Errorf("task is not mapped to this request and organization")
+	}
+	result := s.completion.EvaluateHumanTask(*state.Value.CompletionContract, input.Submission)
+	if !result.Complete {
+		return fmt.Errorf("user task completion contract is not satisfied: %s", strings.Join(result.Reasons, "; "))
+	}
+	for _, artifact := range input.Submission.Artifacts {
+		if artifact.Origin != input.PrincipalID {
+			return fmt.Errorf("user task artifact origin does not match the authenticated principal")
+		}
+	}
+	payload := events.HumanTaskCompletionSubmittedPayload{
+		MessageID: input.Submission.MessageID, Fields: input.Submission.Fields, Artifacts: input.Submission.Artifacts,
+		SourcePrincipalID: input.PrincipalID, SourceChannel: input.SourceChannel,
+	}
+	stream, err := s.gateway.Events(ctx, correlationID)
+	if err != nil {
+		return err
+	}
+	completionEvent, existing, found, err := humanCompletionForTask(stream, state.Value.ID)
+	if err != nil {
+		return err
+	}
+	if found {
+		existingBody, _ := json.Marshal(existing)
+		payloadBody, _ := json.Marshal(payload)
+		if completionEvent.SourceActorID != input.PrincipalID || string(existingBody) != string(payloadBody) {
+			return fmt.Errorf("task already has a different durable user completion")
+		}
+	} else {
+		if state.Value.Status != core.TaskBlocked {
+			return fmt.Errorf("task is not blocked awaiting structured user completion")
+		}
+		completionEvent, err = s.gateway.PublishTrusted(ctx, events.TrustedDraft{
+			OrganizationID: input.OrganizationID, EventType: "HUMAN_TASK_COMPLETION_SUBMITTED",
+			SourceActorID: input.PrincipalID, TaskID: input.TaskID, CorrelationID: correlationID,
+			ArtifactRefs: artifactRefs(input.Submission.Artifacts), Payload: payload,
+		})
+		if err != nil {
+			return err
+		}
+	}
+	if err := s.continueHumanCompletionTask(ctx, actualOrganizationID, state.Value.ID, correlationID, completionEvent, payload); err != nil {
+		return err
+	}
+	return s.reconcileGoals(ctx)
+}
+
+func (s *Service) continueHumanCompletionTask(ctx context.Context, organizationID, taskID core.ID, correlationID string, completionEvent events.Event, payload events.HumanTaskCompletionSubmittedPayload) error {
+	if completionEvent.EventID == "" || completionEvent.EventType != "HUMAN_TASK_COMPLETION_SUBMITTED" || core.ID(completionEvent.TaskID) != taskID {
+		return fmt.Errorf("valid durable user completion event is required")
+	}
+	for {
+		snapshot, err := s.state.Load(ctx)
+		if err != nil {
+			return err
+		}
+		state, ok := snapshot.Tasks[taskID]
+		if !ok || state.CorrelationID != correlationID || state.Value.ExecutionKind != core.ExecutionHuman || state.Value.CompletionContract == nil {
+			return fmt.Errorf("user completion task is invalid")
+		}
+		task := state.Value
+		switch task.Status {
+		case core.TaskCompleted:
+			return nil
+		case core.TaskFailed:
+			return fmt.Errorf("user completion cannot advance failed task %s", task.ID)
+		case core.TaskBlocked:
+			task.Status = core.TaskPending
+			detail := map[string]string{"reason": "structured user completion received", "completion_event_ref": completionEvent.EventID}
+			if err := s.state.SaveTask(ctx, organizationID, "TASK_RESUMED", "runtime", correlationID, state.Version+1, task, detail); err != nil {
+				return err
+			}
+		case core.TaskPending:
+			task.Status = core.TaskRunning
+			detail := map[string]string{"mode": "STRUCTURED_HUMAN_COMPLETION", "completion_event_ref": completionEvent.EventID}
+			if err := s.state.SaveTask(ctx, organizationID, "EXECUTION_STARTED", "runtime", correlationID, state.Version+1, task, detail); err != nil {
+				return err
+			}
+		case core.TaskRunning:
+			return s.finishHumanCompletionTask(ctx, organizationID, state, completionEvent, payload)
+		default:
+			return fmt.Errorf("user completion cannot advance task in status %s", task.Status)
+		}
+	}
+}
+
+func (s *Service) finishHumanCompletionTask(ctx context.Context, organizationID core.ID, state projections.Versioned[core.Task], completionEvent events.Event, payload events.HumanTaskCompletionSubmittedPayload) error {
+	task := state.Value
+	contract := *task.CompletionContract
+	submission := core.HumanTaskSubmission{MessageID: payload.MessageID, Fields: payload.Fields, Artifacts: payload.Artifacts}
+	complete := s.completion.EvaluateHumanTask(contract, submission)
+	if !complete.Complete {
+		return fmt.Errorf("durable user completion no longer satisfies its contract")
+	}
+	executionID := core.ID("human-completion-" + completionEvent.EventID)
+	now := time.Now().UTC()
+	outcome := core.ToolOutcome{
+		ToolInvocationID: core.ID("human-task-" + completionEvent.EventID), ToolID: "human.task-completion", ToolVersion: "v1",
+		Status: core.OutcomeSucceeded, ObservedEffect: map[string]any{"status": "structured user completion persisted", "completion_event_ref": completionEvent.EventID},
+		PostconditionStatus: core.PostconditionVerified, Retryability: core.NotRetryable,
+		ArtifactRefs: artifactRefs(payload.Artifacts), StartedAt: now, FinishedAt: now,
+	}
+	stream, err := s.gateway.Events(ctx, state.CorrelationID)
+	if err != nil {
+		return err
+	}
+	if existing, found, err := continuationEvent(stream, "TOOL_OUTCOME_RECORDED", task.ID, executionID); err != nil {
+		return err
+	} else if found {
+		if err := json.Unmarshal(existing.Payload, &outcome); err != nil || outcome.ToolID != "human.task-completion" || outcome.Status != core.OutcomeSucceeded {
+			return fmt.Errorf("durable user completion outcome is invalid")
+		}
+	} else if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: outcome, CorrelationID: state.CorrelationID}); err != nil {
+		return err
+	}
+	if err := s.publishContinuationEventIfMissing(ctx, stream, organizationID, task.ID, state.CorrelationID, executionID, "EXECUTION_FINISHED", map[string]any{"status": outcome.Status}); err != nil {
+		return err
+	}
+	if err := s.publishContinuationEventIfMissing(ctx, stream, organizationID, task.ID, state.CorrelationID, executionID, "RESULT_PUBLISHED", events.ResultPublishedPayload{Summary: "Structured user completion accepted.", ArtifactRefs: outcome.ArtifactRefs}); err != nil {
+		return err
+	}
+	if err := s.publishContinuationEventIfMissing(ctx, stream, organizationID, task.ID, state.CorrelationID, executionID, "CANDIDATE_COMPLETE", map[string]any{"completion_event_ref": completionEvent.EventID}); err != nil {
+		return err
+	}
+	detail := completionDetail{Contract: contract, Result: complete}
+	if _, found, err := continuationEvent(stream, "COMPLETION_VERIFIED", task.ID, executionID); err != nil {
+		return err
+	} else if !found {
+		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "COMPLETION_VERIFIED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: detail, CorrelationID: state.CorrelationID}); err != nil {
+			return err
+		}
+	}
+	task.Status = core.TaskCompleted
+	return s.state.SaveTask(ctx, organizationID, "TASK_VERIFIED_COMPLETE", "runtime", state.CorrelationID, state.Version+1, task, detail)
+}
+
+func humanCompletionForTask(stream []events.Event, taskID core.ID) (events.Event, events.HumanTaskCompletionSubmittedPayload, bool, error) {
+	var found events.Event
+	var payload events.HumanTaskCompletionSubmittedPayload
+	for _, event := range stream {
+		if event.EventType != "HUMAN_TASK_COMPLETION_SUBMITTED" || core.ID(event.TaskID) != taskID {
+			continue
+		}
+		if found.EventID != "" {
+			return events.Event{}, events.HumanTaskCompletionSubmittedPayload{}, false, fmt.Errorf("task has multiple durable user completion events")
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.MessageID == "" || payload.SourcePrincipalID != event.SourceActorID || payload.SourceChannel != "HUMAN_DIRECT" {
+			return events.Event{}, events.HumanTaskCompletionSubmittedPayload{}, false, fmt.Errorf("durable user completion event is invalid")
+		}
+		found = event
+	}
+	return found, payload, found.EventID != "", nil
+}
+
+func artifactRefs(artifacts []core.ArtifactEvidence) []string {
+	refs := make([]string, len(artifacts))
+	for index, artifact := range artifacts {
+		refs[index] = artifact.Ref
+	}
+	return refs
+}
+
 func (s *Service) ProvideOperatorInput(ctx context.Context, input OperatorInput) error {
 	if err := s.acquire(ctx); err != nil {
 		return err
@@ -398,7 +610,7 @@ func (s *Service) ProvideOperatorInput(ctx context.Context, input OperatorInput)
 		return fmt.Errorf("task is not mapped to this external request and organization")
 	}
 	if state.Value.ExecutionKind != core.ExecutionHuman {
-		return fmt.Errorf("external input can continue only a HUMAN task")
+		return fmt.Errorf("external input can continue only a user-operated task")
 	}
 	stream, err := s.gateway.Events(ctx, correlationID)
 	if err != nil {
@@ -876,6 +1088,14 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 		TaskContractVersion:  "1",
 		Status:               core.TaskPending,
 	}
+	if in.Kind == core.ExecutionHuman && in.SourcePrincipalKind == core.PrincipalHuman {
+		task.CompletionContract = &core.CompletionContract{
+			TaskID: task.ID, TaskVersion: 1,
+			RequiredFields: []core.CompletionFieldRequirement{{
+				Name: "response", Description: "the information requested by the user task", MinBytes: 1, MaxBytes: 64 << 10,
+			}},
+		}
+	}
 	if existing, ok := snapshot.Tasks[task.ID]; ok {
 		if existing.Value.GoalID != goal.ID || existing.Value.Description != in.Statement || existing.Value.ExecutionKind != in.Kind {
 			return core.Intent{}, core.Goal{}, core.Task{}, fmt.Errorf("request task projection does not match submitted work")
@@ -938,9 +1158,9 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		handler = s.agent
 	case core.ExecutionHuman:
 		task.Status = core.TaskBlocked
-		detail := blockedDetail("human task is awaiting authorized external input", "human-provided task input", "the runtime cannot invent or infer a human response")
+		detail := blockedDetail("user task is awaiting structured completion", "every field and artifact required by its CompletionContract", "the runtime cannot invent, infer, or waive required user evidence")
 		if err := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); err != nil {
-			return taskRun{}, fmt.Errorf("persist input-required HUMAN task %s: %w", task.ID, err)
+			return taskRun{}, fmt.Errorf("persist input-required user task %s: %w", task.ID, err)
 		}
 		return taskRun{}, nil
 	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
@@ -1115,7 +1335,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			Missing:       "authorized independent completion judgment against the task contract",
 			WhyNeeded:     "model output is work content and cannot certify its own completion",
 			WorkCompleted: "the provider output, runtime outcome, and completion candidate were durably recorded",
-			RemainingWork: "evaluate the recorded candidate using an approved independent or human judgment path",
+			RemainingWork: "evaluate the recorded candidate using an approved independent or user judgment path",
 			EvidenceRefs:  append([]string(nil), request.EvidenceRefs...),
 		}
 		running := projections.Versioned[core.Task]{Version: state.Version + 1, CorrelationID: state.CorrelationID, Value: task}

@@ -2,6 +2,7 @@ package approvals_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -29,6 +30,33 @@ type effectAdapter struct{ calls int }
 func (a *effectAdapter) Apply(context.Context, core.EffectObligation) ([]string, error) {
 	a.calls++
 	return []string{"receipt-1"}, nil
+}
+
+type latestInboxStore struct{ bodies [][]byte }
+
+func (s latestInboxStore) AppendRecord(context.Context, string, string, string, string, []string, []string, string, string, int, any) error {
+	return errors.New("append is not supported")
+}
+
+func (s latestInboxStore) Records(context.Context, string, string) ([][]byte, error) { return nil, nil }
+
+func (s latestInboxStore) LatestRecords(context.Context, string) ([][]byte, error) {
+	return s.bodies, nil
+}
+
+func TestApprovalInboxLimitExcludesHistoricalRecords(t *testing.T) {
+	bodies := make([][]byte, 0, 1001)
+	for index := range 1001 {
+		body, err := json.Marshal(core.HumanApproval{ID: core.ID(fmt.Sprintf("approval-%d", index)), Status: core.ApprovalDenied})
+		if err != nil {
+			t.Fatal(err)
+		}
+		bodies = append(bodies, body)
+	}
+	contexts, err := approvals.New(latestInboxStore{bodies: bodies}, nil, nil).PendingDecisionContexts(t.Context(), "approver")
+	if err != nil || len(contexts) != 0 {
+		t.Fatalf("historical approvals blocked the inbox: contexts=%d err=%v", len(contexts), err)
+	}
 }
 
 func TestApprovalWaitsAcrossRestart(t *testing.T) {

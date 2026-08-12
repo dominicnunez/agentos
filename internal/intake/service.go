@@ -72,12 +72,13 @@ type Message struct {
 }
 
 type View struct {
-	TaskID         string
-	ConversationID string
-	State          string
-	Prompt         string
-	Result         string
-	UpdatedAt      time.Time
+	TaskID             string
+	ConversationID     string
+	State              string
+	Prompt             string
+	Result             string
+	UpdatedAt          time.Time
+	CompletionContract *core.CompletionContract
 }
 
 type CompletionReviewView struct {
@@ -220,6 +221,9 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 				if taskID == "" {
 					return View{}, fmt.Errorf("%w: blocked work has no task", ErrUnavailable)
 				}
+				if task, found := streamTask(stream); found && task.ExecutionKind == core.ExecutionHuman && task.CompletionContract != nil {
+					return View{}, fmt.Errorf("%w: user tasks require structured completion through the user gateway", ErrConflict)
+				}
 				if err := s.app.ProvideOperatorInput(ctx, app.OperatorInput{
 					OrganizationID: principal.OrganizationID, PrincipalID: principal.ID,
 					PrincipalKind: principal.Kind, SourceChannel: principal.Channel,
@@ -251,6 +255,39 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 		return projectSubmissionReceipt(message.ConversationID, stream), nil
 	}
 	return projectView(message.ConversationID, stream, principal.Allowed(CapabilityReadResult)), nil
+}
+
+func (s *Service) CompleteHumanTask(ctx context.Context, principal Principal, taskID string, submission core.HumanTaskSubmission) (View, error) {
+	if err := validatePrincipal(principal); err != nil {
+		return View{}, err
+	}
+	if principal.Kind != core.PrincipalHuman || principal.Channel != ChannelHumanDirect || !principal.Allowed(CapabilityProvideInput) {
+		return View{}, fmt.Errorf("%w: structured user completion requires local user access", ErrForbidden)
+	}
+	if err := ValidateIdentifier("task", taskID); err != nil {
+		return View{}, err
+	}
+	if err := ValidateIdentifier("message", submission.MessageID); err != nil {
+		return View{}, err
+	}
+	conversationID, stream, err := s.app.ExternalTaskEvents(ctx, principal.OrganizationID, taskID)
+	if err != nil || len(stream) == 0 {
+		return View{}, ErrNotFound
+	}
+	if _, err := authorizedInitialWork(principal, stream); err != nil {
+		return View{}, err
+	}
+	if err := s.app.ProvideHumanCompletion(ctx, app.HumanCompletionInput{
+		OrganizationID: principal.OrganizationID, PrincipalID: principal.ID, SourceChannel: principal.Channel,
+		RequestID: conversationID, TaskID: taskID, Submission: submission,
+	}); err != nil {
+		return View{}, fmt.Errorf("%w: %w", ErrConflict, err)
+	}
+	stream, err = s.app.ExternalEvents(ctx, principal.OrganizationID, conversationID)
+	if err != nil {
+		return View{}, fmt.Errorf("%w: reload user task", ErrUnavailable)
+	}
+	return projectView(conversationID, stream, principal.Allowed(CapabilityReadResult)), nil
 }
 
 func (s *Service) Get(ctx context.Context, principal Principal, taskID string) (View, error) {
@@ -365,7 +402,7 @@ func validatePrincipal(principal Principal) error {
 	switch principal.Kind {
 	case core.PrincipalHuman:
 		if principal.Channel != ChannelHumanDirect || principal.WorkScope != WorkScopeOrganization {
-			return fmt.Errorf("%w: human principal channel mismatch", ErrInvalid)
+			return fmt.Errorf("%w: local user principal channel mismatch", ErrInvalid)
 		}
 	case core.PrincipalExternalAgent:
 		if principal.Channel != ChannelA2A || (principal.WorkScope != WorkScopeOwn && principal.WorkScope != WorkScopeOrganization) {
@@ -409,6 +446,10 @@ func projectView(conversationID string, stream []events.Event, includeResult boo
 	}
 	if view.State == StateInputRequired {
 		view.Prompt = blockedStatusText(stream)
+		if task, found := streamTask(stream); found && task.CompletionContract != nil {
+			contract := *task.CompletionContract
+			view.CompletionContract = &contract
+		}
 	}
 	if view.State == StateFailed {
 		view.Prompt = "Agent OS could not complete the task."
@@ -419,6 +460,22 @@ func projectView(conversationID string, stream []events.Event, includeResult boo
 		}
 	}
 	return view
+}
+
+func streamTask(stream []events.Event) (core.Task, bool) {
+	for index := len(stream) - 1; index >= 0; index-- {
+		switch stream[index].EventType {
+		case "TASK_CREATED", "TASK_BLOCKED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED":
+		default:
+			continue
+		}
+		var projection events.ProjectionEventPayload
+		var task core.Task
+		if json.Unmarshal(stream[index].Payload, &projection) == nil && json.Unmarshal(projection.Projection.Value, &task) == nil && task.ID != "" {
+			return task, true
+		}
+	}
+	return core.Task{}, false
 }
 
 func projectSubmissionReceipt(conversationID string, stream []events.Event) View {
