@@ -1,11 +1,11 @@
 # User and Agent intake
 
 Agent OS accepts work through two boundaries that converge on the same durable
-Intent, Goal, and Task model:
+conversational intake and work model:
 
 ```text
 User -> private Unix socket --+
-                              +-> Intake Service -> Intent -> Goal -> Task DAG
+                              +-> Intake -> confirmed Intent -> Goal -> Task DAG
 Agent -> A2A JSON-RPC -------+
 ```
 
@@ -63,6 +63,29 @@ The initial views are:
 - Agents: view the authorized Agent roster as that capability is added.
 - System: direct the user to the read-only `agentos doctor` report.
 
+Natural-language input first enters a durable, resumable intake conversation.
+The configured model may propose a structured Intent, but its output is
+untrusted and must pass strict schema, provenance, size, completeness, and
+consequence-candidate validation. Information only the user can supply keeps
+the Intent in `AWAITING_USER_INPUT`; facts Agent OS can discover belong in the
+later plan. A reviewable Intent has a clear objective, deliverables, testable
+completion criteria, and no missing user inputs.
+
+Every model-backed normalization records its prompt-contract version, provider,
+model, execution profile, exact input event references, and provider-reported
+token usage in the ledger. Exact message retries reuse the durable draft and do
+not repeat inference. Intake is capped at 32 messages and 128 KiB of text per
+conversation; a request that would exceed either limit is rejected before its
+message is appended.
+
+The console presents the complete Intent for review. `/confirm` binds the
+current Linux user to the exact Intent version and SHA-256 fingerprint. Only
+then may Agent OS create the Goal and executable Task state. An unfinished
+conversation is recovered from SQLite when the console restarts. Confirmation
+means Agent OS understood the requested work; it is never approval for a
+financial, public, destructive, privileged, legal, deployment, or other
+consequential effect.
+
 `/user-task <instruction>` creates work that must wait for structured user
 completion. `/complete <task-id>` collects every required field and file from
 the Task's durable CompletionContract. A self-reported "done" message cannot
@@ -72,6 +95,8 @@ The local HTTP-shaped routes are private implementation boundaries carried over
 the Unix socket:
 
 - `POST /v1/user/messages`
+- `GET /v1/user/intents/active`
+- `POST /v1/user/intents/{conversation-id}/confirm`
 - `GET /v1/user/tasks/{task-id}`
 - `POST /v1/user/tasks/{task-id}/completion`
 - `GET|POST /v1/user/reviews/{task-id}`
@@ -103,10 +128,11 @@ public URL. The local user socket remains separate.
 
 ## Routing and authority
 
-Routing uses registered deterministic handlers first. Other unstructured work
-uses the configured model provider only for the bounded Agent execution step.
-Intake text cannot select a provider, grant a capability, decide an approval,
-or alter a CompletionContract.
+Routing uses registered deterministic handlers first. Adaptive inference is
+used separately for bounded Intent normalization and Agent execution. The
+accepted structured Intent—not the raw conversation alone—is supplied to the
+execution boundary. Intake text cannot select a provider, grant a capability,
+decide an approval, or alter a CompletionContract.
 
 Natural-language claims such as "I approve" or "the task is complete" remain
 untrusted content. Approval requires the separate exact-effect operation, and

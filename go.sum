@@ -1,7 +1,7 @@
 github.com/a2aproject/a2a-go/v2 v2.4.0 h1:da0iwA6voxLhXIw1B3GSAdrhs5UIa2v6m+v/Fix5qTw=
 github.com/a2aproject/a2a-go/v2 v2.4.0/go.mod h1:EghJ/rY9OCC6jme1z+otOBf+1YCVVCpMSPZU31t3hKY=
-github.com/dominicnunez/agentos-a2a-go v0.1.0 h1:Zq0gldIS7Xa2QXlaXT+ncwI5IFdZlNu4FuQG+OLCcIc=
-github.com/dominicnunez/agentos-a2a-go v0.1.0/go.mod h1:jyiUV9wuBA/jyDucvzoQsiNgUw37sMhCxziA2c8P7wY=
+github.com/dominicnunez/agentos-a2a-go v0.2.0 h1:b3qaeMdyt2Pu6WqVbh4VdWKc0Sk7vxY3z5XXCTF3U/8=
+github.com/dominicnunez/agentos-a2a-go v0.2.0/go.mod h1:jyiUV9wuBA/jyDucvzoQsiNgUw37sMhCxziA2c8P7wY=
 github.com/dominicnunez/archguard v0.0.0-20260521162903-d94aba3763e6 h1:sz2k36GdNqwGmr4P1CxWWBtitaXtrCFQIRufajMaDis=
 github.com/dominicnunez/archguard v0.0.0-20260521162903-d94aba3763e6/go.mod h1:YCIZe7klL4ogIVD1oa2uSQy0HUF94NENTG/m856zV4w=
 github.com/dominicnunez/codex-sdk-go v0.0.0-20260810152213-366b1935433f h1:VKnc82aTCodnO2N8kLT8v1NH+YXyHf8nvKa96cGsiy4=

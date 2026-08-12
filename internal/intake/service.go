@@ -2,10 +2,12 @@ package intake
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -19,20 +21,24 @@ const (
 	ChannelA2A         = "A2A"
 	ChannelHumanDirect = "HUMAN_DIRECT"
 
-	CapabilitySubmitWork       = "submit_work"
-	CapabilityReadStatus       = "read_status"
-	CapabilityReadResult       = "read_result"
-	CapabilityProvideInput     = "provide_input"
-	CapabilityReviewCompletion = "review_completion"
-	MaximumReviewFeedbackBytes = 64 << 10
+	CapabilitySubmitWork           = "submit_work"
+	CapabilityConfirmIntent        = "confirm_intent"
+	CapabilityReadStatus           = "read_status"
+	CapabilityReadResult           = "read_result"
+	CapabilityProvideInput         = "provide_input"
+	CapabilityReviewCompletion     = "review_completion"
+	MaximumReviewFeedbackBytes     = 64 << 10
+	MaximumIntentTurns             = 32
+	MaximumIntentConversationBytes = 128 << 10
 
 	WorkScopeOwn          WorkScope = "OWN"
 	WorkScopeOrganization WorkScope = "ORGANIZATION"
 
-	StateWorking       = "WORKING"
-	StateInputRequired = "INPUT_REQUIRED"
-	StateCompleted     = "COMPLETED"
-	StateFailed        = "FAILED"
+	StateWorking              = "WORKING"
+	StateAwaitingConfirmation = "AWAITING_CONFIRMATION"
+	StateInputRequired        = "INPUT_REQUIRED"
+	StateCompleted            = "COMPLETED"
+	StateFailed               = "FAILED"
 )
 
 type WorkScope string
@@ -79,6 +85,7 @@ type View struct {
 	Result             string
 	UpdatedAt          time.Time
 	CompletionContract *core.CompletionContract
+	Intent             *core.IntentDraft
 }
 
 type CompletionReviewView struct {
@@ -125,12 +132,21 @@ func (Router) Route(message Message) (core.ExecutionKind, error) {
 }
 
 type Service struct {
-	app    *app.Service
-	router Router
+	app         *app.Service
+	router      Router
+	normalizer  Normalizer
+	streamLocks [256]sync.Mutex
 }
 
 func New(service *app.Service) *Service {
-	return &Service{app: service}
+	return NewWithNormalizer(service, literalNormalizer{})
+}
+
+func NewWithNormalizer(service *app.Service, normalizer Normalizer) *Service {
+	if service == nil || normalizer == nil {
+		panic("intake service and normalizer are required")
+	}
+	return &Service{app: service, normalizer: normalizer}
 }
 
 func (s *Service) Handle(ctx context.Context, principal Principal, message Message) (View, error) {
@@ -140,113 +156,89 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 	if err := validateMessageContent(message); err != nil {
 		return View{}, err
 	}
+	unlock := s.lockStream(principal.OrganizationID, message.ConversationID)
+	defer unlock()
 	submissionReceiptOnly := false
 	stream, err := s.app.ExternalEvents(ctx, principal.OrganizationID, message.ConversationID)
 	if err != nil {
 		return View{}, fmt.Errorf("%w: load work stream", ErrUnavailable)
 	}
-	if len(stream) == 0 {
-		if message.TaskID != "" {
+	if !streamHasEvent(stream, "INTENT_CONFIRMED") {
+		return s.handleIntentConversation(ctx, principal, message, stream)
+	}
+	initial, err := authorizedInitialWork(principal, stream)
+	if err != nil {
+		return View{}, err
+	}
+	initialIDMatches := initial.MessageID == message.MessageID
+	initialReplay := initialIDMatches && initial.Text == message.Text
+	if initialReplay && !principal.Allowed(CapabilityReadStatus) {
+		if !principal.Allowed(CapabilitySubmitWork) || !initial.matches(principal) {
+			return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
+		}
+		submissionReceiptOnly = true
+	}
+	durableTaskID := streamTaskID(stream)
+	if durableTaskID == "" {
+		return View{}, fmt.Errorf("%w: work has no durable task", ErrUnavailable)
+	}
+	if principal.Channel == ChannelA2A {
+		if initialReplay {
+			if message.TaskID != "" && message.TaskID != durableTaskID {
+				return View{}, fmt.Errorf("%w: initial retry task does not match durable work", ErrConflict)
+			}
+		} else if message.TaskID == "" {
+			return View{}, fmt.Errorf("%w: continuation requires task identifier", ErrConflict)
+		} else if message.TaskID != durableTaskID {
 			return View{}, fmt.Errorf("%w: continuation task does not match durable work", ErrConflict)
 		}
-		if err := ValidateIdentifier("conversation", message.ConversationID); err != nil {
-			return View{}, err
-		}
-		if err := ValidateIdentifier("message", message.MessageID); err != nil {
-			return View{}, err
-		}
-		if !principal.Allowed(CapabilitySubmitWork) {
-			return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilitySubmitWork)
-		}
-		kind, err := s.router.Route(message)
-		if err != nil {
-			return View{}, err
-		}
-		submitted, submitErr := s.app.Submit(ctx, app.Submit{
-			RequestID: message.ConversationID, OrganizationID: principal.OrganizationID,
-			Statement: message.Text, Kind: kind, MessageID: message.MessageID, SourcePrincipalID: core.ID(principal.ID),
-			SourcePrincipalKind: principal.Kind, SourceChannel: principal.Channel,
-		})
-		stream, err = s.app.ExternalEvents(ctx, principal.OrganizationID, message.ConversationID)
-		if err != nil || (submitErr != nil && submitted.Task.ID == "") {
-			return View{}, fmt.Errorf("%w: submit work", ErrUnavailable)
-		}
-		submissionReceiptOnly = !principal.Allowed(CapabilityReadStatus)
-	} else {
-		initial, err := authorizedInitialWork(principal, stream)
-		if err != nil {
-			return View{}, err
-		}
-		initialIDMatches := initial.MessageID == message.MessageID
-		initialReplay := initialIDMatches && initial.Text == message.Text
-		if initialReplay && !principal.Allowed(CapabilityReadStatus) {
-			if !principal.Allowed(CapabilitySubmitWork) || !initial.matches(principal) {
+	}
+	durableInputReplay := matchesDurableInput(stream, principal, message)
+	if err := ValidateIdentifier("message", message.MessageID); err != nil && !initialReplay && !durableInputReplay {
+		return View{}, err
+	}
+	if initialIDMatches && !initialReplay {
+		return View{}, fmt.Errorf("%w: initial message id is bound to different content", ErrConflict)
+	}
+	switch externalState(stream) {
+	case StateInputRequired:
+		if initialReplay && !submissionReceiptOnly {
+			if !principal.Allowed(CapabilityReadStatus) {
 				return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
 			}
-			submissionReceiptOnly = true
-		}
-		durableTaskID := streamTaskID(stream)
-		if durableTaskID == "" {
-			return View{}, fmt.Errorf("%w: work has no durable task", ErrUnavailable)
-		}
-		if principal.Channel == ChannelA2A {
-			if initialReplay {
-				if message.TaskID != "" && message.TaskID != durableTaskID {
-					return View{}, fmt.Errorf("%w: initial retry task does not match durable work", ErrConflict)
-				}
-			} else if message.TaskID == "" {
-				return View{}, fmt.Errorf("%w: continuation requires task identifier", ErrConflict)
-			} else if message.TaskID != durableTaskID {
-				return View{}, fmt.Errorf("%w: continuation task does not match durable work", ErrConflict)
+		} else if !initialReplay {
+			if !principal.Allowed(CapabilityProvideInput) {
+				return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityProvideInput)
+			}
+			taskID := streamTaskID(stream)
+			if taskID == "" {
+				return View{}, fmt.Errorf("%w: blocked work has no task", ErrUnavailable)
+			}
+			if task, found := streamTask(stream); found && task.ExecutionKind == core.ExecutionHuman && task.CompletionContract != nil {
+				return View{}, fmt.Errorf("%w: user tasks require structured completion through the user gateway", ErrConflict)
+			}
+			if err := s.app.ProvideOperatorInput(ctx, app.OperatorInput{
+				OrganizationID: principal.OrganizationID, PrincipalID: principal.ID,
+				PrincipalKind: principal.Kind, SourceChannel: principal.Channel,
+				RequestID: message.ConversationID, TaskID: taskID,
+				MessageID: message.MessageID, Text: message.Text,
+			}); err != nil {
+				return View{}, fmt.Errorf("%w: continue blocked work", ErrConflict)
+			}
+			stream, err = s.app.ExternalEvents(ctx, principal.OrganizationID, message.ConversationID)
+			if err != nil {
+				return View{}, fmt.Errorf("%w: reload continued work", ErrUnavailable)
 			}
 		}
-		durableInputReplay := matchesDurableInput(stream, principal, message)
-		if err := ValidateIdentifier("message", message.MessageID); err != nil && !initialReplay && !durableInputReplay {
-			return View{}, err
+	case StateWorking, StateCompleted, StateFailed:
+		if !initialReplay && !durableInputReplay {
+			return View{}, fmt.Errorf("%w: conversation is bound to different work", ErrConflict)
 		}
-		if initialIDMatches && !initialReplay {
-			return View{}, fmt.Errorf("%w: initial message id is bound to different content", ErrConflict)
+		if !principal.Allowed(CapabilityReadStatus) && !submissionReceiptOnly {
+			return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
 		}
-		switch externalState(stream) {
-		case StateInputRequired:
-			if initialReplay && !submissionReceiptOnly {
-				if !principal.Allowed(CapabilityReadStatus) {
-					return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
-				}
-			} else if !initialReplay {
-				if !principal.Allowed(CapabilityProvideInput) {
-					return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityProvideInput)
-				}
-				taskID := streamTaskID(stream)
-				if taskID == "" {
-					return View{}, fmt.Errorf("%w: blocked work has no task", ErrUnavailable)
-				}
-				if task, found := streamTask(stream); found && task.ExecutionKind == core.ExecutionHuman && task.CompletionContract != nil {
-					return View{}, fmt.Errorf("%w: user tasks require structured completion through the user gateway", ErrConflict)
-				}
-				if err := s.app.ProvideOperatorInput(ctx, app.OperatorInput{
-					OrganizationID: principal.OrganizationID, PrincipalID: principal.ID,
-					PrincipalKind: principal.Kind, SourceChannel: principal.Channel,
-					RequestID: message.ConversationID, TaskID: taskID,
-					MessageID: message.MessageID, Text: message.Text,
-				}); err != nil {
-					return View{}, fmt.Errorf("%w: continue blocked work", ErrConflict)
-				}
-				stream, err = s.app.ExternalEvents(ctx, principal.OrganizationID, message.ConversationID)
-				if err != nil {
-					return View{}, fmt.Errorf("%w: reload continued work", ErrUnavailable)
-				}
-			}
-		case StateWorking, StateCompleted, StateFailed:
-			if !initialReplay && !durableInputReplay {
-				return View{}, fmt.Errorf("%w: conversation is bound to different work", ErrConflict)
-			}
-			if !principal.Allowed(CapabilityReadStatus) && !submissionReceiptOnly {
-				return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
-			}
-		default:
-			return View{}, fmt.Errorf("%w: work has unknown state", ErrUnavailable)
-		}
+	default:
+		return View{}, fmt.Errorf("%w: work has unknown state", ErrUnavailable)
 	}
 	if streamTaskID(stream) == "" {
 		return View{}, fmt.Errorf("%w: work did not create a task", ErrUnavailable)
@@ -255,6 +247,184 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 		return projectSubmissionReceipt(message.ConversationID, stream), nil
 	}
 	return projectView(message.ConversationID, stream, principal.Allowed(CapabilityReadResult)), nil
+}
+
+type IntentConfirmation struct {
+	ConversationID string
+	TaskID         string
+	MessageID      string
+	Fingerprint    string
+}
+
+func (s *Service) ConfirmIntent(ctx context.Context, principal Principal, confirmation IntentConfirmation) (View, error) {
+	if err := validatePrincipal(principal); err != nil {
+		return View{}, err
+	}
+	if !principal.Allowed(CapabilityConfirmIntent) {
+		return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityConfirmIntent)
+	}
+	if ValidateIdentifier("conversation", confirmation.ConversationID) != nil || ValidateIdentifier("message", confirmation.MessageID) != nil || len(confirmation.Fingerprint) != 64 {
+		return View{}, fmt.Errorf("%w: valid confirmation identity and fingerprint are required", ErrInvalid)
+	}
+	unlock := s.lockStream(principal.OrganizationID, confirmation.ConversationID)
+	defer unlock()
+	stream, err := s.app.ExternalEvents(ctx, principal.OrganizationID, confirmation.ConversationID)
+	if err != nil || len(stream) == 0 {
+		return View{}, ErrNotFound
+	}
+	if err := authorizeIntakePrincipal(principal, stream); err != nil {
+		return View{}, err
+	}
+	if confirmation.TaskID != "" && confirmation.TaskID != streamTaskID(stream) {
+		return View{}, fmt.Errorf("%w: confirmation task does not match durable intake", ErrConflict)
+	}
+	payload, found, err := latestIntentPayload(stream)
+	if err != nil || !found || payload.Draft.Fingerprint != confirmation.Fingerprint {
+		return View{}, fmt.Errorf("%w: confirmation does not match the current intent", ErrConflict)
+	}
+	draft := payload.Draft
+	kind, err := s.router.Route(Message{Text: draft.Objective, RequestedKind: draft.RequestedExecutionKind})
+	if err != nil {
+		return View{}, err
+	}
+	_, err = s.app.ConfirmIntent(ctx, app.IntentConfirmation{
+		RequestID: confirmation.ConversationID, OrganizationID: principal.OrganizationID,
+		MessageID: confirmation.MessageID, Fingerprint: confirmation.Fingerprint,
+		SourcePrincipalID: core.ID(principal.ID), SourcePrincipalKind: principal.Kind,
+		SourceChannel: principal.Channel, Kind: kind,
+	})
+	if err != nil {
+		return View{}, fmt.Errorf("%w: confirm intent", ErrConflict)
+	}
+	stream, err = s.app.ExternalEvents(ctx, principal.OrganizationID, confirmation.ConversationID)
+	if err != nil {
+		return View{}, fmt.Errorf("%w: reload confirmed work", ErrUnavailable)
+	}
+	if !principal.Allowed(CapabilityReadStatus) {
+		return projectSubmissionReceipt(confirmation.ConversationID, stream), nil
+	}
+	return projectView(confirmation.ConversationID, stream, principal.Allowed(CapabilityReadResult)), nil
+}
+
+func (s *Service) ActiveIntent(ctx context.Context, principal Principal) (View, error) {
+	if err := validatePrincipal(principal); err != nil {
+		return View{}, err
+	}
+	if !principal.Allowed(CapabilityProvideInput) {
+		return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityProvideInput)
+	}
+	conversationID, stream, found, err := s.app.ActiveIntake(ctx, principal.OrganizationID, core.ID(principal.ID), principal.Kind, principal.Channel)
+	if err != nil {
+		return View{}, fmt.Errorf("%w: load active intent", ErrUnavailable)
+	}
+	if !found {
+		return View{}, ErrNotFound
+	}
+	return projectCurrentIntentView(conversationID, stream)
+}
+
+func (s *Service) handleIntentConversation(ctx context.Context, principal Principal, message Message, stream []events.Event) (View, error) {
+	if err := ValidateIdentifier("conversation", message.ConversationID); err != nil {
+		return View{}, err
+	}
+	if err := ValidateIdentifier("message", message.MessageID); err != nil {
+		return View{}, err
+	}
+	if len(stream) == 0 {
+		if message.TaskID != "" || !principal.Allowed(CapabilitySubmitWork) {
+			return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilitySubmitWork)
+		}
+	} else {
+		if err := authorizeIntakePrincipal(principal, stream); err != nil {
+			return View{}, err
+		}
+		if replay, found, replayErr := replayedIntentView(message.ConversationID, principal, message, stream); replayErr != nil {
+			return View{}, replayErr
+		} else if found {
+			return replay, nil
+		}
+		if !principal.Allowed(CapabilityProvideInput) {
+			return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityProvideInput)
+		}
+		if principal.Channel == ChannelA2A && message.TaskID != streamTaskID(stream) {
+			return View{}, fmt.Errorf("%w: intake continuation requires its durable task identifier", ErrConflict)
+		}
+	}
+	if err := validateIntentConversationCapacity(stream, message); err != nil {
+		return View{}, err
+	}
+	stream, err := s.app.RecordIntakeMessage(ctx, app.IntakeMessage{
+		RequestID: message.ConversationID, OrganizationID: principal.OrganizationID,
+		MessageID: message.MessageID, Text: message.Text, SourcePrincipalID: core.ID(principal.ID),
+		SourcePrincipalKind: principal.Kind, SourceChannel: principal.Channel,
+	})
+	if err != nil {
+		return View{}, fmt.Errorf("%w: record intake message", ErrConflict)
+	}
+	turns, err := intakeTurns(stream)
+	if err != nil {
+		return View{}, fmt.Errorf("%w: load intake conversation", ErrUnavailable)
+	}
+	version := intentDraftVersion(stream) + 1
+	attempt := intentNormalizationAttempt(stream, message.MessageID) + 1
+	executionID := fmt.Sprintf("intent-normalization-%s-%s-a%d", stream[0].CorrelationID, message.MessageID, attempt)
+	descriptor, usesModel := s.normalizer.Descriptor()
+	if usesModel {
+		stream, err = s.app.RecordIntentNormalizationContext(ctx, principal.OrganizationID, message.ConversationID, app.IntentNormalizationContext{
+			ExecutionID: executionID, SourceMessageID: message.MessageID, PromptVersion: descriptor.PromptVersion,
+			Provider: descriptor.Provider, Model: descriptor.Model, ExecutionProfileVersion: descriptor.ExecutionProfileVersion,
+		})
+		if err != nil {
+			return View{}, fmt.Errorf("%w: manifest intent normalization context", ErrUnavailable)
+		}
+	}
+	normalized, err := s.normalizer.Normalize(ctx, turns)
+	if normalized.Usage != nil {
+		_, usageErr := s.app.RecordIntentNormalizationUsage(ctx, principal.OrganizationID, message.ConversationID, executionID, *normalized.Usage)
+		if usageErr != nil {
+			return View{}, fmt.Errorf("%w: persist intent normalization usage", ErrUnavailable)
+		}
+	}
+	if err != nil {
+		return View{}, fmt.Errorf("%w: normalize intent", ErrUnavailable)
+	}
+	if err := validateNormalization(normalized); err != nil {
+		return View{}, fmt.Errorf("%w: validate normalized intent", ErrUnavailable)
+	}
+	if err := validateNormalizationProvenance(normalized, turns); err != nil {
+		return View{}, fmt.Errorf("%w: validate normalized intent provenance", ErrUnavailable)
+	}
+	if usesModel != (normalized.Usage != nil) {
+		return View{}, fmt.Errorf("%w: intent normalizer model usage contract is inconsistent", ErrUnavailable)
+	}
+	requestedKind := message.RequestedKind
+	if previous, found, previousErr := latestIntentPayload(stream); previousErr != nil {
+		return View{}, fmt.Errorf("%w: load previous intent draft", ErrUnavailable)
+	} else if found && requestedKind == "" {
+		requestedKind = previous.Draft.RequestedExecutionKind
+	}
+	status := core.IntentStatusAwaitingInput
+	if normalized.State == normalizationReady {
+		status = core.IntentStatusReadyForReview
+	}
+	draft := core.IntentDraft{
+		ID: core.ID("intent-" + stream[0].CorrelationID), OrganizationID: core.ID(principal.OrganizationID),
+		Version: version, Status: status, RequestedExecutionKind: requestedKind,
+		Objective: normalized.Candidate.Objective, Context: normalized.Candidate.Context,
+		Deliverables: normalized.Candidate.Deliverables, CompletionCriteria: normalized.Candidate.CompletionCriteria,
+		Constraints: normalized.Candidate.Constraints, ResolvedDecisions: normalized.Candidate.ResolvedDecisions,
+		ConsequenceCandidates: normalized.Candidate.ConsequenceCandidates, MissingUserInputs: normalized.Candidate.MissingUserInputs,
+		CreatedAt: time.Now().UTC(),
+	}
+	draft.Fingerprint, err = core.FingerprintIntentDraft(draft)
+	if err != nil {
+		return View{}, fmt.Errorf("%w: fingerprint intent", ErrUnavailable)
+	}
+	stream, err = s.app.RecordIntentDraft(ctx, principal.OrganizationID, message.ConversationID, message.MessageID, draft, normalized.Reply)
+	if err != nil {
+		return View{}, fmt.Errorf("%w: persist intent draft", ErrUnavailable)
+	}
+	return projectIntentView(message.ConversationID, stream, draft, normalized.Reply), nil
 }
 
 func (s *Service) CompleteHumanTask(ctx context.Context, principal Principal, taskID string, submission core.HumanTaskSubmission) (View, error) {
@@ -309,6 +479,12 @@ func (s *Service) Get(ctx context.Context, principal Principal, taskID string) (
 			return View{}, err
 		}
 		return View{}, ErrNotFound
+	}
+	if !streamHasEvent(stream, "INTENT_CONFIRMED") {
+		if err := authorizeIntakePrincipal(principal, stream); err != nil {
+			return View{}, err
+		}
+		return projectCurrentIntentView(conversationID, stream)
 	}
 	if _, err := authorizedInitialWork(principal, stream); err != nil {
 		return View{}, err
@@ -551,7 +727,7 @@ func initialMessage(stream []events.Event) (initialWork, bool) {
 }
 
 func principalCanAccess(principal Principal, work initialWork) bool {
-	return principal.WorkScope == WorkScopeOrganization || (principal.WorkScope == WorkScopeOwn && work.PrincipalID == core.ID(principal.ID))
+	return principal.WorkScope == WorkScopeOrganization || (principal.WorkScope == WorkScopeOwn && work.matches(principal))
 }
 
 func authorizedInitialWork(principal Principal, stream []events.Event) (initialWork, error) {
@@ -563,6 +739,190 @@ func authorizedInitialWork(principal Principal, stream []events.Event) (initialW
 		return initialWork{}, ErrNotFound
 	}
 	return initial, nil
+}
+
+func authorizeIntakePrincipal(principal Principal, stream []events.Event) error {
+	for _, event := range stream {
+		if event.EventType != "INTAKE_MESSAGE_RECORDED" {
+			continue
+		}
+		var payload events.IntakeMessageRecordedPayload
+		if json.Unmarshal(event.Payload, &payload) != nil || payload.SourcePrincipalID == "" {
+			return fmt.Errorf("%w: intake has no durable initial message", ErrUnavailable)
+		}
+		if principal.WorkScope == WorkScopeOwn && (payload.SourcePrincipalID != principal.ID || payload.SourcePrincipalKind != string(principal.Kind) || payload.SourceChannel != principal.Channel) {
+			return ErrNotFound
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: intake has no durable initial message", ErrUnavailable)
+}
+
+func streamHasEvent(stream []events.Event, eventType string) bool {
+	for _, event := range stream {
+		if event.EventType == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+func intakeTurns(stream []events.Event) ([]ConversationTurn, error) {
+	turns := make([]ConversationTurn, 0)
+	totalBytes := 0
+	for _, event := range stream {
+		if event.EventType != "INTAKE_MESSAGE_RECORDED" {
+			continue
+		}
+		var payload events.IntakeMessageRecordedPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.MessageID == "" || payload.Text == "" {
+			return nil, fmt.Errorf("invalid durable intake message")
+		}
+		totalBytes += len(payload.Text)
+		turns = append(turns, ConversationTurn{MessageID: payload.MessageID, Text: payload.Text})
+	}
+	if len(turns) == 0 {
+		return nil, fmt.Errorf("intake conversation is empty")
+	}
+	if len(turns) > MaximumIntentTurns || totalBytes > MaximumIntentConversationBytes {
+		return nil, fmt.Errorf("intake conversation exceeds its bounded context")
+	}
+	return turns, nil
+}
+
+func replayedIntentView(conversationID string, principal Principal, message Message, stream []events.Event) (View, bool, error) {
+	found := false
+	for _, event := range stream {
+		if event.EventType != "INTAKE_MESSAGE_RECORDED" {
+			continue
+		}
+		var payload events.IntakeMessageRecordedPayload
+		if json.Unmarshal(event.Payload, &payload) != nil {
+			return View{}, false, fmt.Errorf("%w: durable intake message is invalid", ErrUnavailable)
+		}
+		if payload.MessageID != message.MessageID {
+			continue
+		}
+		if payload.Text != message.Text || payload.SourcePrincipalID != principal.ID || payload.SourcePrincipalKind != string(principal.Kind) || payload.SourceChannel != principal.Channel {
+			return View{}, false, fmt.Errorf("%w: intake replay does not match its authenticated source", ErrForbidden)
+		}
+		found = true
+	}
+	if !found {
+		return View{}, false, nil
+	}
+	payload, present, err := intentPayloadForMessage(stream, message.MessageID)
+	if err != nil {
+		return View{}, false, fmt.Errorf("%w: replay has invalid durable intent draft", ErrUnavailable)
+	}
+	if !present {
+		return View{}, false, nil
+	}
+	reply := payload.Reply
+	if reply == "" {
+		reply = "Review the current proposed intent before work begins."
+	}
+	return projectIntentView(conversationID, stream, payload.Draft, reply), true, nil
+}
+
+func intentDraftVersion(stream []events.Event) int {
+	version := 0
+	for _, event := range stream {
+		if event.EventType == "INTENT_DRAFTED" {
+			version++
+		}
+	}
+	return version
+}
+
+func intentNormalizationAttempt(stream []events.Event, messageID string) int {
+	attempts := 0
+	for _, event := range stream {
+		if event.EventType != "INTENT_NORMALIZATION_CONTEXT_MANIFESTED" {
+			continue
+		}
+		var payload events.IntentNormalizationContextPayload
+		if json.Unmarshal(event.Payload, &payload) == nil && payload.SourceMessageID == messageID {
+			attempts++
+		}
+	}
+	return attempts
+}
+
+func latestIntentPayload(stream []events.Event) (events.IntentDraftedPayload, bool, error) {
+	return events.LatestPayload[events.IntentDraftedPayload](stream, "INTENT_DRAFTED")
+}
+
+func intentPayloadForMessage(stream []events.Event, messageID string) (events.IntentDraftedPayload, bool, error) {
+	for index := len(stream) - 1; index >= 0; index-- {
+		if stream[index].EventType != "INTENT_DRAFTED" {
+			continue
+		}
+		var payload events.IntentDraftedPayload
+		if err := json.Unmarshal(stream[index].Payload, &payload); err != nil {
+			return events.IntentDraftedPayload{}, false, err
+		}
+		if payload.SourceMessageID == messageID {
+			return payload, true, nil
+		}
+	}
+	return events.IntentDraftedPayload{}, false, nil
+}
+
+func validateIntentConversationCapacity(stream []events.Event, next Message) error {
+	turns := 0
+	totalBytes := 0
+	alreadyRecorded := false
+	for _, event := range stream {
+		if event.EventType != "INTAKE_MESSAGE_RECORDED" {
+			continue
+		}
+		var payload events.IntakeMessageRecordedPayload
+		if json.Unmarshal(event.Payload, &payload) != nil {
+			return fmt.Errorf("%w: durable intake message is invalid", ErrUnavailable)
+		}
+		turns++
+		totalBytes += len(payload.Text)
+		if payload.MessageID == next.MessageID {
+			alreadyRecorded = true
+		}
+	}
+	if !alreadyRecorded {
+		turns++
+		totalBytes += len(next.Text)
+	}
+	if turns > MaximumIntentTurns || totalBytes > MaximumIntentConversationBytes {
+		return fmt.Errorf("%w: intent conversation exceeds %d turns or %d bytes", ErrInvalid, MaximumIntentTurns, MaximumIntentConversationBytes)
+	}
+	return nil
+}
+
+func (s *Service) lockStream(organizationID, conversationID string) func() {
+	digest := sha256.Sum256([]byte(organizationID + "\x00" + conversationID))
+	lock := &s.streamLocks[digest[0]]
+	lock.Lock()
+	return lock.Unlock
+}
+
+func projectCurrentIntentView(conversationID string, stream []events.Event) (View, error) {
+	payload, found, err := latestIntentPayload(stream)
+	if err != nil || !found {
+		return View{}, fmt.Errorf("%w: intake has no durable draft", ErrUnavailable)
+	}
+	reply := payload.Reply
+	if reply == "" {
+		reply = "Continue the intake conversation."
+	}
+	return projectIntentView(conversationID, stream, payload.Draft, reply), nil
+}
+
+func projectIntentView(conversationID string, stream []events.Event, draft core.IntentDraft, reply string) View {
+	state := StateInputRequired
+	if draft.Status == core.IntentStatusReadyForReview {
+		state = StateAwaitingConfirmation
+	}
+	copy := draft
+	return View{TaskID: streamTaskID(stream), ConversationID: conversationID, State: state, Prompt: reply, UpdatedAt: stream[len(stream)-1].CreatedAt, Intent: &copy}
 }
 
 func matchesDurableInput(stream []events.Event, principal Principal, message Message) bool {

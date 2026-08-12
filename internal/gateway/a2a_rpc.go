@@ -15,6 +15,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/dominicnunez/agentos-a2a-go/executionkind"
+	"github.com/dominicnunez/agentos-a2a-go/intentconfirmation"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/intake"
 )
@@ -23,6 +24,7 @@ const (
 	a2aRoleUser           = string(a2a.MessageRoleUser)
 	a2aStateInputRequired = string(a2a.TaskStateInputRequired)
 	a2aStateCompleted     = string(a2a.TaskStateCompleted)
+	intentConfirmationURI = intentconfirmation.URI
 )
 
 type strictJSONRPCRequest struct {
@@ -96,17 +98,25 @@ func validateSendMessageParams(raw json.RawMessage) error {
 	if message == nil || message.MessageID == "" || message.Role != a2aRoleUser || len(message.Parts) != 1 || len(message.ReferenceTasks) != 0 {
 		return errors.New("one ROLE_USER text message with messageId is required")
 	}
-	if len(message.Extensions) > 1 || len(message.Metadata) > 1 {
-		return errors.New("only the execution-kind extension is supported")
+	if len(message.Extensions) > 2 || len(message.Metadata) > 2 {
+		return errors.New("only the declared Agent OS extensions are supported")
 	}
+	declared := make(map[string]struct{}, len(message.Extensions))
 	for _, extension := range message.Extensions {
-		if extension != executionkind.URI {
+		if extension != executionkind.URI && extension != intentConfirmationURI {
 			return errors.New("message declares an unsupported extension")
 		}
+		if _, duplicate := declared[extension]; duplicate {
+			return errors.New("message declares a duplicate extension")
+		}
+		declared[extension] = struct{}{}
 	}
 	for key := range message.Metadata {
-		if key != executionkind.URI {
+		if key != executionkind.URI && key != intentConfirmationURI {
 			return errors.New("message contains unsupported metadata")
+		}
+		if _, ok := declared[key]; !ok {
+			return errors.New("message metadata requires its extension declaration")
 		}
 	}
 	part := message.Parts[0]
@@ -174,6 +184,25 @@ func (h *a2aRequestHandler) SendMessage(ctx context.Context, request *a2a.SendMe
 	}
 	message := request.Message
 	contextID := message.ContextID
+	confirmation, confirms, err := intentconfirmation.Get(message)
+	if err != nil {
+		return nil, a2a.NewError(a2a.ErrInvalidParams, "intent-confirmation extension is invalid")
+	}
+	if confirms {
+		if message.TaskID == "" || contextID == "" {
+			return nil, a2a.NewError(a2a.ErrInvalidParams, "intent confirmation requires durable taskId and contextId")
+		}
+		for _, extension := range message.Extensions {
+			if extension == executionkind.URI {
+				return nil, a2a.NewError(a2a.ErrInvalidParams, "intent confirmation cannot carry an execution-routing hint")
+			}
+		}
+		view, confirmErr := h.service.ConfirmIntent(ctx, principal, intake.IntentConfirmation{ConversationID: contextID, TaskID: string(message.TaskID), MessageID: message.ID, Fingerprint: confirmation.Fingerprint})
+		if confirmErr != nil {
+			return nil, intakeA2AError(confirmErr)
+		}
+		return projectA2ATask(view), nil
+	}
 	if message.TaskID != "" {
 		durable, err := h.service.Get(ctx, principal, string(message.TaskID))
 		if err != nil {
@@ -266,6 +295,15 @@ func projectA2ATask(view intake.View) *a2a.Task {
 			ID: a2a.ArtifactID("result-" + view.TaskID), Name: "Agent OS result", Parts: a2a.ContentParts{part},
 		}}
 	}
+	if view.Intent != nil {
+		task.Metadata = map[string]any{intentConfirmationURI: map[string]any{
+			"state": view.State, "fingerprint": view.Intent.Fingerprint, "version": view.Intent.Version,
+			"objective": view.Intent.Objective, "context": view.Intent.Context, "deliverables": view.Intent.Deliverables,
+			"completion_criteria": view.Intent.CompletionCriteria, "constraints": view.Intent.Constraints,
+			"resolved_decisions": view.Intent.ResolvedDecisions, "consequence_candidates": view.Intent.ConsequenceCandidates,
+			"missing_user_inputs": view.Intent.MissingUserInputs,
+		}}
+	}
 	return task
 }
 
@@ -274,6 +312,8 @@ func a2aState(state string) a2a.TaskState {
 	case intake.StateWorking:
 		return a2a.TaskStateWorking
 	case intake.StateInputRequired:
+		return a2a.TaskStateInputRequired
+	case intake.StateAwaitingConfirmation:
 		return a2a.TaskStateInputRequired
 	case intake.StateCompleted:
 		return a2a.TaskStateCompleted

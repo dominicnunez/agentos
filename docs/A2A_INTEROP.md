@@ -32,11 +32,11 @@ The deterministic role profiles are:
 
 | Role | Capabilities |
 | --- | --- |
-| `SUBMITTER` | `submit_work` |
-| `COLLABORATOR` | `submit_work`, `read_status`, `provide_input` |
+| `SUBMITTER` | `submit_work`, `confirm_intent` |
+| `COLLABORATOR` | `submit_work`, `confirm_intent`, `read_status`, `provide_input` |
 | `OBSERVER` | `read_status` |
 | `RESULT_READER` | `read_status`, `read_result` |
-| `OPERATOR` | all four work-plane capabilities |
+| `OPERATOR` | all five work-plane capabilities |
 
 These roles never include approval, capability administration, policy, freeze,
 security administration, or protected-effect authority. A role is selected by
@@ -57,12 +57,19 @@ The gateway exposes only the A2A v1.0 surface:
   advertised interface URL;
 - an optional Apache-2.0 execution-kind extension identified by
   `https://github.com/dominicnunez/agentos-a2a-go/blob/main/spec/execution-kind-v1.md`;
+- an optional Intent-confirmation extension identified by
+  `https://github.com/dominicnunez/agentos-a2a-go/blob/main/spec/intent-confirmation-v1.md`;
 - server-generated `contextId` when an initial message omits it, with a stable
   value derived from the authenticated organization, actor, and `messageId` so
   the same initial delivery remains idempotent across restart;
-- a `SUBMITTER` receives a stable acceptance receipt containing only its task
-  and context identifiers. An exact retry by that same authenticated principal
-  returns the receipt without granting `read_status` or exposing later state;
+- initial submission returns a durable input-required Task carrying the current
+  Intent draft in extension metadata. When the draft is complete, it includes
+  the exact review fingerprint. Exact retries do not repeat normalization or
+  append ledger events;
+- confirmation requires the durable `taskId`, matching `contextId`, a new
+  `messageId`, and `{ "action": "CONFIRM", "fingerprint": "..." }` beneath
+  the declared Intent-confirmation extension. It begins planning but grants no
+  approval, capability, completion status, or effect permission;
 - continuation only by durable `taskId`. A supplied continuation `contextId`
   must match the task; a different message in an existing context without
   `taskId` is rejected.
@@ -74,6 +81,16 @@ A2A and does not weaken A2A protocol isolation.
 Execution-kind metadata is an untrusted routing hint. It grants no identity,
 authority, approval, capability, completion status, or effect permission. The
 legacy `agentos.execution_kind` metadata key is not accepted.
+
+Intent confirmation is a separate work-plane capability held by authenticated
+`SUBMITTER`, `COLLABORATOR`, and `OPERATOR` roles. It confirms Agent OS's exact
+interpretation of requested work. It cannot be combined with an execution-kind
+hint and never satisfies an exact-effect approval boundary.
+
+The conversation is bounded to 32 messages and 128 KiB of text. Model-backed
+normalization records its provider identity, prompt-contract version, input
+event references, and token usage in the Agent OS ledger before a draft can be
+confirmed.
 
 The gateway uses the official `a2aproject/a2a-go/v2` v2.4.0 message, task,
 Agent Card, JSON-RPC client, and JSON-RPC server contracts. Agent OS retains a

@@ -483,6 +483,22 @@ func reviewInput(view CompletionReviewView, decision completion.ReviewDecision, 
 	}
 }
 
+func TestAcceptedIntentCriteriaBecomeIndependentReviewCriteria(t *testing.T) {
+	accepted := []core.IntentValue{
+		{Value: "Binary starts on supported Linux", Origin: "EXPLICIT", SourceMessageID: "message-1"},
+		{Value: "Checksums match the release archive", Origin: "CONFIRMED", SourceMessageID: "message-2"},
+	}
+	criteria := acceptedReviewCriteria(accepted)
+	if len(criteria) != len(accepted) {
+		t.Fatalf("criteria=%+v", criteria)
+	}
+	for index, criterion := range criteria {
+		if criterion.Description != accepted[index].Value || criterion.Assurance != core.AssuranceHumanJudgment || !criterion.Required {
+			t.Fatalf("criterion %d=%+v", index, criterion)
+		}
+	}
+}
+
 type indexedTaskLedger struct{}
 
 func (indexedTaskLedger) Append(_ context.Context, draft events.TrustedDraft) (events.Event, error) {

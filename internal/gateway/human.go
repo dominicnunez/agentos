@@ -75,6 +75,12 @@ type humanTaskResponse struct {
 	Result             string                   `json:"result,omitempty"`
 	UpdatedAt          string                   `json:"updated_at,omitempty"`
 	CompletionContract *core.CompletionContract `json:"completion_contract,omitempty"`
+	Intent             *core.IntentDraft        `json:"intent,omitempty"`
+}
+
+type humanIntentConfirmationRequest struct {
+	MessageID   string `json:"message_id"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 type humanCompletionRequest struct {
@@ -114,6 +120,21 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleMessage(w, r, principal)
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/user/intents/active" {
+		view, err := h.service.ActiveIntent(r.Context(), principal)
+		h.writeView(w, view, err)
+		return
+	}
+	const intentPrefix = "/v1/user/intents/"
+	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, intentPrefix) && strings.HasSuffix(r.URL.Path, "/confirm") {
+		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, intentPrefix), "/confirm")
+		if conversationID == "" || strings.Contains(conversationID, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		h.handleIntentConfirmation(w, r, principal, conversationID)
+		return
+	}
 	const taskPrefix = "/v1/user/tasks/"
 	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, taskPrefix) && strings.HasSuffix(r.URL.Path, "/completion") {
 		taskID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, taskPrefix), "/completion")
@@ -146,6 +167,22 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.NotFound(w, r)
+}
+
+func (h *Human) handleIntentConfirmation(w http.ResponseWriter, r *http.Request, principal intake.Principal, conversationID string) {
+	if !hasJSONContentType(r.Header.Get("Content-Type")) {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "intent confirmation requires application/json"})
+		return
+	}
+	defer func() { _ = r.Body.Close() }()
+	reader := http.MaxBytesReader(w, r.Body, 4096)
+	var request humanIntentConfirmationRequest
+	if err := trustconfig.DecodeObject(reader, "intent confirmation", &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	view, err := h.service.ConfirmIntent(r.Context(), principal, intake.IntentConfirmation{ConversationID: conversationID, MessageID: request.MessageID, Fingerprint: request.Fingerprint})
+	h.writeView(w, view, err)
 }
 
 func (h *Human) handleTaskCompletion(w http.ResponseWriter, r *http.Request, principal intake.Principal, taskID string) {
@@ -189,7 +226,7 @@ func (h *Human) handleTaskCompletion(w http.ResponseWriter, r *http.Request, pri
 
 func (h *Human) principal() intake.Principal {
 	return operatorPrincipal(string(h.owner.ID), core.PrincipalHuman, string(h.owner.OrganizationID), intake.ChannelHumanDirect, []string{
-		intake.CapabilitySubmitWork, intake.CapabilityReadStatus, intake.CapabilityReadResult,
+		intake.CapabilitySubmitWork, intake.CapabilityConfirmIntent, intake.CapabilityReadStatus, intake.CapabilityReadResult,
 		intake.CapabilityProvideInput, intake.CapabilityReviewCompletion,
 	}, intake.WorkScopeOrganization)
 }
@@ -288,6 +325,7 @@ func humanResponse(view intake.View) humanTaskResponse {
 		State: view.State, Prompt: view.Prompt, Result: view.Result,
 	}
 	response.CompletionContract = view.CompletionContract
+	response.Intent = view.Intent
 	if !view.UpdatedAt.IsZero() {
 		response.UpdatedAt = view.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	}

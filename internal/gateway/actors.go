@@ -131,15 +131,15 @@ func validateOperatorIdentity(actorID, organizationID string) error {
 func actorCapabilities(role ExternalActorRole) []string {
 	switch role {
 	case ExternalRoleSubmitter:
-		return []string{intake.CapabilitySubmitWork}
+		return []string{intake.CapabilitySubmitWork, intake.CapabilityConfirmIntent}
 	case ExternalRoleCollaborator:
-		return []string{intake.CapabilitySubmitWork, intake.CapabilityReadStatus, intake.CapabilityProvideInput}
+		return []string{intake.CapabilitySubmitWork, intake.CapabilityConfirmIntent, intake.CapabilityReadStatus, intake.CapabilityProvideInput}
 	case ExternalRoleObserver:
 		return []string{intake.CapabilityReadStatus}
 	case ExternalRoleResultReader:
 		return []string{intake.CapabilityReadStatus, intake.CapabilityReadResult}
 	case ExternalRoleOperator:
-		return []string{intake.CapabilitySubmitWork, intake.CapabilityReadStatus, intake.CapabilityReadResult, intake.CapabilityProvideInput}
+		return []string{intake.CapabilitySubmitWork, intake.CapabilityConfirmIntent, intake.CapabilityReadStatus, intake.CapabilityReadResult, intake.CapabilityProvideInput}
 	default:
 		return nil
 	}

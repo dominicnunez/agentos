@@ -40,10 +40,10 @@ func TestHumanGatewayRoutesNaturalLanguageAndReturnsNarrowTaskView(t *testing.T)
 	operator := intake.New(app.New(events.NewGateway(store)))
 	handler := testHumanHandler(t, operator)
 
-	response := serveHuman(handler, http.MethodPost, "/v1/user/messages", testOwnerMarker, humanBody(t, humanMessageRequest{
+	response := submitAndConfirmHuman(t, handler, humanMessageRequest{
 		ConversationID: "direct-1", MessageID: "message-1", Text: "draft a release update",
-	}))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) || !strings.Contains(response.Body.String(), `"result":"fake-model: draft a release update"`) {
+	})
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) || !strings.Contains(response.Body.String(), `"result":"fake-model: Execute only this accepted Agent OS Intent.`) || !strings.Contains(response.Body.String(), `\"objective\":\"draft a release update\"`) {
 		t.Fatalf("natural-language submit=%d %s", response.Code, response.Body.String())
 	}
 	if strings.Contains(response.Body.String(), `"events"`) || strings.Contains(response.Body.String(), `"payload"`) || strings.Contains(response.Body.String(), `"intent"`) {
@@ -54,7 +54,7 @@ func TestHumanGatewayRoutesNaturalLanguageAndReturnsNarrowTaskView(t *testing.T)
 		t.Fatalf("human response has no task id: %s err=%v", response.Body.String(), err)
 	}
 	response = serveHuman(handler, http.MethodGet, "/v1/user/tasks/"+submitted.TaskID, testOwnerMarker, "")
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"result":"fake-model: draft a release update"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"result":"fake-model: Execute only this accepted Agent OS Intent.`) {
 		t.Fatalf("human status=%d %s", response.Code, response.Body.String())
 	}
 
@@ -75,9 +75,9 @@ func TestHumanGatewayRequiresStructuredCompletionAndCannotApproveThroughText(t *
 	operator := intake.New(app.New(events.NewGateway(store)))
 	handler := testHumanHandler(t, operator)
 
-	response := serveHuman(handler, http.MethodPost, "/v1/user/messages", testOwnerMarker, humanBody(t, humanMessageRequest{
+	response := submitAndConfirmHuman(t, handler, humanMessageRequest{
 		ConversationID: "direct-blocked", MessageID: "message-1", Text: "decide whether to deploy", ExecutionKind: core.ExecutionHuman,
-	}))
+	})
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"INPUT_REQUIRED"`) || !strings.Contains(response.Body.String(), `"prompt":`) {
 		t.Fatalf("blocked submit=%d %s", response.Code, response.Body.String())
 	}
@@ -170,9 +170,9 @@ func TestLocalOwnerCanFinalizeExactCompletionReview(t *testing.T) {
 	operator := intake.New(app.NewWithModel(events.NewGateway(store), reviewerModel{}))
 	handler := testHumanReviewHandler(t, operator)
 
-	response := serveHuman(handler, http.MethodPost, "/v1/user/messages", testOwnerMarker, humanBody(t, humanMessageRequest{
+	response := submitAndConfirmHuman(t, handler, humanMessageRequest{
 		ConversationID: "reviewed-work", MessageID: "message-1", Text: "draft a release update",
-	}))
+	})
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"INPUT_REQUIRED"`) || strings.Contains(response.Body.String(), `"result"`) {
 		t.Fatalf("unreviewed submit=%d %s", response.Code, response.Body.String())
 	}
@@ -181,7 +181,7 @@ func TestLocalOwnerCanFinalizeExactCompletionReview(t *testing.T) {
 		t.Fatalf("task response=%s err=%v", response.Body.String(), err)
 	}
 	response = serveHuman(handler, http.MethodGet, "/v1/user/reviews/"+task.TaskID, testOwnerMarker, "")
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"objective":"draft a release update"`) || !strings.Contains(response.Body.String(), `"candidate_result":"candidate: draft a release update"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"objective":"draft a release update"`) || !strings.Contains(response.Body.String(), `"candidate_result":"candidate: Execute only this accepted Agent OS Intent.`) {
 		t.Fatalf("review fetch=%d %s", response.Code, response.Body.String())
 	}
 	if response.Header().Get("Cache-Control") != "no-store" {
@@ -200,7 +200,7 @@ func TestLocalOwnerCanFinalizeExactCompletionReview(t *testing.T) {
 		t.Fatalf("review decision=%d %s", response.Code, response.Body.String())
 	}
 	response = serveHuman(handler, http.MethodGet, "/v1/user/tasks/"+task.TaskID, testOwnerMarker, "")
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) || !strings.Contains(response.Body.String(), `"result":"candidate: draft a release update"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) || !strings.Contains(response.Body.String(), `"result":"candidate: Execute only this accepted Agent OS Intent.`) {
 		t.Fatalf("reviewed task=%d %s", response.Code, response.Body.String())
 	}
 }
@@ -213,7 +213,7 @@ func TestReviewerEndpointRejectsStaleFingerprintWithoutLedgerDecision(t *testing
 	t.Cleanup(func() { _ = store.Close() })
 	operator := intake.New(app.NewWithModel(events.NewGateway(store), reviewerModel{}))
 	handler := testHumanReviewHandler(t, operator)
-	response := serveHuman(handler, http.MethodPost, "/v1/user/messages", testOwnerMarker, humanBody(t, humanMessageRequest{ConversationID: "stale-review", MessageID: "message-1", Text: "draft"}))
+	response := submitAndConfirmHuman(t, handler, humanMessageRequest{ConversationID: "stale-review", MessageID: "message-1", Text: "draft"})
 	var task humanTaskResponse
 	if err := json.Unmarshal(response.Body.Bytes(), &task); err != nil {
 		t.Fatal(err)
@@ -264,6 +264,20 @@ func humanBody(t *testing.T, request humanMessageRequest) string {
 		t.Fatal(err)
 	}
 	return string(encoded)
+}
+
+func submitAndConfirmHuman(t *testing.T, handler http.Handler, request humanMessageRequest) *httptest.ResponseRecorder {
+	t.Helper()
+	draftResponse := serveHuman(handler, http.MethodPost, "/v1/user/messages", testOwnerMarker, humanBody(t, request))
+	var draft humanTaskResponse
+	if draftResponse.Code != http.StatusOK || json.Unmarshal(draftResponse.Body.Bytes(), &draft) != nil || draft.State != intake.StateAwaitingConfirmation || draft.Intent == nil {
+		t.Fatalf("intent draft=%d %s", draftResponse.Code, draftResponse.Body.String())
+	}
+	body, err := json.Marshal(humanIntentConfirmationRequest{MessageID: "confirm-" + request.MessageID, Fingerprint: draft.Intent.Fingerprint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return serveHuman(handler, http.MethodPost, "/v1/user/intents/"+request.ConversationID+"/confirm", testOwnerMarker, string(body))
 }
 
 func serveHuman(handler http.Handler, method, path, token, body string) *httptest.ResponseRecorder {

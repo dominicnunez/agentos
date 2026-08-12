@@ -38,8 +38,12 @@ func TestOfficialA2AClientUsesDurableAgentOSState(t *testing.T) {
 		t.Fatalf("SendMessage() error = %v", err)
 	}
 	task, ok := result.(*a2a.Task)
-	if !ok || task.ID == "" || task.ContextID == "" || task.Status.State != a2a.TaskStateCompleted {
+	if !ok || task.ID == "" || task.ContextID == "" || task.Status.State != a2a.TaskStateInputRequired {
 		t.Fatalf("SendMessage() = %#v", result)
+	}
+	task = confirmOfficialIntent(t, client, task, "official-confirmation-1")
+	if task.Status.State != a2a.TaskStateCompleted {
+		t.Fatalf("confirmed task = %#v", task)
 	}
 	if deterministic.ContextID != "" {
 		t.Fatalf("client message was unexpectedly mutated: contextId=%q", deterministic.ContextID)
@@ -88,6 +92,10 @@ func TestOfficialA2AClientUsesDurableAgentOSState(t *testing.T) {
 	if !ok || blocked.Status.State != a2a.TaskStateInputRequired {
 		t.Fatalf("blocked result = %#v", blockedResult)
 	}
+	blocked = confirmOfficialIntent(t, client, blocked, "official-confirmation-blocked")
+	if blocked.Status.State != a2a.TaskStateInputRequired {
+		t.Fatalf("confirmed blocked result = %#v", blocked)
+	}
 	mismatch := a2a.NewMessageForTask(a2a.MessageRoleUser, blocked, a2a.NewTextPart("detail"))
 	mismatch.ID = "official-message-mismatch"
 	mismatch.ContextID = "wrong-context"
@@ -115,8 +123,12 @@ func TestOfficialA2AClientUsesDurableAgentOSState(t *testing.T) {
 		t.Fatal(err)
 	}
 	agentTask, ok := agentResult.(*a2a.Task)
-	if !ok || agentTask.Status.State != a2a.TaskStateCompleted {
+	if !ok || agentTask.Status.State != a2a.TaskStateInputRequired {
 		t.Fatalf("agent result = %#v", agentResult)
+	}
+	agentTask = confirmOfficialIntent(t, client, agentTask, "official-confirmation-agent")
+	if agentTask.Status.State != a2a.TaskStateCompleted {
+		t.Fatalf("confirmed agent result = %#v", agentTask)
 	}
 
 	allBefore, err := store.Events(context.Background(), "")
@@ -161,7 +173,7 @@ func TestOfficialA2ASubmitterCanRetryOnlyItsSubmissionReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	receipt, ok := first.(*a2a.Task)
-	if !ok || receipt.ID == "" || receipt.ContextID == "" || receipt.Status.State != a2a.TaskStateWorking || len(receipt.Artifacts) != 0 {
+	if !ok || receipt.ID == "" || receipt.ContextID == "" || receipt.Status.State != a2a.TaskStateInputRequired || len(receipt.Artifacts) != 0 {
 		t.Fatalf("submission receipt = %#v", first)
 	}
 	eventCount := len(gatewayExternalStream(t, store, receipt.ContextID))
@@ -179,9 +191,38 @@ func TestOfficialA2ASubmitterCanRetryOnlyItsSubmissionReceipt(t *testing.T) {
 	if got := len(gatewayExternalStream(t, store, receipt.ContextID)); got != eventCount {
 		t.Fatalf("receipt retry appended events: got=%d want=%d", got, eventCount)
 	}
+	confirmed := confirmOfficialIntent(t, client, receipt, "submit-only-confirmation")
+	if confirmed.Status.State != a2a.TaskStateWorking || len(confirmed.Artifacts) != 0 {
+		t.Fatalf("submitter confirmation receipt = %#v", confirmed)
+	}
 	if _, err := client.GetTask(context.Background(), &a2a.GetTaskRequest{ID: receipt.ID}); err == nil {
 		t.Fatal("submit-only actor gained task status access")
 	}
+}
+
+func confirmOfficialIntent(t *testing.T, client *a2aclient.Client, task *a2a.Task, messageID string) *a2a.Task {
+	t.Helper()
+	metadata, ok := task.Metadata[intentConfirmationURI].(map[string]any)
+	if !ok {
+		t.Fatalf("task has no intent metadata: %#v", task)
+	}
+	fingerprint, ok := metadata["fingerprint"].(string)
+	if !ok || fingerprint == "" {
+		t.Fatalf("task has no intent fingerprint: %#v", task)
+	}
+	message := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.NewTextPart("Confirm the reviewed Agent OS intent."))
+	message.ID = messageID
+	message.Extensions = []string{intentConfirmationURI}
+	message.Metadata = map[string]any{intentConfirmationURI: map[string]any{"action": "CONFIRM", "fingerprint": fingerprint}}
+	result, err := client.SendMessage(context.Background(), &a2a.SendMessageRequest{Message: message})
+	if err != nil {
+		t.Fatalf("intent confirmation error = %v", err)
+	}
+	confirmed, ok := result.(*a2a.Task)
+	if !ok {
+		t.Fatalf("intent confirmation = %#v", result)
+	}
+	return confirmed
 }
 
 func TestUnsupportedA2AHandlerMethodsDoNotReachLedger(t *testing.T) {

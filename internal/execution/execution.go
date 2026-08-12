@@ -104,7 +104,11 @@ func (a *AgentExecution) Execute(ctx context.Context, task core.Task, manifest c
 		err := fmt.Errorf("execution context model identity does not match the configured adapter")
 		return Result{Outcome: core.ToolOutcome{ToolInvocationID: core.ID("model-" + string(task.ID)), ToolID: a.model.Name(), Status: core.OutcomeFailed, PostconditionStatus: core.PostconditionNotChecked, Retryability: core.NotRetryable, ErrorClass: "provider_contract", ErrorDetail: err.Error(), StartedAt: started, FinishedAt: time.Now().UTC()}}, err
 	}
-	response, err := a.model.Complete(ctx, task.Description)
+	prompt := task.Description
+	if task.ExecutionBrief != "" {
+		prompt = task.ExecutionBrief
+	}
+	response, err := a.model.Complete(ctx, prompt)
 	if err != nil {
 		return Result{Outcome: core.ToolOutcome{ToolInvocationID: core.ID("model-" + string(task.ID)), ToolID: a.model.Name(), Status: core.OutcomeFailed, PostconditionStatus: core.PostconditionNotChecked, Retryability: core.Retryable, ErrorDetail: err.Error(), StartedAt: started, FinishedAt: time.Now().UTC()}}, err
 	}

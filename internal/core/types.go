@@ -35,20 +35,66 @@ type Agent struct {
 	RuntimeAdapter          string `json:"runtime_adapter"`
 	Status                  string `json:"status"`
 }
+
+type IntentStatus string
+
+const (
+	IntentStatusAwaitingInput  IntentStatus = "AWAITING_USER_INPUT"
+	IntentStatusReadyForReview IntentStatus = "READY_FOR_REVIEW"
+)
+
+type IntentValue struct {
+	Value           string `json:"value"`
+	Origin          string `json:"origin"`
+	SourceMessageID string `json:"source_message_id,omitempty"`
+}
+
+type IntentDecision struct {
+	Subject         string `json:"subject"`
+	Value           string `json:"value"`
+	Origin          string `json:"origin"`
+	SourceMessageID string `json:"source_message_id,omitempty"`
+}
+
+// IntentDraft is untrusted model output until the runtime validates it and an
+// authorized operator confirms its exact version and fingerprint. A draft may
+// describe missing input; a reviewable or accepted draft may not.
+type IntentDraft struct {
+	ID                     ID               `json:"id"`
+	OrganizationID         ID               `json:"organization_id"`
+	Version                int              `json:"version"`
+	Status                 IntentStatus     `json:"status"`
+	RequestedExecutionKind ExecutionKind    `json:"requested_execution_kind"`
+	Objective              string           `json:"objective"`
+	Context                []IntentValue    `json:"context"`
+	Deliverables           []IntentValue    `json:"deliverables"`
+	CompletionCriteria     []IntentValue    `json:"completion_criteria"`
+	Constraints            []IntentValue    `json:"constraints"`
+	ResolvedDecisions      []IntentDecision `json:"resolved_decisions"`
+	ConsequenceCandidates  []string         `json:"consequence_candidates"`
+	MissingUserInputs      []IntentValue    `json:"missing_user_inputs,omitempty"`
+	Fingerprint            string           `json:"fingerprint"`
+	CreatedAt              time.Time        `json:"created_at"`
+}
+
 type Intent struct {
-	ID                    ID            `json:"id"`
-	OrganizationID        ID            `json:"organization_id"`
-	OriginalInstruction   string        `json:"original_instruction"`
-	NormalizedObjective   string        `json:"normalized_objective"`
-	HardConstraints       []string      `json:"hard_constraints"`
-	ConsequenceBoundaries []string      `json:"consequence_boundaries"`
-	SourcePrincipalID     ID            `json:"source_principal_id"`
-	SourcePrincipalKind   PrincipalKind `json:"source_principal_kind"`
-	SourceChannel         string        `json:"source_channel"`
-	ExternalRequestID     string        `json:"external_request_id,omitempty"`
-	SourceMessageID       string        `json:"source_message_id,omitempty"`
-	SourceHumanID         ID            `json:"source_human_id,omitempty"`
-	CreatedAt             time.Time     `json:"created_at"`
+	ID                    ID               `json:"id"`
+	OrganizationID        ID               `json:"organization_id"`
+	OriginalInstruction   string           `json:"original_instruction"`
+	NormalizedObjective   string           `json:"normalized_objective"`
+	HardConstraints       []string         `json:"hard_constraints"`
+	ConsequenceBoundaries []string         `json:"consequence_boundaries"`
+	SourcePrincipalID     ID               `json:"source_principal_id"`
+	SourcePrincipalKind   PrincipalKind    `json:"source_principal_kind"`
+	SourceChannel         string           `json:"source_channel"`
+	ExternalRequestID     string           `json:"external_request_id,omitempty"`
+	SourceMessageID       string           `json:"source_message_id,omitempty"`
+	SourceHumanID         ID               `json:"source_human_id,omitempty"`
+	Context               []IntentValue    `json:"context"`
+	Deliverables          []IntentValue    `json:"deliverables"`
+	CompletionCriteria    []IntentValue    `json:"completion_criteria"`
+	ResolvedDecisions     []IntentDecision `json:"resolved_decisions"`
+	CreatedAt             time.Time        `json:"created_at"`
 }
 type Goal struct {
 	ID        ID        `json:"id"`
@@ -91,6 +137,8 @@ type Task struct {
 	ID                   ID                   `json:"id"`
 	GoalID               ID                   `json:"goal_id"`
 	Description          string               `json:"description"`
+	ExecutionBrief       string               `json:"execution_brief,omitempty"`
+	AcceptanceCriteria   []IntentValue        `json:"acceptance_criteria,omitempty"`
 	ExecutionKind        ExecutionKind        `json:"execution_kind"`
 	ModelInferencePolicy ModelInferencePolicy `json:"model_inference_policy"`
 	DependsOn            []ID                 `json:"depends_on,omitempty"`

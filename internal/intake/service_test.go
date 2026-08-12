@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dominicnunez/agentos/internal/app"
 	"github.com/dominicnunez/agentos/internal/core"
@@ -51,8 +53,8 @@ func TestIntakeKeepsSourceProvenance(t *testing.T) {
 	externalAgent := testPrincipal("external-agent-1", core.PrincipalExternalAgent, ChannelA2A)
 	externalAgent.WorkScope = WorkScopeOrganization
 
-	view, err := service.Handle(ctx, human, Message{ConversationID: "human-work", MessageID: "human-message-1", Text: "draft a concise release update"})
-	if err != nil || view.State != StateCompleted || view.Result != "fake-model: draft a concise release update" {
+	view, err := submitAndConfirm(t, ctx, service, human, Message{ConversationID: "human-work", MessageID: "human-message-1", Text: "draft a concise release update"})
+	if err != nil || view.State != StateCompleted || !strings.HasPrefix(view.Result, "fake-model: Execute only this accepted Agent OS Intent.") || !strings.Contains(view.Result, `"objective":"draft a concise release update"`) {
 		t.Fatalf("human view=%+v err=%v", view, err)
 	}
 	intent, task, stream := projectedWork(t, store, "human-work")
@@ -66,7 +68,7 @@ func TestIntakeKeepsSourceProvenance(t *testing.T) {
 		t.Fatalf("agent route lacks manifested inference evidence: %+v", stream)
 	}
 
-	view, err = service.Handle(ctx, externalAgent, Message{ConversationID: "agent-work", MessageID: "agent-message-1", Text: "echo hello"})
+	view, err = submitAndConfirm(t, ctx, service, externalAgent, Message{ConversationID: "agent-work", MessageID: "agent-message-1", Text: "echo hello"})
 	if err != nil || view.State != StateCompleted || view.Result != "hello" {
 		t.Fatalf("external-Agent view=%+v err=%v", view, err)
 	}
@@ -96,7 +98,7 @@ func TestChannelsShareWorkButAgentCannotCompleteUserTask(t *testing.T) {
 	externalAgent := testPrincipal("external-agent-1", core.PrincipalExternalAgent, ChannelA2A)
 	externalAgent.WorkScope = WorkScopeOrganization
 
-	view, err := service.Handle(ctx, human, Message{ConversationID: "shared", MessageID: "human-message-1", Text: "choose the launch date", RequestedKind: core.ExecutionHuman})
+	view, err := submitAndConfirm(t, ctx, service, human, Message{ConversationID: "shared", MessageID: "human-message-1", Text: "choose the launch date", RequestedKind: core.ExecutionHuman})
 	if err != nil || view.State != StateInputRequired || view.Prompt == "" {
 		t.Fatalf("blocked human work=%+v err=%v", view, err)
 	}
@@ -182,7 +184,7 @@ func TestIntakeGrandfathersOnlyDurablyBoundLegacyConversationIDs(t *testing.T) {
 	service := New(app.New(events.NewGateway(store)))
 	principal := testPrincipal("agent-1", core.PrincipalExternalAgent, ChannelA2A)
 	message := Message{ConversationID: "canonical-conversation", MessageID: "message-1", Text: "echo legacy"}
-	view, err := service.Handle(ctx, principal, message)
+	view, err := submitAndConfirm(t, ctx, service, principal, message)
 	if err != nil || view.State != StateCompleted {
 		t.Fatalf("initial work=%+v err=%v", view, err)
 	}
@@ -223,7 +225,7 @@ func TestIntakeUsesDurableMessageIDsForContinuationAndReplayAuthorization(t *tes
 	externalAgent.WorkScope = WorkScopeOrganization
 
 	const repeatedText = "choose the launch date"
-	view, err := service.Handle(ctx, human, Message{ConversationID: "same-text", MessageID: "initial-message", Text: repeatedText, RequestedKind: core.ExecutionHuman})
+	view, err := submitAndConfirm(t, ctx, service, human, Message{ConversationID: "same-text", MessageID: "initial-message", Text: repeatedText, RequestedKind: core.ExecutionHuman})
 	if err != nil || view.State != StateInputRequired {
 		t.Fatalf("blocked work=%+v err=%v", view, err)
 	}
@@ -236,17 +238,344 @@ func TestIntakeUsesDurableMessageIDsForContinuationAndReplayAuthorization(t *tes
 	submitOnly.Capabilities = []string{CapabilitySubmitWork}
 	message := Message{ConversationID: "read-guard", MessageID: "submission", Text: "echo private status"}
 	receipt, err := service.Handle(ctx, submitOnly, message)
-	if err != nil || receipt.TaskID == "" || receipt.State != StateWorking || receipt.Result != "" || receipt.Prompt != "" {
+	if err != nil || receipt.TaskID == "" || receipt.State != StateAwaitingConfirmation || receipt.Result != "" || receipt.Prompt == "" || receipt.Intent == nil {
 		t.Fatalf("initial submission failed: %v", err)
 	}
 	retry, err := service.Handle(ctx, submitOnly, message)
-	if err != nil || retry != receipt {
+	if err != nil || retry.TaskID != receipt.TaskID || retry.State != receipt.State || retry.Intent == nil || retry.Intent.Fingerprint != receipt.Intent.Fingerprint {
 		t.Fatalf("submission receipt retry=%+v want=%+v err=%v", retry, receipt, err)
+	}
+	if _, err := service.ConfirmIntent(ctx, submitOnly, IntentConfirmation{ConversationID: message.ConversationID, MessageID: "confirm-submission", Fingerprint: receipt.Intent.Fingerprint}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("submit-only principal confirmed intent: %v", err)
 	}
 	otherSubmitter := submitOnly
 	otherSubmitter.ID = "human-2"
 	if _, err := service.Handle(ctx, otherSubmitter, message); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("different submitter replay err=%v", err)
+	}
+}
+
+func TestUnconfirmedIntentResumesAfterServiceRestart(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	first := New(app.New(events.NewGateway(store)))
+	draft, err := first.Handle(ctx, principal, Message{ConversationID: "resumable", MessageID: "message-1", Text: "prepare a Linux release"})
+	if err != nil || draft.State != StateAwaitingConfirmation || draft.Intent == nil {
+		t.Fatalf("draft=%+v err=%v", draft, err)
+	}
+	restarted := New(app.New(events.NewGateway(store)))
+	resumed, err := restarted.ActiveIntent(ctx, principal)
+	if err != nil || resumed.ConversationID != draft.ConversationID || resumed.TaskID != draft.TaskID || resumed.Intent == nil || resumed.Intent.Fingerprint != draft.Intent.Fingerprint {
+		t.Fatalf("resumed=%+v err=%v", resumed, err)
+	}
+	confirmed, err := restarted.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: resumed.ConversationID, TaskID: resumed.TaskID, MessageID: "confirmation-1", Fingerprint: resumed.Intent.Fingerprint})
+	if err != nil || confirmed.TaskID != draft.TaskID {
+		t.Fatalf("confirmed=%+v err=%v", confirmed, err)
+	}
+	if _, err := restarted.ActiveIntent(ctx, principal); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("confirmed intake remained active: %v", err)
+	}
+}
+
+func TestOwnScopeBindsCompleteAuthenticatedPrincipalIdentity(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := New(app.New(events.NewGateway(store)))
+	user := testPrincipal("shared-id", core.PrincipalHuman, ChannelHumanDirect)
+	draft, err := service.Handle(ctx, user, Message{ConversationID: "identity-bound", MessageID: "message-1", Text: "echo private"})
+	if err != nil || draft.Intent == nil {
+		t.Fatalf("user draft=%+v err=%v", draft, err)
+	}
+
+	agent := testPrincipal("shared-id", core.PrincipalExternalAgent, ChannelA2A)
+	if _, err := service.ActiveIntent(ctx, agent); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("same-id agent resumed user intake: %v", err)
+	}
+	if _, err := service.Handle(ctx, agent, Message{ConversationID: draft.ConversationID, TaskID: draft.TaskID, MessageID: "message-2", Text: "continue"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("same-id agent continued user intake: %v", err)
+	}
+	if _, err := service.ConfirmIntent(ctx, agent, IntentConfirmation{ConversationID: draft.ConversationID, TaskID: draft.TaskID, MessageID: "confirmation-agent", Fingerprint: draft.Intent.Fingerprint}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("same-id agent confirmed user intent: %v", err)
+	}
+
+	confirmed, err := service.ConfirmIntent(ctx, user, IntentConfirmation{ConversationID: draft.ConversationID, MessageID: "confirmation-user", Fingerprint: draft.Intent.Fingerprint})
+	if err != nil || confirmed.TaskID == "" {
+		t.Fatalf("user confirmation=%+v err=%v", confirmed, err)
+	}
+	if _, err := service.Get(ctx, agent, confirmed.TaskID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("same-id agent read user task: %v", err)
+	}
+}
+
+func TestIntentNormalizationManifestsModelUseAndReplaysWithoutInference(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ready := `{"state":"READY_FOR_REVIEW","reply":"Review this intent.","intent":{"objective":"Prepare a Linux release","context":[],"deliverables":[{"value":"Linux binary","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Binary passes verification","origin":"EXPLICIT","source_message_id":"message-1"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
+	normalizer, err := NewModelNormalizer(normalizationModel{response: ready})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewWithNormalizer(app.New(events.NewGateway(store)), normalizer)
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	message := Message{ConversationID: "audited-intake", MessageID: "message-1", Text: "Prepare a Linux release"}
+
+	first, err := service.Handle(ctx, principal, message)
+	if err != nil || first.State != StateAwaitingConfirmation {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	stream := externalStream(t, store, message.ConversationID)
+	if countEvents(stream, "INTENT_NORMALIZATION_CONTEXT_MANIFESTED") != 1 || countEvents(stream, "INFERENCE_USAGE_RECORDED") != 1 || countEvents(stream, "INTENT_DRAFTED") != 1 {
+		t.Fatalf("normalization audit events=%+v", stream)
+	}
+	var contextPayload events.IntentNormalizationContextPayload
+	for _, event := range stream {
+		if event.EventType == "INTENT_NORMALIZATION_CONTEXT_MANIFESTED" {
+			if err := json.Unmarshal(event.Payload, &contextPayload); err != nil {
+				t.Fatal(err)
+			}
+			if event.SourceExecutionID == "" || contextPayload.SourceMessageID != message.MessageID || contextPayload.PromptVersion != intentNormalizationPromptVersion || len(contextPayload.InputEventRefs) != 1 {
+				t.Fatalf("normalization context event=%+v payload=%+v", event, contextPayload)
+			}
+		}
+	}
+	replayed, err := service.Handle(ctx, principal, message)
+	if err != nil || replayed.Intent == nil || replayed.Intent.Fingerprint != first.Intent.Fingerprint {
+		t.Fatalf("replay=%+v err=%v", replayed, err)
+	}
+	stream = externalStream(t, store, message.ConversationID)
+	if countEvents(stream, "INTENT_NORMALIZATION_CONTEXT_MANIFESTED") != 1 || countEvents(stream, "INFERENCE_USAGE_RECORDED") != 1 || countEvents(stream, "INTENT_DRAFTED") != 1 {
+		t.Fatalf("replay repeated model work: %+v", stream)
+	}
+	confirmed, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: message.ConversationID, MessageID: "confirmation-1", Fingerprint: first.Intent.Fingerprint})
+	if err != nil || confirmed.TaskID == "" {
+		t.Fatalf("confirmation=%+v err=%v", confirmed, err)
+	}
+	_, task, _ := projectedWork(t, store, message.ConversationID)
+	if len(task.AcceptanceCriteria) != 1 || task.AcceptanceCriteria[0].Value != "Binary passes verification" {
+		t.Fatalf("accepted completion criteria did not reach task contract input: %+v", task.AcceptanceCriteria)
+	}
+}
+
+type retryNormalizationModel struct {
+	response string
+	calls    int
+}
+
+func (*retryNormalizationModel) Descriptor() NormalizerDescriptor {
+	return NormalizerDescriptor{Provider: "test", Model: "test-model", ExecutionProfileVersion: "test-profile"}
+}
+
+func (m *retryNormalizationModel) CompleteText(context.Context, string) (TextCompletion, error) {
+	m.calls++
+	if m.calls == 1 {
+		return TextCompletion{}, errors.New("temporary provider failure")
+	}
+	return TextCompletion{Text: m.response, Usage: events.InferenceUsageRecordedPayload{Source: "test", Provider: "test", Model: "test-model"}}, nil
+}
+
+func TestIntentNormalizationRetryCompletesAnInterruptedDraftOnce(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ready := `{"state":"READY_FOR_REVIEW","reply":"Review this intent.","intent":{"objective":"Prepare a Linux release","context":[],"deliverables":[{"value":"Linux binary","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Binary passes verification","origin":"EXPLICIT","source_message_id":"message-1"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
+	model := &retryNormalizationModel{response: ready}
+	normalizer, err := NewModelNormalizer(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewWithNormalizer(app.New(events.NewGateway(store)), normalizer)
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	message := Message{ConversationID: "retry-intake", MessageID: "message-1", Text: "Prepare a Linux release"}
+
+	if _, err := service.Handle(ctx, principal, message); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("first normalization err=%v", err)
+	}
+	view, err := service.Handle(ctx, principal, message)
+	if err != nil || view.State != StateAwaitingConfirmation || model.calls != 2 {
+		t.Fatalf("retried view=%+v calls=%d err=%v", view, model.calls, err)
+	}
+	stream := externalStream(t, store, message.ConversationID)
+	if countEvents(stream, "INTAKE_MESSAGE_RECORDED") != 1 || countEvents(stream, "INTENT_NORMALIZATION_CONTEXT_MANIFESTED") != 2 || countEvents(stream, "INFERENCE_USAGE_RECORDED") != 1 || countEvents(stream, "INTENT_DRAFTED") != 1 {
+		t.Fatalf("interrupted retry did not preserve distinct attempts: %+v", stream)
+	}
+}
+
+func TestInvalidNormalizationStillRecordsProviderUsage(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	normalizer, err := NewModelNormalizer(normalizationModel{response: `{"not":"the contract"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewWithNormalizer(app.New(events.NewGateway(store)), normalizer)
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	message := Message{ConversationID: "invalid-normalization", MessageID: "message-1", Text: "Prepare a release"}
+	if _, err := service.Handle(ctx, principal, message); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("invalid normalization err=%v", err)
+	}
+	stream := externalStream(t, store, message.ConversationID)
+	if countEvents(stream, "INTENT_NORMALIZATION_CONTEXT_MANIFESTED") != 1 || countEvents(stream, "INFERENCE_USAGE_RECORDED") != 1 || countEvents(stream, "INTENT_DRAFTED") != 0 {
+		t.Fatalf("invalid normalization audit events=%+v", stream)
+	}
+}
+
+func TestIntentConversationLimitsRejectBeforeAppending(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := New(app.New(events.NewGateway(store)))
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	conversationID := "bounded-intake"
+	var taskID string
+	for index := 0; index < MaximumIntentTurns; index++ {
+		view, handleErr := service.Handle(ctx, principal, Message{ConversationID: conversationID, TaskID: taskID, MessageID: fmt.Sprintf("message-%d", index), Text: "Add context"})
+		if handleErr != nil {
+			t.Fatalf("turn %d: %v", index, handleErr)
+		}
+		taskID = view.TaskID
+	}
+	if _, err := service.Handle(ctx, principal, Message{ConversationID: conversationID, TaskID: taskID, MessageID: "message-overflow", Text: "One more detail"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("turn overflow err=%v", err)
+	}
+	stream := externalStream(t, store, conversationID)
+	if countEvents(stream, "INTAKE_MESSAGE_RECORDED") != MaximumIntentTurns {
+		t.Fatalf("rejected turn reached ledger: %d", countEvents(stream, "INTAKE_MESSAGE_RECORDED"))
+	}
+}
+
+type fixedNormalizer struct{}
+
+func (fixedNormalizer) Descriptor() (NormalizerDescriptor, bool) {
+	return NormalizerDescriptor{}, false
+}
+
+func (fixedNormalizer) Normalize(_ context.Context, turns []ConversationTurn) (Normalization, error) {
+	latest := turns[len(turns)-1]
+	value := core.IntentValue{Value: "Bounded result", Origin: "DEFAULT", SourceMessageID: latest.MessageID}
+	return Normalization{
+		State: normalizationReady, Reply: "Review this intent.",
+		Candidate: IntentCandidate{Objective: "Retain the supplied context", Deliverables: []core.IntentValue{value}, CompletionCriteria: []core.IntentValue{value}},
+	}, nil
+}
+
+func TestIntentConversationByteLimitRejectsBeforeAppending(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := NewWithNormalizer(app.New(events.NewGateway(store)), fixedNormalizer{})
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	conversationID := "byte-bounded-intake"
+	first, err := service.Handle(ctx, principal, Message{ConversationID: conversationID, MessageID: "message-1", Text: strings.Repeat("a", 64<<10)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Handle(ctx, principal, Message{ConversationID: conversationID, TaskID: first.TaskID, MessageID: "message-2", Text: strings.Repeat("b", 64<<10)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Handle(ctx, principal, Message{ConversationID: conversationID, TaskID: first.TaskID, MessageID: "message-overflow", Text: "c"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("byte overflow err=%v", err)
+	}
+	stream := externalStream(t, store, conversationID)
+	if countEvents(stream, "INTAKE_MESSAGE_RECORDED") != 2 {
+		t.Fatalf("rejected bytes reached ledger: %d", countEvents(stream, "INTAKE_MESSAGE_RECORDED"))
+	}
+}
+
+type stagedNormalizer struct {
+	calls         int
+	secondStarted chan struct{}
+	releaseSecond chan struct{}
+}
+
+func (*stagedNormalizer) Descriptor() (NormalizerDescriptor, bool) {
+	return NormalizerDescriptor{}, false
+}
+
+func (n *stagedNormalizer) Normalize(_ context.Context, turns []ConversationTurn) (Normalization, error) {
+	n.calls++
+	if n.calls == 2 {
+		close(n.secondStarted)
+		<-n.releaseSecond
+	}
+	latest := turns[len(turns)-1]
+	value := core.IntentValue{Value: "Deliver " + latest.MessageID, Origin: "EXPLICIT", SourceMessageID: latest.MessageID}
+	return Normalization{
+		State: normalizationReady, Reply: "Review this intent.",
+		Candidate: IntentCandidate{Objective: "Objective " + latest.MessageID, Deliverables: []core.IntentValue{value}, CompletionCriteria: []core.IntentValue{value}},
+	}, nil
+}
+
+func TestIntentConfirmationCannotRacePastANewerMessage(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	normalizer := &stagedNormalizer{secondStarted: make(chan struct{}), releaseSecond: make(chan struct{})}
+	service := NewWithNormalizer(app.New(events.NewGateway(store)), normalizer)
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	first, err := service.Handle(ctx, principal, Message{ConversationID: "serialized-intake", MessageID: "message-1", Text: "First request"})
+	if err != nil || first.Intent == nil {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+
+	continued := make(chan struct {
+		view View
+		err  error
+	}, 1)
+	go func() {
+		view, handleErr := service.Handle(ctx, principal, Message{ConversationID: "serialized-intake", MessageID: "message-2", Text: "Important correction"})
+		continued <- struct {
+			view View
+			err  error
+		}{view: view, err: handleErr}
+	}()
+	<-normalizer.secondStarted
+
+	confirmed := make(chan error, 1)
+	go func() {
+		_, confirmErr := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: "serialized-intake", MessageID: "confirm-1", Fingerprint: first.Intent.Fingerprint})
+		confirmed <- confirmErr
+	}()
+	select {
+	case confirmErr := <-confirmed:
+		t.Fatalf("stale confirmation crossed active normalization: %v", confirmErr)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(normalizer.releaseSecond)
+	result := <-continued
+	if result.err != nil || result.view.Intent == nil || result.view.Intent.Fingerprint == first.Intent.Fingerprint {
+		t.Fatalf("continued=%+v err=%v", result.view, result.err)
+	}
+	if confirmErr := <-confirmed; !errors.Is(confirmErr, ErrConflict) {
+		t.Fatalf("stale confirmation err=%v", confirmErr)
 	}
 }
 
@@ -257,8 +586,20 @@ func testPrincipal(id string, kind core.PrincipalKind, channel string) Principal
 	}
 	return Principal{
 		ID: id, Kind: kind, OrganizationID: "org-1", Channel: channel,
-		Capabilities: []string{CapabilitySubmitWork, CapabilityReadStatus, CapabilityReadResult, CapabilityProvideInput}, WorkScope: scope,
+		Capabilities: []string{CapabilitySubmitWork, CapabilityConfirmIntent, CapabilityReadStatus, CapabilityReadResult, CapabilityProvideInput}, WorkScope: scope,
 	}
+}
+
+func submitAndConfirm(t *testing.T, ctx context.Context, service *Service, principal Principal, message Message) (View, error) {
+	t.Helper()
+	draft, err := service.Handle(ctx, principal, message)
+	if err != nil {
+		return draft, err
+	}
+	if draft.State != StateAwaitingConfirmation || draft.Intent == nil {
+		t.Fatalf("intent was not ready for confirmation: %+v", draft)
+	}
+	return service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: message.ConversationID, MessageID: "confirm-" + message.MessageID, Fingerprint: draft.Intent.Fingerprint})
 }
 
 func projectedWork(t *testing.T, store *ledger.SQLite, correlationID string) (core.Intent, core.Task, []events.Event) {
@@ -287,6 +628,15 @@ func projectedWork(t *testing.T, store *ledger.SQLite, correlationID string) (co
 
 func externalStream(t *testing.T, store *ledger.SQLite, externalRequestID string) []events.Event {
 	t.Helper()
+	if correlationID, found, err := store.ResolveExternalWork(context.Background(), "org-1", externalRequestID); err != nil {
+		t.Fatal(err)
+	} else if found {
+		stream, err := store.Events(context.Background(), correlationID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return stream
+	}
 	all, err := store.Events(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
@@ -320,4 +670,14 @@ func containsEvent(stream []events.Event, eventType string) bool {
 		}
 	}
 	return false
+}
+
+func countEvents(stream []events.Event, eventType string) int {
+	count := 0
+	for _, event := range stream {
+		if event.EventType == eventType {
+			count++
+		}
+	}
+	return count
 }

@@ -56,7 +56,7 @@ func TestAgentCardAdvertisesOnlyA2AV1JSONRPC(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &card); err != nil {
 		t.Fatal(err)
 	}
-	if card.Version != releaseVersion || len(card.SupportedInterfaces) != 1 || card.SupportedInterfaces[0].URL != "https://agentos.example/" || card.SupportedInterfaces[0].ProtocolBinding != a2a.TransportProtocolJSONRPC || card.SupportedInterfaces[0].ProtocolVersion != a2a.Version || len(card.SecurityRequirements) != 1 || card.Capabilities.Streaming || card.Capabilities.PushNotifications || card.Capabilities.ExtendedAgentCard || len(card.Capabilities.Extensions) != 1 || card.Capabilities.Extensions[0].URI != executionkind.URI {
+	if card.Version != releaseVersion || len(card.SupportedInterfaces) != 1 || card.SupportedInterfaces[0].URL != "https://agentos.example/" || card.SupportedInterfaces[0].ProtocolBinding != a2a.TransportProtocolJSONRPC || card.SupportedInterfaces[0].ProtocolVersion != a2a.Version || len(card.SecurityRequirements) != 1 || card.Capabilities.Streaming || card.Capabilities.PushNotifications || card.Capabilities.ExtendedAgentCard || len(card.Capabilities.Extensions) != 2 || card.Capabilities.Extensions[0].URI != executionkind.URI || card.Capabilities.Extensions[1].URI != intentConfirmationURI {
 		t.Fatalf("unexpected Agent Card: %+v", card)
 	}
 	for _, legacyPath := range []string{"/.well-known/agent.json", "/a2a/v1/tasks/send", "/a2a/v1/tasks/task-1"} {
@@ -166,6 +166,10 @@ func TestA2ACannotApproveEffects(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), a2aStateInputRequired) {
 		t.Fatalf("protected work submit=%d %s", response.Code, response.Body.String())
 	}
+	response = confirmRPCIntent(t, handler, testExternalToken, "rpc-confirm-1", "confirmation-1", response)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), a2aStateInputRequired) {
+		t.Fatalf("protected intent confirmation=%d %s", response.Code, response.Body.String())
+	}
 	taskID := taskIDFromRPC(t, response)
 
 	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: core.ID(taskID), ActorID: "agent-local-org-1", Action: "deploy", Resource: "agent-os", Scope: "org-1", ConsequenceBoundary: core.BoundaryDeployment, Descriptor: "deploy Agent OS", AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1", IdempotencyKey: "deploy-1", ReplayContext: map[string]string{"version": "1"}}
@@ -216,6 +220,7 @@ func TestA2ASendGetAndContinueUseV1TaskContracts(t *testing.T) {
 	handler := testA2A(t, operator, testExternalActor("external-agent", "o", testExternalToken, ExternalRoleOperator, intake.WorkScopeOwn))
 
 	response := serveRPC(handler, testExternalToken, sendMessageBody(t, "rpc-1", "message-1", "r1", "echo hello", nil))
+	response = confirmRPCIntent(t, handler, testExternalToken, "rpc-confirm-1", "confirmation-1", response)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"contextId":"r1"`) || !strings.Contains(response.Body.String(), a2aStateCompleted) || !strings.Contains(response.Body.String(), `"text":"hello"`) {
 		t.Fatalf("send=%d %s", response.Code, response.Body.String())
 	}
@@ -249,6 +254,10 @@ func TestA2ASendGetAndContinueUseV1TaskContracts(t *testing.T) {
 	response = serveRPC(handler, testExternalToken, sendMessageBody(t, "rpc-5", "message-5", "r2", "human decision", executionKindMetadata("HUMAN")))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), a2aStateInputRequired) || !strings.Contains(response.Body.String(), `"role":"ROLE_AGENT"`) {
 		t.Fatalf("blocked send=%d %s", response.Code, response.Body.String())
+	}
+	response = confirmRPCIntent(t, handler, testExternalToken, "rpc-confirm-5", "confirmation-5", response)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), a2aStateInputRequired) {
+		t.Fatalf("blocked intent confirmation=%d %s", response.Code, response.Body.String())
 	}
 	blockedTaskID := taskIDFromRPC(t, response)
 	response = serveRPC(observer, testObserverToken, continuationBody(t, "rpc-6", "message-6", "r2", blockedTaskID, "detail", nil))
@@ -294,6 +303,29 @@ func taskIDFromRPC(t *testing.T, response *httptest.ResponseRecorder) string {
 		t.Fatalf("response has no task id: %s err=%v", response.Body.String(), err)
 	}
 	return envelope.Result.Task.ID
+}
+
+func confirmRPCIntent(t *testing.T, handler http.Handler, token, rpcID, messageID string, response *httptest.ResponseRecorder) *httptest.ResponseRecorder {
+	t.Helper()
+	var envelope struct {
+		Result struct {
+			Task struct {
+				ID        string                    `json:"id"`
+				ContextID string                    `json:"contextId"`
+				Metadata  map[string]map[string]any `json:"metadata"`
+			} `json:"task"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	task := envelope.Result.Task
+	fingerprint, _ := task.Metadata[intentConfirmationURI]["fingerprint"].(string)
+	if task.ID == "" || task.ContextID == "" || fingerprint == "" {
+		t.Fatalf("response has no reviewable intent: %s", response.Body.String())
+	}
+	body := intentConfirmationBody(t, rpcID, messageID, task.ContextID, task.ID, fingerprint)
+	return serveRPC(handler, token, body)
 }
 
 func gatewayExternalStream(t *testing.T, store *ledger.SQLite, externalRequestID string) []events.Event {
@@ -465,6 +497,17 @@ func continuationBody(t *testing.T, rpcID, messageID, contextID, taskID, text st
 
 func executionKindMetadata(kind string) map[string]any {
 	return map[string]any{executionkind.URI: map[string]any{"kind": kind}}
+}
+
+func intentConfirmationBody(t *testing.T, rpcID, messageID, contextID, taskID, fingerprint string) string {
+	t.Helper()
+	message := map[string]any{
+		"messageId": messageID, "contextId": contextID, "taskId": taskID, "role": a2aRoleUser,
+		"parts":      []map[string]string{{"text": "Confirm the reviewed Agent OS intent.", "mediaType": "text/plain"}},
+		"extensions": []string{intentConfirmationURI},
+		"metadata":   map[string]any{intentConfirmationURI: map[string]any{"action": "CONFIRM", "fingerprint": fingerprint}},
+	}
+	return marshalRPCBody(t, map[string]any{"jsonrpc": "2.0", "id": rpcID, "method": "SendMessage", "params": map[string]any{"message": message}})
 }
 
 func getTaskBody(t *testing.T, rpcID, taskID string) string {
