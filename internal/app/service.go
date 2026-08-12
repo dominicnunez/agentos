@@ -408,6 +408,9 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 	materialized := 0
 	for _, goalID := range goalIDs {
 		goalState := snapshot.Goals[goalID]
+		if goalState.Value.Status != "ACTIVE" {
+			continue
+		}
 		hasTask := false
 		for _, taskState := range snapshot.Tasks {
 			if taskState.Value.GoalID == goalID {
@@ -462,6 +465,9 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 			}
 			in.Kind = draft.RequestedExecutionKind
 			in.NormalizedIntent = &draft
+		}
+		if in.RequestID == "" || in.OrganizationID == "" || in.Statement == "" || in.Kind == "" || in.SourcePrincipalID == "" || in.SourcePrincipalKind == "" || in.SourceChannel == "" {
+			return 0, fmt.Errorf("recover planned goal %s: durable submission identity is incomplete", goalID)
 		}
 		_, _, root, err := s.ensureSubmission(ctx, in)
 		if err != nil {

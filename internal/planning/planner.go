@@ -139,8 +139,10 @@ func directTasks(intent core.IntentDraft, kind core.ExecutionKind) ([]core.PlanT
 	case core.ExecutionHuman:
 	case core.ExecutionAgent:
 		policy = core.InferenceAllowed
-	default:
+	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
 		return nil, fmt.Errorf("execution kind %s is unavailable for planning", kind)
+	default:
+		return nil, fmt.Errorf("execution kind %s is unknown", kind)
 	}
 	tasks := []core.PlanTask{{Key: "root", Description: intent.Objective, ExecutionKind: kind, ModelInferencePolicy: policy, DependsOn: []string{}}}
 	return tasks, ValidateTasks(tasks, kind)
@@ -188,10 +190,12 @@ func validateChildren(tasks []core.PlanTask) error {
 			}
 		case core.ExecutionAgent:
 			if task.ModelInferencePolicy != core.InferenceAllowed && task.ModelInferencePolicy != core.InferenceRequired {
-				return fmt.Errorf("Agent planned task has invalid inference policy")
+				return fmt.Errorf("agent planned task has invalid inference policy")
 			}
-		default:
+		case core.ExecutionTool, core.ExecutionTeam, core.ExecutionHuman, core.ExecutionMixed:
 			return fmt.Errorf("planned task execution kind is unavailable")
+		default:
+			return fmt.Errorf("planned task execution kind is unknown")
 		}
 	}
 	for _, task := range tasks {
@@ -249,8 +253,10 @@ func ValidateTasks(tasks []core.PlanTask, requestedKind core.ExecutionKind) erro
 			if root.ModelInferencePolicy != core.InferenceAllowed && root.ModelInferencePolicy != core.InferenceRequired {
 				return fmt.Errorf("direct Agent plan has invalid inference policy")
 			}
-		default:
+		case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
 			return fmt.Errorf("direct plan execution kind is unavailable")
+		default:
+			return fmt.Errorf("direct plan execution kind is unknown")
 		}
 		return nil
 	}
