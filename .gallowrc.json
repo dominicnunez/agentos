@@ -11,8 +11,6 @@
     }
   ],
   "rules": {
-    "complexity": "off",
-    "duplicate-code": "off",
-    "test-only-dependency": "off"
+    "duplicate-code": "warn"
   }
 }
