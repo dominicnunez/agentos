@@ -105,13 +105,13 @@ func SystemPaths() Paths {
 	}
 }
 
-func UserPaths(home, runtimeDir string, uid int) (Paths, error) {
+func UserPaths(home, runtimeDir string, _ int) (Paths, error) {
 	home = filepath.Clean(home)
 	if !filepath.IsAbs(home) || home == string(filepath.Separator) {
 		return Paths{}, fmt.Errorf("user home must be an absolute non-root path")
 	}
 	if runtimeDir == "" {
-		runtimeDir = filepath.Join(os.TempDir(), "agentos-"+strconv.Itoa(uid))
+		return Paths{}, fmt.Errorf("user runtime directory must be supplied by XDG_RUNTIME_DIR")
 	}
 	runtimeDir = filepath.Clean(runtimeDir)
 	if !filepath.IsAbs(runtimeDir) || runtimeDir == string(filepath.Separator) {

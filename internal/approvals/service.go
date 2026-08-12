@@ -41,6 +41,8 @@ var decisionLevels = map[string]struct{}{
 	"CRITICAL": {},
 }
 
+const maximumInboxDecisionContexts = 1000
+
 // RequiresHumanApproval recognizes the closed V1 consequence-boundary set.
 // Unknown non-empty boundaries fail closed instead of silently becoming
 // unprotected work.
@@ -332,10 +334,11 @@ func (s *Service) PendingDecisionContexts(ctx context.Context, humanID core.ID) 
 	if err != nil {
 		return nil, err
 	}
-	if len(bodies) > 1000 {
-		return nil, fmt.Errorf("approval inbox exceeds the V1 safety limit")
+	capacity := len(bodies)
+	if capacity > maximumInboxDecisionContexts {
+		capacity = maximumInboxDecisionContexts
 	}
-	contexts := make([]DecisionContext, 0, len(bodies))
+	contexts := make([]DecisionContext, 0, capacity)
 	for _, body := range bodies {
 		var approval core.HumanApproval
 		if err := json.Unmarshal(body, &approval); err != nil {
@@ -359,6 +362,9 @@ func (s *Service) PendingDecisionContexts(ctx context.Context, humanID core.ID) 
 			return nil, err
 		}
 		contexts = append(contexts, DecisionContext{Approval: approval, Effect: effect})
+		if len(contexts) > maximumInboxDecisionContexts {
+			return nil, fmt.Errorf("approval inbox exceeds the V1 safety limit")
+		}
 	}
 	return contexts, nil
 }

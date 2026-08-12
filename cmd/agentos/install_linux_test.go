@@ -131,6 +131,17 @@ func TestPrivilegedDirectoryPreparationRejectsSymlinkedParents(t *testing.T) {
 	}
 }
 
+func TestSystemWorkspaceRejectsMissingParents(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "missing", "workspace")
+	err := prepareSystemWorkspace(workspace, bootstrap.Owner{Username: "root", UID: effectiveUID(), GID: effectiveUID()}, effectiveUID())
+	if err == nil || !strings.Contains(err.Error(), "must already exist") {
+		t.Fatalf("workspace with missing parent was accepted: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Dir(workspace)); !os.IsNotExist(statErr) {
+		t.Fatalf("workspace parent was created: %v", statErr)
+	}
+}
+
 func TestSystemdCredentialArgumentsMatchServiceScope(t *testing.T) {
 	system, err := systemdCredentialArguments(bootstrap.ModeSystem, "encrypt", "provider-key", "-", "/tmp/provider.cred")
 	if err != nil || strings.Contains(strings.Join(system, " "), "--user") {

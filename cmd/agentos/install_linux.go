@@ -397,7 +397,18 @@ func prepareSystemWorkspace(path string, owner bootstrap.Owner, serviceGID int) 
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := os.MkdirAll(path, 0o770); err != nil {
+	parent := filepath.Dir(path)
+	parentInfo, err := os.Lstat(parent)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("workspace parent %s must already exist", parent)
+	}
+	if err != nil {
+		return err
+	}
+	if parentInfo.Mode()&os.ModeSymlink != 0 || !parentInfo.IsDir() || parentInfo.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("workspace parent %s must be a non-writable directory, not a link", parent)
+	}
+	if err := os.Mkdir(path, 0o770); err != nil {
 		return err
 	}
 	if err := os.Chown(path, owner.UID, serviceGID); err != nil {

@@ -24,6 +24,12 @@ func TestSystemAndUserPathsAreStable(t *testing.T) {
 	}
 }
 
+func TestUserPathsRequireSecureRuntimeDirectory(t *testing.T) {
+	if _, err := UserPaths(filepath.Join(t.TempDir(), "home", "alice"), "", 1000); err == nil || !strings.Contains(err.Error(), "XDG_RUNTIME_DIR") {
+		t.Fatalf("shared temporary runtime fallback was accepted: %v", err)
+	}
+}
+
 func TestReadyConfigurationRequiresRealTypedProvider(t *testing.T) {
 	paths, err := UserPaths(filepath.Join(t.TempDir(), "home", "alice"), filepath.Join(t.TempDir(), "run", "1000"), 1000)
 	if err != nil {
