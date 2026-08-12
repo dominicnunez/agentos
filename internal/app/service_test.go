@@ -835,6 +835,14 @@ func TestTaskPersistenceFailurePreventsExecutionVisibility(t *testing.T) {
 	if err != nil || len(records) != 0 {
 		t.Fatalf("task projection became visible: records=%d err=%v", len(records), err)
 	}
+	recovery, err := New(events.NewGateway(l)).Recover(ctx)
+	if err != nil || recovery.PlansMaterialized != 1 || recovery.TasksExecuted != 1 {
+		t.Fatalf("durable Plan recovery=%+v err=%v", recovery, err)
+	}
+	records, err = l.Records(ctx, projections.KindTask, "")
+	if err != nil || len(records) != 3 {
+		t.Fatalf("recovered task versions=%d err=%v", len(records), err)
+	}
 }
 
 func TestRecoveryIsDeterministicFirst(t *testing.T) {

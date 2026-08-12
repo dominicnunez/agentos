@@ -45,10 +45,11 @@ type Result struct {
 }
 
 type RecoveryResult struct {
-	PendingFound     int `json:"pending_found"`
-	BlockedPreserved int `json:"blocked_preserved"`
-	RunningRecovered int `json:"running_recovered"`
-	TasksExecuted    int `json:"tasks_executed"`
+	PendingFound      int `json:"pending_found"`
+	BlockedPreserved  int `json:"blocked_preserved"`
+	RunningRecovered  int `json:"running_recovered"`
+	TasksExecuted     int `json:"tasks_executed"`
+	PlansMaterialized int `json:"plans_materialized"`
 }
 
 type Service struct {
@@ -264,6 +265,16 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 	if err != nil {
 		return RecoveryResult{}, fmt.Errorf("load durable runtime state: %w", err)
 	}
+	plansMaterialized, err := s.recoverValidatedPlans(ctx, snapshot)
+	if err != nil {
+		return RecoveryResult{}, err
+	}
+	if plansMaterialized > 0 {
+		snapshot, err = s.state.Load(ctx)
+		if err != nil {
+			return RecoveryResult{}, fmt.Errorf("reload task graphs recovered from durable plans: %w", err)
+		}
+	}
 	for _, state := range sortedTaskStates(snapshot.Tasks) {
 		stream, err := s.gateway.Events(ctx, state.CorrelationID)
 		if err != nil {
@@ -293,7 +304,7 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 	if err != nil {
 		return RecoveryResult{}, fmt.Errorf("reload durable runtime state after completion reviews: %w", err)
 	}
-	result := RecoveryResult{}
+	result := RecoveryResult{PlansMaterialized: plansMaterialized}
 	continuedInputs := 0
 	for _, state := range sortedTaskStates(snapshot.Tasks) {
 		organizationID, err := taskOrganization(snapshot, state.Value)
@@ -383,6 +394,85 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 		return RecoveryResult{}, err
 	}
 	return result, nil
+}
+
+// recoverValidatedPlans closes only the crash window after a validated Plan
+// reached the ledger and before its atomic Task batch committed. It never
+// repeats an interrupted model-planning call during startup.
+func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projections.Snapshot) (int, error) {
+	goalIDs := make([]core.ID, 0, len(snapshot.Goals))
+	for goalID := range snapshot.Goals {
+		goalIDs = append(goalIDs, goalID)
+	}
+	sort.Slice(goalIDs, func(i, j int) bool { return goalIDs[i] < goalIDs[j] })
+	materialized := 0
+	for _, goalID := range goalIDs {
+		goalState := snapshot.Goals[goalID]
+		hasTask := false
+		for _, taskState := range snapshot.Tasks {
+			if taskState.Value.GoalID == goalID {
+				hasTask = true
+				break
+			}
+		}
+		if hasTask {
+			continue
+		}
+		intentState, ok := snapshot.Intents[goalState.Value.IntentID]
+		if !ok || intentState.CorrelationID != goalState.CorrelationID {
+			return 0, fmt.Errorf("goal %s has invalid durable intent identity", goalID)
+		}
+		stream, err := s.gateway.Events(ctx, goalState.CorrelationID)
+		if err != nil {
+			return 0, err
+		}
+		hasDurablePlan := false
+		for _, event := range stream {
+			if event.EventType == "PLAN_CREATED" {
+				hasDurablePlan = true
+				break
+			}
+		}
+		if !hasDurablePlan {
+			continue
+		}
+		intent := intentState.Value
+		in := Submit{
+			RequestID: intent.ExternalRequestID, OrganizationID: string(intent.OrganizationID), Statement: intent.OriginalInstruction,
+			MessageID: intent.SourceMessageID, SourcePrincipalID: intent.SourcePrincipalID, SourcePrincipalKind: intent.SourcePrincipalKind,
+			SourceChannel: intent.SourceChannel, correlationID: goalState.CorrelationID,
+		}
+		if intent.SourceChannel == "INTERNAL" {
+			var plan core.Plan
+			for _, event := range stream {
+				if event.EventType == "PLAN_CREATED" && json.Unmarshal(event.Payload, &plan) == nil {
+					break
+				}
+			}
+			for _, task := range plan.Tasks {
+				if task.Key == "root" {
+					in.Kind = task.ExecutionKind
+					break
+				}
+			}
+		} else {
+			draft, found, err := latestIntentDraft(stream)
+			if err != nil || !found {
+				return 0, fmt.Errorf("recover planned goal %s: confirmed intent draft is unavailable", goalID)
+			}
+			in.Kind = draft.RequestedExecutionKind
+			in.NormalizedIntent = &draft
+		}
+		_, _, root, err := s.ensureSubmission(ctx, in)
+		if err != nil {
+			return 0, fmt.Errorf("recover Task DAG for goal %s: %w", goalID, err)
+		}
+		if err := s.ensureOperatorAcceptance(ctx, in, root.ID); err != nil {
+			return 0, fmt.Errorf("recover operator acceptance for goal %s: %w", goalID, err)
+		}
+		materialized++
+	}
+	return materialized, nil
 }
 
 type OperatorInput struct {
