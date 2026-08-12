@@ -948,9 +948,19 @@ func TestAdvanceInputContinuationRejectsInvalidStateWithoutEvents(t *testing.T) 
 			state.Value.ExecutionKind = core.ExecutionAgent
 			return state
 		}()},
-		{name: "terminal task", organization: "org-1", correlationID: "request-1", state: func() projections.Versioned[core.Task] {
+		{name: "running task", organization: "org-1", correlationID: "request-1", state: func() projections.Versioned[core.Task] {
+			state := valid
+			state.Value.Status = core.TaskRunning
+			return state
+		}()},
+		{name: "completed task", organization: "org-1", correlationID: "request-1", state: func() projections.Versioned[core.Task] {
 			state := valid
 			state.Value.Status = core.TaskCompleted
+			return state
+		}()},
+		{name: "failed task", organization: "org-1", correlationID: "request-1", state: func() projections.Versioned[core.Task] {
+			state := valid
+			state.Value.Status = core.TaskFailed
 			return state
 		}()},
 	}

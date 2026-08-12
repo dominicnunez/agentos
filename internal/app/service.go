@@ -706,6 +706,8 @@ func (s *Service) advanceInputContinuation(ctx context.Context, organizationID c
 	case core.TaskPending:
 		task.Status = core.TaskRunning
 		eventType = "EXECUTION_STARTED"
+	case core.TaskRunning, core.TaskCompleted, core.TaskFailed:
+		return fmt.Errorf("input continuation cannot advance task in status %s", task.Status)
 	default:
 		return fmt.Errorf("input continuation cannot advance task in status %s", task.Status)
 	}
