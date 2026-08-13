@@ -1040,6 +1040,57 @@ func TestRecoveryRejectsTeamTenantReassignment(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsInvalidHistoricalTeamRoster(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"},
+		ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	team := core.Team{ID: "team-1", OrganizationID: organization.ID, Name: "Team", MemberAgentIDs: []core.ID{}, Status: "ACTIVE", CreatedAt: now}
+	created, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TEAM_CREATED", SourceActorID: "runtime", CorrelationID: "roster"},
+		ProjectionKind: "team", RecordID: string(team.ID), Version: 1, Value: team,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	team.Name = "Revised Team"
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TEAM_REVISED", SourceActorID: "runtime", CorrelationID: "roster"},
+		ProjectionKind: "team", RecordID: string(team.ID), Version: 2, Value: team,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	payload, present, err := events.AdmittedProjection(created)
+	if err != nil || !present {
+		_ = store.Close()
+		t.Fatalf("Team creation admission is invalid: present=%t err=%v", present, err)
+	}
+	team.Name = "Team"
+	team.MemberAgentIDs = []core.ID{"missing-agent"}
+	payload.Projection.Value, err = json.Marshal(team)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	resealRecoveryProjection(t, ctx, store, path, created, payload)
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "invalid Team roster") {
+		t.Fatalf("historically invalid Team roster recovery error=%v", err)
+	}
+}
+
 func TestRecoveryRejectsInvalidAgentRosterBinding(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.db")

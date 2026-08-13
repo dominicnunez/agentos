@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -306,6 +307,9 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 }
 
 func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) error {
+	sort.Slice(admitted, func(left, right int) bool {
+		return admitted[left].event.Sequence < admitted[right].event.Sequence
+	})
 	snapshot := core.DurableGraph{
 		Organizations:     map[core.ID]core.DurableState[core.Organization]{},
 		Missions:          map[core.ID]core.DurableState[core.Mission]{},
@@ -357,6 +361,9 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 				return fmt.Errorf("event %s contains an invalid Team projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
+			if err := validateRecoveryTeamRoster(value, snapshot); err != nil {
+				return fmt.Errorf("event %s contains an invalid Team roster: %w", event.EventID, err)
+			}
 			if err := setRecoveryProjection(snapshot.Teams, record, value, false, core.ValidTeamRevision); err != nil {
 				return fmt.Errorf("event %s contains invalid Team history: %w", event.EventID, err)
 			}
@@ -466,6 +473,31 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 		}
 		if organizationID == "" || string(organizationID) != event.OrganizationID {
 			return fmt.Errorf("event %s projection crosses its organization boundary", event.EventID)
+		}
+	}
+	return nil
+}
+
+func validateRecoveryTeamRoster(team core.Team, snapshot core.DurableGraph) error {
+	if strings.TrimSpace(team.Name) == "" || strings.TrimSpace(team.Status) == "" {
+		return fmt.Errorf("Team is incomplete")
+	}
+	organization, found := snapshot.Organizations[team.OrganizationID]
+	if !found || organization.Value.ID != team.OrganizationID {
+		return fmt.Errorf("Team requires its durable parent Organization")
+	}
+	members := make(map[core.ID]struct{}, len(team.MemberAgentIDs))
+	for _, memberID := range team.MemberAgentIDs {
+		if memberID == "" {
+			return fmt.Errorf("Team contains an empty member identity")
+		}
+		if _, duplicate := members[memberID]; duplicate {
+			return fmt.Errorf("Team contains a duplicate member identity")
+		}
+		members[memberID] = struct{}{}
+		agent, found := snapshot.Agents[memberID]
+		if !found || agent.Value.ID != memberID || agent.Value.OrganizationID != team.OrganizationID {
+			return fmt.Errorf("Team references invalid member Agent %s", memberID)
 		}
 	}
 	return nil
