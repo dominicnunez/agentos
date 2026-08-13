@@ -357,6 +357,49 @@ func TestRecoveryRejectsMissingGoalMission(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsGoalBeforeMissionAdmission(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	mission := core.Mission{ID: "mission-1", OrganizationID: organization.ID, Statement: "Mission", Status: core.MissionActive, CreatedAt: now}
+	goal := core.Goal{ID: "goal-1", OrganizationID: organization.ID, MissionID: mission.ID, Objective: "Outcome", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "verified", Origin: "TEST"}}, Status: core.GoalActive, CreatedAt: now}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"},
+		ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	missionEvent, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "mission-1"},
+		ProjectionKind: "mission", RecordID: string(mission.ID), Version: 1, Value: mission,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	goalEvent, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_CREATED", SourceActorID: "runtime", CorrelationID: "goal-1"},
+		ProjectionKind: "goal", RecordID: string(goal.ID), Version: 1, Value: goal,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	swapRecoveryProjectionSequences(t, ctx, path, missionEvent, goalEvent)
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "durable same-organization Mission") {
+		t.Fatalf("Goal-before-Mission recovery error=%v", err)
+	}
+}
+
 func TestRecoveryRejectsNoncontiguousProjectionRevisions(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.db")

@@ -356,6 +356,10 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 				return fmt.Errorf("event %s contains an invalid Goal projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
+			mission, found := snapshot.Missions[value.MissionID]
+			if !found || mission.Value.ID != value.MissionID || mission.Value.OrganizationID != value.OrganizationID {
+				return fmt.Errorf("event %s Goal projection requires its durable same-organization Mission", event.EventID)
+			}
 			if err := setRecoveryProjection(snapshot.Goals, record, value, false, core.ValidGoalRevision); err != nil {
 				return fmt.Errorf("event %s contains invalid Goal history: %w", event.EventID, err)
 			}
