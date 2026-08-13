@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -792,6 +793,42 @@ func TestRebuildRejectsProjectionCorrelationMismatch(t *testing.T) {
 	}
 }
 
+func TestFullAuditRejectsProjectionEventWithoutMaterializedRecord(t *testing.T) {
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: time.Unix(1, 0).UTC()}
+	value, err := json.Marshal(organization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := events.ProjectionRecord{
+		ProjectionKind: KindOrganization, RecordID: string(organization.ID), Version: 1,
+		CorrelationID: "setup-1", Value: value,
+	}
+	boundary := events.Event{
+		EventID: "event-1", Sequence: 1, OrganizationID: string(organization.ID), EventType: "ORGANIZATION_CREATED",
+		SourceActorID: "runtime", CorrelationID: record.CorrelationID,
+		CreatedAt: time.Unix(2, 0).UTC(), SchemaVersion: events.SchemaVersion,
+	}
+	sealed, err := events.SealProjectionEvent(boundary, record, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary.Payload, err = json.Marshal(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := Snapshot{
+		Organizations: map[core.ID]Versioned[core.Organization]{organization.ID: {Version: 1, CorrelationID: record.CorrelationID, Value: organization}},
+		Missions:      map[core.ID]Versioned[core.Mission]{}, Goals: map[core.ID]Versioned[core.Goal]{}, Teams: map[core.ID]Versioned[core.Team]{},
+		AgentBlueprints: map[core.ID]Versioned[core.AgentBlueprint]{}, ExecutionProfiles: map[core.ID]Versioned[core.ExecutionProfile]{}, Agents: map[core.ID]Versioned[core.Agent]{},
+		Intents: map[core.ID]Versioned[core.Intent]{}, Works: map[core.ID]Versioned[core.Work]{}, Tasks: map[core.ID]Versioned[core.Task]{},
+	}
+	repository := New(events.NewGateway(replayLedger{stream: []events.Event{boundary}}))
+	err = repository.ValidateCompletionAdmissions(context.Background(), snapshot)
+	if err == nil || !strings.Contains(err.Error(), "lacks one exact materialized record") {
+		t.Fatalf("full audit accepted orphan projection event: %v", err)
+	}
+}
+
 func TestRebuildRejectsProjectionShapedOrdinaryEvents(t *testing.T) {
 	for _, kind := range []string{KindTeam, KindAgentBlueprint, "role", "grant"} {
 		t.Run(kind, func(t *testing.T) {
@@ -846,7 +883,10 @@ func TestRebuildRejectsProjectionShapedOrdinaryEvents(t *testing.T) {
 	}
 }
 
-type replayLedger struct{ stream []events.Event }
+type replayLedger struct {
+	stream  []events.Event
+	records map[string][][]byte
+}
 
 func (replayLedger) Append(context.Context, events.TrustedDraft) (events.Event, error) {
 	return events.Event{}, nil
@@ -854,6 +894,14 @@ func (replayLedger) Append(context.Context, events.TrustedDraft) (events.Event, 
 
 func (l replayLedger) Events(context.Context, string) ([]events.Event, error) {
 	return l.stream, nil
+}
+
+func (l replayLedger) Records(_ context.Context, kind, _ string) ([][]byte, error) {
+	return l.records[kind], nil
+}
+
+func (replayLedger) InboxObservations(context.Context) (map[string]events.InboxObservationBinding, error) {
+	return map[string]events.InboxObservationBinding{}, nil
 }
 
 func validBoundarySnapshot() Snapshot {

@@ -27,6 +27,19 @@ const (
 	KindTask             = "task"
 )
 
+var projectionKinds = [...]string{
+	KindOrganization,
+	KindMission,
+	KindGoal,
+	KindTeam,
+	KindAgentBlueprint,
+	KindExecutionProfile,
+	KindAgent,
+	KindIntent,
+	KindWork,
+	KindTask,
+}
+
 type Versioned[T any] struct {
 	Version       int
 	CorrelationID string
@@ -249,18 +262,21 @@ func (r *Repository) ValidateCompletionAdmissions(ctx context.Context, snapshot 
 	if err := validateProjectionEventAdmissions(stream); err != nil {
 		return err
 	}
-	if err := validateProjectionEventOrganizationBindings(snapshot, stream); err != nil {
+	records, err := r.readProjectionRecords(ctx)
+	if err != nil {
 		return err
 	}
-	teamRecords, err := r.gateway.ProjectionRecords(ctx, KindTeam, "")
-	if err != nil {
+	if err := validateProjectionRecordCoverage(stream, records); err != nil {
+		return err
+	}
+	if err := validateProjectionEventOrganizationBindings(snapshot, stream); err != nil {
 		return err
 	}
 	inboxObservations, err := r.gateway.InboxObservations(ctx)
 	if err != nil {
 		return err
 	}
-	if err := validateWorkCompletionAdmissions(snapshot, stream, teamRecords, inboxObservations); err != nil {
+	if err := validateWorkCompletionAdmissions(snapshot, stream, records[KindTeam], inboxObservations); err != nil {
 		return err
 	}
 	return r.validateGoalAchievementAdmissions(ctx, snapshot)
@@ -346,6 +362,58 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 		}
 	}
 	return nil
+}
+
+type projectionRecordIdentity struct {
+	kind    string
+	id      string
+	version int
+}
+
+func validateProjectionRecordCoverage(stream []events.Event, records map[string][][]byte) error {
+	eventRecords := make(map[projectionRecordIdentity]events.ProjectionRecord)
+	for _, event := range stream {
+		payload, present, err := events.AdmittedProjection(event)
+		if err != nil {
+			return fmt.Errorf("event %s: %w", event.EventID, err)
+		}
+		if !present {
+			continue
+		}
+		key := projectionRecordKey(payload.Projection)
+		if _, duplicate := eventRecords[key]; duplicate {
+			return fmt.Errorf("projection event stream contains duplicate record %s/%s/%d", key.kind, key.id, key.version)
+		}
+		eventRecords[key] = payload.Projection
+	}
+
+	for kind, bodies := range records {
+		for _, body := range bodies {
+			var record events.ProjectionRecord
+			if err := decodeExactProjectionJSON(body, &record); err != nil {
+				return fmt.Errorf("projection record for %s is invalid: %w", kind, err)
+			}
+			if record.ProjectionKind != kind {
+				return fmt.Errorf("projection record %s/%s/%d crosses its kind boundary", record.ProjectionKind, record.RecordID, record.Version)
+			}
+			key := projectionRecordKey(record)
+			eventRecord, admitted := eventRecords[key]
+			if !admitted || !reflect.DeepEqual(record, eventRecord) {
+				return fmt.Errorf("projection record %s/%s/%d lacks one exact event-coupled admission", key.kind, key.id, key.version)
+			}
+			delete(eventRecords, key)
+		}
+	}
+	if len(eventRecords) != 0 {
+		for key := range eventRecords {
+			return fmt.Errorf("projection event %s/%s/%d lacks one exact materialized record", key.kind, key.id, key.version)
+		}
+	}
+	return nil
+}
+
+func projectionRecordKey(record events.ProjectionRecord) projectionRecordIdentity {
+	return projectionRecordIdentity{kind: record.ProjectionKind, id: record.RecordID, version: record.Version}
 }
 
 func validateProjectionEventOrganizationBindings(snapshot Snapshot, stream []events.Event) error {
@@ -740,15 +808,23 @@ func validateWorkCompletionAdmissions(snapshot Snapshot, stream []events.Event, 
 }
 
 func (r *Repository) loadFromRecords(ctx context.Context) (Snapshot, error) {
-	records := make(map[string][][]byte)
-	for _, kind := range []string{KindOrganization, KindMission, KindGoal, KindTeam, KindAgentBlueprint, KindExecutionProfile, KindAgent, KindIntent, KindWork, KindTask} {
+	records, err := r.readProjectionRecords(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return decodeSnapshot(records)
+}
+
+func (r *Repository) readProjectionRecords(ctx context.Context) (map[string][][]byte, error) {
+	records := make(map[string][][]byte, len(projectionKinds))
+	for _, kind := range projectionKinds {
 		rows, err := r.gateway.ProjectionRecords(ctx, kind, "")
 		if err != nil {
-			return Snapshot{}, err
+			return nil, err
 		}
 		records[kind] = rows
 	}
-	return decodeSnapshot(records)
+	return records, nil
 }
 
 func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
