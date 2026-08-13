@@ -674,6 +674,66 @@ func TestAgentIdentitySurvivesExecutionProfileUpdate(t *testing.T) {
 	}
 }
 
+func TestExecutionManifestUsesTaskPinnedRuntimeAfterAgentRebind(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1"}
+	const correlationID = "pinned-runtime"
+	if err := repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", correlationID, 1, organization, nil); err != nil {
+		t.Fatal(err)
+	}
+	agent := seedTestAgents(t, ctx, repository, correlationID, organization.ID, execution.FakeModel{}.Descriptor(), "agent-1")[0]
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "summarize", NormalizedObjective: "summarize"}
+	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: "ACTIVE"}
+	task := core.Task{ID: "task-pinned-runtime", GoalID: goal.ID, Description: "summarize", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
+	for _, save := range []func() error{
+		func() error {
+			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", correlationID, 1, intent, nil)
+		},
+		func() error {
+			return repository.SaveGoal(ctx, organization.ID, "GOAL_CREATED", "runtime", correlationID, 1, goal, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", correlationID, 1, task, nil)
+		},
+	} {
+		if err := save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agent.RuntimeAdapter = "new-runtime"
+	if err := repository.SaveAgent(ctx, "AGENT_CONFIGURATION_UPDATED", "runtime", correlationID, 2, agent, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(gateway).Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stream, err := gateway.Events(ctx, correlationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range stream {
+		if event.EventType != "EXECUTION_CONTEXT_MANIFESTED" {
+			continue
+		}
+		var manifest core.ExecutionContextManifest
+		if err := json.Unmarshal(event.Payload, &manifest); err != nil {
+			t.Fatal(err)
+		}
+		if manifest.RuntimeAdapter != task.AgentConfig.RuntimeAdapter || manifest.RuntimeAdapter == agent.RuntimeAdapter {
+			t.Fatalf("manifest did not preserve the Task-pinned runtime: %+v", manifest)
+		}
+		return
+	}
+	t.Fatal("execution manifest was not recorded")
+}
+
 func TestHumanReviewerFinalizesExactModelCandidate(t *testing.T) {
 	l, err := ledger.Open(":memory:")
 	if err != nil {

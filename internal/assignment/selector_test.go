@@ -108,6 +108,7 @@ func TestResolveAssignedUsesTaskPinnedConfigurationAfterAgentUpdate(t *testing.T
 	roster.ExecutionProfiles[replacement.ID] = replacement
 	agent.ExecutionProfileID = replacement.ID
 	agent.ExecutionProfileVersion = replacement.Version
+	agent.RuntimeAdapter = "new-runtime"
 	roster.Agents[agent.ID] = agent
 
 	selection, err := ResolveAssigned(roster, task, testRequirement())

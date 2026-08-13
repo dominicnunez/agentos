@@ -2430,7 +2430,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			AgentID:                 task.AssigneeID,
 			AgentBlueprintVersion:   selected.Blueprint.Version,
 			ExecutionProfileVersion: selected.ExecutionProfile.Version,
-			RuntimeAdapter:          selected.Agent.RuntimeAdapter,
+			RuntimeAdapter:          task.AgentConfig.RuntimeAdapter,
 			Provider:                selected.ExecutionProfile.ModelProvider,
 			Model:                   selected.ExecutionProfile.Model,
 			TaskID:                  task.ID,
