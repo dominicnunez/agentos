@@ -248,6 +248,8 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 }
 
 func validateProjectionOrganizationBindings(admitted map[string]admittedProjectionEvent) error {
+	organizations := map[core.ID]struct{}{}
+	directOrganizations := map[string]core.ID{}
 	intentOrganizations := map[core.ID]core.ID{}
 	workIntents := map[core.ID]core.ID{}
 	for _, admission := range admitted {
@@ -260,6 +262,7 @@ func validateProjectionOrganizationBindings(admitted map[string]admittedProjecti
 				return fmt.Errorf("event %s contains an invalid Organization projection", event.EventID)
 			}
 			organizationID = value.ID
+			organizations[value.ID] = struct{}{}
 		case "mission":
 			var value core.Mission
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
@@ -315,6 +318,12 @@ func validateProjectionOrganizationBindings(admitted map[string]admittedProjecti
 		}
 		if organizationID == "" || string(organizationID) != event.OrganizationID {
 			return fmt.Errorf("event %s projection crosses its organization boundary", event.EventID)
+		}
+		directOrganizations[event.EventID] = organizationID
+	}
+	for eventID, organizationID := range directOrganizations {
+		if _, found := organizations[organizationID]; !found {
+			return fmt.Errorf("event %s projection references a missing Organization", eventID)
 		}
 	}
 	for _, admission := range admitted {

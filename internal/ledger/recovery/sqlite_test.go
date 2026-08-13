@@ -220,18 +220,44 @@ func TestRecoveryRejectsProjectionOrganizationMismatch(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsMissingProjectionOrganization(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _ = appendRecoveryProjectionState(t, ctx, store, false); t.Failed() {
+		_ = store.Close()
+		return
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil {
+		t.Fatal("recovery verification accepted projections for a missing Organization")
+	}
+}
+
 func appendRecoveryProjectionChain(t *testing.T, ctx context.Context, store *ledger.SQLite) (events.Event, events.ProjectionRecord) {
+	return appendRecoveryProjectionState(t, ctx, store, true)
+}
+
+func appendRecoveryProjectionState(t *testing.T, ctx context.Context, store *ledger.SQLite, includeOrganization bool) (events.Event, events.ProjectionRecord) {
 	t.Helper()
 	now := time.Now().UTC()
 	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, NormalizedObjective: "objective", CreatedAt: now}
 	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
 	task := core.Task{ID: "task-1", WorkID: work.ID, Status: core.TaskPending}
-	for _, draft := range []events.ProjectionDraft{
-		{Event: events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup-1"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization},
+	drafts := []events.ProjectionDraft{
 		{Event: events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"}, ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent},
 		{Event: events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"}, ProjectionKind: "work", RecordID: string(work.ID), Version: 1, Value: work},
-	} {
+	}
+	if includeOrganization {
+		drafts = append([]events.ProjectionDraft{{Event: events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup-1"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization}}, drafts...)
+	}
+	for _, draft := range drafts {
 		if _, err := store.AppendProjection(ctx, draft); err != nil {
 			t.Errorf("append recovery projection %s: %v", draft.ProjectionKind, err)
 			return events.Event{}, events.ProjectionRecord{}
