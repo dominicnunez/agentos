@@ -42,7 +42,7 @@ func TestExternalWorkIndexMigratesLegacyCorrelation(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	organization := core.Organization{ID: "org-1", Name: "org-1", PolicyVersion: "v1", CreatedAt: now}
-	agent := core.Agent{ID: "agent-local-org-1", OrganizationID: organization.ID, BlueprintVersion: "v1-local-worker", ExecutionProfileVersion: "v1-fake", RuntimeAdapter: "local", Status: "ACTIVE"}
+	agent := core.Agent{ID: "agent-local-org-1", OrganizationID: organization.ID, BlueprintID: "blueprint-local-org-1", BlueprintVersion: "v1-local-worker", ExecutionProfileID: "profile-local-org-1", ExecutionProfileVersion: "v1-fake", RuntimeAdapter: "local", Status: "ACTIVE"}
 	intent := core.Intent{ID: "intent-legacy-request", OrganizationID: organization.ID, OriginalInstruction: "echo legacy", NormalizedObjective: "echo legacy", SourcePrincipalID: "agent-1", SourcePrincipalKind: core.PrincipalExternalAgent, SourceChannel: "A2A", SourceMessageID: "message-1", CreatedAt: now}
 	work := core.Work{ID: "work-legacy-request", IntentID: intent.ID, Objective: intent.OriginalInstruction, Status: "COMPLETED", CreatedAt: now}
 	task := core.Task{ID: "task-legacy-request", WorkID: work.ID, Description: intent.OriginalInstruction, ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
@@ -419,6 +419,60 @@ func TestProjectionWriterRejectsMislabeledTaskLifecycle(t *testing.T) {
 	records, err := store.Records(ctx, "task", string(task.ID))
 	if err != nil || len(records) != 1 {
 		t.Fatalf("rejected Task lifecycle changed projection history: records=%d err=%v", len(records), err)
+	}
+}
+
+func TestProjectionWriterRejectsMislabeledAgentLifecycle(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	blueprint := core.AgentBlueprint{ID: "blueprint-1", OrganizationID: organization.ID, Version: "v1", Role: "worker", OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE", CreatedAt: now}
+	profile := core.ExecutionProfile{ID: "profile-1", OrganizationID: organization.ID, Version: "v1", ModelProvider: "provider", Model: "model", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE", CreatedAt: now}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: "org-1", Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_BLUEPRINT_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "agent_blueprint", RecordID: string(blueprint.ID), Version: 1, Value: blueprint},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_PROFILE_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "execution_profile", RecordID: string(profile.ID), Version: 1, Value: profile},
+	} {
+		if _, err := store.AppendProjection(ctx, draft); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "local", Status: "ACTIVE"}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_CREATED", SourceActorID: "runtime", CorrelationID: "setup"},
+		ProjectionKind: "agent", RecordID: string(agent.ID), Version: 1, Value: agent,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*core.Agent, *events.TrustedDraft){
+		"deactivation leaves Agent active": func(candidate *core.Agent, draft *events.TrustedDraft) { draft.EventType = "AGENT_DEACTIVATED" },
+		"configuration changes status": func(candidate *core.Agent, draft *events.TrustedDraft) {
+			candidate.Status = "INACTIVE"
+			draft.EventType = "AGENT_CONFIGURATION_UPDATED"
+		},
+		"deactivation changes config": func(candidate *core.Agent, draft *events.TrustedDraft) {
+			candidate.Status = "INACTIVE"
+			candidate.RuntimeAdapter = "substituted"
+			draft.EventType = "AGENT_DEACTIVATED"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := agent
+			event := events.TrustedDraft{OrganizationID: "org-1", SourceActorID: "runtime", CorrelationID: "setup"}
+			mutate(&candidate, &event)
+			if _, err := store.AppendProjection(ctx, events.ProjectionDraft{Event: event, ProjectionKind: "agent", RecordID: string(agent.ID), Version: 2, Value: candidate}); err == nil {
+				t.Fatal("invalid Agent lifecycle changed durable state")
+			}
+		})
+	}
+	records, err := store.Records(ctx, "agent", string(agent.ID))
+	if err != nil || len(records) != 1 {
+		t.Fatalf("rejected Agent lifecycle changed projection history: records=%d err=%v", len(records), err)
 	}
 }
 

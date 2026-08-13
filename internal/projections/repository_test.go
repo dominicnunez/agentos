@@ -832,6 +832,60 @@ func TestRebuildRejectsMislabeledTaskLifecycle(t *testing.T) {
 	}
 }
 
+func TestRebuildRejectsMislabeledAgentLifecycle(t *testing.T) {
+	agent := core.Agent{ID: "agent-1", OrganizationID: "org-1", BlueprintID: "blueprint-1", BlueprintVersion: "v1", ExecutionProfileID: "profile-1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE"}
+	stream := make([]events.Event, 0, 2)
+	for index, revision := range []struct {
+		eventType string
+		version   int
+	}{{"AGENT_CREATED", 1}, {"AGENT_DEACTIVATED", 2}} {
+		value, err := json.Marshal(agent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := events.ProjectionRecord{ProjectionKind: KindAgent, RecordID: string(agent.ID), Version: revision.version, CorrelationID: "setup", Value: value}
+		boundary := events.Event{EventID: fmt.Sprintf("agent-event-%d", index+1), Sequence: int64(index + 1), OrganizationID: "org-1", EventType: revision.eventType, SourceActorID: "runtime", CorrelationID: "setup", CreatedAt: time.Unix(int64(index+1), 0).UTC(), SchemaVersion: events.SchemaVersion}
+		sealed, err := events.SealProjectionEvent(boundary, record, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		boundary.Payload, err = json.Marshal(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream = append(stream, boundary)
+	}
+	if _, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background()); err == nil {
+		t.Fatal("event replay accepted an ACTIVE Agent under AGENT_DEACTIVATED")
+	}
+}
+
+func TestEventAuditRejectsHistoricalAgentConfigurationBinding(t *testing.T) {
+	agent := core.Agent{ID: "agent-1", OrganizationID: "org-1", BlueprintID: "missing-blueprint", BlueprintVersion: "v1", ExecutionProfileID: "profile-1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE"}
+	value, err := json.Marshal(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := events.ProjectionRecord{ProjectionKind: KindAgent, RecordID: string(agent.ID), Version: 1, CorrelationID: "setup", Value: value}
+	event := events.Event{EventID: "agent-event-1", Sequence: 1, OrganizationID: "org-1", EventType: "AGENT_CREATED", SourceActorID: "runtime", CorrelationID: "setup", CreatedAt: time.Unix(1, 0).UTC(), SchemaVersion: events.SchemaVersion}
+	sealed, err := events.SealProjectionEvent(event, record, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.Payload, err = json.Marshal(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := Snapshot{
+		Organizations:     map[core.ID]Versioned[core.Organization]{"org-1": {Version: 1, Value: core.Organization{ID: "org-1"}}},
+		AgentBlueprints:   map[core.ID]Versioned[core.AgentBlueprint]{"blueprint-1": {Version: 1, Value: core.AgentBlueprint{ID: "blueprint-1", OrganizationID: "org-1", Version: "v1"}}},
+		ExecutionProfiles: map[core.ID]Versioned[core.ExecutionProfile]{"profile-1": {Version: 1, Value: core.ExecutionProfile{ID: "profile-1", OrganizationID: "org-1", Version: "v1"}}},
+	}
+	if err := validateProjectionEventOrganizationBindings(snapshot, []events.Event{event}); err == nil || !strings.Contains(err.Error(), "invalid blueprint") {
+		t.Fatalf("event audit accepted an Agent revision with an unbound blueprint: %v", err)
+	}
+}
+
 func TestFullAuditRejectsProjectionEventWithoutMaterializedRecord(t *testing.T) {
 	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: time.Unix(1, 0).UTC()}
 	value, err := json.Marshal(organization)

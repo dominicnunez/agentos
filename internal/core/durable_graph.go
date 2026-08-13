@@ -59,7 +59,15 @@ func ValidExecutionProfileRevision(previous, next ExecutionProfile) bool {
 // ValidAgentRevision preserves durable Agent identity and tenant ownership
 // while allowing reviewed configuration and lifecycle changes.
 func ValidAgentRevision(previous, next Agent) bool {
-	return previous.ID == next.ID && previous.OrganizationID == next.OrganizationID
+	return ValidAgent(previous) && ValidAgent(next) && previous.ID == next.ID && previous.OrganizationID == next.OrganizationID
+}
+
+// ValidAgent reports whether a durable Agent has a complete pinned runtime
+// configuration and a recognized lifecycle state.
+func ValidAgent(agent Agent) bool {
+	return agent.ID != "" && agent.OrganizationID != "" && agent.BlueprintID != "" && agent.BlueprintVersion != "" &&
+		agent.ExecutionProfileID != "" && agent.ExecutionProfileVersion != "" && agent.RuntimeAdapter != "" &&
+		(agent.Status == "ACTIVE" || agent.Status == "INACTIVE")
 }
 
 // DurableGraph is the current organizational state whose cross-record
@@ -257,7 +265,7 @@ func validateDurableRoster(graph DurableGraph) error {
 	}
 	for id, state := range graph.Agents {
 		agent := state.Value
-		if agent.BlueprintID == "" || agent.BlueprintVersion == "" || agent.ExecutionProfileID == "" || agent.ExecutionProfileVersion == "" || agent.RuntimeAdapter == "" || !validDurableRosterStatus(agent.Status) {
+		if !ValidAgent(agent) {
 			return fmt.Errorf("agent %s is incomplete", id)
 		}
 		blueprint, ok := graph.AgentBlueprints[agent.BlueprintID]

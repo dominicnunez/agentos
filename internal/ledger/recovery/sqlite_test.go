@@ -456,6 +456,74 @@ func TestRecoveryRejectsMislabeledTaskLifecycle(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsMislabeledAgentLifecycle(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	blueprint := core.AgentBlueprint{ID: "blueprint-1", OrganizationID: organization.ID, Version: "v1", Role: "worker", OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE", CreatedAt: now}
+	profile := core.ExecutionProfile{ID: "profile-1", OrganizationID: organization.ID, Version: "v1", ModelProvider: "provider", Model: "model", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE", CreatedAt: now}
+	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "local", Status: "ACTIVE"}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: "org-1", Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_BLUEPRINT_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "agent_blueprint", RecordID: string(blueprint.ID), Version: 1, Value: blueprint},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_PROFILE_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "execution_profile", RecordID: string(profile.ID), Version: 1, Value: profile},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "agent", RecordID: string(agent.ID), Version: 1, Value: agent},
+	} {
+		if _, err := store.AppendProjection(ctx, draft); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	agent.Status = "INACTIVE"
+	deactivated, err := store.AppendProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_DEACTIVATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "agent", RecordID: string(agent.ID), Version: 2, Value: agent})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	payload, present, err := events.AdmittedProjection(deactivated)
+	if err != nil || !present {
+		_ = store.Close()
+		t.Fatalf("Agent deactivation admission is invalid: present=%t err=%v", present, err)
+	}
+	deactivated.EventType = "AGENT_REACTIVATED"
+	sealed, err := events.SealProjectionEvent(deactivated, payload.Projection, payload.Detail)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(sealed)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE events SET event_type=?,payload=? WHERE event_id=?`, deactivated.EventType, body, deactivated.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE records SET admission_fingerprint=? WHERE admission_event_id=?`, sealed.Admission.Fingerprint, deactivated.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil {
+		t.Fatal("recovery verification accepted INACTIVE Agent state under AGENT_REACTIVATED")
+	}
+}
+
 func resealRecoveryProjectionAtSequence(t *testing.T, event events.Event, sequence int64) ([]byte, string) {
 	t.Helper()
 	payload, present, err := events.AdmittedProjection(event)
@@ -580,6 +648,90 @@ func TestRecoveryRejectsInvalidAgentRosterBinding(t *testing.T) {
 	deleteRecoveryProjection(t, ctx, path, "agent_blueprint", blueprint.ID, 1)
 	if _, err := Verify(ctx, path); err == nil {
 		t.Fatal("recovery verification accepted an Agent with a missing blueprint")
+	}
+}
+
+func TestRecoveryRejectsHistoricalAgentConfigurationBinding(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	blueprintOne := core.AgentBlueprint{ID: "blueprint-1", OrganizationID: organization.ID, Version: "v1", Role: "worker", OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE", CreatedAt: now}
+	blueprintTwo := blueprintOne
+	blueprintTwo.ID = "blueprint-2"
+	profile := core.ExecutionProfile{ID: "profile-1", OrganizationID: organization.ID, Version: "v1", ModelProvider: "provider", Model: "model", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE", CreatedAt: now}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: "org-1", Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_BLUEPRINT_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "agent_blueprint", RecordID: string(blueprintOne.ID), Version: 1, Value: blueprintOne},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_BLUEPRINT_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "agent_blueprint", RecordID: string(blueprintTwo.ID), Version: 1, Value: blueprintTwo},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_PROFILE_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "execution_profile", RecordID: string(profile.ID), Version: 1, Value: profile},
+	} {
+		if _, err := store.AppendProjection(ctx, draft); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintID: blueprintOne.ID, BlueprintVersion: blueprintOne.Version, ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "local", Status: "ACTIVE"}
+	created, err := store.AppendProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "agent", RecordID: string(agent.ID), Version: 1, Value: agent})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	agent.BlueprintID = blueprintTwo.ID
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_CONFIGURATION_UPDATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "agent", RecordID: string(agent.ID), Version: 2, Value: agent}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	payload, present, err := events.AdmittedProjection(created)
+	if err != nil || !present {
+		_ = store.Close()
+		t.Fatalf("Agent creation admission is invalid: present=%t err=%v", present, err)
+	}
+	agent.BlueprintID = "missing-blueprint"
+	payload.Projection.Value, err = json.Marshal(agent)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	sealed, err := events.SealProjectionEvent(created, payload.Projection, payload.Detail)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	eventBody, err := json.Marshal(sealed)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	recordBody, err := json.Marshal(payload.Projection)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE events SET payload=? WHERE event_id=?`, eventBody, created.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE records SET body=?,admission_fingerprint=? WHERE admission_event_id=?`, recordBody, sealed.Admission.Fingerprint, created.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil {
+		t.Fatal("recovery verification accepted an invalid historical Agent configuration binding")
 	}
 }
 

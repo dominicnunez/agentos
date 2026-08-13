@@ -1657,6 +1657,15 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 	if !validProjectionEventType(record.ProjectionKind, record.Version, event.EventType) {
 		return fmt.Errorf("projection %s/%s/%d uses unsupported event %s", record.ProjectionKind, record.RecordID, record.Version, event.EventType)
 	}
+	if record.ProjectionKind == "agent" {
+		var agent core.Agent
+		if decodeExactEventJSON(record.Value, &agent) != nil || agent.ID != core.ID(record.RecordID) || string(agent.OrganizationID) != event.OrganizationID {
+			return fmt.Errorf("Agent projection value is invalid")
+		}
+		if err := ValidateAgentProjectionTarget(event.EventType, record.Version, agent); err != nil {
+			return err
+		}
+	}
 	if record.ProjectionKind == "task" {
 		var task core.Task
 		if decodeExactEventJSON(record.Value, &task) != nil || task.ID != core.ID(record.RecordID) {
@@ -1681,6 +1690,65 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 	}
 	if event.TaskID != "" || event.RecipientScope != "" || event.RecipientID != "" {
 		return fmt.Errorf("organizational projection uses a Task or recipient route")
+	}
+	return nil
+}
+
+// ValidateAgentProjectionTarget couples an Agent lifecycle label to the state
+// that label is permitted to materialize.
+func ValidateAgentProjectionTarget(eventType string, version int, agent core.Agent) error {
+	if version < 1 || !core.ValidAgent(agent) {
+		return fmt.Errorf("Agent projection is incomplete")
+	}
+	switch eventType {
+	case "AGENT_CREATED":
+		if version != 1 || agent.Status != "ACTIVE" {
+			return fmt.Errorf("Agent creation must start ACTIVE at version one")
+		}
+	case "AGENT_CONFIGURATION_UPDATED":
+		if version < 2 {
+			return fmt.Errorf("Agent configuration update requires an existing Agent")
+		}
+	case "AGENT_DEACTIVATED":
+		if version < 2 || agent.Status != "INACTIVE" {
+			return fmt.Errorf("Agent deactivation must materialize INACTIVE state")
+		}
+	case "AGENT_REACTIVATED":
+		if version < 2 || agent.Status != "ACTIVE" {
+			return fmt.Errorf("Agent reactivation must materialize ACTIVE state")
+		}
+	default:
+		return fmt.Errorf("Agent projection uses unsupported lifecycle event %s", eventType)
+	}
+	return nil
+}
+
+// ValidateAgentProjectionTransition binds Agent configuration and status
+// changes to mutually exclusive runtime-owned event labels.
+func ValidateAgentProjectionTransition(eventType string, version int, previous *core.Agent, next core.Agent) error {
+	if err := ValidateAgentProjectionTarget(eventType, version, next); err != nil {
+		return err
+	}
+	if previous == nil {
+		return nil
+	}
+	if !core.ValidAgentRevision(*previous, next) {
+		return fmt.Errorf("Agent revision changes immutable identity or organization")
+	}
+	configurationChanged := previous.BlueprintID != next.BlueprintID || previous.BlueprintVersion != next.BlueprintVersion ||
+		previous.ExecutionProfileID != next.ExecutionProfileID || previous.ExecutionProfileVersion != next.ExecutionProfileVersion ||
+		previous.RuntimeAdapter != next.RuntimeAdapter
+	valid := false
+	switch eventType {
+	case "AGENT_CONFIGURATION_UPDATED":
+		valid = previous.Status == next.Status && configurationChanged
+	case "AGENT_DEACTIVATED":
+		valid = previous.Status == "ACTIVE" && next.Status == "INACTIVE" && !configurationChanged
+	case "AGENT_REACTIVATED":
+		valid = previous.Status == "INACTIVE" && next.Status == "ACTIVE" && !configurationChanged
+	}
+	if !valid {
+		return fmt.Errorf("Agent lifecycle event %s does not match its configuration and status transition", eventType)
 	}
 	return nil
 }

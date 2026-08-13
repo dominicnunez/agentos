@@ -112,6 +112,12 @@ func (r *Repository) SaveExecutionProfile(ctx context.Context, eventType, actorI
 }
 
 func (r *Repository) SaveAgent(ctx context.Context, eventType, actorID, correlationID string, version int, value core.Agent, detail any) error {
+	if actorID != "runtime" || correlationID == "" {
+		return fmt.Errorf("complete runtime-owned Agent transition is required")
+	}
+	if err := events.ValidateAgentProjectionTarget(eventType, version, value); err != nil {
+		return err
+	}
 	return r.save(ctx, string(value.OrganizationID), eventType, actorID, "", correlationID, KindAgent, value.ID, version, value, detail)
 }
 
@@ -337,6 +343,7 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 	eventIDs := make(map[string]struct{}, len(stream))
 	sequences := make(map[int64]struct{}, len(stream))
 	tasks := make(map[core.ID]Versioned[core.Task])
+	agents := make(map[core.ID]Versioned[core.Agent])
 	for _, event := range stream {
 		if event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() {
 			return fmt.Errorf("event stream contains an incomplete envelope")
@@ -374,6 +381,24 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 					return fmt.Errorf("event %s: %w", event.EventID, err)
 				}
 				tasks[task.ID] = Versioned[core.Task]{Version: payload.Projection.Version, CorrelationID: payload.Projection.CorrelationID, Value: task}
+			}
+			if payload.Projection.ProjectionKind == KindAgent {
+				var agent core.Agent
+				if decodeExactProjectionJSON(payload.Projection.Value, &agent) != nil {
+					return fmt.Errorf("event %s contains an invalid Agent projection", event.EventID)
+				}
+				previous, found := agents[agent.ID]
+				var prior *core.Agent
+				if found {
+					prior = &previous.Value
+					if payload.Projection.Version != previous.Version+1 {
+						return fmt.Errorf("event %s contains noncontiguous Agent history", event.EventID)
+					}
+				}
+				if err := events.ValidateAgentProjectionTransition(event.EventType, payload.Projection.Version, prior, agent); err != nil {
+					return fmt.Errorf("event %s: %w", event.EventID, err)
+				}
+				agents[agent.ID] = Versioned[core.Agent]{Version: payload.Projection.Version, CorrelationID: payload.Projection.CorrelationID, Value: agent}
 			}
 		} else if events.RequiresProjectionAdmission(event.EventType, event.SourceActorID) {
 			return fmt.Errorf("event %s uses a projection lifecycle event without typed admission", event.EventID)
@@ -481,6 +506,14 @@ func validateProjectionEventOrganizationBindings(snapshot Snapshot, stream []eve
 			var value core.Agent
 			if decodeExactProjectionJSON(payload.Projection.Value, &value) != nil {
 				return fmt.Errorf("event %s contains an invalid Agent projection", event.EventID)
+			}
+			blueprint, found := snapshot.AgentBlueprints[value.BlueprintID]
+			if !found || blueprint.Value.OrganizationID != value.OrganizationID || blueprint.Value.Version != value.BlueprintVersion {
+				return fmt.Errorf("event %s Agent projection references an invalid blueprint", event.EventID)
+			}
+			profile, found := snapshot.ExecutionProfiles[value.ExecutionProfileID]
+			if !found || profile.Value.OrganizationID != value.OrganizationID || profile.Value.Version != value.ExecutionProfileVersion {
+				return fmt.Errorf("event %s Agent projection references an invalid execution profile", event.EventID)
 			}
 			organizationID = value.OrganizationID
 		case KindIntent:

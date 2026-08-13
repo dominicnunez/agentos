@@ -202,6 +202,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	lastProjectionVersions := map[string]int{}
 	lastProjectionSequences := map[string]int64{}
 	lastTasks := map[core.ID]core.Task{}
+	lastAgents := map[core.ID]core.Agent{}
 	for recordRows.Next() {
 		var kind, recordID, admissionEventID, admissionFingerprint string
 		var version int
@@ -257,6 +258,23 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 				return fmt.Errorf("projection record %s/%s/%d: %w", kind, recordID, version, err)
 			}
 			lastTasks[task.ID] = task
+		}
+		if kind == "agent" {
+			var agent core.Agent
+			if decodeExactJSON(record.Value, &agent) != nil || agent.ID != core.ID(recordID) {
+				_ = recordRows.Close()
+				return fmt.Errorf("projection record %s/%s/%d contains an invalid Agent", kind, recordID, version)
+			}
+			previous, previousFound := lastAgents[agent.ID]
+			var prior *core.Agent
+			if previousFound {
+				prior = &previous
+			}
+			if err := events.ValidateAgentProjectionTransition(admission.event.EventType, version, prior, agent); err != nil {
+				_ = recordRows.Close()
+				return fmt.Errorf("projection record %s/%s/%d: %w", kind, recordID, version, err)
+			}
+			lastAgents[agent.ID] = agent
 		}
 		if _, duplicate := used[admissionEventID]; duplicate {
 			_ = recordRows.Close()
@@ -425,6 +443,20 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 			if found {
 				organizationID = snapshot.Intents[work.Value.IntentID].Value.OrganizationID
 			}
+		case "agent":
+			var value core.Agent
+			if decodeExactJSON(record.Value, &value) != nil {
+				return fmt.Errorf("event %s contains an invalid Agent projection", event.EventID)
+			}
+			blueprint, found := snapshot.AgentBlueprints[value.BlueprintID]
+			if !found || blueprint.Value.OrganizationID != value.OrganizationID || blueprint.Value.Version != value.BlueprintVersion {
+				return fmt.Errorf("event %s Agent projection references an invalid blueprint", event.EventID)
+			}
+			profile, found := snapshot.ExecutionProfiles[value.ExecutionProfileID]
+			if !found || profile.Value.OrganizationID != value.OrganizationID || profile.Value.Version != value.ExecutionProfileVersion {
+				return fmt.Errorf("event %s Agent projection references an invalid execution profile", event.EventID)
+			}
+			organizationID = value.OrganizationID
 		default:
 			continue
 		}

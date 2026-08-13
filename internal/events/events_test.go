@@ -60,6 +60,43 @@ func TestTaskProjectionTransitionsAreExact(t *testing.T) {
 	}
 }
 
+func TestAgentProjectionTransitionsAreExact(t *testing.T) {
+	active := core.Agent{
+		ID: "agent-1", OrganizationID: "org-1", BlueprintID: "blueprint-1", BlueprintVersion: "v1",
+		ExecutionProfileID: "profile-1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE",
+	}
+	inactive, configured := active, active
+	inactive.Status = "INACTIVE"
+	configured.RuntimeAdapter = "updated"
+	for name, test := range map[string]struct {
+		eventType string
+		version   int
+		previous  *core.Agent
+		next      core.Agent
+		valid     bool
+	}{
+		"active creation":              {"AGENT_CREATED", 1, nil, active, true},
+		"configuration update":         {"AGENT_CONFIGURATION_UPDATED", 2, &active, configured, true},
+		"deactivation":                 {"AGENT_DEACTIVATED", 2, &active, inactive, true},
+		"reactivation":                 {"AGENT_REACTIVATED", 3, &inactive, active, true},
+		"inactive creation":            {"AGENT_CREATED", 1, nil, inactive, false},
+		"mislabeled deactivation":      {"AGENT_DEACTIVATED", 2, &active, active, false},
+		"mislabeled reactivation":      {"AGENT_REACTIVATED", 2, &active, active, false},
+		"status-changing config event": {"AGENT_CONFIGURATION_UPDATED", 2, &active, inactive, false},
+		"config-changing lifecycle":    {"AGENT_DEACTIVATED", 2, &active, func() core.Agent { value := configured; value.Status = "INACTIVE"; return value }(), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateAgentProjectionTransition(test.eventType, test.version, test.previous, test.next)
+			if test.valid && err != nil {
+				t.Fatalf("valid transition was rejected: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("invalid transition was accepted")
+			}
+		})
+	}
+}
+
 func TestHumanCompletionRejectsEnvelopeArtifactsAbsentFromSubmission(t *testing.T) {
 	contract := core.StructuredUserCompletionContract("task-1")
 	task := WorkCompletionTaskBinding{Task: core.Task{
