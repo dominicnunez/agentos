@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -185,6 +186,27 @@ func TestRecoveryRejectsIncompleteOrdinaryEventIdentity(t *testing.T) {
 			}
 
 			if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "incomplete envelope") {
+				t.Fatalf("recovery verification error=%v", err)
+			}
+		})
+	}
+}
+
+func TestRecoveryRejectsUnsupportedOrdinaryEventSchema(t *testing.T) {
+	for _, schemaVersion := range []int{0, events.SchemaVersion + 1} {
+		t.Run(fmt.Sprintf("schema-%d", schemaVersion), func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "ledger.db")
+			db := createTestLedger(t, path)
+			if _, err := db.ExecContext(ctx, `INSERT INTO events(event_id,payload,created_at,schema_version) VALUES('event-1','{}','2026-08-13T12:00:00Z',?)`, schemaVersion); err != nil {
+				_ = db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "unsupported schema version") {
 				t.Fatalf("recovery verification error=%v", err)
 			}
 		})
@@ -454,6 +476,52 @@ func TestRecoveryRejectsWorkBeforeIntentAdmission(t *testing.T) {
 	swapRecoveryProjectionSequences(t, ctx, path, intentEvent, workEvent)
 	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "work requires its durable Intent") {
 		t.Fatalf("Work-before-Intent recovery error=%v", err)
+	}
+}
+
+func TestRecoveryRejectsTaskBeforeWorkAdmission(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, NormalizedObjective: "objective", CreatedAt: now}
+	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	task := core.Task{ID: "task-1", WorkID: work.ID, Description: "task", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"}, ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent},
+	} {
+		if _, err := store.AppendProjection(ctx, draft); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	workEvent, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"},
+		ProjectionKind: "work", RecordID: string(work.ID), Version: 1, Value: work,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	taskEvent, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1"},
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 1, Value: task,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	swapRecoveryProjectionSequences(t, ctx, path, workEvent, taskEvent)
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "task requires its exact active Work") {
+		t.Fatalf("Task-before-Work recovery error=%v", err)
 	}
 }
 
@@ -1532,17 +1600,17 @@ func createTestLedger(t *testing.T, path string) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.ExecContext(context.Background(), `CREATE TABLE events(
+	_, err = db.ExecContext(context.Background(), fmt.Sprintf(`CREATE TABLE events(
 sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, organization_id TEXT NOT NULL DEFAULT '',
 event_type TEXT NOT NULL DEFAULT '', source_actor_id TEXT NOT NULL DEFAULT '', source_execution_id TEXT NOT NULL DEFAULT '',
 recipient_scope TEXT NOT NULL DEFAULT '', recipient_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '',
 authorization_refs BLOB NOT NULL DEFAULT '[]', artifact_refs BLOB NOT NULL DEFAULT '[]', payload BLOB NOT NULL,
-correlation_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '', schema_version INTEGER NOT NULL DEFAULT 1);
+correlation_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '', schema_version INTEGER NOT NULL DEFAULT %d);
 CREATE TABLE records(kind TEXT NOT NULL, record_id TEXT NOT NULL, version INTEGER NOT NULL, body BLOB NOT NULL, admission_event_id TEXT NOT NULL DEFAULT '', admission_fingerprint TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(kind, record_id, version));
 CREATE TABLE inbox(recipient_scope TEXT NOT NULL, recipient_id TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE, organization_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '', available_at TEXT NOT NULL DEFAULT '', observed_at TEXT NOT NULL DEFAULT '', observation_event_id TEXT NOT NULL DEFAULT '');
 CREATE TABLE consumed_approvals(approval_id TEXT PRIMARY KEY, effect_fingerprint TEXT NOT NULL, consumed_at TEXT NOT NULL);
 CREATE TABLE external_work(organization_id TEXT NOT NULL, request_id TEXT NOT NULL, correlation_id TEXT NOT NULL, intent_id TEXT NOT NULL, PRIMARY KEY(organization_id, request_id));
-CREATE TABLE external_tasks(organization_id TEXT NOT NULL, task_id TEXT NOT NULL, correlation_id TEXT NOT NULL, PRIMARY KEY(organization_id, task_id));`)
+CREATE TABLE external_tasks(organization_id TEXT NOT NULL, task_id TEXT NOT NULL, correlation_id TEXT NOT NULL, PRIMARY KEY(organization_id, task_id));`, events.SchemaVersion))
 	if err != nil {
 		_ = db.Close()
 		t.Fatal(err)

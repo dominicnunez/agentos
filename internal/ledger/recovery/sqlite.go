@@ -155,6 +155,10 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			_ = eventRows.Close()
 			return fmt.Errorf("event stream contains an incomplete envelope")
 		}
+		if event.SchemaVersion != events.SchemaVersion {
+			_ = eventRows.Close()
+			return fmt.Errorf("event %s uses unsupported schema version %d", event.EventID, event.SchemaVersion)
+		}
 		if _, duplicate := eventIDs[event.EventID]; duplicate {
 			_ = eventRows.Close()
 			return fmt.Errorf("event stream contains duplicate event id %s", event.EventID)
@@ -420,6 +424,9 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Task projection", event.EventID)
 			}
+			if err := validateRecoveryTaskWorkBinding(event, record, value, snapshot); err != nil {
+				return fmt.Errorf("event %s contains an invalid Task binding: %w", event.EventID, err)
+			}
 			if err := setRecoveryProjection(snapshot.Tasks, record, value, true, core.ValidTaskRevision); err != nil {
 				return fmt.Errorf("event %s contains invalid Task history: %w", event.EventID, err)
 			}
@@ -514,6 +521,18 @@ func validateRecoveryWorkIntentBinding(event events.Event, record events.Project
 	intent := intentState.Value
 	if intentState.CorrelationID != record.CorrelationID || intent.ID != work.IntentID || intent.GoalID != work.GoalID || intent.NormalizedObjective != work.Objective || string(intent.OrganizationID) != event.OrganizationID {
 		return fmt.Errorf("work does not match its accepted Intent boundary")
+	}
+	return nil
+}
+
+func validateRecoveryTaskWorkBinding(event events.Event, record events.ProjectionRecord, task core.Task, snapshot core.DurableGraph) error {
+	workState, found := snapshot.Works[task.WorkID]
+	if !found || workState.CorrelationID != record.CorrelationID || workState.Value.ID != task.WorkID || workState.Value.Status != core.WorkActive {
+		return fmt.Errorf("task requires its exact active Work on the same correlation boundary")
+	}
+	intentState, found := snapshot.Intents[workState.Value.IntentID]
+	if !found || intentState.CorrelationID != record.CorrelationID || intentState.Value.ID != workState.Value.IntentID || string(intentState.Value.OrganizationID) != event.OrganizationID {
+		return fmt.Errorf("task requires its exact Intent organization and correlation boundary")
 	}
 	return nil
 }
