@@ -184,9 +184,55 @@ func TestDecodeKindRejectsHistoricalCorrelationChange(t *testing.T) {
 		}
 		records = append(records, body)
 	}
-	if err := decodeKind(records, map[core.ID]Versioned[core.Task]{}, true); err == nil {
+	if err := decodeKind(records, map[core.ID]Versioned[core.Task]{}, true, nil); err == nil {
 		t.Fatal("historical correlation change was accepted")
 	}
+}
+
+func TestRosterConfigurationCannotChangeWithinDurableIdentity(t *testing.T) {
+	blueprint := core.AgentBlueprint{ID: "blueprint-1", OrganizationID: "org-1", Version: "v1", Role: "worker", OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE", CreatedAt: time.Unix(1, 0).UTC()}
+	changedBlueprint := blueprint
+	changedBlueprint.OperatingInstructions = "expanded work"
+	if err := decodeKind(projectionBodies(t, KindAgentBlueprint, string(blueprint.ID), blueprint, changedBlueprint), map[core.ID]Versioned[core.AgentBlueprint]{}, false, sameAgentBlueprintRecord); err == nil {
+		t.Fatal("blueprint instructions changed without a new durable identity")
+	}
+
+	profile := core.ExecutionProfile{ID: "profile-1", OrganizationID: "org-1", Version: "v1", ModelProvider: "provider", Model: "model", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE", CreatedAt: time.Unix(1, 0).UTC()}
+	changedProfile := profile
+	changedProfile.PromptVersion = "v2"
+	if err := decodeKind(projectionBodies(t, KindExecutionProfile, string(profile.ID), profile, changedProfile), map[core.ID]Versioned[core.ExecutionProfile]{}, false, sameExecutionProfileRecord); err == nil {
+		t.Fatal("execution profile changed without a new durable identity")
+	}
+
+	agent := core.Agent{ID: "agent-1", OrganizationID: "org-1", BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "local", Status: "ACTIVE"}
+	changedAgent := agent
+	changedAgent.ExecutionProfileID = "profile-2"
+	if err := decodeKind(projectionBodies(t, KindAgent, string(agent.ID), agent, changedAgent), map[core.ID]Versioned[core.Agent]{}, false, sameAgentRecord); err == nil {
+		t.Fatal("Agent binding changed without a new durable identity")
+	}
+
+	inactive := agent
+	inactive.Status = "INACTIVE"
+	if err := decodeKind(projectionBodies(t, KindAgent, string(agent.ID), agent, inactive), map[core.ID]Versioned[core.Agent]{}, false, sameAgentRecord); err != nil {
+		t.Fatalf("status-only Agent transition was rejected: %v", err)
+	}
+}
+
+func projectionBodies[T any](t *testing.T, kind, id string, values ...T) [][]byte {
+	t.Helper()
+	bodies := make([][]byte, 0, len(values))
+	for index, value := range values {
+		encodedValue, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := json.Marshal(events.ProjectionRecord{ProjectionKind: kind, RecordID: id, Version: index + 1, Value: encodedValue})
+		if err != nil {
+			t.Fatal(err)
+		}
+		bodies = append(bodies, body)
+	}
+	return bodies
 }
 
 func TestRebuildRejectsProjectionCorrelationMismatch(t *testing.T) {

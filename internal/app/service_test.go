@@ -1163,18 +1163,18 @@ func TestDispatchFailsClosedWhenDurableRosterEligibilityChanges(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
-		"new capability prerequisite": func(t *testing.T, ctx context.Context, repository *projections.Repository, snapshot projections.Snapshot) {
+		"inactive blueprint": func(t *testing.T, ctx context.Context, repository *projections.Repository, snapshot projections.Snapshot) {
 			state := snapshot.AgentBlueprints["blueprint-test-org-1"]
 			blueprint := state.Value
-			blueprint.RequiredCapabilityClasses = []string{"repository.write"}
+			blueprint.Status = "INACTIVE"
 			if err := repository.SaveAgentBlueprint(ctx, "AGENT_BLUEPRINT_UPDATED", "runtime", "request-1", state.Version+1, blueprint, nil); err != nil {
 				t.Fatal(err)
 			}
 		},
-		"changed model profile": func(t *testing.T, ctx context.Context, repository *projections.Repository, snapshot projections.Snapshot) {
+		"inactive execution profile": func(t *testing.T, ctx context.Context, repository *projections.Repository, snapshot projections.Snapshot) {
 			state := snapshot.ExecutionProfiles["profile-test-org-1"]
 			profile := state.Value
-			profile.Model = "different-model"
+			profile.Status = "INACTIVE"
 			if err := repository.SaveExecutionProfile(ctx, "EXECUTION_PROFILE_UPDATED", "runtime", "request-1", state.Version+1, profile, nil); err != nil {
 				t.Fatal(err)
 			}

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
@@ -196,28 +197,28 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 		Goals:             make(map[core.ID]Versioned[core.Goal]),
 		Tasks:             make(map[core.ID]Versioned[core.Task]),
 	}
-	if err := decodeKind(records[KindOrganization], snapshot.Organizations, false); err != nil {
+	if err := decodeKind(records[KindOrganization], snapshot.Organizations, false, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode organizations: %w", err)
 	}
-	if err := decodeKind(records[KindTeam], snapshot.Teams, false); err != nil {
+	if err := decodeKind(records[KindTeam], snapshot.Teams, false, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode teams: %w", err)
 	}
-	if err := decodeKind(records[KindAgentBlueprint], snapshot.AgentBlueprints, false); err != nil {
+	if err := decodeKind(records[KindAgentBlueprint], snapshot.AgentBlueprints, false, sameAgentBlueprintRecord); err != nil {
 		return Snapshot{}, fmt.Errorf("decode Agent blueprints: %w", err)
 	}
-	if err := decodeKind(records[KindExecutionProfile], snapshot.ExecutionProfiles, false); err != nil {
+	if err := decodeKind(records[KindExecutionProfile], snapshot.ExecutionProfiles, false, sameExecutionProfileRecord); err != nil {
 		return Snapshot{}, fmt.Errorf("decode execution profiles: %w", err)
 	}
-	if err := decodeKind(records[KindAgent], snapshot.Agents, false); err != nil {
+	if err := decodeKind(records[KindAgent], snapshot.Agents, false, sameAgentRecord); err != nil {
 		return Snapshot{}, fmt.Errorf("decode agents: %w", err)
 	}
-	if err := decodeKind(records[KindIntent], snapshot.Intents, true); err != nil {
+	if err := decodeKind(records[KindIntent], snapshot.Intents, true, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode intents: %w", err)
 	}
-	if err := decodeKind(records[KindGoal], snapshot.Goals, true); err != nil {
+	if err := decodeKind(records[KindGoal], snapshot.Goals, true, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode goals: %w", err)
 	}
-	if err := decodeKind(records[KindTask], snapshot.Tasks, true); err != nil {
+	if err := decodeKind(records[KindTask], snapshot.Tasks, true, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode tasks: %w", err)
 	}
 	if err := validateSnapshot(snapshot); err != nil {
@@ -226,7 +227,7 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 	return snapshot, nil
 }
 
-func decodeKind[T any](bodies [][]byte, target map[core.ID]Versioned[T], correlationStable bool) error {
+func decodeKind[T any](bodies [][]byte, target map[core.ID]Versioned[T], correlationStable bool, sameRecordConfiguration func(T, T) bool) error {
 	for _, body := range bodies {
 		var record events.ProjectionRecord
 		if err := json.Unmarshal(body, &record); err != nil {
@@ -253,9 +254,27 @@ func decodeKind[T any](bodies [][]byte, target map[core.ID]Versioned[T], correla
 		if err := json.Unmarshal(record.Value, &value); err != nil {
 			return err
 		}
+		if exists && sameRecordConfiguration != nil && !sameRecordConfiguration(previous.Value, value) {
+			return fmt.Errorf("record %s changes immutable configuration at version %d", id, record.Version)
+		}
 		target[id] = Versioned[T]{Version: record.Version, CorrelationID: record.CorrelationID, Value: value}
 	}
 	return nil
+}
+
+func sameAgentBlueprintRecord(left, right core.AgentBlueprint) bool {
+	right.Status = left.Status
+	return reflect.DeepEqual(left, right)
+}
+
+func sameExecutionProfileRecord(left, right core.ExecutionProfile) bool {
+	right.Status = left.Status
+	return reflect.DeepEqual(left, right)
+}
+
+func sameAgentRecord(left, right core.Agent) bool {
+	right.Status = left.Status
+	return left == right
 }
 
 func validateSnapshot(snapshot Snapshot) error {

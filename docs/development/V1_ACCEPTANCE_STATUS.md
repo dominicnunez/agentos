@@ -7,7 +7,7 @@ to deploy or publish.
 
 | # | Requirement | Evidence |
 |---:|---|---|
-| 1 | Durable identity | PASS - [`TestDurableObjectsSurviveRestartAndRebuildFromEvents`](../../internal/projections/repository_test.go), [`TestSnapshotRejectsMalformedDurableRoster`](../../internal/projections/repository_test.go) |
+| 1 | Durable identity | PASS - [`TestDurableObjectsSurviveRestartAndRebuildFromEvents`](../../internal/projections/repository_test.go), [`TestSnapshotRejectsMalformedDurableRoster`](../../internal/projections/repository_test.go), [`TestRosterConfigurationCannotChangeWithinDurableIdentity`](../../internal/projections/repository_test.go) |
 | 2 | Direct lateral messaging | PASS - [`TestLateralMessagesAtActionBoundary`](../../internal/app/service_test.go) |
 | 3 | Action-boundary delivery | PASS - [`TestLateralMessagesAtActionBoundary`](../../internal/app/service_test.go) |
 | 4 | Atomic message delivery | PASS - [`TestMessageRollbackOnInboxFailure`](../../internal/ledger/sqlite_test.go) |
@@ -19,7 +19,7 @@ to deploy or publish.
 | 10 | Untrusted text stays untrusted | PASS - [`TestAgentCannotMintTrustedStateEvents`](../../internal/events/events_test.go), [`TestMessageEnvelopeUsesAuthenticatedIdentity`](../../internal/events/events_test.go), [`TestCandidateCompletionCannotMintVerifiedCompletion`](../../internal/events/events_test.go) |
 | 11 | Verified completion only | PASS - [`TestVerifierOwnsPostconditionTrust`](../../internal/completion/verifier_test.go), [`TestEvaluateRequiresVerifiedSuccess`](../../internal/completion/engine_test.go) |
 | 12 | Consequential effects are idempotent | PASS - [`TestSingleUseApprovalBeforeEffect`](../../internal/effects/coordinator_test.go) |
-| 13 | Restart continuity | PASS - [`TestRecoverExecutesPersistedPendingWorkAndPreservesIdentity`](../../internal/app/service_test.go), [`TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision`](../../internal/approvals/service_test.go), [`TestMessageInboxSurvivesReopenAndObservation`](../../internal/ledger/sqlite_test.go) |
+| 13 | Restart continuity | PASS - [`TestRecoverExecutesPersistedPendingWorkAndPreservesIdentity`](../../internal/app/service_test.go), [`TestRecoverResumesOnlyRevalidatedAssignmentBlock`](../../internal/app/service_test.go), [`TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision`](../../internal/approvals/service_test.go), [`TestMessageInboxSurvivesReopenAndObservation`](../../internal/ledger/sqlite_test.go) |
 | 14 | Complete run telemetry | PASS - [`TestProjectBuildsCompleteReplayableRunSummary`](../../internal/telemetry/telemetry_test.go), [`TestRunTelemetryCoversDAG`](../../internal/app/service_test.go) |
 | 15 | Model executions have manifests | PASS - [`TestAgentExecutionManifestUsesConfiguredModelDescriptor`](../../internal/app/service_test.go), [`TestAgentExecutionReturnsSeparateUsageContract`](../../internal/execution/execution_test.go) |
 | 16 | Tool failures remain failures | PASS - [`TestAgentExecutionRejectsMismatchedProviderUsageIdentity`](../../internal/execution/execution_test.go), [`TestUnavailableDeterministicWorkIsRejectedBeforeExecution`](../../internal/app/service_test.go), [`TestEvaluateRequiresVerifiedSuccess`](../../internal/completion/engine_test.go) |
