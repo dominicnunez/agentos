@@ -319,7 +319,7 @@ func TestOpenRejectsNonemptyPreAdmissionProjectionSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`CREATE TABLE records(
+	if _, err := db.ExecContext(t.Context(), `CREATE TABLE records(
 kind TEXT NOT NULL, record_id TEXT NOT NULL, version INTEGER NOT NULL, body BLOB NOT NULL,
 created_at TEXT NOT NULL, PRIMARY KEY(kind,record_id,version));
 INSERT INTO records(kind,record_id,version,body,created_at) VALUES('task','task-1',1,'{}','now');`); err != nil {

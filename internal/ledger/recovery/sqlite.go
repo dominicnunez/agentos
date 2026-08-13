@@ -124,6 +124,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("inspect projection admission events: %w", err)
 	}
+	defer func() { _ = eventRows.Close() }()
 	admitted := map[string]events.ProjectionEventPayload{}
 	for eventRows.Next() {
 		var event events.Event
@@ -189,6 +190,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("inspect projection admission records: %w", err)
 	}
+	defer func() { _ = recordRows.Close() }()
 	used := map[string]struct{}{}
 	for recordRows.Next() {
 		var kind, recordID, admissionEventID, admissionFingerprint string

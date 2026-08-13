@@ -1525,20 +1525,20 @@ func SealProjectionEvent(event Event, record ProjectionRecord, detail json.RawMe
 // AdmittedProjection returns present=false only for an ordinary event. Any
 // event that contains a reserved projection/admission key must carry one exact
 // valid sealed contract or fail closed.
-func AdmittedProjection(event Event) (payload ProjectionEventPayload, present bool, err error) {
+func AdmittedProjection(event Event) (ProjectionEventPayload, bool, error) {
 	if rejectDuplicateJSONKeys(event.Payload) != nil {
 		return ProjectionEventPayload{}, false, fmt.Errorf("event payload is malformed")
 	}
 	var object map[string]json.RawMessage
 	if json.Unmarshal(event.Payload, &object) != nil {
-		return ProjectionEventPayload{}, false, nil
+		return ProjectionEventPayload{}, false, fmt.Errorf("event payload is malformed")
 	}
 	_, hasProjection := object["projection"]
 	_, hasAdmission := object["admission"]
 	if !hasProjection && !hasAdmission {
 		return ProjectionEventPayload{}, false, nil
 	}
-	present = true
+	var payload ProjectionEventPayload
 	decoder := json.NewDecoder(bytes.NewReader(event.Payload))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&payload) != nil || decoder.Decode(&struct{}{}) != io.EOF || event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() || payload.Projection.ProjectionKind == "" || payload.Projection.RecordID == "" || payload.Projection.Version < 1 || payload.Projection.CorrelationID != event.CorrelationID || len(payload.Projection.Value) == 0 || payload.Admission.Method != ProjectionAdmissionMethod || payload.Admission.EventRef != event.EventID || !validSHA256(payload.Admission.Fingerprint) {
@@ -1659,13 +1659,13 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 	}
 	if record.ProjectionKind == "task" {
 		if event.TaskID != record.RecordID {
-			return fmt.Errorf("Task projection crosses its Task envelope")
+			return fmt.Errorf("task projection crosses its Task envelope")
 		}
 		if event.RecipientScope == "" && event.RecipientID == "" {
 			return nil
 		}
 		if event.EventType != "TASK_BLOCKED" || event.RecipientScope != RecipientTask || event.RecipientID == "" {
-			return fmt.Errorf("Task projection uses unsupported routing")
+			return fmt.Errorf("task projection uses unsupported routing")
 		}
 		return nil
 	}
