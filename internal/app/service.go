@@ -2247,6 +2247,7 @@ func (s *Service) actionableRemediation(ctx context.Context, snapshot projection
 		return nil, nil
 	}
 	pendingByCorrelation := make(map[string]map[core.ID]struct{})
+	streamByCorrelation := make(map[string][]events.Event)
 	actionable := make([]core.Task, 0, len(candidates))
 	for _, task := range candidates {
 		state, ok := snapshot.Tasks[task.ID]
@@ -2259,6 +2260,7 @@ func (s *Service) actionableRemediation(ctx context.Context, snapshot projection
 			if err != nil {
 				return nil, fmt.Errorf("load remediation review state: %w", err)
 			}
+			streamByCorrelation[state.CorrelationID] = stream
 			requests, decisions, err := completionReviewRecords(stream)
 			if err != nil {
 				return nil, fmt.Errorf("validate remediation review state: %w", err)
@@ -2271,14 +2273,33 @@ func (s *Service) actionableRemediation(ctx context.Context, snapshot projection
 			}
 			pendingByCorrelation[state.CorrelationID] = pending
 		}
-		awaitingIndependentReview := false
+		blockedByIndependentBoundary := false
 		for _, dependencyID := range task.DependsOn {
 			if _, waiting := pending[dependencyID]; waiting {
-				awaitingIndependentReview = true
+				blockedByIndependentBoundary = true
+				break
+			}
+			dependency, ok := snapshot.Tasks[dependencyID]
+			if !ok {
+				return nil, fmt.Errorf("remediation dependency %s has no durable projection", dependencyID)
+			}
+			if dependency.Value.Status != core.TaskBlocked {
+				continue
+			}
+			organizationID, err := taskOrganization(snapshot, dependency.Value)
+			if err != nil {
+				return nil, err
+			}
+			_, assignmentBlocked, err := recordedAssignmentBlock(streamByCorrelation[state.CorrelationID], organizationID, dependency)
+			if err != nil {
+				return nil, fmt.Errorf("validate remediation assignment block for task %s: %w", dependencyID, err)
+			}
+			if assignmentBlocked {
+				blockedByIndependentBoundary = true
 				break
 			}
 		}
-		if !awaitingIndependentReview {
+		if !blockedByIndependentBoundary {
 			actionable = append(actionable, task)
 		}
 	}

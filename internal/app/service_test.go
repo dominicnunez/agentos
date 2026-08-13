@@ -1314,6 +1314,84 @@ func TestRecoverResumesOnlyRevalidatedAssignmentBlock(t *testing.T) {
 	assertEventOrder(t, stream, "TASK_BLOCKED", "TASK_ASSIGNMENT_REVALIDATED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE")
 }
 
+func TestAssignmentBlockedDependencyWaitsForRevalidation(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1"}
+	const correlationID = "assignment-dag-resume"
+	if err := repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", correlationID, 1, organization, nil); err != nil {
+		t.Fatal(err)
+	}
+	agent := seedTestAgents(t, ctx, repository, correlationID, organization.ID, execution.FakeModel{}.Descriptor(), "agent-1")[0]
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "echo resumed DAG", NormalizedObjective: "echo resumed DAG"}
+	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: "ACTIVE"}
+	root := core.Task{ID: "task-" + correlationID, GoalID: goal.ID, Description: "echo aggregate", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, DependsOn: []core.ID{"task-child"}, TaskContractVersion: "1", Status: core.TaskPending}
+	child := core.Task{ID: "task-child", GoalID: goal.ID, ParentID: root.ID, Description: "echo child", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	for _, save := range []func() error{
+		func() error {
+			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", correlationID, 1, intent, nil)
+		},
+		func() error {
+			return repository.SaveGoal(ctx, organization.ID, "GOAL_CREATED", "runtime", correlationID, 1, goal, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", correlationID, 1, root, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", correlationID, 1, child, nil)
+		},
+	} {
+		if err := save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agent.Status = "INACTIVE"
+	if err := repository.SaveAgent(ctx, "AGENT_DEACTIVATED", "runtime", correlationID, 2, agent, nil); err != nil {
+		t.Fatal(err)
+	}
+	service := New(gateway)
+	if _, err := service.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tasks[child.ID].Value.Status != core.TaskBlocked || snapshot.Tasks[root.ID].Value.Status != core.TaskPending {
+		t.Fatalf("assignment block escaped its recoverable boundary: child=%+v root=%+v", snapshot.Tasks[child.ID].Value, snapshot.Tasks[root.ID].Value)
+	}
+
+	agent.Status = "ACTIVE"
+	if err := repository.SaveAgent(ctx, "AGENT_REACTIVATED", "runtime", correlationID, 3, agent, nil); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := service.Recover(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.TasksExecuted != 2 {
+		t.Fatalf("revalidated DAG did not resume exactly once per task: %+v", recovered)
+	}
+	snapshot, err = repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tasks[child.ID].Value.Status != core.TaskCompleted || snapshot.Tasks[root.ID].Value.Status != core.TaskCompleted {
+		t.Fatalf("revalidated DAG did not complete: child=%+v root=%+v", snapshot.Tasks[child.ID].Value, snapshot.Tasks[root.ID].Value)
+	}
+	stream, err := gateway.Events(ctx, correlationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEventOrder(t, stream, "TASK_BLOCKED", "TASK_ASSIGNMENT_REVALIDATED", "TASK_VERIFIED_COMPLETE")
+}
+
 func TestUserWorkDoesNotBootstrapOrDependOnDefaultAgent(t *testing.T) {
 	ctx := context.Background()
 	l, err := ledger.Open(":memory:")
