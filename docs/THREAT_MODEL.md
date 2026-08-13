@@ -14,7 +14,7 @@ does not claim to defend against a compromised operating-system administrator.
 
 ## Protected assets
 
-- Event Contracts and durable organization, Work, and Task state;
+- Event Contracts and durable organization, Mission, Goal, Work, and Task state;
 - capabilities, freezes, approvals, completion decisions, and effect obligations;
 - provider and A2A bearer credentials;
 - tenant-confined work, results, artifacts, and model context;

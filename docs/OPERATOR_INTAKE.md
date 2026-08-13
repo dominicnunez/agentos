@@ -6,12 +6,19 @@ conversational intake and work model:
 ```text
 User -> private Unix socket --+
                               +-> Intake -> confirmed Intent -> Work -> Task DAG
-Agent -> A2A JSON-RPC -------+
+Agent -> A2A JSON-RPC -------+                         ^
+                                                       |
+Mission -> Goal ---------------------------------------+
 ```
 
 Content never supplies its own identity, capabilities, organization, approval,
 or policy. The authenticated boundary injects those values before work enters
 the event ledger.
+
+The Mission/Goal link is optional for ad hoc Work. When present, it must point
+to the same organization and cannot be changed by later Task output or Work
+state transitions. Work completion contributes bounded evidence only; Goal
+progress and achievement require a separate trusted evaluation.
 
 ## Setup and local user access
 

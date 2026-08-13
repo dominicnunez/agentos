@@ -9,7 +9,7 @@ Target: `1.0.0-rc.1`
 
 ### Added
 
-- Durable organizations, intents, bounded Work, Task DAGs, Agent identities,
+- Durable organizations, Missions, Goals, intents, bounded Work, Task DAGs, Agent identities,
   executions, and append-only Event Contracts over SQLite.
 - Private Linux user and authenticated A2A v1.0 work, status, result, and
   continuation boundaries with tenant-scoped capability roles.

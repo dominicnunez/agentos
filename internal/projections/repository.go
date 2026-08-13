@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
@@ -14,6 +15,8 @@ import (
 
 const (
 	KindOrganization     = "organization"
+	KindMission          = "mission"
+	KindGoal             = "goal"
 	KindTeam             = "team"
 	KindAgentBlueprint   = "agent_blueprint"
 	KindExecutionProfile = "execution_profile"
@@ -34,6 +37,8 @@ type Versioned[T any] struct {
 
 type Snapshot struct {
 	Organizations     map[core.ID]Versioned[core.Organization]
+	Missions          map[core.ID]Versioned[core.Mission]
+	Goals             map[core.ID]Versioned[core.Goal]
 	Teams             map[core.ID]Versioned[core.Team]
 	AgentBlueprints   map[core.ID]Versioned[core.AgentBlueprint]
 	ExecutionProfiles map[core.ID]Versioned[core.ExecutionProfile]
@@ -49,6 +54,14 @@ func New(gateway *events.Gateway) *Repository { return &Repository{gateway: gate
 
 func (r *Repository) SaveOrganization(ctx context.Context, eventType, actorID, correlationID string, version int, value core.Organization, detail any) error {
 	return r.save(ctx, string(value.ID), eventType, actorID, "", correlationID, KindOrganization, value.ID, version, value, detail)
+}
+
+func (r *Repository) SaveMission(ctx context.Context, eventType, actorID, correlationID string, version int, value core.Mission, detail any) error {
+	return r.save(ctx, string(value.OrganizationID), eventType, actorID, "", correlationID, KindMission, value.ID, version, value, detail)
+}
+
+func (r *Repository) SaveGoal(ctx context.Context, eventType, actorID, correlationID string, version int, value core.Goal, detail any) error {
+	return r.save(ctx, string(value.OrganizationID), eventType, actorID, "", correlationID, KindGoal, value.ID, version, value, detail)
 }
 
 func (r *Repository) SaveTeam(ctx context.Context, eventType, actorID, correlationID string, version int, value core.Team, detail any) error {
@@ -176,7 +189,7 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 
 func (r *Repository) loadFromRecords(ctx context.Context) (Snapshot, error) {
 	records := make(map[string][][]byte)
-	for _, kind := range []string{KindOrganization, KindTeam, KindAgentBlueprint, KindExecutionProfile, KindAgent, KindIntent, KindWork, KindTask} {
+	for _, kind := range []string{KindOrganization, KindMission, KindGoal, KindTeam, KindAgentBlueprint, KindExecutionProfile, KindAgent, KindIntent, KindWork, KindTask} {
 		rows, err := r.gateway.ProjectionRecords(ctx, kind, "")
 		if err != nil {
 			return Snapshot{}, err
@@ -189,6 +202,8 @@ func (r *Repository) loadFromRecords(ctx context.Context) (Snapshot, error) {
 func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 	snapshot := Snapshot{
 		Organizations:     make(map[core.ID]Versioned[core.Organization]),
+		Missions:          make(map[core.ID]Versioned[core.Mission]),
+		Goals:             make(map[core.ID]Versioned[core.Goal]),
 		Teams:             make(map[core.ID]Versioned[core.Team]),
 		AgentBlueprints:   make(map[core.ID]Versioned[core.AgentBlueprint]),
 		ExecutionProfiles: make(map[core.ID]Versioned[core.ExecutionProfile]),
@@ -199,6 +214,12 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 	}
 	if err := decodeKind(records[KindOrganization], snapshot.Organizations, false, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode organizations: %w", err)
+	}
+	if err := decodeKind(records[KindMission], snapshot.Missions, false, sameMissionIdentity); err != nil {
+		return Snapshot{}, fmt.Errorf("decode missions: %w", err)
+	}
+	if err := decodeKind(records[KindGoal], snapshot.Goals, false, sameGoalIdentity); err != nil {
+		return Snapshot{}, fmt.Errorf("decode goals: %w", err)
 	}
 	if err := decodeKind(records[KindTeam], snapshot.Teams, false, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode teams: %w", err)
@@ -215,7 +236,7 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 	if err := decodeKind(records[KindIntent], snapshot.Intents, true, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode intents: %w", err)
 	}
-	if err := decodeKind(records[KindWork], snapshot.Works, true, nil); err != nil {
+	if err := decodeKind(records[KindWork], snapshot.Works, true, sameWorkRecord); err != nil {
 		return Snapshot{}, fmt.Errorf("decode works: %w", err)
 	}
 	if err := decodeKind(records[KindTask], snapshot.Tasks, true, nil); err != nil {
@@ -267,6 +288,19 @@ func sameAgentBlueprintRecord(left, right core.AgentBlueprint) bool {
 	return reflect.DeepEqual(left, right)
 }
 
+func sameMissionIdentity(left, right core.Mission) bool {
+	return left.ID == right.ID && left.OrganizationID == right.OrganizationID && left.CreatedAt.Equal(right.CreatedAt)
+}
+
+func sameGoalIdentity(left, right core.Goal) bool {
+	return left.ID == right.ID && left.OrganizationID == right.OrganizationID && left.MissionID == right.MissionID && left.CreatedAt.Equal(right.CreatedAt)
+}
+
+func sameWorkRecord(left, right core.Work) bool {
+	right.Status = left.Status
+	return reflect.DeepEqual(left, right)
+}
+
 func sameExecutionProfileRecord(left, right core.ExecutionProfile) bool {
 	right.Status = left.Status
 	return reflect.DeepEqual(left, right)
@@ -282,7 +316,13 @@ func validateSnapshot(snapshot Snapshot) error {
 			return err
 		}
 	}
-	organized := make([]organizedIdentity, 0, len(snapshot.AgentBlueprints)+len(snapshot.ExecutionProfiles)+len(snapshot.Agents)+len(snapshot.Teams)+len(snapshot.Intents))
+	organized := make([]organizedIdentity, 0, len(snapshot.Missions)+len(snapshot.Goals)+len(snapshot.AgentBlueprints)+len(snapshot.ExecutionProfiles)+len(snapshot.Agents)+len(snapshot.Teams)+len(snapshot.Intents))
+	for id, state := range snapshot.Missions {
+		organized = append(organized, organizedIdentity{"mission", id, state.Value.ID, state.Value.OrganizationID})
+	}
+	for id, state := range snapshot.Goals {
+		organized = append(organized, organizedIdentity{"goal", id, state.Value.ID, state.Value.OrganizationID})
+	}
 	for id, state := range snapshot.AgentBlueprints {
 		organized = append(organized, organizedIdentity{"Agent blueprint", id, state.Value.ID, state.Value.OrganizationID})
 	}
@@ -306,6 +346,29 @@ func validateSnapshot(snapshot Snapshot) error {
 	if err := validateRoster(snapshot); err != nil {
 		return err
 	}
+	for id, state := range snapshot.Missions {
+		mission := state.Value
+		if strings.TrimSpace(mission.Statement) == "" || mission.Status != core.MissionActive && mission.Status != core.MissionRetired {
+			return fmt.Errorf("mission %s is incomplete or has unsupported status", id)
+		}
+	}
+	for id, state := range snapshot.Goals {
+		goal := state.Value
+		mission, ok := snapshot.Missions[goal.MissionID]
+		if !ok || mission.Value.OrganizationID != goal.OrganizationID {
+			return fmt.Errorf("goal %s references invalid mission %s", id, goal.MissionID)
+		}
+		validMode := goal.Mode == core.GoalTarget || goal.Mode == core.GoalContinuous
+		validStatus := goal.Status == core.GoalActive || goal.Status == core.GoalPaused || goal.Status == core.GoalAchieved || goal.Status == core.GoalRetired
+		if strings.TrimSpace(goal.Objective) == "" || len(goal.SuccessCriteria) == 0 || len(goal.SuccessCriteria) > 256 || !validMode || !validStatus || goal.Mode == core.GoalContinuous && goal.Status == core.GoalAchieved {
+			return fmt.Errorf("goal %s is incomplete or has unsupported mode or status", id)
+		}
+		for _, criterion := range goal.SuccessCriteria {
+			if strings.TrimSpace(criterion.Value) == "" || strings.TrimSpace(criterion.Origin) == "" {
+				return fmt.Errorf("goal %s has an incomplete success criterion", id)
+			}
+		}
+	}
 	for id, state := range snapshot.Teams {
 		for _, memberID := range state.Value.MemberAgentIDs {
 			member, ok := snapshot.Agents[memberID]
@@ -327,6 +390,12 @@ func validateSnapshot(snapshot Snapshot) error {
 		}
 		if state.CorrelationID == "" || intent.CorrelationID != state.CorrelationID {
 			return fmt.Errorf("work %s crosses its intent correlation boundary", id)
+		}
+		if state.Value.GoalID != "" {
+			goal, ok := snapshot.Goals[state.Value.GoalID]
+			if !ok || goal.Value.OrganizationID != intent.Value.OrganizationID {
+				return fmt.Errorf("work %s references invalid goal %s", id, state.Value.GoalID)
+			}
 		}
 	}
 	for id, state := range snapshot.Tasks {

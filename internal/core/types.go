@@ -18,6 +18,52 @@ type Organization struct {
 	PolicyVersion string    `json:"policy_version"`
 	CreatedAt     time.Time `json:"created_at"`
 }
+
+type MissionStatus string
+
+const (
+	MissionActive  MissionStatus = "ACTIVE"
+	MissionRetired MissionStatus = "RETIRED"
+)
+
+// Mission is enduring organizational direction. It is revised or retired,
+// never completed by a Work or Task transition.
+type Mission struct {
+	ID             ID            `json:"id"`
+	OrganizationID ID            `json:"organization_id"`
+	Statement      string        `json:"statement"`
+	Status         MissionStatus `json:"status"`
+	CreatedAt      time.Time     `json:"created_at"`
+}
+
+type GoalMode string
+
+const (
+	GoalTarget     GoalMode = "TARGET"
+	GoalContinuous GoalMode = "CONTINUOUS"
+)
+
+type GoalStatus string
+
+const (
+	GoalActive   GoalStatus = "ACTIVE"
+	GoalPaused   GoalStatus = "PAUSED"
+	GoalAchieved GoalStatus = "ACHIEVED"
+	GoalRetired  GoalStatus = "RETIRED"
+)
+
+// Goal is a measurable outcome under a Mission. Projection versions preserve
+// refinements; achieving it requires a separate evidence evaluation.
+type Goal struct {
+	ID              ID            `json:"id"`
+	OrganizationID  ID            `json:"organization_id"`
+	MissionID       ID            `json:"mission_id"`
+	Objective       string        `json:"objective"`
+	Mode            GoalMode      `json:"mode"`
+	SuccessCriteria []IntentValue `json:"success_criteria"`
+	Status          GoalStatus    `json:"status"`
+	CreatedAt       time.Time     `json:"created_at"`
+}
 type Team struct {
 	ID             ID        `json:"id"`
 	OrganizationID ID        `json:"organization_id"`
@@ -132,6 +178,7 @@ const (
 type Work struct {
 	ID        ID         `json:"id"`
 	IntentID  ID         `json:"intent_id"`
+	GoalID    ID         `json:"goal_id,omitempty"`
 	Objective string     `json:"objective"`
 	Status    WorkStatus `json:"status"`
 	CreatedAt time.Time  `json:"created_at"`

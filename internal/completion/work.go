@@ -41,6 +41,7 @@ type WorkTaskEvidence struct {
 type WorkEvidence struct {
 	WorkID            core.ID            `json:"work_id"`
 	WorkVersion       int                `json:"work_version"`
+	GoalID            core.ID            `json:"goal_id,omitempty"`
 	IntentID          core.ID            `json:"intent_id"`
 	IntentFingerprint string             `json:"intent_fingerprint"`
 	PlanID            core.ID            `json:"plan_id"`
@@ -54,7 +55,7 @@ type WorkEvidence struct {
 
 func NewWorkEvidence(work core.Work, workVersion int, intent core.Intent, plan core.Plan, tasks []WorkTaskEvidence, createdAt time.Time) (WorkEvidence, error) {
 	record := WorkEvidence{
-		WorkID: work.ID, WorkVersion: workVersion,
+		WorkID: work.ID, WorkVersion: workVersion, GoalID: work.GoalID,
 		IntentID: intent.ID, IntentFingerprint: intent.AcceptedFingerprint,
 		PlanID: plan.ID, PlanVersion: plan.Version,
 		Criteria:  append([]core.IntentValue(nil), intent.CompletionCriteria...),
@@ -109,7 +110,7 @@ func (r WorkEvidence) Valid() bool {
 // the exact current terminal state. CreatedAt and Fingerprint are validated by
 // Valid and are intentionally not regenerated on recovery.
 func (r WorkEvidence) MatchesCurrent(work core.Work, workVersion int, intent core.Intent, plan core.Plan, tasks []WorkTaskEvidence) bool {
-	if !r.Valid() || r.WorkID != work.ID || r.WorkVersion != workVersion || r.IntentID != intent.ID || r.IntentFingerprint != intent.AcceptedFingerprint || r.PlanID != plan.ID || r.PlanVersion != plan.Version || !reflect.DeepEqual(r.Criteria, intent.CompletionCriteria) {
+	if !r.Valid() || r.WorkID != work.ID || r.WorkVersion != workVersion || r.GoalID != work.GoalID || r.IntentID != intent.ID || r.IntentFingerprint != intent.AcceptedFingerprint || r.PlanID != plan.ID || r.PlanVersion != plan.Version || !reflect.DeepEqual(r.Criteria, intent.CompletionCriteria) {
 		return false
 	}
 	expectedTasks := cloneWorkTaskEvidence(tasks)

@@ -12,6 +12,14 @@
 8. A2A v1.0 is an external Agent/operator boundary. It does not become the internal communication model.
 9. Approval decisions fail closed. An approval authorizes a fingerprinted effect, never a general privilege expansion.
 
+The organizational hierarchy is `Mission > Goal > Work > Task`. Mission and
+Goal are durable organization-scoped projections whose append-only revisions
+preserve identity and parentage. A Goal contains measurable success criteria
+and is either a finite target or continuous. Work is the bounded execution
+unit created from an accepted Intent; it may reference a same-organization
+Goal, but ad hoc Work may omit that link. Task belongs to Work, not directly to
+Goal.
+
 ## First slice
 
 The shared intake boundary accepts bounded work from either the private user
@@ -161,6 +169,10 @@ fingerprint, immutable Plan revision, accepted completion criteria, every
 `COMPLETION_VERIFIED` event, and the aggregated Artifact references. Recovery
 revalidates that evidence and the `WORK_COMPLETED` transition; worker-authored
 result or candidate-completion content cannot substitute for it.
+
+When Work belongs to a Goal, that Goal identity is also part of the completion
+evidence fingerprint. This makes the bounded result usable by later Goal
+progress evaluation without allowing completion to rebind or achieve the Goal.
 
 Work is the terminalizable layer in the `Mission > Goal > Work > Task`
 hierarchy. This evidence may contribute to later Goal progress evaluation, but

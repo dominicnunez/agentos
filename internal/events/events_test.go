@@ -42,6 +42,16 @@ func TestInferenceUsageRejectsIntegerOverflow(t *testing.T) {
 
 func TestAgentCannotMintTrustedStateEvents(t *testing.T) {
 	trustedOnly := []string{
+		"MISSION_CREATED",
+		"MISSION_REVISED",
+		"MISSION_RETIRED",
+		"GOAL_CREATED",
+		"GOAL_REFINED",
+		"GOAL_PROGRESS_EVALUATED",
+		"GOAL_ACHIEVED",
+		"WORK_CREATED",
+		"WORK_COMPLETED",
+		"WORK_FAILED",
 		"AGENT_BLUEPRINT_CREATED",
 		"EXECUTION_PROFILE_CREATED",
 		"AGENT_CREATED",

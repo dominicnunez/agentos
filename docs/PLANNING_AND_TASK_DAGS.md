@@ -6,6 +6,15 @@ Intent and immutable Plan, and its Tasks form that Plan's executable DAG.
 Completing Work proves only that bounded undertaking; it cannot by itself mark
 a longer-lived Goal achieved or change the Mission.
 
+Mission and Goal are durable, organization-scoped projections. Mission carries
+enduring direction and is revised or retired rather than completed. Goal
+carries measurable success criteria and is either a finite target or a
+continuous objective. Revisions append new projection versions while retaining
+the Mission/organization identity. Continuous Goals cannot enter `ACHIEVED`.
+A Work may bind to one Goal in the same organization; that binding, its Intent,
+and its objective are immutable after creation. Goal linkage is optional for
+ad hoc Work.
+
 After an Intent is confirmed, Agent OS converts it into the smallest useful
 dependency graph of bounded Tasks. The graph is a runtime coordination
 contract, not a grant of authority.

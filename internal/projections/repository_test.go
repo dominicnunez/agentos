@@ -22,18 +22,24 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	mission := core.Mission{ID: "mission-1", OrganizationID: organization.ID, Statement: "build a durable business", Status: core.MissionActive, CreatedAt: now}
+	goal := core.Goal{ID: "goal-1", OrganizationID: organization.ID, MissionID: mission.ID, Objective: "deliver sustained value", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "verified outcome", Origin: "USER"}}, Status: core.GoalActive, CreatedAt: now}
 	blueprint := core.AgentBlueprint{ID: "blueprint-1", OrganizationID: organization.ID, Version: "blueprint-v1", Role: "worker", OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE", CreatedAt: now}
 	profile := core.ExecutionProfile{ID: "profile-1", OrganizationID: organization.ID, Version: "profile-v1", ModelProvider: "fake", Model: "fake-model/v1", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE", CreatedAt: now}
 	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "fake", Status: "ACTIVE"}
 	team := core.Team{ID: "team-1", OrganizationID: organization.ID, Name: "Delivery", MemberAgentIDs: []core.ID{agent.ID}, Status: "ACTIVE", CreatedAt: now}
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "echo hello", NormalizedObjective: "echo hello", HardConstraints: []string{}, ConsequenceBoundaries: []string{}, CreatedAt: now}
-	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: "echo hello", Status: "ACTIVE", CreatedAt: now}
+	work := core.Work{ID: "work-1", IntentID: intent.ID, GoalID: goal.ID, Objective: "echo hello", Status: core.WorkActive, CreatedAt: now}
 	task := core.Task{ID: "task-1", WorkID: work.ID, Description: "echo hello", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: rosterAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
 	repository := New(events.NewGateway(l))
 	for _, save := range []func() error{
 		func() error {
 			return repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "request-1", 1, organization, nil)
 		},
+		func() error {
+			return repository.SaveMission(ctx, "MISSION_CREATED", "runtime", "request-1", 1, mission, nil)
+		},
+		func() error { return repository.SaveGoal(ctx, "GOAL_CREATED", "runtime", "request-1", 1, goal, nil) },
 		func() error {
 			return repository.SaveAgentBlueprint(ctx, "AGENT_BLUEPRINT_CREATED", "runtime", "request-1", 1, blueprint, nil)
 		},
@@ -85,6 +91,9 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 	}
 	if loaded.Organizations[organization.ID].Value != organization || loaded.Agents[agent.ID].Value != agent {
 		t.Fatalf("durable identity changed after restart: org=%+v agent=%+v", loaded.Organizations[organization.ID].Value, loaded.Agents[agent.ID].Value)
+	}
+	if !reflect.DeepEqual(loaded.Missions[mission.ID].Value, mission) || !reflect.DeepEqual(loaded.Goals[goal.ID].Value, goal) || loaded.Works[work.ID].Value.GoalID != goal.ID {
+		t.Fatalf("organizational hierarchy changed after restart: mission=%+v goal=%+v work=%+v", loaded.Missions[mission.ID].Value, loaded.Goals[goal.ID].Value, loaded.Works[work.ID].Value)
 	}
 	if !reflect.DeepEqual(loaded.AgentBlueprints[blueprint.ID].Value, blueprint) || !reflect.DeepEqual(loaded.ExecutionProfiles[profile.ID].Value, profile) {
 		t.Fatalf("durable roster configuration changed after restart: blueprint=%+v profile=%+v", loaded.AgentBlueprints[blueprint.ID].Value, loaded.ExecutionProfiles[profile.ID].Value)
@@ -138,6 +147,79 @@ func TestSnapshotRejectsUnknownWorkStatus(t *testing.T) {
 	snapshot.Works["work-1"] = work
 	if err := validateSnapshot(snapshot); err == nil {
 		t.Fatal("unknown Work status was accepted")
+	}
+}
+
+func TestMissionGoalWorkHierarchyIsTenantBounded(t *testing.T) {
+	snapshot := validBoundarySnapshot()
+	snapshot.Missions["mission-1"] = Versioned[core.Mission]{Value: core.Mission{
+		ID: "mission-1", OrganizationID: "org-1", Statement: "build a durable business", Status: core.MissionActive,
+	}}
+	snapshot.Goals["goal-1"] = Versioned[core.Goal]{Value: core.Goal{
+		ID: "goal-1", OrganizationID: "org-1", MissionID: "mission-1", Objective: "reach a sustained outcome",
+		Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "verified target", Origin: "USER"}}, Status: core.GoalActive,
+	}}
+	work := snapshot.Works["work-1"]
+	work.Value.GoalID = "goal-1"
+	snapshot.Works["work-1"] = work
+	if err := validateSnapshot(snapshot); err != nil {
+		t.Fatalf("valid Mission > Goal > Work hierarchy was rejected: %v", err)
+	}
+
+	crossTenant := snapshot
+	crossTenant.Goals = make(map[core.ID]Versioned[core.Goal], len(snapshot.Goals)+1)
+	for id, state := range snapshot.Goals {
+		crossTenant.Goals[id] = state
+	}
+	crossTenant.Goals["goal-2"] = Versioned[core.Goal]{Value: core.Goal{
+		ID: "goal-2", OrganizationID: "org-2", MissionID: "mission-1", Objective: "cross tenant",
+		Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "never", Origin: "USER"}}, Status: core.GoalActive,
+	}}
+	work = crossTenant.Works["work-1"]
+	work.Value.GoalID = "goal-2"
+	crossTenant.Works["work-1"] = work
+	if err := validateSnapshot(crossTenant); err == nil {
+		t.Fatal("cross-organization Goal and Work linkage was accepted")
+	}
+}
+
+func TestHierarchyRevisionsPreserveIdentityAndDirectionBoundaries(t *testing.T) {
+	now := time.Unix(1, 0).UTC()
+	mission := core.Mission{ID: "mission-1", OrganizationID: "org-1", Statement: "initial direction", Status: core.MissionActive, CreatedAt: now}
+	revisedMission := mission
+	revisedMission.Statement = "refined direction"
+	if err := decodeKind(projectionBodies(t, KindMission, string(mission.ID), mission, revisedMission), map[core.ID]Versioned[core.Mission]{}, false, sameMissionIdentity); err != nil {
+		t.Fatalf("versioned Mission refinement was rejected: %v", err)
+	}
+	crossOrganizationMission := revisedMission
+	crossOrganizationMission.OrganizationID = "org-2"
+	if err := decodeKind(projectionBodies(t, KindMission, string(mission.ID), mission, crossOrganizationMission), map[core.ID]Versioned[core.Mission]{}, false, sameMissionIdentity); err == nil {
+		t.Fatal("Mission revision changed organization")
+	}
+
+	goal := core.Goal{ID: "goal-1", OrganizationID: "org-1", MissionID: mission.ID, Objective: "initial outcome", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "initial measure", Origin: "USER"}}, Status: core.GoalActive, CreatedAt: now}
+	revisedGoal := goal
+	revisedGoal.Objective = "more specific outcome"
+	revisedGoal.SuccessCriteria = []core.IntentValue{{Value: "refined measure", Origin: "USER"}}
+	if err := decodeKind(projectionBodies(t, KindGoal, string(goal.ID), goal, revisedGoal), map[core.ID]Versioned[core.Goal]{}, false, sameGoalIdentity); err != nil {
+		t.Fatalf("versioned Goal refinement was rejected: %v", err)
+	}
+	reparentedGoal := revisedGoal
+	reparentedGoal.MissionID = "mission-2"
+	if err := decodeKind(projectionBodies(t, KindGoal, string(goal.ID), goal, reparentedGoal), map[core.ID]Versioned[core.Goal]{}, false, sameGoalIdentity); err == nil {
+		t.Fatal("Goal revision changed parent Mission")
+	}
+
+	work := core.Work{ID: "work-1", IntentID: "intent-1", GoalID: goal.ID, Objective: "bounded work", Status: core.WorkActive, CreatedAt: now}
+	completed := work
+	completed.Status = core.WorkCompleted
+	if err := decodeKind(projectionBodies(t, KindWork, string(work.ID), work, completed), map[core.ID]Versioned[core.Work]{}, false, sameWorkRecord); err != nil {
+		t.Fatalf("Work status transition was rejected: %v", err)
+	}
+	relinked := completed
+	relinked.GoalID = "goal-2"
+	if err := decodeKind(projectionBodies(t, KindWork, string(work.ID), work, relinked), map[core.ID]Versioned[core.Work]{}, false, sameWorkRecord); err == nil {
+		t.Fatal("Work transition changed Goal binding")
 	}
 }
 
@@ -325,7 +407,7 @@ func validBoundarySnapshot() Snapshot {
 	}
 	return Snapshot{
 		Organizations: organizations, Teams: map[core.ID]Versioned[core.Team]{}, AgentBlueprints: map[core.ID]Versioned[core.AgentBlueprint]{}, ExecutionProfiles: map[core.ID]Versioned[core.ExecutionProfile]{}, Agents: map[core.ID]Versioned[core.Agent]{},
-		Intents: intents, Works: works, Tasks: tasks,
+		Missions: map[core.ID]Versioned[core.Mission]{}, Goals: map[core.ID]Versioned[core.Goal]{}, Intents: intents, Works: works, Tasks: tasks,
 	}
 }
 

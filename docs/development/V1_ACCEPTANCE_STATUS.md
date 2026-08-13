@@ -7,7 +7,7 @@ to deploy or publish.
 
 | # | Requirement | Evidence |
 |---:|---|---|
-| 1 | Durable identity | PASS - [`TestDurableObjectsSurviveRestartAndRebuildFromEvents`](../../internal/projections/repository_test.go), [`TestSnapshotRejectsMalformedDurableRoster`](../../internal/projections/repository_test.go), [`TestRosterRevisionsPreserveConfigurationAndAgentIdentity`](../../internal/projections/repository_test.go), [`TestSnapshotRejectsMalformedPinnedAgentConfiguration`](../../internal/projections/repository_test.go), [`TestAgentIdentitySurvivesExecutionProfileUpdate`](../../internal/app/service_test.go) |
+| 1 | Durable identity | PASS - [`TestDurableObjectsSurviveRestartAndRebuildFromEvents`](../../internal/projections/repository_test.go), [`TestMissionGoalWorkHierarchyIsTenantBounded`](../../internal/projections/repository_test.go), [`TestHierarchyRevisionsPreserveIdentityAndDirectionBoundaries`](../../internal/projections/repository_test.go), [`TestSnapshotRejectsMalformedDurableRoster`](../../internal/projections/repository_test.go), [`TestRosterRevisionsPreserveConfigurationAndAgentIdentity`](../../internal/projections/repository_test.go), [`TestSnapshotRejectsMalformedPinnedAgentConfiguration`](../../internal/projections/repository_test.go), [`TestAgentIdentitySurvivesExecutionProfileUpdate`](../../internal/app/service_test.go) |
 | 2 | Direct lateral messaging | PASS - [`TestLateralMessagesAtActionBoundary`](../../internal/app/service_test.go) |
 | 3 | Action-boundary delivery | PASS - [`TestLateralMessagesAtActionBoundary`](../../internal/app/service_test.go) |
 | 4 | Atomic message delivery | PASS - [`TestMessageRollbackOnInboxFailure`](../../internal/ledger/sqlite_test.go) |
