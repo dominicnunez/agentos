@@ -203,29 +203,8 @@ func ValidateDurableGraph(graph DurableGraph) error {
 			return fmt.Errorf("task %s crosses its work correlation boundary", id)
 		}
 		intent := graph.Intents[work.Value.IntentID]
-		switch task.AssigneeType {
-		case "":
-			if task.AssigneeID != "" || task.AgentConfig != nil {
-				return fmt.Errorf("task %s has assignment details without an assignee type", id)
-			}
-		case "AGENT":
-			agent, ok := graph.Agents[task.AssigneeID]
-			if !ok || agent.Value.OrganizationID != intent.Value.OrganizationID {
-				return fmt.Errorf("task %s references invalid assignee agent %s", id, task.AssigneeID)
-			}
-			if err := validateDurableTaskAgentConfig(id, task.AgentConfig, intent.Value.OrganizationID, graph); err != nil {
-				return err
-			}
-		case "TEAM":
-			if task.AgentConfig != nil {
-				return fmt.Errorf("task %s has Agent configuration for a Team assignment", id)
-			}
-			team, ok := graph.Teams[task.AssigneeID]
-			if !ok || team.Value.OrganizationID != intent.Value.OrganizationID {
-				return fmt.Errorf("task %s references invalid assignee team %s", id, task.AssigneeID)
-			}
-		default:
-			return fmt.Errorf("task %s has unsupported assignee type %s", id, task.AssigneeType)
+		if err := ValidateTaskAssignment(task, intent.Value.OrganizationID, graph); err != nil {
+			return err
 		}
 		if task.ParentID != "" {
 			parent, ok := graph.Tasks[task.ParentID]
@@ -243,6 +222,36 @@ func ValidateDurableGraph(graph DurableGraph) error {
 	}
 	if err := ValidateTaskDAG(tasks); err != nil {
 		return err
+	}
+	return nil
+}
+
+// ValidateTaskAssignment proves that a Task's assignee and pinned execution
+// configuration are durable within the Task's organization boundary.
+func ValidateTaskAssignment(task Task, organizationID ID, graph DurableGraph) error {
+	switch task.AssigneeType {
+	case "":
+		if task.AssigneeID != "" || task.AgentConfig != nil {
+			return fmt.Errorf("task %s has assignment details without an assignee type", task.ID)
+		}
+	case "AGENT":
+		agent, ok := graph.Agents[task.AssigneeID]
+		if !ok || agent.Value.OrganizationID != organizationID {
+			return fmt.Errorf("task %s references invalid assignee agent %s", task.ID, task.AssigneeID)
+		}
+		if err := validateDurableTaskAgentConfig(task.ID, task.AgentConfig, organizationID, graph); err != nil {
+			return err
+		}
+	case "TEAM":
+		if task.AgentConfig != nil {
+			return fmt.Errorf("task %s has Agent configuration for a Team assignment", task.ID)
+		}
+		team, ok := graph.Teams[task.AssigneeID]
+		if !ok || team.Value.OrganizationID != organizationID {
+			return fmt.Errorf("task %s references invalid assignee team %s", task.ID, task.AssigneeID)
+		}
+	default:
+		return fmt.Errorf("task %s has unsupported assignee type %s", task.ID, task.AssigneeType)
 	}
 	return nil
 }

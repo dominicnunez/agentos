@@ -713,6 +713,96 @@ func TestProjectionBatchRejectsInvalidClosedTaskGraph(t *testing.T) {
 	}
 }
 
+func TestProjectionBatchRejectsInvalidTaskAssignments(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(*testing.T, context.Context, *SQLite) core.Task
+	}{
+		{
+			name: "missing Agent",
+			setup: func(_ *testing.T, _ context.Context, _ *SQLite) core.Task {
+				return assignedTask("missing-agent", core.AgentConfig{BlueprintID: "missing-blueprint", BlueprintVersion: "v1", ProfileID: "missing-profile", ProfileVersion: "v1", RuntimeAdapter: "local"})
+			},
+		},
+		{
+			name: "missing pinned Task configuration",
+			setup: func(t *testing.T, ctx context.Context, store *SQLite) core.Task {
+				agent, config := appendTaskAssignmentAgent(t, ctx, store, "org-1", "local", false)
+				config.BlueprintID = "missing-blueprint"
+				return assignedTask(agent.ID, config)
+			},
+		},
+		{
+			name: "cross-organization Agent",
+			setup: func(t *testing.T, ctx context.Context, store *SQLite) core.Task {
+				agent, config := appendTaskAssignmentAgent(t, ctx, store, "org-2", "foreign", true)
+				return assignedTask(agent.ID, config)
+			},
+		},
+		{
+			name: "missing Team",
+			setup: func(_ *testing.T, _ context.Context, _ *SQLite) core.Task {
+				task := assignedTask("missing-team", core.AgentConfig{})
+				task.AssigneeType = "TEAM"
+				task.AgentConfig = nil
+				return task
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			appendTaskProjectionParents(t, ctx, store, "org-1", "request-1", "work-1")
+			task := test.setup(t, ctx, store)
+			if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+				Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "request-1"},
+				ProjectionKind: "task", RecordID: string(task.ID), Version: 1, Value: task,
+			}); err == nil {
+				t.Fatalf("%s was committed", test.name)
+			}
+			records, err := store.Records(ctx, "task", string(task.ID))
+			if err != nil || len(records) != 0 {
+				t.Fatalf("rejected %s left Task records=%d err=%v", test.name, len(records), err)
+			}
+		})
+	}
+}
+
+func assignedTask(assigneeID core.ID, config core.AgentConfig) core.Task {
+	return core.Task{
+		ID: "task-assignment", WorkID: "work-1", Description: "bounded task", ExecutionKind: core.ExecutionAgent,
+		ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: assigneeID, AgentConfig: &config,
+		TaskContractVersion: "1", Status: core.TaskPending,
+	}
+}
+
+func appendTaskAssignmentAgent(t *testing.T, ctx context.Context, store *SQLite, organizationID, suffix string, includeOrganization bool) (core.Agent, core.AgentConfig) {
+	t.Helper()
+	now := time.Now().UTC()
+	organization := core.Organization{ID: core.ID(organizationID), Name: organizationID, PolicyVersion: "v1", CreatedAt: now}
+	blueprint := core.AgentBlueprint{ID: core.ID("blueprint-" + suffix), OrganizationID: organization.ID, Version: "v1", Role: "worker", OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE", CreatedAt: now}
+	profile := core.ExecutionProfile{ID: core.ID("profile-" + suffix), OrganizationID: organization.ID, Version: "v1", ModelProvider: "provider", Model: "model", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE", CreatedAt: now}
+	agent := core.Agent{ID: core.ID("agent-" + suffix), OrganizationID: organization.ID, BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "local", Status: "ACTIVE"}
+	drafts := []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: organizationID, EventType: "AGENT_BLUEPRINT_CREATED", SourceActorID: "runtime", CorrelationID: "roster-" + suffix}, ProjectionKind: "agent_blueprint", RecordID: string(blueprint.ID), Version: 1, Value: blueprint},
+		{Event: events.TrustedDraft{OrganizationID: organizationID, EventType: "EXECUTION_PROFILE_CREATED", SourceActorID: "runtime", CorrelationID: "roster-" + suffix}, ProjectionKind: "execution_profile", RecordID: string(profile.ID), Version: 1, Value: profile},
+		{Event: events.TrustedDraft{OrganizationID: organizationID, EventType: "AGENT_CREATED", SourceActorID: "runtime", CorrelationID: "roster-" + suffix}, ProjectionKind: "agent", RecordID: string(agent.ID), Version: 1, Value: agent},
+	}
+	if includeOrganization {
+		drafts = append([]events.ProjectionDraft{{Event: events.TrustedDraft{OrganizationID: organizationID, EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup-" + suffix}, ProjectionKind: "organization", RecordID: organizationID, Version: 1, Value: organization}}, drafts...)
+	}
+	for _, draft := range drafts {
+		if _, err := store.AppendProjection(ctx, draft); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return agent, core.AgentConfig{BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ProfileID: profile.ID, ProfileVersion: profile.Version, RuntimeAdapter: agent.RuntimeAdapter}
+}
+
 func TestProjectionBatchAllowsForwardTaskReferences(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(":memory:")
@@ -808,7 +898,8 @@ func TestMessageInboxSurvivesReopenAndObservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	appendTaskProjectionParents(t, ctx, l, "org-1", "work-1", "work-1")
-	task := core.Task{ID: "task-2", WorkID: "work-1", Description: "consume inbox", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: "agent-2", TaskContractVersion: "1", Status: core.TaskPending}
+	agent, config := appendTaskAssignmentAgent(t, ctx, l, "org-1", "2", false)
+	task := core.Task{ID: "task-2", WorkID: "work-1", Description: "consume inbox", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: &config, TaskContractVersion: "1", Status: core.TaskPending}
 	if _, err := l.AppendProjection(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1"},
 		ProjectionKind: "task", RecordID: string(task.ID), Version: 1, Value: task,
@@ -914,7 +1005,7 @@ func TestMessageInboxSurvivesReopenAndObservation(t *testing.T) {
 		t.Fatalf("observed inbox after reopen=%+v err=%v", available, err)
 	}
 	stream, err := l.Events(ctx, "")
-	if err != nil || len(stream) != 8 || stream[len(stream)-1].EventID != observation.EventID {
+	if err != nil || len(stream) != 11 || stream[len(stream)-1].EventID != observation.EventID {
 		t.Fatalf("durable message/observation stream=%+v err=%v", stream, err)
 	}
 }

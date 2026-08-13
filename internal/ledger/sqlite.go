@@ -1233,7 +1233,77 @@ ORDER BY record_id`)
 				return fmt.Errorf("task %s references cross-boundary dependency %s", id, dependencyID)
 			}
 		}
+		if err := validateClosedTaskAssignment(ctx, tx, state.task, state.correlationID); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+func validateClosedTaskAssignment(ctx context.Context, tx *sql.Tx, task core.Task, correlationID string) error {
+	workRecord, work, found, err := latestProjectionRevision[core.Work](ctx, tx, "work", string(task.WorkID))
+	if err != nil || !found || work.ID != task.WorkID || workRecord.CorrelationID != correlationID {
+		return fmt.Errorf("task %s lacks its exact Work boundary", task.ID)
+	}
+	intentRecord, intent, found, err := latestProjectionRevision[core.Intent](ctx, tx, "intent", string(work.IntentID))
+	if err != nil || !found || intent.ID != work.IntentID || intentRecord.CorrelationID != correlationID || intent.OrganizationID == "" {
+		return fmt.Errorf("task %s lacks its exact Intent boundary", task.ID)
+	}
+	graph := core.DurableGraph{
+		Teams:             map[core.ID]core.DurableState[core.Team]{},
+		AgentBlueprints:   map[core.ID]core.DurableState[core.AgentBlueprint]{},
+		ExecutionProfiles: map[core.ID]core.DurableState[core.ExecutionProfile]{},
+		Agents:            map[core.ID]core.DurableState[core.Agent]{},
+	}
+	switch task.AssigneeType {
+	case "AGENT":
+		agentRecord, agent, agentFound, agentErr := latestProjectionRevision[core.Agent](ctx, tx, "agent", string(task.AssigneeID))
+		if agentErr != nil || !agentFound || agent.ID != task.AssigneeID || !core.ValidAgent(agent) {
+			return fmt.Errorf("task %s references invalid assignee agent %s", task.ID, task.AssigneeID)
+		}
+		graph.Agents[agent.ID] = core.DurableState[core.Agent]{Version: agentRecord.Version, CorrelationID: agentRecord.CorrelationID, Value: agent}
+		if err := loadTaskAssignmentBlueprint(ctx, tx, graph.AgentBlueprints, agent.BlueprintID); err != nil {
+			return fmt.Errorf("task %s assignee: %w", task.ID, err)
+		}
+		if err := loadTaskAssignmentProfile(ctx, tx, graph.ExecutionProfiles, agent.ExecutionProfileID); err != nil {
+			return fmt.Errorf("task %s assignee: %w", task.ID, err)
+		}
+		if !core.ValidAgentConfigurationBinding(agent, graph.AgentBlueprints[agent.BlueprintID].Value, graph.ExecutionProfiles[agent.ExecutionProfileID].Value) {
+			return fmt.Errorf("task %s assignee Agent has invalid pinned configuration", task.ID)
+		}
+		if task.AgentConfig != nil {
+			if err := loadTaskAssignmentBlueprint(ctx, tx, graph.AgentBlueprints, task.AgentConfig.BlueprintID); err != nil {
+				return fmt.Errorf("task %s: %w", task.ID, err)
+			}
+			if err := loadTaskAssignmentProfile(ctx, tx, graph.ExecutionProfiles, task.AgentConfig.ProfileID); err != nil {
+				return fmt.Errorf("task %s: %w", task.ID, err)
+			}
+		}
+	case "TEAM":
+		teamRecord, team, teamFound, teamErr := latestProjectionRevision[core.Team](ctx, tx, "team", string(task.AssigneeID))
+		if teamErr != nil || !teamFound || team.ID != task.AssigneeID {
+			return fmt.Errorf("task %s references invalid assignee team %s", task.ID, task.AssigneeID)
+		}
+		graph.Teams[team.ID] = core.DurableState[core.Team]{Version: teamRecord.Version, CorrelationID: teamRecord.CorrelationID, Value: team}
+	}
+	return core.ValidateTaskAssignment(task, intent.OrganizationID, graph)
+}
+
+func loadTaskAssignmentBlueprint(ctx context.Context, tx *sql.Tx, target map[core.ID]core.DurableState[core.AgentBlueprint], id core.ID) error {
+	record, value, found, err := latestProjectionRevision[core.AgentBlueprint](ctx, tx, "agent_blueprint", string(id))
+	if err != nil || !found || value.ID != id {
+		return fmt.Errorf("invalid pinned blueprint %s", id)
+	}
+	target[id] = core.DurableState[core.AgentBlueprint]{Version: record.Version, CorrelationID: record.CorrelationID, Value: value}
+	return nil
+}
+
+func loadTaskAssignmentProfile(ctx context.Context, tx *sql.Tx, target map[core.ID]core.DurableState[core.ExecutionProfile], id core.ID) error {
+	record, value, found, err := latestProjectionRevision[core.ExecutionProfile](ctx, tx, "execution_profile", string(id))
+	if err != nil || !found || value.ID != id {
+		return fmt.Errorf("invalid pinned execution profile %s", id)
+	}
+	target[id] = core.DurableState[core.ExecutionProfile]{Version: record.Version, CorrelationID: record.CorrelationID, Value: value}
 	return nil
 }
 
