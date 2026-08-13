@@ -503,149 +503,128 @@ func (l *SQLite) ValidateGoalAchievement(ctx context.Context, organizationID str
 // ValidateGoalAchievementAdmissions reuses the authoritative ledger evidence
 // validator to certify every current achieved Goal in a read-only database.
 // Backup verification calls this after proving projection/event admission.
-func ValidateGoalAchievementAdmissions(ctx context.Context, db *sql.DB) (finalErr error) {
-	if ctx == nil || db == nil {
-		return fmt.Errorf("goal achievement validation requires a database and context")
-	}
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		return fmt.Errorf("begin Goal achievement validation: %w", err)
-	}
-	defer func() {
-		if tx != nil {
-			finalErr = errors.Join(finalErr, tx.Rollback())
+func ValidateGoalAchievementAdmissions(ctx context.Context, db *sql.DB) error {
+	return validateReadOnlyAdmissions(ctx, db, "Goal achievement", func(tx *sql.Tx) error {
+		current, err := currentProjectionAdmissions[core.Goal](ctx, tx, "goal", "Goal", func(goal core.Goal) core.ID { return goal.ID })
+		if err != nil {
+			return err
 		}
-	}()
-	rows, err := tx.QueryContext(ctx, `SELECT body FROM records AS current
-WHERE kind='goal' AND version=(SELECT MAX(version) FROM records AS latest WHERE latest.kind=current.kind AND latest.record_id=current.record_id)
-ORDER BY record_id`)
-	if err != nil {
-		return fmt.Errorf("read current Goal admissions: %w", err)
-	}
-	defer func() {
-		finalErr = errors.Join(finalErr, rows.Close())
-	}()
-	var achieved []struct {
-		record events.ProjectionRecord
-		goal   core.Goal
-	}
-	for rows.Next() {
-		var body []byte
-		var candidate struct {
-			record events.ProjectionRecord
-			goal   core.Goal
+		for _, candidate := range current {
+			if candidate.value.Status != core.GoalAchieved {
+				continue
+			}
+			if _, err := validateAchievedGoal(ctx, tx, string(candidate.value.OrganizationID), candidate.record, candidate.value); err != nil {
+				return fmt.Errorf("achieved Goal %s lacks exact durable evidence: %w", candidate.value.ID, err)
+			}
 		}
-		if err := rows.Scan(&body); err != nil || decodeExactJSONBytes(body, &candidate.record) != nil || decodeExactJSONBytes(candidate.record.Value, &candidate.goal) != nil || candidate.record.ProjectionKind != "goal" || candidate.record.RecordID != string(candidate.goal.ID) {
-			return fmt.Errorf("current Goal admission is invalid")
-		}
-		if candidate.goal.Status == core.GoalAchieved {
-			achieved = append(achieved, candidate)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate current Goal admissions: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close current Goal admissions: %w", err)
-	}
-	for _, candidate := range achieved {
-		if _, err := validateAchievedGoal(ctx, tx, string(candidate.goal.OrganizationID), candidate.record, candidate.goal); err != nil {
-			return fmt.Errorf("achieved Goal %s lacks exact durable evidence: %w", candidate.goal.ID, err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("complete Goal achievement validation: %w", err)
-	}
-	tx = nil
-	return nil
+		return nil
+	})
 }
 
 // ValidateWorkCompletionAdmissions certifies that every current completed
 // Work projection retains one exact transition and its authoritative evidence
 // chain. Recovery calls this against its read-only SQLite connection.
-func ValidateWorkCompletionAdmissions(ctx context.Context, db *sql.DB) (finalErr error) {
+func ValidateWorkCompletionAdmissions(ctx context.Context, db *sql.DB) error {
+	return validateReadOnlyAdmissions(ctx, db, "Work completion", func(tx *sql.Tx) error {
+		current, err := currentProjectionAdmissions[core.Work](ctx, tx, "work", "Work", func(work core.Work) core.ID { return work.ID })
+		if err != nil {
+			return err
+		}
+		for _, candidate := range current {
+			if candidate.value.Status != core.WorkCompleted {
+				continue
+			}
+			matches, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE event_type='WORK_COMPLETED' AND json_extract(payload,'$.projection.projection_kind')='work' AND json_extract(payload,'$.projection.record_id')=? AND json_extract(payload,'$.projection.version')=? ORDER BY sequence LIMIT 2`, candidate.record.RecordID, candidate.record.Version))
+			if err != nil {
+				return fmt.Errorf("read completed Work %s transition: %w", candidate.value.ID, err)
+			}
+			if len(matches) != 1 {
+				return fmt.Errorf("completed Work %s lacks one exact transition", candidate.value.ID)
+			}
+			transition := matches[0]
+			payload, present, err := events.AdmittedProjection(transition)
+			var detail events.WorkCompletionTransitionPayload
+			if err != nil || !present || !reflect.DeepEqual(payload.Projection, candidate.record) || decodeExactJSONBytes(payload.Detail, &detail) != nil || detail.EvidenceEventRef == "" || detail.Fingerprint == "" {
+				return fmt.Errorf("completed Work %s transition is invalid", candidate.value.ID)
+			}
+			item, err := prepareProjection(events.ProjectionDraft{
+				Event: events.TrustedDraft{
+					OrganizationID: transition.OrganizationID, EventType: transition.EventType, SourceActorID: transition.SourceActorID,
+					SourceExecutionID: transition.SourceExecutionID, RecipientScope: transition.RecipientScope, RecipientID: transition.RecipientID,
+					TaskID: transition.TaskID, AuthorizationRefs: transition.AuthorizationRefs, ArtifactRefs: transition.ArtifactRefs,
+					CorrelationID: transition.CorrelationID, Payload: detail,
+				},
+				ProjectionKind: "work", RecordID: string(candidate.value.ID), Version: candidate.record.Version, Value: candidate.value,
+			}, true, false)
+			if err != nil {
+				return fmt.Errorf("completed Work %s transition cannot be prepared: %w", candidate.value.ID, err)
+			}
+			if err := validateHistoricalPriorActiveWork(ctx, tx, item); err != nil {
+				return fmt.Errorf("completed Work %s lacks its exact prior state: %w", candidate.value.ID, err)
+			}
+			if err := validateWorkCompletionEvidence(ctx, tx, item, detail); err != nil {
+				return fmt.Errorf("completed Work %s lacks exact durable evidence: %w", candidate.value.ID, err)
+			}
+			evidenceEvent, err := scanEvent(tx.QueryRowContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_id=?`, detail.EvidenceEventRef))
+			if err != nil || evidenceEvent.Sequence >= transition.Sequence {
+				return fmt.Errorf("completed Work %s evidence does not precede its transition", candidate.value.ID)
+			}
+		}
+		return nil
+	})
+}
+
+type currentProjectionAdmission[T any] struct {
+	record events.ProjectionRecord
+	value  T
+}
+
+func currentProjectionAdmissions[T any](ctx context.Context, tx *sql.Tx, kind, label string, identity func(T) core.ID) (final []currentProjectionAdmission[T], finalErr error) {
+	rows, err := tx.QueryContext(ctx, `SELECT body FROM records AS current
+WHERE kind=? AND version=(SELECT MAX(version) FROM records AS latest WHERE latest.kind=current.kind AND latest.record_id=current.record_id)
+ORDER BY record_id`, kind)
+	if err != nil {
+		return nil, fmt.Errorf("read current %s admissions: %w", label, err)
+	}
+	defer func() {
+		finalErr = errors.Join(finalErr, rows.Close())
+	}()
+	for rows.Next() {
+		var body []byte
+		var candidate currentProjectionAdmission[T]
+		if err := rows.Scan(&body); err != nil || decodeExactJSONBytes(body, &candidate.record) != nil || decodeExactJSONBytes(candidate.record.Value, &candidate.value) != nil || candidate.record.ProjectionKind != kind || candidate.record.RecordID != string(identity(candidate.value)) {
+			return nil, fmt.Errorf("current %s admission is invalid", label)
+		}
+		final = append(final, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate current %s admissions: %w", label, err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close current %s admissions: %w", label, err)
+	}
+	return final, nil
+}
+
+func validateReadOnlyAdmissions(ctx context.Context, db *sql.DB, label string, validate func(*sql.Tx) error) (finalErr error) {
 	if ctx == nil || db == nil {
-		return fmt.Errorf("work completion validation requires a database and context")
+		return fmt.Errorf("%s validation requires a database and context", label)
 	}
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return fmt.Errorf("begin Work completion validation: %w", err)
+		return fmt.Errorf("begin %s validation: %w", label, err)
 	}
 	defer func() {
 		if tx != nil {
 			finalErr = errors.Join(finalErr, tx.Rollback())
 		}
 	}()
-	rows, err := tx.QueryContext(ctx, `SELECT body FROM records AS current
-WHERE kind='work' AND version=(SELECT MAX(version) FROM records AS latest WHERE latest.kind=current.kind AND latest.record_id=current.record_id)
-ORDER BY record_id`)
-	if err != nil {
-		return fmt.Errorf("read current Work admissions: %w", err)
-	}
-	defer func() {
-		finalErr = errors.Join(finalErr, rows.Close())
-	}()
-	type completedWork struct {
-		record events.ProjectionRecord
-		work   core.Work
-	}
-	completed := make([]completedWork, 0)
-	for rows.Next() {
-		var body []byte
-		var candidate completedWork
-		if err := rows.Scan(&body); err != nil || decodeExactJSONBytes(body, &candidate.record) != nil || decodeExactJSONBytes(candidate.record.Value, &candidate.work) != nil || candidate.record.ProjectionKind != "work" || candidate.record.RecordID != string(candidate.work.ID) {
-			return fmt.Errorf("current Work admission is invalid")
-		}
-		if candidate.work.Status == core.WorkCompleted {
-			completed = append(completed, candidate)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate current Work admissions: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close current Work admissions: %w", err)
-	}
-	for _, candidate := range completed {
-		matches, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
-FROM events WHERE event_type='WORK_COMPLETED' AND json_extract(payload,'$.projection.projection_kind')='work' AND json_extract(payload,'$.projection.record_id')=? AND json_extract(payload,'$.projection.version')=? ORDER BY sequence LIMIT 2`, candidate.record.RecordID, candidate.record.Version))
-		if err != nil {
-			return fmt.Errorf("read completed Work %s transition: %w", candidate.work.ID, err)
-		}
-		if len(matches) != 1 {
-			return fmt.Errorf("completed Work %s lacks one exact transition", candidate.work.ID)
-		}
-		transition := matches[0]
-		payload, present, err := events.AdmittedProjection(transition)
-		var detail events.WorkCompletionTransitionPayload
-		if err != nil || !present || !reflect.DeepEqual(payload.Projection, candidate.record) || decodeExactJSONBytes(payload.Detail, &detail) != nil || detail.EvidenceEventRef == "" || detail.Fingerprint == "" {
-			return fmt.Errorf("completed Work %s transition is invalid", candidate.work.ID)
-		}
-		item, err := prepareProjection(events.ProjectionDraft{
-			Event: events.TrustedDraft{
-				OrganizationID: transition.OrganizationID, EventType: transition.EventType, SourceActorID: transition.SourceActorID,
-				SourceExecutionID: transition.SourceExecutionID, RecipientScope: transition.RecipientScope, RecipientID: transition.RecipientID,
-				TaskID: transition.TaskID, AuthorizationRefs: transition.AuthorizationRefs, ArtifactRefs: transition.ArtifactRefs,
-				CorrelationID: transition.CorrelationID, Payload: detail,
-			},
-			ProjectionKind: "work", RecordID: string(candidate.work.ID), Version: candidate.record.Version, Value: candidate.work,
-		}, true, false)
-		if err != nil {
-			return fmt.Errorf("completed Work %s transition cannot be prepared: %w", candidate.work.ID, err)
-		}
-		if err := validateHistoricalPriorActiveWork(ctx, tx, item); err != nil {
-			return fmt.Errorf("completed Work %s lacks its exact prior state: %w", candidate.work.ID, err)
-		}
-		if err := validateWorkCompletionEvidence(ctx, tx, item, detail); err != nil {
-			return fmt.Errorf("completed Work %s lacks exact durable evidence: %w", candidate.work.ID, err)
-		}
-		evidenceEvent, err := scanEvent(tx.QueryRowContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_id=?`, detail.EvidenceEventRef))
-		if err != nil || evidenceEvent.Sequence >= transition.Sequence {
-			return fmt.Errorf("completed Work %s evidence does not precede its transition", candidate.work.ID)
-		}
+	if err := validate(tx); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("complete Work completion validation: %w", err)
+		return fmt.Errorf("complete %s validation: %w", label, err)
 	}
 	tx = nil
 	return nil
