@@ -1,19 +1,24 @@
 package recovery
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
+	"time"
 
+	"github.com/dominicnunez/agentos/internal/events"
 	"modernc.org/sqlite"
 )
 
@@ -23,7 +28,7 @@ var requiredColumns = map[string][]string{
 	"external_tasks":     {"organization_id", "task_id", "correlation_id"},
 	"external_work":      {"organization_id", "request_id", "correlation_id", "intent_id"},
 	"inbox":              {"recipient_scope", "recipient_id", "event_id", "organization_id", "task_id", "available_at", "observed_at", "observation_event_id"},
-	"records":            {"kind", "record_id", "version", "body", "created_at"},
+	"records":            {"kind", "record_id", "version", "body", "admission_event_id", "admission_fingerprint", "created_at"},
 }
 var requiredTables = []string{"consumed_approvals", "events", "external_tasks", "external_work", "inbox", "records"}
 
@@ -100,6 +105,9 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 			return Result{}, err
 		}
 	}
+	if err := verifyProjectionAdmissions(ctx, db); err != nil {
+		return Result{}, err
+	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(sequence), 0) FROM events`).Scan(&result.EventCount, &result.MaxSequence); err != nil {
 		return Result{}, fmt.Errorf("inspect Agent OS event ledger: %w", err)
 	}
@@ -109,6 +117,148 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	db = nil
 	result, err = fileResult(resolved, result.EventCount, result.MaxSequence)
 	return result, err
+}
+
+func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
+	eventRows, err := db.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events ORDER BY sequence`)
+	if err != nil {
+		return fmt.Errorf("inspect projection admission events: %w", err)
+	}
+	admitted := map[string]events.ProjectionEventPayload{}
+	for eventRows.Next() {
+		var event events.Event
+		var authorizationRefs, artifactRefs []byte
+		var rawPayload any
+		var createdAt string
+		if err := eventRows.Scan(&event.EventID, &event.Sequence, &event.OrganizationID, &event.EventType, &event.SourceActorID, &event.SourceExecutionID, &event.RecipientScope, &event.RecipientID, &event.TaskID, &authorizationRefs, &artifactRefs, &rawPayload, &event.CorrelationID, &createdAt, &event.SchemaVersion); err != nil {
+			_ = eventRows.Close()
+			return fmt.Errorf("read projection admission event: %w", err)
+		}
+		event.Payload, err = sqliteBytes(rawPayload)
+		if err != nil {
+			_ = eventRows.Close()
+			return fmt.Errorf("event %s payload: %w", event.EventID, err)
+		}
+		if json.Unmarshal(authorizationRefs, &event.AuthorizationRefs) != nil || json.Unmarshal(artifactRefs, &event.ArtifactRefs) != nil {
+			_ = eventRows.Close()
+			return fmt.Errorf("event %s has invalid reference arrays", event.EventID)
+		}
+		if createdAt != "" {
+			parsed, err := time.Parse(time.RFC3339Nano, createdAt)
+			if err != nil {
+				_ = eventRows.Close()
+				return fmt.Errorf("event %s has an invalid timestamp", event.EventID)
+			}
+			event.CreatedAt = parsed
+		}
+		payload, present, err := events.AdmittedProjection(event)
+		if err != nil {
+			_ = eventRows.Close()
+			return fmt.Errorf("event %s: %w", event.EventID, err)
+		}
+		if !present {
+			if events.RequiresProjectionAdmission(event.EventType, event.SourceActorID) {
+				_ = eventRows.Close()
+				return fmt.Errorf("event %s lacks required projection admission", event.EventID)
+			}
+			continue
+		}
+		if !events.ProjectionKindRequiresAdmission(payload.Projection.ProjectionKind) {
+			_ = eventRows.Close()
+			return fmt.Errorf("event %s carries unsupported projection kind %s", event.EventID, payload.Projection.ProjectionKind)
+		}
+		if err := events.ValidateProjectionEventBoundary(event, payload); err != nil {
+			_ = eventRows.Close()
+			return fmt.Errorf("event %s: %w", event.EventID, err)
+		}
+		if _, duplicate := admitted[event.EventID]; duplicate {
+			_ = eventRows.Close()
+			return fmt.Errorf("duplicate projection admission event %s", event.EventID)
+		}
+		admitted[event.EventID] = payload
+	}
+	if err := eventRows.Err(); err != nil {
+		_ = eventRows.Close()
+		return fmt.Errorf("iterate projection admission events: %w", err)
+	}
+	if err := eventRows.Close(); err != nil {
+		return fmt.Errorf("close projection admission events: %w", err)
+	}
+
+	recordRows, err := db.QueryContext(ctx, `SELECT kind,record_id,version,body,admission_event_id,admission_fingerprint FROM records ORDER BY kind,record_id,version`)
+	if err != nil {
+		return fmt.Errorf("inspect projection admission records: %w", err)
+	}
+	used := map[string]struct{}{}
+	for recordRows.Next() {
+		var kind, recordID, admissionEventID, admissionFingerprint string
+		var version int
+		var rawBody any
+		if err := recordRows.Scan(&kind, &recordID, &version, &rawBody, &admissionEventID, &admissionFingerprint); err != nil {
+			_ = recordRows.Close()
+			return fmt.Errorf("read projection admission record: %w", err)
+		}
+		body, err := sqliteBytes(rawBody)
+		if err != nil {
+			_ = recordRows.Close()
+			return fmt.Errorf("record %s/%s/%d body: %w", kind, recordID, version, err)
+		}
+		if !events.ProjectionKindRequiresAdmission(kind) {
+			if admissionEventID != "" || admissionFingerprint != "" {
+				_ = recordRows.Close()
+				return fmt.Errorf("generic record %s/%s/%d carries projection authority", kind, recordID, version)
+			}
+			continue
+		}
+		payload, found := admitted[admissionEventID]
+		var record events.ProjectionRecord
+		canonical, canonicalErr := json.Marshal(payload.Projection)
+		if !found || canonicalErr != nil || !bytes.Equal(body, canonical) || decodeExactJSON(body, &record) != nil || record.ProjectionKind != kind || record.RecordID != recordID || record.Version != version || !reflect.DeepEqual(record, payload.Projection) || admissionEventID != payload.Admission.EventRef || admissionFingerprint != payload.Admission.Fingerprint {
+			_ = recordRows.Close()
+			return fmt.Errorf("projection record %s/%s/%d lacks exact event admission", kind, recordID, version)
+		}
+		if _, duplicate := used[admissionEventID]; duplicate {
+			_ = recordRows.Close()
+			return fmt.Errorf("projection admission event %s authorizes multiple records", admissionEventID)
+		}
+		used[admissionEventID] = struct{}{}
+	}
+	if err := recordRows.Err(); err != nil {
+		_ = recordRows.Close()
+		return fmt.Errorf("iterate projection admission records: %w", err)
+	}
+	if err := recordRows.Close(); err != nil {
+		return fmt.Errorf("close projection admission records: %w", err)
+	}
+	for eventID := range admitted {
+		if _, found := used[eventID]; !found {
+			return fmt.Errorf("projection admission event %s has no materialized record", eventID)
+		}
+	}
+	return nil
+}
+
+func sqliteBytes(value any) ([]byte, error) {
+	switch typed := value.(type) {
+	case []byte:
+		return typed, nil
+	case string:
+		return []byte(typed), nil
+	default:
+		return nil, fmt.Errorf("unsupported SQLite value %T", value)
+	}
+}
+
+func decodeExactJSON(body []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("unexpected trailing JSON")
+	}
+	return nil
 }
 
 func verifyIntegrity(ctx context.Context, db *sql.DB) (finalErr error) {

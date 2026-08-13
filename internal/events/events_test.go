@@ -229,6 +229,98 @@ func (m *memoryLedger) Append(_ context.Context, d TrustedDraft) (Event, error) 
 }
 func (m *memoryLedger) Events(context.Context, string) ([]Event, error) { return m.events, nil }
 
+func TestProjectionAdmissionBindsExactEventBoundary(t *testing.T) {
+	record := ProjectionRecord{
+		ProjectionKind: "task", RecordID: "task-1", Version: 2,
+		CorrelationID: "work-1", Value: json.RawMessage(`{"id":"task-1"}`),
+	}
+	draft := TrustedDraft{
+		OrganizationID: "org-1", EventType: "TASK_BLOCKED", SourceActorID: "runtime",
+		TaskID: "task-1", CorrelationID: "work-1",
+	}
+	event := Event{
+		EventID: "event-1", Sequence: 1, OrganizationID: draft.OrganizationID, EventType: draft.EventType,
+		SourceActorID: draft.SourceActorID, TaskID: draft.TaskID, CorrelationID: draft.CorrelationID,
+		CreatedAt: time.Unix(1, 0).UTC(), SchemaVersion: SchemaVersion,
+	}
+	payload, err := SealProjectionEvent(event, record, json.RawMessage(`{"reason":"bounded"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.Payload = body
+	admitted, present, err := AdmittedProjection(event)
+	if err != nil || !present || admitted.Admission.EventRef != event.EventID || admitted.Admission.Fingerprint == "" {
+		t.Fatalf("admitted=%+v present=%t err=%v", admitted, present, err)
+	}
+
+	for name, mutate := range map[string]func(*Event){
+		"event id":       func(candidate *Event) { candidate.EventID = "event-2" },
+		"organization":   func(candidate *Event) { candidate.OrganizationID = "org-2" },
+		"event type":     func(candidate *Event) { candidate.EventType = "TASK_RESUMED" },
+		"task":           func(candidate *Event) { candidate.TaskID = "task-2" },
+		"correlation":    func(candidate *Event) { candidate.CorrelationID = "work-2" },
+		"schema version": func(candidate *Event) { candidate.SchemaVersion++ },
+		"sequence":       func(candidate *Event) { candidate.Sequence++ },
+		"created at":     func(candidate *Event) { candidate.CreatedAt = candidate.CreatedAt.Add(time.Second) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := event
+			mutate(&candidate)
+			if _, present, err := AdmittedProjection(candidate); err == nil || !present {
+				t.Fatalf("changed %s retained admission: present=%t err=%v", name, present, err)
+			}
+		})
+	}
+
+	duplicate := event
+	duplicate.Payload = []byte(`{"projection":{},"projection":{},"admission":{}}`)
+	if _, _, err := AdmittedProjection(duplicate); err == nil {
+		t.Fatal("duplicate projection declaration was accepted")
+	}
+	trailing := event
+	trailing.Payload = append(append([]byte(nil), body...), []byte(`{}`)...)
+	if _, _, err := AdmittedProjection(trailing); err == nil {
+		t.Fatal("trailing projection payload was accepted")
+	}
+}
+
+func TestGenericTrustedPublicationCannotMintProjectionAuthority(t *testing.T) {
+	ledger := &memoryLedger{}
+	gateway := NewGateway(ledger)
+	record := ProjectionRecord{ProjectionKind: "team", RecordID: "team-1", Version: 1, CorrelationID: "work-1", Value: json.RawMessage(`{"id":"team-1"}`)}
+	draft := TrustedDraft{OrganizationID: "org-1", EventType: "TEAM_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"}
+	boundary := Event{
+		EventID: "event-1", Sequence: 1, OrganizationID: draft.OrganizationID, EventType: draft.EventType,
+		SourceActorID: draft.SourceActorID, CorrelationID: draft.CorrelationID,
+		CreatedAt: time.Unix(1, 0).UTC(), SchemaVersion: SchemaVersion,
+	}
+	sealed, err := SealProjectionEvent(boundary, record, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, payload := range map[string]any{
+		"projection key":  map[string]any{"projection": map[string]any{"record_id": "team-1"}},
+		"admission key":   map[string]any{"admission": "forged"},
+		"sealed payload":  sealed,
+		"lifecycle label": map[string]string{"note": "ordinary payload"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := draft
+			candidate.Payload = payload
+			if _, err := gateway.PublishTrusted(context.Background(), candidate); err == nil {
+				t.Fatalf("generic trusted publication accepted %s", name)
+			}
+		})
+	}
+	if len(ledger.events) != 0 {
+		t.Fatalf("rejected projection authority reached ledger: %+v", ledger.events)
+	}
+}
+
 type routeValidatorFunc func(context.Context, AddressedRoute) error
 
 func (f routeValidatorFunc) ValidateAddressedRoute(ctx context.Context, route AddressedRoute) error {

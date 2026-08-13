@@ -121,10 +121,18 @@ with its adapter unreachable until the separately authorized user lifecycle
 records an exact decision.
 
 Durable organization/work projections now commit atomically with their
-authoritative transition events and can be rebuilt by replay. Startup validates
-that state before opening the operator endpoint, preserves blocked work, runs
-dependency-ready pending work, retries only known-safe interrupted deterministic
-work, and blocks interrupted adaptive execution whose outcome is uncertain.
+authoritative transition events and can be rebuilt by replay. Every projection
+record carries the exact authorizing event ID and a schema-v3 fingerprint over
+that event's runtime-owned envelope, record, and transition detail. Generic
+event writers reserve both projection payload keys and projection lifecycle
+labels. Routine record reads, full startup audit, event-only rebuild, and
+backup/restore verification reject missing, copied, duplicated, malformed,
+cross-organization, or mismatched admission. Nonempty pre-admission projection
+schemas are unsupported pre-release state and fail closed rather than receiving
+an inferred compatibility migration. Startup validates that state before
+opening the operator endpoint, preserves blocked work, runs dependency-ready
+pending work, retries only known-safe interrupted deterministic work, and
+blocks interrupted adaptive execution whose outcome is uncertain.
 
 Agent-proposed addressed events use runtime-stamped sender and recipient
 envelopes. The SQLite ledger commits each addressed Event Contract and its

@@ -765,18 +765,84 @@ func TestRebuildRejectsProjectionCorrelationMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := json.Marshal(events.ProjectionEventPayload{Projection: events.ProjectionRecord{
+	record := events.ProjectionRecord{
 		ProjectionKind: KindTask, RecordID: "task-1", Version: 1,
 		CorrelationID: "work-a", Value: value,
-	}})
+	}
+	draft := events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: "task-1", CorrelationID: "work-a"}
+	boundary := events.Event{
+		EventID: "evt-1", Sequence: 1, OrganizationID: draft.OrganizationID, EventType: draft.EventType,
+		SourceActorID: draft.SourceActorID, TaskID: draft.TaskID, CorrelationID: draft.CorrelationID,
+		CreatedAt: time.Unix(1, 0).UTC(), SchemaVersion: events.SchemaVersion,
+	}
+	sealed, err := events.SealProjectionEvent(boundary, record, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(sealed)
 	if err != nil {
 		t.Fatal(err)
 	}
 	repository := New(events.NewGateway(replayLedger{stream: []events.Event{{
-		EventID: "evt-1", CorrelationID: "work-b", Payload: payload,
+		EventID: boundary.EventID, Sequence: boundary.Sequence, OrganizationID: boundary.OrganizationID, EventType: boundary.EventType, SourceActorID: boundary.SourceActorID, TaskID: boundary.TaskID,
+		CorrelationID: "work-b", CreatedAt: boundary.CreatedAt, SchemaVersion: boundary.SchemaVersion, Payload: payload,
 	}}}))
 	if _, err := repository.Rebuild(context.Background()); err == nil {
 		t.Fatal("event-to-projection correlation mismatch was accepted")
+	}
+}
+
+func TestRebuildRejectsProjectionShapedOrdinaryEvents(t *testing.T) {
+	for _, kind := range []string{KindTeam, KindAgentBlueprint, "role", "grant"} {
+		t.Run(kind, func(t *testing.T) {
+			value, err := json.Marshal(map[string]string{"id": kind + "-1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := events.ProjectionRecord{
+				ProjectionKind: kind, RecordID: kind + "-1", Version: 1,
+				CorrelationID: "work-1", Value: value,
+			}
+			ordinaryDraft := events.TrustedDraft{
+				OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "work-1",
+			}
+			boundary := events.Event{
+				EventID: "event-1", Sequence: 1, OrganizationID: ordinaryDraft.OrganizationID, EventType: ordinaryDraft.EventType,
+				SourceActorID: ordinaryDraft.SourceActorID, CorrelationID: ordinaryDraft.CorrelationID,
+				CreatedAt: time.Unix(1, 0).UTC(), SchemaVersion: events.SchemaVersion,
+			}
+			sealed, err := events.SealProjectionEvent(boundary, record, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := json.Marshal(sealed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stream := []events.Event{{
+				EventID: boundary.EventID, Sequence: boundary.Sequence, OrganizationID: boundary.OrganizationID, EventType: boundary.EventType,
+				SourceActorID: boundary.SourceActorID, CorrelationID: boundary.CorrelationID,
+				CreatedAt: boundary.CreatedAt, SchemaVersion: boundary.SchemaVersion, Payload: body,
+			}}
+			if _, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background()); err == nil {
+				t.Fatalf("ordinary event became authoritative %s state", kind)
+			}
+
+			copied := stream[0]
+			copied.EventID = "event-2"
+			if _, err := New(events.NewGateway(replayLedger{stream: []events.Event{copied}})).Rebuild(context.Background()); err == nil {
+				t.Fatalf("copied admission became authoritative %s state", kind)
+			}
+
+			unsealed, err := json.Marshal(events.ProjectionEventPayload{Projection: record})
+			if err != nil {
+				t.Fatal(err)
+			}
+			stream[0].Payload = unsealed
+			if _, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background()); err == nil {
+				t.Fatalf("unsealed event became authoritative %s state", kind)
+			}
+		})
 	}
 }
 

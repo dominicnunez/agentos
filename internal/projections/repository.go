@@ -246,6 +246,12 @@ func (r *Repository) ValidateCompletionAdmissions(ctx context.Context, snapshot 
 	if err != nil {
 		return err
 	}
+	if err := validateProjectionEventAdmissions(stream); err != nil {
+		return err
+	}
+	if err := validateProjectionEventOrganizationBindings(snapshot, stream); err != nil {
+		return err
+	}
 	teamRecords, err := r.gateway.ProjectionRecords(ctx, KindTeam, "")
 	if err != nil {
 		return err
@@ -270,10 +276,16 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
+	if err := validateProjectionEventAdmissions(stream); err != nil {
+		return Snapshot{}, err
+	}
 	records := make(map[string][][]byte)
 	for _, event := range stream {
-		var payload events.ProjectionEventPayload
-		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.Projection.ProjectionKind == "" {
+		payload, present, err := events.AdmittedProjection(event)
+		if err != nil {
+			return Snapshot{}, fmt.Errorf("event %s: %w", event.EventID, err)
+		}
+		if !present {
 			continue
 		}
 		if payload.Projection.CorrelationID != event.CorrelationID {
@@ -290,6 +302,9 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
+	if err := validateProjectionEventOrganizationBindings(snapshot, stream); err != nil {
+		return Snapshot{}, err
+	}
 	inboxObservations, err := r.gateway.InboxObservations(ctx)
 	if err != nil {
 		return Snapshot{}, err
@@ -301,6 +316,125 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	return snapshot, nil
+}
+
+func validateProjectionEventAdmissions(stream []events.Event) error {
+	eventIDs := make(map[string]struct{}, len(stream))
+	sequences := make(map[int64]struct{}, len(stream))
+	for _, event := range stream {
+		if event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() {
+			return fmt.Errorf("event stream contains an incomplete envelope")
+		}
+		if _, duplicate := eventIDs[event.EventID]; duplicate {
+			return fmt.Errorf("event stream contains duplicate event id %s", event.EventID)
+		}
+		if _, duplicate := sequences[event.Sequence]; duplicate {
+			return fmt.Errorf("event stream contains duplicate sequence %d at %s", event.Sequence, event.EventType)
+		}
+		eventIDs[event.EventID] = struct{}{}
+		sequences[event.Sequence] = struct{}{}
+		payload, present, err := events.AdmittedProjection(event)
+		if err != nil {
+			return fmt.Errorf("event %s: %w", event.EventID, err)
+		}
+		if present {
+			if err := events.ValidateProjectionEventBoundary(event, payload); err != nil {
+				return fmt.Errorf("event %s: %w", event.EventID, err)
+			}
+		} else if events.RequiresProjectionAdmission(event.EventType, event.SourceActorID) {
+			return fmt.Errorf("event %s uses a projection lifecycle event without typed admission", event.EventID)
+		}
+	}
+	return nil
+}
+
+func validateProjectionEventOrganizationBindings(snapshot Snapshot, stream []events.Event) error {
+	for _, event := range stream {
+		payload, present, err := events.AdmittedProjection(event)
+		if err != nil {
+			return fmt.Errorf("event %s: %w", event.EventID, err)
+		}
+		if !present {
+			continue
+		}
+		var organizationID core.ID
+		switch payload.Projection.ProjectionKind {
+		case KindOrganization:
+			organizationID = core.ID(payload.Projection.RecordID)
+		case KindMission:
+			var value core.Mission
+			if decodeExactProjectionJSON(payload.Projection.Value, &value) != nil {
+				return fmt.Errorf("event %s contains an invalid Mission projection", event.EventID)
+			}
+			organizationID = value.OrganizationID
+		case KindGoal:
+			var value core.Goal
+			if decodeExactProjectionJSON(payload.Projection.Value, &value) != nil {
+				return fmt.Errorf("event %s contains an invalid Goal projection", event.EventID)
+			}
+			organizationID = value.OrganizationID
+		case KindTeam:
+			var value core.Team
+			if decodeExactProjectionJSON(payload.Projection.Value, &value) != nil {
+				return fmt.Errorf("event %s contains an invalid Team projection", event.EventID)
+			}
+			organizationID = value.OrganizationID
+		case KindAgentBlueprint:
+			var value core.AgentBlueprint
+			if decodeExactProjectionJSON(payload.Projection.Value, &value) != nil {
+				return fmt.Errorf("event %s contains an invalid Agent blueprint projection", event.EventID)
+			}
+			organizationID = value.OrganizationID
+		case KindExecutionProfile:
+			var value core.ExecutionProfile
+			if decodeExactProjectionJSON(payload.Projection.Value, &value) != nil {
+				return fmt.Errorf("event %s contains an invalid execution profile projection", event.EventID)
+			}
+			organizationID = value.OrganizationID
+		case KindAgent:
+			var value core.Agent
+			if decodeExactProjectionJSON(payload.Projection.Value, &value) != nil {
+				return fmt.Errorf("event %s contains an invalid Agent projection", event.EventID)
+			}
+			organizationID = value.OrganizationID
+		case KindIntent:
+			var value core.Intent
+			if decodeExactProjectionJSON(payload.Projection.Value, &value) != nil {
+				return fmt.Errorf("event %s contains an invalid Intent projection", event.EventID)
+			}
+			organizationID = value.OrganizationID
+		case KindWork:
+			var value core.Work
+			if decodeExactProjectionJSON(payload.Projection.Value, &value) != nil {
+				return fmt.Errorf("event %s contains an invalid Work projection", event.EventID)
+			}
+			intent, found := snapshot.Intents[value.IntentID]
+			if !found {
+				return fmt.Errorf("event %s Work projection lacks its Intent organization", event.EventID)
+			}
+			organizationID = intent.Value.OrganizationID
+		case KindTask:
+			var value core.Task
+			if decodeExactProjectionJSON(payload.Projection.Value, &value) != nil {
+				return fmt.Errorf("event %s contains an invalid Task projection", event.EventID)
+			}
+			work, found := snapshot.Works[value.WorkID]
+			if !found {
+				return fmt.Errorf("event %s Task projection lacks its Work", event.EventID)
+			}
+			intent, found := snapshot.Intents[work.Value.IntentID]
+			if !found {
+				return fmt.Errorf("event %s Task projection lacks its Intent organization", event.EventID)
+			}
+			organizationID = intent.Value.OrganizationID
+		default:
+			return fmt.Errorf("event %s contains unsupported projection kind %s", event.EventID, payload.Projection.ProjectionKind)
+		}
+		if organizationID == "" || event.OrganizationID != string(organizationID) {
+			return fmt.Errorf("event %s projection crosses its organization boundary", event.EventID)
+		}
+	}
+	return nil
 }
 
 func (r *Repository) validateGoalAchievementAdmissions(ctx context.Context, snapshot Snapshot) error {

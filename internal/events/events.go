@@ -1,10 +1,12 @@
 package events
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"reflect"
 	"slices"
 	"sort"
@@ -15,7 +17,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 )
 
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 const (
 	RecipientAgent = "AGENT"
@@ -1466,11 +1468,279 @@ type ProjectionRecord struct {
 	Value          json.RawMessage `json:"value"`
 }
 
+const ProjectionAdmissionMethod = "EVENT_COUPLED_PROJECTION_V1"
+
+// ProjectionAdmission proves that a projection payload was created by the
+// typed ledger admission path for this exact event envelope and identity.
+// Generic events reserve this contract and cannot mint it.
+type ProjectionAdmission struct {
+	Method      string `json:"method"`
+	EventRef    string `json:"event_ref"`
+	Fingerprint string `json:"fingerprint"`
+}
+
 // ProjectionEventPayload preserves transition detail while carrying the
-// complete versioned record needed for deterministic replay.
+// complete versioned record and sealed admission needed for deterministic
+// replay. Presence of either top-level field is reserved to typed projection
+// admission even when the payload is malformed.
 type ProjectionEventPayload struct {
-	Projection ProjectionRecord `json:"projection"`
-	Detail     json.RawMessage  `json:"detail,omitempty"`
+	Projection ProjectionRecord    `json:"projection"`
+	Admission  ProjectionAdmission `json:"admission"`
+	Detail     json.RawMessage     `json:"detail,omitempty"`
+}
+
+type projectionAdmissionFingerprintPayload struct {
+	Method            string           `json:"method"`
+	EventRef          string           `json:"event_ref"`
+	Sequence          int64            `json:"sequence"`
+	OrganizationID    string           `json:"organization_id"`
+	EventType         string           `json:"event_type"`
+	SourceActorID     string           `json:"source_actor_id"`
+	SourceExecutionID string           `json:"source_execution_id"`
+	RecipientScope    string           `json:"recipient_scope"`
+	RecipientID       string           `json:"recipient_id"`
+	TaskID            string           `json:"task_id"`
+	AuthorizationRefs []string         `json:"authorization_refs"`
+	ArtifactRefs      []string         `json:"artifact_refs"`
+	CorrelationID     string           `json:"correlation_id"`
+	CreatedAt         string           `json:"created_at"`
+	SchemaVersion     int              `json:"schema_version"`
+	Projection        ProjectionRecord `json:"projection"`
+	Detail            json.RawMessage  `json:"detail,omitempty"`
+}
+
+func SealProjectionEvent(event Event, record ProjectionRecord, detail json.RawMessage) (ProjectionEventPayload, error) {
+	if event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() || event.SchemaVersion != SchemaVersion || event.EventType == "" || event.OrganizationID == "" || record.ProjectionKind == "" || record.RecordID == "" || record.Version < 1 || record.CorrelationID != event.CorrelationID || len(record.Value) == 0 {
+		return ProjectionEventPayload{}, fmt.Errorf("complete projection admission identity is required")
+	}
+	admission := ProjectionAdmission{Method: ProjectionAdmissionMethod, EventRef: event.EventID}
+	fingerprint, err := projectionAdmissionFingerprint(admission, event, record, detail)
+	if err != nil {
+		return ProjectionEventPayload{}, err
+	}
+	admission.Fingerprint = fingerprint
+	return ProjectionEventPayload{Projection: record, Admission: admission, Detail: detail}, nil
+}
+
+// AdmittedProjection returns present=false only for an ordinary event. Any
+// event that contains a reserved projection/admission key must carry one exact
+// valid sealed contract or fail closed.
+func AdmittedProjection(event Event) (payload ProjectionEventPayload, present bool, err error) {
+	if rejectDuplicateJSONKeys(event.Payload) != nil {
+		return ProjectionEventPayload{}, false, fmt.Errorf("event payload is malformed")
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(event.Payload, &object) != nil {
+		return ProjectionEventPayload{}, false, nil
+	}
+	_, hasProjection := object["projection"]
+	_, hasAdmission := object["admission"]
+	if !hasProjection && !hasAdmission {
+		return ProjectionEventPayload{}, false, nil
+	}
+	present = true
+	decoder := json.NewDecoder(bytes.NewReader(event.Payload))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&payload) != nil || decoder.Decode(&struct{}{}) != io.EOF || event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() || payload.Projection.ProjectionKind == "" || payload.Projection.RecordID == "" || payload.Projection.Version < 1 || payload.Projection.CorrelationID != event.CorrelationID || len(payload.Projection.Value) == 0 || payload.Admission.Method != ProjectionAdmissionMethod || payload.Admission.EventRef != event.EventID || !validSHA256(payload.Admission.Fingerprint) {
+		return ProjectionEventPayload{}, true, fmt.Errorf("projection event admission is malformed")
+	}
+	want, fingerprintErr := projectionAdmissionFingerprint(payload.Admission, event, payload.Projection, payload.Detail)
+	if fingerprintErr != nil || want != payload.Admission.Fingerprint || event.SchemaVersion != SchemaVersion {
+		return ProjectionEventPayload{}, true, fmt.Errorf("projection event admission does not match its event boundary")
+	}
+	return payload, true, nil
+}
+
+func rejectDuplicateJSONKeys(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := validateUniqueJSONValue(decoder); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return fmt.Errorf("unexpected trailing JSON")
+	}
+	return nil
+}
+
+func validateUniqueJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, compound := token.(json.Delim)
+	if !compound {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := map[string]struct{}{}
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return fmt.Errorf("JSON object key is invalid")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("JSON object contains duplicate key %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := validateUniqueJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim('}') {
+			return fmt.Errorf("JSON object is incomplete")
+		}
+	case '[':
+		for decoder.More() {
+			if err := validateUniqueJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim(']') {
+			return fmt.Errorf("JSON array is incomplete")
+		}
+	default:
+		return fmt.Errorf("unsupported JSON delimiter")
+	}
+	return nil
+}
+
+// RequiresProjectionAdmission identifies runtime event labels that are owned
+// by the typed projection writer. TASK_BLOCKED remains agent-proposable when
+// the authenticated source is an Agent execution, but runtime lifecycle state
+// always requires the sealed event/record transaction.
+func RequiresProjectionAdmission(eventType, sourceActorID string) bool {
+	switch eventType {
+	case "ORGANIZATION_CREATED",
+		"MISSION_CREATED", "MISSION_REVISED", "MISSION_RETIRED",
+		"GOAL_CREATED", "GOAL_REFINED", "GOAL_PAUSED", "GOAL_RESUMED", "GOAL_RETIRED", "GOAL_ACHIEVED",
+		"TEAM_CREATED", "TEAM_REVISED",
+		"AGENT_BLUEPRINT_CREATED", "AGENT_BLUEPRINT_UPDATED",
+		"EXECUTION_PROFILE_CREATED", "EXECUTION_PROFILE_UPDATED",
+		"AGENT_CREATED", "AGENT_CONFIGURATION_UPDATED", "AGENT_DEACTIVATED", "AGENT_REACTIVATED",
+		"INTENT_CREATED",
+		"WORK_CREATED", "WORK_COMPLETED", "WORK_FAILED", "WORK_PLANNING_FAILED",
+		"TASK_CREATED", "TASK_ASSIGNMENT_REVALIDATED", "TASK_RECOVERED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED":
+		return true
+	case "TASK_BLOCKED":
+		return sourceActorID == "runtime"
+	default:
+		return false
+	}
+}
+
+// ProjectionKindRequiresAdmission identifies the closed set of organizational
+// projections carried by the current Event Contract schema.
+func ProjectionKindRequiresAdmission(kind string) bool {
+	switch kind {
+	case "organization", "mission", "goal", "team", "agent_blueprint", "execution_profile", "agent", "intent", "work", "task":
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidateProjectionEventBoundary proves that a sealed projection uses the
+// runtime-owned label and routing envelope reserved for its kind and version.
+func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload) error {
+	record := payload.Projection
+	if event.OrganizationID == "" || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.SchemaVersion != SchemaVersion {
+		return fmt.Errorf("projection event crosses its runtime-owned envelope")
+	}
+	if !validProjectionEventType(record.ProjectionKind, record.Version, event.EventType) {
+		return fmt.Errorf("projection %s/%s/%d uses unsupported event %s", record.ProjectionKind, record.RecordID, record.Version, event.EventType)
+	}
+	if record.ProjectionKind == "task" {
+		if event.TaskID != record.RecordID {
+			return fmt.Errorf("Task projection crosses its Task envelope")
+		}
+		if event.RecipientScope == "" && event.RecipientID == "" {
+			return nil
+		}
+		if event.EventType != "TASK_BLOCKED" || event.RecipientScope != RecipientTask || event.RecipientID == "" {
+			return fmt.Errorf("Task projection uses unsupported routing")
+		}
+		return nil
+	}
+	if event.TaskID != "" || event.RecipientScope != "" || event.RecipientID != "" {
+		return fmt.Errorf("organizational projection uses a Task or recipient route")
+	}
+	return nil
+}
+
+func validProjectionEventType(kind string, version int, eventType string) bool {
+	if version < 1 {
+		return false
+	}
+	switch kind {
+	case "organization":
+		return version == 1 && eventType == "ORGANIZATION_CREATED"
+	case "mission":
+		return version == 1 && eventType == "MISSION_CREATED" || version > 1 && (eventType == "MISSION_REVISED" || eventType == "MISSION_RETIRED")
+	case "goal":
+		return version == 1 && eventType == "GOAL_CREATED" || version > 1 && (eventType == "GOAL_REFINED" || eventType == "GOAL_PAUSED" || eventType == "GOAL_RESUMED" || eventType == "GOAL_RETIRED" || eventType == "GOAL_ACHIEVED")
+	case "team":
+		return version == 1 && eventType == "TEAM_CREATED" || version > 1 && eventType == "TEAM_REVISED"
+	case "agent_blueprint":
+		return version == 1 && eventType == "AGENT_BLUEPRINT_CREATED" || version > 1 && eventType == "AGENT_BLUEPRINT_UPDATED"
+	case "execution_profile":
+		return version == 1 && eventType == "EXECUTION_PROFILE_CREATED" || version > 1 && eventType == "EXECUTION_PROFILE_UPDATED"
+	case "agent":
+		return version == 1 && eventType == "AGENT_CREATED" || version > 1 && (eventType == "AGENT_CONFIGURATION_UPDATED" || eventType == "AGENT_DEACTIVATED" || eventType == "AGENT_REACTIVATED")
+	case "intent":
+		return version == 1 && eventType == "INTENT_CREATED"
+	case "work":
+		return version == 1 && eventType == "WORK_CREATED" || version > 1 && (eventType == "WORK_COMPLETED" || eventType == "WORK_FAILED" || eventType == "WORK_PLANNING_FAILED")
+	case "task":
+		if version == 1 {
+			return eventType == "TASK_CREATED" || eventType == "TASK_BLOCKED"
+		}
+		switch eventType {
+		case "TASK_ASSIGNMENT_REVALIDATED", "TASK_BLOCKED", "TASK_RECOVERED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED":
+			return true
+		}
+	}
+	return false
+}
+
+// ReservesProjectionPayload reports whether a generic draft attempts to use
+// either top-level projection authority key, including a malformed imitation.
+func ReservesProjectionPayload(value any) bool {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(body, &object) != nil {
+		return false
+	}
+	_, hasProjection := object["projection"]
+	_, hasAdmission := object["admission"]
+	return hasProjection || hasAdmission
+}
+
+func projectionAdmissionFingerprint(admission ProjectionAdmission, event Event, record ProjectionRecord, detail json.RawMessage) (string, error) {
+	contract := projectionAdmissionFingerprintPayload{
+		Method: admission.Method, EventRef: admission.EventRef, Sequence: event.Sequence,
+		OrganizationID: event.OrganizationID, EventType: event.EventType, SourceActorID: event.SourceActorID, SourceExecutionID: event.SourceExecutionID,
+		RecipientScope: event.RecipientScope, RecipientID: event.RecipientID, TaskID: event.TaskID,
+		AuthorizationRefs: event.AuthorizationRefs, ArtifactRefs: event.ArtifactRefs, CorrelationID: event.CorrelationID,
+		CreatedAt: event.CreatedAt.UTC().Format(time.RFC3339Nano), SchemaVersion: event.SchemaVersion,
+		Projection: record, Detail: detail,
+	}
+	body, err := json.Marshal(contract)
+	if err != nil {
+		return "", fmt.Errorf("encode projection admission: %w", err)
+	}
+	digest := sha256.Sum256(body)
+	return fmt.Sprintf("%x", digest), nil
 }
 
 // ResolveTeamRevisionBindings couples every Team revision admitted to the
@@ -1720,6 +1990,12 @@ func (g *Gateway) PublishAgentDraft(ctx context.Context, organizationID, actorID
 	return g.ledger.Append(ctx, trusted)
 }
 func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event, error) {
+	if ReservesProjectionPayload(draft.Payload) {
+		return Event{}, fmt.Errorf("projection payloads require typed admission")
+	}
+	if RequiresProjectionAdmission(draft.EventType, draft.SourceActorID) {
+		return Event{}, fmt.Errorf("projection lifecycle events require typed admission")
+	}
 	if draft.EventType == "INBOX_EVENTS_OBSERVED" {
 		return Event{}, fmt.Errorf("inbox observations require atomic inbox admission")
 	}

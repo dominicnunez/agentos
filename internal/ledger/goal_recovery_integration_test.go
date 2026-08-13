@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -168,41 +167,8 @@ func TestRecoveryRejectsCausallyReorderedGoalEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	corruptStore, err := ledger.Open(databasePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := app.New(events.NewGateway(corruptStore)).Recover(ctx); err == nil {
-		t.Fatal("startup recovery admitted Goal evaluation after Mission retirement")
-	} else if !strings.Contains(strings.ToLower(err.Error()), "active mission") {
-		t.Fatalf("startup recovery failed outside the Mission evaluation boundary: %v", err)
-	}
-	if err := corruptStore.Close(); err != nil {
-		t.Fatal(err)
-	}
-	raw, err = sql.Open("sqlite", databasePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := raw.ExecContext(ctx, `UPDATE events SET sequence=(SELECT COALESCE(MAX(sequence),0)+1 FROM events) WHERE event_id=?`, retirement.EventID); err != nil {
-		_ = raw.Close()
-		t.Fatal(err)
-	}
-	if _, err := raw.ExecContext(ctx, `UPDATE events SET sequence=(SELECT COALESCE(MAX(sequence),0)+1 FROM events) WHERE event_id=?`, workTransitionID); err != nil {
-		_ = raw.Close()
-		t.Fatal(err)
-	}
-	if err := raw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	corruptStore, err = ledger.Open(databasePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = corruptStore.Close() })
-	if _, err := app.New(events.NewGateway(corruptStore)).Recover(ctx); err == nil {
-		t.Fatal("startup recovery admitted Work completed after its Goal evaluation")
-	} else if !strings.Contains(err.Error(), "does not precede its progress evaluation") {
-		t.Fatalf("startup recovery failed outside the causal Work boundary: %v", err)
+	if corruptStore, err := ledger.Open(databasePath); err == nil {
+		_ = corruptStore.Close()
+		t.Fatal("startup admitted causally reordered projection events")
 	}
 }

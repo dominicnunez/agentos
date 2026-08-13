@@ -60,9 +60,13 @@ CREATE INDEX IF NOT EXISTS events_correlation_idx ON events(correlation_id, sequ
 	}
 	_, err = l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS records (
 kind TEXT NOT NULL, record_id TEXT NOT NULL, version INTEGER NOT NULL, body BLOB NOT NULL,
+admission_event_id TEXT NOT NULL DEFAULT '', admission_fingerprint TEXT NOT NULL DEFAULT '',
 created_at TEXT NOT NULL, PRIMARY KEY(kind, record_id, version));
 CREATE INDEX IF NOT EXISTS records_kind_idx ON records(kind, created_at);`)
 	if err != nil {
+		return err
+	}
+	if err := l.ensureProjectionAdmissionColumns(ctx); err != nil {
 		return err
 	}
 	if err := l.migrateExternalWorkIndex(ctx); err != nil {
@@ -82,6 +86,37 @@ approval_id TEXT PRIMARY KEY, effect_fingerprint TEXT NOT NULL, consumed_at TEXT
 	return err
 }
 
+func (l *SQLite) ensureProjectionAdmissionColumns(ctx context.Context) error {
+	columns, err := l.tableColumns(ctx, "records")
+	if err != nil {
+		return err
+	}
+	if columns["admission_event_id"] && columns["admission_fingerprint"] {
+		_, err := l.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS records_admission_event_idx ON records(admission_event_id) WHERE admission_event_id<>''`)
+		return err
+	}
+	var records int
+	if err := l.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM records`).Scan(&records); err != nil {
+		return fmt.Errorf("inspect pre-admission projection records: %w", err)
+	}
+	if records != 0 {
+		return fmt.Errorf("records schema predates event-coupled projection admission; unsupported pre-release state")
+	}
+	for name, ddl := range map[string]string{
+		"admission_event_id":    `ALTER TABLE records ADD COLUMN admission_event_id TEXT NOT NULL DEFAULT ''`,
+		"admission_fingerprint": `ALTER TABLE records ADD COLUMN admission_fingerprint TEXT NOT NULL DEFAULT ''`,
+	} {
+		if columns[name] {
+			continue
+		}
+		if _, err := l.db.ExecContext(ctx, ddl); err != nil {
+			return fmt.Errorf("add projection admission column %s: %w", name, err)
+		}
+	}
+	_, err = l.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS records_admission_event_idx ON records(admission_event_id) WHERE admission_event_id<>''`)
+	return err
+}
+
 func (l *SQLite) migrateExternalWorkIndex(ctx context.Context) error {
 	if _, err := l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS external_work (
 organization_id TEXT NOT NULL, request_id TEXT NOT NULL, correlation_id TEXT NOT NULL, intent_id TEXT NOT NULL,
@@ -92,18 +127,13 @@ PRIMARY KEY(organization_id, task_id));
 CREATE INDEX IF NOT EXISTS external_tasks_correlation_idx ON external_tasks(organization_id, correlation_id);`); err != nil {
 		return fmt.Errorf("create external work index: %w", err)
 	}
-	rows, err := l.db.QueryContext(ctx, `SELECT body FROM records WHERE kind='intent' ORDER BY record_id, version`)
+	intentBodies, err := l.Records(ctx, "intent", "")
 	if err != nil {
 		return fmt.Errorf("scan intents for external work migration: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
 	type workBinding struct{ organizationID, requestID, correlationID, intentID string }
 	var bindings []workBinding
-	for rows.Next() {
-		var body []byte
-		if err := rows.Scan(&body); err != nil {
-			return fmt.Errorf("read intent for external work migration: %w", err)
-		}
+	for _, body := range intentBodies {
 		var record events.ProjectionRecord
 		var intent core.Intent
 		if err := json.Unmarshal(body, &record); err != nil {
@@ -123,12 +153,6 @@ CREATE INDEX IF NOT EXISTS external_tasks_correlation_idx ON external_tasks(orga
 			return fmt.Errorf("external intent %q lacks migration identity", intent.ID)
 		}
 		bindings = append(bindings, workBinding{string(intent.OrganizationID), requestID, record.CorrelationID, string(intent.ID)})
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate intents for external work migration: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close intent migration rows: %w", err)
 	}
 	return l.withTx(ctx, func(tx *sql.Tx) error {
 		for _, binding := range bindings {
@@ -161,25 +185,9 @@ WHERE e.task_id<>'' AND t.correlation_id<>e.correlation_id)`).Scan(&conflictingT
 }
 
 func (l *SQLite) ensureEventRoutingColumns(ctx context.Context) error {
-	columns := map[string]bool{}
-	rows, err := l.db.QueryContext(ctx, `PRAGMA table_info(events)`)
+	columns, err := l.tableColumns(ctx, "events")
 	if err != nil {
-		return fmt.Errorf("inspect event schema: %w", err)
-	}
-	defer func() {
-		_ = rows.Close() // Iteration and close failures are reported by rows.Err.
-	}()
-	for rows.Next() {
-		var cid, notNull, primaryKey int
-		var name, columnType string
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			return fmt.Errorf("read event schema: %w", err)
-		}
-		columns[name] = true
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate event schema: %w", err)
+		return err
 	}
 	for name, ddl := range map[string]string{
 		"recipient_scope": `ALTER TABLE events ADD COLUMN recipient_scope TEXT NOT NULL DEFAULT ''`,
@@ -195,9 +203,44 @@ func (l *SQLite) ensureEventRoutingColumns(ctx context.Context) error {
 	return nil
 }
 
+func (l *SQLite) tableColumns(ctx context.Context, table string) (map[string]bool, error) {
+	var query string
+	switch table {
+	case "events":
+		query = `PRAGMA table_info(events)`
+	case "records":
+		query = `PRAGMA table_info(records)`
+	default:
+		return nil, fmt.Errorf("unsupported schema table %q", table)
+	}
+	rows, err := l.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+	defer func() {
+		_ = rows.Close() // Iteration and close failures are reported by rows.Err.
+	}()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return nil, fmt.Errorf("read %s schema: %w", table, err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate %s schema: %w", table, err)
+	}
+	return columns, nil
+}
+
 type preparedProjection struct {
 	draft      events.ProjectionDraft
 	eventDraft events.TrustedDraft
+	record     events.ProjectionRecord
+	detail     json.RawMessage
 	body       []byte
 	mission    *core.Mission
 	goal       *core.Goal
@@ -231,7 +274,7 @@ func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, ac
 
 func genericRecordKindAllowed(kind string) bool {
 	switch kind {
-	case "approval", "capability_lease", "effect", "knowledge", "organization_freeze":
+	case "approval", "authorization_trace", "capability_lease", "effect", "knowledge", "organization_freeze":
 		return true
 	default:
 		return false
@@ -531,8 +574,8 @@ func validateAchievedGoal(ctx context.Context, tx *sql.Tx, organizationID string
 	if err := validateGoalMissionForProgress(ctx, tx, organizationID, goal, false); err != nil {
 		return events.GoalProgressAdmission{}, err
 	}
-	var priorBody []byte
-	if err := tx.QueryRowContext(ctx, `SELECT body FROM records WHERE kind='goal' AND record_id=? AND version=?`, string(goal.ID), record.Version-1).Scan(&priorBody); err != nil {
+	priorBody, found, err := recordBodyAtVersion(ctx, tx, "goal", string(goal.ID), record.Version-1)
+	if err != nil || !found {
 		return events.GoalProgressAdmission{}, fmt.Errorf("read pre-achievement Goal revision: %w", err)
 	}
 	var priorRecord events.ProjectionRecord
@@ -612,8 +655,8 @@ FROM events WHERE organization_id=? AND sequence<? AND json_extract(payload,'$.p
 		event.EventType != activeMissionEvent(payload.Projection.Version) || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != "" || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID != payload.Projection.CorrelationID || event.SchemaVersion != events.SchemaVersion {
 		return fmt.Errorf("mission was not active on its runtime-owned evaluation boundary")
 	}
-	var body []byte
-	if err := tx.QueryRowContext(ctx, `SELECT body FROM records WHERE kind='mission' AND record_id=? AND version=?`, string(missionID), payload.Projection.Version).Scan(&body); err != nil {
+	body, found, err := recordBodyAtVersion(ctx, tx, "mission", string(missionID), payload.Projection.Version)
+	if err != nil || !found {
 		return fmt.Errorf("read mission revision at evaluation: %w", err)
 	}
 	var record events.ProjectionRecord
@@ -814,7 +857,7 @@ func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.Projecti
 		if err != nil {
 			return fmt.Errorf("read Agent execution route boundary: %w", err)
 		}
-		teamBodies, err := collectRecordBodies(tx.QueryContext(ctx, `SELECT body FROM records WHERE kind='team' ORDER BY record_id,version`))
+		teamBodies, err := admittedProjectionRecordBodies(ctx, tx, `WHERE r.kind='team' ORDER BY r.record_id,r.version`)
 		if err != nil {
 			return fmt.Errorf("read Agent execution Team history: %w", err)
 		}
@@ -877,8 +920,7 @@ func prepareProjection(draft events.ProjectionDraft, allowWorkCompletion, allowG
 		return preparedProjection{}, fmt.Errorf("encode projection event detail: %w", err)
 	}
 	eventDraft := draft.Event
-	eventDraft.Payload = events.ProjectionEventPayload{Projection: record, Detail: detail}
-	item := preparedProjection{draft: draft, eventDraft: eventDraft, body: body}
+	item := preparedProjection{draft: draft, eventDraft: eventDraft, record: record, detail: detail, body: body}
 	switch draft.ProjectionKind {
 	case "mission":
 		var mission core.Mission
@@ -987,11 +1029,11 @@ func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProj
 			return events.Event{}, err
 		}
 	}
-	event, err := appendEvent(ctx, tx, item.eventDraft)
+	event, payload, err := appendProjectionEvent(ctx, tx, item.eventDraft, item.record, item.detail)
 	if err != nil {
 		return events.Event{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, item.draft.ProjectionKind, item.draft.RecordID, item.draft.Version, item.body, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,admission_event_id,admission_fingerprint,created_at) VALUES(?,?,?,?,?,?,?)`, item.draft.ProjectionKind, item.draft.RecordID, item.draft.Version, item.body, event.EventID, payload.Admission.Fingerprint, event.CreatedAt.Format(time.RFC3339Nano)); err != nil {
 		return events.Event{}, fmt.Errorf("append projection: %w", err)
 	}
 	if item.intent != nil && item.intent.ExternalRequestID != "" {
@@ -1450,7 +1492,7 @@ func validateWorkCompletionEvidence(ctx context.Context, tx *sql.Tx, item prepar
 		}
 		profiles[profileID] = profile
 	}
-	teamBodies, err := collectRecordBodies(tx.QueryContext(ctx, `SELECT body FROM records WHERE kind='team' ORDER BY record_id,version`))
+	teamBodies, err := admittedProjectionRecordBodies(ctx, tx, `WHERE r.kind='team' ORDER BY r.record_id,r.version`)
 	if err != nil {
 		return fmt.Errorf("read work completion Teams: %w", err)
 	}
@@ -1755,6 +1797,16 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, obligation
 }
 
 func latestRecordBody(ctx context.Context, tx *sql.Tx, kind, id string) ([]byte, bool, error) {
+	if !genericRecordKindAllowed(kind) {
+		bodies, err := admittedProjectionRecordBodies(ctx, tx, `WHERE r.kind=? AND r.record_id=? ORDER BY r.version DESC LIMIT 1`, kind, id)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(bodies) == 0 {
+			return nil, false, nil
+		}
+		return bodies[0], true, nil
+	}
 	var body []byte
 	err := tx.QueryRowContext(ctx, `SELECT body FROM records WHERE kind=? AND record_id=? ORDER BY version DESC LIMIT 1`, kind, id).Scan(&body)
 	if err == sql.ErrNoRows {
@@ -1764,6 +1816,30 @@ func latestRecordBody(ctx context.Context, tx *sql.Tx, kind, id string) ([]byte,
 		return nil, false, err
 	}
 	return body, true, nil
+}
+
+func recordBodyAtVersion(ctx context.Context, queryer rowsQueryer, kind, id string, version int) ([]byte, bool, error) {
+	if kind == "" || id == "" || version < 1 {
+		return nil, false, fmt.Errorf("complete record version identity is required")
+	}
+	if !genericRecordKindAllowed(kind) {
+		bodies, err := admittedProjectionRecordBodies(ctx, queryer, `WHERE r.kind=? AND r.record_id=? AND r.version=?`, kind, id, version)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(bodies) == 0 {
+			return nil, false, nil
+		}
+		return bodies[0], true, nil
+	}
+	rows, err := collectRecordBodies(queryer.QueryContext(ctx, `SELECT body FROM records WHERE kind=? AND record_id=? AND version=?`, kind, id, version))
+	if err != nil {
+		return nil, false, err
+	}
+	if len(rows) == 0 {
+		return nil, false, nil
+	}
+	return rows[0], true, nil
 }
 
 func nextRecordVersion(ctx context.Context, tx *sql.Tx, kind, id string) (int, error) {
@@ -1799,6 +1875,9 @@ func (l *SQLite) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
 }
 
 func (l *SQLite) Records(ctx context.Context, kind, id string) ([][]byte, error) {
+	if !genericRecordKindAllowed(kind) {
+		return admittedProjectionRecordBodies(ctx, l.db, `WHERE r.kind=? AND (?='' OR r.record_id=?) ORDER BY r.record_id,r.version`, kind, id, id)
+	}
 	return collectRecordBodies(l.db.QueryContext(ctx, `SELECT body FROM records WHERE kind=? AND (?='' OR record_id=?) ORDER BY record_id,version`, kind, id, id))
 }
 
@@ -1817,6 +1896,16 @@ func latestRecordBodies(ctx context.Context, queryer rowsQueryer, kind string) (
 	if kind == "" {
 		return nil, fmt.Errorf("record kind is required")
 	}
+	if !genericRecordKindAllowed(kind) {
+		return admittedProjectionRecordBodies(ctx, queryer, `JOIN (
+	SELECT record_id, MAX(version) AS version
+	FROM records
+	WHERE kind=?
+	GROUP BY record_id
+) AS latest ON latest.record_id=r.record_id AND latest.version=r.version
+WHERE r.kind=?
+ORDER BY r.record_id`, kind, kind)
+	}
 	return collectRecordBodies(queryer.QueryContext(ctx, `SELECT current.body
 FROM records AS current
 JOIN (
@@ -1827,6 +1916,48 @@ JOIN (
 ) AS latest ON latest.record_id=current.record_id AND latest.version=current.version
 WHERE current.kind=?
 ORDER BY current.record_id`, kind, kind))
+}
+
+func admittedProjectionRecordBodies(ctx context.Context, queryer rowsQueryer, suffix string, args ...any) ([][]byte, error) {
+	query := `SELECT r.body,r.kind,r.record_id,r.version,r.admission_event_id,r.admission_fingerprint,
+e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version
+FROM records AS r
+LEFT JOIN events AS e ON e.event_id=r.admission_event_id ` + suffix
+	rows, err := queryer.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var bodies [][]byte
+	for rows.Next() {
+		var body []byte
+		var kind, recordID, admissionEventID, admissionFingerprint string
+		var version int
+		var event events.Event
+		var authorizationRefs, artifactRefs []byte
+		var createdAt string
+		if err := rows.Scan(&body, &kind, &recordID, &version, &admissionEventID, &admissionFingerprint,
+			&event.EventID, &event.Sequence, &event.OrganizationID, &event.EventType, &event.SourceActorID, &event.SourceExecutionID, &event.RecipientScope, &event.RecipientID, &event.TaskID,
+			&authorizationRefs, &artifactRefs, &event.Payload, &event.CorrelationID, &createdAt, &event.SchemaVersion); err != nil {
+			return nil, err
+		}
+		if json.Unmarshal(authorizationRefs, &event.AuthorizationRefs) != nil || json.Unmarshal(artifactRefs, &event.ArtifactRefs) != nil {
+			return nil, fmt.Errorf("projection admission event references are invalid")
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("projection admission event time is invalid")
+		}
+		event.CreatedAt = parsed
+		payload, present, err := events.AdmittedProjection(event)
+		var record events.ProjectionRecord
+		canonical, canonicalErr := json.Marshal(payload.Projection)
+		if err != nil || !present || canonicalErr != nil || !bytes.Equal(body, canonical) || decodeExactJSONBytes(body, &record) != nil || record.ProjectionKind != kind || record.RecordID != recordID || record.Version != version || !reflect.DeepEqual(record, payload.Projection) || admissionEventID != event.EventID || admissionEventID != payload.Admission.EventRef || admissionFingerprint != payload.Admission.Fingerprint {
+			return nil, fmt.Errorf("projection record %s/%s/%d lacks its exact event-coupled admission", kind, recordID, version)
+		}
+		bodies = append(bodies, body)
+	}
+	return bodies, rows.Err()
 }
 
 func collectRecordBodies(rows *sql.Rows, err error) ([][]byte, error) {
@@ -1848,6 +1979,12 @@ func collectRecordBodies(rows *sql.Rows, err error) ([][]byte, error) {
 }
 
 func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Event, error) {
+	if events.ReservesProjectionPayload(d.Payload) {
+		return events.Event{}, fmt.Errorf("projection payloads require typed admission")
+	}
+	if events.RequiresProjectionAdmission(d.EventType, d.SourceActorID) {
+		return events.Event{}, fmt.Errorf("projection lifecycle events require typed admission")
+	}
 	if d.EventType == "INBOX_EVENTS_OBSERVED" {
 		return events.Event{}, fmt.Errorf("inbox observations require atomic inbox admission")
 	}
@@ -1909,12 +2046,12 @@ func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.Trus
 			event = candidate
 			return nil
 		}
-		var body []byte
-		if err := tx.QueryRowContext(ctx, `SELECT body FROM records WHERE kind='goal' AND record_id=? ORDER BY version DESC LIMIT 1`, string(goalID)).Scan(&body); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("confirmed intent goal is unavailable")
-			}
+		body, found, err := latestRecordBody(ctx, tx, "goal", string(goalID))
+		if err != nil {
 			return fmt.Errorf("read confirmed intent goal: %w", err)
+		}
+		if !found {
+			return fmt.Errorf("confirmed intent goal is unavailable")
 		}
 		var record events.ProjectionRecord
 		var goal core.Goal
@@ -2121,8 +2258,11 @@ func resolveInboxObservationExecution(ctx context.Context, tx *sql.Tx, draft eve
 		if event.EventType != "EXECUTION_STARTED" || event.OrganizationID != draft.OrganizationID || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != draft.TaskID || event.CorrelationID != draft.CorrelationID {
 			continue
 		}
-		var payload events.ProjectionEventPayload
-		if json.Unmarshal(event.Payload, &payload) != nil || !reflect.DeepEqual(payload.Projection, record) {
+		payload, present, admissionErr := events.AdmittedProjection(event)
+		if admissionErr != nil {
+			return events.Event{}, admissionErr
+		}
+		if !present || !reflect.DeepEqual(payload.Projection, record) {
 			continue
 		}
 		if startEvent.EventID != "" {
@@ -2135,7 +2275,7 @@ func resolveInboxObservationExecution(ctx context.Context, tx *sql.Tx, draft eve
 	}
 	var teamRevisions map[core.ID][]events.TeamRevisionBinding
 	if recipientScope == events.RecipientTeam {
-		teamBodies, err := collectRecordBodies(tx.QueryContext(ctx, `SELECT body FROM records WHERE kind='team' ORDER BY record_id,version`))
+		teamBodies, err := admittedProjectionRecordBodies(ctx, tx, `WHERE r.kind='team' ORDER BY r.record_id,r.version`)
 		if err != nil {
 			return events.Event{}, fmt.Errorf("read inbox observation Team history: %w", err)
 		}
@@ -2171,18 +2311,64 @@ type sqlExecutor interface {
 }
 
 func appendEvent(ctx context.Context, db sqlExecutor, d events.TrustedDraft) (events.Event, error) {
+	id, err := newEventID()
+	if err != nil {
+		return events.Event{}, err
+	}
+	return appendEventWithID(ctx, db, d, id)
+}
+
+func newEventID() (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate event id: %w", err)
+	}
+	return "evt-" + hex.EncodeToString(random[:]), nil
+}
+
+func appendEventWithID(ctx context.Context, db sqlExecutor, d events.TrustedDraft, id string) (events.Event, error) {
+	if id == "" {
+		return events.Event{}, fmt.Errorf("event id is required")
+	}
 	data, err := json.Marshal(d.Payload)
 	if err != nil {
 		return events.Event{}, fmt.Errorf("encode event: %w", err)
 	}
+	return insertEvent(ctx, db, d, id, data, time.Now().UTC())
+}
+
+func appendProjectionEvent(ctx context.Context, db sqlExecutor, draft events.TrustedDraft, record events.ProjectionRecord, detail json.RawMessage) (events.Event, events.ProjectionEventPayload, error) {
+	id, err := newEventID()
+	if err != nil {
+		return events.Event{}, events.ProjectionEventPayload{}, err
+	}
+	event, err := insertEvent(ctx, db, draft, id, []byte(`{}`), time.Now().UTC())
+	if err != nil {
+		return events.Event{}, events.ProjectionEventPayload{}, err
+	}
+	payload, err := events.SealProjectionEvent(event, record, detail)
+	if err != nil {
+		return events.Event{}, events.ProjectionEventPayload{}, err
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return events.Event{}, events.ProjectionEventPayload{}, fmt.Errorf("encode projection event: %w", err)
+	}
+	result, err := db.ExecContext(ctx, `UPDATE events SET payload=? WHERE event_id=? AND sequence=?`, data, event.EventID, event.Sequence)
+	if err != nil {
+		return events.Event{}, events.ProjectionEventPayload{}, fmt.Errorf("seal projection event: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil || updated != 1 {
+		return events.Event{}, events.ProjectionEventPayload{}, fmt.Errorf("seal projection event boundary")
+	}
+	event.Payload = data
+	return event, payload, nil
+}
+
+func insertEvent(ctx context.Context, db sqlExecutor, d events.TrustedDraft, id string, data []byte, now time.Time) (events.Event, error) {
 	auth, _ := json.Marshal(d.AuthorizationRefs)
 	artifacts, _ := json.Marshal(d.ArtifactRefs)
-	now := time.Now().UTC()
-	var random [16]byte
-	if _, err := rand.Read(random[:]); err != nil {
-		return events.Event{}, fmt.Errorf("generate event id: %w", err)
-	}
-	id := "evt-" + hex.EncodeToString(random[:])
 	r, err := db.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, d.OrganizationID, d.EventType, d.SourceActorID, d.SourceExecutionID, d.RecipientScope, d.RecipientID, d.TaskID, auth, artifacts, data, d.CorrelationID, now.Format(time.RFC3339Nano), events.SchemaVersion)
 	if err != nil {
 		return events.Event{}, fmt.Errorf("append event: %w", err)

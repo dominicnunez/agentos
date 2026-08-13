@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -128,11 +129,12 @@ func insertLegacyProjection(ctx context.Context, l *SQLite, eventType, kind, rec
 	if err != nil {
 		return err
 	}
-	payload := events.ProjectionEventPayload{Projection: record}
-	if _, err := appendEvent(ctx, l.db, events.TrustedDraft{OrganizationID: "org-1", EventType: eventType, SourceActorID: "runtime", TaskID: taskID, CorrelationID: "legacy-request", Payload: payload}); err != nil {
+	draft := events.TrustedDraft{OrganizationID: "org-1", EventType: eventType, SourceActorID: "runtime", TaskID: taskID, CorrelationID: "legacy-request"}
+	event, payload, err := appendProjectionEvent(ctx, l.db, draft, record, nil)
+	if err != nil {
 		return err
 	}
-	_, err = l.db.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, kind, recordID, 1, body, time.Now().UTC().Format(time.RFC3339Nano))
+	_, err = l.db.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,admission_event_id,admission_fingerprint,created_at) VALUES(?,?,?,?,?,?,?)`, kind, recordID, 1, body, event.EventID, payload.Admission.Fingerprint, event.CreatedAt.Format(time.RFC3339Nano))
 	return err
 }
 
@@ -146,7 +148,7 @@ func TestAppendAndRead(t *testing.T) {
 			t.Errorf("close ledger: %v", err)
 		}
 	})
-	e, err := l.Append(context.Background(), events.TrustedDraft{OrganizationID: "o", EventType: "TASK_CREATED", TaskID: "1", Payload: map[string]string{"ok": "yes"}, CorrelationID: "c"})
+	e, err := l.Append(context.Background(), events.TrustedDraft{OrganizationID: "o", EventType: "AUDIT_NOTE", TaskID: "1", Payload: map[string]string{"ok": "yes"}, CorrelationID: "c"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,6 +220,118 @@ func TestProjectionVersionConflictRollsBackItsEvent(t *testing.T) {
 	available, err := l.Inbox(ctx, events.RecipientTask, "task-parent")
 	if err != nil || len(available) != 1 || available[0].EventID != stream[0].EventID {
 		t.Fatalf("projection failure changed addressed availability: inbox=%+v err=%v", available, err)
+	}
+}
+
+func TestProjectionRecordLoadsRequireExactEventAdmission(t *testing.T) {
+	for name, corrupt := range map[string]func(context.Context, *SQLite) error{
+		"record fingerprint": func(ctx context.Context, store *SQLite) error {
+			_, err := store.db.ExecContext(ctx, `UPDATE records SET admission_fingerprint=? WHERE kind='task' AND record_id='task-1'`, strings.Repeat("0", 64))
+			return err
+		},
+		"record event reference": func(ctx context.Context, store *SQLite) error {
+			_, err := store.db.ExecContext(ctx, `UPDATE records SET admission_event_id='missing-event' WHERE kind='task' AND record_id='task-1'`)
+			return err
+		},
+		"event envelope": func(ctx context.Context, store *SQLite) error {
+			_, err := store.db.ExecContext(ctx, `UPDATE events SET organization_id='org-2' WHERE correlation_id='work-1'`)
+			return err
+		},
+		"event sequence": func(ctx context.Context, store *SQLite) error {
+			_, err := store.db.ExecContext(ctx, `UPDATE events SET sequence=sequence+100 WHERE correlation_id='work-1'`)
+			return err
+		},
+		"event time": func(ctx context.Context, store *SQLite) error {
+			_, err := store.db.ExecContext(ctx, `UPDATE events SET created_at='2030-01-01T00:00:00Z' WHERE correlation_id='work-1'`)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			event, err := store.AppendProjection(ctx, events.ProjectionDraft{
+				Event: events.TrustedDraft{
+					OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime",
+					TaskID: "task-1", CorrelationID: "work-1",
+				},
+				ProjectionKind: "task", RecordID: "task-1", Version: 1,
+				Value: core.Task{ID: "task-1", WorkID: "work-1", Status: core.TaskPending},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, present, err := events.AdmittedProjection(event)
+			if err != nil || !present || payload.Admission.EventRef != event.EventID {
+				t.Fatalf("projection was not sealed: present=%t payload=%+v err=%v", present, payload, err)
+			}
+			if records, err := store.Records(ctx, "task", "task-1"); err != nil || len(records) != 1 {
+				t.Fatalf("valid admitted record unavailable: records=%d err=%v", len(records), err)
+			}
+			if err := corrupt(ctx, store); err != nil {
+				t.Fatal(err)
+			}
+			if records, err := store.Records(ctx, "task", "task-1"); err == nil || len(records) != 0 {
+				t.Fatalf("corrupt admission was returned: records=%d err=%v", len(records), err)
+			}
+			if records, err := store.LatestRecords(ctx, "task"); err == nil || len(records) != 0 {
+				t.Fatalf("corrupt latest admission was returned: records=%d err=%v", len(records), err)
+			}
+		})
+	}
+}
+
+func TestGenericSQLiteAppendCannotMintProjectionAuthority(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	for name, draft := range map[string]events.TrustedDraft{
+		"reserved payload": {
+			OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "work-1",
+			Payload: map[string]any{"projection": map[string]string{"record_id": "team-1"}},
+		},
+		"projection event": {
+			OrganizationID: "org-1", EventType: "TEAM_CREATED", SourceActorID: "runtime", CorrelationID: "work-1",
+			Payload: map[string]string{"note": "ordinary payload"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := store.Append(ctx, draft); err == nil {
+				t.Fatalf("generic append accepted %s", name)
+			}
+		})
+	}
+	stream, err := store.Events(ctx, "")
+	if err != nil || len(stream) != 0 {
+		t.Fatalf("rejected generic projections changed ledger: events=%d err=%v", len(stream), err)
+	}
+}
+
+func TestOpenRejectsNonemptyPreAdmissionProjectionSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pre-admission.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE records(
+kind TEXT NOT NULL, record_id TEXT NOT NULL, version INTEGER NOT NULL, body BLOB NOT NULL,
+created_at TEXT NOT NULL, PRIMARY KEY(kind,record_id,version));
+INSERT INTO records(kind,record_id,version,body,created_at) VALUES('task','task-1',1,'{}','now');`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if store, err := Open(path); err == nil {
+		_ = store.Close()
+		t.Fatal("nonempty pre-admission projection schema was migrated permissively")
 	}
 }
 
