@@ -22,7 +22,9 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
-	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintVersion: "v1", ExecutionProfileVersion: "v1", RuntimeAdapter: "fake", Status: "ACTIVE"}
+	blueprint := core.AgentBlueprint{ID: "blueprint-1", OrganizationID: organization.ID, Version: "blueprint-v1", Role: "worker", OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE", CreatedAt: now}
+	profile := core.ExecutionProfile{ID: "profile-1", OrganizationID: organization.ID, Version: "profile-v1", ModelProvider: "fake", Model: "fake-model/v1", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE", CreatedAt: now}
+	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "fake", Status: "ACTIVE"}
 	team := core.Team{ID: "team-1", OrganizationID: organization.ID, Name: "Delivery", MemberAgentIDs: []core.ID{agent.ID}, Status: "ACTIVE", CreatedAt: now}
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "echo hello", NormalizedObjective: "echo hello", HardConstraints: []string{}, ConsequenceBoundaries: []string{}, CreatedAt: now}
 	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: "echo hello", Status: "ACTIVE", CreatedAt: now}
@@ -31,6 +33,12 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 	for _, save := range []func() error{
 		func() error {
 			return repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "request-1", 1, organization, nil)
+		},
+		func() error {
+			return repository.SaveAgentBlueprint(ctx, "AGENT_BLUEPRINT_CREATED", "runtime", "request-1", 1, blueprint, nil)
+		},
+		func() error {
+			return repository.SaveExecutionProfile(ctx, "EXECUTION_PROFILE_CREATED", "runtime", "request-1", 1, profile, nil)
 		},
 		func() error { return repository.SaveAgent(ctx, "AGENT_CREATED", "runtime", "request-1", 1, agent, nil) },
 		func() error { return repository.SaveTeam(ctx, "TEAM_CREATED", "runtime", "request-1", 1, team, nil) },
@@ -78,6 +86,9 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 	if loaded.Organizations[organization.ID].Value != organization || loaded.Agents[agent.ID].Value != agent {
 		t.Fatalf("durable identity changed after restart: org=%+v agent=%+v", loaded.Organizations[organization.ID].Value, loaded.Agents[agent.ID].Value)
 	}
+	if !reflect.DeepEqual(loaded.AgentBlueprints[blueprint.ID].Value, blueprint) || !reflect.DeepEqual(loaded.ExecutionProfiles[profile.ID].Value, profile) {
+		t.Fatalf("durable roster configuration changed after restart: blueprint=%+v profile=%+v", loaded.AgentBlueprints[blueprint.ID].Value, loaded.ExecutionProfiles[profile.ID].Value)
+	}
 	if !reflect.DeepEqual(loaded.Teams[team.ID].Value, team) {
 		t.Fatalf("team changed after restart: %+v", loaded.Teams[team.ID].Value)
 	}
@@ -115,6 +126,43 @@ func TestSnapshotRejectsCrossBoundaryTaskGraph(t *testing.T) {
 			mutate(snapshot)
 			if err := validateSnapshot(snapshot); err == nil {
 				t.Fatal("cross-boundary graph was accepted")
+			}
+		})
+	}
+}
+
+func TestSnapshotRejectsMalformedDurableRoster(t *testing.T) {
+	tests := map[string]func(Snapshot){
+		"missing blueprint": func(snapshot Snapshot) {
+			delete(snapshot.AgentBlueprints, "blueprint-1")
+		},
+		"wrong blueprint version": func(snapshot Snapshot) {
+			agent := snapshot.Agents["agent-1"]
+			agent.Value.BlueprintVersion = "other"
+			snapshot.Agents["agent-1"] = agent
+		},
+		"cross-organization profile": func(snapshot Snapshot) {
+			profile := snapshot.ExecutionProfiles["profile-1"]
+			profile.Value.OrganizationID = "org-2"
+			snapshot.ExecutionProfiles["profile-1"] = profile
+		},
+		"duplicate capability prerequisite": func(snapshot Snapshot) {
+			blueprint := snapshot.AgentBlueprints["blueprint-1"]
+			blueprint.Value.RequiredCapabilityClasses = []string{"repository.write", "repository.write"}
+			snapshot.AgentBlueprints["blueprint-1"] = blueprint
+		},
+		"unknown Agent status": func(snapshot Snapshot) {
+			agent := snapshot.Agents["agent-1"]
+			agent.Value.Status = "UNKNOWN"
+			snapshot.Agents["agent-1"] = agent
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			snapshot := validRosterSnapshot()
+			mutate(snapshot)
+			if err := validateSnapshot(snapshot); err == nil {
+				t.Fatal("malformed durable roster was accepted")
 			}
 		})
 	}
@@ -189,7 +237,21 @@ func validBoundarySnapshot() Snapshot {
 		"task-2": {CorrelationID: "work-2", Value: core.Task{ID: "task-2", GoalID: "goal-2"}},
 	}
 	return Snapshot{
-		Organizations: organizations, Teams: map[core.ID]Versioned[core.Team]{}, Agents: map[core.ID]Versioned[core.Agent]{},
+		Organizations: organizations, Teams: map[core.ID]Versioned[core.Team]{}, AgentBlueprints: map[core.ID]Versioned[core.AgentBlueprint]{}, ExecutionProfiles: map[core.ID]Versioned[core.ExecutionProfile]{}, Agents: map[core.ID]Versioned[core.Agent]{},
 		Intents: intents, Goals: goals, Tasks: tasks,
+	}
+}
+
+func validRosterSnapshot() Snapshot {
+	organization := core.Organization{ID: "org-1"}
+	otherOrganization := core.Organization{ID: "org-2"}
+	blueprint := core.AgentBlueprint{ID: "blueprint-1", OrganizationID: organization.ID, Version: "blueprint-v1", Role: "worker", OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE"}
+	profile := core.ExecutionProfile{ID: "profile-1", OrganizationID: organization.ID, Version: "profile-v1", ModelProvider: "provider", Model: "model", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE"}
+	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "local", Status: "ACTIVE"}
+	return Snapshot{
+		Organizations: map[core.ID]Versioned[core.Organization]{organization.ID: {Value: organization}, otherOrganization.ID: {Value: otherOrganization}},
+		Teams:         map[core.ID]Versioned[core.Team]{}, AgentBlueprints: map[core.ID]Versioned[core.AgentBlueprint]{blueprint.ID: {Value: blueprint}},
+		ExecutionProfiles: map[core.ID]Versioned[core.ExecutionProfile]{profile.ID: {Value: profile}}, Agents: map[core.ID]Versioned[core.Agent]{agent.ID: {Value: agent}},
+		Intents: map[core.ID]Versioned[core.Intent]{}, Goals: map[core.ID]Versioned[core.Goal]{}, Tasks: map[core.ID]Versioned[core.Task]{},
 	}
 }

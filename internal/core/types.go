@@ -27,10 +27,34 @@ type Team struct {
 	Status         string    `json:"status"`
 	CreatedAt      time.Time `json:"created_at"`
 }
+type AgentBlueprint struct {
+	ID                        ID        `json:"id"`
+	OrganizationID            ID        `json:"organization_id"`
+	Version                   string    `json:"version"`
+	Role                      string    `json:"role"`
+	OperatingInstructions     string    `json:"operating_instructions"`
+	RequiredCapabilityClasses []string  `json:"required_capability_classes"`
+	Status                    string    `json:"status"`
+	CreatedAt                 time.Time `json:"created_at"`
+}
+type ExecutionProfile struct {
+	ID               ID        `json:"id"`
+	OrganizationID   ID        `json:"organization_id"`
+	Version          string    `json:"version"`
+	ModelProvider    string    `json:"model_provider"`
+	Model            string    `json:"model"`
+	ReasoningSetting string    `json:"reasoning_setting,omitempty"`
+	PromptVersion    string    `json:"prompt_version"`
+	ToolRefs         []string  `json:"tool_refs"`
+	Status           string    `json:"status"`
+	CreatedAt        time.Time `json:"created_at"`
+}
 type Agent struct {
 	ID                      ID     `json:"id"`
 	OrganizationID          ID     `json:"organization_id"`
+	BlueprintID             ID     `json:"blueprint_id"`
 	BlueprintVersion        string `json:"blueprint_version"`
+	ExecutionProfileID      ID     `json:"execution_profile_id"`
 	ExecutionProfileVersion string `json:"execution_profile_version"`
 	RuntimeAdapter          string `json:"runtime_adapter"`
 	Status                  string `json:"status"`
@@ -257,7 +281,9 @@ type VersionedRef struct {
 type ExecutionContextManifest struct {
 	ExecutionID             ID             `json:"execution_id"`
 	AgentID                 ID             `json:"agent_id"`
+	AgentBlueprintVersion   string         `json:"agent_blueprint_version"`
 	ExecutionProfileVersion string         `json:"execution_profile_version"`
+	RuntimeAdapter          string         `json:"runtime_adapter"`
 	Provider                string         `json:"provider,omitempty"`
 	Model                   string         `json:"model,omitempty"`
 	TaskID                  ID             `json:"task_id"`

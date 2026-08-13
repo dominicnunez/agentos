@@ -131,7 +131,7 @@ func TestIntakeKeepsSourceProvenance(t *testing.T) {
 	externalAgent.WorkScope = WorkScopeOrganization
 
 	view, err := submitAndConfirm(t, ctx, service, human, Message{ConversationID: "human-work", MessageID: "human-message-1", Text: "draft a concise release update"})
-	if err != nil || view.State != StateCompleted || !strings.HasPrefix(view.Result, "fake-model: Execute only this accepted Agent OS Intent.") || !strings.Contains(view.Result, `"objective":"draft a concise release update"`) {
+	if err != nil || view.State != StateCompleted || !strings.HasPrefix(view.Result, "fake-model: Operate only as this runtime-selected durable Agent blueprint.") || !strings.Contains(view.Result, `"objective":"draft a concise release update"`) {
 		t.Fatalf("human view=%+v err=%v", view, err)
 	}
 	intent, task, stream := projectedWork(t, store, "human-work")

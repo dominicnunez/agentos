@@ -12,12 +12,14 @@ import (
 )
 
 const (
-	KindOrganization = "organization"
-	KindTeam         = "team"
-	KindAgent        = "agent"
-	KindIntent       = "intent"
-	KindGoal         = "goal"
-	KindTask         = "task"
+	KindOrganization     = "organization"
+	KindTeam             = "team"
+	KindAgentBlueprint   = "agent_blueprint"
+	KindExecutionProfile = "execution_profile"
+	KindAgent            = "agent"
+	KindIntent           = "intent"
+	KindGoal             = "goal"
+	KindTask             = "task"
 )
 
 type Versioned[T any] struct {
@@ -30,12 +32,14 @@ type Versioned[T any] struct {
 }
 
 type Snapshot struct {
-	Organizations map[core.ID]Versioned[core.Organization]
-	Teams         map[core.ID]Versioned[core.Team]
-	Agents        map[core.ID]Versioned[core.Agent]
-	Intents       map[core.ID]Versioned[core.Intent]
-	Goals         map[core.ID]Versioned[core.Goal]
-	Tasks         map[core.ID]Versioned[core.Task]
+	Organizations     map[core.ID]Versioned[core.Organization]
+	Teams             map[core.ID]Versioned[core.Team]
+	AgentBlueprints   map[core.ID]Versioned[core.AgentBlueprint]
+	ExecutionProfiles map[core.ID]Versioned[core.ExecutionProfile]
+	Agents            map[core.ID]Versioned[core.Agent]
+	Intents           map[core.ID]Versioned[core.Intent]
+	Goals             map[core.ID]Versioned[core.Goal]
+	Tasks             map[core.ID]Versioned[core.Task]
 }
 
 type Repository struct{ gateway *events.Gateway }
@@ -48,6 +52,14 @@ func (r *Repository) SaveOrganization(ctx context.Context, eventType, actorID, c
 
 func (r *Repository) SaveTeam(ctx context.Context, eventType, actorID, correlationID string, version int, value core.Team, detail any) error {
 	return r.save(ctx, string(value.OrganizationID), eventType, actorID, "", correlationID, KindTeam, value.ID, version, value, detail)
+}
+
+func (r *Repository) SaveAgentBlueprint(ctx context.Context, eventType, actorID, correlationID string, version int, value core.AgentBlueprint, detail any) error {
+	return r.save(ctx, string(value.OrganizationID), eventType, actorID, "", correlationID, KindAgentBlueprint, value.ID, version, value, detail)
+}
+
+func (r *Repository) SaveExecutionProfile(ctx context.Context, eventType, actorID, correlationID string, version int, value core.ExecutionProfile, detail any) error {
+	return r.save(ctx, string(value.OrganizationID), eventType, actorID, "", correlationID, KindExecutionProfile, value.ID, version, value, detail)
 }
 
 func (r *Repository) SaveAgent(ctx context.Context, eventType, actorID, correlationID string, version int, value core.Agent, detail any) error {
@@ -163,7 +175,7 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 
 func (r *Repository) loadFromRecords(ctx context.Context) (Snapshot, error) {
 	records := make(map[string][][]byte)
-	for _, kind := range []string{KindOrganization, KindTeam, KindAgent, KindIntent, KindGoal, KindTask} {
+	for _, kind := range []string{KindOrganization, KindTeam, KindAgentBlueprint, KindExecutionProfile, KindAgent, KindIntent, KindGoal, KindTask} {
 		rows, err := r.gateway.ProjectionRecords(ctx, kind, "")
 		if err != nil {
 			return Snapshot{}, err
@@ -175,18 +187,26 @@ func (r *Repository) loadFromRecords(ctx context.Context) (Snapshot, error) {
 
 func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 	snapshot := Snapshot{
-		Organizations: make(map[core.ID]Versioned[core.Organization]),
-		Teams:         make(map[core.ID]Versioned[core.Team]),
-		Agents:        make(map[core.ID]Versioned[core.Agent]),
-		Intents:       make(map[core.ID]Versioned[core.Intent]),
-		Goals:         make(map[core.ID]Versioned[core.Goal]),
-		Tasks:         make(map[core.ID]Versioned[core.Task]),
+		Organizations:     make(map[core.ID]Versioned[core.Organization]),
+		Teams:             make(map[core.ID]Versioned[core.Team]),
+		AgentBlueprints:   make(map[core.ID]Versioned[core.AgentBlueprint]),
+		ExecutionProfiles: make(map[core.ID]Versioned[core.ExecutionProfile]),
+		Agents:            make(map[core.ID]Versioned[core.Agent]),
+		Intents:           make(map[core.ID]Versioned[core.Intent]),
+		Goals:             make(map[core.ID]Versioned[core.Goal]),
+		Tasks:             make(map[core.ID]Versioned[core.Task]),
 	}
 	if err := decodeKind(records[KindOrganization], snapshot.Organizations, false); err != nil {
 		return Snapshot{}, fmt.Errorf("decode organizations: %w", err)
 	}
 	if err := decodeKind(records[KindTeam], snapshot.Teams, false); err != nil {
 		return Snapshot{}, fmt.Errorf("decode teams: %w", err)
+	}
+	if err := decodeKind(records[KindAgentBlueprint], snapshot.AgentBlueprints, false); err != nil {
+		return Snapshot{}, fmt.Errorf("decode Agent blueprints: %w", err)
+	}
+	if err := decodeKind(records[KindExecutionProfile], snapshot.ExecutionProfiles, false); err != nil {
+		return Snapshot{}, fmt.Errorf("decode execution profiles: %w", err)
 	}
 	if err := decodeKind(records[KindAgent], snapshot.Agents, false); err != nil {
 		return Snapshot{}, fmt.Errorf("decode agents: %w", err)
@@ -244,7 +264,13 @@ func validateSnapshot(snapshot Snapshot) error {
 			return err
 		}
 	}
-	organized := make([]organizedIdentity, 0, len(snapshot.Agents)+len(snapshot.Teams)+len(snapshot.Intents))
+	organized := make([]organizedIdentity, 0, len(snapshot.AgentBlueprints)+len(snapshot.ExecutionProfiles)+len(snapshot.Agents)+len(snapshot.Teams)+len(snapshot.Intents))
+	for id, state := range snapshot.AgentBlueprints {
+		organized = append(organized, organizedIdentity{"Agent blueprint", id, state.Value.ID, state.Value.OrganizationID})
+	}
+	for id, state := range snapshot.ExecutionProfiles {
+		organized = append(organized, organizedIdentity{"execution profile", id, state.Value.ID, state.Value.OrganizationID})
+	}
 	for id, state := range snapshot.Agents {
 		organized = append(organized, organizedIdentity{"agent", id, state.Value.ID, state.Value.OrganizationID})
 	}
@@ -258,6 +284,9 @@ func validateSnapshot(snapshot Snapshot) error {
 		if err := validateOrganizedIdentity(record.kind, record.recordID, record.valueID, record.organizationID, snapshot.Organizations); err != nil {
 			return err
 		}
+	}
+	if err := validateRoster(snapshot); err != nil {
+		return err
 	}
 	for id, state := range snapshot.Teams {
 		for _, memberID := range state.Value.MemberAgentIDs {
@@ -319,6 +348,60 @@ func validateSnapshot(snapshot Snapshot) error {
 				return fmt.Errorf("task %s references invalid dependency %s", id, dependencyID)
 			}
 		}
+	}
+	return nil
+}
+
+func validateRoster(snapshot Snapshot) error {
+	for id, state := range snapshot.AgentBlueprints {
+		blueprint := state.Value
+		if blueprint.Version == "" || blueprint.Role == "" || blueprint.OperatingInstructions == "" || !validRosterStatus(blueprint.Status) {
+			return fmt.Errorf("Agent blueprint %s is incomplete", id)
+		}
+		if err := validateDistinctStrings("Agent blueprint required capability classes", id, blueprint.RequiredCapabilityClasses); err != nil {
+			return err
+		}
+	}
+	for id, state := range snapshot.ExecutionProfiles {
+		profile := state.Value
+		if profile.Version == "" || profile.ModelProvider == "" || profile.Model == "" || profile.PromptVersion == "" || !validRosterStatus(profile.Status) {
+			return fmt.Errorf("execution profile %s is incomplete", id)
+		}
+		if err := validateDistinctStrings("execution profile tool refs", id, profile.ToolRefs); err != nil {
+			return err
+		}
+	}
+	for id, state := range snapshot.Agents {
+		agent := state.Value
+		if agent.BlueprintID == "" || agent.BlueprintVersion == "" || agent.ExecutionProfileID == "" || agent.ExecutionProfileVersion == "" || agent.RuntimeAdapter == "" || !validRosterStatus(agent.Status) {
+			return fmt.Errorf("Agent %s is incomplete", id)
+		}
+		blueprint, ok := snapshot.AgentBlueprints[agent.BlueprintID]
+		if !ok || blueprint.Value.OrganizationID != agent.OrganizationID || blueprint.Value.Version != agent.BlueprintVersion {
+			return fmt.Errorf("Agent %s references invalid blueprint %s", id, agent.BlueprintID)
+		}
+		profile, ok := snapshot.ExecutionProfiles[agent.ExecutionProfileID]
+		if !ok || profile.Value.OrganizationID != agent.OrganizationID || profile.Value.Version != agent.ExecutionProfileVersion {
+			return fmt.Errorf("Agent %s references invalid execution profile %s", id, agent.ExecutionProfileID)
+		}
+	}
+	return nil
+}
+
+func validRosterStatus(status string) bool {
+	return status == "ACTIVE" || status == "INACTIVE"
+}
+
+func validateDistinctStrings(kind string, id core.ID, values []string) error {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value == "" {
+			return fmt.Errorf("%s %s contains an empty value", kind, id)
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return fmt.Errorf("%s %s contains duplicate value %s", kind, id, value)
+		}
+		seen[value] = struct{}{}
 	}
 	return nil
 }
