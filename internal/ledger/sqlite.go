@@ -522,6 +522,9 @@ ORDER BY record_id`)
 	if err != nil {
 		return fmt.Errorf("read current Goal admissions: %w", err)
 	}
+	defer func() {
+		finalErr = errors.Join(finalErr, rows.Close())
+	}()
 	var achieved []struct {
 		record events.ProjectionRecord
 		goal   core.Goal
@@ -533,7 +536,6 @@ ORDER BY record_id`)
 			goal   core.Goal
 		}
 		if err := rows.Scan(&body); err != nil || decodeExactJSONBytes(body, &candidate.record) != nil || decodeExactJSONBytes(candidate.record.Value, &candidate.goal) != nil || candidate.record.ProjectionKind != "goal" || candidate.record.RecordID != string(candidate.goal.ID) {
-			_ = rows.Close()
 			return fmt.Errorf("current Goal admission is invalid")
 		}
 		if candidate.goal.Status == core.GoalAchieved {
@@ -541,7 +543,6 @@ ORDER BY record_id`)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
 		return fmt.Errorf("iterate current Goal admissions: %w", err)
 	}
 	if err := rows.Close(); err != nil {
