@@ -273,8 +273,7 @@ func sameExecutionProfileRecord(left, right core.ExecutionProfile) bool {
 }
 
 func sameAgentRecord(left, right core.Agent) bool {
-	right.Status = left.Status
-	return left == right
+	return left.ID == right.ID && left.OrganizationID == right.OrganizationID
 }
 
 func validateSnapshot(snapshot Snapshot) error {
@@ -342,12 +341,21 @@ func validateSnapshot(snapshot Snapshot) error {
 		intent := snapshot.Intents[goal.Value.IntentID]
 		switch task.AssigneeType {
 		case "":
+			if task.AssigneeID != "" || task.AgentConfig != nil {
+				return fmt.Errorf("task %s has assignment details without an assignee type", id)
+			}
 		case "AGENT":
 			agent, ok := snapshot.Agents[task.AssigneeID]
 			if !ok || agent.Value.OrganizationID != intent.Value.OrganizationID {
 				return fmt.Errorf("task %s references invalid assignee agent %s", id, task.AssigneeID)
 			}
+			if err := validateTaskAgentConfig(id, task.AgentConfig, intent.Value.OrganizationID, snapshot); err != nil {
+				return err
+			}
 		case "TEAM":
+			if task.AgentConfig != nil {
+				return fmt.Errorf("task %s has Agent configuration for a Team assignment", id)
+			}
 			team, ok := snapshot.Teams[task.AssigneeID]
 			if !ok || team.Value.OrganizationID != intent.Value.OrganizationID {
 				return fmt.Errorf("task %s references invalid assignee team %s", id, task.AssigneeID)
@@ -367,6 +375,21 @@ func validateSnapshot(snapshot Snapshot) error {
 				return fmt.Errorf("task %s references invalid dependency %s", id, dependencyID)
 			}
 		}
+	}
+	return nil
+}
+
+func validateTaskAgentConfig(taskID core.ID, config *core.AgentConfig, organizationID core.ID, snapshot Snapshot) error {
+	if config == nil || config.BlueprintID == "" || config.BlueprintVersion == "" || config.ProfileID == "" || config.ProfileVersion == "" || config.RuntimeAdapter == "" {
+		return fmt.Errorf("task %s has incomplete pinned Agent configuration", taskID)
+	}
+	blueprint, ok := snapshot.AgentBlueprints[config.BlueprintID]
+	if !ok || blueprint.Value.OrganizationID != organizationID || blueprint.Value.Version != config.BlueprintVersion {
+		return fmt.Errorf("task %s references invalid pinned blueprint %s", taskID, config.BlueprintID)
+	}
+	profile, ok := snapshot.ExecutionProfiles[config.ProfileID]
+	if !ok || profile.Value.OrganizationID != organizationID || profile.Value.Version != config.ProfileVersion {
+		return fmt.Errorf("task %s references invalid pinned execution profile %s", taskID, config.ProfileID)
 	}
 	return nil
 }

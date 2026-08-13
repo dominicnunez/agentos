@@ -28,7 +28,7 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 	team := core.Team{ID: "team-1", OrganizationID: organization.ID, Name: "Delivery", MemberAgentIDs: []core.ID{agent.ID}, Status: "ACTIVE", CreatedAt: now}
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "echo hello", NormalizedObjective: "echo hello", HardConstraints: []string{}, ConsequenceBoundaries: []string{}, CreatedAt: now}
 	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: "echo hello", Status: "ACTIVE", CreatedAt: now}
-	task := core.Task{ID: "task-1", GoalID: goal.ID, Description: "echo hello", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	task := core.Task{ID: "task-1", GoalID: goal.ID, Description: "echo hello", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: rosterAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
 	repository := New(events.NewGateway(l))
 	for _, save := range []func() error{
 		func() error {
@@ -168,6 +168,31 @@ func TestSnapshotRejectsMalformedDurableRoster(t *testing.T) {
 	}
 }
 
+func TestSnapshotRejectsMalformedPinnedAgentConfiguration(t *testing.T) {
+	tests := map[string]func(*core.Task){
+		"missing configuration":   func(task *core.Task) { task.AgentConfig = nil },
+		"wrong blueprint version": func(task *core.Task) { task.AgentConfig.BlueprintVersion = "other" },
+		"missing profile":         func(task *core.Task) { task.AgentConfig.ProfileID = "missing" },
+		"missing runtime":         func(task *core.Task) { task.AgentConfig.RuntimeAdapter = "" },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			snapshot := validRosterSnapshot()
+			intent := core.Intent{ID: "intent-1", OrganizationID: "org-1"}
+			goal := core.Goal{ID: "goal-1", IntentID: intent.ID}
+			agent := snapshot.Agents["agent-1"].Value
+			task := core.Task{ID: "task-1", GoalID: goal.ID, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: rosterAgentConfig(agent)}
+			mutate(&task)
+			snapshot.Intents[intent.ID] = Versioned[core.Intent]{CorrelationID: "work-1", Value: intent}
+			snapshot.Goals[goal.ID] = Versioned[core.Goal]{CorrelationID: "work-1", Value: goal}
+			snapshot.Tasks[task.ID] = Versioned[core.Task]{CorrelationID: "work-1", Value: task}
+			if err := validateSnapshot(snapshot); err == nil {
+				t.Fatal("malformed pinned Agent configuration was accepted")
+			}
+		})
+	}
+}
+
 func TestDecodeKindRejectsHistoricalCorrelationChange(t *testing.T) {
 	records := make([][]byte, 0, 3)
 	for version, correlationID := range []string{"work-a", "work-b", "work-a"} {
@@ -189,7 +214,7 @@ func TestDecodeKindRejectsHistoricalCorrelationChange(t *testing.T) {
 	}
 }
 
-func TestRosterConfigurationCannotChangeWithinDurableIdentity(t *testing.T) {
+func TestRosterRevisionsPreserveConfigurationAndAgentIdentity(t *testing.T) {
 	blueprint := core.AgentBlueprint{ID: "blueprint-1", OrganizationID: "org-1", Version: "v1", Role: "worker", OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE", CreatedAt: time.Unix(1, 0).UTC()}
 	changedBlueprint := blueprint
 	changedBlueprint.OperatingInstructions = "expanded work"
@@ -207,14 +232,20 @@ func TestRosterConfigurationCannotChangeWithinDurableIdentity(t *testing.T) {
 	agent := core.Agent{ID: "agent-1", OrganizationID: "org-1", BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "local", Status: "ACTIVE"}
 	changedAgent := agent
 	changedAgent.ExecutionProfileID = "profile-2"
-	if err := decodeKind(projectionBodies(t, KindAgent, string(agent.ID), agent, changedAgent), map[core.ID]Versioned[core.Agent]{}, false, sameAgentRecord); err == nil {
-		t.Fatal("Agent binding changed without a new durable identity")
+	if err := decodeKind(projectionBodies(t, KindAgent, string(agent.ID), agent, changedAgent), map[core.ID]Versioned[core.Agent]{}, false, sameAgentRecord); err != nil {
+		t.Fatalf("Agent configuration revision changed its durable identity: %v", err)
 	}
 
 	inactive := agent
 	inactive.Status = "INACTIVE"
 	if err := decodeKind(projectionBodies(t, KindAgent, string(agent.ID), agent, inactive), map[core.ID]Versioned[core.Agent]{}, false, sameAgentRecord); err != nil {
 		t.Fatalf("status-only Agent transition was rejected: %v", err)
+	}
+
+	otherOrganization := agent
+	otherOrganization.OrganizationID = "org-2"
+	if err := decodeKind(projectionBodies(t, KindAgent, string(agent.ID), agent, otherOrganization), map[core.ID]Versioned[core.Agent]{}, false, sameAgentRecord); err == nil {
+		t.Fatal("Agent identity crossed its organization boundary")
 	}
 }
 
@@ -299,5 +330,13 @@ func validRosterSnapshot() Snapshot {
 		Teams:         map[core.ID]Versioned[core.Team]{}, AgentBlueprints: map[core.ID]Versioned[core.AgentBlueprint]{blueprint.ID: {Value: blueprint}},
 		ExecutionProfiles: map[core.ID]Versioned[core.ExecutionProfile]{profile.ID: {Value: profile}}, Agents: map[core.ID]Versioned[core.Agent]{agent.ID: {Value: agent}},
 		Intents: map[core.ID]Versioned[core.Intent]{}, Goals: map[core.ID]Versioned[core.Goal]{}, Tasks: map[core.ID]Versioned[core.Task]{},
+	}
+}
+
+func rosterAgentConfig(agent core.Agent) *core.AgentConfig {
+	return &core.AgentConfig{
+		BlueprintID: agent.BlueprintID, BlueprintVersion: agent.BlueprintVersion,
+		ProfileID: agent.ExecutionProfileID, ProfileVersion: agent.ExecutionProfileVersion,
+		RuntimeAdapter: agent.RuntimeAdapter,
 	}
 }

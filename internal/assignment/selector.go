@@ -66,7 +66,7 @@ func Select(roster Roster, requirement Requirement) (Selection, error) {
 // begins. A stale or tampered assignment therefore cannot fall back to another
 // Agent or silently change execution profiles.
 func ResolveAssigned(roster Roster, task core.Task, requirement Requirement) (Selection, error) {
-	if task.AssigneeType != "AGENT" || task.AssigneeID == "" {
+	if task.AssigneeType != "AGENT" || task.AssigneeID == "" || task.AgentConfig == nil {
 		return Selection{}, fmt.Errorf("task requires an explicit Agent assignment")
 	}
 	if task.ExecutionKind != requirement.ExecutionKind {
@@ -79,7 +79,7 @@ func ResolveAssigned(roster Roster, task core.Task, requirement Requirement) (Se
 	if !ok || agent.ID != task.AssigneeID {
 		return Selection{}, fmt.Errorf("assigned Agent is not in the durable roster")
 	}
-	selection, eligible := eligibleSelection(roster, agent, requirement)
+	selection, eligible := eligibleConfiguration(roster, agent, *task.AgentConfig, requirement)
 	if !eligible {
 		return Selection{}, fmt.Errorf("assigned Agent no longer satisfies the bounded assignment requirement")
 	}
@@ -108,15 +108,27 @@ func eligibleSelection(roster Roster, agent core.Agent, requirement Requirement)
 	if agent.ID == "" || agent.OrganizationID != requirement.OrganizationID || agent.Status != Active || agent.RuntimeAdapter != requirement.RuntimeAdapter {
 		return Selection{}, false
 	}
-	blueprint, ok := roster.Blueprints[agent.BlueprintID]
-	if !ok || blueprint.ID != agent.BlueprintID || blueprint.OrganizationID != requirement.OrganizationID || blueprint.Version != agent.BlueprintVersion || blueprint.Status != Active {
+	config := core.AgentConfig{
+		BlueprintID: agent.BlueprintID, BlueprintVersion: agent.BlueprintVersion,
+		ProfileID: agent.ExecutionProfileID, ProfileVersion: agent.ExecutionProfileVersion,
+		RuntimeAdapter: agent.RuntimeAdapter,
+	}
+	return eligibleConfiguration(roster, agent, config, requirement)
+}
+
+func eligibleConfiguration(roster Roster, agent core.Agent, config core.AgentConfig, requirement Requirement) (Selection, bool) {
+	if agent.ID == "" || agent.OrganizationID != requirement.OrganizationID || agent.Status != Active || config.RuntimeAdapter != requirement.RuntimeAdapter {
+		return Selection{}, false
+	}
+	blueprint, ok := roster.Blueprints[config.BlueprintID]
+	if !ok || blueprint.ID != config.BlueprintID || blueprint.OrganizationID != requirement.OrganizationID || blueprint.Version != config.BlueprintVersion || blueprint.Status != Active {
 		return Selection{}, false
 	}
 	if !containsAll(requirement.AvailableCapabilityClasses, blueprint.RequiredCapabilityClasses) {
 		return Selection{}, false
 	}
-	profile, ok := roster.ExecutionProfiles[agent.ExecutionProfileID]
-	if !ok || profile.ID != agent.ExecutionProfileID || profile.OrganizationID != requirement.OrganizationID || profile.Version != agent.ExecutionProfileVersion {
+	profile, ok := roster.ExecutionProfiles[config.ProfileID]
+	if !ok || profile.ID != config.ProfileID || profile.OrganizationID != requirement.OrganizationID || profile.Version != config.ProfileVersion {
 		return Selection{}, false
 	}
 	if requirement.ExecutionKind == core.ExecutionAgent {
@@ -126,6 +138,14 @@ func eligibleSelection(roster Roster, agent core.Agent, requirement Requirement)
 		}
 	}
 	return Selection{Agent: agent, Blueprint: blueprint, ExecutionProfile: profile}, true
+}
+
+func Config(selection Selection) *core.AgentConfig {
+	return &core.AgentConfig{
+		BlueprintID: selection.Blueprint.ID, BlueprintVersion: selection.Blueprint.Version,
+		ProfileID: selection.ExecutionProfile.ID, ProfileVersion: selection.ExecutionProfile.Version,
+		RuntimeAdapter: selection.Agent.RuntimeAdapter,
+	}
 }
 
 func containsAll(available, required []string) bool {

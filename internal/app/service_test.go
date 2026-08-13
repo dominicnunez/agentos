@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -48,6 +49,14 @@ func seedTestAgents(t *testing.T, ctx context.Context, repository *projections.R
 		agents = append(agents, agent)
 	}
 	return agents
+}
+
+func testAgentConfig(agent core.Agent) *core.AgentConfig {
+	return &core.AgentConfig{
+		BlueprintID: agent.BlueprintID, BlueprintVersion: agent.BlueprintVersion,
+		ProfileID: agent.ExecutionProfileID, ProfileVersion: agent.ExecutionProfileVersion,
+		RuntimeAdapter: agent.RuntimeAdapter,
+	}
 }
 
 func TestVerticalSlice(t *testing.T) {
@@ -527,6 +536,16 @@ func (changedDescriptorModel) Complete(_ context.Context, _ string) (execution.M
 	return execution.ModelResponse{}, errors.New("changed model must not run during replay")
 }
 
+type replacementModel struct{}
+
+func (replacementModel) Name() string { return "openai/replacement-model" }
+func (replacementModel) Descriptor() execution.ModelDescriptor {
+	return execution.ModelDescriptor{Provider: "openai", Model: "replacement-model", ExecutionProfileVersion: "v2-openai"}
+}
+func (replacementModel) Complete(_ context.Context, prompt string) (execution.ModelResponse, error) {
+	return execution.ModelResponse{Text: "replacement-model: " + prompt, Usage: events.InferenceUsageRecordedPayload{Source: "provider_api", Provider: "openai", Model: "replacement-model", InputTokens: 1, OutputTokens: 1, TotalTokens: 2}}, nil
+}
+
 func TestAgentExecutionManifestUsesConfiguredModelDescriptor(t *testing.T) {
 	l, err := ledger.Open(":memory:")
 	if err != nil {
@@ -596,7 +615,7 @@ func TestReplayRetainsDurableAssignmentWhenConfiguredModelChanges(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = l.Close() })
 	gateway := events.NewGateway(l)
-	submission := Submit{RequestID: "stable-assignment", OrganizationID: "org-1", Statement: "echo stable", Kind: core.ExecutionDeterministic}
+	submission := Submit{RequestID: "stable-assignment", OrganizationID: "org-1", Statement: "summarize stable", Kind: core.ExecutionAgent}
 
 	first, err := NewWithModel(gateway, describedModel{}).Submit(context.Background(), submission)
 	if err != nil {
@@ -610,15 +629,48 @@ func TestReplayRetainsDurableAssignmentWhenConfiguredModelChanges(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if replayed.Task.AssigneeID != first.Task.AssigneeID || replayed.Task.Status != first.Task.Status {
+	if replayed.Task.AssigneeID != first.Task.AssigneeID || replayed.Task.Status != first.Task.Status || !reflect.DeepEqual(replayed.Task.AgentConfig, first.Task.AgentConfig) {
 		t.Fatalf("durable assignment changed during replay: before=%+v after=%+v", first.Task, replayed.Task)
 	}
 	snapshot, err := projections.New(gateway).Load(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Agents) != 1 {
-		t.Fatalf("deterministic replay bootstrapped an unrelated model roster: agents=%d", len(snapshot.Agents))
+	if len(snapshot.Agents) != 1 || len(snapshot.ExecutionProfiles) != 1 {
+		t.Fatalf("materialized replay bootstrapped unrelated roster state: agents=%d profiles=%d", len(snapshot.Agents), len(snapshot.ExecutionProfiles))
+	}
+}
+
+func TestAgentIdentitySurvivesExecutionProfileUpdate(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	first, err := NewWithModel(gateway, describedModel{}).Submit(context.Background(), Submit{RequestID: "identity-before-profile", OrganizationID: "org-1", Statement: "echo before", Kind: core.ExecutionDeterministic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewWithModel(gateway, replacementModel{}).Submit(context.Background(), Submit{RequestID: "identity-after-profile", OrganizationID: "org-1", Statement: "summarize after", Kind: core.ExecutionAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Task.AssigneeID == "" || second.Task.AssigneeID != first.Task.AssigneeID {
+		t.Fatalf("execution-profile update split durable Agent identity: before=%+v after=%+v", first.Task, second.Task)
+	}
+	if first.Task.AgentConfig == nil || second.Task.AgentConfig == nil || first.Task.AgentConfig.ProfileID == second.Task.AgentConfig.ProfileID {
+		t.Fatalf("Tasks did not pin distinct execution-profile revisions: before=%+v after=%+v", first.Task.AgentConfig, second.Task.AgentConfig)
+	}
+	snapshot, err := projections.New(gateway).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Agents) != 1 || len(snapshot.ExecutionProfiles) != 2 || snapshot.Agents[first.Task.AssigneeID].Value.ExecutionProfileID != second.Task.AgentConfig.ProfileID {
+		t.Fatalf("Agent history or current profile binding is inconsistent: %+v", snapshot)
+	}
+	if snapshot.Tasks[first.Task.ID].Value.AgentConfig.ProfileID != first.Task.AgentConfig.ProfileID {
+		t.Fatal("earlier Task lost its pinned execution-profile revision")
 	}
 }
 
@@ -753,8 +805,8 @@ func TestCompletionReviewSelectsExactTaskInSharedDAGStream(t *testing.T) {
 	agent := seedTestAgents(t, ctx, repository, correlationID, organization.ID, describedModel{}.Descriptor(), "agent-1")[0]
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "draft two independent updates", NormalizedObjective: "draft two independent updates"}
 	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: "ACTIVE"}
-	first := core.Task{ID: "task-1", GoalID: goal.ID, Description: "Draft the security update.", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
-	second := core.Task{ID: "task-2", GoalID: goal.ID, Description: "Draft the release update.", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	first := core.Task{ID: "task-1", GoalID: goal.ID, Description: "Draft the security update.", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
+	second := core.Task{ID: "task-2", GoalID: goal.ID, Description: "Draft the release update.", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
 	for _, save := range []func() error{
 		func() error {
 			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", correlationID, 1, intent, nil)
@@ -1028,8 +1080,8 @@ func TestRunTelemetryCoversDAG(t *testing.T) {
 	agent := seedTestAgents(t, ctx, repository, "request-1", organization.ID, execution.FakeModel{}.Descriptor(), "agent-1")[0]
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "two steps", NormalizedObjective: "two steps"}
 	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: "two steps", Status: "ACTIVE"}
-	first := core.Task{ID: "task-1", GoalID: goal.ID, Description: "echo first", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
-	second := core.Task{ID: "task-2", GoalID: goal.ID, Description: "echo second", DependsOn: []core.ID{first.ID}, ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	first := core.Task{ID: "task-1", GoalID: goal.ID, Description: "echo first", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
+	second := core.Task{ID: "task-2", GoalID: goal.ID, Description: "echo second", DependsOn: []core.ID{first.ID}, ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
 	for _, save := range []func() error{
 		func() error {
 			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "request-1", 1, intent, nil)
@@ -1094,8 +1146,8 @@ func TestRecoverExecutesPersistedPendingWorkAndPreservesIdentity(t *testing.T) {
 	agent := seedTestAgents(t, ctx, repository, "request-1", organization.ID, execution.FakeModel{}.Descriptor(), "agent-1")[0]
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "echo after restart", NormalizedObjective: "echo after restart"}
 	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: "echo after restart", Status: "ACTIVE"}
-	first := core.Task{ID: "task-1", GoalID: goal.ID, Description: "echo already done", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskCompleted}
-	second := core.Task{ID: "task-2", GoalID: goal.ID, Description: "echo after restart", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, DependsOn: []core.ID{first.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	first := core.Task{ID: "task-1", GoalID: goal.ID, Description: "echo already done", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskCompleted}
+	second := core.Task{ID: "task-2", GoalID: goal.ID, Description: "echo after restart", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, DependsOn: []core.ID{first.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
 	for _, save := range []func() error{
 		func() error {
 			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "request-1", 1, intent, nil)
@@ -1197,7 +1249,7 @@ func TestDispatchFailsClosedWhenDurableRosterEligibilityChanges(t *testing.T) {
 			agent := seedTestAgents(t, ctx, repository, "request-1", organization.ID, execution.FakeModel{}.Descriptor(), "agent-1")[0]
 			intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "bounded work", NormalizedObjective: "bounded work"}
 			goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: "ACTIVE"}
-			task := core.Task{ID: "task-request-1", GoalID: goal.ID, Description: "bounded work", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+			task := core.Task{ID: "task-request-1", GoalID: goal.ID, Description: "bounded work", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
 			for _, save := range []func() error{
 				func() error {
 					return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "request-1", 1, intent, nil)
@@ -1258,7 +1310,7 @@ func TestRecoverResumesOnlyRevalidatedAssignmentBlock(t *testing.T) {
 	agent := seedTestAgents(t, ctx, repository, "assignment-resume", organization.ID, execution.FakeModel{}.Descriptor(), "agent-1")[0]
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "echo resumed", NormalizedObjective: "echo resumed"}
 	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: "ACTIVE"}
-	task := core.Task{ID: "task-assignment-resume", GoalID: goal.ID, Description: "echo resumed", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	task := core.Task{ID: "task-assignment-resume", GoalID: goal.ID, Description: "echo resumed", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
 	for _, save := range []func() error{
 		func() error {
 			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "assignment-resume", 1, intent, nil)
@@ -1331,8 +1383,8 @@ func TestAssignmentBlockedDependencyWaitsForRevalidation(t *testing.T) {
 	agent := seedTestAgents(t, ctx, repository, correlationID, organization.ID, execution.FakeModel{}.Descriptor(), "agent-1")[0]
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "echo resumed DAG", NormalizedObjective: "echo resumed DAG"}
 	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: "ACTIVE"}
-	root := core.Task{ID: "task-" + correlationID, GoalID: goal.ID, Description: "echo aggregate", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, DependsOn: []core.ID{"task-child"}, TaskContractVersion: "1", Status: core.TaskPending}
-	child := core.Task{ID: "task-child", GoalID: goal.ID, ParentID: root.ID, Description: "echo child", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	root := core.Task{ID: "task-" + correlationID, GoalID: goal.ID, Description: "echo aggregate", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), DependsOn: []core.ID{"task-child"}, TaskContractVersion: "1", Status: core.TaskPending}
+	child := core.Task{ID: "task-child", GoalID: goal.ID, ParentID: root.ID, Description: "echo child", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
 	for _, save := range []func() error{
 		func() error {
 			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", correlationID, 1, intent, nil)
@@ -1813,7 +1865,7 @@ func TestRecoveryIsDeterministicFirst(t *testing.T) {
 		if kind == core.ExecutionAgent {
 			policy = core.InferenceAllowed
 		}
-		task := core.Task{ID: core.ID("task-" + requestID), GoalID: goal.ID, Description: statement, ExecutionKind: kind, ModelInferencePolicy: policy, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskRunning}
+		task := core.Task{ID: core.ID("task-" + requestID), GoalID: goal.ID, Description: statement, ExecutionKind: kind, ModelInferencePolicy: policy, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskRunning}
 		for _, save := range []func() error{
 			func() error {
 				return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", requestID, 1, intent, nil)
@@ -2063,8 +2115,8 @@ func TestBlockedChildReturnsToParent(t *testing.T) {
 	agent := seedTestAgents(t, ctx, repository, "request-1", organization.ID, execution.FakeModel{}.Descriptor(), "agent-1")[0]
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "complete governed work", NormalizedObjective: "complete governed work"}
 	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: "complete governed work", Status: "ACTIVE"}
-	child := core.Task{ID: "task-child", GoalID: goal.ID, ParentID: "task-request-1", Description: "use unavailable tool", ExecutionKind: core.ExecutionTool, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
-	parent := core.Task{ID: "task-request-1", GoalID: goal.ID, Description: "govern child remediation", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{child.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	child := core.Task{ID: "task-child", GoalID: goal.ID, ParentID: "task-request-1", Description: "use unavailable tool", ExecutionKind: core.ExecutionTool, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
+	parent := core.Task{ID: "task-request-1", GoalID: goal.ID, Description: "govern child remediation", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{child.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
 	for _, save := range []func() error{
 		func() error {
 			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "request-1", 1, intent, nil)
@@ -2177,9 +2229,9 @@ func TestDeepBlockedDependencyReachesActionableRoot(t *testing.T) {
 	agent := seedTestAgents(t, ctx, repository, "deep-block", organization.ID, execution.FakeModel{}.Descriptor(), "agent-1")[0]
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "complete governed work", NormalizedObjective: "complete governed work"}
 	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: "complete governed work", Status: "ACTIVE"}
-	blocked := core.Task{ID: "task-a", GoalID: goal.ID, ParentID: "task-deep-block", Description: "use unavailable tool", ExecutionKind: core.ExecutionTool, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
-	middle := core.Task{ID: "task-b", GoalID: goal.ID, ParentID: "task-deep-block", Description: "interpret blocked dependency", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{blocked.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
-	root := core.Task{ID: "task-deep-block", GoalID: goal.ID, Description: "govern remediation", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{middle.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	blocked := core.Task{ID: "task-a", GoalID: goal.ID, ParentID: "task-deep-block", Description: "use unavailable tool", ExecutionKind: core.ExecutionTool, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
+	middle := core.Task{ID: "task-b", GoalID: goal.ID, ParentID: "task-deep-block", Description: "interpret blocked dependency", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{blocked.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
+	root := core.Task{ID: "task-deep-block", GoalID: goal.ID, Description: "govern remediation", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{middle.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
 	for _, save := range []func() error{
 		func() error {
 			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "deep-block", 1, intent, nil)
@@ -2257,8 +2309,8 @@ func TestLateralMessagesAtActionBoundary(t *testing.T) {
 	team := core.Team{ID: "team-1", OrganizationID: organization.ID, Name: "Delivery", MemberAgentIDs: []core.ID{recipient.ID}, Status: "ACTIVE"}
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "finish from handoff", NormalizedObjective: "finish from handoff"}
 	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: "finish from handoff", Status: "ACTIVE"}
-	sourceTask := core.Task{ID: "task-source", GoalID: goal.ID, Description: "prepare handoff", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: sender.ID, TaskContractVersion: "1", Status: core.TaskCompleted}
-	recipientTask := core.Task{ID: "task-recipient", GoalID: goal.ID, Description: "finish work", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{sourceTask.ID}, AssigneeType: "AGENT", AssigneeID: recipient.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	sourceTask := core.Task{ID: "task-source", GoalID: goal.ID, Description: "prepare handoff", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: sender.ID, AgentConfig: testAgentConfig(sender), TaskContractVersion: "1", Status: core.TaskCompleted}
+	recipientTask := core.Task{ID: "task-recipient", GoalID: goal.ID, Description: "finish work", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{sourceTask.ID}, AssigneeType: "AGENT", AssigneeID: recipient.ID, AgentConfig: testAgentConfig(recipient), TaskContractVersion: "1", Status: core.TaskPending}
 	for _, save := range []func() error{
 		func() error { return repository.SaveTeam(ctx, "TEAM_CREATED", "runtime", "request-1", 1, team, nil) },
 		func() error {

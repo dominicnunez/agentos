@@ -179,6 +179,16 @@ type Plan struct {
 	CreatedAt         time.Time  `json:"created_at"`
 }
 
+// AgentConfig pins the exact reviewed configuration selected for a Task.
+// Agent identity remains durable when its current configuration evolves.
+type AgentConfig struct {
+	BlueprintID      ID     `json:"blueprint_id"`
+	BlueprintVersion string `json:"blueprint_version"`
+	ProfileID        ID     `json:"profile_id"`
+	ProfileVersion   string `json:"profile_version"`
+	RuntimeAdapter   string `json:"runtime_adapter"`
+}
+
 type Task struct {
 	ID                   ID                   `json:"id"`
 	GoalID               ID                   `json:"goal_id"`
@@ -191,6 +201,7 @@ type Task struct {
 	ParentID             ID                   `json:"parent_id,omitempty"`
 	AssigneeType         string               `json:"assignee_type,omitempty"`
 	AssigneeID           ID                   `json:"assignee_id,omitempty"`
+	AgentConfig          *AgentConfig         `json:"agent_config,omitempty"`
 	RuntimeHandlerRef    string               `json:"runtime_handler_ref,omitempty"`
 	TaskContractVersion  string               `json:"task_contract_version"`
 	CompletionContract   *CompletionContract  `json:"completion_contract,omitempty"`

@@ -1447,24 +1447,36 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 		}
 		return core.Intent{}, core.Goal{}, core.Task{}, err
 	}
-	needsDefaultAgent := false
-	checkedKinds := make(map[core.ExecutionKind]struct{})
-	for _, planned := range plan.Tasks {
-		if planned.ExecutionKind != core.ExecutionDeterministic && planned.ExecutionKind != core.ExecutionAgent {
-			continue
-		}
-		if _, checked := checkedKinds[planned.ExecutionKind]; checked {
-			continue
-		}
-		checkedKinds[planned.ExecutionKind] = struct{}{}
-		if _, selectErr := assignment.Select(assignmentRoster(snapshot), s.assignmentRequirement(organizationID, planned.ExecutionKind)); selectErr != nil {
-			needsDefaultAgent = true
-			break
+	ids := planTaskIDs(correlationID, plan)
+	existingTasks := 0
+	for _, id := range ids {
+		if _, ok := snapshot.Tasks[id]; ok {
+			existingTasks++
 		}
 	}
-	if needsDefaultAgent {
-		if _, err := s.ensureDefaultAgent(ctx, &snapshot, organizationID, correlationID, now); err != nil {
-			return core.Intent{}, core.Goal{}, core.Task{}, err
+	if existingTasks != 0 && existingTasks != len(plan.Tasks) {
+		return core.Intent{}, core.Goal{}, core.Task{}, fmt.Errorf("durable Task DAG is only partially materialized")
+	}
+	if existingTasks == 0 {
+		needsDefaultAgent := false
+		checkedKinds := make(map[core.ExecutionKind]struct{})
+		for _, planned := range plan.Tasks {
+			if planned.ExecutionKind != core.ExecutionDeterministic && planned.ExecutionKind != core.ExecutionAgent {
+				continue
+			}
+			if _, checked := checkedKinds[planned.ExecutionKind]; checked {
+				continue
+			}
+			checkedKinds[planned.ExecutionKind] = struct{}{}
+			if _, selectErr := assignment.Select(assignmentRoster(snapshot), s.assignmentRequirement(organizationID, planned.ExecutionKind)); selectErr != nil {
+				needsDefaultAgent = true
+				break
+			}
+		}
+		if needsDefaultAgent {
+			if _, err := s.ensureDefaultAgent(ctx, &snapshot, organizationID, correlationID, now); err != nil {
+				return core.Intent{}, core.Goal{}, core.Task{}, err
+			}
 		}
 	}
 	task, err := s.ensurePlanTasks(ctx, organizationID, correlationID, snapshot, goal, acceptedDraft, plan, intent.SourcePrincipalKind == core.PrincipalHuman)
@@ -1475,6 +1487,10 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 }
 
 func (s *Service) ensureDefaultAgent(ctx context.Context, snapshot *projections.Snapshot, organizationID core.ID, correlationID string, now time.Time) (core.Agent, error) {
+	agentID := rosterID("agent", string(organizationID), "default")
+	if existing, ok := snapshot.Agents[agentID]; ok && existing.Value.Status != assignment.Active {
+		return existing.Value, nil
+	}
 	blueprint := core.AgentBlueprint{
 		ID: rosterID("blueprint", string(organizationID), defaultBlueprintVersion), OrganizationID: organizationID,
 		Version: defaultBlueprintVersion, Role: "General worker",
@@ -1502,18 +1518,24 @@ func (s *Service) ensureDefaultAgent(ctx context.Context, snapshot *projections.
 	}
 
 	agent := core.Agent{
-		ID: rosterID("agent", string(organizationID), string(blueprint.ID), string(profile.ID), localRuntimeAdapter), OrganizationID: organizationID,
+		ID: agentID, OrganizationID: organizationID,
 		BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version,
 		ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version,
 		RuntimeAdapter: localRuntimeAdapter, Status: assignment.Active,
 	}
 	if existing, ok := snapshot.Agents[agent.ID]; ok {
-		expected := agent
-		expected.Status = existing.Value.Status
-		if existing.Value != expected {
-			return core.Agent{}, fmt.Errorf("durable Agent identity is bound to different configuration")
+		if existing.Value.OrganizationID != organizationID || existing.Value.BlueprintID != blueprint.ID || existing.Value.BlueprintVersion != blueprint.Version || existing.Value.RuntimeAdapter != localRuntimeAdapter {
+			return core.Agent{}, fmt.Errorf("durable default Agent identity is bound to a different organization, blueprint, or runtime")
 		}
-		return existing.Value, nil
+		if existing.Value.Status != assignment.Active || (existing.Value.ExecutionProfileID == profile.ID && existing.Value.ExecutionProfileVersion == profile.Version) {
+			return existing.Value, nil
+		}
+		agent.Status = existing.Value.Status
+		if err := s.state.SaveAgent(ctx, "AGENT_CONFIGURATION_UPDATED", "runtime", correlationID, existing.Version+1, agent, nil); err != nil {
+			return core.Agent{}, fmt.Errorf("update default Agent configuration: %w", err)
+		}
+		snapshot.Agents[agent.ID] = projections.Versioned[core.Agent]{Version: existing.Version + 1, CorrelationID: correlationID, Value: agent}
+		return agent, nil
 	}
 	if err := s.state.SaveAgent(ctx, "AGENT_CREATED", "runtime", correlationID, 1, agent, nil); err != nil {
 		return core.Agent{}, fmt.Errorf("persist Agent identity: %w", err)
@@ -1797,15 +1819,8 @@ func validateDurablePlan(plan core.Plan, planID core.ID, intent core.Intent, dra
 }
 
 func (s *Service) ensurePlanTasks(ctx context.Context, organizationID core.ID, correlationID string, snapshot projections.Snapshot, goal core.Goal, draft core.IntentDraft, plan core.Plan, structuredUserCompletion bool) (core.Task, error) {
-	ids := make(map[string]core.ID, len(plan.Tasks))
+	ids := planTaskIDs(correlationID, plan)
 	rootID := core.ID("task-" + correlationID)
-	for _, item := range plan.Tasks {
-		if item.Key == "root" {
-			ids[item.Key] = rootID
-		} else {
-			ids[item.Key] = core.ID("task-" + correlationID + "-" + item.Key)
-		}
-	}
 	expected := make([]core.Task, 0, len(plan.Tasks))
 	expectedIDs := make(map[core.ID]struct{}, len(plan.Tasks))
 	for _, item := range plan.Tasks {
@@ -1817,11 +1832,13 @@ func (s *Service) ensurePlanTasks(ctx context.Context, organizationID core.ID, c
 		switch item.ExecutionKind {
 		case core.ExecutionDeterministic, core.ExecutionAgent:
 			if durable, ok := snapshot.Tasks[task.ID]; ok {
-				if durable.Value.AssigneeType != "AGENT" || durable.Value.AssigneeID == "" {
+				if durable.Value.AssigneeType != "AGENT" || durable.Value.AssigneeID == "" || durable.Value.AgentConfig == nil {
 					return core.Task{}, fmt.Errorf("planned task %s has an invalid durable Agent assignment", item.Key)
 				}
 				task.AssigneeType = durable.Value.AssigneeType
 				task.AssigneeID = durable.Value.AssigneeID
+				config := *durable.Value.AgentConfig
+				task.AgentConfig = &config
 			} else {
 				selection, err := assignment.Select(assignmentRoster(snapshot), s.assignmentRequirement(organizationID, item.ExecutionKind))
 				if err != nil {
@@ -1829,6 +1846,7 @@ func (s *Service) ensurePlanTasks(ctx context.Context, organizationID core.ID, c
 				}
 				task.AssigneeType = "AGENT"
 				task.AssigneeID = selection.Agent.ID
+				task.AgentConfig = assignment.Config(selection)
 			}
 		case core.ExecutionHuman, core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
 			// User work and unavailable V1 execution kinds are intentionally not
@@ -1904,6 +1922,18 @@ func (s *Service) ensurePlanTasks(ctx context.Context, organizationID core.ID, c
 	return root, nil
 }
 
+func planTaskIDs(correlationID string, plan core.Plan) map[string]core.ID {
+	ids := make(map[string]core.ID, len(plan.Tasks))
+	for _, item := range plan.Tasks {
+		if item.Key == "root" {
+			ids[item.Key] = core.ID("task-" + correlationID)
+		} else {
+			ids[item.Key] = core.ID("task-" + correlationID + "-" + item.Key)
+		}
+	}
+	return ids
+}
+
 func assignmentRoster(snapshot projections.Snapshot) assignment.Roster {
 	roster := assignment.Roster{
 		Agents:            make(map[core.ID]core.Agent, len(snapshot.Agents)),
@@ -1937,6 +1967,7 @@ func sameTaskContract(existing, expected core.Task) bool {
 		existing.ExecutionKind == expected.ExecutionKind && existing.ModelInferencePolicy == expected.ModelInferencePolicy &&
 		slices.Equal(existing.DependsOn, expected.DependsOn) && existing.ParentID == expected.ParentID &&
 		existing.AssigneeType == expected.AssigneeType && existing.AssigneeID == expected.AssigneeID &&
+		reflect.DeepEqual(existing.AgentConfig, expected.AgentConfig) &&
 		existing.RuntimeHandlerRef == expected.RuntimeHandlerRef && existing.TaskContractVersion == expected.TaskContractVersion &&
 		reflect.DeepEqual(existing.CompletionContract, expected.CompletionContract)
 }

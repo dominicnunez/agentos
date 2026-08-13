@@ -75,7 +75,7 @@ func TestResolveAssignedNeverFallsBackToAnotherAgent(t *testing.T) {
 	active.ID = "agent-c"
 	active.Status = Active
 	roster.Agents[active.ID] = active
-	task := core.Task{ExecutionKind: core.ExecutionAgent, AssigneeType: "AGENT", AssigneeID: inactive.ID}
+	task := core.Task{ExecutionKind: core.ExecutionAgent, AssigneeType: "AGENT", AssigneeID: inactive.ID, AgentConfig: agentConfig(inactive)}
 
 	if _, err := ResolveAssigned(roster, task, testRequirement()); err == nil {
 		t.Fatal("stale assignment fell back to a different active Agent")
@@ -84,7 +84,7 @@ func TestResolveAssignedNeverFallsBackToAnotherAgent(t *testing.T) {
 
 func TestResolveAssignedBindsTaskKindAndRosterIdentity(t *testing.T) {
 	roster := testRoster()
-	task := core.Task{ExecutionKind: core.ExecutionDeterministic, AssigneeType: "AGENT", AssigneeID: "agent-b"}
+	task := core.Task{ExecutionKind: core.ExecutionDeterministic, AssigneeType: "AGENT", AssigneeID: "agent-b", AgentConfig: agentConfig(roster.Agents["agent-b"])}
 	if _, err := ResolveAssigned(roster, task, testRequirement()); err == nil {
 		t.Fatal("assignment requirement changed the durable task execution kind")
 	}
@@ -94,6 +94,28 @@ func TestResolveAssignedBindsTaskKindAndRosterIdentity(t *testing.T) {
 	task.ExecutionKind = core.ExecutionAgent
 	if _, err := ResolveAssigned(roster, task, testRequirement()); err == nil {
 		t.Fatal("roster map key substituted a different Agent identity")
+	}
+}
+
+func TestResolveAssignedUsesTaskPinnedConfigurationAfterAgentUpdate(t *testing.T) {
+	roster := testRoster()
+	agent := roster.Agents["agent-b"]
+	task := core.Task{ExecutionKind: core.ExecutionAgent, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: agentConfig(agent)}
+	replacement := roster.ExecutionProfiles[agent.ExecutionProfileID]
+	replacement.ID = "profile-2"
+	replacement.Version = "profile-v2"
+	replacement.Model = "new-model"
+	roster.ExecutionProfiles[replacement.ID] = replacement
+	agent.ExecutionProfileID = replacement.ID
+	agent.ExecutionProfileVersion = replacement.Version
+	roster.Agents[agent.ID] = agent
+
+	selection, err := ResolveAssigned(roster, task, testRequirement())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.Agent.ID != agent.ID || selection.ExecutionProfile.ID != "profile-1" {
+		t.Fatalf("durable Task configuration was replaced by current Agent configuration: %+v", selection)
 	}
 }
 
@@ -146,4 +168,12 @@ func testRoster() Roster {
 
 func testRequirement() Requirement {
 	return Requirement{OrganizationID: "org-1", ExecutionKind: core.ExecutionAgent, RuntimeAdapter: "local", ModelProvider: "provider", Model: "model", ExecutionProfileVersion: "profile-v1", PromptVersion: "prompt-v1", ToolRefs: []string{}, AvailableCapabilityClasses: []string{}}
+}
+
+func agentConfig(agent core.Agent) *core.AgentConfig {
+	return &core.AgentConfig{
+		BlueprintID: agent.BlueprintID, BlueprintVersion: agent.BlueprintVersion,
+		ProfileID: agent.ExecutionProfileID, ProfileVersion: agent.ExecutionProfileVersion,
+		RuntimeAdapter: agent.RuntimeAdapter,
+	}
 }
