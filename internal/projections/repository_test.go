@@ -171,6 +171,10 @@ func TestMissionGoalWorkHierarchyIsTenantBounded(t *testing.T) {
 	for id, state := range snapshot.Goals {
 		crossTenant.Goals[id] = state
 	}
+	crossTenant.Works = make(map[core.ID]Versioned[core.Work], len(snapshot.Works))
+	for id, state := range snapshot.Works {
+		crossTenant.Works[id] = state
+	}
 	crossTenant.Goals["goal-2"] = Versioned[core.Goal]{Value: core.Goal{
 		ID: "goal-2", OrganizationID: "org-2", MissionID: "mission-1", Objective: "cross tenant",
 		Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "never", Origin: "USER"}}, Status: core.GoalActive,
@@ -181,6 +185,19 @@ func TestMissionGoalWorkHierarchyIsTenantBounded(t *testing.T) {
 	if err := validateSnapshot(crossTenant); err == nil {
 		t.Fatal("cross-organization Goal and Work linkage was accepted")
 	}
+
+	continuousAchieved := snapshot
+	continuousAchieved.Goals = make(map[core.ID]Versioned[core.Goal], len(snapshot.Goals))
+	for id, state := range snapshot.Goals {
+		continuousAchieved.Goals[id] = state
+	}
+	continuous := continuousAchieved.Goals["goal-1"]
+	continuous.Value.Mode = core.GoalContinuous
+	continuous.Value.Status = core.GoalAchieved
+	continuousAchieved.Goals["goal-1"] = continuous
+	if err := validateSnapshot(continuousAchieved); err == nil {
+		t.Fatal("continuous Goal was accepted as achieved")
+	}
 }
 
 func TestHierarchyRevisionsPreserveIdentityAndDirectionBoundaries(t *testing.T) {
@@ -188,26 +205,36 @@ func TestHierarchyRevisionsPreserveIdentityAndDirectionBoundaries(t *testing.T) 
 	mission := core.Mission{ID: "mission-1", OrganizationID: "org-1", Statement: "initial direction", Status: core.MissionActive, CreatedAt: now}
 	revisedMission := mission
 	revisedMission.Statement = "refined direction"
-	if err := decodeKind(projectionBodies(t, KindMission, string(mission.ID), mission, revisedMission), map[core.ID]Versioned[core.Mission]{}, false, sameMissionIdentity); err != nil {
+	if err := decodeKind(projectionBodies(t, KindMission, string(mission.ID), mission, revisedMission), map[core.ID]Versioned[core.Mission]{}, false, sameMissionRecord); err != nil {
 		t.Fatalf("versioned Mission refinement was rejected: %v", err)
 	}
 	crossOrganizationMission := revisedMission
 	crossOrganizationMission.OrganizationID = "org-2"
-	if err := decodeKind(projectionBodies(t, KindMission, string(mission.ID), mission, crossOrganizationMission), map[core.ID]Versioned[core.Mission]{}, false, sameMissionIdentity); err == nil {
+	if err := decodeKind(projectionBodies(t, KindMission, string(mission.ID), mission, crossOrganizationMission), map[core.ID]Versioned[core.Mission]{}, false, sameMissionRecord); err == nil {
 		t.Fatal("Mission revision changed organization")
+	}
+	invalidMission := mission
+	invalidMission.Status = "UNKNOWN"
+	if err := decodeKind(projectionBodies(t, KindMission, string(mission.ID), invalidMission, mission), map[core.ID]Versioned[core.Mission]{}, false, sameMissionRecord); err == nil {
+		t.Fatal("invalid historical Mission state was hidden by a later revision")
 	}
 
 	goal := core.Goal{ID: "goal-1", OrganizationID: "org-1", MissionID: mission.ID, Objective: "initial outcome", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "initial measure", Origin: "USER"}}, Status: core.GoalActive, CreatedAt: now}
 	revisedGoal := goal
 	revisedGoal.Objective = "more specific outcome"
 	revisedGoal.SuccessCriteria = []core.IntentValue{{Value: "refined measure", Origin: "USER"}}
-	if err := decodeKind(projectionBodies(t, KindGoal, string(goal.ID), goal, revisedGoal), map[core.ID]Versioned[core.Goal]{}, false, sameGoalIdentity); err != nil {
+	if err := decodeKind(projectionBodies(t, KindGoal, string(goal.ID), goal, revisedGoal), map[core.ID]Versioned[core.Goal]{}, false, sameGoalRecord); err != nil {
 		t.Fatalf("versioned Goal refinement was rejected: %v", err)
 	}
 	reparentedGoal := revisedGoal
 	reparentedGoal.MissionID = "mission-2"
-	if err := decodeKind(projectionBodies(t, KindGoal, string(goal.ID), goal, reparentedGoal), map[core.ID]Versioned[core.Goal]{}, false, sameGoalIdentity); err == nil {
+	if err := decodeKind(projectionBodies(t, KindGoal, string(goal.ID), goal, reparentedGoal), map[core.ID]Versioned[core.Goal]{}, false, sameGoalRecord); err == nil {
 		t.Fatal("Goal revision changed parent Mission")
+	}
+	achievedWithChangedCriteria := revisedGoal
+	achievedWithChangedCriteria.Status = core.GoalAchieved
+	if err := decodeKind(projectionBodies(t, KindGoal, string(goal.ID), goal, achievedWithChangedCriteria), map[core.ID]Versioned[core.Goal]{}, false, sameGoalRecord); err == nil {
+		t.Fatal("Goal achievement changed success criteria at the terminal boundary")
 	}
 
 	work := core.Work{ID: "work-1", IntentID: "intent-1", GoalID: goal.ID, Objective: "bounded work", Status: core.WorkActive, CreatedAt: now}
@@ -220,6 +247,25 @@ func TestHierarchyRevisionsPreserveIdentityAndDirectionBoundaries(t *testing.T) 
 	relinked.GoalID = "goal-2"
 	if err := decodeKind(projectionBodies(t, KindWork, string(work.ID), work, relinked), map[core.ID]Versioned[core.Work]{}, false, sameWorkRecord); err == nil {
 		t.Fatal("Work transition changed Goal binding")
+	}
+	reopened := completed
+	reopened.Status = core.WorkActive
+	if err := decodeKind(projectionBodies(t, KindWork, string(work.ID), completed, reopened), map[core.ID]Versioned[core.Work]{}, false, sameWorkRecord); err == nil {
+		t.Fatal("terminal Work was reopened")
+	}
+	retiredMission := mission
+	retiredMission.Status = core.MissionRetired
+	reopenedMission := retiredMission
+	reopenedMission.Status = core.MissionActive
+	if err := decodeKind(projectionBodies(t, KindMission, string(mission.ID), retiredMission, reopenedMission), map[core.ID]Versioned[core.Mission]{}, false, sameMissionRecord); err == nil {
+		t.Fatal("retired Mission was reopened")
+	}
+	achievedGoal := goal
+	achievedGoal.Status = core.GoalAchieved
+	reopenedGoal := achievedGoal
+	reopenedGoal.Status = core.GoalActive
+	if err := decodeKind(projectionBodies(t, KindGoal, string(goal.ID), achievedGoal, reopenedGoal), map[core.ID]Versioned[core.Goal]{}, false, sameGoalRecord); err == nil {
+		t.Fatal("achieved Goal was reopened")
 	}
 }
 

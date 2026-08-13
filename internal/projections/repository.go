@@ -215,10 +215,10 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 	if err := decodeKind(records[KindOrganization], snapshot.Organizations, false, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode organizations: %w", err)
 	}
-	if err := decodeKind(records[KindMission], snapshot.Missions, false, sameMissionIdentity); err != nil {
+	if err := decodeKind(records[KindMission], snapshot.Missions, false, sameMissionRecord); err != nil {
 		return Snapshot{}, fmt.Errorf("decode missions: %w", err)
 	}
-	if err := decodeKind(records[KindGoal], snapshot.Goals, false, sameGoalIdentity); err != nil {
+	if err := decodeKind(records[KindGoal], snapshot.Goals, false, sameGoalRecord); err != nil {
 		return Snapshot{}, fmt.Errorf("decode goals: %w", err)
 	}
 	if err := decodeKind(records[KindTeam], snapshot.Teams, false, nil); err != nil {
@@ -288,17 +288,60 @@ func sameAgentBlueprintRecord(left, right core.AgentBlueprint) bool {
 	return reflect.DeepEqual(left, right)
 }
 
-func sameMissionIdentity(left, right core.Mission) bool {
-	return left.ID == right.ID && left.OrganizationID == right.OrganizationID && left.CreatedAt.Equal(right.CreatedAt)
+func sameMissionRecord(left, right core.Mission) bool {
+	if !validMissionValue(left) || !validMissionValue(right) || left.ID != right.ID || left.OrganizationID != right.OrganizationID || !left.CreatedAt.Equal(right.CreatedAt) {
+		return false
+	}
+	if left.Status == core.MissionRetired {
+		return reflect.DeepEqual(left, right)
+	}
+	if right.Status == core.MissionActive {
+		return true
+	}
+	transition := right.Status == core.MissionRetired
+	right.Status = left.Status
+	return transition && reflect.DeepEqual(left, right)
 }
 
-func sameGoalIdentity(left, right core.Goal) bool {
-	return left.ID == right.ID && left.OrganizationID == right.OrganizationID && left.MissionID == right.MissionID && left.CreatedAt.Equal(right.CreatedAt)
+func sameGoalRecord(left, right core.Goal) bool {
+	if !validGoalValue(left) || !validGoalValue(right) || left.ID != right.ID || left.OrganizationID != right.OrganizationID || left.MissionID != right.MissionID || !left.CreatedAt.Equal(right.CreatedAt) {
+		return false
+	}
+	if left.Status == core.GoalRetired || left.Status == core.GoalAchieved {
+		return reflect.DeepEqual(left, right)
+	}
+	if left.Status == right.Status {
+		return true
+	}
+	transition := left.Status == core.GoalActive && (right.Status == core.GoalPaused || right.Status == core.GoalAchieved || right.Status == core.GoalRetired) ||
+		left.Status == core.GoalPaused && (right.Status == core.GoalActive || right.Status == core.GoalRetired)
+	right.Status = left.Status
+	return transition && reflect.DeepEqual(left, right)
 }
 
 func sameWorkRecord(left, right core.Work) bool {
+	transition := left.Status == right.Status || left.Status == core.WorkActive && (right.Status == core.WorkCompleted || right.Status == core.WorkFailed)
 	right.Status = left.Status
-	return reflect.DeepEqual(left, right)
+	return transition && reflect.DeepEqual(left, right)
+}
+
+func validMissionValue(mission core.Mission) bool {
+	return mission.ID != "" && mission.OrganizationID != "" && strings.TrimSpace(mission.Statement) != "" &&
+		(mission.Status == core.MissionActive || mission.Status == core.MissionRetired)
+}
+
+func validGoalValue(goal core.Goal) bool {
+	validMode := goal.Mode == core.GoalTarget || goal.Mode == core.GoalContinuous
+	validStatus := goal.Status == core.GoalActive || goal.Status == core.GoalPaused || goal.Status == core.GoalAchieved || goal.Status == core.GoalRetired
+	if goal.ID == "" || goal.OrganizationID == "" || goal.MissionID == "" || strings.TrimSpace(goal.Objective) == "" || len(goal.SuccessCriteria) == 0 || len(goal.SuccessCriteria) > 256 || !validMode || !validStatus || goal.Mode == core.GoalContinuous && goal.Status == core.GoalAchieved {
+		return false
+	}
+	for _, criterion := range goal.SuccessCriteria {
+		if strings.TrimSpace(criterion.Value) == "" || strings.TrimSpace(criterion.Origin) == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func sameExecutionProfileRecord(left, right core.ExecutionProfile) bool {
@@ -348,7 +391,7 @@ func validateSnapshot(snapshot Snapshot) error {
 	}
 	for id, state := range snapshot.Missions {
 		mission := state.Value
-		if strings.TrimSpace(mission.Statement) == "" || mission.Status != core.MissionActive && mission.Status != core.MissionRetired {
+		if !validMissionValue(mission) {
 			return fmt.Errorf("mission %s is incomplete or has unsupported status", id)
 		}
 	}
@@ -358,15 +401,8 @@ func validateSnapshot(snapshot Snapshot) error {
 		if !ok || mission.Value.OrganizationID != goal.OrganizationID {
 			return fmt.Errorf("goal %s references invalid mission %s", id, goal.MissionID)
 		}
-		validMode := goal.Mode == core.GoalTarget || goal.Mode == core.GoalContinuous
-		validStatus := goal.Status == core.GoalActive || goal.Status == core.GoalPaused || goal.Status == core.GoalAchieved || goal.Status == core.GoalRetired
-		if strings.TrimSpace(goal.Objective) == "" || len(goal.SuccessCriteria) == 0 || len(goal.SuccessCriteria) > 256 || !validMode || !validStatus || goal.Mode == core.GoalContinuous && goal.Status == core.GoalAchieved {
+		if !validGoalValue(goal) {
 			return fmt.Errorf("goal %s is incomplete or has unsupported mode or status", id)
-		}
-		for _, criterion := range goal.SuccessCriteria {
-			if strings.TrimSpace(criterion.Value) == "" || strings.TrimSpace(criterion.Origin) == "" {
-				return fmt.Errorf("goal %s has an incomplete success criterion", id)
-			}
 		}
 	}
 	for id, state := range snapshot.Teams {
