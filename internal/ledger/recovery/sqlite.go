@@ -408,6 +408,9 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Work projection", event.EventID)
 			}
+			if err := validateRecoveryWorkIntentBinding(event, record, value, snapshot); err != nil {
+				return fmt.Errorf("event %s contains an invalid Work binding: %w", event.EventID, err)
+			}
 			if err := setRecoveryProjection(snapshot.Works, record, value, true, core.ValidWorkRevision); err != nil {
 				return fmt.Errorf("event %s contains invalid Work history: %w", event.EventID, err)
 			}
@@ -499,6 +502,18 @@ func validateRecoveryTeamRoster(team core.Team, snapshot core.DurableGraph) erro
 		if !found || agent.Value.ID != memberID || agent.Value.OrganizationID != team.OrganizationID {
 			return fmt.Errorf("team references invalid member Agent %s", memberID)
 		}
+	}
+	return nil
+}
+
+func validateRecoveryWorkIntentBinding(event events.Event, record events.ProjectionRecord, work core.Work, snapshot core.DurableGraph) error {
+	intentState, found := snapshot.Intents[work.IntentID]
+	if !found {
+		return fmt.Errorf("work requires its durable Intent")
+	}
+	intent := intentState.Value
+	if intentState.CorrelationID != record.CorrelationID || intent.ID != work.IntentID || intent.GoalID != work.GoalID || intent.NormalizedObjective != work.Objective || string(intent.OrganizationID) != event.OrganizationID {
+		return fmt.Errorf("work does not match its accepted Intent boundary")
 	}
 	return nil
 }

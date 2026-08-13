@@ -1530,7 +1530,7 @@ func AdmittedProjection(event Event) (ProjectionEventPayload, bool, error) {
 		return ProjectionEventPayload{}, false, fmt.Errorf("event payload is malformed")
 	}
 	var object map[string]json.RawMessage
-	if json.Unmarshal(event.Payload, &object) != nil {
+	if json.Unmarshal(event.Payload, &object) != nil || object == nil {
 		return ProjectionEventPayload{}, false, fmt.Errorf("event payload is malformed")
 	}
 	_, hasProjection := object["projection"]

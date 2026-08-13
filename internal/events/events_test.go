@@ -485,6 +485,11 @@ func TestProjectionAdmissionBindsExactEventBoundary(t *testing.T) {
 	if _, _, err := AdmittedProjection(malformed); err == nil {
 		t.Fatal("malformed ordinary event payload was accepted")
 	}
+	nullPayload := event
+	nullPayload.Payload = []byte(`null`)
+	if _, _, err := AdmittedProjection(nullPayload); err == nil {
+		t.Fatal("null ordinary event payload was accepted")
+	}
 }
 
 func TestGenericTrustedPublicationCannotMintProjectionAuthority(t *testing.T) {

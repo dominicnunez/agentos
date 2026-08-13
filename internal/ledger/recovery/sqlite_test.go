@@ -408,51 +408,52 @@ func TestRecoveryRejectsReorderedProjectionRevisionEvents(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	firstBody, firstFingerprint := resealRecoveryProjectionAtSequence(t, first, second.Sequence)
-	secondBody, secondFingerprint := resealRecoveryProjectionAtSequence(t, second, first.Sequence)
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE events SET sequence=-sequence WHERE event_id IN (?,?)`, first.EventID, second.EventID); err != nil {
-		_ = tx.Rollback()
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	for _, update := range []struct {
-		eventID     string
-		sequence    int64
-		body        []byte
-		fingerprint string
-	}{
-		{first.EventID, second.Sequence, firstBody, firstFingerprint},
-		{second.EventID, first.Sequence, secondBody, secondFingerprint},
-	} {
-		if _, err := tx.ExecContext(ctx, `UPDATE events SET sequence=?,payload=? WHERE event_id=?`, update.sequence, update.body, update.eventID); err != nil {
-			_ = tx.Rollback()
-			_ = db.Close()
-			t.Fatal(err)
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE records SET admission_fingerprint=? WHERE admission_event_id=?`, update.fingerprint, update.eventID); err != nil {
-			_ = tx.Rollback()
-			_ = db.Close()
-			t.Fatal(err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
+	swapRecoveryProjectionSequences(t, ctx, path, first, second)
 	if _, err := Verify(ctx, path); err == nil {
 		t.Fatal("recovery verification accepted projection events in reverse revision order")
+	}
+}
+
+func TestRecoveryRejectsWorkBeforeIntentAdmission(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, NormalizedObjective: "objective", CreatedAt: now}
+	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"},
+		ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	intentEvent, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"},
+		ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	workEvent, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"},
+		ProjectionKind: "work", RecordID: string(work.ID), Version: 1, Value: work,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	swapRecoveryProjectionSequences(t, ctx, path, intentEvent, workEvent)
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "work requires its durable Intent") {
+		t.Fatalf("Work-before-Intent recovery error=%v", err)
 	}
 }
 
@@ -887,6 +888,53 @@ func appendRecoveryRefinedGoal(t *testing.T, ctx context.Context, store *ledger.
 		t.Fatal(err)
 	}
 	return refined, goal
+}
+
+func swapRecoveryProjectionSequences(t *testing.T, ctx context.Context, path string, first, second events.Event) {
+	t.Helper()
+	firstBody, firstFingerprint := resealRecoveryProjectionAtSequence(t, first, second.Sequence)
+	secondBody, secondFingerprint := resealRecoveryProjectionAtSequence(t, second, first.Sequence)
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE events SET sequence=-sequence WHERE event_id IN (?,?)`, first.EventID, second.EventID); err != nil {
+		_ = tx.Rollback()
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	for _, update := range []struct {
+		eventID     string
+		sequence    int64
+		body        []byte
+		fingerprint string
+	}{
+		{first.EventID, second.Sequence, firstBody, firstFingerprint},
+		{second.EventID, first.Sequence, secondBody, secondFingerprint},
+	} {
+		if _, err := tx.ExecContext(ctx, `UPDATE events SET sequence=?,payload=? WHERE event_id=?`, update.sequence, update.body, update.eventID); err != nil {
+			_ = tx.Rollback()
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE records SET admission_fingerprint=? WHERE admission_event_id=?`, update.fingerprint, update.eventID); err != nil {
+			_ = tx.Rollback()
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func resealRecoveryProjectionAtSequence(t *testing.T, event events.Event, sequence int64) ([]byte, string) {
