@@ -2840,7 +2840,7 @@ func completedGoalTaskEvidence(stream []events.Event, snapshot projections.Snaps
 	for _, id := range ids {
 		evidence, err := completedTaskEvidence(stream, states[id], organizationID)
 		if err != nil {
-			return nil, fmt.Errorf("Task %s: %w", id, err)
+			return nil, fmt.Errorf("task %s: %w", id, err)
 		}
 		result = append(result, evidence)
 	}
@@ -2957,7 +2957,7 @@ func validateCompletedGoal(stream []events.Event, snapshot projections.Snapshot,
 		return err
 	}
 	if evidenceEvent.EventID == "" || !evidence.MatchesCurrent(state.Value, state.Version, intent, plan, tasks) {
-		return fmt.Errorf("Goal completion evidence is missing or stale")
+		return fmt.Errorf("goal completion evidence is missing or stale")
 	}
 	var transition events.Event
 	for _, event := range stream {
