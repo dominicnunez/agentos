@@ -524,6 +524,88 @@ func TestRecoveryRejectsMislabeledAgentLifecycle(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsMislabeledGoalAchievement(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	mission := core.Mission{ID: "mission-1", OrganizationID: organization.ID, Statement: "produce bounded outcomes", Status: core.MissionActive, CreatedAt: now}
+	goal := core.Goal{
+		ID: "goal-1", OrganizationID: organization.ID, MissionID: mission.ID, Objective: "produce one bounded outcome",
+		Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "bounded outcome", Origin: "USER"}}, Status: core.GoalActive, CreatedAt: now,
+	}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "mission", RecordID: string(mission.ID), Version: 1, Value: mission},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_CREATED", SourceActorID: "runtime", CorrelationID: "goal-1"}, ProjectionKind: "goal", RecordID: string(goal.ID), Version: 1, Value: goal},
+	} {
+		if _, err := store.AppendProjection(ctx, draft); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	goal.Objective = "produce one verified bounded outcome"
+	refined, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_REFINED", SourceActorID: "runtime", CorrelationID: "goal-1"},
+		ProjectionKind: "goal", RecordID: string(goal.ID), Version: 2, Value: goal,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	payload, present, err := events.AdmittedProjection(refined)
+	if err != nil || !present {
+		_ = store.Close()
+		t.Fatalf("Goal refinement admission is invalid: present=%t err=%v", present, err)
+	}
+	goal.Status = core.GoalAchieved
+	payload.Projection.Value, err = json.Marshal(goal)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	sealed, err := events.SealProjectionEvent(refined, payload.Projection, payload.Detail)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	eventBody, err := json.Marshal(sealed)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	recordBody, err := json.Marshal(payload.Projection)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE events SET payload=? WHERE event_id=?`, eventBody, refined.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE records SET body=?,admission_fingerprint=? WHERE admission_event_id=?`, recordBody, sealed.Admission.Fingerprint, refined.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil {
+		t.Fatal("recovery verification accepted achieved Goal state under GOAL_REFINED")
+	}
+}
+
 func resealRecoveryProjectionAtSequence(t *testing.T, event events.Event, sequence int64) ([]byte, string) {
 	t.Helper()
 	payload, present, err := events.AdmittedProjection(event)

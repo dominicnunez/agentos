@@ -12,6 +12,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	ledgerrecovery "github.com/dominicnunez/agentos/internal/ledger/recovery"
 )
 
 func TestRecoveryRejectsCausallyReorderedGoalEvidence(t *testing.T) {
@@ -137,6 +138,9 @@ func TestRecoveryRejectsCausallyReorderedGoalEvidence(t *testing.T) {
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := ledgerrecovery.Verify(ctx, databasePath); err != nil {
+		t.Fatalf("recovery verification rejected legitimate Goal achievement evidence: %v", err)
 	}
 	raw, err := sql.Open("sqlite", databasePath)
 	if err != nil {

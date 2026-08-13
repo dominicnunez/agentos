@@ -44,7 +44,9 @@ do not contain the required Agent OS ledger tables and columns, unsupported
 pre-admission projection state, projection lifecycle events without typed
 admission, and materialized projections that do not match their authorizing
 event or durable Organization/Intent/Work relationship exactly. Agent and Task
-lifecycle events must match their exact prior and resulting status. Agent
+lifecycle events must match their exact prior and resulting status, and Agent
+history must begin with version-one creation. Achieved Goals must retain their
+exact atomic transition and authoritative progress evidence. Agent
 configuration changes remain distinct from activation changes; Task history
 also preserves its immutable execution contract and correlation boundary.
 

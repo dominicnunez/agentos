@@ -130,7 +130,8 @@ backup/restore verification reject missing, copied, duplicated, malformed,
 cross-organization, or mismatched admission. Nonempty pre-admission projection
 schemas are unsupported pre-release state and fail closed rather than receiving
 an inferred compatibility migration. Agent and Task revisions additionally bind
-each lifecycle label to its exact prior and resulting status. Agent configuration
+each lifecycle label to its exact prior and resulting status, and an Agent
+history must begin with its version-one creation. Agent configuration
 updates cannot masquerade as activation changes. Task revisions preserve the
 immutable planned and assigned contract, retain one Work/correlation boundary,
 and route a blocked child only to its durable parent. The same contracts are enforced at
@@ -201,7 +202,8 @@ criteria with the current Goal revision, and appends a fingerprinted
 `GOAL_PROGRESS_EVALUATED` contract. Target Goals enter `ACHIEVED` only when all
 criteria have authoritative coverage; the evaluation and `GOAL_ACHIEVED`
 projection commit in one SQLite transaction. Continuous Goals record progress
-without becoming terminal. Each Goal revision keeps a stable bounded proof set:
+without becoming terminal. Recovery certification replays the same Goal
+achievement evidence contract before accepting a backup. Each Goal revision keeps a stable bounded proof set:
 the earliest current Work completion that exactly covers each criterion, or
 the earliest completion before any criterion is covered. Evidence growth is
 therefore bounded by the Goal's criteria rather than its lifetime Work count,

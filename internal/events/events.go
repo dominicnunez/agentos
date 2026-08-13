@@ -1730,6 +1730,9 @@ func ValidateAgentProjectionTransition(eventType string, version int, previous *
 		return err
 	}
 	if previous == nil {
+		if version != 1 || eventType != "AGENT_CREATED" {
+			return fmt.Errorf("agent history must begin with creation at version one")
+		}
 		return nil
 	}
 	if !core.ValidAgentRevision(*previous, next) {

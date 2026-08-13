@@ -443,6 +443,15 @@ func TestProjectionWriterRejectsMislabeledAgentLifecycle(t *testing.T) {
 		}
 	}
 	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "local", Status: "ACTIVE"}
+	absent := agent
+	absent.ID = "agent-absent"
+	absent.Status = "INACTIVE"
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_DEACTIVATED", SourceActorID: "runtime", CorrelationID: "setup"},
+		ProjectionKind: "agent", RecordID: string(absent.ID), Version: 2, Value: absent,
+	}); err == nil {
+		t.Fatal("Agent lifecycle update without prior state was accepted")
+	}
 	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_CREATED", SourceActorID: "runtime", CorrelationID: "setup"},
 		ProjectionKind: "agent", RecordID: string(agent.ID), Version: 1, Value: agent,

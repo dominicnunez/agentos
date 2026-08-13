@@ -500,6 +500,65 @@ func (l *SQLite) ValidateGoalAchievement(ctx context.Context, organizationID str
 	})
 }
 
+// ValidateGoalAchievementAdmissions reuses the authoritative ledger evidence
+// validator to certify every current achieved Goal in a read-only database.
+// Backup verification calls this after proving projection/event admission.
+func ValidateGoalAchievementAdmissions(ctx context.Context, db *sql.DB) (finalErr error) {
+	if ctx == nil || db == nil {
+		return fmt.Errorf("goal achievement validation requires a database and context")
+	}
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("begin Goal achievement validation: %w", err)
+	}
+	defer func() {
+		if tx != nil {
+			finalErr = errors.Join(finalErr, tx.Rollback())
+		}
+	}()
+	rows, err := tx.QueryContext(ctx, `SELECT body FROM records AS current
+WHERE kind='goal' AND version=(SELECT MAX(version) FROM records AS latest WHERE latest.kind=current.kind AND latest.record_id=current.record_id)
+ORDER BY record_id`)
+	if err != nil {
+		return fmt.Errorf("read current Goal admissions: %w", err)
+	}
+	var achieved []struct {
+		record events.ProjectionRecord
+		goal   core.Goal
+	}
+	for rows.Next() {
+		var body []byte
+		var candidate struct {
+			record events.ProjectionRecord
+			goal   core.Goal
+		}
+		if err := rows.Scan(&body); err != nil || decodeExactJSONBytes(body, &candidate.record) != nil || decodeExactJSONBytes(candidate.record.Value, &candidate.goal) != nil || candidate.record.ProjectionKind != "goal" || candidate.record.RecordID != string(candidate.goal.ID) {
+			_ = rows.Close()
+			return fmt.Errorf("current Goal admission is invalid")
+		}
+		if candidate.goal.Status == core.GoalAchieved {
+			achieved = append(achieved, candidate)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate current Goal admissions: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close current Goal admissions: %w", err)
+	}
+	for _, candidate := range achieved {
+		if _, err := validateAchievedGoal(ctx, tx, string(candidate.goal.OrganizationID), candidate.record, candidate.goal); err != nil {
+			return fmt.Errorf("achieved Goal %s lacks exact durable evidence: %w", candidate.goal.ID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("complete Goal achievement validation: %w", err)
+	}
+	tx = nil
+	return nil
+}
+
 func currentGoalRevision(ctx context.Context, tx *sql.Tx, organizationID string, goalID core.ID) (events.ProjectionRecord, core.Goal, error) {
 	body, found, err := latestRecordBody(ctx, tx, "goal", string(goalID))
 	if err != nil {

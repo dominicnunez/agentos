@@ -75,15 +75,17 @@ func TestAgentProjectionTransitionsAreExact(t *testing.T) {
 		next      core.Agent
 		valid     bool
 	}{
-		"active creation":              {"AGENT_CREATED", 1, nil, active, true},
-		"configuration update":         {"AGENT_CONFIGURATION_UPDATED", 2, &active, configured, true},
-		"deactivation":                 {"AGENT_DEACTIVATED", 2, &active, inactive, true},
-		"reactivation":                 {"AGENT_REACTIVATED", 3, &inactive, active, true},
-		"inactive creation":            {"AGENT_CREATED", 1, nil, inactive, false},
-		"mislabeled deactivation":      {"AGENT_DEACTIVATED", 2, &active, active, false},
-		"mislabeled reactivation":      {"AGENT_REACTIVATED", 2, &active, active, false},
-		"status-changing config event": {"AGENT_CONFIGURATION_UPDATED", 2, &active, inactive, false},
-		"config-changing lifecycle":    {"AGENT_DEACTIVATED", 2, &active, func() core.Agent { value := configured; value.Status = "INACTIVE"; return value }(), false},
+		"active creation":                {"AGENT_CREATED", 1, nil, active, true},
+		"update without prior state":     {"AGENT_CONFIGURATION_UPDATED", 2, nil, configured, false},
+		"deactivate without prior state": {"AGENT_DEACTIVATED", 2, nil, inactive, false},
+		"configuration update":           {"AGENT_CONFIGURATION_UPDATED", 2, &active, configured, true},
+		"deactivation":                   {"AGENT_DEACTIVATED", 2, &active, inactive, true},
+		"reactivation":                   {"AGENT_REACTIVATED", 3, &inactive, active, true},
+		"inactive creation":              {"AGENT_CREATED", 1, nil, inactive, false},
+		"mislabeled deactivation":        {"AGENT_DEACTIVATED", 2, &active, active, false},
+		"mislabeled reactivation":        {"AGENT_REACTIVATED", 2, &active, active, false},
+		"status-changing config event":   {"AGENT_CONFIGURATION_UPDATED", 2, &active, inactive, false},
+		"config-changing lifecycle":      {"AGENT_DEACTIVATED", 2, &active, func() core.Agent { value := configured; value.Status = "INACTIVE"; return value }(), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := ValidateAgentProjectionTransition(test.eventType, test.version, test.previous, test.next)

@@ -20,6 +20,7 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
+	ledgerstore "github.com/dominicnunez/agentos/internal/ledger"
 	"modernc.org/sqlite"
 )
 
@@ -107,6 +108,9 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 		}
 	}
 	if err := verifyProjectionAdmissions(ctx, db); err != nil {
+		return Result{}, err
+	}
+	if err := ledgerstore.ValidateGoalAchievementAdmissions(ctx, db); err != nil {
 		return Result{}, err
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(sequence), 0) FROM events`).Scan(&result.EventCount, &result.MaxSequence); err != nil {
