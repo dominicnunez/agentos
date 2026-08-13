@@ -134,7 +134,8 @@ each lifecycle label to its exact prior and resulting status, and an Agent
 history must begin with its version-one creation. Agent configuration
 updates cannot masquerade as activation changes. Task revisions preserve the
 immutable planned and assigned contract, retain one Work/correlation boundary,
-and route a blocked child only to its durable parent. The same contracts are enforced at
+form an acyclic dependency graph, and route a blocked child only to its durable
+parent. The same contracts are enforced at
 write, event-only rebuild, and recovery verification. Startup validates state before
 opening the operator endpoint, preserves blocked work, runs dependency-ready
 pending work, retries only known-safe interrupted deterministic work, and

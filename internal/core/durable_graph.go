@@ -180,6 +180,7 @@ func ValidateDurableGraph(graph DurableGraph) error {
 			}
 		}
 	}
+	tasks := make(map[ID]Task, len(graph.Tasks))
 	for id, state := range graph.Tasks {
 		task := state.Value
 		if err := validateDurableIdentity("task", id, task.ID); err != nil {
@@ -232,6 +233,10 @@ func ValidateDurableGraph(graph DurableGraph) error {
 				return fmt.Errorf("task %s references invalid dependency %s", id, dependencyID)
 			}
 		}
+		tasks[id] = task
+	}
+	if err := ValidateTaskDAG(tasks); err != nil {
+		return err
 	}
 	return nil
 }

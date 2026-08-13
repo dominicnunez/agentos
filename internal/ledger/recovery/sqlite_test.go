@@ -845,6 +845,80 @@ func TestRecoveryRejectsInvalidTaskDAGBinding(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsCyclicTaskDAG(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstEvent, _ := appendRecoveryProjectionChain(t, ctx, store)
+	if t.Failed() {
+		_ = store.Close()
+		return
+	}
+	second := core.Task{ID: "task-2", WorkID: "work-1", Description: "second task", DependsOn: []core.ID{"task-1"}, ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(second.ID), CorrelationID: "work-1"},
+		ProjectionKind: "task", RecordID: string(second.ID), Version: 1, Value: second,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	payload, present, err := events.AdmittedProjection(firstEvent)
+	if err != nil || !present {
+		_ = store.Close()
+		t.Fatalf("first Task projection admission is invalid: present=%t err=%v", present, err)
+	}
+	var first core.Task
+	if err := json.Unmarshal(payload.Projection.Value, &first); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	first.DependsOn = []core.ID{second.ID}
+	payload.Projection.Value, err = json.Marshal(first)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	sealed, err := events.SealProjectionEvent(firstEvent, payload.Projection, payload.Detail)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	eventBody, err := json.Marshal(sealed)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	recordBody, err := json.Marshal(payload.Projection)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE events SET payload=? WHERE event_id=?`, eventBody, firstEvent.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE records SET body=?,admission_fingerprint=? WHERE admission_event_id=?`, recordBody, sealed.Admission.Fingerprint, firstEvent.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "dependency cycle") {
+		t.Fatalf("cyclic Task DAG recovery error=%v", err)
+	}
+}
+
 func deleteRecoveryProjection(t *testing.T, ctx context.Context, path, kind string, recordID core.ID, version int) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
