@@ -157,14 +157,12 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			_ = eventRows.Close()
 			return fmt.Errorf("event %s has invalid reference arrays", event.EventID)
 		}
-		if createdAt != "" {
-			parsed, err := time.Parse(time.RFC3339Nano, createdAt)
-			if err != nil {
-				_ = eventRows.Close()
-				return fmt.Errorf("event %s has an invalid timestamp", event.EventID)
-			}
-			event.CreatedAt = parsed
+		parsed, err := time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil || parsed.IsZero() {
+			_ = eventRows.Close()
+			return fmt.Errorf("event %s has an invalid timestamp", event.EventID)
 		}
+		event.CreatedAt = parsed
 		payload, present, err := events.AdmittedProjection(event)
 		if err != nil {
 			_ = eventRows.Close()

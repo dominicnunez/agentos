@@ -27,7 +27,7 @@ func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	if _, err := live.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := live.ExecContext(ctx, `INSERT INTO events(event_id,payload) VALUES('event-1','{}')`); err != nil {
+	if _, err := live.ExecContext(ctx, `INSERT INTO events(event_id,payload,created_at) VALUES('event-1','{}','2026-08-13T12:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -39,7 +39,7 @@ func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	if backup.Path != backupPath || backup.EventCount != 1 || backup.MaxSequence != 1 || backup.SHA256 == "" || backup.SizeBytes == 0 {
 		t.Fatalf("backup=%+v", backup)
 	}
-	if _, err := live.ExecContext(ctx, `INSERT INTO events(event_id,payload) VALUES('event-2','{}')`); err != nil {
+	if _, err := live.ExecContext(ctx, `INSERT INTO events(event_id,payload,created_at) VALUES('event-2','{}','2026-08-13T12:01:00Z')`); err != nil {
 		t.Fatal(err)
 	}
 	verified, err := Verify(ctx, backupPath)
@@ -133,6 +133,33 @@ func TestRecoveryRejectsCorruptionWrongSchemaAndCancelledPublication(t *testing.
 	}
 	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("cancelled backup published destination: %v", err)
+	}
+}
+
+func TestRecoveryRejectsMissingOrZeroEventTimestamp(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		createdAt string
+	}{
+		{name: "missing"},
+		{name: "zero", createdAt: "0001-01-01T00:00:00Z"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "ledger.db")
+			db := createTestLedger(t, path)
+			if _, err := db.ExecContext(ctx, `INSERT INTO events(event_id,payload,created_at) VALUES('event-1','{}',?)`, test.createdAt); err != nil {
+				_ = db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "invalid timestamp") {
+				t.Fatalf("recovery verification error=%v", err)
+			}
+		})
 	}
 }
 
