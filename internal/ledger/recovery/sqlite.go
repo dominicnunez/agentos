@@ -480,24 +480,24 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 
 func validateRecoveryTeamRoster(team core.Team, snapshot core.DurableGraph) error {
 	if strings.TrimSpace(team.Name) == "" || strings.TrimSpace(team.Status) == "" {
-		return fmt.Errorf("Team is incomplete")
+		return fmt.Errorf("team is incomplete")
 	}
 	organization, found := snapshot.Organizations[team.OrganizationID]
 	if !found || organization.Value.ID != team.OrganizationID {
-		return fmt.Errorf("Team requires its durable parent Organization")
+		return fmt.Errorf("team requires its durable parent Organization")
 	}
 	members := make(map[core.ID]struct{}, len(team.MemberAgentIDs))
 	for _, memberID := range team.MemberAgentIDs {
 		if memberID == "" {
-			return fmt.Errorf("Team contains an empty member identity")
+			return fmt.Errorf("team contains an empty member identity")
 		}
 		if _, duplicate := members[memberID]; duplicate {
-			return fmt.Errorf("Team contains a duplicate member identity")
+			return fmt.Errorf("team contains a duplicate member identity")
 		}
 		members[memberID] = struct{}{}
 		agent, found := snapshot.Agents[memberID]
 		if !found || agent.Value.ID != memberID || agent.Value.OrganizationID != team.OrganizationID {
-			return fmt.Errorf("Team references invalid member Agent %s", memberID)
+			return fmt.Errorf("team references invalid member Agent %s", memberID)
 		}
 	}
 	return nil
