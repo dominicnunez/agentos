@@ -577,7 +577,10 @@ FROM events WHERE event_type='WORK_COMPLETED' AND json_extract(payload,'$.projec
 
 type currentProjectionAdmission[T any] struct {
 	record events.ProjectionRecord
-	value  T
+	// Generic instantiations are read by both evidence validators, but Gallow
+	// cannot currently connect those reads to this generic declaration.
+	// gallow-ignore-next-line unused-field
+	value T
 }
 
 func currentProjectionAdmissions[T any](ctx context.Context, tx *sql.Tx, kind, label string, identity func(T) core.ID) (final []currentProjectionAdmission[T], finalErr error) {
