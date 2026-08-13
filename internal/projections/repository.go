@@ -318,6 +318,9 @@ func validateSnapshot(snapshot Snapshot) error {
 		if err := validateIdentity("work", id, state.Value.ID); err != nil {
 			return err
 		}
+		if state.Value.Status != core.WorkActive && state.Value.Status != core.WorkCompleted && state.Value.Status != core.WorkFailed {
+			return fmt.Errorf("work %s has unsupported status %s", id, state.Value.Status)
+		}
 		intent, ok := snapshot.Intents[state.Value.IntentID]
 		if !ok {
 			return fmt.Errorf("work %s references missing intent %s", id, state.Value.IntentID)

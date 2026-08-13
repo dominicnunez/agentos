@@ -121,12 +121,20 @@ type Intent struct {
 	AcceptedFingerprint   string           `json:"accepted_fingerprint,omitempty"`
 	CreatedAt             time.Time        `json:"created_at"`
 }
+type WorkStatus string
+
+const (
+	WorkActive    WorkStatus = "ACTIVE"
+	WorkCompleted WorkStatus = "COMPLETED"
+	WorkFailed    WorkStatus = "FAILED"
+)
+
 type Work struct {
-	ID        ID        `json:"id"`
-	IntentID  ID        `json:"intent_id"`
-	Objective string    `json:"objective"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        ID         `json:"id"`
+	IntentID  ID         `json:"intent_id"`
+	Objective string     `json:"objective"`
+	Status    WorkStatus `json:"status"`
+	CreatedAt time.Time  `json:"created_at"`
 }
 
 type ExecutionKind string

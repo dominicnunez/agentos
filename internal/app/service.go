@@ -660,7 +660,7 @@ func (s *Service) failPlanningWork(ctx context.Context, organizationID core.ID, 
 		}
 	}
 	work := state.Value
-	work.Status = "FAILED"
+	work.Status = core.WorkFailed
 	if err := s.state.SaveWork(persistCtx, organizationID, "WORK_PLANNING_FAILED", "runtime", state.CorrelationID, state.Version+1, work, detail); err != nil {
 		return fmt.Errorf("persist planning failure for work %s: %w", work.ID, err)
 	}
@@ -1414,7 +1414,7 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 		snapshot.Intents[intent.ID] = projections.Versioned[core.Intent]{Version: 1, CorrelationID: correlationID, Value: intent}
 	}
 
-	work := core.Work{ID: core.ID("work-" + correlationID), IntentID: intent.ID, Objective: acceptedDraft.Objective, Status: "ACTIVE", CreatedAt: now}
+	work := core.Work{ID: core.ID("work-" + correlationID), IntentID: intent.ID, Objective: acceptedDraft.Objective, Status: core.WorkActive, CreatedAt: now}
 	if existing, ok := snapshot.Works[work.ID]; ok {
 		if existing.Value.IntentID != intent.ID || existing.Value.Objective != acceptedDraft.Objective {
 			return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("request work projection does not match submitted work")
@@ -1430,7 +1430,7 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 	plan, err := s.ensurePlan(ctx, organizationID, correlationID, intent, acceptedDraft, in.Kind)
 	if err != nil {
 		var attemptErr *planningAttemptError
-		if work.Status == "ACTIVE" {
+		if work.Status == core.WorkActive {
 			code := "PLANNING_REJECTED"
 			reason := "the accepted Intent did not produce an admissible durable Task graph"
 			evidenceRef := ""
@@ -2700,8 +2700,8 @@ func (s *Service) reconcileWorks(ctx context.Context) error {
 	sort.Slice(workIDs, func(i, j int) bool { return workIDs[i] < workIDs[j] })
 	for _, workID := range workIDs {
 		state := snapshot.Works[workID]
-		if state.Value.Status != "ACTIVE" {
-			if state.Value.Status == "COMPLETED" {
+		if state.Value.Status != core.WorkActive {
+			if state.Value.Status == core.WorkCompleted {
 				intent, ok := snapshot.Intents[state.Value.IntentID]
 				if !ok {
 					return fmt.Errorf("completed work %s references missing intent %s", workID, state.Value.IntentID)
@@ -2778,10 +2778,10 @@ func (s *Service) reconcileWorks(ctx context.Context) error {
 			}
 		}
 		workEventType := "WORK_COMPLETED"
-		work.Status = "COMPLETED"
+		work.Status = core.WorkCompleted
 		if !allComplete {
 			workEventType = "WORK_FAILED"
-			work.Status = "FAILED"
+			work.Status = core.WorkFailed
 		}
 		if err := s.state.SaveWork(ctx, intent.Value.OrganizationID, workEventType, "runtime", correlationID, state.Version+1, work, workDetail); err != nil {
 			return fmt.Errorf("persist terminal work %s: %w", workID, err)

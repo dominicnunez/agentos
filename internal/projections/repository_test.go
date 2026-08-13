@@ -131,6 +131,16 @@ func TestSnapshotRejectsCrossBoundaryTaskGraph(t *testing.T) {
 	}
 }
 
+func TestSnapshotRejectsUnknownWorkStatus(t *testing.T) {
+	snapshot := validBoundarySnapshot()
+	work := snapshot.Works["work-1"]
+	work.Value.Status = "UNKNOWN"
+	snapshot.Works["work-1"] = work
+	if err := validateSnapshot(snapshot); err == nil {
+		t.Fatal("unknown Work status was accepted")
+	}
+}
+
 func TestSnapshotRejectsMalformedDurableRoster(t *testing.T) {
 	tests := map[string]func(Snapshot){
 		"missing blueprint": func(snapshot Snapshot) {
@@ -306,8 +316,8 @@ func validBoundarySnapshot() Snapshot {
 		"intent-2": {CorrelationID: "work-2", Value: core.Intent{ID: "intent-2", OrganizationID: "org-2"}},
 	}
 	works := map[core.ID]Versioned[core.Work]{
-		"work-1": {CorrelationID: "work-1", Value: core.Work{ID: "work-1", IntentID: "intent-1"}},
-		"work-2": {CorrelationID: "work-2", Value: core.Work{ID: "work-2", IntentID: "intent-2"}},
+		"work-1": {CorrelationID: "work-1", Value: core.Work{ID: "work-1", IntentID: "intent-1", Status: core.WorkActive}},
+		"work-2": {CorrelationID: "work-2", Value: core.Work{ID: "work-2", IntentID: "intent-2", Status: core.WorkActive}},
 	}
 	tasks := map[core.ID]Versioned[core.Task]{
 		"task-1": {CorrelationID: "work-1", Value: core.Task{ID: "task-1", WorkID: "work-1"}},
