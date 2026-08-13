@@ -343,7 +343,7 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 				return fmt.Errorf("event %s contains an invalid Team projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
-			if err := setRecoveryProjection(snapshot.Teams, record, value, false, nil); err != nil {
+			if err := setRecoveryProjection(snapshot.Teams, record, value, false, core.ValidTeamRevision); err != nil {
 				return fmt.Errorf("event %s contains invalid Team history: %w", event.EventID, err)
 			}
 		case "agent_blueprint":

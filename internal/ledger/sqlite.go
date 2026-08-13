@@ -1238,6 +1238,11 @@ ORDER BY record_id`)
 }
 
 func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProjection) (events.Event, error) {
+	if item.intent != nil {
+		if err := validateIntentRevision(ctx, tx, item); err != nil {
+			return events.Event{}, err
+		}
+	}
 	if item.mission != nil {
 		if err := validateMissionRevision(ctx, tx, item); err != nil {
 			return events.Event{}, err
@@ -1346,6 +1351,17 @@ func validateAgentRevision(ctx context.Context, tx *sql.Tx, item preparedProject
 	}
 	if err := events.ValidateAgentProjectionTransition(item.draft.Event.EventType, item.draft.Version, &previous, agent); err != nil {
 		return fmt.Errorf("agent revision: %w", err)
+	}
+	return nil
+}
+
+func validateIntentRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+	intent := *item.intent
+	if intent.ID != core.ID(item.draft.RecordID) || string(intent.OrganizationID) != item.draft.Event.OrganizationID || item.draft.Event.CorrelationID == "" {
+		return fmt.Errorf("intent projection crosses its durable identity or correlation boundary")
+	}
+	if err := validateRosterParentOrganization(ctx, tx, intent.OrganizationID); err != nil {
+		return fmt.Errorf("intent: %w", err)
 	}
 	return nil
 }
@@ -1565,7 +1581,7 @@ func validateTeamRevision(ctx context.Context, tx *sql.Tx, item preparedProjecti
 	if item.draft.Version != record.Version+1 {
 		return fmt.Errorf("team version %d follows %d", item.draft.Version, record.Version)
 	}
-	if previous.ID != team.ID || previous.OrganizationID != team.OrganizationID || !previous.CreatedAt.Equal(team.CreatedAt) {
+	if !core.ValidTeamRevision(previous, team) {
 		return fmt.Errorf("team revision changes immutable identity")
 	}
 	return nil

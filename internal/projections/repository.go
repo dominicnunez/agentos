@@ -900,7 +900,7 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 	if err := decodeKind(records[KindGoal], snapshot.Goals, false, sameGoalRecord); err != nil {
 		return Snapshot{}, fmt.Errorf("decode goals: %w", err)
 	}
-	if err := decodeKind(records[KindTeam], snapshot.Teams, false, nil); err != nil {
+	if err := decodeKind(records[KindTeam], snapshot.Teams, false, sameTeamRecord); err != nil {
 		return Snapshot{}, fmt.Errorf("decode teams: %w", err)
 	}
 	if err := decodeKind(records[KindAgentBlueprint], snapshot.AgentBlueprints, false, sameAgentBlueprintRecord); err != nil {
@@ -947,6 +947,10 @@ func decodeKind[T any](bodies [][]byte, target map[core.ID]Versioned[T], correla
 
 func sameAgentBlueprintRecord(left, right core.AgentBlueprint) bool {
 	return core.ValidAgentBlueprintRevision(left, right)
+}
+
+func sameTeamRecord(left, right core.Team) bool {
+	return core.ValidTeamRevision(left, right)
 }
 
 func sameMissionRecord(left, right core.Mission) bool {

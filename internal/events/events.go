@@ -1657,6 +1657,12 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 	if !validProjectionEventType(record.ProjectionKind, record.Version, event.EventType) {
 		return fmt.Errorf("projection %s/%s/%d uses unsupported event %s", record.ProjectionKind, record.RecordID, record.Version, event.EventType)
 	}
+	if record.ProjectionKind == "organization" {
+		var organization core.Organization
+		if decodeExactEventJSON(record.Value, &organization) != nil || organization.ID == "" || organization.ID != core.ID(record.RecordID) || string(organization.ID) != event.OrganizationID {
+			return fmt.Errorf("organization projection value is invalid")
+		}
+	}
 	if record.ProjectionKind == "mission" {
 		var mission core.Mission
 		if decodeExactEventJSON(record.Value, &mission) != nil || mission.ID != core.ID(record.RecordID) || string(mission.OrganizationID) != event.OrganizationID {
@@ -1691,6 +1697,12 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 		}
 		if err := ValidateAgentProjectionTarget(event.EventType, record.Version, agent); err != nil {
 			return err
+		}
+	}
+	if record.ProjectionKind == "intent" {
+		var intent core.Intent
+		if decodeExactEventJSON(record.Value, &intent) != nil || intent.ID == "" || intent.ID != core.ID(record.RecordID) || intent.OrganizationID == "" || string(intent.OrganizationID) != event.OrganizationID || record.CorrelationID == "" || record.CorrelationID != event.CorrelationID {
+			return fmt.Errorf("intent projection value is invalid or lacks its correlation boundary")
 		}
 	}
 	if record.ProjectionKind == "task" {

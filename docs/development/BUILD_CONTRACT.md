@@ -137,7 +137,10 @@ Agent configuration updates cannot masquerade as activation changes. Task creati
 post-batch graph before commit while allowing references within that batch. Task revisions preserve the
 immutable planned and assigned contract, retain one Work/correlation boundary,
 form an acyclic dependency graph, and route a blocked child only to its durable
-parent. The same contracts are enforced at
+parent. Organization and Intent creation bind value identity to the exact
+admission envelope; Intent additionally requires its durable parent
+Organization and a nonempty correlation boundary. Team revisions preserve
+tenant ownership and creation identity. The same contracts are enforced at
 write, event-only rebuild, and recovery verification. Startup validates state before
 opening the operator endpoint, preserves blocked work, runs dependency-ready
 pending work, retries only known-safe interrupted deterministic work, and

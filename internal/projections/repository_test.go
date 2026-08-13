@@ -402,6 +402,18 @@ func TestHierarchyRevisionsPreserveIdentityAndDirectionBoundaries(t *testing.T) 
 		t.Fatalf("evidence-backed Goal achievement could not be rebuilt: %v", err)
 	}
 
+	team := core.Team{ID: "team-1", OrganizationID: "org-1", Name: "Team", MemberAgentIDs: []core.ID{}, Status: "ACTIVE", CreatedAt: now}
+	revisedTeam := team
+	revisedTeam.Name = "Revised Team"
+	if err := decodeKind(projectionBodies(t, KindTeam, string(team.ID), team, revisedTeam), map[core.ID]Versioned[core.Team]{}, false, sameTeamRecord); err != nil {
+		t.Fatalf("valid Team revision was rejected: %v", err)
+	}
+	reassignedTeam := revisedTeam
+	reassignedTeam.OrganizationID = "org-2"
+	if err := decodeKind(projectionBodies(t, KindTeam, string(team.ID), team, reassignedTeam), map[core.ID]Versioned[core.Team]{}, false, sameTeamRecord); err == nil {
+		t.Fatal("Team revision changed tenant ownership")
+	}
+
 	work := core.Work{ID: "work-1", IntentID: "intent-1", GoalID: goal.ID, Objective: "bounded work", Status: core.WorkActive, CreatedAt: now}
 	completed := work
 	completed.Status = core.WorkCompleted

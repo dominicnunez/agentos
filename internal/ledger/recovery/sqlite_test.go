@@ -227,13 +227,14 @@ func TestRecoveryRejectsMissingProjectionOrganization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _ = appendRecoveryProjectionState(t, ctx, store, false); t.Failed() {
+	if _, _ = appendRecoveryProjectionState(t, ctx, store, true); t.Failed() {
 		_ = store.Close()
 		return
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
+	deleteRecoveryProjection(t, ctx, path, "organization", "org-1", 1)
 	if _, err := Verify(ctx, path); err == nil {
 		t.Fatal("recovery verification accepted projections for a missing Organization")
 	}
@@ -775,7 +776,7 @@ func resealRecoveryProjection(t *testing.T, ctx context.Context, store *ledger.S
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE events SET event_type=?,payload=? WHERE event_id=?`, event.EventType, eventBody, event.EventID); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE events SET organization_id=?,event_type=?,payload=? WHERE event_id=?`, event.OrganizationID, event.EventType, eventBody, event.EventID); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -925,6 +926,62 @@ func TestRecoveryRejectsInvalidProjectionRevisionHistory(t *testing.T) {
 	}
 	if _, err := Verify(ctx, path); err == nil {
 		t.Fatal("recovery verification accepted an immutable blueprint change")
+	}
+}
+
+func TestRecoveryRejectsTeamTenantReassignment(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organizations := []core.Organization{
+		{ID: "org-1", Name: "Organization 1", PolicyVersion: "v1", CreatedAt: now},
+		{ID: "org-2", Name: "Organization 2", PolicyVersion: "v1", CreatedAt: now},
+	}
+	for _, organization := range organizations {
+		if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+			Event:          events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"},
+			ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization,
+		}); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	team := core.Team{ID: "team-1", OrganizationID: "org-1", Name: "Team", MemberAgentIDs: []core.ID{}, Status: "ACTIVE", CreatedAt: now}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TEAM_CREATED", SourceActorID: "runtime", CorrelationID: "roster"},
+		ProjectionKind: "team", RecordID: string(team.ID), Version: 1, Value: team,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	team.Name = "Revised Team"
+	revised, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TEAM_REVISED", SourceActorID: "runtime", CorrelationID: "roster"},
+		ProjectionKind: "team", RecordID: string(team.ID), Version: 2, Value: team,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	payload, present, err := events.AdmittedProjection(revised)
+	if err != nil || !present {
+		_ = store.Close()
+		t.Fatalf("Team revision admission is invalid: present=%t err=%v", present, err)
+	}
+	team.OrganizationID = "org-2"
+	payload.Projection.Value, err = json.Marshal(team)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	revised.OrganizationID = "org-2"
+	resealRecoveryProjection(t, ctx, store, path, revised, payload)
+	if _, err := Verify(ctx, path); err == nil {
+		t.Fatal("recovery verification accepted Team tenant reassignment")
 	}
 }
 

@@ -56,6 +56,12 @@ func ValidExecutionProfileRevision(previous, next ExecutionProfile) bool {
 	return reflect.DeepEqual(previous, next)
 }
 
+// ValidTeamRevision permits roster and descriptive changes while preserving
+// durable Team identity, tenant ownership, and creation time.
+func ValidTeamRevision(previous, next Team) bool {
+	return previous.ID == next.ID && previous.OrganizationID == next.OrganizationID && previous.CreatedAt.Equal(next.CreatedAt)
+}
+
 // ValidAgentRevision preserves durable Agent identity and tenant ownership
 // while allowing reviewed configuration and lifecycle changes.
 func ValidAgentRevision(previous, next Agent) bool {

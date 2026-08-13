@@ -392,6 +392,60 @@ func TestProjectionWriterRejectsInvalidBoundaryBeforePersistence(t *testing.T) {
 	}
 }
 
+func TestProjectionWriterRejectsInvalidOrganizationAndIntentBindings(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	mismatched := organization
+	mismatched.ID = "org-2"
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"},
+		ProjectionKind: "organization", RecordID: "org-1", Version: 1, Value: mismatched,
+	}); err == nil {
+		t.Fatal("projection writer accepted an Organization value outside its admission envelope")
+	}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"},
+		ProjectionKind: "organization", RecordID: "org-1", Version: 1, Value: organization,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	baseIntent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, NormalizedObjective: "bounded work", CreatedAt: now}
+	for name, test := range map[string]struct {
+		intent        core.Intent
+		organization  string
+		correlationID string
+		recordID      string
+	}{
+		"missing parent organization": {intent: func() core.Intent { value := baseIntent; value.OrganizationID = "org-missing"; return value }(), organization: "org-missing", correlationID: "work-1", recordID: "intent-1"},
+		"empty correlation":           {intent: baseIntent, organization: "org-1", correlationID: "", recordID: "intent-1"},
+		"mismatched identity":         {intent: func() core.Intent { value := baseIntent; value.ID = "intent-2"; return value }(), organization: "org-1", correlationID: "work-1", recordID: "intent-1"},
+		"mismatched organization":     {intent: baseIntent, organization: "org-2", correlationID: "work-1", recordID: "intent-1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+				Event:          events.TrustedDraft{OrganizationID: test.organization, EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: test.correlationID},
+				ProjectionKind: "intent", RecordID: test.recordID, Version: 1, Value: test.intent,
+			}); err == nil {
+				t.Fatal("projection writer accepted an invalid Intent boundary")
+			}
+		})
+	}
+	stream, err := store.Events(ctx, "")
+	if err != nil || len(stream) != 1 || stream[0].EventType != "ORGANIZATION_CREATED" {
+		t.Fatalf("rejected bindings changed ledger: events=%d err=%v", len(stream), err)
+	}
+	records, err := store.Records(ctx, "intent", "intent-1")
+	if err != nil || len(records) != 0 {
+		t.Fatalf("rejected Intent binding materialized state: records=%d err=%v", len(records), err)
+	}
+}
+
 func TestProjectionWriterRejectsMislabeledTaskLifecycle(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(":memory:")
