@@ -27,8 +27,8 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "fake", Status: "ACTIVE"}
 	team := core.Team{ID: "team-1", OrganizationID: organization.ID, Name: "Delivery", MemberAgentIDs: []core.ID{agent.ID}, Status: "ACTIVE", CreatedAt: now}
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "echo hello", NormalizedObjective: "echo hello", HardConstraints: []string{}, ConsequenceBoundaries: []string{}, CreatedAt: now}
-	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: "echo hello", Status: "ACTIVE", CreatedAt: now}
-	task := core.Task{ID: "task-1", GoalID: goal.ID, Description: "echo hello", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: rosterAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
+	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: "echo hello", Status: "ACTIVE", CreatedAt: now}
+	task := core.Task{ID: "task-1", WorkID: work.ID, Description: "echo hello", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: rosterAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
 	repository := New(events.NewGateway(l))
 	for _, save := range []func() error{
 		func() error {
@@ -46,7 +46,7 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "request-1", 1, intent, nil)
 		},
 		func() error {
-			return repository.SaveGoal(ctx, organization.ID, "GOAL_CREATED", "runtime", "request-1", 1, goal, nil)
+			return repository.SaveWork(ctx, organization.ID, "WORK_CREATED", "runtime", "request-1", 1, work, nil)
 		},
 		func() error {
 			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "request-1", 1, task, nil)
@@ -99,22 +99,22 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 
 func TestSnapshotRejectsCrossBoundaryTaskGraph(t *testing.T) {
 	tests := map[string]func(Snapshot){
-		"goal correlation": func(snapshot Snapshot) {
-			goal := snapshot.Goals["goal-1"]
-			goal.CorrelationID = "other"
-			snapshot.Goals["goal-1"] = goal
+		"work correlation": func(snapshot Snapshot) {
+			work := snapshot.Works["work-1"]
+			work.CorrelationID = "other"
+			snapshot.Works["work-1"] = work
 		},
 		"task correlation": func(snapshot Snapshot) {
 			task := snapshot.Tasks["task-1"]
 			task.CorrelationID = "other"
 			snapshot.Tasks["task-1"] = task
 		},
-		"cross-goal dependency": func(snapshot Snapshot) {
+		"cross-work dependency": func(snapshot Snapshot) {
 			task := snapshot.Tasks["task-1"]
 			task.Value.DependsOn = []core.ID{"task-2"}
 			snapshot.Tasks["task-1"] = task
 		},
-		"cross-goal parent": func(snapshot Snapshot) {
+		"cross-work parent": func(snapshot Snapshot) {
 			task := snapshot.Tasks["task-1"]
 			task.Value.ParentID = "task-2"
 			snapshot.Tasks["task-1"] = task
@@ -179,12 +179,12 @@ func TestSnapshotRejectsMalformedPinnedAgentConfiguration(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			snapshot := validRosterSnapshot()
 			intent := core.Intent{ID: "intent-1", OrganizationID: "org-1"}
-			goal := core.Goal{ID: "goal-1", IntentID: intent.ID}
+			work := core.Work{ID: "work-1", IntentID: intent.ID}
 			agent := snapshot.Agents["agent-1"].Value
-			task := core.Task{ID: "task-1", GoalID: goal.ID, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: rosterAgentConfig(agent)}
+			task := core.Task{ID: "task-1", WorkID: work.ID, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: rosterAgentConfig(agent)}
 			mutate(&task)
 			snapshot.Intents[intent.ID] = Versioned[core.Intent]{CorrelationID: "work-1", Value: intent}
-			snapshot.Goals[goal.ID] = Versioned[core.Goal]{CorrelationID: "work-1", Value: goal}
+			snapshot.Works[work.ID] = Versioned[core.Work]{CorrelationID: "work-1", Value: work}
 			snapshot.Tasks[task.ID] = Versioned[core.Task]{CorrelationID: "work-1", Value: task}
 			if err := validateSnapshot(snapshot); err == nil {
 				t.Fatal("malformed pinned Agent configuration was accepted")
@@ -305,17 +305,17 @@ func validBoundarySnapshot() Snapshot {
 		"intent-1": {CorrelationID: "work-1", Value: core.Intent{ID: "intent-1", OrganizationID: "org-1"}},
 		"intent-2": {CorrelationID: "work-2", Value: core.Intent{ID: "intent-2", OrganizationID: "org-2"}},
 	}
-	goals := map[core.ID]Versioned[core.Goal]{
-		"goal-1": {CorrelationID: "work-1", Value: core.Goal{ID: "goal-1", IntentID: "intent-1"}},
-		"goal-2": {CorrelationID: "work-2", Value: core.Goal{ID: "goal-2", IntentID: "intent-2"}},
+	works := map[core.ID]Versioned[core.Work]{
+		"work-1": {CorrelationID: "work-1", Value: core.Work{ID: "work-1", IntentID: "intent-1"}},
+		"work-2": {CorrelationID: "work-2", Value: core.Work{ID: "work-2", IntentID: "intent-2"}},
 	}
 	tasks := map[core.ID]Versioned[core.Task]{
-		"task-1": {CorrelationID: "work-1", Value: core.Task{ID: "task-1", GoalID: "goal-1"}},
-		"task-2": {CorrelationID: "work-2", Value: core.Task{ID: "task-2", GoalID: "goal-2"}},
+		"task-1": {CorrelationID: "work-1", Value: core.Task{ID: "task-1", WorkID: "work-1"}},
+		"task-2": {CorrelationID: "work-2", Value: core.Task{ID: "task-2", WorkID: "work-2"}},
 	}
 	return Snapshot{
 		Organizations: organizations, Teams: map[core.ID]Versioned[core.Team]{}, AgentBlueprints: map[core.ID]Versioned[core.AgentBlueprint]{}, ExecutionProfiles: map[core.ID]Versioned[core.ExecutionProfile]{}, Agents: map[core.ID]Versioned[core.Agent]{},
-		Intents: intents, Goals: goals, Tasks: tasks,
+		Intents: intents, Works: works, Tasks: tasks,
 	}
 }
 
@@ -329,7 +329,7 @@ func validRosterSnapshot() Snapshot {
 		Organizations: map[core.ID]Versioned[core.Organization]{organization.ID: {Value: organization}, otherOrganization.ID: {Value: otherOrganization}},
 		Teams:         map[core.ID]Versioned[core.Team]{}, AgentBlueprints: map[core.ID]Versioned[core.AgentBlueprint]{blueprint.ID: {Value: blueprint}},
 		ExecutionProfiles: map[core.ID]Versioned[core.ExecutionProfile]{profile.ID: {Value: profile}}, Agents: map[core.ID]Versioned[core.Agent]{agent.ID: {Value: agent}},
-		Intents: map[core.ID]Versioned[core.Intent]{}, Goals: map[core.ID]Versioned[core.Goal]{}, Tasks: map[core.ID]Versioned[core.Task]{},
+		Intents: map[core.ID]Versioned[core.Intent]{}, Works: map[core.ID]Versioned[core.Work]{}, Tasks: map[core.ID]Versioned[core.Task]{},
 	}
 }
 

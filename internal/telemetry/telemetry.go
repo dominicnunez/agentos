@@ -211,7 +211,7 @@ func Project(correlationID string, stream []events.Event) (Run, error) {
 
 // ProjectPlanningFailure summarizes an accepted run that failed before Task
 // materialization. The failure contract must already exist so telemetry can
-// cite durable evidence before the Goal is terminalized.
+// cite durable evidence before the Work is terminalized.
 func ProjectPlanningFailure(correlationID string, stream []events.Event, finishedAt time.Time, evidenceRefs ...string) (Run, error) {
 	if correlationID == "" || len(stream) == 0 || finishedAt.IsZero() || len(evidenceRefs) == 0 {
 		return Run{}, fmt.Errorf("planning-failure telemetry requires a correlation, stream, finish time, and evidence")

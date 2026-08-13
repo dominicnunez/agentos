@@ -121,9 +121,9 @@ type Intent struct {
 	AcceptedFingerprint   string           `json:"accepted_fingerprint,omitempty"`
 	CreatedAt             time.Time        `json:"created_at"`
 }
-type Goal struct {
+type Work struct {
 	ID        ID        `json:"id"`
-	IntentID  ID        `json:"intent_envelope_id"`
+	IntentID  ID        `json:"intent_id"`
 	Objective string    `json:"objective"`
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
@@ -191,7 +191,7 @@ type AgentConfig struct {
 
 type Task struct {
 	ID                   ID                   `json:"id"`
-	GoalID               ID                   `json:"goal_id"`
+	WorkID               ID                   `json:"work_id"`
 	Description          string               `json:"description"`
 	ExecutionBrief       string               `json:"execution_brief,omitempty"`
 	AcceptanceCriteria   []IntentValue        `json:"acceptance_criteria,omitempty"`

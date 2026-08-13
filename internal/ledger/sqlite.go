@@ -425,7 +425,7 @@ func (l *SQLite) ReserveExternalWork(ctx context.Context, organizationID, reques
 			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
 SELECT 1 FROM events WHERE correlation_id=?
 UNION ALL SELECT 1 FROM external_work WHERE correlation_id=?
-UNION ALL SELECT 1 FROM records WHERE (kind='intent' AND record_id=?) OR (kind='goal' AND record_id=?) OR (kind='task' AND record_id=?))`, candidate, candidate, intentID, "goal-"+candidate, "task-"+candidate).Scan(&occupied); err != nil {
+UNION ALL SELECT 1 FROM records WHERE (kind='intent' AND record_id=?) OR (kind='work' AND record_id=?) OR (kind='task' AND record_id=?))`, candidate, candidate, intentID, "work-"+candidate, "task-"+candidate).Scan(&occupied); err != nil {
 				return fmt.Errorf("check external work namespace: %w", err)
 			}
 			if occupied {

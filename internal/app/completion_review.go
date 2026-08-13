@@ -210,7 +210,7 @@ func (s *Service) ReviewCompletion(ctx context.Context, input CompletionReviewIn
 	if _, err := s.runReady(ctx); err != nil {
 		return CompletionReviewView{}, err
 	}
-	if err := s.reconcileGoals(ctx); err != nil {
+	if err := s.reconcileWorks(ctx); err != nil {
 		return CompletionReviewView{}, err
 	}
 	view.Decision = review.Decision

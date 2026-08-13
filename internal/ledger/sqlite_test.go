@@ -23,8 +23,8 @@ func TestExternalWorkIndexMigratesLegacyCorrelation(t *testing.T) {
 	organization := core.Organization{ID: "org-1", Name: "org-1", PolicyVersion: "v1", CreatedAt: now}
 	agent := core.Agent{ID: "agent-local-org-1", OrganizationID: organization.ID, BlueprintVersion: "v1-local-worker", ExecutionProfileVersion: "v1-fake", RuntimeAdapter: "local", Status: "ACTIVE"}
 	intent := core.Intent{ID: "intent-legacy-request", OrganizationID: organization.ID, OriginalInstruction: "echo legacy", NormalizedObjective: "echo legacy", SourcePrincipalID: "agent-1", SourcePrincipalKind: core.PrincipalExternalAgent, SourceChannel: "A2A", SourceMessageID: "message-1", CreatedAt: now}
-	goal := core.Goal{ID: "goal-legacy-request", IntentID: intent.ID, Objective: intent.OriginalInstruction, Status: "COMPLETED", CreatedAt: now}
-	task := core.Task{ID: "task-legacy-request", GoalID: goal.ID, Description: intent.OriginalInstruction, ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskCompleted}
+	work := core.Work{ID: "work-legacy-request", IntentID: intent.ID, Objective: intent.OriginalInstruction, Status: "COMPLETED", CreatedAt: now}
+	task := core.Task{ID: "task-legacy-request", WorkID: work.ID, Description: intent.OriginalInstruction, ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskCompleted}
 	for _, projection := range []struct {
 		eventType, kind, recordID, taskID string
 		value                             any
@@ -32,7 +32,7 @@ func TestExternalWorkIndexMigratesLegacyCorrelation(t *testing.T) {
 		{"ORGANIZATION_CREATED", "organization", string(organization.ID), "", organization},
 		{"AGENT_CREATED", "agent", string(agent.ID), "", agent},
 		{"INTENT_CREATED", "intent", string(intent.ID), "", intent},
-		{"GOAL_CREATED", "goal", string(goal.ID), "", goal},
+		{"WORK_CREATED", "work", string(work.ID), "", work},
 		{"TASK_VERIFIED_COMPLETE", "task", string(task.ID), string(task.ID), task},
 	} {
 		if err := insertLegacyProjection(context.Background(), legacy, projection.eventType, projection.kind, projection.recordID, projection.taskID, projection.value); err != nil {

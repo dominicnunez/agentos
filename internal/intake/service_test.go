@@ -85,7 +85,7 @@ func TestExternalViewProjectsPlanningAndRemediationFailures(t *testing.T) {
 	base := []events.Event{{EventType: "INTAKE_MESSAGE_RECORDED", TaskID: rootID, CreatedAt: started}}
 
 	planning := append([]events.Event(nil), base...)
-	planning = append(planning, events.Event{EventType: "GOAL_PLANNING_FAILED", CreatedAt: started.Add(time.Second)})
+	planning = append(planning, events.Event{EventType: "WORK_PLANNING_FAILED", CreatedAt: started.Add(time.Second)})
 	view := projectView("work-1", planning, true)
 	if view.State != StateFailed || !view.UpdatedAt.Equal(started.Add(time.Second)) {
 		t.Fatalf("planning failure view=%+v", view)

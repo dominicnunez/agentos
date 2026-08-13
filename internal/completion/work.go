@@ -16,17 +16,17 @@ import (
 )
 
 const (
-	maximumGoalCriteria  = 256
-	maximumGoalTasks     = 4096
+	maximumWorkCriteria  = 256
+	maximumWorkTasks     = 4096
 	maximumTaskArtifacts = 1024
 )
 
-var ErrInvalidGoalEvidence = errors.New("goal completion evidence is invalid")
+var ErrInvalidWorkEvidence = errors.New("work completion evidence is invalid")
 
-// GoalTaskEvidence binds one terminal Task projection to the trusted
+// WorkTaskEvidence binds one terminal Task projection to the trusted
 // completion decision that preceded it. Neither reference is supplied by the
 // worker whose output was evaluated.
-type GoalTaskEvidence struct {
+type WorkTaskEvidence struct {
 	TaskID               core.ID  `json:"task_id"`
 	TaskVersion          int      `json:"task_version"`
 	VerificationEventRef string   `json:"verification_event_ref"`
@@ -34,52 +34,52 @@ type GoalTaskEvidence struct {
 	ArtifactRefs         []string `json:"artifact_refs"`
 }
 
-// GoalEvidence is the runtime-owned terminal proof for one Goal. It binds the
+// WorkEvidence is the runtime-owned terminal proof for one Work. It binds the
 // accepted Intent and immutable Plan to every independently verified Task.
 // The record is evidence, not authority, and cannot grant capabilities or
 // approve effects.
-type GoalEvidence struct {
-	GoalID            core.ID            `json:"goal_id"`
-	GoalVersion       int                `json:"goal_version"`
+type WorkEvidence struct {
+	WorkID            core.ID            `json:"work_id"`
+	WorkVersion       int                `json:"work_version"`
 	IntentID          core.ID            `json:"intent_id"`
 	IntentFingerprint string             `json:"intent_fingerprint"`
 	PlanID            core.ID            `json:"plan_id"`
 	PlanVersion       int                `json:"plan_version"`
 	Criteria          []core.IntentValue `json:"criteria"`
-	Tasks             []GoalTaskEvidence `json:"tasks"`
+	Tasks             []WorkTaskEvidence `json:"tasks"`
 	ArtifactRefs      []string           `json:"artifact_refs"`
 	CreatedAt         time.Time          `json:"created_at"`
 	Fingerprint       string             `json:"fingerprint"`
 }
 
-func NewGoalEvidence(goal core.Goal, goalVersion int, intent core.Intent, plan core.Plan, tasks []GoalTaskEvidence, createdAt time.Time) (GoalEvidence, error) {
-	record := GoalEvidence{
-		GoalID: goal.ID, GoalVersion: goalVersion,
+func NewWorkEvidence(work core.Work, workVersion int, intent core.Intent, plan core.Plan, tasks []WorkTaskEvidence, createdAt time.Time) (WorkEvidence, error) {
+	record := WorkEvidence{
+		WorkID: work.ID, WorkVersion: workVersion,
 		IntentID: intent.ID, IntentFingerprint: intent.AcceptedFingerprint,
 		PlanID: plan.ID, PlanVersion: plan.Version,
 		Criteria:  append([]core.IntentValue(nil), intent.CompletionCriteria...),
-		Tasks:     cloneGoalTaskEvidence(tasks),
+		Tasks:     cloneWorkTaskEvidence(tasks),
 		CreatedAt: createdAt.UTC(),
 	}
 	sort.Slice(record.Tasks, func(i, j int) bool { return record.Tasks[i].TaskID < record.Tasks[j].TaskID })
-	record.ArtifactRefs = goalArtifactRefs(record.Tasks)
+	record.ArtifactRefs = workArtifactRefs(record.Tasks)
 	fingerprint, err := record.expectedFingerprint()
 	if err != nil {
-		return GoalEvidence{}, err
+		return WorkEvidence{}, err
 	}
 	record.Fingerprint = fingerprint
 	if !record.Valid() {
-		return GoalEvidence{}, ErrInvalidGoalEvidence
+		return WorkEvidence{}, ErrInvalidWorkEvidence
 	}
 	return record, nil
 }
 
-func (r GoalEvidence) Valid() bool {
+func (r WorkEvidence) Valid() bool {
 	_, offset := r.CreatedAt.Zone()
-	if r.GoalID == "" || r.GoalVersion < 1 || r.IntentID == "" || !validDigest(r.IntentFingerprint) || r.PlanID == "" || r.PlanVersion < 1 || r.CreatedAt.IsZero() || offset != 0 {
+	if r.WorkID == "" || r.WorkVersion < 1 || r.IntentID == "" || !validDigest(r.IntentFingerprint) || r.PlanID == "" || r.PlanVersion < 1 || r.CreatedAt.IsZero() || offset != 0 {
 		return false
 	}
-	if len(r.Criteria) == 0 || len(r.Criteria) > maximumGoalCriteria || len(r.Tasks) == 0 || len(r.Tasks) > maximumGoalTasks {
+	if len(r.Criteria) == 0 || len(r.Criteria) > maximumWorkCriteria || len(r.Tasks) == 0 || len(r.Tasks) > maximumWorkTasks {
 		return false
 	}
 	for _, criterion := range r.Criteria {
@@ -98,7 +98,7 @@ func (r GoalEvidence) Valid() bool {
 			return false
 		}
 	}
-	if !slices.Equal(r.ArtifactRefs, goalArtifactRefs(r.Tasks)) {
+	if !slices.Equal(r.ArtifactRefs, workArtifactRefs(r.Tasks)) {
 		return false
 	}
 	expected, err := r.expectedFingerprint()
@@ -108,16 +108,16 @@ func (r GoalEvidence) Valid() bool {
 // MatchesCurrent proves that a previously persisted record still describes
 // the exact current terminal state. CreatedAt and Fingerprint are validated by
 // Valid and are intentionally not regenerated on recovery.
-func (r GoalEvidence) MatchesCurrent(goal core.Goal, goalVersion int, intent core.Intent, plan core.Plan, tasks []GoalTaskEvidence) bool {
-	if !r.Valid() || r.GoalID != goal.ID || r.GoalVersion != goalVersion || r.IntentID != intent.ID || r.IntentFingerprint != intent.AcceptedFingerprint || r.PlanID != plan.ID || r.PlanVersion != plan.Version || !reflect.DeepEqual(r.Criteria, intent.CompletionCriteria) {
+func (r WorkEvidence) MatchesCurrent(work core.Work, workVersion int, intent core.Intent, plan core.Plan, tasks []WorkTaskEvidence) bool {
+	if !r.Valid() || r.WorkID != work.ID || r.WorkVersion != workVersion || r.IntentID != intent.ID || r.IntentFingerprint != intent.AcceptedFingerprint || r.PlanID != plan.ID || r.PlanVersion != plan.Version || !reflect.DeepEqual(r.Criteria, intent.CompletionCriteria) {
 		return false
 	}
-	expectedTasks := cloneGoalTaskEvidence(tasks)
+	expectedTasks := cloneWorkTaskEvidence(tasks)
 	sort.Slice(expectedTasks, func(i, j int) bool { return expectedTasks[i].TaskID < expectedTasks[j].TaskID })
-	return reflect.DeepEqual(r.Tasks, expectedTasks) && slices.Equal(r.ArtifactRefs, goalArtifactRefs(expectedTasks))
+	return reflect.DeepEqual(r.Tasks, expectedTasks) && slices.Equal(r.ArtifactRefs, workArtifactRefs(expectedTasks))
 }
 
-func (r GoalEvidence) expectedFingerprint() (string, error) {
+func (r WorkEvidence) expectedFingerprint() (string, error) {
 	binding := r
 	binding.Fingerprint = ""
 	body, err := json.Marshal(binding)
@@ -128,8 +128,8 @@ func (r GoalEvidence) expectedFingerprint() (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
-func cloneGoalTaskEvidence(tasks []GoalTaskEvidence) []GoalTaskEvidence {
-	cloned := make([]GoalTaskEvidence, len(tasks))
+func cloneWorkTaskEvidence(tasks []WorkTaskEvidence) []WorkTaskEvidence {
+	cloned := make([]WorkTaskEvidence, len(tasks))
 	for index, task := range tasks {
 		cloned[index] = task
 		cloned[index].ArtifactRefs = append([]string(nil), task.ArtifactRefs...)
@@ -137,7 +137,7 @@ func cloneGoalTaskEvidence(tasks []GoalTaskEvidence) []GoalTaskEvidence {
 	return cloned
 }
 
-func goalArtifactRefs(tasks []GoalTaskEvidence) []string {
+func workArtifactRefs(tasks []WorkTaskEvidence) []string {
 	seen := make(map[string]struct{})
 	for _, task := range tasks {
 		for _, ref := range task.ArtifactRefs {

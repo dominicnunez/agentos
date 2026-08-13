@@ -19,7 +19,7 @@ const (
 	KindExecutionProfile = "execution_profile"
 	KindAgent            = "agent"
 	KindIntent           = "intent"
-	KindGoal             = "goal"
+	KindWork             = "work"
 	KindTask             = "task"
 )
 
@@ -39,7 +39,7 @@ type Snapshot struct {
 	ExecutionProfiles map[core.ID]Versioned[core.ExecutionProfile]
 	Agents            map[core.ID]Versioned[core.Agent]
 	Intents           map[core.ID]Versioned[core.Intent]
-	Goals             map[core.ID]Versioned[core.Goal]
+	Works             map[core.ID]Versioned[core.Work]
 	Tasks             map[core.ID]Versioned[core.Task]
 }
 
@@ -71,8 +71,8 @@ func (r *Repository) SaveIntent(ctx context.Context, eventType, actorID, correla
 	return r.save(ctx, string(value.OrganizationID), eventType, actorID, "", correlationID, KindIntent, value.ID, version, value, detail)
 }
 
-func (r *Repository) SaveGoal(ctx context.Context, organizationID core.ID, eventType, actorID, correlationID string, version int, value core.Goal, detail any) error {
-	return r.save(ctx, string(organizationID), eventType, actorID, "", correlationID, KindGoal, value.ID, version, value, detail)
+func (r *Repository) SaveWork(ctx context.Context, organizationID core.ID, eventType, actorID, correlationID string, version int, value core.Work, detail any) error {
+	return r.save(ctx, string(organizationID), eventType, actorID, "", correlationID, KindWork, value.ID, version, value, detail)
 }
 
 func (r *Repository) SaveTask(ctx context.Context, organizationID core.ID, eventType, actorID, correlationID string, version int, value core.Task, detail any) error {
@@ -176,7 +176,7 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 
 func (r *Repository) loadFromRecords(ctx context.Context) (Snapshot, error) {
 	records := make(map[string][][]byte)
-	for _, kind := range []string{KindOrganization, KindTeam, KindAgentBlueprint, KindExecutionProfile, KindAgent, KindIntent, KindGoal, KindTask} {
+	for _, kind := range []string{KindOrganization, KindTeam, KindAgentBlueprint, KindExecutionProfile, KindAgent, KindIntent, KindWork, KindTask} {
 		rows, err := r.gateway.ProjectionRecords(ctx, kind, "")
 		if err != nil {
 			return Snapshot{}, err
@@ -194,7 +194,7 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 		ExecutionProfiles: make(map[core.ID]Versioned[core.ExecutionProfile]),
 		Agents:            make(map[core.ID]Versioned[core.Agent]),
 		Intents:           make(map[core.ID]Versioned[core.Intent]),
-		Goals:             make(map[core.ID]Versioned[core.Goal]),
+		Works:             make(map[core.ID]Versioned[core.Work]),
 		Tasks:             make(map[core.ID]Versioned[core.Task]),
 	}
 	if err := decodeKind(records[KindOrganization], snapshot.Organizations, false, nil); err != nil {
@@ -215,8 +215,8 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 	if err := decodeKind(records[KindIntent], snapshot.Intents, true, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode intents: %w", err)
 	}
-	if err := decodeKind(records[KindGoal], snapshot.Goals, true, nil); err != nil {
-		return Snapshot{}, fmt.Errorf("decode goals: %w", err)
+	if err := decodeKind(records[KindWork], snapshot.Works, true, nil); err != nil {
+		return Snapshot{}, fmt.Errorf("decode works: %w", err)
 	}
 	if err := decodeKind(records[KindTask], snapshot.Tasks, true, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode tasks: %w", err)
@@ -314,16 +314,16 @@ func validateSnapshot(snapshot Snapshot) error {
 			}
 		}
 	}
-	for id, state := range snapshot.Goals {
-		if err := validateIdentity("goal", id, state.Value.ID); err != nil {
+	for id, state := range snapshot.Works {
+		if err := validateIdentity("work", id, state.Value.ID); err != nil {
 			return err
 		}
 		intent, ok := snapshot.Intents[state.Value.IntentID]
 		if !ok {
-			return fmt.Errorf("goal %s references missing intent %s", id, state.Value.IntentID)
+			return fmt.Errorf("work %s references missing intent %s", id, state.Value.IntentID)
 		}
 		if state.CorrelationID == "" || intent.CorrelationID != state.CorrelationID {
-			return fmt.Errorf("goal %s crosses its intent correlation boundary", id)
+			return fmt.Errorf("work %s crosses its intent correlation boundary", id)
 		}
 	}
 	for id, state := range snapshot.Tasks {
@@ -331,14 +331,14 @@ func validateSnapshot(snapshot Snapshot) error {
 		if err := validateIdentity("task", id, task.ID); err != nil {
 			return err
 		}
-		goal, ok := snapshot.Goals[task.GoalID]
+		work, ok := snapshot.Works[task.WorkID]
 		if !ok {
-			return fmt.Errorf("task %s references missing goal %s", id, task.GoalID)
+			return fmt.Errorf("task %s references missing work %s", id, task.WorkID)
 		}
-		if state.CorrelationID == "" || goal.CorrelationID != state.CorrelationID {
-			return fmt.Errorf("task %s crosses its goal correlation boundary", id)
+		if state.CorrelationID == "" || work.CorrelationID != state.CorrelationID {
+			return fmt.Errorf("task %s crosses its work correlation boundary", id)
 		}
-		intent := snapshot.Intents[goal.Value.IntentID]
+		intent := snapshot.Intents[work.Value.IntentID]
 		switch task.AssigneeType {
 		case "":
 			if task.AssigneeID != "" || task.AgentConfig != nil {
@@ -365,13 +365,13 @@ func validateSnapshot(snapshot Snapshot) error {
 		}
 		if task.ParentID != "" {
 			parent, ok := snapshot.Tasks[task.ParentID]
-			if !ok || parent.Value.GoalID != task.GoalID || parent.CorrelationID != state.CorrelationID || task.ParentID == id {
+			if !ok || parent.Value.WorkID != task.WorkID || parent.CorrelationID != state.CorrelationID || task.ParentID == id {
 				return fmt.Errorf("task %s references invalid parent %s", id, task.ParentID)
 			}
 		}
 		for _, dependencyID := range task.DependsOn {
 			dependency, ok := snapshot.Tasks[dependencyID]
-			if !ok || dependency.Value.GoalID != task.GoalID || dependency.CorrelationID != state.CorrelationID || dependencyID == id {
+			if !ok || dependency.Value.WorkID != task.WorkID || dependency.CorrelationID != state.CorrelationID || dependencyID == id {
 				return fmt.Errorf("task %s references invalid dependency %s", id, dependencyID)
 			}
 		}

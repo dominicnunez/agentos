@@ -5,7 +5,7 @@ conversational intake and work model:
 
 ```text
 User -> private Unix socket --+
-                              +-> Intake -> confirmed Intent -> Goal -> Task DAG
+                              +-> Intake -> confirmed Intent -> Work -> Task DAG
 Agent -> A2A JSON-RPC -------+
 ```
 
@@ -80,7 +80,7 @@ message is appended.
 
 The console presents the complete Intent for review. `/confirm` binds the
 current Linux user to the exact Intent version and SHA-256 fingerprint. Only
-then may Agent OS create the Goal and executable Task state. The confirmed
+then may Agent OS create the Work and executable Task state. The confirmed
 Intent is fingerprint-bound to a runtime-validated Plan. Exact deterministic
 work skips planning inference; adaptive work may use the configured provider
 to propose the smallest useful Task DAG. The complete graph is committed

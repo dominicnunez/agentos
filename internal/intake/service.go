@@ -667,7 +667,7 @@ func ValidateIdentifier(name, value string) error {
 func projectView(conversationID string, stream []events.Event, includeResult bool) View {
 	view := View{TaskID: streamTaskID(stream), ConversationID: conversationID, State: externalState(stream)}
 	for _, event := range stream {
-		if event.TaskID == view.TaskID || event.EventType == "GOAL_PLANNING_FAILED" {
+		if event.TaskID == view.TaskID || event.EventType == "WORK_PLANNING_FAILED" {
 			view.UpdatedAt = event.CreatedAt
 		}
 	}
@@ -727,7 +727,7 @@ func externalState(stream []events.Event) string {
 	state := StateWorking
 	rootID := streamTaskID(stream)
 	for _, event := range stream {
-		if event.EventType == "GOAL_PLANNING_FAILED" {
+		if event.EventType == "WORK_PLANNING_FAILED" {
 			state = StateFailed
 			continue
 		}
