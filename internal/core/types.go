@@ -18,6 +18,51 @@ type Organization struct {
 	PolicyVersion string    `json:"policy_version"`
 	CreatedAt     time.Time `json:"created_at"`
 }
+
+type MissionStatus string
+
+const (
+	MissionActive  MissionStatus = "ACTIVE"
+	MissionRetired MissionStatus = "RETIRED"
+)
+
+// Mission is enduring organizational direction. It is revised or retired,
+// never completed by a Work or Task transition.
+type Mission struct {
+	ID             ID            `json:"id"`
+	OrganizationID ID            `json:"organization_id"`
+	Statement      string        `json:"statement"`
+	Status         MissionStatus `json:"status"`
+	CreatedAt      time.Time     `json:"created_at"`
+}
+
+type GoalMode string
+
+const (
+	GoalTarget     GoalMode = "TARGET"
+	GoalContinuous GoalMode = "CONTINUOUS"
+)
+
+type GoalStatus string
+
+const (
+	GoalActive  GoalStatus = "ACTIVE"
+	GoalPaused  GoalStatus = "PAUSED"
+	GoalRetired GoalStatus = "RETIRED"
+)
+
+// Goal is a measurable outcome under a Mission. Projection versions preserve
+// refinements; achieving it requires a separate evidence evaluation.
+type Goal struct {
+	ID              ID            `json:"id"`
+	OrganizationID  ID            `json:"organization_id"`
+	MissionID       ID            `json:"mission_id"`
+	Objective       string        `json:"objective"`
+	Mode            GoalMode      `json:"mode"`
+	SuccessCriteria []IntentValue `json:"success_criteria"`
+	Status          GoalStatus    `json:"status"`
+	CreatedAt       time.Time     `json:"created_at"`
+}
 type Team struct {
 	ID             ID        `json:"id"`
 	OrganizationID ID        `json:"organization_id"`
@@ -89,6 +134,7 @@ type IntentDraft struct {
 	Version                int              `json:"version"`
 	Status                 IntentStatus     `json:"status"`
 	RequestedExecutionKind ExecutionKind    `json:"requested_execution_kind"`
+	Goal                   *IntentValue     `json:"goal,omitempty"`
 	Objective              string           `json:"objective"`
 	Context                []IntentValue    `json:"context"`
 	Deliverables           []IntentValue    `json:"deliverables"`
@@ -104,6 +150,7 @@ type IntentDraft struct {
 type Intent struct {
 	ID                    ID               `json:"id"`
 	OrganizationID        ID               `json:"organization_id"`
+	GoalID                ID               `json:"goal_id,omitempty"`
 	OriginalInstruction   string           `json:"original_instruction"`
 	NormalizedObjective   string           `json:"normalized_objective"`
 	HardConstraints       []string         `json:"hard_constraints"`
@@ -121,12 +168,21 @@ type Intent struct {
 	AcceptedFingerprint   string           `json:"accepted_fingerprint,omitempty"`
 	CreatedAt             time.Time        `json:"created_at"`
 }
-type Goal struct {
-	ID        ID        `json:"id"`
-	IntentID  ID        `json:"intent_envelope_id"`
-	Objective string    `json:"objective"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+type WorkStatus string
+
+const (
+	WorkActive    WorkStatus = "ACTIVE"
+	WorkCompleted WorkStatus = "COMPLETED"
+	WorkFailed    WorkStatus = "FAILED"
+)
+
+type Work struct {
+	ID        ID         `json:"id"`
+	IntentID  ID         `json:"intent_id"`
+	GoalID    ID         `json:"goal_id,omitempty"`
+	Objective string     `json:"objective"`
+	Status    WorkStatus `json:"status"`
+	CreatedAt time.Time  `json:"created_at"`
 }
 
 type ExecutionKind string
@@ -191,7 +247,7 @@ type AgentConfig struct {
 
 type Task struct {
 	ID                   ID                   `json:"id"`
-	GoalID               ID                   `json:"goal_id"`
+	WorkID               ID                   `json:"work_id"`
 	Description          string               `json:"description"`
 	ExecutionBrief       string               `json:"execution_brief,omitempty"`
 	AcceptanceCriteria   []IntentValue        `json:"acceptance_criteria,omitempty"`
@@ -258,6 +314,50 @@ type CompletionContract struct {
 	ArtifactRequirements []ArtifactRequirement        `json:"artifact_requirements,omitempty"`
 	RequiredArtifacts    []string                     `json:"required_artifacts,omitempty"`
 }
+
+type CompletionResult struct {
+	Complete bool     `json:"complete"`
+	Reasons  []string `json:"reasons,omitempty"`
+}
+
+// EvaluateCompletion deterministically evaluates the evidence shared by the
+// completion engine and durable completion-admission validators.
+func EvaluateCompletion(c CompletionContract, o ToolOutcome, humanApproved *bool) CompletionResult {
+	var reasons []string
+	if o.Status != OutcomeSucceeded {
+		reasons = append(reasons, "tool outcome did not succeed")
+	}
+	for _, criterion := range c.Criteria {
+		if !criterion.Required {
+			continue
+		}
+		switch criterion.Assurance {
+		case AssuranceDeterministic:
+			if o.PostconditionStatus != PostconditionVerified {
+				reasons = append(reasons, "postcondition is not verified for criterion "+criterion.ID)
+			}
+		case AssuranceHumanJudgment:
+			if humanApproved == nil {
+				reasons = append(reasons, "human judgment is required for criterion "+criterion.ID)
+			} else if !*humanApproved {
+				reasons = append(reasons, "human judgment rejected criterion "+criterion.ID)
+			}
+		default:
+			reasons = append(reasons, "unsupported assurance for criterion "+criterion.ID)
+		}
+	}
+	availableArtifacts := make(map[string]struct{}, len(o.ArtifactRefs))
+	for _, ref := range o.ArtifactRefs {
+		availableArtifacts[ref] = struct{}{}
+	}
+	for _, required := range c.RequiredArtifacts {
+		if _, ok := availableArtifacts[required]; !ok {
+			reasons = append(reasons, "required artifact is missing: "+required)
+		}
+	}
+	return CompletionResult{Complete: len(reasons) == 0, Reasons: reasons}
+}
+
 type ArtifactEvidence struct {
 	Ref       string `json:"ref"`
 	Role      string `json:"role"`
@@ -299,6 +399,7 @@ type ExecutionContextManifest struct {
 	Model                   string         `json:"model,omitempty"`
 	TaskID                  ID             `json:"task_id"`
 	TaskContractVersion     string         `json:"task_contract_version"`
+	ExecutionInputSHA256    string         `json:"execution_input_sha256"`
 	PromptVersion           string         `json:"prompt_version,omitempty"`
 	PolicyVersion           string         `json:"policy_version,omitempty"`
 	EventRefs               []string       `json:"event_refs"`

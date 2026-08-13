@@ -259,6 +259,10 @@ func (s *Service) ConfirmIntent(ctx context.Context, in IntentConfirmation) (Res
 	if err != nil || recomputed != draft.Fingerprint {
 		return Result{}, fmt.Errorf("durable intent fingerprint is invalid")
 	}
+	goalID, err := acceptedGoalID(draft)
+	if err != nil {
+		return Result{}, fmt.Errorf("accepted Intent Goal is invalid: %w", err)
+	}
 	original, found, err := initialIntakeMessage(stream)
 	if err != nil || !found {
 		return Result{}, fmt.Errorf("durable initial intake message is required")
@@ -268,21 +272,31 @@ func (s *Service) ConfirmIntent(ctx context.Context, in IntentConfirmation) (Res
 			continue
 		}
 		var recorded events.IntentConfirmedPayload
-		if json.Unmarshal(event.Payload, &recorded) != nil || recorded.Fingerprint != in.Fingerprint || recorded.MessageID != in.MessageID ||
+		if json.Unmarshal(event.Payload, &recorded) != nil || recorded.IntentID != string(draft.ID) || recorded.GoalID != string(goalID) || recorded.Version != draft.Version || recorded.Fingerprint != in.Fingerprint || recorded.MessageID != in.MessageID ||
 			recorded.ConfirmingActorID != string(in.SourcePrincipalID) || recorded.ConfirmingActorKind != string(in.SourcePrincipalKind) || recorded.SourceChannel != in.SourceChannel {
 			return Result{}, fmt.Errorf("intent confirmation conflicts with durable state")
 		}
 		return s.Submit(ctx, submitFromIntent(in, draft, original, correlationID))
 	}
-	payload := events.IntentConfirmedPayload{IntentID: string(draft.ID), Version: draft.Version, Fingerprint: draft.Fingerprint, ConfirmingActorID: string(in.SourcePrincipalID), ConfirmingActorKind: string(in.SourcePrincipalKind), SourceChannel: in.SourceChannel, MessageID: in.MessageID}
-	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: in.OrganizationID, EventType: "INTENT_CONFIRMED", SourceActorID: string(in.SourcePrincipalID), TaskID: "task-" + correlationID, CorrelationID: correlationID, Payload: payload}); err != nil {
+	payload := events.IntentConfirmedPayload{IntentID: string(draft.ID), GoalID: string(goalID), Version: draft.Version, Fingerprint: draft.Fingerprint, ConfirmingActorID: string(in.SourcePrincipalID), ConfirmingActorKind: string(in.SourcePrincipalKind), SourceChannel: in.SourceChannel, MessageID: in.MessageID}
+	confirmation := events.TrustedDraft{OrganizationID: in.OrganizationID, EventType: "INTENT_CONFIRMED", SourceActorID: string(in.SourcePrincipalID), TaskID: "task-" + correlationID, CorrelationID: correlationID, Payload: payload}
+	if goalID == "" {
+		_, err = s.gateway.PublishTrusted(ctx, confirmation)
+	} else {
+		_, err = s.gateway.PublishIntentConfirmation(ctx, confirmation, goalID)
+	}
+	if err != nil {
 		return Result{}, fmt.Errorf("persist intent confirmation: %w", err)
 	}
 	return s.Submit(ctx, submitFromIntent(in, draft, original, correlationID))
 }
 
 func submitFromIntent(in IntentConfirmation, draft core.IntentDraft, original events.IntakeMessageRecordedPayload, correlationID string) Submit {
-	return Submit{RequestID: in.RequestID, OrganizationID: in.OrganizationID, Statement: original.Text, Kind: in.Kind, MessageID: original.MessageID, SourcePrincipalID: core.ID(original.SourcePrincipalID), SourcePrincipalKind: core.PrincipalKind(original.SourcePrincipalKind), SourceChannel: original.SourceChannel, correlationID: correlationID, NormalizedIntent: &draft}
+	var goalID core.ID
+	if draft.Goal != nil {
+		goalID = core.ID(draft.Goal.Value)
+	}
+	return Submit{RequestID: in.RequestID, OrganizationID: in.OrganizationID, GoalID: goalID, Statement: original.Text, Kind: in.Kind, MessageID: original.MessageID, SourcePrincipalID: core.ID(original.SourcePrincipalID), SourcePrincipalKind: core.PrincipalKind(original.SourcePrincipalKind), SourceChannel: original.SourceChannel, correlationID: correlationID, NormalizedIntent: &draft}
 }
 
 func initialIntakeMessage(stream []events.Event) (events.IntakeMessageRecordedPayload, bool, error) {

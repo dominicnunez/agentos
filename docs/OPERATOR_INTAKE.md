@@ -5,13 +5,28 @@ conversational intake and work model:
 
 ```text
 User -> private Unix socket --+
-                              +-> Intake -> confirmed Intent -> Goal -> Task DAG
-Agent -> A2A JSON-RPC -------+
+                              +-> Intake -> confirmed Intent -> Work -> Task DAG
+Agent -> A2A JSON-RPC -------+                         ^
+                                                       |
+Mission -> Goal ---------------------------------------+
 ```
 
 Content never supplies its own identity, capabilities, organization, approval,
 or policy. The authenticated boundary injects those values before work enters
 the event ledger.
+
+The Mission/Goal link is optional for ad hoc Work. When present, it must point
+to an active Goal in the same organization and cannot be changed by later Task
+output or Work state transitions. A user or Agent may identify that Goal during
+the natural-language intake conversation. The normalizer may carry only an
+exact Goal ID present in the cited message, and the Goal is shown in the
+fingerprinted Intent review before confirmation. It may not invent or select a
+Goal. Goal activity and tenant ownership are checked in the same SQLite
+transaction that records confirmation. A later pause or retirement prevents
+new bindings but does not invalidate retry or recovery of already admitted
+Work. Work completion contributes bounded evidence only; Goal progress and
+achievement require a separate trusted evaluation, and bare achievement
+projection updates are rejected.
 
 ## Setup and local user access
 
@@ -80,7 +95,7 @@ message is appended.
 
 The console presents the complete Intent for review. `/confirm` binds the
 current Linux user to the exact Intent version and SHA-256 fingerprint. Only
-then may Agent OS create the Goal and executable Task state. The confirmed
+then may Agent OS create the Work and executable Task state. The confirmed
 Intent is fingerprint-bound to a runtime-validated Plan. Exact deterministic
 work skips planning inference; adaptive work may use the configured provider
 to propose the smallest useful Task DAG. The complete graph is committed

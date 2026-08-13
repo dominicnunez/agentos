@@ -108,7 +108,7 @@ policy:
       from:
         module: completion
       to:
-        module: core
+        modules: [core, events]
 
     - name: execution-domain
       from:

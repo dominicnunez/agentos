@@ -36,12 +36,6 @@ type recordedReview struct {
 	Event  events.Event
 }
 
-type candidateCompletePayload struct {
-	ToolInvocationID string   `json:"tool_invocation_id"`
-	ResultEventID    string   `json:"result_event_id"`
-	ArtifactRefs     []string `json:"artifact_refs"`
-}
-
 type CompletionReviewPage struct {
 	Reviews   []CompletionReviewView
 	NextAfter core.ID
@@ -210,7 +204,7 @@ func (s *Service) ReviewCompletion(ctx context.Context, input CompletionReviewIn
 	if _, err := s.runReady(ctx); err != nil {
 		return CompletionReviewView{}, err
 	}
-	if err := s.reconcileGoals(ctx); err != nil {
+	if err := s.reconcileWorks(ctx); err != nil {
 		return CompletionReviewView{}, err
 	}
 	view.Decision = review.Decision
@@ -257,13 +251,13 @@ func (s *Service) continueCompletionReview(ctx context.Context, request completi
 		if !result.Complete {
 			return fmt.Errorf("approved completion review did not satisfy its contract")
 		}
-		detail := completionDetail{Contract: request.Contract, Result: result, JudgmentRef: decisionEvent.EventID}
+		detail := completionDetail{Contract: request.Contract, Result: result, OutcomeEventRef: request.EvidenceRefs[0], JudgmentRef: decisionEvent.EventID}
 		verified, err := completionVerification(stream, request.TaskID, decisionEvent.EventID)
 		if err != nil {
 			return err
 		}
 		if !verified {
-			if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(request.OrganizationID), EventType: "COMPLETION_VERIFIED", SourceActorID: "runtime", TaskID: string(request.TaskID), Payload: detail, CorrelationID: state.CorrelationID}); err != nil {
+			if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(request.OrganizationID), EventType: "COMPLETION_VERIFIED", SourceActorID: "runtime", TaskID: string(request.TaskID), ArtifactRefs: outcome.ArtifactRefs, Payload: detail, CorrelationID: state.CorrelationID}); err != nil {
 				return fmt.Errorf("persist reviewed completion verification: %w", err)
 			}
 		}
@@ -287,7 +281,7 @@ func (s *Service) continueCompletionReview(ctx context.Context, request completi
 			return err
 		}
 		task.Status = core.TaskFailed
-		detail := completionDetail{Contract: request.Contract, Result: s.completion.EvaluateHuman(request.Contract, outcome, false), JudgmentRef: decisionEvent.EventID}
+		detail := completionDetail{Contract: request.Contract, Result: s.completion.EvaluateHuman(request.Contract, outcome, false), OutcomeEventRef: request.EvidenceRefs[0], JudgmentRef: decisionEvent.EventID}
 		return s.state.SaveTask(ctx, request.OrganizationID, "COMPLETION_REJECTED", "runtime", state.CorrelationID, state.Version+1, task, detail)
 	case completion.ReviewRevise:
 		if task.Status == core.TaskPending || task.Status == core.TaskRunning {
@@ -383,14 +377,15 @@ func reviewEvidence(stream []events.Event, request completion.ReviewRequest) (co
 	}
 	var outcome core.ToolOutcome
 	var result events.ResultPublishedPayload
-	var candidate candidateCompletePayload
+	var candidate events.CandidateCompletePayload
 	if json.Unmarshal(selected[0].Payload, &outcome) != nil || json.Unmarshal(selected[1].Payload, &result) != nil || json.Unmarshal(selected[2].Payload, &candidate) != nil {
 		return core.ToolOutcome{}, events.ResultPublishedPayload{}, fmt.Errorf("completion review evidence payload is invalid")
 	}
 	if selected[0].SourceExecutionID == "" || selected[0].SourceExecutionID != selected[1].SourceExecutionID || selected[0].SourceExecutionID != selected[2].SourceExecutionID {
 		return core.ToolOutcome{}, events.ResultPublishedPayload{}, fmt.Errorf("completion review evidence crosses execution boundaries")
 	}
-	if outcome.ToolInvocationID == "" || outcome.ToolID == "" || outcome.StartedAt.IsZero() || outcome.FinishedAt.Before(outcome.StartedAt) || outcome.Status != core.OutcomeSucceeded || !result.ValidFor(selected[1].ArtifactRefs) || !slices.Equal(selected[1].ArtifactRefs, outcome.ArtifactRefs) || candidate.ToolInvocationID != string(outcome.ToolInvocationID) || candidate.ResultEventID != selected[1].EventID || !slices.Equal(candidate.ArtifactRefs, outcome.ArtifactRefs) || !slices.Equal(selected[2].ArtifactRefs, outcome.ArtifactRefs) {
+	expectedSummary, summaryErr := core.ToolOutcomeSummary(outcome)
+	if summaryErr != nil || outcome.ToolInvocationID == "" || outcome.ToolID == "" || outcome.StartedAt.IsZero() || outcome.FinishedAt.Before(outcome.StartedAt) || outcome.Status != core.OutcomeSucceeded || !result.ValidFor(selected[1].ArtifactRefs) || result.Summary != expectedSummary || !slices.Equal(selected[1].ArtifactRefs, outcome.ArtifactRefs) || candidate.ToolInvocationID != string(outcome.ToolInvocationID) || candidate.ResultEventID != selected[1].EventID || !slices.Equal(candidate.ArtifactRefs, outcome.ArtifactRefs) || !slices.Equal(selected[2].ArtifactRefs, outcome.ArtifactRefs) {
 		return core.ToolOutcome{}, events.ResultPublishedPayload{}, fmt.Errorf("completion review evidence bindings are invalid")
 	}
 	return outcome, result, nil

@@ -2,10 +2,212 @@ package events
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
+	"slices"
 	"testing"
+	"time"
+
+	"github.com/dominicnunez/agentos/internal/core"
 )
+
+func TestHumanCompletionRejectsEnvelopeArtifactsAbsentFromSubmission(t *testing.T) {
+	contract := core.StructuredUserCompletionContract("task-1")
+	task := WorkCompletionTaskBinding{Task: core.Task{
+		ID: "task-1", ExecutionKind: core.ExecutionHuman, CompletionContract: &contract,
+	}, Version: 1, CorrelationID: "run-1"}
+	decision := CompletionDecisionPayload{
+		Contract: contract, Result: core.CompletionResult{Complete: true},
+		OutcomeEventRef: "outcome-1", SubmissionEventRef: "submission-1",
+	}
+	outcome := core.ToolOutcome{ArtifactRefs: []string{"forged-artifact"}}
+	outcomeEvent := Event{
+		EventID: "outcome-1", Sequence: 2, OrganizationID: "org-1",
+		TaskID: "task-1", CorrelationID: "run-1", ArtifactRefs: outcome.ArtifactRefs,
+	}
+	verification := Event{
+		EventID: "verification-1", Sequence: 3, OrganizationID: "org-1",
+		TaskID: "task-1", CorrelationID: "run-1", ArtifactRefs: outcome.ArtifactRefs,
+	}
+	payload, err := json.Marshal(HumanTaskCompletionSubmittedPayload{
+		MessageID: "submission-message-1", Fields: map[string]string{"response": "done"},
+		SourcePrincipalID: "user-1", SourceChannel: "HUMAN_DIRECT",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	submission := Event{
+		EventID: "submission-1", Sequence: 1, OrganizationID: "org-1", EventType: "HUMAN_TASK_COMPLETION_SUBMITTED",
+		SourceActorID: "user-1", TaskID: "task-1", CorrelationID: "run-1",
+		ArtifactRefs: outcome.ArtifactRefs, Payload: payload,
+	}
+	binding := WorkCompletionBinding{OrganizationID: "org-1", CorrelationID: "run-1"}
+	if _, err := completionDecisionResult(binding, task, decision, outcome, outcomeEvent, verification, []Event{submission}); err == nil {
+		t.Fatal("submission envelope introduced artifacts absent from the authenticated payload")
+	}
+}
+
+func TestHumanCompletionRequiresExactRuntimeOutcome(t *testing.T) {
+	contract := core.CompletionContract{TaskID: "task-1", TaskVersion: 1, RequiredFields: []core.CompletionFieldRequirement{{Name: "response", MinBytes: 1, MaxBytes: 64}}}
+	task := WorkCompletionTaskBinding{Task: core.Task{
+		ID: "task-1", ExecutionKind: core.ExecutionHuman, CompletionContract: &contract,
+	}, Version: 4, CorrelationID: "run-1"}
+	payload := HumanTaskCompletionSubmittedPayload{
+		MessageID: "message-1", SourcePrincipalID: "user-1", SourceChannel: "HUMAN_DIRECT",
+		Fields: map[string]string{"response": "done"}, Artifacts: []core.ArtifactEvidence{},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submission := Event{
+		EventID: "submission-1", Sequence: 1, OrganizationID: "org-1", EventType: "HUMAN_TASK_COMPLETION_SUBMITTED",
+		SourceActorID: "user-1", TaskID: "task-1", CorrelationID: "run-1", Payload: body,
+	}
+	now := time.Unix(10, 0).UTC()
+	outcome := core.HumanTaskCompletionOutcome(submission.EventID, nil, now)
+	outcomeEvent := Event{
+		EventID: "outcome-1", Sequence: 2, OrganizationID: "org-1", EventType: "TOOL_OUTCOME_RECORDED",
+		SourceActorID: "runtime", SourceExecutionID: "human-completion-" + submission.EventID, TaskID: "task-1", CorrelationID: "run-1",
+	}
+	verification := Event{EventID: "verification-1", Sequence: 3, OrganizationID: "org-1", EventType: "COMPLETION_VERIFIED", TaskID: "task-1", CorrelationID: "run-1"}
+	decision := CompletionDecisionPayload{Contract: contract, SubmissionEventRef: submission.EventID}
+	binding := WorkCompletionBinding{OrganizationID: "org-1", CorrelationID: "run-1"}
+	result, err := completionDecisionResult(binding, task, decision, outcome, outcomeEvent, verification, []Event{submission})
+	if err != nil || !result.Complete {
+		t.Fatalf("exact runtime user outcome was rejected: result=%+v err=%v", result, err)
+	}
+
+	tests := []struct {
+		name   string
+		event  Event
+		mutate func(*core.ToolOutcome)
+	}{
+		{name: "unrelated execution", event: func() Event { event := outcomeEvent; event.SourceExecutionID = "human-completion-other"; return event }()},
+		{name: "failed", event: outcomeEvent, mutate: func(value *core.ToolOutcome) { value.Status = core.OutcomeFailed }},
+		{name: "unchecked postcondition", event: outcomeEvent, mutate: func(value *core.ToolOutcome) { value.PostconditionStatus = core.PostconditionNotChecked }},
+		{name: "unrelated invocation", event: outcomeEvent, mutate: func(value *core.ToolOutcome) { value.ToolInvocationID = "other" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := outcome
+			if test.mutate != nil {
+				test.mutate(&candidate)
+			}
+			if _, err := completionDecisionResult(binding, task, decision, candidate, test.event, verification, []Event{submission}); err == nil {
+				t.Fatal("non-runtime user outcome authorized completion")
+			}
+		})
+	}
+}
+
+func TestReviewedCompletionRevalidatesExactEvidencePayloads(t *testing.T) {
+	now := time.Unix(10, 0).UTC()
+	task := core.Task{ID: "task-1", Description: "produce the reviewed result", ExecutionKind: core.ExecutionAgent, AssigneeID: "agent-1"}
+	contract := core.ReviewedOutcomeCompletionContract(task.ID, 2, nil)
+	outcome := core.ToolOutcome{
+		ToolInvocationID: "invocation-1", ToolID: "model/v1", Status: core.OutcomeSucceeded,
+		ObservedEffect: "actual model output", PostconditionStatus: core.PostconditionNotChecked,
+		Retryability: core.NotRetryable, ArtifactRefs: []string{"artifact-1"}, StartedAt: now, FinishedAt: now,
+	}
+	outcomeEvent := Event{EventID: "outcome-1", Sequence: 1, OrganizationID: "org-1", EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: "execution-task-1-v2", TaskID: "task-1", ArtifactRefs: outcome.ArtifactRefs, CorrelationID: "work-1"}
+	resultEvent := Event{EventID: "result-1", Sequence: 2, OrganizationID: "org-1", EventType: "RESULT_PUBLISHED", SourceActorID: "agent-1", SourceExecutionID: outcomeEvent.SourceExecutionID, TaskID: "task-1", ArtifactRefs: outcome.ArtifactRefs, CorrelationID: "work-1"}
+	resultEvent.Payload, _ = json.Marshal(ResultPublishedPayload{Summary: "actual model output", ArtifactRefs: outcome.ArtifactRefs})
+	candidateEvent := Event{EventID: "candidate-1", Sequence: 3, OrganizationID: "org-1", EventType: "CANDIDATE_COMPLETE", SourceActorID: "agent-1", SourceExecutionID: outcomeEvent.SourceExecutionID, TaskID: "task-1", ArtifactRefs: outcome.ArtifactRefs, CorrelationID: "work-1"}
+	candidateEvent.Payload, _ = json.Marshal(CandidateCompletePayload{ToolInvocationID: string(outcome.ToolInvocationID), ResultEventID: resultEvent.EventID, ArtifactRefs: outcome.ArtifactRefs})
+	request := completionReviewRequestPayload{
+		ID: "review-1", OrganizationID: "org-1", TaskID: task.ID, TaskVersion: 2, Objective: task.Description,
+		Contract: contract, EvidenceRefs: []string{outcomeEvent.EventID, resultEvent.EventID, candidateEvent.EventID}, CreatedAt: now,
+	}
+	request.Fingerprint, _ = completionReviewRequestFingerprint(request)
+	requestEvent := Event{EventID: "request-1", Sequence: 4, OrganizationID: "org-1", EventType: "COMPLETION_REVIEW_REQUESTED", SourceActorID: "runtime", SourceExecutionID: outcomeEvent.SourceExecutionID, TaskID: "task-1", CorrelationID: "work-1"}
+	requestEvent.Payload, _ = json.Marshal(request)
+	review := completionReviewDecisionPayload{
+		ReviewID: request.ID, OrganizationID: "org-1", TaskID: task.ID, TaskVersion: 2, Fingerprint: request.Fingerprint,
+		Decision: core.CompletionReviewApprove, ReviewerID: "user-1", Method: core.AssuranceHumanJudgment, EvidenceRefs: request.EvidenceRefs, DecidedAt: now.Add(time.Second),
+	}
+	judgmentEvent := Event{EventID: "judgment-1", Sequence: 5, OrganizationID: "org-1", EventType: "COMPLETION_REVIEW_DECIDED", SourceActorID: "user-1", TaskID: "task-1", CorrelationID: "work-1"}
+	judgmentEvent.Payload, _ = json.Marshal(review)
+	verification := Event{EventID: "verification-1", Sequence: 6, OrganizationID: "org-1", EventType: "COMPLETION_VERIFIED", TaskID: "task-1", CorrelationID: "work-1"}
+	decision := CompletionDecisionPayload{Contract: contract, OutcomeEventRef: outcomeEvent.EventID, JudgmentRef: judgmentEvent.EventID}
+	binding := WorkCompletionBinding{OrganizationID: "org-1", CorrelationID: "work-1"}
+	stream := []Event{outcomeEvent, resultEvent, candidateEvent, requestEvent, judgmentEvent, verification}
+	approved, err := completionDecisionApproval(binding, task, decision, outcome, outcomeEvent, verification, stream)
+	if err != nil || approved == nil || !*approved {
+		t.Fatalf("exact reviewed evidence was rejected: approved=%v err=%v", approved, err)
+	}
+
+	for _, mutate := range []func([]Event){
+		func(events []Event) {
+			events[1].Payload, _ = json.Marshal(ResultPublishedPayload{Summary: "fabricated review summary", ArtifactRefs: outcome.ArtifactRefs})
+		},
+		func(events []Event) {
+			events[2].Payload, _ = json.Marshal(CandidateCompletePayload{ToolInvocationID: string(outcome.ToolInvocationID), ResultEventID: "other-result", ArtifactRefs: outcome.ArtifactRefs})
+		},
+	} {
+		forged := append([]Event(nil), stream...)
+		mutate(forged)
+		if _, err := completionDecisionApproval(binding, task, decision, outcome, outcomeEvent, verification, forged); err == nil {
+			t.Fatal("substituted reviewed evidence payload authorized completion")
+		}
+	}
+}
+
+func TestExecutionInboxUsesPersistedSnapshotCutoff(t *testing.T) {
+	task := core.Task{ID: "task-1", ExecutionKind: core.ExecutionAgent, AssigneeType: "AGENT", AssigneeID: "agent-1"}
+	running := task
+	running.Status = core.TaskRunning
+	value, err := json.Marshal(running)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := json.Marshal(ExecutionStartDetail{InboxCutoffSequence: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startPayload, err := json.Marshal(ProjectionEventPayload{Projection: ProjectionRecord{ProjectionKind: "task", RecordID: "task-1", Version: 2, CorrelationID: "work-1", Value: value}, Detail: detail})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := Event{EventID: "message-selected", Sequence: 1, OrganizationID: "org-1", EventType: "MESSAGE", SourceActorID: "sender", RecipientScope: RecipientAgent, RecipientID: "agent-1", CreatedAt: time.Unix(1, 0).UTC(), Payload: json.RawMessage(`{"body":"selected"}`)}
+	arrivedBeforeStartAfterSnapshot := Event{EventID: "message-late", Sequence: 2, OrganizationID: "org-1", EventType: "MESSAGE", SourceActorID: "sender", RecipientScope: RecipientAgent, RecipientID: "agent-1", CreatedAt: time.Unix(2, 0).UTC(), Payload: json.RawMessage(`{"body":"next execution"}`)}
+	start := Event{EventID: "start-1", Sequence: 3, OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: "task-1", CorrelationID: "work-1", Payload: startPayload}
+	refs, inbox, err := executionInbox(WorkCompletionBinding{OrganizationID: "org-1", CorrelationID: "work-1"}, task, start, []Event{selected, arrivedBeforeStartAfterSnapshot, start})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(refs, []string{selected.EventID}) || len(inbox) != 1 || inbox[0].EventID != selected.EventID {
+		t.Fatalf("execution inbox crossed its durable cutoff: refs=%v inbox=%+v", refs, inbox)
+	}
+}
+
+func TestPlannedAgentTaskRequiresDerivedExecutionBrief(t *testing.T) {
+	intent := core.Intent{
+		ID: "intent-1", OrganizationID: "org-1", NormalizedObjective: "produce a bounded result",
+		Context: []core.IntentValue{}, Deliverables: []core.IntentValue{{Value: "result", Origin: "USER"}},
+		CompletionCriteria: []core.IntentValue{{Value: "verified", Origin: "USER"}}, HardConstraints: []string{},
+		ConsequenceBoundaries: []string{}, ResolvedDecisions: []core.IntentDecision{}, AcceptedFingerprint: "accepted", CreatedAt: time.Unix(1, 0).UTC(),
+	}
+	planned := core.PlanTask{Key: "root", Description: "perform bounded work", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []string{}}
+	brief, err := core.AgentTaskExecutionBrief(intent, planned, "plan-fingerprint")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := core.Task{
+		ID: "task-1", WorkID: "work-1", Description: planned.Description, ExecutionBrief: brief,
+		AcceptanceCriteria: intent.CompletionCriteria, ExecutionKind: planned.ExecutionKind, ModelInferencePolicy: planned.ModelInferencePolicy,
+		DependsOn: []core.ID{}, TaskContractVersion: "1", Status: core.TaskCompleted,
+	}
+	binding := WorkCompletionBinding{Intent: intent}
+	if err := validatePlannedTask(binding, task, planned, map[string]core.ID{"root": task.ID}, task.ID, "plan-fingerprint"); err != nil {
+		t.Fatalf("derived Agent execution brief was rejected: %v", err)
+	}
+	task.ExecutionBrief = "substituted model input"
+	if err := validatePlannedTask(binding, task, planned, map[string]core.ID{"root": task.ID}, task.ID, "plan-fingerprint"); err == nil {
+		t.Fatal("substituted Agent execution brief matched the accepted Intent and Plan")
+	}
+}
 
 type memoryLedger struct{ events []Event }
 
@@ -42,6 +244,16 @@ func TestInferenceUsageRejectsIntegerOverflow(t *testing.T) {
 
 func TestAgentCannotMintTrustedStateEvents(t *testing.T) {
 	trustedOnly := []string{
+		"MISSION_CREATED",
+		"MISSION_REVISED",
+		"MISSION_RETIRED",
+		"GOAL_CREATED",
+		"GOAL_REFINED",
+		"GOAL_PROGRESS_EVALUATED",
+		"GOAL_ACHIEVED",
+		"WORK_CREATED",
+		"WORK_COMPLETED",
+		"WORK_FAILED",
 		"AGENT_BLUEPRINT_CREATED",
 		"EXECUTION_PROFILE_CREATED",
 		"AGENT_CREATED",
@@ -57,6 +269,7 @@ func TestAgentCannotMintTrustedStateEvents(t *testing.T) {
 		"INBOX_EVENTS_OBSERVED",
 		"COMPLETION_VERIFIED",
 		"TASK_VERIFIED_COMPLETE",
+		"WORK_COMPLETION_EVALUATED",
 		"RUN_TELEMETRY_RECORDED",
 	}
 	for _, eventType := range trustedOnly {
@@ -68,6 +281,40 @@ func TestAgentCannotMintTrustedStateEvents(t *testing.T) {
 				t.Fatalf("agent draft minted trusted state: type=%s events=%+v err=%v", eventType, ledger.events, err)
 			}
 		})
+	}
+}
+
+func TestGoalBoundIntentCannotBypassAtomicAdmission(t *testing.T) {
+	ledger := &memoryLedger{}
+	gateway := NewGateway(ledger)
+	draft := TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", CorrelationID: "work-1",
+		Payload: IntentConfirmedPayload{IntentID: "intent-1", GoalID: "goal-1", Version: 1, Fingerprint: "fingerprint", MessageID: "message-1"},
+	}
+	if _, err := gateway.PublishTrusted(context.Background(), draft); err == nil {
+		t.Fatal("Goal-bound Intent bypassed atomic Goal admission")
+	}
+	if _, err := gateway.PublishIntentConfirmation(context.Background(), draft, "goal-2"); err == nil {
+		t.Fatal("Intent payload Goal did not match the Goal selected for atomic admission")
+	}
+	if _, err := gateway.PublishIntentConfirmation(context.Background(), draft, "goal-1"); err == nil {
+		t.Fatal("ledger without atomic Goal admission support accepted confirmation")
+	}
+	if len(ledger.events) != 0 {
+		t.Fatalf("rejected Goal confirmation reached ledger: %+v", ledger.events)
+	}
+}
+
+func TestInboxObservationCannotBypassAtomicAdmission(t *testing.T) {
+	ledger := &memoryLedger{}
+	gateway := NewGateway(ledger)
+	_, err := gateway.PublishTrusted(context.Background(), TrustedDraft{
+		OrganizationID: "org-1", EventType: "INBOX_EVENTS_OBSERVED", SourceActorID: "agent-1",
+		SourceExecutionID: "execution-task-1-v2", RecipientScope: RecipientAgent, RecipientID: "agent-1",
+		TaskID: "task-1", CorrelationID: "work-1", Payload: map[string]any{"event_ids": []string{"message-1"}},
+	})
+	if err == nil || len(ledger.events) != 0 {
+		t.Fatalf("generic trusted publication minted an inbox observation: events=%+v err=%v", ledger.events, err)
 	}
 }
 

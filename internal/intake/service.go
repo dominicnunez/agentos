@@ -419,6 +419,7 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 	draft := core.IntentDraft{
 		ID: core.ID("intent-" + stream[0].CorrelationID), OrganizationID: core.ID(principal.OrganizationID),
 		Version: version, Status: status, RequestedExecutionKind: requestedKind,
+		Goal:      cloneIntentValue(normalized.Candidate.Goal),
 		Objective: normalized.Candidate.Objective, Context: normalized.Candidate.Context,
 		Deliverables: normalized.Candidate.Deliverables, CompletionCriteria: normalized.Candidate.CompletionCriteria,
 		Constraints: normalized.Candidate.Constraints, ResolvedDecisions: normalized.Candidate.ResolvedDecisions,
@@ -434,6 +435,14 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 		return View{}, fmt.Errorf("%w: persist intent draft", ErrUnavailable)
 	}
 	return projectIntentView(message.ConversationID, stream, draft, normalized.Reply), nil
+}
+
+func cloneIntentValue(value *core.IntentValue) *core.IntentValue {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func explicitRequestedKind(stream []events.Event) (core.ExecutionKind, error) {
@@ -667,7 +676,7 @@ func ValidateIdentifier(name, value string) error {
 func projectView(conversationID string, stream []events.Event, includeResult bool) View {
 	view := View{TaskID: streamTaskID(stream), ConversationID: conversationID, State: externalState(stream)}
 	for _, event := range stream {
-		if event.TaskID == view.TaskID || event.EventType == "GOAL_PLANNING_FAILED" {
+		if event.TaskID == view.TaskID || event.EventType == "WORK_PLANNING_FAILED" {
 			view.UpdatedAt = event.CreatedAt
 		}
 	}
@@ -727,7 +736,7 @@ func externalState(stream []events.Event) string {
 	state := StateWorking
 	rootID := streamTaskID(stream)
 	for _, event := range stream {
-		if event.EventType == "GOAL_PLANNING_FAILED" {
+		if event.EventType == "WORK_PLANNING_FAILED" {
 			state = StateFailed
 			continue
 		}

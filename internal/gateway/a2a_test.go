@@ -69,6 +69,28 @@ func TestAgentCardAdvertisesOnlyA2AV1JSONRPC(t *testing.T) {
 	}
 }
 
+func TestA2AIntentReviewSerializesSelectedGoalProvenance(t *testing.T) {
+	goal := core.IntentValue{Value: "goal-123", Origin: "EXPLICIT", SourceMessageID: "message-1"}
+	task := projectA2ATask(intake.View{
+		TaskID: "task-1", ConversationID: "context-1", State: intake.StateAwaitingConfirmation,
+		Intent: &core.IntentDraft{Version: 1, Fingerprint: strings.Repeat("a", 64), Objective: "Advance the Goal", Goal: &goal},
+	})
+	body, err := json.Marshal(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Metadata map[string]map[string]json.RawMessage `json:"metadata"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatal(err)
+	}
+	var reviewed core.IntentValue
+	if err := json.Unmarshal(wire.Metadata[intentConfirmationURI]["goal"], &reviewed); err != nil || reviewed != goal {
+		t.Fatalf("A2A review omitted the selected Goal provenance: body=%s goal=%+v err=%v", body, reviewed, err)
+	}
+}
+
 func TestUnconfiguredAgentCardRejectsNonLoopbackHost(t *testing.T) {
 	handler := NewA2A(intake.New(app.New(events.NewGateway(noopLedger{}))), nil, "", "test-version")
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/.well-known/agent-card.json", nil)

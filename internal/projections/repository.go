@@ -3,6 +3,7 @@
 package projections
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,12 +15,14 @@ import (
 
 const (
 	KindOrganization     = "organization"
+	KindMission          = "mission"
+	KindGoal             = "goal"
 	KindTeam             = "team"
 	KindAgentBlueprint   = "agent_blueprint"
 	KindExecutionProfile = "execution_profile"
 	KindAgent            = "agent"
 	KindIntent           = "intent"
-	KindGoal             = "goal"
+	KindWork             = "work"
 	KindTask             = "task"
 )
 
@@ -34,12 +37,14 @@ type Versioned[T any] struct {
 
 type Snapshot struct {
 	Organizations     map[core.ID]Versioned[core.Organization]
+	Missions          map[core.ID]Versioned[core.Mission]
+	Goals             map[core.ID]Versioned[core.Goal]
 	Teams             map[core.ID]Versioned[core.Team]
 	AgentBlueprints   map[core.ID]Versioned[core.AgentBlueprint]
 	ExecutionProfiles map[core.ID]Versioned[core.ExecutionProfile]
 	Agents            map[core.ID]Versioned[core.Agent]
 	Intents           map[core.ID]Versioned[core.Intent]
-	Goals             map[core.ID]Versioned[core.Goal]
+	Works             map[core.ID]Versioned[core.Work]
 	Tasks             map[core.ID]Versioned[core.Task]
 }
 
@@ -51,7 +56,36 @@ func (r *Repository) SaveOrganization(ctx context.Context, eventType, actorID, c
 	return r.save(ctx, string(value.ID), eventType, actorID, "", correlationID, KindOrganization, value.ID, version, value, detail)
 }
 
+func (r *Repository) SaveMission(ctx context.Context, eventType, actorID, correlationID string, version int, value core.Mission, detail any) error {
+	if actorID != "runtime" || !validMissionEventType(eventType) {
+		return fmt.Errorf("mission revisions require a runtime-owned lifecycle event")
+	}
+	return r.save(ctx, string(value.OrganizationID), eventType, actorID, "", correlationID, KindMission, value.ID, version, value, detail)
+}
+
+func (r *Repository) SaveGoal(ctx context.Context, eventType, actorID, correlationID string, version int, value core.Goal, detail any) error {
+	if actorID != "runtime" || !validGoalEventType(eventType) {
+		return fmt.Errorf("goal revisions require a runtime-owned lifecycle event")
+	}
+	return r.save(ctx, string(value.OrganizationID), eventType, actorID, "", correlationID, KindGoal, value.ID, version, value, detail)
+}
+
+func validMissionEventType(eventType string) bool {
+	return eventType == "MISSION_CREATED" || eventType == "MISSION_REVISED" || eventType == "MISSION_RETIRED"
+}
+
+func validGoalEventType(eventType string) bool {
+	return eventType == "GOAL_CREATED" || eventType == "GOAL_REFINED" || eventType == "GOAL_PAUSED" || eventType == "GOAL_RESUMED" || eventType == "GOAL_RETIRED"
+}
+
 func (r *Repository) SaveTeam(ctx context.Context, eventType, actorID, correlationID string, version int, value core.Team, detail any) error {
+	expectedEventType := "TEAM_REVISED"
+	if version == 1 {
+		expectedEventType = "TEAM_CREATED"
+	}
+	if actorID != "runtime" || eventType != expectedEventType {
+		return fmt.Errorf("team revisions require the runtime-owned lifecycle event")
+	}
 	return r.save(ctx, string(value.OrganizationID), eventType, actorID, "", correlationID, KindTeam, value.ID, version, value, detail)
 }
 
@@ -71,12 +105,59 @@ func (r *Repository) SaveIntent(ctx context.Context, eventType, actorID, correla
 	return r.save(ctx, string(value.OrganizationID), eventType, actorID, "", correlationID, KindIntent, value.ID, version, value, detail)
 }
 
-func (r *Repository) SaveGoal(ctx context.Context, organizationID core.ID, eventType, actorID, correlationID string, version int, value core.Goal, detail any) error {
-	return r.save(ctx, string(organizationID), eventType, actorID, "", correlationID, KindGoal, value.ID, version, value, detail)
+func (r *Repository) SaveWork(ctx context.Context, organizationID core.ID, eventType, actorID, correlationID string, version int, value core.Work, detail any) error {
+	if value.Status == core.WorkCompleted || eventType == "WORK_COMPLETED" {
+		if value.Status != core.WorkCompleted || eventType != "WORK_COMPLETED" {
+			return fmt.Errorf("work completion requires its exact runtime-owned lifecycle event")
+		}
+		var evidence events.WorkCompletionTransitionPayload
+		encoded, err := json.Marshal(detail)
+		if err == nil {
+			decoder := json.NewDecoder(bytes.NewReader(encoded))
+			decoder.DisallowUnknownFields()
+			err = decoder.Decode(&evidence)
+		}
+		if err != nil {
+			return fmt.Errorf("completed work requires exact durable evidence")
+		}
+		return r.SaveCompletedWork(ctx, organizationID, actorID, correlationID, version, value, evidence)
+	}
+	validFailure := value.Status == core.WorkFailed && (eventType == "WORK_FAILED" || eventType == "WORK_PLANNING_FAILED")
+	if actorID != "runtime" || value.Status == core.WorkActive && eventType != "WORK_CREATED" || value.Status != core.WorkActive && !validFailure {
+		return fmt.Errorf("work revisions require the exact runtime-owned lifecycle event")
+	}
+	return r.save(ctx, string(organizationID), eventType, actorID, "", correlationID, KindWork, value.ID, version, value, detail)
+}
+
+func (r *Repository) SaveCompletedWork(ctx context.Context, organizationID core.ID, actorID, correlationID string, version int, value core.Work, detail events.WorkCompletionTransitionPayload) error {
+	if r == nil || r.gateway == nil || organizationID == "" || actorID != "runtime" || correlationID == "" || value.ID == "" || value.Status != core.WorkCompleted {
+		return fmt.Errorf("complete evidence-backed work transition is required")
+	}
+	_, err := r.gateway.PublishWorkCompletion(ctx, events.ProjectionDraft{
+		Event: events.TrustedDraft{
+			OrganizationID: string(organizationID), EventType: "WORK_COMPLETED", SourceActorID: actorID,
+			CorrelationID: correlationID, Payload: detail,
+		},
+		ProjectionKind: KindWork, RecordID: string(value.ID), Version: version, Value: value,
+	})
+	return err
 }
 
 func (r *Repository) SaveTask(ctx context.Context, organizationID core.ID, eventType, actorID, correlationID string, version int, value core.Task, detail any) error {
 	return r.save(ctx, string(organizationID), eventType, actorID, string(value.ID), correlationID, KindTask, value.ID, version, value, detail)
+}
+
+func (r *Repository) StartAgentExecution(ctx context.Context, organizationID core.ID, correlationID string, version int, value core.Task, mode string, routes []events.InboxRoute) (events.Event, []events.InboxSelection, error) {
+	if r == nil || r.gateway == nil || organizationID == "" || correlationID == "" || value.ID == "" || value.ExecutionKind != core.ExecutionAgent || value.Status != core.TaskRunning || version < 2 {
+		return events.Event{}, nil, fmt.Errorf("complete Agent execution-start projection is required")
+	}
+	return r.gateway.PublishExecutionStart(ctx, events.ProjectionDraft{
+		Event: events.TrustedDraft{
+			OrganizationID: string(organizationID), EventType: "EXECUTION_STARTED", SourceActorID: "runtime",
+			TaskID: string(value.ID), CorrelationID: correlationID, Payload: events.ExecutionStartDetail{Mode: mode},
+		},
+		ProjectionKind: KindTask, RecordID: string(value.ID), Version: version, Value: value,
+	}, routes)
 }
 
 // SaveNewTasks atomically creates a complete Task DAG. Every Task starts at
@@ -145,6 +226,29 @@ func (r *Repository) Load(ctx context.Context) (Snapshot, error) {
 	return r.loadFromRecords(ctx)
 }
 
+// ValidateCompletionAdmissions performs the full authoritative-chain audit
+// required before recovery mutates durable state. Routine scheduler loads use
+// the transactionally admitted records projection and do not replay unrelated
+// historical event streams.
+func (r *Repository) ValidateCompletionAdmissions(ctx context.Context, snapshot Snapshot) error {
+	if r == nil || r.gateway == nil {
+		return fmt.Errorf("durable projection gateway is required")
+	}
+	stream, err := r.gateway.Events(ctx, "")
+	if err != nil {
+		return err
+	}
+	teamRecords, err := r.gateway.ProjectionRecords(ctx, KindTeam, "")
+	if err != nil {
+		return err
+	}
+	inboxObservations, err := r.gateway.InboxObservations(ctx)
+	if err != nil {
+		return err
+	}
+	return validateWorkCompletionAdmissions(snapshot, stream, teamRecords, inboxObservations)
+}
+
 // Rebuild ignores the records table and deterministically replays projection
 // records embedded in the authoritative event stream.
 func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
@@ -171,12 +275,95 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 		kind := payload.Projection.ProjectionKind
 		records[kind] = append(records[kind], body)
 	}
-	return decodeSnapshot(records)
+	snapshot, err := decodeSnapshot(records)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	inboxObservations, err := r.gateway.InboxObservations(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if err := validateWorkCompletionAdmissions(snapshot, stream, records[KindTeam], inboxObservations); err != nil {
+		return Snapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func validateWorkCompletionAdmissions(snapshot Snapshot, stream []events.Event, teamRecords [][]byte, inboxObservations map[string]events.InboxObservationBinding) error {
+	for workID, state := range snapshot.Works {
+		if state.Value.Status != core.WorkCompleted {
+			continue
+		}
+		intent, ok := snapshot.Intents[state.Value.IntentID]
+		if !ok {
+			return fmt.Errorf("completed work %s references missing intent", workID)
+		}
+		var transition events.Event
+		var transitionDetail events.WorkCompletionTransitionPayload
+		for _, event := range stream {
+			if event.EventType != "WORK_COMPLETED" {
+				continue
+			}
+			var payload events.ProjectionEventPayload
+			var projected core.Work
+			var detail events.WorkCompletionTransitionPayload
+			if event.OrganizationID != string(intent.Value.OrganizationID) || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.TaskID != "" || event.CorrelationID != state.CorrelationID ||
+				json.Unmarshal(event.Payload, &payload) != nil || payload.Projection.ProjectionKind != KindWork || payload.Projection.RecordID != string(workID) || payload.Projection.Version != state.Version || payload.Projection.CorrelationID != state.CorrelationID ||
+				json.Unmarshal(payload.Projection.Value, &projected) != nil || !reflect.DeepEqual(projected, state.Value) || json.Unmarshal(payload.Detail, &detail) != nil || detail.EvidenceEventRef == "" || detail.Fingerprint == "" {
+				continue
+			}
+			if transition.EventID != "" {
+				return fmt.Errorf("completed work %s has multiple authoritative transitions", workID)
+			}
+			transition, transitionDetail = event, detail
+		}
+		if transition.EventID == "" {
+			return fmt.Errorf("completed work %s lacks an authoritative transition", workID)
+		}
+		var evidenceEvent events.Event
+		for _, event := range stream {
+			if event.EventID == transitionDetail.EvidenceEventRef {
+				evidenceEvent = event
+				break
+			}
+		}
+		if evidenceEvent.EventID == "" || evidenceEvent.Sequence >= transition.Sequence {
+			return fmt.Errorf("completed work %s lacks exact durable evidence", workID)
+		}
+		tasks := make([]events.WorkCompletionTaskBinding, 0)
+		for _, task := range snapshot.Tasks {
+			if task.Value.WorkID == workID {
+				tasks = append(tasks, events.WorkCompletionTaskBinding{Task: task.Value, Version: task.Version, CorrelationID: task.CorrelationID})
+			}
+		}
+		profiles := make(map[core.ID]core.ExecutionProfile, len(snapshot.ExecutionProfiles))
+		for profileID, profile := range snapshot.ExecutionProfiles {
+			profiles[profileID] = profile.Value
+		}
+		blueprints := make(map[core.ID]core.AgentBlueprint, len(snapshot.AgentBlueprints))
+		for blueprintID, blueprint := range snapshot.AgentBlueprints {
+			blueprints[blueprintID] = blueprint.Value
+		}
+		teamRevisions, err := events.ResolveTeamRevisionBindings(string(intent.Value.OrganizationID), teamRecords, stream)
+		if err != nil {
+			return fmt.Errorf("completed work %s has invalid Team history: %w", workID, err)
+		}
+		binding := events.WorkCompletionBinding{
+			OrganizationID: string(intent.Value.OrganizationID), CorrelationID: state.CorrelationID,
+			Work: state.Value, WorkVersion: state.Version, Intent: intent.Value, Tasks: tasks,
+			TeamRevisions: teamRevisions, InboxObservations: inboxObservations, AgentBlueprints: blueprints, ExecutionProfiles: profiles,
+		}
+		evidence, err := events.ValidateWorkCompletionEvidenceChain(binding, evidenceEvent, stream)
+		if err != nil || evidence.Fingerprint != transitionDetail.Fingerprint {
+			return fmt.Errorf("completed work %s lacks exact durable evidence", workID)
+		}
+	}
+	return nil
 }
 
 func (r *Repository) loadFromRecords(ctx context.Context) (Snapshot, error) {
 	records := make(map[string][][]byte)
-	for _, kind := range []string{KindOrganization, KindTeam, KindAgentBlueprint, KindExecutionProfile, KindAgent, KindIntent, KindGoal, KindTask} {
+	for _, kind := range []string{KindOrganization, KindMission, KindGoal, KindTeam, KindAgentBlueprint, KindExecutionProfile, KindAgent, KindIntent, KindWork, KindTask} {
 		rows, err := r.gateway.ProjectionRecords(ctx, kind, "")
 		if err != nil {
 			return Snapshot{}, err
@@ -189,16 +376,24 @@ func (r *Repository) loadFromRecords(ctx context.Context) (Snapshot, error) {
 func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 	snapshot := Snapshot{
 		Organizations:     make(map[core.ID]Versioned[core.Organization]),
+		Missions:          make(map[core.ID]Versioned[core.Mission]),
+		Goals:             make(map[core.ID]Versioned[core.Goal]),
 		Teams:             make(map[core.ID]Versioned[core.Team]),
 		AgentBlueprints:   make(map[core.ID]Versioned[core.AgentBlueprint]),
 		ExecutionProfiles: make(map[core.ID]Versioned[core.ExecutionProfile]),
 		Agents:            make(map[core.ID]Versioned[core.Agent]),
 		Intents:           make(map[core.ID]Versioned[core.Intent]),
-		Goals:             make(map[core.ID]Versioned[core.Goal]),
+		Works:             make(map[core.ID]Versioned[core.Work]),
 		Tasks:             make(map[core.ID]Versioned[core.Task]),
 	}
 	if err := decodeKind(records[KindOrganization], snapshot.Organizations, false, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode organizations: %w", err)
+	}
+	if err := decodeKind(records[KindMission], snapshot.Missions, false, sameMissionRecord); err != nil {
+		return Snapshot{}, fmt.Errorf("decode missions: %w", err)
+	}
+	if err := decodeKind(records[KindGoal], snapshot.Goals, false, sameGoalRecord); err != nil {
+		return Snapshot{}, fmt.Errorf("decode goals: %w", err)
 	}
 	if err := decodeKind(records[KindTeam], snapshot.Teams, false, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode teams: %w", err)
@@ -215,8 +410,8 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 	if err := decodeKind(records[KindIntent], snapshot.Intents, true, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode intents: %w", err)
 	}
-	if err := decodeKind(records[KindGoal], snapshot.Goals, true, nil); err != nil {
-		return Snapshot{}, fmt.Errorf("decode goals: %w", err)
+	if err := decodeKind(records[KindWork], snapshot.Works, true, sameWorkRecord); err != nil {
+		return Snapshot{}, fmt.Errorf("decode works: %w", err)
 	}
 	if err := decodeKind(records[KindTask], snapshot.Tasks, true, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode tasks: %w", err)
@@ -267,6 +462,26 @@ func sameAgentBlueprintRecord(left, right core.AgentBlueprint) bool {
 	return reflect.DeepEqual(left, right)
 }
 
+func sameMissionRecord(left, right core.Mission) bool {
+	return core.ValidMissionRevision(left, right)
+}
+
+func sameGoalRecord(left, right core.Goal) bool {
+	return core.ValidGoalRevision(left, right)
+}
+
+func sameWorkRecord(left, right core.Work) bool {
+	return core.ValidWorkRevision(left, right)
+}
+
+func validMissionValue(mission core.Mission) bool {
+	return core.ValidMission(mission)
+}
+
+func validGoalValue(goal core.Goal) bool {
+	return core.ValidGoal(goal)
+}
+
 func sameExecutionProfileRecord(left, right core.ExecutionProfile) bool {
 	right.Status = left.Status
 	return reflect.DeepEqual(left, right)
@@ -282,7 +497,13 @@ func validateSnapshot(snapshot Snapshot) error {
 			return err
 		}
 	}
-	organized := make([]organizedIdentity, 0, len(snapshot.AgentBlueprints)+len(snapshot.ExecutionProfiles)+len(snapshot.Agents)+len(snapshot.Teams)+len(snapshot.Intents))
+	organized := make([]organizedIdentity, 0, len(snapshot.Missions)+len(snapshot.Goals)+len(snapshot.AgentBlueprints)+len(snapshot.ExecutionProfiles)+len(snapshot.Agents)+len(snapshot.Teams)+len(snapshot.Intents))
+	for id, state := range snapshot.Missions {
+		organized = append(organized, organizedIdentity{"mission", id, state.Value.ID, state.Value.OrganizationID})
+	}
+	for id, state := range snapshot.Goals {
+		organized = append(organized, organizedIdentity{"goal", id, state.Value.ID, state.Value.OrganizationID})
+	}
 	for id, state := range snapshot.AgentBlueprints {
 		organized = append(organized, organizedIdentity{"Agent blueprint", id, state.Value.ID, state.Value.OrganizationID})
 	}
@@ -306,6 +527,22 @@ func validateSnapshot(snapshot Snapshot) error {
 	if err := validateRoster(snapshot); err != nil {
 		return err
 	}
+	for id, state := range snapshot.Missions {
+		mission := state.Value
+		if !validMissionValue(mission) {
+			return fmt.Errorf("mission %s is incomplete or has unsupported status", id)
+		}
+	}
+	for id, state := range snapshot.Goals {
+		goal := state.Value
+		mission, ok := snapshot.Missions[goal.MissionID]
+		if !ok || mission.Value.OrganizationID != goal.OrganizationID {
+			return fmt.Errorf("goal %s references invalid mission %s", id, goal.MissionID)
+		}
+		if !validGoalValue(goal) {
+			return fmt.Errorf("goal %s is incomplete or has unsupported mode or status", id)
+		}
+	}
 	for id, state := range snapshot.Teams {
 		for _, memberID := range state.Value.MemberAgentIDs {
 			member, ok := snapshot.Agents[memberID]
@@ -314,16 +551,31 @@ func validateSnapshot(snapshot Snapshot) error {
 			}
 		}
 	}
-	for id, state := range snapshot.Goals {
-		if err := validateIdentity("goal", id, state.Value.ID); err != nil {
+	for id, state := range snapshot.Works {
+		if err := validateIdentity("work", id, state.Value.ID); err != nil {
 			return err
+		}
+		if state.Value.Status != core.WorkActive && state.Value.Status != core.WorkCompleted && state.Value.Status != core.WorkFailed {
+			return fmt.Errorf("work %s has unsupported status %s", id, state.Value.Status)
 		}
 		intent, ok := snapshot.Intents[state.Value.IntentID]
 		if !ok {
-			return fmt.Errorf("goal %s references missing intent %s", id, state.Value.IntentID)
+			return fmt.Errorf("work %s references missing intent %s", id, state.Value.IntentID)
+		}
+		if state.Value.GoalID != intent.Value.GoalID {
+			return fmt.Errorf("work %s does not match its accepted intent goal", id)
+		}
+		if state.Value.Objective != intent.Value.NormalizedObjective {
+			return fmt.Errorf("work %s does not match its accepted intent objective", id)
 		}
 		if state.CorrelationID == "" || intent.CorrelationID != state.CorrelationID {
-			return fmt.Errorf("goal %s crosses its intent correlation boundary", id)
+			return fmt.Errorf("work %s crosses its intent correlation boundary", id)
+		}
+		if state.Value.GoalID != "" {
+			goal, ok := snapshot.Goals[state.Value.GoalID]
+			if !ok || goal.Value.OrganizationID != intent.Value.OrganizationID {
+				return fmt.Errorf("work %s references invalid goal %s", id, state.Value.GoalID)
+			}
 		}
 	}
 	for id, state := range snapshot.Tasks {
@@ -331,14 +583,14 @@ func validateSnapshot(snapshot Snapshot) error {
 		if err := validateIdentity("task", id, task.ID); err != nil {
 			return err
 		}
-		goal, ok := snapshot.Goals[task.GoalID]
+		work, ok := snapshot.Works[task.WorkID]
 		if !ok {
-			return fmt.Errorf("task %s references missing goal %s", id, task.GoalID)
+			return fmt.Errorf("task %s references missing work %s", id, task.WorkID)
 		}
-		if state.CorrelationID == "" || goal.CorrelationID != state.CorrelationID {
-			return fmt.Errorf("task %s crosses its goal correlation boundary", id)
+		if state.CorrelationID == "" || work.CorrelationID != state.CorrelationID {
+			return fmt.Errorf("task %s crosses its work correlation boundary", id)
 		}
-		intent := snapshot.Intents[goal.Value.IntentID]
+		intent := snapshot.Intents[work.Value.IntentID]
 		switch task.AssigneeType {
 		case "":
 			if task.AssigneeID != "" || task.AgentConfig != nil {
@@ -365,13 +617,13 @@ func validateSnapshot(snapshot Snapshot) error {
 		}
 		if task.ParentID != "" {
 			parent, ok := snapshot.Tasks[task.ParentID]
-			if !ok || parent.Value.GoalID != task.GoalID || parent.CorrelationID != state.CorrelationID || task.ParentID == id {
+			if !ok || parent.Value.WorkID != task.WorkID || parent.CorrelationID != state.CorrelationID || task.ParentID == id {
 				return fmt.Errorf("task %s references invalid parent %s", id, task.ParentID)
 			}
 		}
 		for _, dependencyID := range task.DependsOn {
 			dependency, ok := snapshot.Tasks[dependencyID]
-			if !ok || dependency.Value.GoalID != task.GoalID || dependency.CorrelationID != state.CorrelationID || dependencyID == id {
+			if !ok || dependency.Value.WorkID != task.WorkID || dependency.CorrelationID != state.CorrelationID || dependencyID == id {
 				return fmt.Errorf("task %s references invalid dependency %s", id, dependencyID)
 			}
 		}

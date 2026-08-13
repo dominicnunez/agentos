@@ -58,3 +58,51 @@ func TestModelNormalizerAllowsOnlyExplicitMissingUserInputState(t *testing.T) {
 		t.Fatalf("normalization=%+v err=%v", result, err)
 	}
 }
+
+func TestModelNormalizerBindsOnlyExplicitGoalReference(t *testing.T) {
+	response := `{"state":"READY_FOR_REVIEW","reply":"Review the Goal-bound work.","intent":{"objective":"Advance the Goal","goal":{"value":"goal-123","origin":"EXPLICIT","source_message_id":"message-1"},"context":[],"deliverables":[{"value":"Result","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Verified","origin":"DEFAULT"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
+	normalizer, err := NewModelNormalizer(normalizationModel{response: response})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := normalizer.Normalize(context.Background(), []ConversationTurn{{MessageID: "message-1", Text: "Use goal-123 for this work"}})
+	if err != nil || result.Candidate.Goal == nil || result.Candidate.Goal.Value != "goal-123" {
+		t.Fatalf("explicit Goal normalization=%+v err=%v", result, err)
+	}
+	for _, invalid := range []string{
+		strings.Replace(response, `"origin":"EXPLICIT"`, `"origin":"INFERRED"`, 1),
+		strings.Replace(response, `goal-123`, `goal-invented`, 1),
+		strings.Replace(response, `goal-123`, `goal-12`, 1),
+		strings.Replace(response, `"source_message_id":"message-1"`, `"source_message_id":"unknown"`, 1),
+	} {
+		normalizer, err := NewModelNormalizer(normalizationModel{response: invalid})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := normalizer.Normalize(context.Background(), []ConversationTurn{{MessageID: "message-1", Text: "Use goal-123 for this work"}}); err == nil {
+			t.Fatalf("untrusted Goal binding was accepted: %s", invalid)
+		}
+	}
+}
+
+func TestModelNormalizerTreatsOnlyUnambiguousPunctuationAsGoalBoundary(t *testing.T) {
+	response := `{"state":"READY_FOR_REVIEW","reply":"Review the Goal-bound work.","intent":{"objective":"Advance the Goal","goal":{"value":"goal-123","origin":"EXPLICIT","source_message_id":"message-1"},"context":[],"deliverables":[{"value":"Result","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Verified","origin":"DEFAULT"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
+	for _, text := range []string{"Use goal-123, then continue", "Use goal-123!", "Use (goal-123)."} {
+		normalizer, err := NewModelNormalizer(normalizationModel{response: response})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := normalizer.Normalize(context.Background(), []ConversationTurn{{MessageID: "message-1", Text: text}}); err != nil {
+			t.Fatalf("ordinary Goal punctuation was rejected for %q: %v", text, err)
+		}
+	}
+	for _, text := range []string{"Use goal-123.", "Use goal-123: complete the work", "Use goal-123.4.", "Use goal-123:child."} {
+		normalizer, err := NewModelNormalizer(normalizationModel{response: response})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := normalizer.Normalize(context.Background(), []ConversationTurn{{MessageID: "message-1", Text: text}}); err == nil {
+			t.Fatalf("Goal prefix was accepted as an exact reference in %q", text)
+		}
+	}
+}

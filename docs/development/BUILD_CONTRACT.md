@@ -12,10 +12,18 @@
 8. A2A v1.0 is an external Agent/operator boundary. It does not become the internal communication model.
 9. Approval decisions fail closed. An approval authorizes a fingerprinted effect, never a general privilege expansion.
 
+The organizational hierarchy is `Mission > Goal > Work > Task`. Mission and
+Goal are durable organization-scoped projections whose append-only revisions
+preserve identity and parentage. A Goal contains measurable success criteria
+and is either a finite target or continuous. Work is the bounded execution
+unit created from an accepted Intent; it may reference a same-organization
+Goal, but ad hoc Work may omit that link. Task belongs to Work, not directly to
+Goal.
+
 ## First slice
 
 The shared intake boundary accepts bounded work from either the private user
-gateway or A2A Operator Gateway, creates an Intent, Goal, and single-node or
+gateway or A2A Operator Gateway, creates an Intent, Work, and single-node or
 bounded multi-node Task DAG, executes either a deterministic handler or a configured `AgentExecution`,
 records each transition, applies the completion engine, and returns terminal
 task state.
@@ -154,8 +162,32 @@ lookup errors, unknown or malformed status, missing evidence, and attempt drift
 leave the obligation explicitly `ATTEMPTED` for operator resolution. No
 production effect adapter or blind resend path is enabled.
 
+Before a Work can enter `COMPLETED`, the runtime records one fingerprinted
+`WORK_COMPLETION_EVALUATED` contract. It binds the exact confirmed Intent
+fingerprint, immutable Plan revision, accepted completion criteria, every
+`TASK_VERIFIED_COMPLETE` projection, its preceding runtime
+`COMPLETION_VERIFIED` event, and the aggregated Artifact references. Recovery
+revalidates that evidence and the `WORK_COMPLETED` transition; worker-authored
+result or candidate-completion content cannot substitute for it.
+
+When Work belongs to a Goal, that Goal identity is also part of the completion
+evidence fingerprint. This makes the bounded result usable by later Goal
+progress evaluation without allowing completion to rebind or achieve the Goal.
+The accepted Intent fingerprint also binds an explicit, source-attributed Goal
+reference. Creation rejects missing, inactive, or cross-organization Goals,
+and a retry cannot add, remove, or change the binding. Goal admission and
+Intent confirmation share one SQLite transaction. Subsequent Goal pause or
+retirement blocks new Work admission without stranding a previously confirmed
+Work retry or recovery.
+
+Work is the terminalizable layer in the `Mission > Goal > Work > Task`
+hierarchy. This evidence may contribute to later Goal progress evaluation, but
+it neither achieves a Goal nor revises organizational direction. Until the
+separate progress evaluator supplies and validates durable evidence, Goal
+achievement is not an admitted projection transition.
+
 Terminal work records one typed `RUN_TELEMETRY_RECORDED` Event Contract before
-the goal enters `COMPLETED` or `FAILED`. The telemetry module deterministically
+the work enters `COMPLETED` or `FAILED`. The telemetry module deterministically
 projects every Task in the run's authoritative Event Contract stream into
 verified or rejected outcome, execution mechanisms, wall time,
 provider/model/token/cost use, tool calls, messages, blocks, retries, user

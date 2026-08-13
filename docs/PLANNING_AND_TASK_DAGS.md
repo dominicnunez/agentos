@@ -1,5 +1,21 @@
 # Planning and Task DAGs
 
+Agent OS uses `Mission > Goal > Work > Task` as its organizational hierarchy.
+This document covers the bounded execution layers: one Work owns an accepted
+Intent and immutable Plan, and its Tasks form that Plan's executable DAG.
+Completing Work proves only that bounded undertaking; it cannot by itself mark
+a longer-lived Goal achieved or change the Mission.
+
+Mission and Goal are durable, organization-scoped projections. Mission carries
+enduring direction and is revised or retired rather than completed. Goal
+carries measurable success criteria and is either a finite target or a
+continuous objective. Revisions append new projection versions while retaining
+the Mission/organization identity. A bare projection update cannot mark any
+Goal achieved; that transition remains fail-closed until it is coupled to the
+separate durable progress-evidence path. A Work may bind to one active Goal in
+the same organization; that binding, its Intent, and its objective are
+immutable after creation. Goal linkage is optional for ad hoc Work.
+
 After an Intent is confirmed, Agent OS converts it into the smallest useful
 dependency graph of bounded Tasks. The graph is a runtime coordination
 contract, not a grant of authority.
@@ -44,8 +60,8 @@ inference call. Once a model context exists, every error, timeout, malformed
 result, or failed Plan write is a non-replayable planning attempt in both the
 running process and startup recovery. Agent OS durably records the failure,
 then `RUN_TELEMETRY_RECORDED` with timing, available provider usage, and exact
-failure evidence, and only then terminalizes the Goal through
-`GOAL_PLANNING_FAILED`. A crash between those steps resumes the existing
+failure evidence, and only then terminalizes the Work through
+`WORK_PLANNING_FAILED`. A crash between those steps resumes the existing
 failure decision instead of invoking the provider or inventing a different
 reason. Planning rejected before a model turn, including an unsupported exact
 operation, follows the same telemetry-before-terminal transition and is not
@@ -53,9 +69,9 @@ silently left active.
 
 A failed dependency deterministically terminalizes every affected pending or
 blocked dependent through `TASK_DEPENDENCY_FAILED`; failure then propagates to
-the runtime root and Goal instead of leaving work active forever. Once the
+the runtime root and Work instead of leaving work active forever. Once the
 root fails, remaining nonterminal sibling work is stopped through
-`TASK_GOAL_FAILED` before another Task is selected. The events' stable codes
+`TASK_WORK_FAILED` before another Task is selected. The events' stable codes
 and exact Task IDs are machine contract data, independent of user-facing
 language.
 
@@ -74,16 +90,16 @@ remediation from substituting model judgment for that review. Approval wakes
 newly eligible dependents immediately; rejection follows the deterministic
 failure path. Other child work that cannot proceed emits a typed blocked-work
 contract to its accountable parent. When a deeper DAG dependent is the next
-actionable Task, the runtime supplies that exact same-goal blocked contract as
+actionable Task, the runtime supplies that exact same-work blocked contract as
 bounded evidence. The scheduler never treats blocked work as completed or lets
 another Task inherit missing authority.
 
 A bounded remediation pass may report and route a child block, but it cannot
 invent a DAG mutation or treat the dependency as complete. When an Agent root
 has no governing parent and the block remains unresolved, the runtime records
-`TASK_REMEDIATION_FAILED`, fails the root, and terminalizes the Goal rather than
+`TASK_REMEDIATION_FAILED`, fails the root, and terminalizes the Work rather than
 advertising an input request that no authorized V1 transition can consume.
 
-Intent, Goal, and Task projection histories keep one immutable correlation
+Intent, Work, and Task projection histories keep one immutable correlation
 boundary across every version. Rebuild fails closed if any historical record
 crosses that boundary, even if a later version changes it back.

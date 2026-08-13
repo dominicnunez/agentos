@@ -9,8 +9,10 @@ Target: `1.0.0-rc.1`
 
 ### Added
 
-- Durable organizations, intents, goals, Task DAGs, Agent identities, bounded
+- Durable organizations, Missions, Goals, intents, bounded Work, Task DAGs, Agent identities,
   executions, and append-only Event Contracts over SQLite.
+- Reviewed intake can bind Work to an explicitly identified active Goal; the
+  binding is tenant-checked, immutable, and included in completion evidence.
 - Private Linux user and authenticated A2A v1.0 work, status, result, and
   continuation boundaries with tenant-scoped capability roles.
 - Resumable Linux setup with system mode by default, stable filesystem paths,
@@ -31,6 +33,8 @@ Target: `1.0.0-rc.1`
 
 - Exact-effect approval, expiry, revocation, freeze, single-use, and
   attempt-time authorization checks.
+- Goal achievement fails closed until a durable progress evaluation is
+  validated; a bare projection update cannot certify organizational success.
 - Kernel-provided local peer identity, owner-only exact-effect controls, strict
   Agent registries, role isolation, rate and concurrency limits, remote TLS
   requirements, bounded decoding, and authority-shaped input rejection.
