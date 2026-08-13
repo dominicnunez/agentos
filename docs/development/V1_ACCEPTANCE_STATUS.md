@@ -7,21 +7,21 @@ to deploy or publish.
 
 | # | Requirement | Evidence |
 |---:|---|---|
-| 1 | Durable identity | PASS - [`TestDurableObjectsSurviveRestartAndRebuildFromEvents`](../../internal/projections/repository_test.go) |
+| 1 | Durable identity | PASS - [`TestDurableObjectsSurviveRestartAndRebuildFromEvents`](../../internal/projections/repository_test.go), [`TestSnapshotRejectsMalformedDurableRoster`](../../internal/projections/repository_test.go), [`TestRosterRevisionsPreserveConfigurationAndAgentIdentity`](../../internal/projections/repository_test.go), [`TestSnapshotRejectsMalformedPinnedAgentConfiguration`](../../internal/projections/repository_test.go), [`TestAgentIdentitySurvivesExecutionProfileUpdate`](../../internal/app/service_test.go) |
 | 2 | Direct lateral messaging | PASS - [`TestLateralMessagesAtActionBoundary`](../../internal/app/service_test.go) |
 | 3 | Action-boundary delivery | PASS - [`TestLateralMessagesAtActionBoundary`](../../internal/app/service_test.go) |
 | 4 | Atomic message delivery | PASS - [`TestMessageRollbackOnInboxFailure`](../../internal/ledger/sqlite_test.go) |
 | 5 | Blocked work returns control | PASS - [`TestBlockedChildReturnsToParent`](../../internal/app/service_test.go) |
-| 6 | No implicit authority inheritance | PASS - [`TestChildAssignmentDoesNotInheritParentCapability`](../../internal/authority/authority_test.go) |
+| 6 | No implicit authority inheritance | PASS - [`TestChildAssignmentDoesNotInheritParentCapability`](../../internal/authority/authority_test.go), [`TestSelectUsesStableEligibleAgentWithoutGrantingRequirements`](../../internal/assignment/selector_test.go), [`TestDispatchFailsClosedWhenDurableRosterEligibilityChanges`](../../internal/app/service_test.go) |
 | 7 | Durable approval wait | PASS - [`TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision`](../../internal/approvals/service_test.go) |
 | 8 | Acknowledgement is not approval | PASS - [`TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision`](../../internal/approvals/service_test.go) |
 | 9 | Time-of-use revocation | PASS - [`TestRevocationBlocksEffect`](../../internal/effects/coordinator_test.go), [`TestApprovalExpiryAtAttempt`](../../internal/effects/coordinator_test.go) |
 | 10 | Untrusted text stays untrusted | PASS - [`TestAgentCannotMintTrustedStateEvents`](../../internal/events/events_test.go), [`TestMessageEnvelopeUsesAuthenticatedIdentity`](../../internal/events/events_test.go), [`TestCandidateCompletionCannotMintVerifiedCompletion`](../../internal/events/events_test.go) |
 | 11 | Verified completion only | PASS - [`TestVerifierOwnsPostconditionTrust`](../../internal/completion/verifier_test.go), [`TestEvaluateRequiresVerifiedSuccess`](../../internal/completion/engine_test.go) |
 | 12 | Consequential effects are idempotent | PASS - [`TestSingleUseApprovalBeforeEffect`](../../internal/effects/coordinator_test.go) |
-| 13 | Restart continuity | PASS - [`TestRecoverExecutesPersistedPendingWorkAndPreservesIdentity`](../../internal/app/service_test.go), [`TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision`](../../internal/approvals/service_test.go), [`TestMessageInboxSurvivesReopenAndObservation`](../../internal/ledger/sqlite_test.go) |
+| 13 | Restart continuity | PASS - [`TestRecoverExecutesPersistedPendingWorkAndPreservesIdentity`](../../internal/app/service_test.go), [`TestRecoverResumesOnlyRevalidatedAssignmentBlock`](../../internal/app/service_test.go), [`TestProtectedEffectWaitsAcrossRestartForExactAuthorizedDecision`](../../internal/approvals/service_test.go), [`TestMessageInboxSurvivesReopenAndObservation`](../../internal/ledger/sqlite_test.go) |
 | 14 | Complete run telemetry | PASS - [`TestProjectBuildsCompleteReplayableRunSummary`](../../internal/telemetry/telemetry_test.go), [`TestRunTelemetryCoversDAG`](../../internal/app/service_test.go) |
-| 15 | Model executions have manifests | PASS - [`TestAgentExecutionUsesFakeAdapter`](../../internal/app/service_test.go), [`TestAgentExecutionReturnsSeparateUsageContract`](../../internal/execution/execution_test.go) |
+| 15 | Model executions have manifests | PASS - [`TestAgentExecutionManifestUsesConfiguredModelDescriptor`](../../internal/app/service_test.go), [`TestAgentExecutionReturnsSeparateUsageContract`](../../internal/execution/execution_test.go) |
 | 16 | Tool failures remain failures | PASS - [`TestAgentExecutionRejectsMismatchedProviderUsageIdentity`](../../internal/execution/execution_test.go), [`TestUnavailableDeterministicWorkIsRejectedBeforeExecution`](../../internal/app/service_test.go), [`TestEvaluateRequiresVerifiedSuccess`](../../internal/completion/engine_test.go) |
 | 17 | Deterministic-first recovery | PASS - [`TestRecoveryIsDeterministicFirst`](../../internal/app/service_test.go) |
 | 18 | Authorized A2A operation | PASS - [`TestA2ASendGetAndContinueUseV1TaskContracts`](../../internal/gateway/a2a_test.go), [`TestOfficialA2AClientUsesDurableAgentOSState`](../../internal/gateway/a2a_official_test.go) |
@@ -46,9 +46,11 @@ persisted review decision after restart.
 - Gateway tests cover UID-authenticated local intake, authenticated A2A intake,
   replay, capability roles, visibility, lifecycle and request limits, tenant
   isolation, and rejection of authority-shaped content.
-- Planning tests cover no-inference exact work, closed schemas, task ceilings,
+- Planning and assignment tests cover no-inference exact work, closed schemas, task ceilings,
   unsupported execution, unknown dependencies, cycles, atomic graph admission,
-  durable replay, dependency evidence selection, and A2A root isolation.
+  durable replay, stable same-organization Agent selection, exact profile and
+  capability-prerequisite checks, dependency evidence selection, and A2A root
+  isolation.
 
 ## Operational supplement
 

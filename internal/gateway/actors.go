@@ -42,13 +42,6 @@ type ExternalActorRegistry struct {
 	credentials *credentialRegistry
 }
 
-func (r *ExternalActorRegistry) operatorCredentials() *credentialRegistry {
-	if r == nil {
-		return nil
-	}
-	return r.credentials
-}
-
 func DecodeExternalActorConfig(reader io.Reader) ([]ExternalActor, error) {
 	var config ExternalActorConfig
 	return trustconfig.DecodeEntries(reader, "external actor registry", "actor", &config, &config.Actors)

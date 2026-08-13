@@ -8,6 +8,8 @@ packages:
 modules:
   - name: app
     path: internal/app
+  - name: assignment
+    path: internal/assignment
   - name: artifacts
     path: internal/artifacts
   - name: approvals
@@ -70,7 +72,13 @@ policy:
       from:
         module: app
       to:
-        modules: [completion, core, events, execution, planning, projections, telemetry, workflow]
+        modules: [assignment, completion, core, events, execution, planning, projections, telemetry, workflow]
+
+    - name: assignment-domain
+      from:
+        module: assignment
+      to:
+        module: core
 
     - name: artifact-domain
       from:

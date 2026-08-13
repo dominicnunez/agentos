@@ -43,7 +43,7 @@ func TestHumanGatewayRoutesNaturalLanguageAndReturnsNarrowTaskView(t *testing.T)
 	response := submitAndConfirmHuman(t, handler, humanMessageRequest{
 		ConversationID: "direct-1", MessageID: "message-1", Text: "draft a release update",
 	})
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) || !strings.Contains(response.Body.String(), `"result":"fake-model: Execute only this accepted Agent OS Intent.`) || !strings.Contains(response.Body.String(), `\"objective\":\"draft a release update\"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) || !strings.Contains(response.Body.String(), `"result":"fake-model: Operate only as this runtime-selected durable Agent blueprint.`) || !strings.Contains(response.Body.String(), `\"objective\":\"draft a release update\"`) {
 		t.Fatalf("natural-language submit=%d %s", response.Code, response.Body.String())
 	}
 	if strings.Contains(response.Body.String(), `"events"`) || strings.Contains(response.Body.String(), `"payload"`) || strings.Contains(response.Body.String(), `"intent"`) {
@@ -54,7 +54,7 @@ func TestHumanGatewayRoutesNaturalLanguageAndReturnsNarrowTaskView(t *testing.T)
 		t.Fatalf("human response has no task id: %s err=%v", response.Body.String(), err)
 	}
 	response = serveHuman(handler, http.MethodGet, "/v1/user/tasks/"+submitted.TaskID, testOwnerMarker, "")
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"result":"fake-model: Execute only this accepted Agent OS Intent.`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"result":"fake-model: Operate only as this runtime-selected durable Agent blueprint.`) {
 		t.Fatalf("human status=%d %s", response.Code, response.Body.String())
 	}
 
@@ -189,7 +189,7 @@ func TestLocalOwnerCanFinalizeExactCompletionReview(t *testing.T) {
 		t.Fatalf("review list=%s err=%v", response.Body.String(), err)
 	}
 	response = serveHuman(handler, http.MethodGet, "/v1/user/reviews/"+task.TaskID, testOwnerMarker, "")
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"objective":"draft a release update"`) || !strings.Contains(response.Body.String(), `"candidate_result":"candidate: Execute only this accepted Agent OS Intent.`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"objective":"draft a release update"`) || !strings.Contains(response.Body.String(), `"candidate_result":"candidate: Operate only as this runtime-selected durable Agent blueprint.`) {
 		t.Fatalf("review fetch=%d %s", response.Code, response.Body.String())
 	}
 	if response.Header().Get("Cache-Control") != "no-store" {
@@ -208,7 +208,7 @@ func TestLocalOwnerCanFinalizeExactCompletionReview(t *testing.T) {
 		t.Fatalf("review decision=%d %s", response.Code, response.Body.String())
 	}
 	response = serveHuman(handler, http.MethodGet, "/v1/user/tasks/"+task.TaskID, testOwnerMarker, "")
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) || !strings.Contains(response.Body.String(), `"result":"candidate: Execute only this accepted Agent OS Intent.`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) || !strings.Contains(response.Body.String(), `"result":"candidate: Operate only as this runtime-selected durable Agent blueprint.`) {
 		t.Fatalf("reviewed task=%d %s", response.Code, response.Body.String())
 	}
 }

@@ -27,10 +27,34 @@ type Team struct {
 	Status         string    `json:"status"`
 	CreatedAt      time.Time `json:"created_at"`
 }
+type AgentBlueprint struct {
+	ID                        ID        `json:"id"`
+	OrganizationID            ID        `json:"organization_id"`
+	Version                   string    `json:"version"`
+	Role                      string    `json:"role"`
+	OperatingInstructions     string    `json:"operating_instructions"`
+	RequiredCapabilityClasses []string  `json:"required_capability_classes"`
+	Status                    string    `json:"status"`
+	CreatedAt                 time.Time `json:"created_at"`
+}
+type ExecutionProfile struct {
+	ID               ID        `json:"id"`
+	OrganizationID   ID        `json:"organization_id"`
+	Version          string    `json:"version"`
+	ModelProvider    string    `json:"model_provider"`
+	Model            string    `json:"model"`
+	ReasoningSetting string    `json:"reasoning_setting,omitempty"`
+	PromptVersion    string    `json:"prompt_version"`
+	ToolRefs         []string  `json:"tool_refs"`
+	Status           string    `json:"status"`
+	CreatedAt        time.Time `json:"created_at"`
+}
 type Agent struct {
 	ID                      ID     `json:"id"`
 	OrganizationID          ID     `json:"organization_id"`
+	BlueprintID             ID     `json:"blueprint_id"`
 	BlueprintVersion        string `json:"blueprint_version"`
+	ExecutionProfileID      ID     `json:"execution_profile_id"`
 	ExecutionProfileVersion string `json:"execution_profile_version"`
 	RuntimeAdapter          string `json:"runtime_adapter"`
 	Status                  string `json:"status"`
@@ -155,6 +179,16 @@ type Plan struct {
 	CreatedAt         time.Time  `json:"created_at"`
 }
 
+// AgentConfig pins the exact reviewed configuration selected for a Task.
+// Agent identity remains durable when its current configuration evolves.
+type AgentConfig struct {
+	BlueprintID      ID     `json:"blueprint_id"`
+	BlueprintVersion string `json:"blueprint_version"`
+	ProfileID        ID     `json:"profile_id"`
+	ProfileVersion   string `json:"profile_version"`
+	RuntimeAdapter   string `json:"runtime_adapter"`
+}
+
 type Task struct {
 	ID                   ID                   `json:"id"`
 	GoalID               ID                   `json:"goal_id"`
@@ -167,6 +201,7 @@ type Task struct {
 	ParentID             ID                   `json:"parent_id,omitempty"`
 	AssigneeType         string               `json:"assignee_type,omitempty"`
 	AssigneeID           ID                   `json:"assignee_id,omitempty"`
+	AgentConfig          *AgentConfig         `json:"agent_config,omitempty"`
 	RuntimeHandlerRef    string               `json:"runtime_handler_ref,omitempty"`
 	TaskContractVersion  string               `json:"task_contract_version"`
 	CompletionContract   *CompletionContract  `json:"completion_contract,omitempty"`
@@ -257,7 +292,9 @@ type VersionedRef struct {
 type ExecutionContextManifest struct {
 	ExecutionID             ID             `json:"execution_id"`
 	AgentID                 ID             `json:"agent_id"`
+	AgentBlueprintVersion   string         `json:"agent_blueprint_version"`
 	ExecutionProfileVersion string         `json:"execution_profile_version"`
+	RuntimeAdapter          string         `json:"runtime_adapter"`
 	Provider                string         `json:"provider,omitempty"`
 	Model                   string         `json:"model,omitempty"`
 	TaskID                  ID             `json:"task_id"`
