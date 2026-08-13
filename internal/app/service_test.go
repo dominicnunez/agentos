@@ -517,6 +517,16 @@ func (describedModel) Complete(_ context.Context, prompt string) (execution.Mode
 	return execution.ModelResponse{Text: "configured-model: " + prompt, Usage: events.InferenceUsageRecordedPayload{Source: "provider_cli", Provider: "codex-subscription", Model: "test-model", InputTokens: 1, OutputTokens: 1, TotalTokens: 2}}, nil
 }
 
+type changedDescriptorModel struct{}
+
+func (changedDescriptorModel) Name() string { return "openai/changed-model" }
+func (changedDescriptorModel) Descriptor() execution.ModelDescriptor {
+	return execution.ModelDescriptor{Provider: "openai", Model: "changed-model", ExecutionProfileVersion: "v2-openai"}
+}
+func (changedDescriptorModel) Complete(_ context.Context, _ string) (execution.ModelResponse, error) {
+	return execution.ModelResponse{}, errors.New("changed model must not run during replay")
+}
+
 func TestAgentExecutionManifestUsesConfiguredModelDescriptor(t *testing.T) {
 	l, err := ledger.Open(":memory:")
 	if err != nil {
@@ -576,6 +586,39 @@ func TestAgentExecutionManifestUsesConfiguredModelDescriptor(t *testing.T) {
 	}
 	if replayed.Task.Status != core.TaskBlocked || replayed.Completion.Complete || len(replayed.Completion.Reasons) == 0 || len(replayed.Events) != len(r.Events) {
 		t.Fatalf("blocked review did not replay idempotently: before=%+v after=%+v", r, replayed)
+	}
+}
+
+func TestReplayRetainsDurableAssignmentWhenConfiguredModelChanges(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	submission := Submit{RequestID: "stable-assignment", OrganizationID: "org-1", Statement: "echo stable", Kind: core.ExecutionDeterministic}
+
+	first, err := NewWithModel(gateway, describedModel{}).Submit(context.Background(), submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Task.AssigneeType != "AGENT" || first.Task.AssigneeID == "" {
+		t.Fatalf("initial assignment=%+v", first.Task)
+	}
+
+	replayed, err := NewWithModel(gateway, changedDescriptorModel{}).Submit(context.Background(), submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Task.AssigneeID != first.Task.AssigneeID || replayed.Task.Status != first.Task.Status {
+		t.Fatalf("durable assignment changed during replay: before=%+v after=%+v", first.Task, replayed.Task)
+	}
+	snapshot, err := projections.New(gateway).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Agents) != 2 {
+		t.Fatalf("configured model change did not create a distinct roster identity: agents=%d", len(snapshot.Agents))
 	}
 }
 

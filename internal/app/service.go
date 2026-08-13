@@ -1770,12 +1770,20 @@ func (s *Service) ensurePlanTasks(ctx context.Context, organizationID core.ID, c
 		}
 		switch item.ExecutionKind {
 		case core.ExecutionDeterministic, core.ExecutionAgent:
-			selection, err := assignment.Select(assignmentRoster(snapshot), s.assignmentRequirement(organizationID, item.ExecutionKind))
-			if err != nil {
-				return core.Task{}, fmt.Errorf("assign planned task %s: %w", item.Key, err)
+			if durable, ok := snapshot.Tasks[task.ID]; ok {
+				if durable.Value.AssigneeType != "AGENT" || durable.Value.AssigneeID == "" {
+					return core.Task{}, fmt.Errorf("planned task %s has an invalid durable Agent assignment", item.Key)
+				}
+				task.AssigneeType = durable.Value.AssigneeType
+				task.AssigneeID = durable.Value.AssigneeID
+			} else {
+				selection, err := assignment.Select(assignmentRoster(snapshot), s.assignmentRequirement(organizationID, item.ExecutionKind))
+				if err != nil {
+					return core.Task{}, fmt.Errorf("assign planned task %s: %w", item.Key, err)
+				}
+				task.AssigneeType = "AGENT"
+				task.AssigneeID = selection.Agent.ID
 			}
-			task.AssigneeType = "AGENT"
-			task.AssigneeID = selection.Agent.ID
 		case core.ExecutionHuman, core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
 			// User work and unavailable V1 execution kinds are intentionally not
 			// attached to an Agent. Assignment is never a capability grant.
