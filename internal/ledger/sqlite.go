@@ -921,6 +921,16 @@ func prepareProjection(draft events.ProjectionDraft, allowWorkCompletion, allowG
 	}
 	eventDraft := draft.Event
 	item := preparedProjection{draft: draft, eventDraft: eventDraft, record: record, detail: detail, body: body}
+	boundary := events.Event{
+		OrganizationID: draft.Event.OrganizationID, EventType: draft.Event.EventType,
+		SourceActorID: draft.Event.SourceActorID, SourceExecutionID: draft.Event.SourceExecutionID,
+		RecipientScope: draft.Event.RecipientScope, RecipientID: draft.Event.RecipientID, TaskID: draft.Event.TaskID,
+		AuthorizationRefs: draft.Event.AuthorizationRefs, ArtifactRefs: draft.Event.ArtifactRefs,
+		CorrelationID: draft.Event.CorrelationID, SchemaVersion: events.SchemaVersion,
+	}
+	if err := events.ValidateProjectionEventBoundary(boundary, events.ProjectionEventPayload{Projection: record}); err != nil {
+		return preparedProjection{}, fmt.Errorf("projection boundary: %w", err)
+	}
 	switch draft.ProjectionKind {
 	case "mission":
 		var mission core.Mission
@@ -1979,8 +1989,8 @@ func collectRecordBodies(rows *sql.Rows, err error) ([][]byte, error) {
 }
 
 func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Event, error) {
-	if events.ReservesProjectionPayload(d.Payload) {
-		return events.Event{}, fmt.Errorf("projection payloads require typed admission")
+	if err := events.ValidateOrdinaryEventPayload(d.Payload); err != nil {
+		return events.Event{}, err
 	}
 	if events.RequiresProjectionAdmission(d.EventType, d.SourceActorID) {
 		return events.Event{}, fmt.Errorf("projection lifecycle events require typed admission")
@@ -2329,6 +2339,9 @@ func newEventID() (string, error) {
 func appendEventWithID(ctx context.Context, db sqlExecutor, d events.TrustedDraft, id string) (events.Event, error) {
 	if id == "" {
 		return events.Event{}, fmt.Errorf("event id is required")
+	}
+	if err := events.ValidateOrdinaryEventPayload(d.Payload); err != nil {
+		return events.Event{}, err
 	}
 	data, err := json.Marshal(d.Payload)
 	if err != nil {

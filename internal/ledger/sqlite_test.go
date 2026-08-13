@@ -198,7 +198,7 @@ func TestProjectionVersionConflictRollsBackItsEvent(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = l.Close() })
 	draft := events.ProjectionDraft{
-		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_BLOCKED", RecipientScope: events.RecipientTask, RecipientID: "task-parent", TaskID: "task-1", CorrelationID: "request-1"},
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_BLOCKED", SourceActorID: "runtime", RecipientScope: events.RecipientTask, RecipientID: "task-parent", TaskID: "task-1", CorrelationID: "request-1"},
 		ProjectionKind: "task",
 		RecordID:       "task-1",
 		Version:        1,
@@ -300,6 +300,17 @@ func TestGenericSQLiteAppendCannotMintProjectionAuthority(t *testing.T) {
 			OrganizationID: "org-1", EventType: "TEAM_CREATED", SourceActorID: "runtime", CorrelationID: "work-1",
 			Payload: map[string]string{"note": "ordinary payload"},
 		},
+		"array payload": {
+			OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "work-1",
+			Payload: []string{"ordinary"},
+		},
+		"scalar payload": {
+			OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "work-1",
+			Payload: "ordinary",
+		},
+		"null payload": {
+			OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "work-1",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := store.Append(ctx, draft); err == nil {
@@ -310,6 +321,32 @@ func TestGenericSQLiteAppendCannotMintProjectionAuthority(t *testing.T) {
 	stream, err := store.Events(ctx, "")
 	if err != nil || len(stream) != 0 {
 		t.Fatalf("rejected generic projections changed ledger: events=%d err=%v", len(stream), err)
+	}
+}
+
+func TestProjectionWriterRejectsInvalidBoundaryBeforePersistence(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event: events.TrustedDraft{
+			OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "setup-1",
+		},
+		ProjectionKind: "organization", RecordID: "org-1", Version: 1,
+		Value: core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: time.Now().UTC()},
+	}); err == nil {
+		t.Fatal("projection writer accepted an unsupported lifecycle boundary")
+	}
+	stream, err := store.Events(ctx, "")
+	if err != nil || len(stream) != 0 {
+		t.Fatalf("invalid projection boundary changed ledger: events=%d err=%v", len(stream), err)
+	}
+	records, err := store.Records(ctx, "organization", "org-1")
+	if err != nil || len(records) != 0 {
+		t.Fatalf("invalid projection boundary materialized state: records=%d err=%v", len(records), err)
 	}
 }
 
@@ -373,8 +410,8 @@ func TestChildTaskIsNotExternallyAddressable(t *testing.T) {
 	rootID := "task-" + correlationID
 	childID := rootID + "-child"
 	drafts := []events.ProjectionDraft{
-		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", TaskID: childID, CorrelationID: correlationID}, ProjectionKind: "task", RecordID: childID, Version: 1, Value: core.Task{ID: core.ID(childID), ParentID: core.ID(rootID)}},
-		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", TaskID: rootID, CorrelationID: correlationID}, ProjectionKind: "task", RecordID: rootID, Version: 1, Value: core.Task{ID: core.ID(rootID)}},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: childID, CorrelationID: correlationID}, ProjectionKind: "task", RecordID: childID, Version: 1, Value: core.Task{ID: core.ID(childID), ParentID: core.ID(rootID)}},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: rootID, CorrelationID: correlationID}, ProjectionKind: "task", RecordID: rootID, Version: 1, Value: core.Task{ID: core.ID(rootID)}},
 	}
 	if _, err := l.AppendProjections(ctx, drafts); err != nil {
 		t.Fatal(err)
@@ -753,7 +790,14 @@ func TestCompletedWorkRequiresExactDurableEvidence(t *testing.T) {
 	if _, err := l.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "PLAN_CREATED", SourceActorID: "runtime", SourceExecutionID: "planning-1", TaskID: "task-run-1", Payload: plan, CorrelationID: "run-1"}); err != nil {
 		t.Fatal(err)
 	}
-	task := core.Task{ID: "task-run-1", WorkID: "work-1", Description: "verify", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskCompleted}
+	task := core.Task{ID: "task-run-1", WorkID: "work-1", Description: "verify", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
+	if _, err := l.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "run-1"},
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 1, Value: task,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task.Status = core.TaskCompleted
 	failedOutcome := core.ToolOutcome{
 		ToolInvocationID: "tool-invocation-1", ToolID: "test.verifier", ToolVersion: "v1",
 		Status: core.OutcomeFailed, PostconditionStatus: core.PostconditionFailed,
@@ -764,7 +808,7 @@ func TestCompletedWorkRequiresExactDurableEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	forged := events.CompletionDecisionPayload{
-		Contract: core.CompletionContract{TaskID: task.ID, TaskVersion: 1, Criteria: []core.CompletionCriterion{{ID: "verified", Assurance: core.AssuranceDeterministic, Required: true}}},
+		Contract: core.CompletionContract{TaskID: task.ID, TaskVersion: 2, Criteria: []core.CompletionCriterion{{ID: "verified", Assurance: core.AssuranceDeterministic, Required: true}}},
 		Result:   events.CompletionDecisionResultPayload{Complete: true}, OutcomeEventRef: outcomeEvent.EventID,
 	}
 	verificationEvent, err := l.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "COMPLETION_VERIFIED", SourceActorID: "runtime", TaskID: string(task.ID), Payload: forged, CorrelationID: "run-1"})
@@ -773,7 +817,7 @@ func TestCompletedWorkRequiresExactDurableEvidence(t *testing.T) {
 	}
 	taskEvent, err := l.AppendProjection(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_VERIFIED_COMPLETE", SourceActorID: "runtime", TaskID: string(task.ID), Payload: forged, CorrelationID: "run-1"},
-		ProjectionKind: "task", RecordID: string(task.ID), Version: 1, Value: task,
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -784,7 +828,7 @@ func TestCompletedWorkRequiresExactDurableEvidence(t *testing.T) {
 		PlanID:            "plan-1", PlanVersion: 1,
 		Criteria: criteria,
 		Tasks: []events.WorkCompletionTaskEvidencePayload{{
-			TaskID: "task-run-1", TaskVersion: 1, VerificationEventRef: "evt-verification", CompletionEventRef: "evt-completion", ArtifactRefs: []string{},
+			TaskID: "task-run-1", TaskVersion: 2, VerificationEventRef: "evt-verification", CompletionEventRef: "evt-completion", ArtifactRefs: []string{},
 		}},
 		ArtifactRefs: []string{}, CreatedAt: now,
 	}
@@ -870,10 +914,9 @@ func TestGoalProgressWitnessSelectionCrossesFormerEvidenceWindow(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			transition, err := appendEvent(ctx, tx, events.TrustedDraft{
+			transition, _, err := appendProjectionEvent(ctx, tx, events.TrustedDraft{
 				OrganizationID: "org-1", EventType: "WORK_COMPLETED", SourceActorID: "runtime", CorrelationID: correlationID,
-				Payload: events.ProjectionEventPayload{Projection: events.ProjectionRecord{ProjectionKind: "work", RecordID: string(workID), Version: 2, CorrelationID: correlationID, Value: workValue}, Detail: detail},
-			})
+			}, events.ProjectionRecord{ProjectionKind: "work", RecordID: string(workID), Version: 2, CorrelationID: correlationID, Value: workValue}, detail)
 			if err != nil {
 				return err
 			}
@@ -916,10 +959,9 @@ func TestGoalRevisionMustPrecedeProgressEvaluation(t *testing.T) {
 	}
 	record := events.ProjectionRecord{ProjectionKind: "goal", RecordID: string(goal.ID), Version: 1, CorrelationID: "goal-1", Value: value}
 	err = l.withTx(ctx, func(tx *sql.Tx) error {
-		revision, err := appendEvent(ctx, tx, events.TrustedDraft{
+		revision, _, err := appendProjectionEvent(ctx, tx, events.TrustedDraft{
 			OrganizationID: "org-1", EventType: "GOAL_CREATED", SourceActorID: "runtime", CorrelationID: "goal-1",
-			Payload: events.ProjectionEventPayload{Projection: record},
-		})
+		}, record, nil)
 		if err != nil {
 			return err
 		}

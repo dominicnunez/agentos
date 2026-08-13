@@ -1710,20 +1710,28 @@ func validProjectionEventType(kind string, version int, eventType string) bool {
 	return false
 }
 
-// ReservesProjectionPayload reports whether a generic draft attempts to use
-// either top-level projection authority key, including a malformed imitation.
-func ReservesProjectionPayload(value any) bool {
+// ValidateOrdinaryEventPayload enforces the object-shaped Event Contract
+// boundary and reserves typed projection authority keys. Writers call this
+// before persistence so startup never discovers a payload they admitted but
+// cannot classify.
+func ValidateOrdinaryEventPayload(value any) error {
 	body, err := json.Marshal(value)
 	if err != nil {
-		return false
+		return fmt.Errorf("encode event payload: %w", err)
+	}
+	if rejectDuplicateJSONKeys(body) != nil {
+		return fmt.Errorf("event payload is malformed")
 	}
 	var object map[string]json.RawMessage
-	if json.Unmarshal(body, &object) != nil {
-		return false
+	if json.Unmarshal(body, &object) != nil || object == nil {
+		return fmt.Errorf("event payload must be a JSON object")
 	}
 	_, hasProjection := object["projection"]
 	_, hasAdmission := object["admission"]
-	return hasProjection || hasAdmission
+	if hasProjection || hasAdmission {
+		return fmt.Errorf("projection payloads require typed admission")
+	}
+	return nil
 }
 
 func projectionAdmissionFingerprint(admission ProjectionAdmission, event Event, record ProjectionRecord, detail json.RawMessage) (string, error) {
@@ -1990,8 +1998,8 @@ func (g *Gateway) PublishAgentDraft(ctx context.Context, organizationID, actorID
 	return g.ledger.Append(ctx, trusted)
 }
 func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event, error) {
-	if ReservesProjectionPayload(draft.Payload) {
-		return Event{}, fmt.Errorf("projection payloads require typed admission")
+	if err := ValidateOrdinaryEventPayload(draft.Payload); err != nil {
+		return Event{}, err
 	}
 	if RequiresProjectionAdmission(draft.EventType, draft.SourceActorID) {
 		return Event{}, fmt.Errorf("projection lifecycle events require typed admission")

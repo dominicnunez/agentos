@@ -326,6 +326,28 @@ func TestGenericTrustedPublicationCannotMintProjectionAuthority(t *testing.T) {
 	}
 }
 
+func TestTrustedPublicationRequiresObjectPayload(t *testing.T) {
+	for name, payload := range map[string]any{
+		"array":  []string{"value"},
+		"scalar": "value",
+		"null":   nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			ledger := &memoryLedger{}
+			gateway := NewGateway(ledger)
+			if _, err := gateway.PublishTrusted(context.Background(), TrustedDraft{
+				OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime",
+				CorrelationID: "work-1", Payload: payload,
+			}); err == nil {
+				t.Fatalf("trusted publication accepted %s payload", name)
+			}
+			if len(ledger.events) != 0 {
+				t.Fatalf("rejected %s payload reached ledger", name)
+			}
+		})
+	}
+}
+
 type routeValidatorFunc func(context.Context, AddressedRoute) error
 
 func (f routeValidatorFunc) ValidateAddressedRoute(ctx context.Context, route AddressedRoute) error {

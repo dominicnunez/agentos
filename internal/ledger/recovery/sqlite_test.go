@@ -3,12 +3,14 @@ package recovery
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
@@ -141,16 +143,9 @@ func TestRecoveryRejectsProjectionAdmissionCorruption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
-		Event: events.TrustedDraft{
-			OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime",
-			TaskID: "task-1", CorrelationID: "work-1",
-		},
-		ProjectionKind: "task", RecordID: "task-1", Version: 1,
-		Value: core.Task{ID: "task-1", WorkID: "work-1", Status: core.TaskPending},
-	}); err != nil {
+	if _, _ = appendRecoveryProjectionChain(t, ctx, store); t.Failed() {
 		_ = store.Close()
-		t.Fatal(err)
+		return
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -172,6 +167,90 @@ func TestRecoveryRejectsProjectionAdmissionCorruption(t *testing.T) {
 	if _, err := Verify(ctx, path); err == nil {
 		t.Fatal("recovery verification accepted corrupt projection admission")
 	}
+}
+
+func TestRecoveryRejectsProjectionOrganizationMismatch(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskEvent, taskRecord := appendRecoveryProjectionChain(t, ctx, store)
+	if t.Failed() {
+		_ = store.Close()
+		return
+	}
+	payload, present, err := events.AdmittedProjection(taskEvent)
+	if err != nil || !present {
+		_ = store.Close()
+		t.Fatalf("task projection admission is invalid: present=%t err=%v", present, err)
+	}
+	taskEvent.OrganizationID = "org-2"
+	sealed, err := events.SealProjectionEvent(taskEvent, taskRecord, payload.Detail)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(sealed)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE events SET organization_id=?,payload=? WHERE event_id=?`, taskEvent.OrganizationID, body, taskEvent.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE records SET admission_fingerprint=? WHERE admission_event_id=?`, sealed.Admission.Fingerprint, taskEvent.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil {
+		t.Fatal("recovery verification accepted a cross-organization projection")
+	}
+}
+
+func appendRecoveryProjectionChain(t *testing.T, ctx context.Context, store *ledger.SQLite) (events.Event, events.ProjectionRecord) {
+	t.Helper()
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, NormalizedObjective: "objective", CreatedAt: now}
+	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	task := core.Task{ID: "task-1", WorkID: work.ID, Status: core.TaskPending}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup-1"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"}, ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent},
+		{Event: events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"}, ProjectionKind: "work", RecordID: string(work.ID), Version: 1, Value: work},
+	} {
+		if _, err := store.AppendProjection(ctx, draft); err != nil {
+			t.Errorf("append recovery projection %s: %v", draft.ProjectionKind, err)
+			return events.Event{}, events.ProjectionRecord{}
+		}
+	}
+	taskEvent, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1"},
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 1, Value: task,
+	})
+	if err != nil {
+		t.Errorf("append recovery Task projection: %v", err)
+		return events.Event{}, events.ProjectionRecord{}
+	}
+	taskValue, err := json.Marshal(task)
+	if err != nil {
+		t.Errorf("encode recovery Task projection: %v", err)
+		return events.Event{}, events.ProjectionRecord{}
+	}
+	return taskEvent, events.ProjectionRecord{ProjectionKind: "task", RecordID: string(task.ID), Version: 1, CorrelationID: "work-1", Value: taskValue}
 }
 
 func TestBackupRefusesExistingDestination(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"modernc.org/sqlite"
 )
@@ -119,13 +120,18 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	return result, err
 }
 
+type admittedProjectionEvent struct {
+	event   events.Event
+	payload events.ProjectionEventPayload
+}
+
 func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	eventRows, err := db.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events ORDER BY sequence`)
 	if err != nil {
 		return fmt.Errorf("inspect projection admission events: %w", err)
 	}
 	defer func() { _ = eventRows.Close() }()
-	admitted := map[string]events.ProjectionEventPayload{}
+	admitted := map[string]admittedProjectionEvent{}
 	for eventRows.Next() {
 		var event events.Event
 		var authorizationRefs, artifactRefs []byte
@@ -176,7 +182,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			_ = eventRows.Close()
 			return fmt.Errorf("duplicate projection admission event %s", event.EventID)
 		}
-		admitted[event.EventID] = payload
+		admitted[event.EventID] = admittedProjectionEvent{event: event, payload: payload}
 	}
 	if err := eventRows.Err(); err != nil {
 		_ = eventRows.Close()
@@ -212,7 +218,8 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			}
 			continue
 		}
-		payload, found := admitted[admissionEventID]
+		admission, found := admitted[admissionEventID]
+		payload := admission.payload
 		var record events.ProjectionRecord
 		canonical, canonicalErr := json.Marshal(payload.Projection)
 		if !found || canonicalErr != nil || !bytes.Equal(body, canonical) || decodeExactJSON(body, &record) != nil || record.ProjectionKind != kind || record.RecordID != recordID || record.Version != version || !reflect.DeepEqual(record, payload.Projection) || admissionEventID != payload.Admission.EventRef || admissionFingerprint != payload.Admission.Fingerprint {
@@ -237,6 +244,113 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("projection admission event %s has no materialized record", eventID)
 		}
 	}
+	return validateProjectionOrganizationBindings(admitted)
+}
+
+func validateProjectionOrganizationBindings(admitted map[string]admittedProjectionEvent) error {
+	intentOrganizations := map[core.ID]core.ID{}
+	workIntents := map[core.ID]core.ID{}
+	for _, admission := range admitted {
+		event, record := admission.event, admission.payload.Projection
+		var organizationID core.ID
+		switch record.ProjectionKind {
+		case "organization":
+			var value core.Organization
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
+				return fmt.Errorf("event %s contains an invalid Organization projection", event.EventID)
+			}
+			organizationID = value.ID
+		case "mission":
+			var value core.Mission
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
+				return fmt.Errorf("event %s contains an invalid Mission projection", event.EventID)
+			}
+			organizationID = value.OrganizationID
+		case "goal":
+			var value core.Goal
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
+				return fmt.Errorf("event %s contains an invalid Goal projection", event.EventID)
+			}
+			organizationID = value.OrganizationID
+		case "team":
+			var value core.Team
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
+				return fmt.Errorf("event %s contains an invalid Team projection", event.EventID)
+			}
+			organizationID = value.OrganizationID
+		case "agent_blueprint":
+			var value core.AgentBlueprint
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
+				return fmt.Errorf("event %s contains an invalid Agent blueprint projection", event.EventID)
+			}
+			organizationID = value.OrganizationID
+		case "execution_profile":
+			var value core.ExecutionProfile
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
+				return fmt.Errorf("event %s contains an invalid execution profile projection", event.EventID)
+			}
+			organizationID = value.OrganizationID
+		case "agent":
+			var value core.Agent
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
+				return fmt.Errorf("event %s contains an invalid Agent projection", event.EventID)
+			}
+			organizationID = value.OrganizationID
+		case "intent":
+			var value core.Intent
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID || bindRecoveryReference(intentOrganizations, value.ID, value.OrganizationID) != nil {
+				return fmt.Errorf("event %s contains an invalid Intent projection", event.EventID)
+			}
+			organizationID = value.OrganizationID
+		case "work":
+			var value core.Work
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID || bindRecoveryReference(workIntents, value.ID, value.IntentID) != nil {
+				return fmt.Errorf("event %s contains an invalid Work projection", event.EventID)
+			}
+			continue
+		case "task":
+			continue
+		default:
+			return fmt.Errorf("event %s contains unsupported projection kind %s", event.EventID, record.ProjectionKind)
+		}
+		if organizationID == "" || string(organizationID) != event.OrganizationID {
+			return fmt.Errorf("event %s projection crosses its organization boundary", event.EventID)
+		}
+	}
+	for _, admission := range admitted {
+		event, record := admission.event, admission.payload.Projection
+		var organizationID core.ID
+		switch record.ProjectionKind {
+		case "work":
+			var value core.Work
+			if decodeExactJSON(record.Value, &value) != nil {
+				return fmt.Errorf("event %s contains an invalid Work projection", event.EventID)
+			}
+			organizationID = intentOrganizations[value.IntentID]
+		case "task":
+			var value core.Task
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
+				return fmt.Errorf("event %s contains an invalid Task projection", event.EventID)
+			}
+			organizationID = intentOrganizations[workIntents[value.WorkID]]
+		default:
+			continue
+		}
+		if organizationID == "" || string(organizationID) != event.OrganizationID {
+			return fmt.Errorf("event %s projection crosses its organization boundary", event.EventID)
+		}
+	}
+	return nil
+}
+
+func bindRecoveryReference(target map[core.ID]core.ID, id, reference core.ID) error {
+	if id == "" || reference == "" {
+		return fmt.Errorf("projection reference is incomplete")
+	}
+	if previous, exists := target[id]; exists && previous != reference {
+		return fmt.Errorf("projection reference changed")
+	}
+	target[id] = reference
 	return nil
 }
 

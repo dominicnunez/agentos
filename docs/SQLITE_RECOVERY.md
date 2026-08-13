@@ -21,7 +21,8 @@ staging file, verifies SQLite integrity, the Agent OS ledger schema, and every
 event-coupled projection admission, syncs it, then publishes it without an
 overwrite race. Verification requires a one-to-one match between each
 organizational projection record and its exact sealed event envelope; orphaned,
-copied, malformed, or mismatched state is rejected. Existing SQLite journal,
+copied, malformed, cross-organization, or otherwise mismatched state is
+rejected. Existing SQLite journal,
 WAL, or shared-memory sidecars at the destination are rejected so stale state
 cannot be applied to a recovered ledger. The utility returns JSON containing
 the resolved path, SHA-256 checksum, size, event count, and maximum sequence.
@@ -42,7 +43,7 @@ Verification is read-only. It rejects corruption, valid SQLite databases that
 do not contain the required Agent OS ledger tables and columns, unsupported
 pre-admission projection state, projection lifecycle events without typed
 admission, and materialized projections that do not match their authorizing
-event exactly.
+event or durable Organization/Intent/Work relationship exactly.
 
 ## Restore without overwrite
 
