@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -193,6 +194,13 @@ func TestChannelsShareWorkButAgentCannotCompleteUserTask(t *testing.T) {
 	shared, err := service.Get(ctx, externalAgent, taskID)
 	if err != nil || shared.State != StateInputRequired {
 		t.Fatalf("authorized Agent could not observe blocked shared work: view=%+v err=%v", shared, err)
+	}
+	completed, err := service.CompleteHumanTask(ctx, human, taskID, core.HumanTaskSubmission{
+		MessageID: "human-completion-1",
+		Fields:    map[string]string{"response": "Use September 15"},
+	})
+	if err != nil || completed.State != StateCompleted || completed.Result != "structured user completion persisted" {
+		t.Fatalf("structured user completion did not finish its durable Work: view=%+v err=%v", completed, err)
 	}
 
 	noInput := externalAgent
@@ -555,6 +563,186 @@ type fixedNormalizer struct{}
 
 func (fixedNormalizer) Descriptor() (NormalizerDescriptor, bool) {
 	return NormalizerDescriptor{}, false
+}
+
+type goalNormalizer struct{ goalID string }
+
+func (goalNormalizer) Descriptor() (NormalizerDescriptor, bool) {
+	return NormalizerDescriptor{}, false
+}
+
+func (n goalNormalizer) Normalize(_ context.Context, turns []ConversationTurn) (Normalization, error) {
+	latest := turns[len(turns)-1]
+	value := core.IntentValue{Value: latest.Text, Origin: "EXPLICIT", SourceMessageID: latest.MessageID}
+	goal := core.IntentValue{Value: n.goalID, Origin: "EXPLICIT", SourceMessageID: latest.MessageID}
+	return Normalization{
+		State: normalizationReady, Reply: "Review this Goal-bound intent.",
+		Candidate: IntentCandidate{Goal: &goal, Objective: "Advance " + n.goalID, Deliverables: []core.IntentValue{value}, CompletionCriteria: []core.IntentValue{value}},
+	}, nil
+}
+
+func TestInvalidGoalCannotStrandIntentConfirmation(t *testing.T) {
+	tests := map[string]func(*testing.T, context.Context, *events.Gateway){
+		"missing": func(*testing.T, context.Context, *events.Gateway) {},
+		"paused": func(t *testing.T, ctx context.Context, gateway *events.Gateway) {
+			seedIntakeGoal(t, ctx, gateway, "org-1", "goal-invalid", core.GoalPaused)
+		},
+		"cross organization": func(t *testing.T, ctx context.Context, gateway *events.Gateway) {
+			seedIntakeGoal(t, ctx, gateway, "org-2", "goal-invalid", core.GoalActive)
+		},
+	}
+	for name, seed := range tests {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := ledger.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			gateway := events.NewGateway(store)
+			seed(t, ctx, gateway)
+			service := NewWithNormalizer(app.New(gateway), goalNormalizer{goalID: "goal-invalid"})
+			principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+			draft, err := service.Handle(ctx, principal, Message{ConversationID: "invalid-goal", MessageID: "message-1", Text: "Use goal-invalid for this work"})
+			if err != nil || draft.Intent == nil {
+				t.Fatalf("draft=%+v err=%v", draft, err)
+			}
+			if _, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: "invalid-goal", MessageID: "confirm-1", Fingerprint: draft.Intent.Fingerprint}); !errors.Is(err, ErrConflict) {
+				t.Fatalf("invalid Goal confirmation err=%v", err)
+			}
+			stream := externalStream(t, store, "invalid-goal")
+			if containsEvent(stream, "INTENT_CONFIRMED") {
+				t.Fatal("invalid Goal was persisted as a confirmed Intent")
+			}
+			continued, err := service.Handle(ctx, principal, Message{ConversationID: "invalid-goal", MessageID: "message-2", Text: "Remove goal-invalid from the request"})
+			if err != nil || continued.Intent == nil {
+				t.Fatalf("unconfirmed conversation could not continue: view=%+v err=%v", continued, err)
+			}
+		})
+	}
+}
+
+func TestGoalBoundIntentPreservesSubmissionAndConfirmationMessageIdentities(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	seedIntakeGoal(t, ctx, gateway, "org-1", "goal-1", core.GoalActive)
+	service := NewWithNormalizer(app.New(gateway), goalNormalizer{goalID: "goal-1"})
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	draft, err := service.Handle(ctx, principal, Message{ConversationID: "goal-work", MessageID: "message-1", Text: "Use goal-1 for this work"})
+	if err != nil || draft.Intent == nil {
+		t.Fatalf("draft=%+v err=%v", draft, err)
+	}
+	confirmed, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: "goal-work", MessageID: "confirmation-1", Fingerprint: draft.Intent.Fingerprint})
+	if err != nil || confirmed.TaskID == "" {
+		t.Fatalf("confirmed=%+v err=%v", confirmed, err)
+	}
+	intent, _, stream := projectedWork(t, store, "goal-work")
+	if intent.GoalID != "goal-1" || intent.SourceMessageID != "message-1" {
+		t.Fatalf("accepted Intent lost its Goal or submission identity: %+v", intent)
+	}
+	var confirmation events.IntentConfirmedPayload
+	for _, event := range stream {
+		if event.EventType == "INTENT_CONFIRMED" {
+			if err := json.Unmarshal(event.Payload, &confirmation); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if confirmation.MessageID != "confirmation-1" || confirmation.MessageID == intent.SourceMessageID {
+		t.Fatalf("submission and confirmation identities were conflated: intent=%+v confirmation=%+v", intent, confirmation)
+	}
+}
+
+func TestGoalBoundIntentConcurrentConfirmationIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	seedIntakeGoal(t, ctx, gateway, "org-1", "goal-1", core.GoalActive)
+	service := NewWithNormalizer(app.New(gateway), goalNormalizer{goalID: "goal-1"})
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	draft, err := service.Handle(ctx, principal, Message{ConversationID: "goal-race", MessageID: "message-1", Text: "Use goal-1 for this work"})
+	if err != nil || draft.Intent == nil {
+		t.Fatalf("draft=%+v err=%v", draft, err)
+	}
+	confirmation := IntentConfirmation{ConversationID: "goal-race", MessageID: "confirmation-1", Fingerprint: draft.Intent.Fingerprint}
+	start := make(chan struct{})
+	results := make(chan View, 2)
+	errorsOut := make(chan error, 2)
+	var callers sync.WaitGroup
+	for range 2 {
+		callers.Add(1)
+		go func() {
+			defer callers.Done()
+			<-start
+			result, err := service.ConfirmIntent(ctx, principal, confirmation)
+			results <- result
+			errorsOut <- err
+		}()
+	}
+	close(start)
+	callers.Wait()
+	close(results)
+	close(errorsOut)
+	var taskID string
+	for err := range errorsOut {
+		if err != nil {
+			t.Fatalf("concurrent confirmation failed: %v", err)
+		}
+	}
+	for result := range results {
+		if taskID == "" {
+			taskID = result.TaskID
+		}
+		if result.TaskID == "" || result.TaskID != taskID {
+			t.Fatalf("concurrent confirmation diverged: first=%s result=%+v", taskID, result)
+		}
+	}
+	_, _, stream := projectedWork(t, store, "goal-race")
+	confirmations := 0
+	for _, event := range stream {
+		if event.EventType == "INTENT_CONFIRMED" {
+			confirmations++
+		}
+	}
+	if confirmations != 1 {
+		t.Fatalf("concurrent replay persisted %d intent confirmations", confirmations)
+	}
+	confirmation.MessageID = "confirmation-2"
+	if _, err := service.ConfirmIntent(ctx, principal, confirmation); err == nil {
+		t.Fatal("conflicting confirmation identity was accepted")
+	}
+}
+
+func seedIntakeGoal(t *testing.T, ctx context.Context, gateway *events.Gateway, organizationID, goalID core.ID, status core.GoalStatus) {
+	t.Helper()
+	now := time.Now().UTC()
+	organization := core.Organization{ID: organizationID, Name: string(organizationID), PolicyVersion: "v1", CreatedAt: now}
+	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: string(organizationID), EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "seed-" + string(organizationID)}, ProjectionKind: "organization", RecordID: string(organizationID), Version: 1, Value: organization}); err != nil {
+		t.Fatal(err)
+	}
+	mission := core.Mission{ID: core.ID("mission-" + string(organizationID)), OrganizationID: organizationID, Statement: "test direction", Status: core.MissionActive, CreatedAt: now}
+	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: string(organizationID), EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "seed-" + string(mission.ID)}, ProjectionKind: "mission", RecordID: string(mission.ID), Version: 1, Value: mission}); err != nil {
+		t.Fatal(err)
+	}
+	goal := core.Goal{ID: goalID, OrganizationID: organizationID, MissionID: mission.ID, Objective: "test outcome", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "verified", Origin: "RUNTIME_TEST"}}, Status: core.GoalActive, CreatedAt: now}
+	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: string(organizationID), EventType: "GOAL_CREATED", SourceActorID: "runtime", CorrelationID: "seed-" + string(goalID)}, ProjectionKind: "goal", RecordID: string(goalID), Version: 1, Value: goal}); err != nil {
+		t.Fatal(err)
+	}
+	if status != core.GoalActive {
+		goal.Status = status
+		if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: string(organizationID), EventType: "GOAL_PAUSED", SourceActorID: "runtime", CorrelationID: "seed-" + string(goalID)}, ProjectionKind: "goal", RecordID: string(goalID), Version: 2, Value: goal}); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func (fixedNormalizer) Normalize(_ context.Context, turns []ConversationTurn) (Normalization, error) {

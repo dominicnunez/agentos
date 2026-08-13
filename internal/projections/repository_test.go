@@ -13,6 +13,47 @@ import (
 	"github.com/dominicnunez/agentos/internal/ledger"
 )
 
+type eventReadLedger struct {
+	*ledger.SQLite
+	eventReads int
+}
+
+func (l *eventReadLedger) Events(ctx context.Context, correlationID string) ([]events.Event, error) {
+	l.eventReads++
+	return l.SQLite.Events(ctx, correlationID)
+}
+
+func TestRoutineLoadDoesNotReplayHistoricalLedger(t *testing.T) {
+	ctx := context.Background()
+	sqlite, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlite.Close() })
+	counted := &eventReadLedger{SQLite: sqlite}
+	repository := New(events.NewGateway(counted))
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: time.Now().UTC()}
+	if err := repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "setup", 1, organization, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if counted.eventReads != 0 {
+		t.Fatalf("routine projection Load replayed the event ledger %d times", counted.eventReads)
+	}
+	snapshot, err := repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.ValidateCompletionAdmissions(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if counted.eventReads != 1 {
+		t.Fatalf("explicit recovery audit event reads=%d want=1", counted.eventReads)
+	}
+}
+
 func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "agentos.db")
@@ -28,10 +69,26 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 	profile := core.ExecutionProfile{ID: "profile-1", OrganizationID: organization.ID, Version: "profile-v1", ModelProvider: "fake", Model: "fake-model/v1", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE", CreatedAt: now}
 	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "fake", Status: "ACTIVE"}
 	team := core.Team{ID: "team-1", OrganizationID: organization.ID, Name: "Delivery", MemberAgentIDs: []core.ID{agent.ID}, Status: "ACTIVE", CreatedAt: now}
-	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "echo hello", NormalizedObjective: "echo hello", HardConstraints: []string{}, ConsequenceBoundaries: []string{}, CreatedAt: now}
+	sourceText := "Use goal-1 to echo hello"
+	reviewed := core.IntentDraft{
+		ID: "intent-request-1", OrganizationID: organization.ID, Version: 1, Status: core.IntentStatusReadyForReview, RequestedExecutionKind: core.ExecutionDeterministic,
+		Goal: &core.IntentValue{Value: string(goal.ID), Origin: "EXPLICIT", SourceMessageID: "message-1"}, Objective: "echo hello",
+		Context: []core.IntentValue{}, Deliverables: []core.IntentValue{{Value: "hello", Origin: "EXPLICIT", SourceMessageID: "message-1"}},
+		CompletionCriteria: []core.IntentValue{{Value: "verified outcome", Origin: "DEFAULT"}}, Constraints: []core.IntentValue{}, ResolvedDecisions: []core.IntentDecision{},
+		ConsequenceCandidates: []string{}, MissingUserInputs: []core.IntentValue{}, CreatedAt: now,
+	}
+	reviewed.Fingerprint, err = core.FingerprintIntentDraft(reviewed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := core.Intent{
+		ID: "intent-request-1", OrganizationID: organization.ID, GoalID: goal.ID, OriginalInstruction: sourceText, NormalizedObjective: "echo hello", HardConstraints: []string{}, ConsequenceBoundaries: []string{},
+		SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: "message-1", AcceptedFingerprint: reviewed.Fingerprint, CreatedAt: now,
+	}
 	work := core.Work{ID: "work-1", IntentID: intent.ID, GoalID: goal.ID, Objective: "echo hello", Status: core.WorkActive, CreatedAt: now}
 	task := core.Task{ID: "task-1", WorkID: work.ID, Description: "echo hello", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: rosterAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
-	repository := New(events.NewGateway(l))
+	gateway := events.NewGateway(l)
+	repository := New(gateway)
 	for _, save := range []func() error{
 		func() error {
 			return repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "request-1", 1, organization, nil)
@@ -40,6 +97,25 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 			return repository.SaveMission(ctx, "MISSION_CREATED", "runtime", "request-1", 1, mission, nil)
 		},
 		func() error { return repository.SaveGoal(ctx, "GOAL_CREATED", "runtime", "request-1", 1, goal, nil) },
+		func() error {
+			if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+				OrganizationID: string(organization.ID), EventType: "INTAKE_MESSAGE_RECORDED", SourceActorID: "user-1", TaskID: "task-request-1", CorrelationID: "request-1",
+				Payload: events.IntakeMessageRecordedPayload{MessageID: "message-1", Text: sourceText, SourcePrincipalID: "user-1", SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", RequestedExecutionKind: core.ExecutionDeterministic},
+			}); err != nil {
+				return err
+			}
+			if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+				OrganizationID: string(organization.ID), EventType: "INTENT_DRAFTED", SourceActorID: "runtime", TaskID: "task-request-1", CorrelationID: "request-1",
+				Payload: events.IntentDraftedPayload{SourceMessageID: "message-1", Draft: reviewed, Reply: "Review the proposed intent before work begins."},
+			}); err != nil {
+				return err
+			}
+			_, err := gateway.PublishIntentConfirmation(ctx, events.TrustedDraft{
+				OrganizationID: string(organization.ID), EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-request-1", CorrelationID: "request-1",
+				Payload: events.IntentConfirmedPayload{IntentID: string(intent.ID), GoalID: string(goal.ID), Version: 1, Fingerprint: intent.AcceptedFingerprint, ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1"},
+			}, goal.ID)
+			return err
+		},
 		func() error {
 			return repository.SaveAgentBlueprint(ctx, "AGENT_BLUEPRINT_CREATED", "runtime", "request-1", 1, blueprint, nil)
 		},
@@ -150,6 +226,78 @@ func TestSnapshotRejectsUnknownWorkStatus(t *testing.T) {
 	}
 }
 
+func TestRepositoryRejectsBareCompletedWork(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	repository := New(events.NewGateway(l))
+	work := core.Work{ID: "work-1", IntentID: "intent-1", Objective: "forged completion", Status: core.WorkCompleted, CreatedAt: time.Now().UTC()}
+	if err := repository.SaveWork(ctx, "org-1", "WORK_COMPLETED", "runtime", "run-1", 2, work, events.WorkCompletionTransitionPayload{}); err == nil {
+		t.Fatal("bare completed Work reached the generic repository path")
+	}
+	stream, err := l.Events(ctx, "run-1")
+	if err != nil || len(stream) != 0 {
+		t.Fatalf("rejected Work completion reached ledger: events=%+v err=%v", stream, err)
+	}
+}
+
+func TestRepositoryRejectsUntrustedWorkLifecycleEvents(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	repository := New(events.NewGateway(l))
+	now := time.Now().UTC()
+	active := core.Work{ID: "work-1", IntentID: "intent-1", Objective: "bounded work", Status: core.WorkActive, CreatedAt: now}
+	failed := active
+	failed.Status = core.WorkFailed
+	completed := active
+	completed.Status = core.WorkCompleted
+	for name, input := range map[string]struct {
+		eventType string
+		actorID   string
+		version   int
+		work      core.Work
+	}{
+		"Agent creation":   {eventType: "WORK_CREATED", actorID: "agent-1", version: 1, work: active},
+		"mislabeled start": {eventType: "WORK_FAILED", actorID: "runtime", version: 1, work: active},
+		"Agent failure":    {eventType: "WORK_FAILED", actorID: "agent-1", version: 2, work: failed},
+		"mislabeled fail":  {eventType: "WORK_CREATED", actorID: "runtime", version: 2, work: failed},
+		"mislabeled complete": {
+			eventType: "WORK_FAILED", actorID: "runtime", version: 2, work: completed,
+		},
+		"completion label on active": {
+			eventType: "WORK_COMPLETED", actorID: "runtime", version: 2, work: active,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := repository.SaveWork(ctx, "org-1", input.eventType, input.actorID, "run-1", input.version, input.work, nil); err == nil {
+				t.Fatal("untrusted Work lifecycle event reached the repository")
+			}
+		})
+	}
+	stream, err := l.Events(ctx, "run-1")
+	if err != nil || len(stream) != 0 {
+		t.Fatalf("rejected Work lifecycle event reached ledger: events=%+v err=%v", stream, err)
+	}
+}
+
+func TestCompletedWorkSnapshotRequiresDurableAdmissionEvidence(t *testing.T) {
+	snapshot := validBoundarySnapshot()
+	work := snapshot.Works["work-1"]
+	work.Version = 2
+	work.Value.Status = core.WorkCompleted
+	snapshot.Works["work-1"] = work
+	if err := validateWorkCompletionAdmissions(snapshot, nil, nil, nil); err == nil {
+		t.Fatal("completed Work was exposed without a durable transition and evidence")
+	}
+}
+
 func TestMissionGoalWorkHierarchyIsTenantBounded(t *testing.T) {
 	snapshot := validBoundarySnapshot()
 	snapshot.Missions["mission-1"] = Versioned[core.Mission]{Value: core.Mission{
@@ -162,6 +310,9 @@ func TestMissionGoalWorkHierarchyIsTenantBounded(t *testing.T) {
 	work := snapshot.Works["work-1"]
 	work.Value.GoalID = "goal-1"
 	snapshot.Works["work-1"] = work
+	intent := snapshot.Intents["intent-1"]
+	intent.Value.GoalID = "goal-1"
+	snapshot.Intents["intent-1"] = intent
 	if err := validateSnapshot(snapshot); err != nil {
 		t.Fatalf("valid Mission > Goal > Work hierarchy was rejected: %v", err)
 	}
@@ -186,17 +337,28 @@ func TestMissionGoalWorkHierarchyIsTenantBounded(t *testing.T) {
 		t.Fatal("cross-organization Goal and Work linkage was accepted")
 	}
 
-	continuousAchieved := snapshot
-	continuousAchieved.Goals = make(map[core.ID]Versioned[core.Goal], len(snapshot.Goals))
-	for id, state := range snapshot.Goals {
-		continuousAchieved.Goals[id] = state
+	mismatched := snapshot
+	mismatched.Intents = make(map[core.ID]Versioned[core.Intent], len(snapshot.Intents))
+	for id, state := range snapshot.Intents {
+		mismatched.Intents[id] = state
 	}
-	continuous := continuousAchieved.Goals["goal-1"]
-	continuous.Value.Mode = core.GoalContinuous
-	continuous.Value.Status = core.GoalAchieved
-	continuousAchieved.Goals["goal-1"] = continuous
-	if err := validateSnapshot(continuousAchieved); err == nil {
-		t.Fatal("continuous Goal was accepted as achieved")
+	intent = mismatched.Intents["intent-1"]
+	intent.Value.GoalID = ""
+	mismatched.Intents["intent-1"] = intent
+	if err := validateSnapshot(mismatched); err == nil {
+		t.Fatal("Work Goal differed from its accepted Intent Goal")
+	}
+
+	bareAchievement := snapshot
+	bareAchievement.Goals = make(map[core.ID]Versioned[core.Goal], len(snapshot.Goals))
+	for id, state := range snapshot.Goals {
+		bareAchievement.Goals[id] = state
+	}
+	achieved := bareAchievement.Goals["goal-1"]
+	achieved.Value.Status = core.GoalStatus("ACHIEVED")
+	bareAchievement.Goals["goal-1"] = achieved
+	if err := validateSnapshot(bareAchievement); err == nil {
+		t.Fatal("Goal was accepted as achieved without an evidence-backed transition")
 	}
 }
 
@@ -231,10 +393,10 @@ func TestHierarchyRevisionsPreserveIdentityAndDirectionBoundaries(t *testing.T) 
 	if err := decodeKind(projectionBodies(t, KindGoal, string(goal.ID), goal, reparentedGoal), map[core.ID]Versioned[core.Goal]{}, false, sameGoalRecord); err == nil {
 		t.Fatal("Goal revision changed parent Mission")
 	}
-	achievedWithChangedCriteria := revisedGoal
-	achievedWithChangedCriteria.Status = core.GoalAchieved
-	if err := decodeKind(projectionBodies(t, KindGoal, string(goal.ID), goal, achievedWithChangedCriteria), map[core.ID]Versioned[core.Goal]{}, false, sameGoalRecord); err == nil {
-		t.Fatal("Goal achievement changed success criteria at the terminal boundary")
+	bareAchievement := goal
+	bareAchievement.Status = core.GoalStatus("ACHIEVED")
+	if err := decodeKind(projectionBodies(t, KindGoal, string(goal.ID), goal, bareAchievement), map[core.ID]Versioned[core.Goal]{}, false, sameGoalRecord); err == nil {
+		t.Fatal("Goal achievement bypassed durable evaluation evidence")
 	}
 
 	work := core.Work{ID: "work-1", IntentID: "intent-1", GoalID: goal.ID, Objective: "bounded work", Status: core.WorkActive, CreatedAt: now}
@@ -260,12 +422,141 @@ func TestHierarchyRevisionsPreserveIdentityAndDirectionBoundaries(t *testing.T) 
 	if err := decodeKind(projectionBodies(t, KindMission, string(mission.ID), retiredMission, reopenedMission), map[core.ID]Versioned[core.Mission]{}, false, sameMissionRecord); err == nil {
 		t.Fatal("retired Mission was reopened")
 	}
-	achievedGoal := goal
-	achievedGoal.Status = core.GoalAchieved
-	reopenedGoal := achievedGoal
+	retiredGoal := goal
+	retiredGoal.Status = core.GoalRetired
+	reopenedGoal := retiredGoal
 	reopenedGoal.Status = core.GoalActive
-	if err := decodeKind(projectionBodies(t, KindGoal, string(goal.ID), achievedGoal, reopenedGoal), map[core.ID]Versioned[core.Goal]{}, false, sameGoalRecord); err == nil {
-		t.Fatal("achieved Goal was reopened")
+	if err := decodeKind(projectionBodies(t, KindGoal, string(goal.ID), retiredGoal, reopenedGoal), map[core.ID]Versioned[core.Goal]{}, false, sameGoalRecord); err == nil {
+		t.Fatal("retired Goal was reopened")
+	}
+}
+
+func TestSaveMissionAndGoalRejectInvalidHierarchyBeforeAppending(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(filepath.Join(t.TempDir(), "agentos.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := New(gateway)
+	now := time.Unix(1, 0).UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	mission := core.Mission{ID: "mission-1", OrganizationID: organization.ID, Statement: "durable direction", Status: core.MissionActive, CreatedAt: now}
+	goal := core.Goal{
+		ID: "goal-1", OrganizationID: organization.ID, MissionID: mission.ID, Objective: "measurable outcome", Mode: core.GoalTarget,
+		SuccessCriteria: []core.IntentValue{{Value: "verified result", Origin: "USER"}}, Status: core.GoalActive, CreatedAt: now,
+	}
+	orphanMission := mission
+	orphanMission.ID = "mission-orphan"
+	orphanMission.OrganizationID = "org-missing"
+	if err := repository.SaveMission(ctx, "MISSION_CREATED", "runtime", "orphan-mission-create", 1, orphanMission, nil); err == nil {
+		t.Fatal("Mission without a durable parent Organization was appended")
+	}
+	assertEmptyEventStream(t, ctx, gateway, "orphan-mission-create")
+	if err := repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "organization-create", 1, organization, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.SaveMission(ctx, "MISSION_CREATED", "agent-1", "agent-mission-create", 1, mission, nil); err == nil {
+		t.Fatal("Agent authored Mission creation was admitted")
+	}
+	assertEmptyEventStream(t, ctx, gateway, "agent-mission-create")
+	if err := repository.SaveMission(ctx, "MISSION_CREATED", "runtime", "mission-create", 1, mission, nil); err != nil {
+		t.Fatal(err)
+	}
+	for name, test := range map[string]struct {
+		version int
+		change  func(*core.Mission)
+	}{
+		"unknown status": {version: 2, change: func(candidate *core.Mission) { candidate.Status = "UNKNOWN" }},
+		"version gap":    {version: 3, change: func(*core.Mission) {}},
+	} {
+		t.Run("Mission "+name, func(t *testing.T) {
+			candidate := mission
+			test.change(&candidate)
+			correlationID := "invalid-mission-" + name
+			if err := repository.SaveMission(ctx, "MISSION_REVISED", "runtime", correlationID, test.version, candidate, nil); err == nil {
+				t.Fatal("invalid Mission revision was appended")
+			}
+			assertEmptyEventStream(t, ctx, gateway, correlationID)
+		})
+	}
+	for name, candidate := range map[string]core.Goal{
+		"missing Mission": func() core.Goal { value := goal; value.MissionID = "missing"; return value }(),
+		"cross-organization Mission": func() core.Goal {
+			value := goal
+			value.OrganizationID = "org-2"
+			return value
+		}(),
+	} {
+		t.Run("Goal "+name, func(t *testing.T) {
+			correlationID := "invalid-goal-parent-" + name
+			if err := repository.SaveGoal(ctx, "GOAL_CREATED", "runtime", correlationID, 1, candidate, nil); err == nil {
+				t.Fatal("Goal with invalid parent Mission was appended")
+			}
+			assertEmptyEventStream(t, ctx, gateway, correlationID)
+		})
+	}
+	if err := repository.SaveGoal(ctx, "GOAL_CREATED", "agent-1", "agent-goal-create", 1, goal, nil); err == nil {
+		t.Fatal("Agent authored Goal creation was admitted")
+	}
+	assertEmptyEventStream(t, ctx, gateway, "agent-goal-create")
+	if err := repository.SaveGoal(ctx, "GOAL_ACHIEVED", "runtime", "mislabeled-goal-create", 1, goal, nil); err == nil {
+		t.Fatal("mislabeled Goal creation was admitted")
+	}
+	assertEmptyEventStream(t, ctx, gateway, "mislabeled-goal-create")
+	if err := repository.SaveGoal(ctx, "GOAL_CREATED", "runtime", "goal-create", 1, goal, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := map[string]struct {
+		version int
+		change  func(*core.Goal)
+	}{
+		"bare achievement": {version: 2, change: func(candidate *core.Goal) { candidate.Status = core.GoalStatus("ACHIEVED") }},
+		"changed Mission":  {version: 2, change: func(candidate *core.Goal) { candidate.MissionID = "mission-2" }},
+		"version gap":      {version: 3, change: func(*core.Goal) {}},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			candidate := goal
+			test.change(&candidate)
+			correlationID := "invalid-" + name
+			if err := repository.SaveGoal(ctx, "GOAL_REFINED", "runtime", correlationID, test.version, candidate, nil); err == nil {
+				t.Fatal("invalid Goal revision was appended")
+			}
+			assertEmptyEventStream(t, ctx, gateway, correlationID)
+		})
+	}
+	retired := mission
+	retired.Status = core.MissionRetired
+	if err := repository.SaveMission(ctx, "MISSION_RETIRED", "runtime", "mission-retire", 2, retired, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.SaveMission(ctx, "MISSION_REOPENED", "runtime", "invalid-mission-reopen", 3, mission, nil); err == nil {
+		t.Fatal("retired Mission was reopened")
+	}
+	assertEmptyEventStream(t, ctx, gateway, "invalid-mission-reopen")
+	loaded, err := repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := loaded.Goals[goal.ID]; state.Version != 1 || !reflect.DeepEqual(state.Value, goal) {
+		t.Fatalf("rejected revision changed durable Goal: %+v", state)
+	}
+	if state := loaded.Missions[mission.ID]; state.Version != 2 || !reflect.DeepEqual(state.Value, retired) {
+		t.Fatalf("rejected revision changed durable Mission: %+v", state)
+	}
+}
+
+func assertEmptyEventStream(t *testing.T, ctx context.Context, gateway *events.Gateway, correlationID string) {
+	t.Helper()
+	stream, err := gateway.Events(ctx, correlationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stream) != 0 {
+		t.Fatalf("rejected hierarchy revision left %d authoritative events", len(stream))
 	}
 }
 
@@ -384,6 +675,70 @@ func TestRosterRevisionsPreserveConfigurationAndAgentIdentity(t *testing.T) {
 	otherOrganization.OrganizationID = "org-2"
 	if err := decodeKind(projectionBodies(t, KindAgent, string(agent.ID), agent, otherOrganization), map[core.ID]Versioned[core.Agent]{}, false, sameAgentRecord); err == nil {
 		t.Fatal("Agent identity crossed its organization boundary")
+	}
+}
+
+func TestRosterConfigurationRevisionRejectedBeforeCommit(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := New(gateway)
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1"}
+	if err := repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "setup", 1, organization, nil); err != nil {
+		t.Fatal(err)
+	}
+	blueprint := core.AgentBlueprint{
+		ID: "blueprint-1", OrganizationID: organization.ID, Version: "v1", Role: "worker",
+		OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE",
+	}
+	profile := core.ExecutionProfile{
+		ID: "profile-1", OrganizationID: organization.ID, Version: "v1", ModelProvider: "review-provider",
+		Model: "review-model", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE",
+	}
+	if err := repository.SaveAgentBlueprint(ctx, "AGENT_BLUEPRINT_CREATED", "runtime", "setup", 1, blueprint, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.SaveExecutionProfile(ctx, "EXECUTION_PROFILE_CREATED", "runtime", "setup", 1, profile, nil); err != nil {
+		t.Fatal(err)
+	}
+	forgedBlueprint := blueprint
+	forgedBlueprint.OperatingInstructions = "substituted instructions"
+	if err := repository.SaveAgentBlueprint(ctx, "AGENT_BLUEPRINT_UPDATED", "runtime", "forged-blueprint", 2, forgedBlueprint, nil); err == nil {
+		t.Fatal("Agent blueprint configuration changed under its pinned domain version")
+	}
+	forgedProfile := profile
+	forgedProfile.ModelProvider = "fake"
+	forgedProfile.Model = "fake-model/v1"
+	if err := repository.SaveExecutionProfile(ctx, "EXECUTION_PROFILE_UPDATED", "runtime", "forged-profile", 2, forgedProfile, nil); err == nil {
+		t.Fatal("execution profile configuration changed under its pinned domain version")
+	}
+	for _, correlationID := range []string{"forged-blueprint", "forged-profile"} {
+		stream, err := gateway.Events(ctx, correlationID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(stream) != 0 {
+			t.Fatalf("rejected roster revision left authoritative events for %s: %+v", correlationID, stream)
+		}
+	}
+	blueprint.Status = "INACTIVE"
+	if err := repository.SaveAgentBlueprint(ctx, "AGENT_BLUEPRINT_UPDATED", "runtime", "blueprint-status", 2, blueprint, nil); err != nil {
+		t.Fatalf("status-only Agent blueprint revision was rejected: %v", err)
+	}
+	profile.Status = "INACTIVE"
+	if err := repository.SaveExecutionProfile(ctx, "EXECUTION_PROFILE_UPDATED", "runtime", "profile-status", 2, profile, nil); err != nil {
+		t.Fatalf("status-only execution profile revision was rejected: %v", err)
+	}
+	snapshot, err := repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(snapshot.AgentBlueprints[blueprint.ID].Value, blueprint) || !reflect.DeepEqual(snapshot.ExecutionProfiles[profile.ID].Value, profile) {
+		t.Fatalf("admitted roster state differs from valid status revisions: blueprint=%+v profile=%+v", snapshot.AgentBlueprints[blueprint.ID], snapshot.ExecutionProfiles[profile.ID])
 	}
 }
 

@@ -46,10 +46,9 @@ const (
 type GoalStatus string
 
 const (
-	GoalActive   GoalStatus = "ACTIVE"
-	GoalPaused   GoalStatus = "PAUSED"
-	GoalAchieved GoalStatus = "ACHIEVED"
-	GoalRetired  GoalStatus = "RETIRED"
+	GoalActive  GoalStatus = "ACTIVE"
+	GoalPaused  GoalStatus = "PAUSED"
+	GoalRetired GoalStatus = "RETIRED"
 )
 
 // Goal is a measurable outcome under a Mission. Projection versions preserve
@@ -135,6 +134,7 @@ type IntentDraft struct {
 	Version                int              `json:"version"`
 	Status                 IntentStatus     `json:"status"`
 	RequestedExecutionKind ExecutionKind    `json:"requested_execution_kind"`
+	Goal                   *IntentValue     `json:"goal,omitempty"`
 	Objective              string           `json:"objective"`
 	Context                []IntentValue    `json:"context"`
 	Deliverables           []IntentValue    `json:"deliverables"`
@@ -150,6 +150,7 @@ type IntentDraft struct {
 type Intent struct {
 	ID                    ID               `json:"id"`
 	OrganizationID        ID               `json:"organization_id"`
+	GoalID                ID               `json:"goal_id,omitempty"`
 	OriginalInstruction   string           `json:"original_instruction"`
 	NormalizedObjective   string           `json:"normalized_objective"`
 	HardConstraints       []string         `json:"hard_constraints"`
@@ -313,6 +314,50 @@ type CompletionContract struct {
 	ArtifactRequirements []ArtifactRequirement        `json:"artifact_requirements,omitempty"`
 	RequiredArtifacts    []string                     `json:"required_artifacts,omitempty"`
 }
+
+type CompletionResult struct {
+	Complete bool     `json:"complete"`
+	Reasons  []string `json:"reasons,omitempty"`
+}
+
+// EvaluateCompletion deterministically evaluates the evidence shared by the
+// completion engine and durable completion-admission validators.
+func EvaluateCompletion(c CompletionContract, o ToolOutcome, humanApproved *bool) CompletionResult {
+	var reasons []string
+	if o.Status != OutcomeSucceeded {
+		reasons = append(reasons, "tool outcome did not succeed")
+	}
+	for _, criterion := range c.Criteria {
+		if !criterion.Required {
+			continue
+		}
+		switch criterion.Assurance {
+		case AssuranceDeterministic:
+			if o.PostconditionStatus != PostconditionVerified {
+				reasons = append(reasons, "postcondition is not verified for criterion "+criterion.ID)
+			}
+		case AssuranceHumanJudgment:
+			if humanApproved == nil {
+				reasons = append(reasons, "human judgment is required for criterion "+criterion.ID)
+			} else if !*humanApproved {
+				reasons = append(reasons, "human judgment rejected criterion "+criterion.ID)
+			}
+		default:
+			reasons = append(reasons, "unsupported assurance for criterion "+criterion.ID)
+		}
+	}
+	availableArtifacts := make(map[string]struct{}, len(o.ArtifactRefs))
+	for _, ref := range o.ArtifactRefs {
+		availableArtifacts[ref] = struct{}{}
+	}
+	for _, required := range c.RequiredArtifacts {
+		if _, ok := availableArtifacts[required]; !ok {
+			reasons = append(reasons, "required artifact is missing: "+required)
+		}
+	}
+	return CompletionResult{Complete: len(reasons) == 0, Reasons: reasons}
+}
+
 type ArtifactEvidence struct {
 	Ref       string `json:"ref"`
 	Role      string `json:"role"`
@@ -354,6 +399,7 @@ type ExecutionContextManifest struct {
 	Model                   string         `json:"model,omitempty"`
 	TaskID                  ID             `json:"task_id"`
 	TaskContractVersion     string         `json:"task_contract_version"`
+	ExecutionInputSHA256    string         `json:"execution_input_sha256"`
 	PromptVersion           string         `json:"prompt_version,omitempty"`
 	PolicyVersion           string         `json:"policy_version,omitempty"`
 	EventRefs               []string       `json:"event_refs"`

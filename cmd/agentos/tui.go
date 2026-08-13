@@ -170,6 +170,9 @@ type tuiTask struct {
 
 func printIntentReview(output io.Writer, draft core.IntentDraft) {
 	_, _ = fmt.Fprintf(output, "\nProposed work\n\nOutcome\n%s\n", safeTerminalText(draft.Objective))
+	if draft.Goal != nil {
+		_, _ = fmt.Fprintf(output, "\nGoal\n%s\n", safeTerminalLine(draft.Goal.Value))
+	}
 	printIntentValues(output, "Context", draft.Context)
 	printIntentValues(output, "Deliverables", draft.Deliverables)
 	printIntentValues(output, "Done when", draft.CompletionCriteria)

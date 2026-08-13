@@ -296,13 +296,17 @@ func projectA2ATask(view intake.View) *a2a.Task {
 		}}
 	}
 	if view.Intent != nil {
-		task.Metadata = map[string]any{intentConfirmationURI: map[string]any{
+		review := map[string]any{
 			"state": view.State, "fingerprint": view.Intent.Fingerprint, "version": view.Intent.Version,
 			"objective": view.Intent.Objective, "context": view.Intent.Context, "deliverables": view.Intent.Deliverables,
 			"completion_criteria": view.Intent.CompletionCriteria, "constraints": view.Intent.Constraints,
 			"resolved_decisions": view.Intent.ResolvedDecisions, "consequence_candidates": view.Intent.ConsequenceCandidates,
 			"missing_user_inputs": view.Intent.MissingUserInputs,
-		}}
+		}
+		if view.Intent.Goal != nil {
+			review["goal"] = *view.Intent.Goal
+		}
+		task.Metadata = map[string]any{intentConfirmationURI: review}
 	}
 	return task
 }

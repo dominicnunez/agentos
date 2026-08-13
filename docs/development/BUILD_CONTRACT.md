@@ -173,10 +173,18 @@ result or candidate-completion content cannot substitute for it.
 When Work belongs to a Goal, that Goal identity is also part of the completion
 evidence fingerprint. This makes the bounded result usable by later Goal
 progress evaluation without allowing completion to rebind or achieve the Goal.
+The accepted Intent fingerprint also binds an explicit, source-attributed Goal
+reference. Creation rejects missing, inactive, or cross-organization Goals,
+and a retry cannot add, remove, or change the binding. Goal admission and
+Intent confirmation share one SQLite transaction. Subsequent Goal pause or
+retirement blocks new Work admission without stranding a previously confirmed
+Work retry or recovery.
 
 Work is the terminalizable layer in the `Mission > Goal > Work > Task`
 hierarchy. This evidence may contribute to later Goal progress evaluation, but
-it neither achieves a Goal nor revises organizational direction.
+it neither achieves a Goal nor revises organizational direction. Until the
+separate progress evaluator supplies and validates durable evidence, Goal
+achievement is not an admitted projection transition.
 
 Terminal work records one typed `RUN_TELEMETRY_RECORDED` Event Contract before
 the work enters `COMPLETED` or `FAILED`. The telemetry module deterministically

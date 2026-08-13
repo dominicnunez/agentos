@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -8,7 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
+	"slices"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dominicnunez/agentos/internal/approvals"
 	"github.com/dominicnunez/agentos/internal/authority"
@@ -21,6 +26,8 @@ type SQLite struct {
 	db                 *sql.DB
 	newWorkCorrelation func() (string, error)
 }
+
+const maximumReviewedIntentEvidenceEvents = 1024
 
 func Open(path string) (*SQLite, error) {
 	db, err := sql.Open("sqlite", path)
@@ -187,12 +194,29 @@ func (l *SQLite) ensureEventRoutingColumns(ctx context.Context) error {
 	return nil
 }
 
-// AppendRecord appends the authoritative transition event and updates its
-// rebuildable record projection in one transaction. The event is inserted
-// first so durable object state can never exist without ledger evidence.
+type preparedProjection struct {
+	draft      events.ProjectionDraft
+	eventDraft events.TrustedDraft
+	body       []byte
+	mission    *core.Mission
+	goal       *core.Goal
+	team       *core.Team
+	blueprint  *core.AgentBlueprint
+	profile    *core.ExecutionProfile
+	intent     *core.Intent
+	task       *core.Task
+	work       *core.Work
+}
+
+// AppendRecord is retained for non-projection domain records whose bounded
+// services own their validation. Every organizational projection namespace is
+// reserved for the typed, event-coupled admission paths below.
 func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, actorID, taskID string, authorizationRefs, artifactRefs []string, kind, id string, version int, value any) error {
 	if kind == "" || id == "" || version < 1 {
 		return fmt.Errorf("kind, id, and positive version are required")
+	}
+	if !genericRecordKindAllowed(kind) {
+		return fmt.Errorf("record kind is not admitted by the generic writer")
 	}
 	body, err := json.Marshal(value)
 	if err != nil {
@@ -202,6 +226,15 @@ func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, ac
 		draft := events.TrustedDraft{OrganizationID: organizationID, EventType: eventType, SourceActorID: actorID, TaskID: taskID, AuthorizationRefs: authorizationRefs, ArtifactRefs: artifactRefs, Payload: value}
 		return appendRecord(ctx, tx, draft, kind, id, version, body)
 	})
+}
+
+func genericRecordKindAllowed(kind string) bool {
+	switch kind {
+	case "approval", "capability_lease", "effect", "knowledge", "organization_freeze":
+		return true
+	default:
+		return false
+	}
 }
 
 // AppendProjection atomically appends a trusted transition and its versioned,
@@ -221,91 +254,770 @@ func (l *SQLite) AppendProjections(ctx context.Context, drafts []events.Projecti
 	if len(drafts) == 0 {
 		return nil, fmt.Errorf("at least one projection is required")
 	}
-	type preparedProjection struct {
-		draft      events.ProjectionDraft
-		eventDraft events.TrustedDraft
-		body       []byte
-		intent     *core.Intent
-		task       *core.Task
-	}
 	prepared := make([]preparedProjection, 0, len(drafts))
 	for _, draft := range drafts {
-		if draft.Event.EventType == "" || draft.ProjectionKind == "" || draft.RecordID == "" || draft.Version < 1 {
-			return nil, fmt.Errorf("event type, projection kind, record id, and positive version are required")
-		}
-		value, err := json.Marshal(draft.Value)
+		item, err := prepareProjection(draft, false)
 		if err != nil {
-			return nil, fmt.Errorf("encode projection value: %w", err)
+			return nil, err
 		}
-		record := events.ProjectionRecord{ProjectionKind: draft.ProjectionKind, RecordID: draft.RecordID, Version: draft.Version, CorrelationID: draft.Event.CorrelationID, Value: value}
-		body, err := json.Marshal(record)
-		if err != nil {
-			return nil, fmt.Errorf("encode projection record: %w", err)
-		}
-		detail, err := json.Marshal(draft.Event.Payload)
-		if err != nil {
-			return nil, fmt.Errorf("encode projection event detail: %w", err)
-		}
-		eventDraft := draft.Event
-		eventDraft.Payload = events.ProjectionEventPayload{Projection: record, Detail: detail}
-		item := preparedProjection{draft: draft, eventDraft: eventDraft, body: body}
-		switch draft.ProjectionKind {
-		case "intent":
-			var intent core.Intent
-			if err := json.Unmarshal(value, &intent); err != nil {
-				return nil, fmt.Errorf("decode intent for external work index: %w", err)
-			}
-			item.intent = &intent
-		case "task":
-			var task core.Task
-			if err := json.Unmarshal(value, &task); err != nil {
-				return nil, fmt.Errorf("decode task for external work index: %w", err)
-			}
-			item.task = &task
+		if item.task != nil && item.draft.Event.EventType == "EXECUTION_STARTED" && item.task.ExecutionKind == core.ExecutionAgent {
+			return nil, fmt.Errorf("agent execution start requires atomic inbox selection")
 		}
 		prepared = append(prepared, item)
 	}
+	return l.appendPreparedProjections(ctx, prepared)
+}
+
+// AppendWorkCompletion is the only ledger path that admits a completed Work.
+// It serializes the prior active projection, the exact durable evidence event,
+// and the terminal transition in one transaction.
+func (l *SQLite) AppendWorkCompletion(ctx context.Context, draft events.ProjectionDraft) (events.Event, error) {
+	if draft.Event.EventType != "WORK_COMPLETED" || draft.Event.OrganizationID == "" || draft.Event.SourceActorID != "runtime" || draft.Event.SourceExecutionID != "" || draft.Event.TaskID != "" || draft.Event.CorrelationID == "" || draft.ProjectionKind != "work" || draft.RecordID == "" || draft.Version < 2 {
+		return events.Event{}, fmt.Errorf("complete work transition identity is required")
+	}
+	item, err := prepareProjection(draft, true)
+	if err != nil {
+		return events.Event{}, err
+	}
+	if item.work == nil || item.work.ID != core.ID(draft.RecordID) || item.work.Status != core.WorkCompleted {
+		return events.Event{}, fmt.Errorf("completed work projection is invalid")
+	}
+	var detail events.WorkCompletionTransitionPayload
+	if err := decodeExactJSON(draft.Event.Payload, &detail); err != nil || detail.EvidenceEventRef == "" || detail.Fingerprint == "" {
+		return events.Event{}, fmt.Errorf("completed work requires exact durable evidence")
+	}
+
+	var appended events.Event
+	err = l.withTx(ctx, func(tx *sql.Tx) error {
+		if err := validatePriorActiveWork(ctx, tx, item); err != nil {
+			return err
+		}
+		if err := validateWorkCompletionEvidence(ctx, tx, item, detail); err != nil {
+			return err
+		}
+		var err error
+		appended, err = appendPreparedProjection(ctx, tx, item)
+		return err
+	})
+	return appended, err
+}
+
+func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.ProjectionDraft, routes []events.InboxRoute) (events.Event, []events.InboxSelection, error) {
+	var requested events.ExecutionStartDetail
+	if draft.Event.EventType != "EXECUTION_STARTED" || draft.Event.OrganizationID == "" || draft.Event.SourceActorID != "runtime" || draft.Event.SourceExecutionID != "" || draft.Event.TaskID == "" || draft.Event.TaskID != draft.RecordID || draft.Event.CorrelationID == "" || draft.ProjectionKind != "task" || draft.RecordID == "" || draft.Version < 2 || len(routes) < 2 || decodeExactJSON(draft.Event.Payload, &requested) != nil || requested.InboxCutoffSequence != 0 || requested.Mode != "" && requested.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
+		return events.Event{}, nil, fmt.Errorf("complete Agent execution-start boundary is required")
+	}
+	value, err := json.Marshal(draft.Value)
+	if err != nil {
+		return events.Event{}, nil, fmt.Errorf("encode Agent execution-start Task: %w", err)
+	}
+	var task core.Task
+	if json.Unmarshal(value, &task) != nil || task.ID != core.ID(draft.RecordID) || task.ExecutionKind != core.ExecutionAgent || task.Status != core.TaskRunning || task.AssigneeType != "AGENT" || task.AssigneeID == "" {
+		return events.Event{}, nil, fmt.Errorf("agent execution-start task is invalid")
+	}
+	var started events.Event
+	var selections []events.InboxSelection
+	err = l.withTx(ctx, func(tx *sql.Tx) error {
+		if err := validatePriorAgentExecutionTask(ctx, tx, draft, task); err != nil {
+			return err
+		}
+		var cutoff int64
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0) FROM events`).Scan(&cutoff); err != nil {
+			return fmt.Errorf("read Agent execution inbox cutoff: %w", err)
+		}
+		draft.Event.Payload = events.ExecutionStartDetail{Mode: requested.Mode, InboxCutoffSequence: cutoff}
+		item, err := prepareProjection(draft, false)
+		if err != nil {
+			return err
+		}
+		started, err = appendPreparedProjection(ctx, tx, item)
+		if err != nil {
+			return err
+		}
+		stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? ORDER BY sequence`, draft.Event.OrganizationID))
+		if err != nil {
+			return fmt.Errorf("read Agent execution route boundary: %w", err)
+		}
+		teamBodies, err := collectRecordBodies(tx.QueryContext(ctx, `SELECT body FROM records WHERE kind='team' ORDER BY record_id,version`))
+		if err != nil {
+			return fmt.Errorf("read Agent execution Team history: %w", err)
+		}
+		teamRevisions, err := events.ResolveTeamRevisionBindings(draft.Event.OrganizationID, teamBodies, stream)
+		if err != nil {
+			return fmt.Errorf("resolve Agent execution Team history: %w", err)
+		}
+		expectedRoutes := events.AgentExecutionRoutes(teamRevisions, task, started.Sequence)
+		if !reflect.DeepEqual(routes, expectedRoutes) {
+			return fmt.Errorf("agent execution inbox routes do not match admitted assignment and team membership")
+		}
+		selections = make([]events.InboxSelection, 0, len(routes))
+		for _, route := range routes {
+			selected, err := collectEvents(tx.QueryContext(ctx, `SELECT e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version
+FROM inbox i JOIN events e ON e.event_id=i.event_id AND e.organization_id=i.organization_id AND e.recipient_scope=i.recipient_scope AND e.recipient_id=i.recipient_id
+WHERE i.organization_id=? AND i.recipient_scope=? AND i.recipient_id=? AND i.observed_at='' AND e.sequence<=?
+ORDER BY e.sequence`, draft.Event.OrganizationID, route.Scope, route.ID, cutoff))
+			if err != nil {
+				return fmt.Errorf("select Agent execution inbox %s/%s: %w", route.Scope, route.ID, err)
+			}
+			selections = append(selections, events.InboxSelection{Route: route, Events: selected})
+		}
+		return nil
+	})
+	return started, selections, err
+}
+
+func validatePriorAgentExecutionTask(ctx context.Context, tx *sql.Tx, draft events.ProjectionDraft, task core.Task) error {
+	body, found, err := latestRecordBody(ctx, tx, "task", draft.RecordID)
+	if err != nil {
+		return fmt.Errorf("read prior Agent execution Task: %w", err)
+	}
+	var record events.ProjectionRecord
+	var prior core.Task
+	if !found || json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &prior) != nil || record.ProjectionKind != "task" || record.RecordID != draft.RecordID || record.Version < 1 || record.CorrelationID != draft.Event.CorrelationID || draft.Version != record.Version+1 || prior.ID != task.ID || prior.Status != core.TaskPending && prior.Status != core.TaskBlocked {
+		return fmt.Errorf("agent execution start does not follow an eligible exact task revision")
+	}
+	prior.Status = task.Status
+	if !reflect.DeepEqual(prior, task) {
+		return fmt.Errorf("agent execution start changes the immutable task contract")
+	}
+	return nil
+}
+
+func prepareProjection(draft events.ProjectionDraft, allowWorkCompletion bool) (preparedProjection, error) {
+	if draft.Event.EventType == "" || draft.ProjectionKind == "" || draft.RecordID == "" || draft.Version < 1 {
+		return preparedProjection{}, fmt.Errorf("event type, projection kind, record id, and positive version are required")
+	}
+	value, err := json.Marshal(draft.Value)
+	if err != nil {
+		return preparedProjection{}, fmt.Errorf("encode projection value: %w", err)
+	}
+	record := events.ProjectionRecord{ProjectionKind: draft.ProjectionKind, RecordID: draft.RecordID, Version: draft.Version, CorrelationID: draft.Event.CorrelationID, Value: value}
+	body, err := json.Marshal(record)
+	if err != nil {
+		return preparedProjection{}, fmt.Errorf("encode projection record: %w", err)
+	}
+	detail, err := json.Marshal(draft.Event.Payload)
+	if err != nil {
+		return preparedProjection{}, fmt.Errorf("encode projection event detail: %w", err)
+	}
+	eventDraft := draft.Event
+	eventDraft.Payload = events.ProjectionEventPayload{Projection: record, Detail: detail}
+	item := preparedProjection{draft: draft, eventDraft: eventDraft, body: body}
+	switch draft.ProjectionKind {
+	case "mission":
+		var mission core.Mission
+		if err := json.Unmarshal(value, &mission); err != nil {
+			return preparedProjection{}, fmt.Errorf("decode mission projection: %w", err)
+		}
+		item.mission = &mission
+	case "goal":
+		var goal core.Goal
+		if err := json.Unmarshal(value, &goal); err != nil {
+			return preparedProjection{}, fmt.Errorf("decode goal projection: %w", err)
+		}
+		item.goal = &goal
+	case "team":
+		var team core.Team
+		if err := json.Unmarshal(value, &team); err != nil {
+			return preparedProjection{}, fmt.Errorf("decode Team projection: %w", err)
+		}
+		item.team = &team
+	case "agent_blueprint":
+		var blueprint core.AgentBlueprint
+		if err := json.Unmarshal(value, &blueprint); err != nil {
+			return preparedProjection{}, fmt.Errorf("decode Agent blueprint projection: %w", err)
+		}
+		item.blueprint = &blueprint
+	case "execution_profile":
+		var profile core.ExecutionProfile
+		if err := json.Unmarshal(value, &profile); err != nil {
+			return preparedProjection{}, fmt.Errorf("decode execution profile projection: %w", err)
+		}
+		item.profile = &profile
+	case "intent":
+		var intent core.Intent
+		if err := json.Unmarshal(value, &intent); err != nil {
+			return preparedProjection{}, fmt.Errorf("decode intent for external work index: %w", err)
+		}
+		item.intent = &intent
+	case "task":
+		var task core.Task
+		if err := json.Unmarshal(value, &task); err != nil {
+			return preparedProjection{}, fmt.Errorf("decode task for external work index: %w", err)
+		}
+		item.task = &task
+	case "work":
+		var work core.Work
+		if err := json.Unmarshal(value, &work); err != nil {
+			return preparedProjection{}, fmt.Errorf("decode work projection: %w", err)
+		}
+		if !allowWorkCompletion && (work.Status == core.WorkCompleted || draft.Event.EventType == "WORK_COMPLETED") {
+			return preparedProjection{}, fmt.Errorf("completed work requires evidence-backed admission")
+		}
+		item.work = &work
+	}
+	return item, nil
+}
+
+func (l *SQLite) appendPreparedProjections(ctx context.Context, prepared []preparedProjection) ([]events.Event, error) {
 	appended := make([]events.Event, 0, len(prepared))
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
 		for _, item := range prepared {
-			event, err := appendEvent(ctx, tx, item.eventDraft)
+			event, err := appendPreparedProjection(ctx, tx, item)
 			if err != nil {
 				return err
-			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, item.draft.ProjectionKind, item.draft.RecordID, item.draft.Version, item.body, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-				return fmt.Errorf("append projection: %w", err)
-			}
-			if item.intent != nil && item.intent.ExternalRequestID != "" {
-				if err := registerExternalWork(ctx, tx, string(item.intent.OrganizationID), item.intent.ExternalRequestID, item.draft.Event.CorrelationID, string(item.intent.ID)); err != nil {
-					return err
-				}
-			}
-			// Only the runtime-owned root is an externally addressable A2A Task.
-			// Internal DAG nodes never cross the gateway boundary.
-			if item.task != nil && item.task.ParentID == "" {
-				registered, err := externalWorkRegistered(ctx, tx, item.draft.Event.OrganizationID, item.draft.Event.CorrelationID)
-				if err != nil {
-					return err
-				}
-				if registered {
-					if err := registerExternalTask(ctx, tx, item.draft.Event.OrganizationID, item.draft.RecordID, item.draft.Event.CorrelationID); err != nil {
-						return err
-					}
-				}
-			}
-			if item.eventDraft.RecipientScope != "" || item.eventDraft.RecipientID != "" {
-				if item.eventDraft.RecipientScope == "" || item.eventDraft.RecipientID == "" {
-					return fmt.Errorf("addressed projection recipient is required")
-				}
-				if err := projectInbox(ctx, tx, event); err != nil {
-					return err
-				}
 			}
 			appended = append(appended, event)
 		}
 		return nil
 	})
 	return appended, err
+}
+
+func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProjection) (events.Event, error) {
+	if item.mission != nil {
+		if err := validateMissionRevision(ctx, tx, item); err != nil {
+			return events.Event{}, err
+		}
+	}
+	if item.goal != nil {
+		if err := validateGoalRevision(ctx, tx, item); err != nil {
+			return events.Event{}, err
+		}
+	}
+	if item.team != nil {
+		if err := validateTeamRevision(ctx, tx, item); err != nil {
+			return events.Event{}, err
+		}
+	}
+	if item.blueprint != nil {
+		if err := validateAgentBlueprintRevision(ctx, tx, item); err != nil {
+			return events.Event{}, err
+		}
+	}
+	if item.profile != nil {
+		if err := validateExecutionProfileRevision(ctx, tx, item); err != nil {
+			return events.Event{}, err
+		}
+	}
+	if item.work != nil {
+		if err := validateWorkRevision(ctx, tx, item); err != nil {
+			return events.Event{}, err
+		}
+		if err := validateWorkIntentBinding(ctx, tx, item); err != nil {
+			return events.Event{}, err
+		}
+	}
+	event, err := appendEvent(ctx, tx, item.eventDraft)
+	if err != nil {
+		return events.Event{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, item.draft.ProjectionKind, item.draft.RecordID, item.draft.Version, item.body, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return events.Event{}, fmt.Errorf("append projection: %w", err)
+	}
+	if item.intent != nil && item.intent.ExternalRequestID != "" {
+		if err := registerExternalWork(ctx, tx, string(item.intent.OrganizationID), item.intent.ExternalRequestID, item.draft.Event.CorrelationID, string(item.intent.ID)); err != nil {
+			return events.Event{}, err
+		}
+	}
+	// Only the runtime-owned root is an externally addressable A2A Task.
+	// Internal DAG nodes never cross the gateway boundary.
+	if item.task != nil && item.task.ParentID == "" {
+		registered, err := externalWorkRegistered(ctx, tx, item.draft.Event.OrganizationID, item.draft.Event.CorrelationID)
+		if err != nil {
+			return events.Event{}, err
+		}
+		if registered {
+			if err := registerExternalTask(ctx, tx, item.draft.Event.OrganizationID, item.draft.RecordID, item.draft.Event.CorrelationID); err != nil {
+				return events.Event{}, err
+			}
+		}
+	}
+	if item.eventDraft.RecipientScope != "" || item.eventDraft.RecipientID != "" {
+		if item.eventDraft.RecipientScope == "" || item.eventDraft.RecipientID == "" {
+			return events.Event{}, fmt.Errorf("addressed projection recipient is required")
+		}
+		if err := projectInbox(ctx, tx, event); err != nil {
+			return events.Event{}, err
+		}
+	}
+	return event, nil
+}
+
+func validateWorkRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+	work := *item.work
+	if work.ID != core.ID(item.draft.RecordID) || !core.ValidWork(work) || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" || item.draft.Event.RecipientScope != "" || item.draft.Event.RecipientID != "" {
+		return fmt.Errorf("work projection is incomplete or crosses its runtime-owned lifecycle boundary")
+	}
+	body, found, err := latestRecordBody(ctx, tx, "work", item.draft.RecordID)
+	if err != nil {
+		return fmt.Errorf("read prior work revision: %w", err)
+	}
+	if !found {
+		if item.draft.Version != 1 || work.Status != core.WorkActive || item.draft.Event.EventType != "WORK_CREATED" {
+			return fmt.Errorf("work creation must start active at version one with its exact lifecycle event")
+		}
+		return nil
+	}
+	var record events.ProjectionRecord
+	var previous core.Work
+	if json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &previous) != nil || record.ProjectionKind != "work" || record.RecordID != item.draft.RecordID || record.Version < 1 || record.CorrelationID == "" || record.CorrelationID != item.draft.Event.CorrelationID {
+		return fmt.Errorf("prior work revision is invalid or crosses its correlation boundary")
+	}
+	if item.draft.Version != record.Version+1 {
+		return fmt.Errorf("work version %d follows %d", item.draft.Version, record.Version)
+	}
+	if !core.ValidWorkRevision(previous, work) {
+		return fmt.Errorf("work revision changes immutable identity or reopens terminal state")
+	}
+	validFailure := previous.Status == core.WorkActive && work.Status == core.WorkFailed && (item.draft.Event.EventType == "WORK_FAILED" || item.draft.Event.EventType == "WORK_PLANNING_FAILED")
+	if work.Status != core.WorkCompleted && !validFailure {
+		return fmt.Errorf("work revision does not match its exact runtime-owned lifecycle event")
+	}
+	return nil
+}
+
+func validateMissionRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+	mission := *item.mission
+	if mission.ID != core.ID(item.draft.RecordID) || string(mission.OrganizationID) != item.draft.Event.OrganizationID || !core.ValidMission(mission) || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" || item.draft.Event.RecipientScope != "" || item.draft.Event.RecipientID != "" {
+		return fmt.Errorf("mission projection is incomplete or crosses its runtime-owned lifecycle boundary")
+	}
+	organizationBody, organizationFound, err := latestRecordBody(ctx, tx, "organization", string(mission.OrganizationID))
+	if err != nil {
+		return fmt.Errorf("read mission parent organization: %w", err)
+	}
+	var organizationRecord events.ProjectionRecord
+	var organization core.Organization
+	if !organizationFound || json.Unmarshal(organizationBody, &organizationRecord) != nil || json.Unmarshal(organizationRecord.Value, &organization) != nil || organizationRecord.ProjectionKind != "organization" || organizationRecord.RecordID != string(mission.OrganizationID) || organization.ID != mission.OrganizationID {
+		return fmt.Errorf("mission requires its durable parent organization")
+	}
+	return validateProjectionLifecycle(ctx, tx, item, "mission", mission,
+		func(value core.Mission) bool { return value.Status == core.MissionActive },
+		core.ValidMissionRevision, missionRevisionEvent,
+		"changes immutable identity, direction during retirement, or lifecycle order")
+}
+
+func missionRevisionEvent(previous, current core.Mission) string {
+	switch {
+	case previous.Status == current.Status && !reflect.DeepEqual(previous, current):
+		return "MISSION_REVISED"
+	case previous.Status == core.MissionActive && current.Status == core.MissionRetired:
+		return "MISSION_RETIRED"
+	}
+	return ""
+}
+
+func validateGoalRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+	goal := *item.goal
+	if goal.ID != core.ID(item.draft.RecordID) || string(goal.OrganizationID) != item.draft.Event.OrganizationID || !core.ValidGoal(goal) || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" || item.draft.Event.RecipientScope != "" || item.draft.Event.RecipientID != "" {
+		return fmt.Errorf("goal projection is incomplete or crosses its runtime-owned lifecycle boundary")
+	}
+	missionBody, missionFound, err := latestRecordBody(ctx, tx, "mission", string(goal.MissionID))
+	if err != nil {
+		return fmt.Errorf("read goal parent mission: %w", err)
+	}
+	var missionRecord events.ProjectionRecord
+	var mission core.Mission
+	if !missionFound || json.Unmarshal(missionBody, &missionRecord) != nil || json.Unmarshal(missionRecord.Value, &mission) != nil || missionRecord.ProjectionKind != "mission" || missionRecord.RecordID != string(goal.MissionID) || mission.ID != goal.MissionID || mission.OrganizationID != goal.OrganizationID || !core.ValidMission(mission) {
+		return fmt.Errorf("goal requires a valid parent mission in its organization")
+	}
+	return validateProjectionLifecycle(ctx, tx, item, "goal", goal,
+		func(value core.Goal) bool { return value.Status == core.GoalActive },
+		core.ValidGoalRevision, goalRevisionEvent,
+		"changes immutable identity, direction during a lifecycle transition, or lifecycle order")
+}
+
+func goalRevisionEvent(previous, current core.Goal) string {
+	switch {
+	case previous.Status == current.Status && !reflect.DeepEqual(previous, current):
+		return "GOAL_REFINED"
+	case previous.Status == core.GoalActive && current.Status == core.GoalPaused:
+		return "GOAL_PAUSED"
+	case previous.Status == core.GoalPaused && current.Status == core.GoalActive:
+		return "GOAL_RESUMED"
+	case current.Status == core.GoalRetired && previous.Status != core.GoalRetired:
+		return "GOAL_RETIRED"
+	}
+	return ""
+}
+
+func validateProjectionLifecycle[T any](ctx context.Context, tx *sql.Tx, item preparedProjection, kind string, value T, activeCreation func(T) bool, validRevision func(T, T) bool, revisionEvent func(T, T) string, invalidRevision string) error {
+	record, previous, found, err := latestProjectionRevision[T](ctx, tx, kind, item.draft.RecordID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		if item.draft.Version != 1 || !activeCreation(value) || item.draft.Event.EventType != strings.ToUpper(kind)+"_CREATED" {
+			return fmt.Errorf("%s creation must start active at version one with its exact lifecycle event", kind)
+		}
+		return nil
+	}
+	if item.draft.Version != record.Version+1 {
+		return fmt.Errorf("%s version %d follows %d", kind, item.draft.Version, record.Version)
+	}
+	if !validRevision(previous, value) {
+		return fmt.Errorf("%s revision %s", kind, invalidRevision)
+	}
+	expectedEventType := revisionEvent(previous, value)
+	if expectedEventType == "" || item.draft.Event.EventType != expectedEventType {
+		return fmt.Errorf("%s revision does not match its exact runtime-owned lifecycle event", kind)
+	}
+	return nil
+}
+
+func latestProjectionRevision[T any](ctx context.Context, tx *sql.Tx, kind, recordID string) (events.ProjectionRecord, T, bool, error) {
+	var value T
+	body, found, err := latestRecordBody(ctx, tx, kind, recordID)
+	if err != nil {
+		return events.ProjectionRecord{}, value, false, fmt.Errorf("read prior %s revision: %w", kind, err)
+	}
+	if !found {
+		return events.ProjectionRecord{}, value, false, nil
+	}
+	var record events.ProjectionRecord
+	if json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &value) != nil || record.ProjectionKind != kind || record.RecordID != recordID || record.Version < 1 {
+		return events.ProjectionRecord{}, value, false, fmt.Errorf("prior %s revision is invalid", kind)
+	}
+	return record, value, true, nil
+}
+
+func validateTeamRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+	team := *item.team
+	expectedEventType := "TEAM_REVISED"
+	if item.draft.Version == 1 {
+		expectedEventType = "TEAM_CREATED"
+	}
+	if team.ID != core.ID(item.draft.RecordID) || string(team.OrganizationID) != item.draft.Event.OrganizationID || strings.TrimSpace(team.Name) == "" || strings.TrimSpace(team.Status) == "" || item.draft.Event.EventType != expectedEventType || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" {
+		return fmt.Errorf("team projection is incomplete or crosses its runtime-owned lifecycle boundary")
+	}
+	organizationBody, organizationFound, err := latestRecordBody(ctx, tx, "organization", string(team.OrganizationID))
+	if err != nil {
+		return fmt.Errorf("read Team parent organization: %w", err)
+	}
+	var organizationRecord events.ProjectionRecord
+	var organization core.Organization
+	if !organizationFound || json.Unmarshal(organizationBody, &organizationRecord) != nil || json.Unmarshal(organizationRecord.Value, &organization) != nil || organizationRecord.ProjectionKind != "organization" || organizationRecord.RecordID != string(team.OrganizationID) || organization.ID != team.OrganizationID {
+		return fmt.Errorf("team requires its durable parent organization")
+	}
+	members := make(map[core.ID]struct{}, len(team.MemberAgentIDs))
+	for _, memberID := range team.MemberAgentIDs {
+		if memberID == "" {
+			return fmt.Errorf("team projection contains an empty member identity")
+		}
+		if _, duplicate := members[memberID]; duplicate {
+			return fmt.Errorf("team projection contains a duplicate member identity")
+		}
+		members[memberID] = struct{}{}
+		body, found, err := latestRecordBody(ctx, tx, "agent", string(memberID))
+		if err != nil {
+			return fmt.Errorf("read Team member Agent: %w", err)
+		}
+		var record events.ProjectionRecord
+		var agent core.Agent
+		if !found || json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &agent) != nil || record.ProjectionKind != "agent" || record.RecordID != string(memberID) || agent.ID != memberID || agent.OrganizationID != team.OrganizationID {
+			return fmt.Errorf("team projection references an invalid member Agent")
+		}
+	}
+	body, found, err := latestRecordBody(ctx, tx, "team", item.draft.RecordID)
+	if err != nil {
+		return fmt.Errorf("read prior Team revision: %w", err)
+	}
+	if !found {
+		if item.draft.Version != 1 {
+			return fmt.Errorf("team creation must start at version one")
+		}
+		return nil
+	}
+	var record events.ProjectionRecord
+	var previous core.Team
+	if json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &previous) != nil || record.ProjectionKind != "team" || record.RecordID != item.draft.RecordID || record.Version < 1 {
+		return fmt.Errorf("prior Team revision is invalid")
+	}
+	if item.draft.Version != record.Version+1 {
+		return fmt.Errorf("team version %d follows %d", item.draft.Version, record.Version)
+	}
+	if previous.ID != team.ID || previous.OrganizationID != team.OrganizationID || !previous.CreatedAt.Equal(team.CreatedAt) {
+		return fmt.Errorf("team revision changes immutable identity")
+	}
+	return nil
+}
+
+func validateAgentBlueprintRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+	blueprint := *item.blueprint
+	expectedEventType := "AGENT_BLUEPRINT_UPDATED"
+	if item.draft.Version == 1 {
+		expectedEventType = "AGENT_BLUEPRINT_CREATED"
+	}
+	if blueprint.ID != core.ID(item.draft.RecordID) || string(blueprint.OrganizationID) != item.draft.Event.OrganizationID || blueprint.Version == "" || strings.TrimSpace(blueprint.Role) == "" || strings.TrimSpace(blueprint.OperatingInstructions) == "" || !validRosterProjectionStatus(blueprint.Status) || !distinctNonemptyStrings(blueprint.RequiredCapabilityClasses) || item.draft.Event.EventType != expectedEventType || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" {
+		return fmt.Errorf("agent blueprint projection is incomplete or crosses its runtime-owned lifecycle boundary")
+	}
+	if err := validateRosterParentOrganization(ctx, tx, blueprint.OrganizationID); err != nil {
+		return fmt.Errorf("agent blueprint: %w", err)
+	}
+	body, found, err := latestRecordBody(ctx, tx, "agent_blueprint", item.draft.RecordID)
+	if err != nil {
+		return fmt.Errorf("read prior Agent blueprint revision: %w", err)
+	}
+	if !found {
+		if item.draft.Version != 1 {
+			return fmt.Errorf("agent blueprint creation must start at version one")
+		}
+		return nil
+	}
+	var record events.ProjectionRecord
+	var previous core.AgentBlueprint
+	if json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &previous) != nil || record.ProjectionKind != "agent_blueprint" || record.RecordID != item.draft.RecordID || record.Version < 1 {
+		return fmt.Errorf("prior Agent blueprint revision is invalid")
+	}
+	if item.draft.Version != record.Version+1 {
+		return fmt.Errorf("agent blueprint version %d follows %d", item.draft.Version, record.Version)
+	}
+	blueprint.Status = previous.Status
+	if !reflect.DeepEqual(previous, blueprint) {
+		return fmt.Errorf("agent blueprint revision changes immutable configuration")
+	}
+	return nil
+}
+
+func validateExecutionProfileRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+	profile := *item.profile
+	expectedEventType := "EXECUTION_PROFILE_UPDATED"
+	if item.draft.Version == 1 {
+		expectedEventType = "EXECUTION_PROFILE_CREATED"
+	}
+	if profile.ID != core.ID(item.draft.RecordID) || string(profile.OrganizationID) != item.draft.Event.OrganizationID || profile.Version == "" || profile.ModelProvider == "" || profile.Model == "" || profile.PromptVersion == "" || !validRosterProjectionStatus(profile.Status) || !distinctNonemptyStrings(profile.ToolRefs) || item.draft.Event.EventType != expectedEventType || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" {
+		return fmt.Errorf("execution profile projection is incomplete or crosses its runtime-owned lifecycle boundary")
+	}
+	if err := validateRosterParentOrganization(ctx, tx, profile.OrganizationID); err != nil {
+		return fmt.Errorf("execution profile: %w", err)
+	}
+	body, found, err := latestRecordBody(ctx, tx, "execution_profile", item.draft.RecordID)
+	if err != nil {
+		return fmt.Errorf("read prior execution profile revision: %w", err)
+	}
+	if !found {
+		if item.draft.Version != 1 {
+			return fmt.Errorf("execution profile creation must start at version one")
+		}
+		return nil
+	}
+	var record events.ProjectionRecord
+	var previous core.ExecutionProfile
+	if json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &previous) != nil || record.ProjectionKind != "execution_profile" || record.RecordID != item.draft.RecordID || record.Version < 1 {
+		return fmt.Errorf("prior execution profile revision is invalid")
+	}
+	if item.draft.Version != record.Version+1 {
+		return fmt.Errorf("execution profile version %d follows %d", item.draft.Version, record.Version)
+	}
+	profile.Status = previous.Status
+	if !reflect.DeepEqual(previous, profile) {
+		return fmt.Errorf("execution profile revision changes immutable configuration")
+	}
+	return nil
+}
+
+func validateRosterParentOrganization(ctx context.Context, tx *sql.Tx, organizationID core.ID) error {
+	body, found, err := latestRecordBody(ctx, tx, "organization", string(organizationID))
+	if err != nil {
+		return fmt.Errorf("read parent organization: %w", err)
+	}
+	var record events.ProjectionRecord
+	var organization core.Organization
+	if !found || json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &organization) != nil || record.ProjectionKind != "organization" || record.RecordID != string(organizationID) || organization.ID != organizationID {
+		return fmt.Errorf("durable parent organization is unavailable")
+	}
+	return nil
+}
+
+func validRosterProjectionStatus(status string) bool {
+	return status == "ACTIVE" || status == "INACTIVE"
+}
+
+func distinctNonemptyStrings(values []string) bool {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value == "" {
+			return false
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return false
+		}
+		seen[value] = struct{}{}
+	}
+	return true
+}
+
+func validateWorkIntentBinding(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+	body, found, err := latestRecordBody(ctx, tx, "intent", string(item.work.IntentID))
+	if err != nil {
+		return fmt.Errorf("read work intent binding: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("work requires its durable intent")
+	}
+	var record events.ProjectionRecord
+	var intent core.Intent
+	if json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &intent) != nil || record.RecordID != string(item.work.IntentID) || record.CorrelationID != item.draft.Event.CorrelationID || intent.ID != item.work.IntentID || intent.GoalID != item.work.GoalID || intent.NormalizedObjective != item.work.Objective || string(intent.OrganizationID) != item.draft.Event.OrganizationID {
+		return fmt.Errorf("work does not match its accepted intent boundary")
+	}
+	if intent.GoalID != "" {
+		if err := validateGoalBoundIntentConfirmation(ctx, tx, item, intent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateGoalBoundIntentConfirmation(ctx context.Context, tx *sql.Tx, item preparedProjection, intent core.Intent) error {
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type='INTENT_CONFIRMED' ORDER BY sequence`, item.draft.Event.CorrelationID))
+	if err != nil {
+		return fmt.Errorf("read goal-bound intent confirmation: %w", err)
+	}
+	if len(stream) != 1 {
+		return fmt.Errorf("goal-bound work requires one atomic intent confirmation")
+	}
+	event := stream[0]
+	var confirmation events.IntentConfirmedPayload
+	if err := decodeExactJSON(event.Payload, &confirmation); err != nil ||
+		event.OrganizationID != item.draft.Event.OrganizationID || event.SourceActorID == "" || event.SourceActorID != confirmation.ConfirmingActorID || event.SourceExecutionID != "" || event.TaskID != "task-"+item.draft.Event.CorrelationID || event.CorrelationID != item.draft.Event.CorrelationID ||
+		confirmation.IntentID != string(intent.ID) || confirmation.GoalID != string(intent.GoalID) || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.Fingerprint != intent.AcceptedFingerprint || confirmation.ConfirmingActorID != string(intent.SourcePrincipalID) || confirmation.ConfirmingActorKind != string(intent.SourcePrincipalKind) || confirmation.SourceChannel != intent.SourceChannel || confirmation.MessageID == "" {
+		return fmt.Errorf("goal-bound work intent confirmation is invalid")
+	}
+	return nil
+}
+
+func validatePriorActiveWork(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+	body, found, err := latestRecordBody(ctx, tx, "work", item.draft.RecordID)
+	if err != nil {
+		return fmt.Errorf("read prior work projection: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("completed work requires a prior active projection")
+	}
+	var record events.ProjectionRecord
+	var prior core.Work
+	if json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &prior) != nil || record.RecordID != item.draft.RecordID || record.Version != item.draft.Version-1 || record.CorrelationID != item.draft.Event.CorrelationID || prior.ID != item.work.ID || prior.IntentID != item.work.IntentID || prior.GoalID != item.work.GoalID || prior.Objective != item.work.Objective || !prior.CreatedAt.Equal(item.work.CreatedAt) || prior.Status != core.WorkActive {
+		return fmt.Errorf("completed work does not exactly follow its active projection")
+	}
+	return nil
+}
+
+func validateWorkCompletionEvidence(ctx context.Context, tx *sql.Tx, item preparedProjection, detail events.WorkCompletionTransitionPayload) error {
+	row := tx.QueryRowContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_id=?`, detail.EvidenceEventRef)
+	evidenceEvent, err := scanEvent(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("work completion evidence event is missing")
+		}
+		return fmt.Errorf("read work completion evidence: %w", err)
+	}
+	intentBody, found, err := latestRecordBody(ctx, tx, "intent", string(item.work.IntentID))
+	if err != nil {
+		return fmt.Errorf("read work completion intent: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("work completion intent projection is missing")
+	}
+	var intentRecord events.ProjectionRecord
+	var intent core.Intent
+	if json.Unmarshal(intentBody, &intentRecord) != nil || json.Unmarshal(intentRecord.Value, &intent) != nil || intentRecord.RecordID != string(item.work.IntentID) || intentRecord.CorrelationID != item.draft.Event.CorrelationID || intent.ID != item.work.IntentID {
+		return fmt.Errorf("work completion intent projection is invalid")
+	}
+	taskBodies, err := latestRecordBodies(ctx, tx, "task")
+	if err != nil {
+		return fmt.Errorf("read work completion tasks: %w", err)
+	}
+	tasks := make([]events.WorkCompletionTaskBinding, 0)
+	blueprints := make(map[core.ID]core.AgentBlueprint)
+	profiles := make(map[core.ID]core.ExecutionProfile)
+	for _, body := range taskBodies {
+		var record events.ProjectionRecord
+		var task core.Task
+		if json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &task) != nil {
+			return fmt.Errorf("decode work completion task projection")
+		}
+		if task.WorkID != item.work.ID {
+			continue
+		}
+		if record.RecordID != string(task.ID) {
+			return fmt.Errorf("work completion task projection identity is invalid")
+		}
+		tasks = append(tasks, events.WorkCompletionTaskBinding{Task: task, Version: record.Version, CorrelationID: record.CorrelationID})
+		if task.ExecutionKind != core.ExecutionAgent || task.AgentConfig == nil {
+			continue
+		}
+		blueprintID := task.AgentConfig.BlueprintID
+		blueprintBody, blueprintFound, err := latestRecordBody(ctx, tx, "agent_blueprint", string(blueprintID))
+		if err != nil {
+			return fmt.Errorf("read work completion Agent blueprint: %w", err)
+		}
+		var blueprintRecord events.ProjectionRecord
+		var blueprint core.AgentBlueprint
+		if !blueprintFound || json.Unmarshal(blueprintBody, &blueprintRecord) != nil || json.Unmarshal(blueprintRecord.Value, &blueprint) != nil || blueprintRecord.ProjectionKind != "agent_blueprint" || blueprintRecord.RecordID != string(blueprintID) || blueprint.ID != blueprintID || string(blueprint.OrganizationID) != item.draft.Event.OrganizationID || blueprint.Version != task.AgentConfig.BlueprintVersion {
+			return fmt.Errorf("work completion Agent blueprint is invalid")
+		}
+		blueprints[blueprintID] = blueprint
+		profileID := task.AgentConfig.ProfileID
+		profileBody, profileFound, err := latestRecordBody(ctx, tx, "execution_profile", string(profileID))
+		if err != nil {
+			return fmt.Errorf("read work completion execution profile: %w", err)
+		}
+		var profileRecord events.ProjectionRecord
+		var profile core.ExecutionProfile
+		if !profileFound || json.Unmarshal(profileBody, &profileRecord) != nil || json.Unmarshal(profileRecord.Value, &profile) != nil || profileRecord.ProjectionKind != "execution_profile" || profileRecord.RecordID != string(profileID) || profile.ID != profileID || string(profile.OrganizationID) != item.draft.Event.OrganizationID || profile.Version != task.AgentConfig.ProfileVersion {
+			return fmt.Errorf("work completion execution profile is invalid")
+		}
+		profiles[profileID] = profile
+	}
+	teamBodies, err := collectRecordBodies(tx.QueryContext(ctx, `SELECT body FROM records WHERE kind='team' ORDER BY record_id,version`))
+	if err != nil {
+		return fmt.Errorf("read work completion Teams: %w", err)
+	}
+	// Execution inputs may include addressed inbox events from another Work
+	// correlation. Completion admission therefore receives the complete
+	// organization event boundary while every Work claim remains correlation-
+	// bound by the event-contract validator.
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? ORDER BY sequence`, item.draft.Event.OrganizationID))
+	if err != nil {
+		return fmt.Errorf("read work completion event chain: %w", err)
+	}
+	teamRevisions, err := events.ResolveTeamRevisionBindings(item.draft.Event.OrganizationID, teamBodies, stream)
+	if err != nil {
+		return fmt.Errorf("resolve work completion Team history: %w", err)
+	}
+	inboxObservations, err := inboxObservationBindings(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("read work completion inbox observations: %w", err)
+	}
+	binding := events.WorkCompletionBinding{
+		OrganizationID: item.draft.Event.OrganizationID, CorrelationID: item.draft.Event.CorrelationID,
+		Work: *item.work, WorkVersion: item.draft.Version, Intent: intent, Tasks: tasks,
+		TeamRevisions: teamRevisions, InboxObservations: inboxObservations, AgentBlueprints: blueprints, ExecutionProfiles: profiles,
+	}
+	evidence, err := events.ValidateWorkCompletionEvidenceChain(binding, evidenceEvent, stream)
+	if err != nil {
+		return err
+	}
+	if evidence.Fingerprint != detail.Fingerprint {
+		return fmt.Errorf("work completion evidence fingerprint does not match the transition")
+	}
+	return nil
+}
+
+func decodeExactJSON(value any, target any) error {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(target)
+}
+
+func decodeExactJSONBytes(body []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(target)
 }
 
 func registerExternalWork(ctx context.Context, tx *sql.Tx, organizationID, requestID, correlationID, intentID string) error {
@@ -613,10 +1325,18 @@ func (l *SQLite) Records(ctx context.Context, kind, id string) ([][]byte, error)
 // ordered by record identity. Callers still re-read a specific record before a
 // state transition so discovery never becomes a stale write authorization.
 func (l *SQLite) LatestRecords(ctx context.Context, kind string) ([][]byte, error) {
+	return latestRecordBodies(ctx, l.db, kind)
+}
+
+type rowsQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func latestRecordBodies(ctx context.Context, queryer rowsQueryer, kind string) ([][]byte, error) {
 	if kind == "" {
 		return nil, fmt.Errorf("record kind is required")
 	}
-	return collectRecordBodies(l.db.QueryContext(ctx, `SELECT current.body
+	return collectRecordBodies(queryer.QueryContext(ctx, `SELECT current.body
 FROM records AS current
 JOIN (
 	SELECT record_id, MAX(version) AS version
@@ -647,10 +1367,178 @@ func collectRecordBodies(rows *sql.Rows, err error) ([][]byte, error) {
 }
 
 func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Event, error) {
+	if d.EventType == "INBOX_EVENTS_OBSERVED" {
+		return events.Event{}, fmt.Errorf("inbox observations require atomic inbox admission")
+	}
+	if d.EventType == "INTENT_CONFIRMED" {
+		var confirmation events.IntentConfirmedPayload
+		if err := decodeExactJSON(d.Payload, &confirmation); err != nil {
+			return events.Event{}, fmt.Errorf("intent confirmation payload is invalid")
+		}
+		if confirmation.GoalID != "" {
+			return events.Event{}, fmt.Errorf("goal-bound intent confirmation requires atomic Goal admission")
+		}
+	}
 	if d.EventType == "MESSAGE" || d.RecipientScope != "" || d.RecipientID != "" {
 		return l.appendAddressed(ctx, d)
 	}
 	return appendEvent(ctx, l.db, d)
+}
+
+func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.TrustedDraft, goalID core.ID) (events.Event, error) {
+	if draft.EventType != "INTENT_CONFIRMED" || draft.OrganizationID == "" || goalID == "" {
+		return events.Event{}, fmt.Errorf("complete goal-bound intent confirmation is required")
+	}
+	var confirmation events.IntentConfirmedPayload
+	if err := decodeExactJSON(draft.Payload, &confirmation); err != nil || confirmation.GoalID != string(goalID) || confirmation.IntentID != "intent-"+draft.CorrelationID || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.ConfirmingActorID == "" || confirmation.ConfirmingActorKind == "" || confirmation.SourceChannel == "" || confirmation.MessageID == "" ||
+		draft.SourceActorID != confirmation.ConfirmingActorID || !validReviewedOperatorIdentity(confirmation.ConfirmingActorID, confirmation.ConfirmingActorKind, confirmation.SourceChannel) || draft.SourceExecutionID != "" || draft.RecipientScope != "" || draft.RecipientID != "" || draft.TaskID != "task-"+draft.CorrelationID || draft.CorrelationID == "" || len(draft.AuthorizationRefs) != 0 || len(draft.ArtifactRefs) != 0 {
+		return events.Event{}, fmt.Errorf("goal-bound intent confirmation does not match its checked goal")
+	}
+	var event events.Event
+	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_DRAFTED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, draft.CorrelationID, maximumReviewedIntentEvidenceEvents+1))
+		if err != nil {
+			return fmt.Errorf("read reviewed goal-bound intent evidence: %w", err)
+		}
+		if len(stream) > maximumReviewedIntentEvidenceEvents {
+			return fmt.Errorf("goal-bound intent review evidence exceeds its admission bound")
+		}
+		if err := validateReviewedGoalIntent(stream, draft, confirmation, goalID); err != nil {
+			return err
+		}
+		existing := make([]events.Event, 0, 1)
+		for _, candidate := range stream {
+			if candidate.EventType == "INTENT_CONFIRMED" {
+				existing = append(existing, candidate)
+			}
+		}
+		if len(existing) > 1 {
+			return fmt.Errorf("goal-bound intent has multiple durable confirmations")
+		}
+		if len(existing) == 1 {
+			var recorded events.IntentConfirmedPayload
+			candidate := existing[0]
+			if decodeExactJSONBytes(candidate.Payload, &recorded) != nil || !reflect.DeepEqual(recorded, confirmation) || candidate.OrganizationID != draft.OrganizationID || candidate.EventType != draft.EventType || candidate.SourceActorID != draft.SourceActorID || candidate.SourceExecutionID != draft.SourceExecutionID || candidate.RecipientScope != draft.RecipientScope || candidate.RecipientID != draft.RecipientID || candidate.TaskID != draft.TaskID || !slices.Equal(candidate.AuthorizationRefs, draft.AuthorizationRefs) || !slices.Equal(candidate.ArtifactRefs, draft.ArtifactRefs) || candidate.CorrelationID != draft.CorrelationID || candidate.SchemaVersion != events.SchemaVersion {
+				return fmt.Errorf("goal-bound intent confirmation conflicts with durable state")
+			}
+			event = candidate
+			return nil
+		}
+		var body []byte
+		if err := tx.QueryRowContext(ctx, `SELECT body FROM records WHERE kind='goal' AND record_id=? ORDER BY version DESC LIMIT 1`, string(goalID)).Scan(&body); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("confirmed intent goal is unavailable")
+			}
+			return fmt.Errorf("read confirmed intent goal: %w", err)
+		}
+		var record events.ProjectionRecord
+		var goal core.Goal
+		if json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &goal) != nil || goal.ID != goalID || string(goal.OrganizationID) != draft.OrganizationID || goal.Status != core.GoalActive {
+			return fmt.Errorf("confirmed intent requires an active goal in its organization")
+		}
+		event, err = appendEvent(ctx, tx, draft)
+		return err
+	})
+	return event, err
+}
+
+func validateReviewedGoalIntent(stream []events.Event, confirmationDraft events.TrustedDraft, confirmation events.IntentConfirmedPayload, goalID core.ID) error {
+	intakeMessages := make(map[string]events.IntakeMessageRecordedPayload)
+	intakeSequences := make(map[string]int64)
+	var latestIntakeMessageID string
+	var latestIntakeSequence int64
+	var latestDraftEvent events.Event
+	var latestDraft events.IntentDraftedPayload
+	draftCount := 0
+	for _, event := range stream {
+		switch event.EventType {
+		case "INTAKE_MESSAGE_RECORDED":
+			var payload events.IntakeMessageRecordedPayload
+			if decodeExactJSONBytes(event.Payload, &payload) != nil || !validReviewedIntakeMessage(event, payload, confirmationDraft) {
+				return fmt.Errorf("goal-bound intent has invalid durable intake evidence")
+			}
+			if _, exists := intakeMessages[payload.MessageID]; exists {
+				return fmt.Errorf("goal-bound intent source message is not unique")
+			}
+			intakeMessages[payload.MessageID] = payload
+			intakeSequences[payload.MessageID] = event.Sequence
+			latestIntakeMessageID = payload.MessageID
+			latestIntakeSequence = event.Sequence
+		case "INTENT_DRAFTED":
+			var payload events.IntentDraftedPayload
+			if decodeExactJSONBytes(event.Payload, &payload) != nil || event.OrganizationID != confirmationDraft.OrganizationID || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != confirmationDraft.TaskID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID != confirmationDraft.CorrelationID || event.SchemaVersion != events.SchemaVersion {
+				return fmt.Errorf("goal-bound intent has invalid durable review draft")
+			}
+			draftCount++
+			latestDraftEvent = event
+			latestDraft = payload
+		}
+	}
+	if latestDraftEvent.EventID == "" || latestIntakeMessageID == "" || latestDraftEvent.Sequence <= latestIntakeSequence || latestDraft.SourceMessageID != latestIntakeMessageID || latestDraft.Draft.CreatedAt.IsZero() || strings.TrimSpace(latestDraft.Reply) == "" {
+		return fmt.Errorf("goal-bound intent confirmation requires the current durable reviewed draft")
+	}
+	reviewed := latestDraft.Draft
+	if reviewed.ID != core.ID(confirmation.IntentID) || reviewed.OrganizationID != core.ID(confirmationDraft.OrganizationID) || reviewed.Version != confirmation.Version || reviewed.Version != draftCount || reviewed.Fingerprint != confirmation.Fingerprint {
+		return fmt.Errorf("goal-bound intent confirmation does not match its durable reviewed draft")
+	}
+	switch reviewed.RequestedExecutionKind {
+	case core.ExecutionDeterministic, core.ExecutionAgent, core.ExecutionHuman:
+	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed, "":
+		return fmt.Errorf("goal-bound intent reviewed execution kind is unavailable")
+	default:
+		return fmt.Errorf("goal-bound intent reviewed execution kind is unavailable")
+	}
+	if err := core.ValidateAcceptedIntentDraft(reviewed, core.ID(confirmationDraft.OrganizationID), reviewed.RequestedExecutionKind); err != nil {
+		return fmt.Errorf("goal-bound intent durable reviewed draft is invalid: %w", err)
+	}
+	reviewedGoalID, err := core.AcceptedIntentGoalID(reviewed)
+	if err != nil || reviewedGoalID != goalID || reviewed.Goal == nil || reviewed.Goal.Origin != "EXPLICIT" && reviewed.Goal.Origin != "CONFIRMED" {
+		return fmt.Errorf("goal-bound intent reviewed Goal provenance is invalid")
+	}
+	goalMessage, found := intakeMessages[reviewed.Goal.SourceMessageID]
+	if !found || intakeSequences[reviewed.Goal.SourceMessageID] >= latestDraftEvent.Sequence || !core.ContainsExactGoalReference(goalMessage.Text, string(goalID)) {
+		return fmt.Errorf("goal-bound intent Goal is not present in its attributed source message")
+	}
+	for _, event := range stream {
+		if event.EventType == "INTENT_CONFIRMED" && event.Sequence <= latestDraftEvent.Sequence {
+			return fmt.Errorf("goal-bound intent confirmation precedes its reviewed draft")
+		}
+	}
+	return nil
+}
+
+func validReviewedIntakeMessage(event events.Event, payload events.IntakeMessageRecordedPayload, confirmationDraft events.TrustedDraft) bool {
+	if payload.MessageID == "" || strings.TrimSpace(payload.Text) == "" || !utf8.ValidString(payload.Text) || payload.SourcePrincipalID == "" || payload.SourcePrincipalKind == "" || payload.SourceChannel == "" ||
+		event.OrganizationID != confirmationDraft.OrganizationID || event.SourceActorID != payload.SourcePrincipalID || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != confirmationDraft.TaskID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID != confirmationDraft.CorrelationID || event.SchemaVersion != events.SchemaVersion {
+		return false
+	}
+	if !validReviewedOperatorIdentity(payload.SourcePrincipalID, payload.SourcePrincipalKind, payload.SourceChannel) {
+		return false
+	}
+	switch payload.RequestedExecutionKind {
+	case "", core.ExecutionDeterministic, core.ExecutionAgent, core.ExecutionHuman:
+		return true
+	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
+		return false
+	default:
+		return false
+	}
+}
+
+func validReviewedOperatorIdentity(id, kind, channel string) bool {
+	if id == "" {
+		return false
+	}
+	switch core.PrincipalKind(kind) {
+	case core.PrincipalHuman:
+		return channel == "HUMAN_DIRECT"
+	case core.PrincipalExternalAgent:
+		return channel == "A2A"
+	case core.PrincipalRuntime:
+		return false
+	default:
+		return false
+	}
 }
 
 func (l *SQLite) appendAddressed(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {
@@ -670,12 +1558,48 @@ func projectInbox(ctx context.Context, tx *sql.Tx, event events.Event) error {
 }
 
 func (l *SQLite) ObserveInbox(ctx context.Context, draft events.TrustedDraft, recipientScope, recipientID string, eventIDs []string) (events.Event, error) {
-	if draft.OrganizationID == "" || draft.RecipientScope != recipientScope || draft.RecipientID != recipientID || len(eventIDs) == 0 {
-		return events.Event{}, fmt.Errorf("observation organization and matching recipient are required")
+	var payload struct {
+		EventIDs []string `json:"event_ids"`
 	}
-	return l.appendWithProjection(ctx, draft, func(tx *sql.Tx, observation events.Event) error {
+	if draft.EventType != "INBOX_EVENTS_OBSERVED" || draft.OrganizationID == "" || draft.SourceActorID == "" || draft.SourceExecutionID == "" || draft.TaskID == "" || draft.CorrelationID == "" || draft.RecipientScope != recipientScope || draft.RecipientID != recipientID || len(eventIDs) == 0 || decodeExactJSON(draft.Payload, &payload) != nil || !slices.Equal(payload.EventIDs, eventIDs) {
+		return events.Event{}, fmt.Errorf("complete observation identity and matching recipient events are required")
+	}
+	distinct := make(map[string]struct{}, len(eventIDs))
+	for _, eventID := range eventIDs {
+		if eventID == "" {
+			return events.Event{}, fmt.Errorf("observation event ids must be non-empty")
+		}
+		distinct[eventID] = struct{}{}
+	}
+	if len(distinct) != len(eventIDs) {
+		return events.Event{}, fmt.Errorf("observation event ids must be distinct")
+	}
+	var observation events.Event
+	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		startEvent, err := resolveInboxObservationExecution(ctx, tx, draft, recipientScope, recipientID)
+		if err != nil {
+			return err
+		}
+		persisted := draft
+		persisted.Payload = events.InboxEventsObservedPayload{EventIDs: append([]string(nil), eventIDs...), ExecutionStartEventRef: startEvent.EventID}
+		observation, err = appendEvent(ctx, tx, persisted)
+		if err != nil {
+			return err
+		}
 		now := observation.CreatedAt.Format(time.RFC3339Nano)
+		var previousSequence int64
 		for _, eventID := range eventIDs {
+			var eventSequence int64
+			if err := tx.QueryRowContext(ctx, `SELECT addressed.sequence FROM inbox AS i JOIN events AS addressed ON addressed.event_id=i.event_id AND addressed.organization_id=i.organization_id AND addressed.recipient_scope=i.recipient_scope AND addressed.recipient_id=i.recipient_id WHERE i.organization_id=? AND i.recipient_scope=? AND i.recipient_id=? AND i.event_id=? AND i.observed_at=''`, draft.OrganizationID, recipientScope, recipientID, eventID).Scan(&eventSequence); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("inbox event %s is not available to recipient", eventID)
+				}
+				return fmt.Errorf("read inbox event %s: %w", eventID, err)
+			}
+			if eventSequence >= startEvent.Sequence || previousSequence > 0 && eventSequence <= previousSequence {
+				return fmt.Errorf("inbox event %s is outside the execution's ordered input boundary", eventID)
+			}
+			previousSequence = eventSequence
 			result, err := tx.ExecContext(ctx, `UPDATE inbox SET observed_at=?,observation_event_id=? WHERE organization_id=? AND recipient_scope=? AND recipient_id=? AND event_id=? AND observed_at=''`, now, observation.EventID, draft.OrganizationID, recipientScope, recipientID, eventID)
 			if err != nil {
 				return fmt.Errorf("observe inbox event %s: %w", eventID, err)
@@ -690,6 +1614,55 @@ func (l *SQLite) ObserveInbox(ctx context.Context, draft events.TrustedDraft, re
 		}
 		return nil
 	})
+	return observation, err
+}
+
+func resolveInboxObservationExecution(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft, recipientScope, recipientID string) (events.Event, error) {
+	body, found, err := latestRecordBody(ctx, tx, "task", draft.TaskID)
+	if err != nil {
+		return events.Event{}, fmt.Errorf("read inbox observation task: %w", err)
+	}
+	var record events.ProjectionRecord
+	var task core.Task
+	if !found || json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &task) != nil || record.ProjectionKind != "task" || record.RecordID != draft.TaskID || record.Version < 1 || record.CorrelationID != draft.CorrelationID || task.ID != core.ID(draft.TaskID) || task.ExecutionKind != core.ExecutionAgent || task.Status != core.TaskRunning || task.AssigneeID == "" || draft.SourceActorID != string(task.AssigneeID) || draft.SourceExecutionID != fmt.Sprintf("execution-%s-v%d", task.ID, record.Version) {
+		return events.Event{}, fmt.Errorf("inbox observation is not bound to a running Agent execution")
+	}
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? ORDER BY sequence`, draft.OrganizationID))
+	if err != nil {
+		return events.Event{}, fmt.Errorf("read inbox observation execution boundary: %w", err)
+	}
+	var startEvent events.Event
+	for _, event := range stream {
+		if event.EventType != "EXECUTION_STARTED" || event.OrganizationID != draft.OrganizationID || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != draft.TaskID || event.CorrelationID != draft.CorrelationID {
+			continue
+		}
+		var payload events.ProjectionEventPayload
+		if json.Unmarshal(event.Payload, &payload) != nil || !reflect.DeepEqual(payload.Projection, record) {
+			continue
+		}
+		if startEvent.EventID != "" {
+			return events.Event{}, fmt.Errorf("running Agent execution has multiple start transitions")
+		}
+		startEvent = event
+	}
+	if startEvent.EventID == "" {
+		return events.Event{}, fmt.Errorf("running Agent execution lacks its exact start transition")
+	}
+	var teamRevisions map[core.ID][]events.TeamRevisionBinding
+	if recipientScope == events.RecipientTeam {
+		teamBodies, err := collectRecordBodies(tx.QueryContext(ctx, `SELECT body FROM records WHERE kind='team' ORDER BY record_id,version`))
+		if err != nil {
+			return events.Event{}, fmt.Errorf("read inbox observation Team history: %w", err)
+		}
+		teamRevisions, err = events.ResolveTeamRevisionBindings(draft.OrganizationID, teamBodies, stream)
+		if err != nil {
+			return events.Event{}, fmt.Errorf("resolve inbox observation Team history: %w", err)
+		}
+	}
+	if !events.ExecutionRecipientAllowed(teamRevisions, task, startEvent.Sequence, recipientScope, recipientID) {
+		return events.Event{}, fmt.Errorf("inbox observation recipient is outside its running Agent execution")
+	}
+	return startEvent, nil
 }
 
 // appendWithProjection commits the authoritative event before its derived
@@ -744,6 +1717,64 @@ func (l *SQLite) Inbox(ctx context.Context, recipientScope, recipientID string) 
 FROM inbox i JOIN events e ON e.event_id=i.event_id
 WHERE i.recipient_scope=? AND i.recipient_id=? AND i.observed_at=''
 ORDER BY e.sequence`, recipientScope, recipientID))
+}
+
+func (l *SQLite) InboxObservations(ctx context.Context) (map[string]events.InboxObservationBinding, error) {
+	return inboxObservationBindings(ctx, l.db)
+}
+
+func inboxObservationBindings(ctx context.Context, queryer rowsQueryer) (map[string]events.InboxObservationBinding, error) {
+	rows, err := queryer.QueryContext(ctx, `SELECT i.observation_event_id,observation.payload,i.event_id
+FROM inbox AS i
+JOIN events AS addressed ON addressed.event_id=i.event_id
+  AND addressed.organization_id=i.organization_id
+  AND addressed.recipient_scope=i.recipient_scope
+  AND addressed.recipient_id=i.recipient_id
+JOIN events AS observation ON observation.event_id=i.observation_event_id
+  AND observation.event_type='INBOX_EVENTS_OBSERVED'
+  AND observation.organization_id=i.organization_id
+  AND observation.recipient_scope=i.recipient_scope
+  AND observation.recipient_id=i.recipient_id
+WHERE i.observation_event_id<>''
+ORDER BY i.observation_event_id,addressed.sequence`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	bindings := make(map[string]events.InboxObservationBinding)
+	payloads := make(map[string]events.InboxEventsObservedPayload)
+	for rows.Next() {
+		var observationEventID, eventID string
+		var body []byte
+		if err := rows.Scan(&observationEventID, &body, &eventID); err != nil {
+			return nil, err
+		}
+		var payload events.InboxEventsObservedPayload
+		if err := decodeExactJSONBytes(body, &payload); err != nil || payload.ExecutionStartEventRef == "" || len(payload.EventIDs) == 0 {
+			return nil, fmt.Errorf("inbox observation payload is invalid")
+		}
+		if prior, exists := payloads[observationEventID]; exists && !reflect.DeepEqual(prior, payload) {
+			return nil, fmt.Errorf("inbox observation payload is inconsistent")
+		}
+		payloads[observationEventID] = payload
+		binding := bindings[observationEventID]
+		if binding.ExecutionStartEventRef != "" && binding.ExecutionStartEventRef != payload.ExecutionStartEventRef {
+			return nil, fmt.Errorf("inbox observation execution binding is inconsistent")
+		}
+		binding.ExecutionStartEventRef = payload.ExecutionStartEventRef
+		binding.EventIDs = append(binding.EventIDs, eventID)
+		bindings[observationEventID] = binding
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for observationEventID, binding := range bindings {
+		payload := payloads[observationEventID]
+		if payload.ExecutionStartEventRef != binding.ExecutionStartEventRef || !slices.Equal(payload.EventIDs, binding.EventIDs) {
+			return nil, fmt.Errorf("inbox observation does not match its projected recipient events")
+		}
+	}
+	return bindings, nil
 }
 
 func collectEvents(rows *sql.Rows, err error) ([]events.Event, error) {

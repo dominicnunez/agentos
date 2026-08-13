@@ -3,11 +3,11 @@
 package projections
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"strings"
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
@@ -57,14 +57,35 @@ func (r *Repository) SaveOrganization(ctx context.Context, eventType, actorID, c
 }
 
 func (r *Repository) SaveMission(ctx context.Context, eventType, actorID, correlationID string, version int, value core.Mission, detail any) error {
+	if actorID != "runtime" || !validMissionEventType(eventType) {
+		return fmt.Errorf("mission revisions require a runtime-owned lifecycle event")
+	}
 	return r.save(ctx, string(value.OrganizationID), eventType, actorID, "", correlationID, KindMission, value.ID, version, value, detail)
 }
 
 func (r *Repository) SaveGoal(ctx context.Context, eventType, actorID, correlationID string, version int, value core.Goal, detail any) error {
+	if actorID != "runtime" || !validGoalEventType(eventType) {
+		return fmt.Errorf("goal revisions require a runtime-owned lifecycle event")
+	}
 	return r.save(ctx, string(value.OrganizationID), eventType, actorID, "", correlationID, KindGoal, value.ID, version, value, detail)
 }
 
+func validMissionEventType(eventType string) bool {
+	return eventType == "MISSION_CREATED" || eventType == "MISSION_REVISED" || eventType == "MISSION_RETIRED"
+}
+
+func validGoalEventType(eventType string) bool {
+	return eventType == "GOAL_CREATED" || eventType == "GOAL_REFINED" || eventType == "GOAL_PAUSED" || eventType == "GOAL_RESUMED" || eventType == "GOAL_RETIRED"
+}
+
 func (r *Repository) SaveTeam(ctx context.Context, eventType, actorID, correlationID string, version int, value core.Team, detail any) error {
+	expectedEventType := "TEAM_REVISED"
+	if version == 1 {
+		expectedEventType = "TEAM_CREATED"
+	}
+	if actorID != "runtime" || eventType != expectedEventType {
+		return fmt.Errorf("team revisions require the runtime-owned lifecycle event")
+	}
 	return r.save(ctx, string(value.OrganizationID), eventType, actorID, "", correlationID, KindTeam, value.ID, version, value, detail)
 }
 
@@ -85,11 +106,58 @@ func (r *Repository) SaveIntent(ctx context.Context, eventType, actorID, correla
 }
 
 func (r *Repository) SaveWork(ctx context.Context, organizationID core.ID, eventType, actorID, correlationID string, version int, value core.Work, detail any) error {
+	if value.Status == core.WorkCompleted || eventType == "WORK_COMPLETED" {
+		if value.Status != core.WorkCompleted || eventType != "WORK_COMPLETED" {
+			return fmt.Errorf("work completion requires its exact runtime-owned lifecycle event")
+		}
+		var evidence events.WorkCompletionTransitionPayload
+		encoded, err := json.Marshal(detail)
+		if err == nil {
+			decoder := json.NewDecoder(bytes.NewReader(encoded))
+			decoder.DisallowUnknownFields()
+			err = decoder.Decode(&evidence)
+		}
+		if err != nil {
+			return fmt.Errorf("completed work requires exact durable evidence")
+		}
+		return r.SaveCompletedWork(ctx, organizationID, actorID, correlationID, version, value, evidence)
+	}
+	validFailure := value.Status == core.WorkFailed && (eventType == "WORK_FAILED" || eventType == "WORK_PLANNING_FAILED")
+	if actorID != "runtime" || value.Status == core.WorkActive && eventType != "WORK_CREATED" || value.Status != core.WorkActive && !validFailure {
+		return fmt.Errorf("work revisions require the exact runtime-owned lifecycle event")
+	}
 	return r.save(ctx, string(organizationID), eventType, actorID, "", correlationID, KindWork, value.ID, version, value, detail)
+}
+
+func (r *Repository) SaveCompletedWork(ctx context.Context, organizationID core.ID, actorID, correlationID string, version int, value core.Work, detail events.WorkCompletionTransitionPayload) error {
+	if r == nil || r.gateway == nil || organizationID == "" || actorID != "runtime" || correlationID == "" || value.ID == "" || value.Status != core.WorkCompleted {
+		return fmt.Errorf("complete evidence-backed work transition is required")
+	}
+	_, err := r.gateway.PublishWorkCompletion(ctx, events.ProjectionDraft{
+		Event: events.TrustedDraft{
+			OrganizationID: string(organizationID), EventType: "WORK_COMPLETED", SourceActorID: actorID,
+			CorrelationID: correlationID, Payload: detail,
+		},
+		ProjectionKind: KindWork, RecordID: string(value.ID), Version: version, Value: value,
+	})
+	return err
 }
 
 func (r *Repository) SaveTask(ctx context.Context, organizationID core.ID, eventType, actorID, correlationID string, version int, value core.Task, detail any) error {
 	return r.save(ctx, string(organizationID), eventType, actorID, string(value.ID), correlationID, KindTask, value.ID, version, value, detail)
+}
+
+func (r *Repository) StartAgentExecution(ctx context.Context, organizationID core.ID, correlationID string, version int, value core.Task, mode string, routes []events.InboxRoute) (events.Event, []events.InboxSelection, error) {
+	if r == nil || r.gateway == nil || organizationID == "" || correlationID == "" || value.ID == "" || value.ExecutionKind != core.ExecutionAgent || value.Status != core.TaskRunning || version < 2 {
+		return events.Event{}, nil, fmt.Errorf("complete Agent execution-start projection is required")
+	}
+	return r.gateway.PublishExecutionStart(ctx, events.ProjectionDraft{
+		Event: events.TrustedDraft{
+			OrganizationID: string(organizationID), EventType: "EXECUTION_STARTED", SourceActorID: "runtime",
+			TaskID: string(value.ID), CorrelationID: correlationID, Payload: events.ExecutionStartDetail{Mode: mode},
+		},
+		ProjectionKind: KindTask, RecordID: string(value.ID), Version: version, Value: value,
+	}, routes)
 }
 
 // SaveNewTasks atomically creates a complete Task DAG. Every Task starts at
@@ -158,6 +226,29 @@ func (r *Repository) Load(ctx context.Context) (Snapshot, error) {
 	return r.loadFromRecords(ctx)
 }
 
+// ValidateCompletionAdmissions performs the full authoritative-chain audit
+// required before recovery mutates durable state. Routine scheduler loads use
+// the transactionally admitted records projection and do not replay unrelated
+// historical event streams.
+func (r *Repository) ValidateCompletionAdmissions(ctx context.Context, snapshot Snapshot) error {
+	if r == nil || r.gateway == nil {
+		return fmt.Errorf("durable projection gateway is required")
+	}
+	stream, err := r.gateway.Events(ctx, "")
+	if err != nil {
+		return err
+	}
+	teamRecords, err := r.gateway.ProjectionRecords(ctx, KindTeam, "")
+	if err != nil {
+		return err
+	}
+	inboxObservations, err := r.gateway.InboxObservations(ctx)
+	if err != nil {
+		return err
+	}
+	return validateWorkCompletionAdmissions(snapshot, stream, teamRecords, inboxObservations)
+}
+
 // Rebuild ignores the records table and deterministically replays projection
 // records embedded in the authoritative event stream.
 func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
@@ -184,7 +275,90 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 		kind := payload.Projection.ProjectionKind
 		records[kind] = append(records[kind], body)
 	}
-	return decodeSnapshot(records)
+	snapshot, err := decodeSnapshot(records)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	inboxObservations, err := r.gateway.InboxObservations(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if err := validateWorkCompletionAdmissions(snapshot, stream, records[KindTeam], inboxObservations); err != nil {
+		return Snapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func validateWorkCompletionAdmissions(snapshot Snapshot, stream []events.Event, teamRecords [][]byte, inboxObservations map[string]events.InboxObservationBinding) error {
+	for workID, state := range snapshot.Works {
+		if state.Value.Status != core.WorkCompleted {
+			continue
+		}
+		intent, ok := snapshot.Intents[state.Value.IntentID]
+		if !ok {
+			return fmt.Errorf("completed work %s references missing intent", workID)
+		}
+		var transition events.Event
+		var transitionDetail events.WorkCompletionTransitionPayload
+		for _, event := range stream {
+			if event.EventType != "WORK_COMPLETED" {
+				continue
+			}
+			var payload events.ProjectionEventPayload
+			var projected core.Work
+			var detail events.WorkCompletionTransitionPayload
+			if event.OrganizationID != string(intent.Value.OrganizationID) || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.TaskID != "" || event.CorrelationID != state.CorrelationID ||
+				json.Unmarshal(event.Payload, &payload) != nil || payload.Projection.ProjectionKind != KindWork || payload.Projection.RecordID != string(workID) || payload.Projection.Version != state.Version || payload.Projection.CorrelationID != state.CorrelationID ||
+				json.Unmarshal(payload.Projection.Value, &projected) != nil || !reflect.DeepEqual(projected, state.Value) || json.Unmarshal(payload.Detail, &detail) != nil || detail.EvidenceEventRef == "" || detail.Fingerprint == "" {
+				continue
+			}
+			if transition.EventID != "" {
+				return fmt.Errorf("completed work %s has multiple authoritative transitions", workID)
+			}
+			transition, transitionDetail = event, detail
+		}
+		if transition.EventID == "" {
+			return fmt.Errorf("completed work %s lacks an authoritative transition", workID)
+		}
+		var evidenceEvent events.Event
+		for _, event := range stream {
+			if event.EventID == transitionDetail.EvidenceEventRef {
+				evidenceEvent = event
+				break
+			}
+		}
+		if evidenceEvent.EventID == "" || evidenceEvent.Sequence >= transition.Sequence {
+			return fmt.Errorf("completed work %s lacks exact durable evidence", workID)
+		}
+		tasks := make([]events.WorkCompletionTaskBinding, 0)
+		for _, task := range snapshot.Tasks {
+			if task.Value.WorkID == workID {
+				tasks = append(tasks, events.WorkCompletionTaskBinding{Task: task.Value, Version: task.Version, CorrelationID: task.CorrelationID})
+			}
+		}
+		profiles := make(map[core.ID]core.ExecutionProfile, len(snapshot.ExecutionProfiles))
+		for profileID, profile := range snapshot.ExecutionProfiles {
+			profiles[profileID] = profile.Value
+		}
+		blueprints := make(map[core.ID]core.AgentBlueprint, len(snapshot.AgentBlueprints))
+		for blueprintID, blueprint := range snapshot.AgentBlueprints {
+			blueprints[blueprintID] = blueprint.Value
+		}
+		teamRevisions, err := events.ResolveTeamRevisionBindings(string(intent.Value.OrganizationID), teamRecords, stream)
+		if err != nil {
+			return fmt.Errorf("completed work %s has invalid Team history: %w", workID, err)
+		}
+		binding := events.WorkCompletionBinding{
+			OrganizationID: string(intent.Value.OrganizationID), CorrelationID: state.CorrelationID,
+			Work: state.Value, WorkVersion: state.Version, Intent: intent.Value, Tasks: tasks,
+			TeamRevisions: teamRevisions, InboxObservations: inboxObservations, AgentBlueprints: blueprints, ExecutionProfiles: profiles,
+		}
+		evidence, err := events.ValidateWorkCompletionEvidenceChain(binding, evidenceEvent, stream)
+		if err != nil || evidence.Fingerprint != transitionDetail.Fingerprint {
+			return fmt.Errorf("completed work %s lacks exact durable evidence", workID)
+		}
+	}
+	return nil
 }
 
 func (r *Repository) loadFromRecords(ctx context.Context) (Snapshot, error) {
@@ -289,59 +463,23 @@ func sameAgentBlueprintRecord(left, right core.AgentBlueprint) bool {
 }
 
 func sameMissionRecord(left, right core.Mission) bool {
-	if !validMissionValue(left) || !validMissionValue(right) || left.ID != right.ID || left.OrganizationID != right.OrganizationID || !left.CreatedAt.Equal(right.CreatedAt) {
-		return false
-	}
-	if left.Status == core.MissionRetired {
-		return reflect.DeepEqual(left, right)
-	}
-	if right.Status == core.MissionActive {
-		return true
-	}
-	transition := right.Status == core.MissionRetired
-	right.Status = left.Status
-	return transition && reflect.DeepEqual(left, right)
+	return core.ValidMissionRevision(left, right)
 }
 
 func sameGoalRecord(left, right core.Goal) bool {
-	if !validGoalValue(left) || !validGoalValue(right) || left.ID != right.ID || left.OrganizationID != right.OrganizationID || left.MissionID != right.MissionID || !left.CreatedAt.Equal(right.CreatedAt) {
-		return false
-	}
-	if left.Status == core.GoalRetired || left.Status == core.GoalAchieved {
-		return reflect.DeepEqual(left, right)
-	}
-	if left.Status == right.Status {
-		return true
-	}
-	transition := left.Status == core.GoalActive && (right.Status == core.GoalPaused || right.Status == core.GoalAchieved || right.Status == core.GoalRetired) ||
-		left.Status == core.GoalPaused && (right.Status == core.GoalActive || right.Status == core.GoalRetired)
-	right.Status = left.Status
-	return transition && reflect.DeepEqual(left, right)
+	return core.ValidGoalRevision(left, right)
 }
 
 func sameWorkRecord(left, right core.Work) bool {
-	transition := left.Status == right.Status || left.Status == core.WorkActive && (right.Status == core.WorkCompleted || right.Status == core.WorkFailed)
-	right.Status = left.Status
-	return transition && reflect.DeepEqual(left, right)
+	return core.ValidWorkRevision(left, right)
 }
 
 func validMissionValue(mission core.Mission) bool {
-	return mission.ID != "" && mission.OrganizationID != "" && strings.TrimSpace(mission.Statement) != "" &&
-		(mission.Status == core.MissionActive || mission.Status == core.MissionRetired)
+	return core.ValidMission(mission)
 }
 
 func validGoalValue(goal core.Goal) bool {
-	validMode := goal.Mode == core.GoalTarget || goal.Mode == core.GoalContinuous
-	validStatus := goal.Status == core.GoalActive || goal.Status == core.GoalPaused || goal.Status == core.GoalAchieved || goal.Status == core.GoalRetired
-	if goal.ID == "" || goal.OrganizationID == "" || goal.MissionID == "" || strings.TrimSpace(goal.Objective) == "" || len(goal.SuccessCriteria) == 0 || len(goal.SuccessCriteria) > 256 || !validMode || !validStatus || goal.Mode == core.GoalContinuous && goal.Status == core.GoalAchieved {
-		return false
-	}
-	for _, criterion := range goal.SuccessCriteria {
-		if strings.TrimSpace(criterion.Value) == "" || strings.TrimSpace(criterion.Origin) == "" {
-			return false
-		}
-	}
-	return true
+	return core.ValidGoal(goal)
 }
 
 func sameExecutionProfileRecord(left, right core.ExecutionProfile) bool {
@@ -423,6 +561,12 @@ func validateSnapshot(snapshot Snapshot) error {
 		intent, ok := snapshot.Intents[state.Value.IntentID]
 		if !ok {
 			return fmt.Errorf("work %s references missing intent %s", id, state.Value.IntentID)
+		}
+		if state.Value.GoalID != intent.Value.GoalID {
+			return fmt.Errorf("work %s does not match its accepted intent goal", id)
+		}
+		if state.Value.Objective != intent.Value.NormalizedObjective {
+			return fmt.Errorf("work %s does not match its accepted intent objective", id)
 		}
 		if state.CorrelationID == "" || intent.CorrelationID != state.CorrelationID {
 			return fmt.Errorf("work %s crosses its intent correlation boundary", id)
