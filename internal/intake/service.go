@@ -176,7 +176,7 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 		return View{}, err
 	}
 	initialIDMatches := initial.MessageID == message.MessageID
-	initialReplay := initialIDMatches && initial.Text == message.Text
+	initialReplay := initialIDMatches && initial.Text == message.Text && initial.RequestedKind == message.RequestedKind
 	if initialReplay && !principal.Allowed(CapabilityReadStatus) {
 		if !principal.Allowed(CapabilitySubmitWork) || !initial.matches(principal) {
 			return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
@@ -203,7 +203,7 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 		return View{}, err
 	}
 	if initialIDMatches && !initialReplay {
-		return View{}, fmt.Errorf("%w: initial message id is bound to different content", ErrConflict)
+		return View{}, fmt.Errorf("%w: initial message id is bound to different input", ErrConflict)
 	}
 	switch externalState(stream) {
 	case StateInputRequired:
@@ -793,8 +793,12 @@ func initialMessage(stream []events.Event) (initialWork, bool) {
 			if intent.SourceMessageID == "" || intent.OriginalInstruction == "" {
 				return initialWork{}, false
 			}
+			requestedKind, found := initialRequestedKind(stream, intent)
+			if intent.SourceChannel != "INTERNAL" && !found {
+				return initialWork{}, false
+			}
 			return initialWork{
-				Message:       Message{MessageID: intent.SourceMessageID, Text: intent.OriginalInstruction},
+				Message:       Message{MessageID: intent.SourceMessageID, Text: intent.OriginalInstruction, RequestedKind: requestedKind},
 				PrincipalID:   intent.SourcePrincipalID,
 				PrincipalKind: intent.SourcePrincipalKind,
 				Channel:       intent.SourceChannel,
@@ -802,6 +806,27 @@ func initialMessage(stream []events.Event) (initialWork, bool) {
 		}
 	}
 	return initialWork{}, false
+}
+
+func initialRequestedKind(stream []events.Event, intent core.Intent) (core.ExecutionKind, bool) {
+	found := false
+	requestedKind := core.ExecutionKind("")
+	for _, event := range stream {
+		if event.EventType != "INTAKE_MESSAGE_RECORDED" {
+			continue
+		}
+		var payload events.IntakeMessageRecordedPayload
+		if json.Unmarshal(event.Payload, &payload) != nil || payload.MessageID != intent.SourceMessageID {
+			continue
+		}
+		if found || event.SourceActorID != string(intent.SourcePrincipalID) || payload.Text != intent.OriginalInstruction ||
+			payload.SourcePrincipalID != string(intent.SourcePrincipalID) || payload.SourcePrincipalKind != string(intent.SourcePrincipalKind) || payload.SourceChannel != intent.SourceChannel {
+			return "", false
+		}
+		found = true
+		requestedKind = payload.RequestedExecutionKind
+	}
+	return requestedKind, found
 }
 
 func principalCanAccess(principal Principal, work initialWork) bool {

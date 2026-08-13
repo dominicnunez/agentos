@@ -306,6 +306,9 @@ func TestIntakeUsesDurableMessageIDsForContinuationAndReplayAuthorization(t *tes
 	if err != nil || view.State != StateInputRequired {
 		t.Fatalf("blocked work=%+v err=%v", view, err)
 	}
+	if _, err := service.Handle(ctx, human, Message{ConversationID: "same-text", MessageID: "initial-message", Text: repeatedText, RequestedKind: core.ExecutionAgent}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("confirmed initial replay changed its requested execution kind: %v", err)
+	}
 	view, err = service.Handle(ctx, externalAgent, Message{ConversationID: "same-text", TaskID: view.TaskID, MessageID: "continuation-message", Text: repeatedText})
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("same-text Agent continuation completed a user task: view=%+v err=%v", view, err)
