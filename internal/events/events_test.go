@@ -140,6 +140,39 @@ func TestGoalProjectionTransitionsAreExact(t *testing.T) {
 	}
 }
 
+func TestMissionProjectionTransitionsAreExact(t *testing.T) {
+	now := time.Now().UTC()
+	active := core.Mission{ID: "mission-1", OrganizationID: "org-1", Statement: "durable direction", Status: core.MissionActive, CreatedAt: now}
+	revised, retired := active, active
+	revised.Statement = "refined durable direction"
+	retired.Status = core.MissionRetired
+	for name, test := range map[string]struct {
+		eventType string
+		version   int
+		previous  *core.Mission
+		next      core.Mission
+		valid     bool
+	}{
+		"active creation":                {"MISSION_CREATED", 1, nil, active, true},
+		"active refinement":              {"MISSION_REVISED", 2, &active, revised, true},
+		"retirement":                     {"MISSION_RETIRED", 2, &active, retired, true},
+		"retirement label with active":   {"MISSION_RETIRED", 2, &active, active, false},
+		"revision label with retirement": {"MISSION_REVISED", 2, &active, retired, false},
+		"unchanged refinement":           {"MISSION_REVISED", 2, &active, active, false},
+		"revision without creation":      {"MISSION_REVISED", 2, nil, revised, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateMissionProjectionTransition(test.eventType, test.version, test.previous, test.next)
+			if test.valid && err != nil {
+				t.Fatalf("valid transition was rejected: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("invalid transition was accepted")
+			}
+		})
+	}
+}
+
 func TestWorkProjectionTransitionsAreExact(t *testing.T) {
 	active := core.Work{ID: "work-1", IntentID: "intent-1", Objective: "bounded work", Status: core.WorkActive, CreatedAt: time.Now().UTC()}
 	completed, failed := active, active

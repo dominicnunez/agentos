@@ -666,6 +666,47 @@ func TestRecoveryRejectsMislabeledWorkLifecycle(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsMislabeledMissionLifecycle(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	mission := core.Mission{ID: "mission-1", OrganizationID: organization.ID, Statement: "durable direction", Status: core.MissionActive, CreatedAt: now}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "mission-1"}, ProjectionKind: "mission", RecordID: string(mission.ID), Version: 1, Value: mission},
+	} {
+		if _, err := store.AppendProjection(ctx, draft); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	revised := mission
+	revised.Statement = "refined durable direction"
+	revisedEvent, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "MISSION_REVISED", SourceActorID: "runtime", CorrelationID: "mission-1"},
+		ProjectionKind: "mission", RecordID: string(mission.ID), Version: 2, Value: revised,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	payload, present, err := events.AdmittedProjection(revisedEvent)
+	if err != nil || !present {
+		_ = store.Close()
+		t.Fatalf("Mission revision admission is invalid: present=%t err=%v", present, err)
+	}
+	revisedEvent.EventType = "MISSION_RETIRED"
+	resealRecoveryProjection(t, ctx, store, path, revisedEvent, payload)
+	if _, err := Verify(ctx, path); err == nil {
+		t.Fatal("recovery verification accepted an ACTIVE Mission under MISSION_RETIRED")
+	}
+}
+
 func TestRecoveryRejectsCompletedWorkWithoutEvidence(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.db")

@@ -344,6 +344,7 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 	sequences := make(map[int64]struct{}, len(stream))
 	tasks := make(map[core.ID]Versioned[core.Task])
 	agents := make(map[core.ID]Versioned[core.Agent])
+	missions := make(map[core.ID]Versioned[core.Mission])
 	goals := make(map[core.ID]Versioned[core.Goal])
 	works := make(map[core.ID]Versioned[core.Work])
 	for _, event := range stream {
@@ -367,6 +368,8 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 				return fmt.Errorf("event %s: %w", event.EventID, err)
 			}
 			switch payload.Projection.ProjectionKind {
+			case KindMission:
+				err = validateProjectionEventLifecycle(event, payload.Projection, "Mission", missions, func(value core.Mission) core.ID { return value.ID }, false, events.ValidateMissionProjectionTransition)
 			case KindTask:
 				err = validateProjectionEventLifecycle(event, payload.Projection, "Task", tasks, func(value core.Task) core.ID { return value.ID }, true, events.ValidateTaskProjectionTransition)
 			case KindAgent:

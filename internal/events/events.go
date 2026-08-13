@@ -1657,6 +1657,15 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 	if !validProjectionEventType(record.ProjectionKind, record.Version, event.EventType) {
 		return fmt.Errorf("projection %s/%s/%d uses unsupported event %s", record.ProjectionKind, record.RecordID, record.Version, event.EventType)
 	}
+	if record.ProjectionKind == "mission" {
+		var mission core.Mission
+		if decodeExactEventJSON(record.Value, &mission) != nil || mission.ID != core.ID(record.RecordID) || string(mission.OrganizationID) != event.OrganizationID {
+			return fmt.Errorf("mission projection value is invalid")
+		}
+		if err := ValidateMissionProjectionTarget(event.EventType, record.Version, mission); err != nil {
+			return err
+		}
+	}
 	if record.ProjectionKind == "goal" {
 		var goal core.Goal
 		if decodeExactEventJSON(record.Value, &goal) != nil || goal.ID != core.ID(record.RecordID) || string(goal.OrganizationID) != event.OrganizationID {
@@ -1708,6 +1717,49 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 	}
 	if event.TaskID != "" || event.RecipientScope != "" || event.RecipientID != "" {
 		return fmt.Errorf("organizational projection uses a Task or recipient route")
+	}
+	return nil
+}
+
+// ValidateMissionProjectionTarget couples each Mission lifecycle label to its
+// only permitted materialized state.
+func ValidateMissionProjectionTarget(eventType string, version int, mission core.Mission) error {
+	if version < 1 || !core.ValidMission(mission) {
+		return fmt.Errorf("mission projection is incomplete")
+	}
+	valid := eventType == "MISSION_CREATED" && version == 1 && mission.Status == core.MissionActive ||
+		eventType == "MISSION_REVISED" && version > 1 && mission.Status == core.MissionActive ||
+		eventType == "MISSION_RETIRED" && version > 1 && mission.Status == core.MissionRetired
+	if !valid {
+		return fmt.Errorf("mission lifecycle event %s cannot materialize status %s at version %d", eventType, mission.Status, version)
+	}
+	return nil
+}
+
+// ValidateMissionProjectionTransition preserves one durable direction and
+// keeps active refinement distinct from terminal retirement.
+func ValidateMissionProjectionTransition(eventType string, version int, previous *core.Mission, next core.Mission) error {
+	if err := ValidateMissionProjectionTarget(eventType, version, next); err != nil {
+		return err
+	}
+	if previous == nil {
+		if version != 1 || eventType != "MISSION_CREATED" {
+			return fmt.Errorf("mission history must begin with creation at version one")
+		}
+		return nil
+	}
+	if version < 2 || !core.ValidMissionRevision(*previous, next) {
+		return fmt.Errorf("mission revision changes immutable identity, direction during retirement, or lifecycle order")
+	}
+	expected := ""
+	switch {
+	case previous.Status == core.MissionActive && next.Status == core.MissionActive && !reflect.DeepEqual(*previous, next):
+		expected = "MISSION_REVISED"
+	case previous.Status == core.MissionActive && next.Status == core.MissionRetired:
+		expected = "MISSION_RETIRED"
+	}
+	if expected == "" || eventType != expected {
+		return fmt.Errorf("mission lifecycle event %s does not match the exact state transition", eventType)
 	}
 	return nil
 }

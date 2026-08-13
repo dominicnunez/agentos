@@ -129,7 +129,7 @@ labels. Routine record reads, full startup audit, event-only rebuild, and
 backup/restore verification reject missing, copied, duplicated, malformed,
 cross-organization, or mismatched admission. Nonempty pre-admission projection
 schemas are unsupported pre-release state and fail closed rather than receiving
-an inferred compatibility migration. Agent, Goal, Work, and Task revisions
+an inferred compatibility migration. Agent, Mission, Goal, Work, and Task revisions
 additionally bind each lifecycle label to its exact prior and resulting status,
 and an Agent history must begin with its version-one creation. Completed Work
 must retain the exact verified Task evidence that authorized its transition.

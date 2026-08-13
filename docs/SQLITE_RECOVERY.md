@@ -45,8 +45,8 @@ pre-admission projection state, projection lifecycle events without typed
 admission, and materialized projections that do not match their authorizing
 event or durable Organization/Intent/Work relationship exactly. Task
 dependencies must resolve within one Work boundary and remain acyclic. Agent,
-Goal, Work, and Task lifecycle events must match their exact prior and resulting
-status, and Agent history must begin with version-one creation. Completed Work
+Mission, Goal, Work, and Task lifecycle events must match their exact prior and
+resulting status, and Agent history must begin with version-one creation. Completed Work
 must retain the exact verified Task evidence that authorized its transition,
 and achieved Goals must retain their exact atomic transition and authoritative
 progress evidence. Agent configuration changes remain distinct from activation

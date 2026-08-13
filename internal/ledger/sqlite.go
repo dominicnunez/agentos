@@ -1472,20 +1472,17 @@ func validateMissionRevision(ctx context.Context, tx *sql.Tx, item preparedProje
 	if !organizationFound || json.Unmarshal(organizationBody, &organizationRecord) != nil || json.Unmarshal(organizationRecord.Value, &organization) != nil || organizationRecord.ProjectionKind != "organization" || organizationRecord.RecordID != string(mission.OrganizationID) || organization.ID != mission.OrganizationID {
 		return fmt.Errorf("mission requires its durable parent organization")
 	}
-	return validateProjectionLifecycle(ctx, tx, item, "mission", mission,
-		func(value core.Mission) bool { return value.Status == core.MissionActive },
-		core.ValidMissionRevision, missionRevisionEvent,
-		"changes immutable identity, direction during retirement, or lifecycle order")
-}
-
-func missionRevisionEvent(previous, current core.Mission) string {
-	switch {
-	case previous.Status == current.Status && !reflect.DeepEqual(previous, current):
-		return "MISSION_REVISED"
-	case previous.Status == core.MissionActive && current.Status == core.MissionRetired:
-		return "MISSION_RETIRED"
+	record, previous, found, err := latestProjectionRevision[core.Mission](ctx, tx, "mission", item.draft.RecordID)
+	if err != nil {
+		return err
 	}
-	return ""
+	if !found {
+		return events.ValidateMissionProjectionTransition(item.draft.Event.EventType, item.draft.Version, nil, mission)
+	}
+	if item.draft.Version != record.Version+1 {
+		return fmt.Errorf("mission version %d follows %d", item.draft.Version, record.Version)
+	}
+	return events.ValidateMissionProjectionTransition(item.draft.Event.EventType, item.draft.Version, &previous, mission)
 }
 
 func validateGoalRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
@@ -1513,30 +1510,6 @@ func validateGoalRevision(ctx context.Context, tx *sql.Tx, item preparedProjecti
 		return fmt.Errorf("goal version %d follows %d", item.draft.Version, record.Version)
 	}
 	return events.ValidateGoalProjectionTransition(item.draft.Event.EventType, item.draft.Version, &previous, goal)
-}
-
-func validateProjectionLifecycle[T any](ctx context.Context, tx *sql.Tx, item preparedProjection, kind string, value T, activeCreation func(T) bool, validRevision func(T, T) bool, revisionEvent func(T, T) string, invalidRevision string) error {
-	record, previous, found, err := latestProjectionRevision[T](ctx, tx, kind, item.draft.RecordID)
-	if err != nil {
-		return err
-	}
-	if !found {
-		if item.draft.Version != 1 || !activeCreation(value) || item.draft.Event.EventType != strings.ToUpper(kind)+"_CREATED" {
-			return fmt.Errorf("%s creation must start active at version one with its exact lifecycle event", kind)
-		}
-		return nil
-	}
-	if item.draft.Version != record.Version+1 {
-		return fmt.Errorf("%s version %d follows %d", kind, item.draft.Version, record.Version)
-	}
-	if !validRevision(previous, value) {
-		return fmt.Errorf("%s revision %s", kind, invalidRevision)
-	}
-	expectedEventType := revisionEvent(previous, value)
-	if expectedEventType == "" || item.draft.Event.EventType != expectedEventType {
-		return fmt.Errorf("%s revision does not match its exact runtime-owned lifecycle event", kind)
-	}
-	return nil
 }
 
 func latestProjectionRevision[T any](ctx context.Context, tx *sql.Tx, kind, recordID string) (events.ProjectionRecord, T, bool, error) {

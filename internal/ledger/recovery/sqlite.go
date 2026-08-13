@@ -210,6 +210,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	lastProjectionSequences := map[string]int64{}
 	lastTasks := map[core.ID]core.Task{}
 	lastAgents := map[core.ID]core.Agent{}
+	lastMissions := map[core.ID]core.Mission{}
 	lastGoals := map[core.ID]core.Goal{}
 	lastWorks := map[core.ID]core.Work{}
 	for recordRows.Next() {
@@ -253,6 +254,8 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 		lastProjectionSequences[versionKey] = admission.event.Sequence
 		var transitionErr error
 		switch kind {
+		case "mission":
+			transitionErr = validateRecoveryLifecycle(record, admission.event.EventType, lastMissions, func(value core.Mission) core.ID { return value.ID }, events.ValidateMissionProjectionTransition)
 		case "task":
 			transitionErr = validateRecoveryLifecycle(record, admission.event.EventType, lastTasks, func(value core.Task) core.ID { return value.ID }, events.ValidateTaskProjectionTransition)
 		case "agent":
