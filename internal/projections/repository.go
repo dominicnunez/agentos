@@ -870,7 +870,7 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 	if err := decodeKind(records[KindTask], snapshot.Tasks, true, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode tasks: %w", err)
 	}
-	if err := validateSnapshot(snapshot); err != nil {
+	if err := ValidateSnapshot(snapshot); err != nil {
 		return Snapshot{}, err
 	}
 	return snapshot, nil
@@ -945,7 +945,10 @@ func sameAgentRecord(left, right core.Agent) bool {
 	return left.ID == right.ID && left.OrganizationID == right.OrganizationID
 }
 
-func validateSnapshot(snapshot Snapshot) error {
+// ValidateSnapshot applies the complete fail-closed projection graph contract.
+// Recovery uses the same validator so startup certification cannot drift from
+// routine materialization as the organizational model evolves.
+func ValidateSnapshot(snapshot Snapshot) error {
 	for id, state := range snapshot.Organizations {
 		if err := validateIdentity("organization", id, state.Value.ID); err != nil {
 			return err

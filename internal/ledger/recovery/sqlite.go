@@ -20,6 +20,7 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/projections"
 	"modernc.org/sqlite"
 )
 
@@ -198,6 +199,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	}
 	defer func() { _ = recordRows.Close() }()
 	used := map[string]struct{}{}
+	lastProjectionVersions := map[string]int{}
 	for recordRows.Next() {
 		var kind, recordID, admissionEventID, admissionFingerprint string
 		var version int
@@ -218,6 +220,12 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			}
 			continue
 		}
+		versionKey := kind + "\x00" + recordID
+		if version != lastProjectionVersions[versionKey]+1 {
+			_ = recordRows.Close()
+			return fmt.Errorf("projection record %s/%s version %d is not contiguous", kind, recordID, version)
+		}
+		lastProjectionVersions[versionKey] = version
 		admission, found := admitted[admissionEventID]
 		payload := admission.payload
 		var record events.ProjectionRecord
@@ -248,13 +256,20 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 }
 
 func validateProjectionOrganizationBindings(admitted map[string]admittedProjectionEvent) error {
-	organizations := map[core.ID]struct{}{}
+	snapshot := projections.Snapshot{
+		Organizations:     map[core.ID]projections.Versioned[core.Organization]{},
+		Missions:          map[core.ID]projections.Versioned[core.Mission]{},
+		Goals:             map[core.ID]projections.Versioned[core.Goal]{},
+		Teams:             map[core.ID]projections.Versioned[core.Team]{},
+		AgentBlueprints:   map[core.ID]projections.Versioned[core.AgentBlueprint]{},
+		ExecutionProfiles: map[core.ID]projections.Versioned[core.ExecutionProfile]{},
+		Agents:            map[core.ID]projections.Versioned[core.Agent]{},
+		Intents:           map[core.ID]projections.Versioned[core.Intent]{},
+		Works:             map[core.ID]projections.Versioned[core.Work]{},
+		Tasks:             map[core.ID]projections.Versioned[core.Task]{},
+	}
 	directOrganizations := map[string]core.ID{}
-	missionOrganizations := map[core.ID]core.ID{}
-	goalOrganizations := map[core.ID]core.ID{}
-	goalMissions := map[core.ID]core.ID{}
-	intentOrganizations := map[core.ID]core.ID{}
-	workIntents := map[core.ID]core.ID{}
+
 	for _, admission := range admitted {
 		event, record := admission.event, admission.payload.Projection
 		var organizationID core.ID
@@ -265,56 +280,69 @@ func validateProjectionOrganizationBindings(admitted map[string]admittedProjecti
 				return fmt.Errorf("event %s contains an invalid Organization projection", event.EventID)
 			}
 			organizationID = value.ID
-			organizations[value.ID] = struct{}{}
+			setRecoveryProjection(snapshot.Organizations, record, value)
 		case "mission":
 			var value core.Mission
-			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID || bindRecoveryReference(missionOrganizations, value.ID, value.OrganizationID) != nil {
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Mission projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
+			setRecoveryProjection(snapshot.Missions, record, value)
 		case "goal":
 			var value core.Goal
-			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID || bindRecoveryReference(goalOrganizations, value.ID, value.OrganizationID) != nil || bindRecoveryReference(goalMissions, value.ID, value.MissionID) != nil {
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Goal projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
+			setRecoveryProjection(snapshot.Goals, record, value)
 		case "team":
 			var value core.Team
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Team projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
+			setRecoveryProjection(snapshot.Teams, record, value)
 		case "agent_blueprint":
 			var value core.AgentBlueprint
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Agent blueprint projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
+			setRecoveryProjection(snapshot.AgentBlueprints, record, value)
 		case "execution_profile":
 			var value core.ExecutionProfile
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid execution profile projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
+			setRecoveryProjection(snapshot.ExecutionProfiles, record, value)
 		case "agent":
 			var value core.Agent
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Agent projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
+			setRecoveryProjection(snapshot.Agents, record, value)
 		case "intent":
 			var value core.Intent
-			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID || bindRecoveryReference(intentOrganizations, value.ID, value.OrganizationID) != nil {
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Intent projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
+			setRecoveryProjection(snapshot.Intents, record, value)
 		case "work":
 			var value core.Work
-			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID || bindRecoveryReference(workIntents, value.ID, value.IntentID) != nil {
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Work projection", event.EventID)
 			}
+			setRecoveryProjection(snapshot.Works, record, value)
 			continue
 		case "task":
+			var value core.Task
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
+				return fmt.Errorf("event %s contains an invalid Task projection", event.EventID)
+			}
+			setRecoveryProjection(snapshot.Tasks, record, value)
 			continue
 		default:
 			return fmt.Errorf("event %s contains unsupported projection kind %s", event.EventID, record.ProjectionKind)
@@ -324,17 +352,14 @@ func validateProjectionOrganizationBindings(admitted map[string]admittedProjecti
 		}
 		directOrganizations[event.EventID] = organizationID
 	}
+
 	for eventID, organizationID := range directOrganizations {
-		if _, found := organizations[organizationID]; !found {
+		if _, found := snapshot.Organizations[organizationID]; !found {
 			return fmt.Errorf("event %s projection references a missing Organization", eventID)
 		}
 	}
-	for goalID, missionID := range goalMissions {
-		goalOrganizationID := goalOrganizations[goalID]
-		missionOrganizationID, found := missionOrganizations[missionID]
-		if !found || missionOrganizationID != goalOrganizationID {
-			return fmt.Errorf("goal %s references a missing or cross-organization Mission %s", goalID, missionID)
-		}
+	if err := projections.ValidateSnapshot(snapshot); err != nil {
+		return err
 	}
 	for _, admission := range admitted {
 		event, record := admission.event, admission.payload.Projection
@@ -345,13 +370,16 @@ func validateProjectionOrganizationBindings(admitted map[string]admittedProjecti
 			if decodeExactJSON(record.Value, &value) != nil {
 				return fmt.Errorf("event %s contains an invalid Work projection", event.EventID)
 			}
-			organizationID = intentOrganizations[value.IntentID]
+			organizationID = snapshot.Intents[value.IntentID].Value.OrganizationID
 		case "task":
 			var value core.Task
-			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
+			if decodeExactJSON(record.Value, &value) != nil {
 				return fmt.Errorf("event %s contains an invalid Task projection", event.EventID)
 			}
-			organizationID = intentOrganizations[workIntents[value.WorkID]]
+			work, found := snapshot.Works[value.WorkID]
+			if found {
+				organizationID = snapshot.Intents[work.Value.IntentID].Value.OrganizationID
+			}
 		default:
 			continue
 		}
@@ -362,15 +390,11 @@ func validateProjectionOrganizationBindings(admitted map[string]admittedProjecti
 	return nil
 }
 
-func bindRecoveryReference(target map[core.ID]core.ID, id, reference core.ID) error {
-	if id == "" || reference == "" {
-		return fmt.Errorf("projection reference is incomplete")
+func setRecoveryProjection[T any](target map[core.ID]projections.Versioned[T], record events.ProjectionRecord, value T) {
+	id := core.ID(record.RecordID)
+	if current, found := target[id]; !found || record.Version > current.Version {
+		target[id] = projections.Versioned[T]{Version: record.Version, CorrelationID: record.CorrelationID, Value: value}
 	}
-	if previous, exists := target[id]; exists && previous != reference {
-		return fmt.Errorf("projection reference changed")
-	}
-	target[id] = reference
-	return nil
 }
 
 func sqliteBytes(value any) ([]byte, error) {

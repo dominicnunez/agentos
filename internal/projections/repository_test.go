@@ -210,7 +210,7 @@ func TestSnapshotRejectsCrossBoundaryTaskGraph(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			snapshot := validBoundarySnapshot()
 			mutate(snapshot)
-			if err := validateSnapshot(snapshot); err == nil {
+			if err := ValidateSnapshot(snapshot); err == nil {
 				t.Fatal("cross-boundary graph was accepted")
 			}
 		})
@@ -222,7 +222,7 @@ func TestSnapshotRejectsUnknownWorkStatus(t *testing.T) {
 	work := snapshot.Works["work-1"]
 	work.Value.Status = "UNKNOWN"
 	snapshot.Works["work-1"] = work
-	if err := validateSnapshot(snapshot); err == nil {
+	if err := ValidateSnapshot(snapshot); err == nil {
 		t.Fatal("unknown Work status was accepted")
 	}
 }
@@ -314,7 +314,7 @@ func TestMissionGoalWorkHierarchyIsTenantBounded(t *testing.T) {
 	intent := snapshot.Intents["intent-1"]
 	intent.Value.GoalID = "goal-1"
 	snapshot.Intents["intent-1"] = intent
-	if err := validateSnapshot(snapshot); err != nil {
+	if err := ValidateSnapshot(snapshot); err != nil {
 		t.Fatalf("valid Mission > Goal > Work hierarchy was rejected: %v", err)
 	}
 
@@ -334,7 +334,7 @@ func TestMissionGoalWorkHierarchyIsTenantBounded(t *testing.T) {
 	work = crossTenant.Works["work-1"]
 	work.Value.GoalID = "goal-2"
 	crossTenant.Works["work-1"] = work
-	if err := validateSnapshot(crossTenant); err == nil {
+	if err := ValidateSnapshot(crossTenant); err == nil {
 		t.Fatal("cross-organization Goal and Work linkage was accepted")
 	}
 
@@ -346,7 +346,7 @@ func TestMissionGoalWorkHierarchyIsTenantBounded(t *testing.T) {
 	intent = mismatched.Intents["intent-1"]
 	intent.Value.GoalID = ""
 	mismatched.Intents["intent-1"] = intent
-	if err := validateSnapshot(mismatched); err == nil {
+	if err := ValidateSnapshot(mismatched); err == nil {
 		t.Fatal("Work Goal differed from its accepted Intent Goal")
 	}
 
@@ -359,7 +359,7 @@ func TestMissionGoalWorkHierarchyIsTenantBounded(t *testing.T) {
 	achieved.Value.Mode = core.GoalContinuous
 	achieved.Value.Status = core.GoalAchieved
 	bareAchievement.Goals["goal-1"] = achieved
-	if err := validateSnapshot(bareAchievement); err == nil {
+	if err := ValidateSnapshot(bareAchievement); err == nil {
 		t.Fatal("continuous Goal was accepted as terminally achieved")
 	}
 }
@@ -592,7 +592,7 @@ func TestSnapshotRejectsMalformedDurableRoster(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			snapshot := validRosterSnapshot()
 			mutate(snapshot)
-			if err := validateSnapshot(snapshot); err == nil {
+			if err := ValidateSnapshot(snapshot); err == nil {
 				t.Fatal("malformed durable roster was accepted")
 			}
 		})
@@ -617,7 +617,7 @@ func TestSnapshotRejectsMalformedPinnedAgentConfiguration(t *testing.T) {
 			snapshot.Intents[intent.ID] = Versioned[core.Intent]{CorrelationID: "work-1", Value: intent}
 			snapshot.Works[work.ID] = Versioned[core.Work]{CorrelationID: "work-1", Value: work}
 			snapshot.Tasks[task.ID] = Versioned[core.Task]{CorrelationID: "work-1", Value: task}
-			if err := validateSnapshot(snapshot); err == nil {
+			if err := ValidateSnapshot(snapshot); err == nil {
 				t.Fatal("malformed pinned Agent configuration was accepted")
 			}
 		})
