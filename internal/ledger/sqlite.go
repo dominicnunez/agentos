@@ -2367,6 +2367,17 @@ func appendProjectionEvent(ctx context.Context, db sqlExecutor, draft events.Tru
 	if err != nil {
 		return events.Event{}, events.ProjectionEventPayload{}, fmt.Errorf("encode projection event: %w", err)
 	}
+	event.Payload = data
+	admitted, present, err := events.AdmittedProjection(event)
+	if err != nil {
+		return events.Event{}, events.ProjectionEventPayload{}, fmt.Errorf("validate sealed projection event: %w", err)
+	}
+	if !present || !reflect.DeepEqual(admitted, payload) {
+		return events.Event{}, events.ProjectionEventPayload{}, fmt.Errorf("sealed projection event changed during serialization")
+	}
+	if err := events.ValidateProjectionEventBoundary(event, admitted); err != nil {
+		return events.Event{}, events.ProjectionEventPayload{}, fmt.Errorf("validate sealed projection boundary: %w", err)
+	}
 	result, err := db.ExecContext(ctx, `UPDATE events SET payload=? WHERE event_id=? AND sequence=?`, data, event.EventID, event.Sequence)
 	if err != nil {
 		return events.Event{}, events.ProjectionEventPayload{}, fmt.Errorf("seal projection event: %w", err)
@@ -2375,7 +2386,6 @@ func appendProjectionEvent(ctx context.Context, db sqlExecutor, draft events.Tru
 	if err != nil || updated != 1 {
 		return events.Event{}, events.ProjectionEventPayload{}, fmt.Errorf("seal projection event boundary")
 	}
-	event.Payload = data
 	return event, payload, nil
 }
 

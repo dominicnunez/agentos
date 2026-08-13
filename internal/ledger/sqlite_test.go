@@ -28,7 +28,7 @@ func TestExternalWorkIndexMigratesLegacyCorrelation(t *testing.T) {
 	agent := core.Agent{ID: "agent-local-org-1", OrganizationID: organization.ID, BlueprintVersion: "v1-local-worker", ExecutionProfileVersion: "v1-fake", RuntimeAdapter: "local", Status: "ACTIVE"}
 	intent := core.Intent{ID: "intent-legacy-request", OrganizationID: organization.ID, OriginalInstruction: "echo legacy", NormalizedObjective: "echo legacy", SourcePrincipalID: "agent-1", SourcePrincipalKind: core.PrincipalExternalAgent, SourceChannel: "A2A", SourceMessageID: "message-1", CreatedAt: now}
 	work := core.Work{ID: "work-legacy-request", IntentID: intent.ID, Objective: intent.OriginalInstruction, Status: "COMPLETED", CreatedAt: now}
-	task := core.Task{ID: "task-legacy-request", WorkID: work.ID, Description: intent.OriginalInstruction, ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskCompleted}
+	task := core.Task{ID: "task-legacy-request", WorkID: work.ID, Description: intent.OriginalInstruction, ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
 	for _, projection := range []struct {
 		eventType, kind, recordID, taskID string
 		value                             any
@@ -37,7 +37,7 @@ func TestExternalWorkIndexMigratesLegacyCorrelation(t *testing.T) {
 		{"AGENT_CREATED", "agent", string(agent.ID), "", agent},
 		{"INTENT_CREATED", "intent", string(intent.ID), "", intent},
 		{"WORK_CREATED", "work", string(work.ID), "", work},
-		{"TASK_VERIFIED_COMPLETE", "task", string(task.ID), string(task.ID), task},
+		{"TASK_CREATED", "task", string(task.ID), string(task.ID), task},
 	} {
 		if err := insertLegacyProjection(context.Background(), legacy, projection.eventType, projection.kind, projection.recordID, projection.taskID, projection.value); err != nil {
 			t.Fatal(err)
@@ -347,6 +347,46 @@ func TestProjectionWriterRejectsInvalidBoundaryBeforePersistence(t *testing.T) {
 	records, err := store.Records(ctx, "organization", "org-1")
 	if err != nil || len(records) != 0 {
 		t.Fatalf("invalid projection boundary materialized state: records=%d err=%v", len(records), err)
+	}
+}
+
+func TestProjectionWriterRejectsMalformedSealedJSONBeforePersistence(t *testing.T) {
+	for name, draft := range map[string]events.ProjectionDraft{
+		"projection value": {
+			Event: events.TrustedDraft{
+				OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup-1",
+			},
+			ProjectionKind: "organization", RecordID: "org-1", Version: 1,
+			Value: json.RawMessage(`{"id":"org-1","id":"org-2"}`),
+		},
+		"projection detail": {
+			Event: events.TrustedDraft{
+				OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup-1",
+				Payload: json.RawMessage(`{"reason":"one","reason":"two"}`),
+			},
+			ProjectionKind: "organization", RecordID: "org-1", Version: 1,
+			Value: core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: time.Now().UTC()},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			if _, err := store.AppendProjection(ctx, draft); err == nil {
+				t.Fatalf("projection writer accepted malformed %s", name)
+			}
+			stream, err := store.Events(ctx, "")
+			if err != nil || len(stream) != 0 {
+				t.Fatalf("malformed %s changed ledger: events=%d err=%v", name, len(stream), err)
+			}
+			records, err := store.Records(ctx, "organization", "org-1")
+			if err != nil || len(records) != 0 {
+				t.Fatalf("malformed %s materialized state: records=%d err=%v", name, len(records), err)
+			}
+		})
 	}
 }
 
