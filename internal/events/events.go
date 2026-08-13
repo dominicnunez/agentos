@@ -1660,7 +1660,7 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 	if record.ProjectionKind == "agent" {
 		var agent core.Agent
 		if decodeExactEventJSON(record.Value, &agent) != nil || agent.ID != core.ID(record.RecordID) || string(agent.OrganizationID) != event.OrganizationID {
-			return fmt.Errorf("Agent projection value is invalid")
+			return fmt.Errorf("agent projection value is invalid")
 		}
 		if err := ValidateAgentProjectionTarget(event.EventType, record.Version, agent); err != nil {
 			return err
@@ -1698,27 +1698,27 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 // that label is permitted to materialize.
 func ValidateAgentProjectionTarget(eventType string, version int, agent core.Agent) error {
 	if version < 1 || !core.ValidAgent(agent) {
-		return fmt.Errorf("Agent projection is incomplete")
+		return fmt.Errorf("agent projection is incomplete")
 	}
 	switch eventType {
 	case "AGENT_CREATED":
 		if version != 1 || agent.Status != "ACTIVE" {
-			return fmt.Errorf("Agent creation must start ACTIVE at version one")
+			return fmt.Errorf("agent creation must start ACTIVE at version one")
 		}
 	case "AGENT_CONFIGURATION_UPDATED":
 		if version < 2 {
-			return fmt.Errorf("Agent configuration update requires an existing Agent")
+			return fmt.Errorf("agent configuration update requires an existing Agent")
 		}
 	case "AGENT_DEACTIVATED":
 		if version < 2 || agent.Status != "INACTIVE" {
-			return fmt.Errorf("Agent deactivation must materialize INACTIVE state")
+			return fmt.Errorf("agent deactivation must materialize INACTIVE state")
 		}
 	case "AGENT_REACTIVATED":
 		if version < 2 || agent.Status != "ACTIVE" {
-			return fmt.Errorf("Agent reactivation must materialize ACTIVE state")
+			return fmt.Errorf("agent reactivation must materialize ACTIVE state")
 		}
 	default:
-		return fmt.Errorf("Agent projection uses unsupported lifecycle event %s", eventType)
+		return fmt.Errorf("agent projection uses unsupported lifecycle event %s", eventType)
 	}
 	return nil
 }
@@ -1733,7 +1733,7 @@ func ValidateAgentProjectionTransition(eventType string, version int, previous *
 		return nil
 	}
 	if !core.ValidAgentRevision(*previous, next) {
-		return fmt.Errorf("Agent revision changes immutable identity or organization")
+		return fmt.Errorf("agent revision changes immutable identity or organization")
 	}
 	configurationChanged := previous.BlueprintID != next.BlueprintID || previous.BlueprintVersion != next.BlueprintVersion ||
 		previous.ExecutionProfileID != next.ExecutionProfileID || previous.ExecutionProfileVersion != next.ExecutionProfileVersion ||
@@ -1748,7 +1748,7 @@ func ValidateAgentProjectionTransition(eventType string, version int, previous *
 		valid = previous.Status == "INACTIVE" && next.Status == "ACTIVE" && !configurationChanged
 	}
 	if !valid {
-		return fmt.Errorf("Agent lifecycle event %s does not match its configuration and status transition", eventType)
+		return fmt.Errorf("agent lifecycle event %s does not match its configuration and status transition", eventType)
 	}
 	return nil
 }

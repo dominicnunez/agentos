@@ -1103,10 +1103,10 @@ func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProj
 func validateAgentRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
 	agent := *item.agent
 	if agent.ID != core.ID(item.draft.RecordID) || string(agent.OrganizationID) != item.draft.Event.OrganizationID || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" || item.draft.Event.RecipientScope != "" || item.draft.Event.RecipientID != "" {
-		return fmt.Errorf("Agent projection crosses its runtime-owned lifecycle boundary")
+		return fmt.Errorf("agent projection crosses its runtime-owned lifecycle boundary")
 	}
 	if err := validateRosterParentOrganization(ctx, tx, agent.OrganizationID); err != nil {
-		return fmt.Errorf("Agent: %w", err)
+		return fmt.Errorf("agent: %w", err)
 	}
 	if err := validateAgentConfigurationBinding(ctx, tx, agent); err != nil {
 		return err
@@ -1117,15 +1117,15 @@ func validateAgentRevision(ctx context.Context, tx *sql.Tx, item preparedProject
 	}
 	if !found {
 		if err := events.ValidateAgentProjectionTransition(item.draft.Event.EventType, item.draft.Version, nil, agent); err != nil {
-			return fmt.Errorf("Agent creation: %w", err)
+			return fmt.Errorf("agent creation: %w", err)
 		}
 		return nil
 	}
 	if item.draft.Version != record.Version+1 {
-		return fmt.Errorf("Agent version %d follows %d", item.draft.Version, record.Version)
+		return fmt.Errorf("agent version %d follows %d", item.draft.Version, record.Version)
 	}
 	if err := events.ValidateAgentProjectionTransition(item.draft.Event.EventType, item.draft.Version, &previous, agent); err != nil {
-		return fmt.Errorf("Agent revision: %w", err)
+		return fmt.Errorf("agent revision: %w", err)
 	}
 	return nil
 }
@@ -1138,7 +1138,7 @@ func validateAgentConfigurationBinding(ctx context.Context, tx *sql.Tx, agent co
 	var blueprintRecord events.ProjectionRecord
 	var blueprint core.AgentBlueprint
 	if !blueprintFound || decodeExactJSONBytes(blueprintBody, &blueprintRecord) != nil || decodeExactJSONBytes(blueprintRecord.Value, &blueprint) != nil || blueprintRecord.ProjectionKind != "agent_blueprint" || blueprint.ID != agent.BlueprintID || blueprint.OrganizationID != agent.OrganizationID || blueprint.Version != agent.BlueprintVersion {
-		return fmt.Errorf("Agent references an invalid pinned blueprint")
+		return fmt.Errorf("agent references an invalid pinned blueprint")
 	}
 	profileBody, profileFound, err := latestRecordBody(ctx, tx, "execution_profile", string(agent.ExecutionProfileID))
 	if err != nil {
@@ -1147,7 +1147,7 @@ func validateAgentConfigurationBinding(ctx context.Context, tx *sql.Tx, agent co
 	var profileRecord events.ProjectionRecord
 	var profile core.ExecutionProfile
 	if !profileFound || decodeExactJSONBytes(profileBody, &profileRecord) != nil || decodeExactJSONBytes(profileRecord.Value, &profile) != nil || profileRecord.ProjectionKind != "execution_profile" || profile.ID != agent.ExecutionProfileID || profile.OrganizationID != agent.OrganizationID || profile.Version != agent.ExecutionProfileVersion {
-		return fmt.Errorf("Agent references an invalid pinned execution profile")
+		return fmt.Errorf("agent references an invalid pinned execution profile")
 	}
 	return nil
 }
