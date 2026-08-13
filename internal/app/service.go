@@ -2564,7 +2564,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	complete := s.completion.Evaluate(contract, outcome)
 	detail := completionDetail{Contract: contract, Result: complete}
 	if complete.Complete {
-		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "COMPLETION_VERIFIED", TaskID: string(task.ID), Payload: detail, CorrelationID: state.CorrelationID}); err != nil {
+		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "COMPLETION_VERIFIED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: detail, CorrelationID: state.CorrelationID}); err != nil {
 			return taskRun{}, fmt.Errorf("persist completion verification for task %s: %w", task.ID, err)
 		}
 		task.Status = core.TaskCompleted
@@ -2683,6 +2683,11 @@ type completionDetail struct {
 	JudgmentRef string                  `json:"judgment_ref,omitempty"`
 }
 
+type goalCompletionDetail struct {
+	EvidenceEventRef string `json:"evidence_event_ref"`
+	Fingerprint      string `json:"fingerprint"`
+}
+
 func (s *Service) reconcileGoals(ctx context.Context) error {
 	snapshot, err := s.state.Load(ctx)
 	if err != nil {
@@ -2696,6 +2701,19 @@ func (s *Service) reconcileGoals(ctx context.Context) error {
 	for _, goalID := range goalIDs {
 		state := snapshot.Goals[goalID]
 		if state.Value.Status != "ACTIVE" {
+			if state.Value.Status == "COMPLETED" {
+				intent, ok := snapshot.Intents[state.Value.IntentID]
+				if !ok {
+					return fmt.Errorf("completed goal %s references missing intent %s", goalID, state.Value.IntentID)
+				}
+				stream, err := s.gateway.Events(ctx, state.CorrelationID)
+				if err != nil {
+					return fmt.Errorf("load completed Goal evidence for goal %s: %w", goalID, err)
+				}
+				if err := validateCompletedGoal(stream, snapshot, state, intent.Value); err != nil {
+					return fmt.Errorf("validate completed Goal %s: %w", goalID, err)
+				}
+			}
 			continue
 		}
 		hasTasks := false
@@ -2727,6 +2745,22 @@ func (s *Service) reconcileGoals(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("load run telemetry source for goal %s: %w", goalID, err)
 		}
+		var goalDetail any
+		if allComplete {
+			plan, err := goalCompletionPlan(stream, intent.Value, correlationID)
+			if err != nil {
+				return fmt.Errorf("validate terminal plan for goal %s: %w", goalID, err)
+			}
+			taskEvidence, err := completedGoalTaskEvidence(stream, snapshot, goalID, intent.Value.OrganizationID, correlationID, plan)
+			if err != nil {
+				return fmt.Errorf("aggregate verified Task evidence for goal %s: %w", goalID, err)
+			}
+			evidenceEvent, evidenceRecord, err := s.ensureGoalCompletionEvidence(ctx, stream, state, intent.Value, plan, taskEvidence)
+			if err != nil {
+				return fmt.Errorf("persist Goal completion evidence for goal %s: %w", goalID, err)
+			}
+			goalDetail = goalCompletionDetail{EvidenceEventRef: evidenceEvent.EventID, Fingerprint: evidenceRecord.Fingerprint}
+		}
 		recordedRun, telemetryRecorded, err := telemetry.Recorded(stream)
 		if err != nil {
 			return fmt.Errorf("validate recorded run telemetry for goal %s: %w", goalID, err)
@@ -2749,11 +2783,219 @@ func (s *Service) reconcileGoals(ctx context.Context) error {
 			goalEventType = "GOAL_FAILED"
 			goal.Status = "FAILED"
 		}
-		if err := s.state.SaveGoal(ctx, intent.Value.OrganizationID, goalEventType, "runtime", correlationID, state.Version+1, goal, nil); err != nil {
+		if err := s.state.SaveGoal(ctx, intent.Value.OrganizationID, goalEventType, "runtime", correlationID, state.Version+1, goal, goalDetail); err != nil {
 			return fmt.Errorf("persist terminal goal %s: %w", goalID, err)
 		}
 	}
 	return nil
+}
+
+func goalCompletionPlan(stream []events.Event, intent core.Intent, correlationID string) (core.Plan, error) {
+	var recorded core.Plan
+	for _, event := range stream {
+		if event.EventType != "PLAN_CREATED" {
+			continue
+		}
+		if recorded.ID != "" {
+			return core.Plan{}, fmt.Errorf("run contains multiple terminal plans")
+		}
+		if event.OrganizationID != string(intent.OrganizationID) || event.SourceActorID != "runtime" || event.CorrelationID != correlationID || event.TaskID != "task-"+correlationID || event.SourceExecutionID != "" && event.SourceExecutionID != "planning-plan-"+correlationID+"-attempt-1" {
+			return core.Plan{}, fmt.Errorf("terminal plan event crosses its trust boundary")
+		}
+		if err := json.Unmarshal(event.Payload, &recorded); err != nil {
+			return core.Plan{}, fmt.Errorf("decode terminal plan: %w", err)
+		}
+	}
+	if recorded.ID != core.ID("plan-"+correlationID) || recorded.IntentID != intent.ID || recorded.IntentFingerprint != intent.AcceptedFingerprint || recorded.Version != 1 || recorded.CreatedAt.IsZero() {
+		return core.Plan{}, fmt.Errorf("terminal plan does not bind the accepted Intent")
+	}
+	fingerprint, err := core.FingerprintPlan(recorded)
+	if err != nil || recorded.Fingerprint == "" || recorded.Fingerprint != fingerprint {
+		return core.Plan{}, fmt.Errorf("terminal plan fingerprint is invalid")
+	}
+	return recorded, nil
+}
+
+func completedGoalTaskEvidence(stream []events.Event, snapshot projections.Snapshot, goalID, organizationID core.ID, correlationID string, plan core.Plan) ([]completion.GoalTaskEvidence, error) {
+	expectedIDs := planTaskIDs(correlationID, plan)
+	states := make(map[core.ID]projections.Versioned[core.Task], len(expectedIDs))
+	for id, state := range snapshot.Tasks {
+		if state.Value.GoalID == goalID {
+			states[id] = state
+		}
+	}
+	if len(states) != len(expectedIDs) {
+		return nil, fmt.Errorf("terminal Task set does not match the immutable Plan")
+	}
+	ids := make([]core.ID, 0, len(expectedIDs))
+	for _, id := range expectedIDs {
+		state, ok := states[id]
+		if !ok || state.Value.Status != core.TaskCompleted || state.CorrelationID != correlationID {
+			return nil, fmt.Errorf("planned Task %s lacks a terminal verified projection", id)
+		}
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	result := make([]completion.GoalTaskEvidence, 0, len(ids))
+	for _, id := range ids {
+		evidence, err := completedTaskEvidence(stream, states[id], organizationID)
+		if err != nil {
+			return nil, fmt.Errorf("Task %s: %w", id, err)
+		}
+		result = append(result, evidence)
+	}
+	return result, nil
+}
+
+func completedTaskEvidence(stream []events.Event, state projections.Versioned[core.Task], organizationID core.ID) (completion.GoalTaskEvidence, error) {
+	var completionEvent events.Event
+	var completionRecord completionDetail
+	for _, event := range stream {
+		if event.EventType != "TASK_VERIFIED_COMPLETE" || event.TaskID != string(state.Value.ID) {
+			continue
+		}
+		if completionEvent.EventID != "" {
+			return completion.GoalTaskEvidence{}, fmt.Errorf("multiple authoritative completion transitions")
+		}
+		var payload events.ProjectionEventPayload
+		var projected core.Task
+		if event.OrganizationID != string(organizationID) || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.CorrelationID != state.CorrelationID ||
+			json.Unmarshal(event.Payload, &payload) != nil || payload.Projection.ProjectionKind != projections.KindTask || payload.Projection.RecordID != string(state.Value.ID) || payload.Projection.Version != state.Version ||
+			payload.Projection.CorrelationID != state.CorrelationID || json.Unmarshal(payload.Projection.Value, &projected) != nil || !reflect.DeepEqual(projected, state.Value) || json.Unmarshal(payload.Detail, &completionRecord) != nil {
+			return completion.GoalTaskEvidence{}, fmt.Errorf("completion transition crosses its durable Task boundary")
+		}
+		if !completionRecord.Result.Complete || completionRecord.Contract.TaskID != state.Value.ID {
+			return completion.GoalTaskEvidence{}, fmt.Errorf("completion transition lacks a satisfied runtime contract")
+		}
+		completionEvent = event
+	}
+	if completionEvent.EventID == "" {
+		return completion.GoalTaskEvidence{}, fmt.Errorf("authoritative completion transition is missing")
+	}
+
+	var verificationEvent events.Event
+	for _, event := range stream {
+		if event.EventType != "COMPLETION_VERIFIED" || event.TaskID != string(state.Value.ID) {
+			continue
+		}
+		var detail completionDetail
+		if event.OrganizationID != string(organizationID) || event.SourceActorID != "runtime" || event.CorrelationID != state.CorrelationID || event.Sequence >= completionEvent.Sequence || json.Unmarshal(event.Payload, &detail) != nil || !reflect.DeepEqual(detail, completionRecord) {
+			continue
+		}
+		if verificationEvent.EventID != "" {
+			return completion.GoalTaskEvidence{}, fmt.Errorf("multiple completion verifications match the terminal transition")
+		}
+		verificationEvent = event
+	}
+	if verificationEvent.EventID == "" {
+		return completion.GoalTaskEvidence{}, fmt.Errorf("trusted completion verification is missing")
+	}
+	if !distinctStrings(verificationEvent.ArtifactRefs) {
+		return completion.GoalTaskEvidence{}, fmt.Errorf("completion verification contains invalid artifact refs")
+	}
+	return completion.GoalTaskEvidence{
+		TaskID: state.Value.ID, TaskVersion: state.Version,
+		VerificationEventRef: verificationEvent.EventID, CompletionEventRef: completionEvent.EventID,
+		ArtifactRefs: append([]string(nil), verificationEvent.ArtifactRefs...),
+	}, nil
+}
+
+func (s *Service) ensureGoalCompletionEvidence(ctx context.Context, stream []events.Event, state projections.Versioned[core.Goal], intent core.Intent, plan core.Plan, tasks []completion.GoalTaskEvidence) (events.Event, completion.GoalEvidence, error) {
+	recordedEvent, recorded, err := recordedGoalCompletionEvidence(stream, intent.OrganizationID, state.CorrelationID)
+	if err != nil {
+		return events.Event{}, completion.GoalEvidence{}, err
+	}
+	if recordedEvent.EventID != "" {
+		if !recorded.MatchesCurrent(state.Value, state.Version+1, intent, plan, tasks) {
+			return events.Event{}, completion.GoalEvidence{}, fmt.Errorf("durable Goal completion evidence conflicts with current state")
+		}
+		return recordedEvent, recorded, nil
+	}
+	record, err := completion.NewGoalEvidence(state.Value, state.Version+1, intent, plan, tasks, time.Now().UTC())
+	if err != nil {
+		return events.Event{}, completion.GoalEvidence{}, err
+	}
+	event, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: string(intent.OrganizationID), EventType: "GOAL_COMPLETION_EVALUATED", SourceActorID: "runtime",
+		ArtifactRefs: record.ArtifactRefs, Payload: record, CorrelationID: state.CorrelationID,
+	})
+	if err != nil {
+		return events.Event{}, completion.GoalEvidence{}, err
+	}
+	return event, record, nil
+}
+
+func recordedGoalCompletionEvidence(stream []events.Event, organizationID core.ID, correlationID string) (events.Event, completion.GoalEvidence, error) {
+	var recordedEvent events.Event
+	var recorded completion.GoalEvidence
+	for _, event := range stream {
+		if event.EventType != "GOAL_COMPLETION_EVALUATED" {
+			continue
+		}
+		if recordedEvent.EventID != "" {
+			return events.Event{}, completion.GoalEvidence{}, fmt.Errorf("multiple Goal completion evidence records")
+		}
+		if event.OrganizationID != string(organizationID) || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.TaskID != "" || event.CorrelationID != correlationID || json.Unmarshal(event.Payload, &recorded) != nil || !recorded.Valid() || !slices.Equal(event.ArtifactRefs, recorded.ArtifactRefs) {
+			return events.Event{}, completion.GoalEvidence{}, fmt.Errorf("durable Goal completion evidence is invalid")
+		}
+		recordedEvent = event
+	}
+	return recordedEvent, recorded, nil
+}
+
+func validateCompletedGoal(stream []events.Event, snapshot projections.Snapshot, state projections.Versioned[core.Goal], intent core.Intent) error {
+	plan, err := goalCompletionPlan(stream, intent, state.CorrelationID)
+	if err != nil {
+		return err
+	}
+	tasks, err := completedGoalTaskEvidence(stream, snapshot, state.Value.ID, intent.OrganizationID, state.CorrelationID, plan)
+	if err != nil {
+		return err
+	}
+	evidenceEvent, evidence, err := recordedGoalCompletionEvidence(stream, intent.OrganizationID, state.CorrelationID)
+	if err != nil {
+		return err
+	}
+	if evidenceEvent.EventID == "" || !evidence.MatchesCurrent(state.Value, state.Version, intent, plan, tasks) {
+		return fmt.Errorf("Goal completion evidence is missing or stale")
+	}
+	var transition events.Event
+	for _, event := range stream {
+		if event.EventType != "GOAL_COMPLETED" {
+			continue
+		}
+		var payload events.ProjectionEventPayload
+		var projected core.Goal
+		var detail goalCompletionDetail
+		if event.OrganizationID != string(intent.OrganizationID) || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.TaskID != "" || event.CorrelationID != state.CorrelationID ||
+			json.Unmarshal(event.Payload, &payload) != nil || payload.Projection.ProjectionKind != projections.KindGoal || payload.Projection.RecordID != string(state.Value.ID) || payload.Projection.Version != state.Version ||
+			payload.Projection.CorrelationID != state.CorrelationID || json.Unmarshal(payload.Projection.Value, &projected) != nil || !reflect.DeepEqual(projected, state.Value) || json.Unmarshal(payload.Detail, &detail) != nil ||
+			detail.EvidenceEventRef != evidenceEvent.EventID || detail.Fingerprint != evidence.Fingerprint || evidenceEvent.Sequence >= event.Sequence {
+			continue
+		}
+		if transition.EventID != "" {
+			return fmt.Errorf("multiple authoritative Goal completion transitions")
+		}
+		transition = event
+	}
+	if transition.EventID == "" {
+		return fmt.Errorf("authoritative Goal completion transition is missing")
+	}
+	return nil
+}
+
+func distinctStrings(values []string) bool {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value == "" {
+			return false
+		}
+		if _, exists := seen[value]; exists {
+			return false
+		}
+		seen[value] = struct{}{}
+	}
+	return true
 }
 
 func (s *Service) readTaskResult(ctx context.Context, correlationID string, taskID core.ID) (taskRun, error) {

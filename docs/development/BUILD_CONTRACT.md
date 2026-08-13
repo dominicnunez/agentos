@@ -154,6 +154,14 @@ lookup errors, unknown or malformed status, missing evidence, and attempt drift
 leave the obligation explicitly `ATTEMPTED` for operator resolution. No
 production effect adapter or blind resend path is enabled.
 
+Before a Goal can enter `COMPLETED`, the runtime records one fingerprinted
+`GOAL_COMPLETION_EVALUATED` contract. It binds the exact confirmed Intent
+fingerprint, immutable Plan revision, accepted completion criteria, every
+`TASK_VERIFIED_COMPLETE` projection, its preceding runtime
+`COMPLETION_VERIFIED` event, and the aggregated Artifact references. Recovery
+revalidates that evidence and the `GOAL_COMPLETED` transition; worker-authored
+result or candidate-completion content cannot substitute for it.
+
 Terminal work records one typed `RUN_TELEMETRY_RECORDED` Event Contract before
 the goal enters `COMPLETED` or `FAILED`. The telemetry module deterministically
 projects every Task in the run's authoritative Event Contract stream into

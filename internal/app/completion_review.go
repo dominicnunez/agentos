@@ -263,7 +263,7 @@ func (s *Service) continueCompletionReview(ctx context.Context, request completi
 			return err
 		}
 		if !verified {
-			if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(request.OrganizationID), EventType: "COMPLETION_VERIFIED", SourceActorID: "runtime", TaskID: string(request.TaskID), Payload: detail, CorrelationID: state.CorrelationID}); err != nil {
+			if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(request.OrganizationID), EventType: "COMPLETION_VERIFIED", SourceActorID: "runtime", TaskID: string(request.TaskID), ArtifactRefs: outcome.ArtifactRefs, Payload: detail, CorrelationID: state.CorrelationID}); err != nil {
 				return fmt.Errorf("persist reviewed completion verification: %w", err)
 			}
 		}

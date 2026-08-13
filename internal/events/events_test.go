@@ -57,6 +57,7 @@ func TestAgentCannotMintTrustedStateEvents(t *testing.T) {
 		"INBOX_EVENTS_OBSERVED",
 		"COMPLETION_VERIFIED",
 		"TASK_VERIFIED_COMPLETE",
+		"GOAL_COMPLETION_EVALUATED",
 		"RUN_TELEMETRY_RECORDED",
 	}
 	for _, eventType := range trustedOnly {
