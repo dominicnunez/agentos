@@ -110,6 +110,9 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	if err := verifyProjectionAdmissions(ctx, db); err != nil {
 		return Result{}, err
 	}
+	if err := ledgerstore.ValidateWorkCompletionAdmissions(ctx, db); err != nil {
+		return Result{}, err
+	}
 	if err := ledgerstore.ValidateGoalAchievementAdmissions(ctx, db); err != nil {
 		return Result{}, err
 	}
@@ -208,6 +211,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	lastTasks := map[core.ID]core.Task{}
 	lastAgents := map[core.ID]core.Agent{}
 	lastGoals := map[core.ID]core.Goal{}
+	lastWorks := map[core.ID]core.Work{}
 	for recordRows.Next() {
 		var kind, recordID, admissionEventID, admissionFingerprint string
 		var version int
@@ -255,6 +259,8 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			transitionErr = validateRecoveryLifecycle(record, admission.event.EventType, lastAgents, func(value core.Agent) core.ID { return value.ID }, events.ValidateAgentProjectionTransition)
 		case "goal":
 			transitionErr = validateRecoveryLifecycle(record, admission.event.EventType, lastGoals, func(value core.Goal) core.ID { return value.ID }, events.ValidateGoalProjectionTransition)
+		case "work":
+			transitionErr = validateRecoveryLifecycle(record, admission.event.EventType, lastWorks, func(value core.Work) core.ID { return value.ID }, events.ValidateWorkProjectionTransition)
 		}
 		if transitionErr != nil {
 			_ = recordRows.Close()

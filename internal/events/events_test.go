@@ -140,6 +140,39 @@ func TestGoalProjectionTransitionsAreExact(t *testing.T) {
 	}
 }
 
+func TestWorkProjectionTransitionsAreExact(t *testing.T) {
+	active := core.Work{ID: "work-1", IntentID: "intent-1", Objective: "bounded work", Status: core.WorkActive, CreatedAt: time.Now().UTC()}
+	completed, failed := active, active
+	completed.Status = core.WorkCompleted
+	failed.Status = core.WorkFailed
+	for name, test := range map[string]struct {
+		eventType string
+		version   int
+		previous  *core.Work
+		next      core.Work
+		valid     bool
+	}{
+		"active creation":                 {"WORK_CREATED", 1, nil, active, true},
+		"completion":                      {"WORK_COMPLETED", 2, &active, completed, true},
+		"execution failure":               {"WORK_FAILED", 2, &active, failed, true},
+		"planning failure":                {"WORK_PLANNING_FAILED", 2, &active, failed, true},
+		"failure label with active state": {"WORK_FAILED", 2, &active, active, false},
+		"completion label with failure":   {"WORK_COMPLETED", 2, &active, failed, false},
+		"terminal state reopened":         {"WORK_FAILED", 3, &completed, failed, false},
+		"revision without creation":       {"WORK_FAILED", 2, nil, failed, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateWorkProjectionTransition(test.eventType, test.version, test.previous, test.next)
+			if test.valid && err != nil {
+				t.Fatalf("valid transition was rejected: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("invalid transition was accepted")
+			}
+		})
+	}
+}
+
 func TestHumanCompletionRejectsEnvelopeArtifactsAbsentFromSubmission(t *testing.T) {
 	contract := core.StructuredUserCompletionContract("task-1")
 	task := WorkCompletionTaskBinding{Task: core.Task{

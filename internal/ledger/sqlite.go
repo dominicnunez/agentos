@@ -560,6 +560,125 @@ ORDER BY record_id`)
 	return nil
 }
 
+// ValidateWorkCompletionAdmissions certifies that every current completed
+// Work projection retains one exact transition and its authoritative evidence
+// chain. Recovery calls this against its read-only SQLite connection.
+func ValidateWorkCompletionAdmissions(ctx context.Context, db *sql.DB) (finalErr error) {
+	if ctx == nil || db == nil {
+		return fmt.Errorf("work completion validation requires a database and context")
+	}
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("begin Work completion validation: %w", err)
+	}
+	defer func() {
+		if tx != nil {
+			finalErr = errors.Join(finalErr, tx.Rollback())
+		}
+	}()
+	rows, err := tx.QueryContext(ctx, `SELECT body FROM records AS current
+WHERE kind='work' AND version=(SELECT MAX(version) FROM records AS latest WHERE latest.kind=current.kind AND latest.record_id=current.record_id)
+ORDER BY record_id`)
+	if err != nil {
+		return fmt.Errorf("read current Work admissions: %w", err)
+	}
+	defer func() {
+		finalErr = errors.Join(finalErr, rows.Close())
+	}()
+	type completedWork struct {
+		record events.ProjectionRecord
+		work   core.Work
+	}
+	completed := make([]completedWork, 0)
+	for rows.Next() {
+		var body []byte
+		var candidate completedWork
+		if err := rows.Scan(&body); err != nil || decodeExactJSONBytes(body, &candidate.record) != nil || decodeExactJSONBytes(candidate.record.Value, &candidate.work) != nil || candidate.record.ProjectionKind != "work" || candidate.record.RecordID != string(candidate.work.ID) {
+			return fmt.Errorf("current Work admission is invalid")
+		}
+		if candidate.work.Status == core.WorkCompleted {
+			completed = append(completed, candidate)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate current Work admissions: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close current Work admissions: %w", err)
+	}
+	for _, candidate := range completed {
+		matches, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE event_type='WORK_COMPLETED' AND json_extract(payload,'$.projection.projection_kind')='work' AND json_extract(payload,'$.projection.record_id')=? AND json_extract(payload,'$.projection.version')=? ORDER BY sequence LIMIT 2`, candidate.record.RecordID, candidate.record.Version))
+		if err != nil {
+			return fmt.Errorf("read completed Work %s transition: %w", candidate.work.ID, err)
+		}
+		if len(matches) != 1 {
+			return fmt.Errorf("completed Work %s lacks one exact transition", candidate.work.ID)
+		}
+		transition := matches[0]
+		payload, present, err := events.AdmittedProjection(transition)
+		var detail events.WorkCompletionTransitionPayload
+		if err != nil || !present || !reflect.DeepEqual(payload.Projection, candidate.record) || decodeExactJSONBytes(payload.Detail, &detail) != nil || detail.EvidenceEventRef == "" || detail.Fingerprint == "" {
+			return fmt.Errorf("completed Work %s transition is invalid", candidate.work.ID)
+		}
+		item, err := prepareProjection(events.ProjectionDraft{
+			Event: events.TrustedDraft{
+				OrganizationID: transition.OrganizationID, EventType: transition.EventType, SourceActorID: transition.SourceActorID,
+				SourceExecutionID: transition.SourceExecutionID, RecipientScope: transition.RecipientScope, RecipientID: transition.RecipientID,
+				TaskID: transition.TaskID, AuthorizationRefs: transition.AuthorizationRefs, ArtifactRefs: transition.ArtifactRefs,
+				CorrelationID: transition.CorrelationID, Payload: detail,
+			},
+			ProjectionKind: "work", RecordID: string(candidate.work.ID), Version: candidate.record.Version, Value: candidate.work,
+		}, true, false)
+		if err != nil {
+			return fmt.Errorf("completed Work %s transition cannot be prepared: %w", candidate.work.ID, err)
+		}
+		if err := validateHistoricalPriorActiveWork(ctx, tx, item); err != nil {
+			return fmt.Errorf("completed Work %s lacks its exact prior state: %w", candidate.work.ID, err)
+		}
+		if err := validateWorkCompletionEvidence(ctx, tx, item, detail); err != nil {
+			return fmt.Errorf("completed Work %s lacks exact durable evidence: %w", candidate.work.ID, err)
+		}
+		evidenceEvent, err := scanEvent(tx.QueryRowContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_id=?`, detail.EvidenceEventRef))
+		if err != nil || evidenceEvent.Sequence >= transition.Sequence {
+			return fmt.Errorf("completed Work %s evidence does not precede its transition", candidate.work.ID)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("complete Work completion validation: %w", err)
+	}
+	tx = nil
+	return nil
+}
+
+func validateHistoricalPriorActiveWork(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+	if item.work == nil || item.draft.Version < 2 {
+		return fmt.Errorf("completed Work requires a prior revision")
+	}
+	var body []byte
+	if err := tx.QueryRowContext(ctx, `SELECT body FROM records WHERE kind='work' AND record_id=? AND version=?`, item.draft.RecordID, item.draft.Version-1).Scan(&body); err != nil {
+		return fmt.Errorf("read prior completed Work revision: %w", err)
+	}
+	var record events.ProjectionRecord
+	var prior core.Work
+	if decodeExactJSONBytes(body, &record) != nil || decodeExactJSONBytes(record.Value, &prior) != nil {
+		return fmt.Errorf("prior completed Work revision is malformed")
+	}
+	if record.ProjectionKind != "work" || record.RecordID != item.draft.RecordID || record.Version != item.draft.Version-1 {
+		return fmt.Errorf("prior completed Work revision has mismatched identity")
+	}
+	if record.CorrelationID != item.draft.Event.CorrelationID {
+		return fmt.Errorf("prior completed Work revision crosses its correlation boundary")
+	}
+	if prior.Status != core.WorkActive {
+		return fmt.Errorf("prior completed Work revision is not active")
+	}
+	if err := events.ValidateWorkProjectionTransition("WORK_COMPLETED", item.draft.Version, &prior, *item.work); err != nil {
+		return fmt.Errorf("completed Work transition is invalid: %w", err)
+	}
+	return nil
+}
+
 func currentGoalRevision(ctx context.Context, tx *sql.Tx, organizationID string, goalID core.ID) (events.ProjectionRecord, core.Goal, error) {
 	body, found, err := latestRecordBody(ctx, tx, "goal", string(goalID))
 	if err != nil {
@@ -1320,35 +1439,23 @@ func validateTaskWorkBinding(ctx context.Context, tx *sql.Tx, item preparedProje
 
 func validateWorkRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
 	work := *item.work
-	if work.ID != core.ID(item.draft.RecordID) || !core.ValidWork(work) || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" || item.draft.Event.RecipientScope != "" || item.draft.Event.RecipientID != "" {
+	if work.ID != core.ID(item.draft.RecordID) || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" || item.draft.Event.RecipientScope != "" || item.draft.Event.RecipientID != "" {
 		return fmt.Errorf("work projection is incomplete or crosses its runtime-owned lifecycle boundary")
 	}
-	body, found, err := latestRecordBody(ctx, tx, "work", item.draft.RecordID)
+	record, previous, found, err := latestProjectionRevision[core.Work](ctx, tx, "work", item.draft.RecordID)
 	if err != nil {
-		return fmt.Errorf("read prior work revision: %w", err)
+		return err
 	}
 	if !found {
-		if item.draft.Version != 1 || work.Status != core.WorkActive || item.draft.Event.EventType != "WORK_CREATED" {
-			return fmt.Errorf("work creation must start active at version one with its exact lifecycle event")
-		}
-		return nil
+		return events.ValidateWorkProjectionTransition(item.draft.Event.EventType, item.draft.Version, nil, work)
 	}
-	var record events.ProjectionRecord
-	var previous core.Work
-	if json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &previous) != nil || record.ProjectionKind != "work" || record.RecordID != item.draft.RecordID || record.Version < 1 || record.CorrelationID == "" || record.CorrelationID != item.draft.Event.CorrelationID {
+	if record.CorrelationID == "" || record.CorrelationID != item.draft.Event.CorrelationID {
 		return fmt.Errorf("prior work revision is invalid or crosses its correlation boundary")
 	}
 	if item.draft.Version != record.Version+1 {
 		return fmt.Errorf("work version %d follows %d", item.draft.Version, record.Version)
 	}
-	if !core.ValidWorkRevision(previous, work) {
-		return fmt.Errorf("work revision changes immutable identity or reopens terminal state")
-	}
-	validFailure := previous.Status == core.WorkActive && work.Status == core.WorkFailed && (item.draft.Event.EventType == "WORK_FAILED" || item.draft.Event.EventType == "WORK_PLANNING_FAILED")
-	if work.Status != core.WorkCompleted && !validFailure {
-		return fmt.Errorf("work revision does not match its exact runtime-owned lifecycle event")
-	}
-	return nil
+	return events.ValidateWorkProjectionTransition(item.draft.Event.EventType, item.draft.Version, &previous, work)
 }
 
 func validateMissionRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {

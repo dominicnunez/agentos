@@ -129,10 +129,11 @@ labels. Routine record reads, full startup audit, event-only rebuild, and
 backup/restore verification reject missing, copied, duplicated, malformed,
 cross-organization, or mismatched admission. Nonempty pre-admission projection
 schemas are unsupported pre-release state and fail closed rather than receiving
-an inferred compatibility migration. Agent, Goal, and Task revisions additionally
-bind each lifecycle label to its exact prior and resulting status, and an Agent
-history must begin with its version-one creation. Agent configuration updates
-cannot masquerade as activation changes. Task creation validates the complete
+an inferred compatibility migration. Agent, Goal, Work, and Task revisions
+additionally bind each lifecycle label to its exact prior and resulting status,
+and an Agent history must begin with its version-one creation. Completed Work
+must retain the exact verified Task evidence that authorized its transition.
+Agent configuration updates cannot masquerade as activation changes. Task creation validates the complete
 post-batch graph before commit while allowing references within that batch. Task revisions preserve the
 immutable planned and assigned contract, retain one Work/correlation boundary,
 form an acyclic dependency graph, and route a blocked child only to its durable

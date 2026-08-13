@@ -44,7 +44,7 @@ func TestExternalWorkIndexMigratesLegacyCorrelation(t *testing.T) {
 	organization := core.Organization{ID: "org-1", Name: "org-1", PolicyVersion: "v1", CreatedAt: now}
 	agent := core.Agent{ID: "agent-local-org-1", OrganizationID: organization.ID, BlueprintID: "blueprint-local-org-1", BlueprintVersion: "v1-local-worker", ExecutionProfileID: "profile-local-org-1", ExecutionProfileVersion: "v1-fake", RuntimeAdapter: "local", Status: "ACTIVE"}
 	intent := core.Intent{ID: "intent-legacy-request", OrganizationID: organization.ID, OriginalInstruction: "echo legacy", NormalizedObjective: "echo legacy", SourcePrincipalID: "agent-1", SourcePrincipalKind: core.PrincipalExternalAgent, SourceChannel: "A2A", SourceMessageID: "message-1", CreatedAt: now}
-	work := core.Work{ID: "work-legacy-request", IntentID: intent.ID, Objective: intent.OriginalInstruction, Status: "COMPLETED", CreatedAt: now}
+	work := core.Work{ID: "work-legacy-request", IntentID: intent.ID, Objective: intent.OriginalInstruction, Status: core.WorkActive, CreatedAt: now}
 	task := core.Task{ID: "task-legacy-request", WorkID: work.ID, Description: intent.OriginalInstruction, ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
 	for _, projection := range []struct {
 		eventType, kind, recordID, taskID string
@@ -1203,7 +1203,7 @@ func TestGoalProgressWitnessSelectionCrossesFormerEvidenceWindow(t *testing.T) {
 				return err
 			}
 			workID := core.ID(correlationID)
-			workValue, err := json.Marshal(core.Work{ID: workID, GoalID: goal.ID, Status: core.WorkCompleted})
+			workValue, err := json.Marshal(core.Work{ID: workID, IntentID: "intent-1", GoalID: goal.ID, Objective: "bounded evidence", Status: core.WorkCompleted})
 			if err != nil {
 				return err
 			}

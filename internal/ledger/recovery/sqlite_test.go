@@ -628,6 +628,139 @@ func TestRecoveryRejectsMislabeledGoalLifecycle(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsMislabeledWorkLifecycle(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _ = appendRecoveryProjectionChain(t, ctx, store); t.Failed() {
+		_ = store.Close()
+		return
+	}
+	failed := recoveryCurrentWork(t, ctx, store)
+	failed.Status = core.WorkFailed
+	failedEvent, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_FAILED", SourceActorID: "runtime", CorrelationID: "work-1"},
+		ProjectionKind: "work", RecordID: "work-1", Version: 2, Value: failed,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	payload, present, err := events.AdmittedProjection(failedEvent)
+	if err != nil || !present {
+		_ = store.Close()
+		t.Fatalf("Work failure admission is invalid: present=%t err=%v", present, err)
+	}
+	failed.Status = core.WorkActive
+	payload.Projection.Value, err = json.Marshal(failed)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	resealRecoveryProjection(t, ctx, store, path, failedEvent, payload)
+	if _, err := Verify(ctx, path); err == nil {
+		t.Fatal("recovery verification accepted ACTIVE Work state under WORK_FAILED")
+	}
+}
+
+func TestRecoveryRejectsCompletedWorkWithoutEvidence(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _ = appendRecoveryProjectionChain(t, ctx, store); t.Failed() {
+		_ = store.Close()
+		return
+	}
+	work := recoveryCurrentWork(t, ctx, store)
+	work.Status = core.WorkFailed
+	failedEvent, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_FAILED", SourceActorID: "runtime", CorrelationID: "work-1"},
+		ProjectionKind: "work", RecordID: "work-1", Version: 2, Value: work,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	payload, present, err := events.AdmittedProjection(failedEvent)
+	if err != nil || !present {
+		_ = store.Close()
+		t.Fatalf("Work failure admission is invalid: present=%t err=%v", present, err)
+	}
+	work.Status = core.WorkCompleted
+	payload.Projection.Value, err = json.Marshal(work)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	payload.Detail, err = json.Marshal(events.WorkCompletionTransitionPayload{EvidenceEventRef: "missing-evidence", Fingerprint: strings.Repeat("0", 64)})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	failedEvent.EventType = "WORK_COMPLETED"
+	resealRecoveryProjection(t, ctx, store, path, failedEvent, payload)
+	if _, err := Verify(ctx, path); err == nil {
+		t.Fatal("recovery verification accepted completed Work without durable evidence")
+	}
+}
+
+func resealRecoveryProjection(t *testing.T, ctx context.Context, store *ledger.SQLite, path string, event events.Event, payload events.ProjectionEventPayload) {
+	t.Helper()
+	sealed, err := events.SealProjectionEvent(event, payload.Projection, payload.Detail)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	eventBody, err := json.Marshal(sealed)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	recordBody, err := json.Marshal(payload.Projection)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE events SET event_type=?,payload=? WHERE event_id=?`, event.EventType, eventBody, event.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE records SET body=?,admission_fingerprint=? WHERE admission_event_id=?`, recordBody, sealed.Admission.Fingerprint, event.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func recoveryCurrentWork(t *testing.T, ctx context.Context, store *ledger.SQLite) core.Work {
+	t.Helper()
+	bodies, err := store.Records(ctx, "work", "work-1")
+	if err != nil || len(bodies) != 1 {
+		t.Fatalf("current recovery Work records=%d err=%v", len(bodies), err)
+	}
+	var record events.ProjectionRecord
+	var work core.Work
+	if json.Unmarshal(bodies[0], &record) != nil || json.Unmarshal(record.Value, &work) != nil {
+		t.Fatal("current recovery Work is invalid")
+	}
+	return work
+}
+
 func appendRecoveryRefinedGoal(t *testing.T, ctx context.Context, store *ledger.SQLite) (events.Event, core.Goal) {
 	t.Helper()
 	now := time.Now().UTC()

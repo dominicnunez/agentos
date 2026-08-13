@@ -1666,6 +1666,15 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 			return err
 		}
 	}
+	if record.ProjectionKind == "work" {
+		var work core.Work
+		if decodeExactEventJSON(record.Value, &work) != nil || work.ID != core.ID(record.RecordID) {
+			return fmt.Errorf("work projection value is invalid")
+		}
+		if err := ValidateWorkProjectionTarget(event.EventType, record.Version, work); err != nil {
+			return err
+		}
+	}
 	if record.ProjectionKind == "agent" {
 		var agent core.Agent
 		if decodeExactEventJSON(record.Value, &agent) != nil || agent.ID != core.ID(record.RecordID) || string(agent.OrganizationID) != event.OrganizationID {
@@ -1699,6 +1708,50 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 	}
 	if event.TaskID != "" || event.RecipientScope != "" || event.RecipientID != "" {
 		return fmt.Errorf("organizational projection uses a Task or recipient route")
+	}
+	return nil
+}
+
+// ValidateWorkProjectionTarget couples each Work lifecycle label to its only
+// permitted materialized state.
+func ValidateWorkProjectionTarget(eventType string, version int, work core.Work) error {
+	if version < 1 || !core.ValidWork(work) {
+		return fmt.Errorf("work projection is incomplete")
+	}
+	valid := false
+	switch eventType {
+	case "WORK_CREATED":
+		valid = version == 1 && work.Status == core.WorkActive
+	case "WORK_COMPLETED":
+		valid = version > 1 && work.Status == core.WorkCompleted
+	case "WORK_FAILED", "WORK_PLANNING_FAILED":
+		valid = version > 1 && work.Status == core.WorkFailed
+	}
+	if !valid {
+		return fmt.Errorf("work lifecycle event %s cannot materialize status %s at version %d", eventType, work.Status, version)
+	}
+	return nil
+}
+
+// ValidateWorkProjectionTransition preserves one accepted Intent, optional
+// Goal, objective, and correlation-owned lifecycle from active to terminal.
+func ValidateWorkProjectionTransition(eventType string, version int, previous *core.Work, next core.Work) error {
+	if err := ValidateWorkProjectionTarget(eventType, version, next); err != nil {
+		return err
+	}
+	if previous == nil {
+		if version != 1 || eventType != "WORK_CREATED" {
+			return fmt.Errorf("work history must begin with creation at version one")
+		}
+		return nil
+	}
+	if version < 2 || !core.ValidWorkRevision(*previous, next) {
+		return fmt.Errorf("work revision changes immutable identity or reopens terminal state")
+	}
+	valid := previous.Status == core.WorkActive && next.Status == core.WorkCompleted && eventType == "WORK_COMPLETED" ||
+		previous.Status == core.WorkActive && next.Status == core.WorkFailed && (eventType == "WORK_FAILED" || eventType == "WORK_PLANNING_FAILED")
+	if !valid {
+		return fmt.Errorf("work lifecycle event %s does not match the exact state transition", eventType)
 	}
 	return nil
 }

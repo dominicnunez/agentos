@@ -891,6 +891,34 @@ func TestRebuildRejectsMislabeledGoalLifecycle(t *testing.T) {
 	}
 }
 
+func TestRebuildRejectsMislabeledWorkLifecycle(t *testing.T) {
+	work := core.Work{ID: "work-1", IntentID: "intent-1", Objective: "bounded work", Status: core.WorkActive, CreatedAt: time.Unix(1, 0).UTC()}
+	stream := make([]events.Event, 0, 2)
+	for index, revision := range []struct {
+		eventType string
+		version   int
+	}{{"WORK_CREATED", 1}, {"WORK_FAILED", 2}} {
+		value, err := json.Marshal(work)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := events.ProjectionRecord{ProjectionKind: KindWork, RecordID: string(work.ID), Version: revision.version, CorrelationID: "work-1", Value: value}
+		boundary := events.Event{EventID: fmt.Sprintf("work-event-%d", index+1), Sequence: int64(index + 1), OrganizationID: "org-1", EventType: revision.eventType, SourceActorID: "runtime", CorrelationID: "work-1", CreatedAt: time.Unix(int64(index+1), 0).UTC(), SchemaVersion: events.SchemaVersion}
+		sealed, err := events.SealProjectionEvent(boundary, record, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		boundary.Payload, err = json.Marshal(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream = append(stream, boundary)
+	}
+	if _, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background()); err == nil {
+		t.Fatal("event replay accepted ACTIVE Work under WORK_FAILED")
+	}
+}
+
 func TestEventAuditRejectsHistoricalAgentConfigurationBinding(t *testing.T) {
 	agent := core.Agent{ID: "agent-1", OrganizationID: "org-1", BlueprintID: "missing-blueprint", BlueprintVersion: "v1", ExecutionProfileID: "profile-1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE"}
 	value, err := json.Marshal(agent)

@@ -345,6 +345,7 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 	tasks := make(map[core.ID]Versioned[core.Task])
 	agents := make(map[core.ID]Versioned[core.Agent])
 	goals := make(map[core.ID]Versioned[core.Goal])
+	works := make(map[core.ID]Versioned[core.Work])
 	for _, event := range stream {
 		if event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() {
 			return fmt.Errorf("event stream contains an incomplete envelope")
@@ -372,6 +373,8 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 				err = validateProjectionEventLifecycle(event, payload.Projection, "Agent", agents, func(value core.Agent) core.ID { return value.ID }, false, events.ValidateAgentProjectionTransition)
 			case KindGoal:
 				err = validateProjectionEventLifecycle(event, payload.Projection, "Goal", goals, func(value core.Goal) core.ID { return value.ID }, false, events.ValidateGoalProjectionTransition)
+			case KindWork:
+				err = validateProjectionEventLifecycle(event, payload.Projection, "Work", works, func(value core.Work) core.ID { return value.ID }, true, events.ValidateWorkProjectionTransition)
 			}
 			if err != nil {
 				return fmt.Errorf("event %s: %w", event.EventID, err)
