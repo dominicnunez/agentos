@@ -70,6 +70,13 @@ func ValidAgent(agent Agent) bool {
 		(agent.Status == "ACTIVE" || agent.Status == "INACTIVE")
 }
 
+// ValidAgentConfigurationBinding proves that an Agent's pinned blueprint and
+// execution profile are exact, same-organization durable definitions.
+func ValidAgentConfigurationBinding(agent Agent, blueprint AgentBlueprint, profile ExecutionProfile) bool {
+	return blueprint.ID == agent.BlueprintID && blueprint.OrganizationID == agent.OrganizationID && blueprint.Version == agent.BlueprintVersion &&
+		profile.ID == agent.ExecutionProfileID && profile.OrganizationID == agent.OrganizationID && profile.Version == agent.ExecutionProfileVersion
+}
+
 // DurableGraph is the current organizational state whose cross-record
 // relationships must remain valid regardless of how it was materialized.
 type DurableGraph struct {
@@ -268,13 +275,10 @@ func validateDurableRoster(graph DurableGraph) error {
 		if !ValidAgent(agent) {
 			return fmt.Errorf("agent %s is incomplete", id)
 		}
-		blueprint, ok := graph.AgentBlueprints[agent.BlueprintID]
-		if !ok || blueprint.Value.OrganizationID != agent.OrganizationID || blueprint.Value.Version != agent.BlueprintVersion {
+		blueprint, blueprintFound := graph.AgentBlueprints[agent.BlueprintID]
+		profile, profileFound := graph.ExecutionProfiles[agent.ExecutionProfileID]
+		if !blueprintFound || !profileFound || !ValidAgentConfigurationBinding(agent, blueprint.Value, profile.Value) {
 			return fmt.Errorf("agent %s references invalid blueprint %s", id, agent.BlueprintID)
-		}
-		profile, ok := graph.ExecutionProfiles[agent.ExecutionProfileID]
-		if !ok || profile.Value.OrganizationID != agent.OrganizationID || profile.Value.Version != agent.ExecutionProfileVersion {
-			return fmt.Errorf("agent %s references invalid execution profile %s", id, agent.ExecutionProfileID)
 		}
 	}
 	return nil

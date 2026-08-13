@@ -507,13 +507,10 @@ func validateProjectionEventOrganizationBindings(snapshot Snapshot, stream []eve
 			if decodeExactProjectionJSON(payload.Projection.Value, &value) != nil {
 				return fmt.Errorf("event %s contains an invalid Agent projection", event.EventID)
 			}
-			blueprint, found := snapshot.AgentBlueprints[value.BlueprintID]
-			if !found || blueprint.Value.OrganizationID != value.OrganizationID || blueprint.Value.Version != value.BlueprintVersion {
-				return fmt.Errorf("event %s Agent projection references an invalid blueprint", event.EventID)
-			}
-			profile, found := snapshot.ExecutionProfiles[value.ExecutionProfileID]
-			if !found || profile.Value.OrganizationID != value.OrganizationID || profile.Value.Version != value.ExecutionProfileVersion {
-				return fmt.Errorf("event %s Agent projection references an invalid execution profile", event.EventID)
+			blueprint, blueprintFound := snapshot.AgentBlueprints[value.BlueprintID]
+			profile, profileFound := snapshot.ExecutionProfiles[value.ExecutionProfileID]
+			if !blueprintFound || !profileFound || !core.ValidAgentConfigurationBinding(value, blueprint.Value, profile.Value) {
+				return fmt.Errorf("event %s Agent projection references an invalid pinned configuration", event.EventID)
 			}
 			organizationID = value.OrganizationID
 		case KindIntent:

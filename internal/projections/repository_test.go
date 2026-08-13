@@ -881,7 +881,7 @@ func TestEventAuditRejectsHistoricalAgentConfigurationBinding(t *testing.T) {
 		AgentBlueprints:   map[core.ID]Versioned[core.AgentBlueprint]{"blueprint-1": {Version: 1, Value: core.AgentBlueprint{ID: "blueprint-1", OrganizationID: "org-1", Version: "v1"}}},
 		ExecutionProfiles: map[core.ID]Versioned[core.ExecutionProfile]{"profile-1": {Version: 1, Value: core.ExecutionProfile{ID: "profile-1", OrganizationID: "org-1", Version: "v1"}}},
 	}
-	if err := validateProjectionEventOrganizationBindings(snapshot, []events.Event{event}); err == nil || !strings.Contains(err.Error(), "invalid blueprint") {
+	if err := validateProjectionEventOrganizationBindings(snapshot, []events.Event{event}); err == nil || !strings.Contains(err.Error(), "invalid pinned configuration") {
 		t.Fatalf("event audit accepted an Agent revision with an unbound blueprint: %v", err)
 	}
 }

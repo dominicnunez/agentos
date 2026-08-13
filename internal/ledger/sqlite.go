@@ -1137,7 +1137,7 @@ func validateAgentConfigurationBinding(ctx context.Context, tx *sql.Tx, agent co
 	}
 	var blueprintRecord events.ProjectionRecord
 	var blueprint core.AgentBlueprint
-	if !blueprintFound || decodeExactJSONBytes(blueprintBody, &blueprintRecord) != nil || decodeExactJSONBytes(blueprintRecord.Value, &blueprint) != nil || blueprintRecord.ProjectionKind != "agent_blueprint" || blueprint.ID != agent.BlueprintID || blueprint.OrganizationID != agent.OrganizationID || blueprint.Version != agent.BlueprintVersion {
+	if !blueprintFound || decodeExactJSONBytes(blueprintBody, &blueprintRecord) != nil || decodeExactJSONBytes(blueprintRecord.Value, &blueprint) != nil || blueprintRecord.ProjectionKind != "agent_blueprint" {
 		return fmt.Errorf("agent references an invalid pinned blueprint")
 	}
 	profileBody, profileFound, err := latestRecordBody(ctx, tx, "execution_profile", string(agent.ExecutionProfileID))
@@ -1146,7 +1146,7 @@ func validateAgentConfigurationBinding(ctx context.Context, tx *sql.Tx, agent co
 	}
 	var profileRecord events.ProjectionRecord
 	var profile core.ExecutionProfile
-	if !profileFound || decodeExactJSONBytes(profileBody, &profileRecord) != nil || decodeExactJSONBytes(profileRecord.Value, &profile) != nil || profileRecord.ProjectionKind != "execution_profile" || profile.ID != agent.ExecutionProfileID || profile.OrganizationID != agent.OrganizationID || profile.Version != agent.ExecutionProfileVersion {
+	if !profileFound || decodeExactJSONBytes(profileBody, &profileRecord) != nil || decodeExactJSONBytes(profileRecord.Value, &profile) != nil || profileRecord.ProjectionKind != "execution_profile" || !core.ValidAgentConfigurationBinding(agent, blueprint, profile) {
 		return fmt.Errorf("agent references an invalid pinned execution profile")
 	}
 	return nil

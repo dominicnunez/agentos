@@ -242,39 +242,16 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("projection record %s/%s version %d precedes its prior admission event", kind, recordID, version)
 		}
 		lastProjectionSequences[versionKey] = admission.event.Sequence
-		if kind == "task" {
-			var task core.Task
-			if decodeExactJSON(record.Value, &task) != nil || task.ID != core.ID(recordID) {
-				_ = recordRows.Close()
-				return fmt.Errorf("projection record %s/%s/%d contains an invalid Task", kind, recordID, version)
-			}
-			previous, previousFound := lastTasks[task.ID]
-			var prior *core.Task
-			if previousFound {
-				prior = &previous
-			}
-			if err := events.ValidateTaskProjectionTransition(admission.event.EventType, version, prior, task); err != nil {
-				_ = recordRows.Close()
-				return fmt.Errorf("projection record %s/%s/%d: %w", kind, recordID, version, err)
-			}
-			lastTasks[task.ID] = task
+		var transitionErr error
+		switch kind {
+		case "task":
+			transitionErr = validateRecoveryLifecycle(record, admission.event.EventType, lastTasks, func(value core.Task) core.ID { return value.ID }, events.ValidateTaskProjectionTransition)
+		case "agent":
+			transitionErr = validateRecoveryLifecycle(record, admission.event.EventType, lastAgents, func(value core.Agent) core.ID { return value.ID }, events.ValidateAgentProjectionTransition)
 		}
-		if kind == "agent" {
-			var agent core.Agent
-			if decodeExactJSON(record.Value, &agent) != nil || agent.ID != core.ID(recordID) {
-				_ = recordRows.Close()
-				return fmt.Errorf("projection record %s/%s/%d contains an invalid Agent", kind, recordID, version)
-			}
-			previous, previousFound := lastAgents[agent.ID]
-			var prior *core.Agent
-			if previousFound {
-				prior = &previous
-			}
-			if err := events.ValidateAgentProjectionTransition(admission.event.EventType, version, prior, agent); err != nil {
-				_ = recordRows.Close()
-				return fmt.Errorf("projection record %s/%s/%d: %w", kind, recordID, version, err)
-			}
-			lastAgents[agent.ID] = agent
+		if transitionErr != nil {
+			_ = recordRows.Close()
+			return fmt.Errorf("projection record %s/%s/%d: %w", kind, recordID, version, transitionErr)
 		}
 		if _, duplicate := used[admissionEventID]; duplicate {
 			_ = recordRows.Close()
@@ -448,13 +425,10 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 			if decodeExactJSON(record.Value, &value) != nil {
 				return fmt.Errorf("event %s contains an invalid Agent projection", event.EventID)
 			}
-			blueprint, found := snapshot.AgentBlueprints[value.BlueprintID]
-			if !found || blueprint.Value.OrganizationID != value.OrganizationID || blueprint.Value.Version != value.BlueprintVersion {
-				return fmt.Errorf("event %s Agent projection references an invalid blueprint", event.EventID)
-			}
-			profile, found := snapshot.ExecutionProfiles[value.ExecutionProfileID]
-			if !found || profile.Value.OrganizationID != value.OrganizationID || profile.Value.Version != value.ExecutionProfileVersion {
-				return fmt.Errorf("event %s Agent projection references an invalid execution profile", event.EventID)
+			blueprint, blueprintFound := snapshot.AgentBlueprints[value.BlueprintID]
+			profile, profileFound := snapshot.ExecutionProfiles[value.ExecutionProfileID]
+			if !blueprintFound || !profileFound || !core.ValidAgentConfigurationBinding(value, blueprint.Value, profile.Value) {
+				return fmt.Errorf("event %s Agent projection references an invalid pinned configuration", event.EventID)
 			}
 			organizationID = value.OrganizationID
 		default:
@@ -469,6 +443,23 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 
 func setRecoveryProjection[T any](target map[core.ID]core.DurableState[T], record events.ProjectionRecord, value T, correlationStable bool, validRevision func(T, T) bool) error {
 	return core.AdmitDurableRevision(target, core.ID(record.RecordID), record.Version, record.CorrelationID, value, correlationStable, validRevision)
+}
+
+func validateRecoveryLifecycle[T any](record events.ProjectionRecord, eventType string, history map[core.ID]T, identity func(T) core.ID, validate func(string, int, *T, T) error) error {
+	var value T
+	if decodeExactJSON(record.Value, &value) != nil || identity(value) != core.ID(record.RecordID) {
+		return fmt.Errorf("contains an invalid lifecycle value")
+	}
+	previous, found := history[identity(value)]
+	var prior *T
+	if found {
+		prior = &previous
+	}
+	if err := validate(eventType, record.Version, prior, value); err != nil {
+		return err
+	}
+	history[identity(value)] = value
+	return nil
 }
 
 func sqliteBytes(value any) ([]byte, error) {
