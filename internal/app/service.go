@@ -1926,6 +1926,7 @@ func (s *Service) assignmentRequirement(organizationID core.ID, kind core.Execut
 	return assignment.Requirement{
 		OrganizationID: organizationID, ExecutionKind: kind, RuntimeAdapter: localRuntimeAdapter,
 		ModelProvider: s.agentModel.Provider, Model: s.agentModel.Model, ExecutionProfileVersion: s.agentModel.ExecutionProfileVersion,
+		ReasoningSetting: "", PromptVersion: defaultPromptVersion, ToolRefs: []string{},
 		AvailableCapabilityClasses: []string{},
 	}
 }

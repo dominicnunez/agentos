@@ -26,6 +26,9 @@ type Requirement struct {
 	ModelProvider              string
 	Model                      string
 	ExecutionProfileVersion    string
+	ReasoningSetting           string
+	PromptVersion              string
+	ToolRefs                   []string
 	AvailableCapabilityClasses []string
 }
 
@@ -90,7 +93,7 @@ func validateRequirement(requirement Requirement) error {
 	switch requirement.ExecutionKind {
 	case core.ExecutionDeterministic:
 	case core.ExecutionAgent:
-		if requirement.ModelProvider == "" || requirement.Model == "" || requirement.ExecutionProfileVersion == "" {
+		if requirement.ModelProvider == "" || requirement.Model == "" || requirement.ExecutionProfileVersion == "" || requirement.PromptVersion == "" || requirement.ToolRefs == nil {
 			return fmt.Errorf("adaptive assignment requires an exact model execution profile")
 		}
 	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionHuman, core.ExecutionMixed:
@@ -113,11 +116,12 @@ func eligibleSelection(roster Roster, agent core.Agent, requirement Requirement)
 		return Selection{}, false
 	}
 	profile, ok := roster.ExecutionProfiles[agent.ExecutionProfileID]
-	if !ok || profile.ID != agent.ExecutionProfileID || profile.OrganizationID != requirement.OrganizationID || profile.Version != agent.ExecutionProfileVersion || profile.Status != Active {
+	if !ok || profile.ID != agent.ExecutionProfileID || profile.OrganizationID != requirement.OrganizationID || profile.Version != agent.ExecutionProfileVersion {
 		return Selection{}, false
 	}
 	if requirement.ExecutionKind == core.ExecutionAgent {
-		if profile.ModelProvider != requirement.ModelProvider || profile.Model != requirement.Model || profile.Version != requirement.ExecutionProfileVersion {
+		if profile.Status != Active || profile.ModelProvider != requirement.ModelProvider || profile.Model != requirement.Model || profile.Version != requirement.ExecutionProfileVersion ||
+			profile.ReasoningSetting != requirement.ReasoningSetting || profile.PromptVersion != requirement.PromptVersion || !slices.Equal(profile.ToolRefs, requirement.ToolRefs) {
 			return Selection{}, false
 		}
 	}

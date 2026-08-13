@@ -99,13 +99,37 @@ func TestResolveAssignedBindsTaskKindAndRosterIdentity(t *testing.T) {
 
 func TestDeterministicAssignmentDoesNotRequireConfiguredModel(t *testing.T) {
 	roster := testRoster()
+	profile := roster.ExecutionProfiles["profile-1"]
+	profile.Status = "INACTIVE"
+	roster.ExecutionProfiles[profile.ID] = profile
 	requirement := testRequirement()
 	requirement.ExecutionKind = core.ExecutionDeterministic
 	requirement.ModelProvider = ""
 	requirement.Model = ""
 	requirement.ExecutionProfileVersion = ""
+	requirement.PromptVersion = ""
+	requirement.ToolRefs = nil
 	if _, err := Select(roster, requirement); err != nil {
-		t.Fatalf("deterministic work was coupled to model availability: %v", err)
+		t.Fatalf("deterministic work was coupled to model-profile availability: %v", err)
+	}
+}
+
+func TestAdaptiveAssignmentRejectsUnsupportedExecutionProfileSettings(t *testing.T) {
+	tests := map[string]func(*core.ExecutionProfile){
+		"prompt version":    func(profile *core.ExecutionProfile) { profile.PromptVersion = "other-prompt" },
+		"reasoning setting": func(profile *core.ExecutionProfile) { profile.ReasoningSetting = "high" },
+		"tool references":   func(profile *core.ExecutionProfile) { profile.ToolRefs = []string{"unavailable-tool"} },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			roster := testRoster()
+			profile := roster.ExecutionProfiles["profile-1"]
+			mutate(&profile)
+			roster.ExecutionProfiles[profile.ID] = profile
+			if _, err := Select(roster, testRequirement()); err == nil {
+				t.Fatal("unsupported execution-profile setting was accepted")
+			}
+		})
 	}
 }
 
@@ -121,5 +145,5 @@ func testRoster() Roster {
 }
 
 func testRequirement() Requirement {
-	return Requirement{OrganizationID: "org-1", ExecutionKind: core.ExecutionAgent, RuntimeAdapter: "local", ModelProvider: "provider", Model: "model", ExecutionProfileVersion: "profile-v1", AvailableCapabilityClasses: []string{}}
+	return Requirement{OrganizationID: "org-1", ExecutionKind: core.ExecutionAgent, RuntimeAdapter: "local", ModelProvider: "provider", Model: "model", ExecutionProfileVersion: "profile-v1", PromptVersion: "prompt-v1", ToolRefs: []string{}, AvailableCapabilityClasses: []string{}}
 }
