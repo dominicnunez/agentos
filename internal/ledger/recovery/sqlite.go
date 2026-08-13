@@ -139,6 +139,8 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	}
 	defer func() { _ = eventRows.Close() }()
 	admitted := map[string]admittedProjectionEvent{}
+	eventIDs := map[string]struct{}{}
+	sequences := map[int64]struct{}{}
 	for eventRows.Next() {
 		var event events.Event
 		var authorizationRefs, artifactRefs []byte
@@ -148,6 +150,20 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			_ = eventRows.Close()
 			return fmt.Errorf("read projection admission event: %w", err)
 		}
+		if event.EventID == "" || event.Sequence < 1 {
+			_ = eventRows.Close()
+			return fmt.Errorf("event stream contains an incomplete envelope")
+		}
+		if _, duplicate := eventIDs[event.EventID]; duplicate {
+			_ = eventRows.Close()
+			return fmt.Errorf("event stream contains duplicate event id %s", event.EventID)
+		}
+		if _, duplicate := sequences[event.Sequence]; duplicate {
+			_ = eventRows.Close()
+			return fmt.Errorf("event stream contains duplicate sequence %d at %s", event.Sequence, event.EventType)
+		}
+		eventIDs[event.EventID] = struct{}{}
+		sequences[event.Sequence] = struct{}{}
 		event.Payload, err = sqliteBytes(rawPayload)
 		if err != nil {
 			_ = eventRows.Close()

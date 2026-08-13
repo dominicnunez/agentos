@@ -163,6 +163,34 @@ func TestRecoveryRejectsMissingOrZeroEventTimestamp(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsIncompleteOrdinaryEventIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		eventID  string
+		sequence int64
+	}{
+		{name: "missing event id", sequence: 1},
+		{name: "nonpositive sequence", eventID: "event-1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "ledger.db")
+			db := createTestLedger(t, path)
+			if _, err := db.ExecContext(ctx, `INSERT INTO events(sequence,event_id,payload,created_at) VALUES(?,?, '{}','2026-08-13T12:00:00Z')`, test.sequence, test.eventID); err != nil {
+				_ = db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "incomplete envelope") {
+				t.Fatalf("recovery verification error=%v", err)
+			}
+		})
+	}
+}
+
 func TestRecoveryRejectsProjectionAdmissionCorruption(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.db")
