@@ -928,14 +928,6 @@ func sameWorkRecord(left, right core.Work) bool {
 	return core.ValidWorkRevision(left, right)
 }
 
-func validMissionValue(mission core.Mission) bool {
-	return core.ValidMission(mission)
-}
-
-func validGoalValue(goal core.Goal) bool {
-	return core.ValidGoal(goal)
-}
-
 func sameExecutionProfileRecord(left, right core.ExecutionProfile) bool {
 	right.Status = left.Status
 	return reflect.DeepEqual(left, right)
@@ -946,237 +938,27 @@ func sameAgentRecord(left, right core.Agent) bool {
 }
 
 // ValidateSnapshot applies the complete fail-closed projection graph contract.
-// Recovery uses the same validator so startup certification cannot drift from
-// routine materialization as the organizational model evolves.
+// Recovery uses the same core validator so startup certification cannot drift
+// from routine materialization as the organizational model evolves.
 func ValidateSnapshot(snapshot Snapshot) error {
-	for id, state := range snapshot.Organizations {
-		if err := validateIdentity("organization", id, state.Value.ID); err != nil {
-			return err
-		}
-	}
-	organized := make([]organizedIdentity, 0, len(snapshot.Missions)+len(snapshot.Goals)+len(snapshot.AgentBlueprints)+len(snapshot.ExecutionProfiles)+len(snapshot.Agents)+len(snapshot.Teams)+len(snapshot.Intents))
-	for id, state := range snapshot.Missions {
-		organized = append(organized, organizedIdentity{"mission", id, state.Value.ID, state.Value.OrganizationID})
-	}
-	for id, state := range snapshot.Goals {
-		organized = append(organized, organizedIdentity{"goal", id, state.Value.ID, state.Value.OrganizationID})
-	}
-	for id, state := range snapshot.AgentBlueprints {
-		organized = append(organized, organizedIdentity{"Agent blueprint", id, state.Value.ID, state.Value.OrganizationID})
-	}
-	for id, state := range snapshot.ExecutionProfiles {
-		organized = append(organized, organizedIdentity{"execution profile", id, state.Value.ID, state.Value.OrganizationID})
-	}
-	for id, state := range snapshot.Agents {
-		organized = append(organized, organizedIdentity{"agent", id, state.Value.ID, state.Value.OrganizationID})
-	}
-	for id, state := range snapshot.Teams {
-		organized = append(organized, organizedIdentity{"team", id, state.Value.ID, state.Value.OrganizationID})
-	}
-	for id, state := range snapshot.Intents {
-		organized = append(organized, organizedIdentity{"intent", id, state.Value.ID, state.Value.OrganizationID})
-	}
-	for _, record := range organized {
-		if err := validateOrganizedIdentity(record.kind, record.recordID, record.valueID, record.organizationID, snapshot.Organizations); err != nil {
-			return err
-		}
-	}
-	if err := validateRoster(snapshot); err != nil {
-		return err
-	}
-	for id, state := range snapshot.Missions {
-		mission := state.Value
-		if !validMissionValue(mission) {
-			return fmt.Errorf("mission %s is incomplete or has unsupported status", id)
-		}
-	}
-	for id, state := range snapshot.Goals {
-		goal := state.Value
-		mission, ok := snapshot.Missions[goal.MissionID]
-		if !ok || mission.Value.OrganizationID != goal.OrganizationID {
-			return fmt.Errorf("goal %s references invalid mission %s", id, goal.MissionID)
-		}
-		if !validGoalValue(goal) {
-			return fmt.Errorf("goal %s is incomplete or has unsupported mode or status", id)
-		}
-	}
-	for id, state := range snapshot.Teams {
-		for _, memberID := range state.Value.MemberAgentIDs {
-			member, ok := snapshot.Agents[memberID]
-			if !ok || member.Value.OrganizationID != state.Value.OrganizationID {
-				return fmt.Errorf("team %s references invalid member agent %s", id, memberID)
-			}
-		}
-	}
-	for id, state := range snapshot.Works {
-		if err := validateIdentity("work", id, state.Value.ID); err != nil {
-			return err
-		}
-		if state.Value.Status != core.WorkActive && state.Value.Status != core.WorkCompleted && state.Value.Status != core.WorkFailed {
-			return fmt.Errorf("work %s has unsupported status %s", id, state.Value.Status)
-		}
-		intent, ok := snapshot.Intents[state.Value.IntentID]
-		if !ok {
-			return fmt.Errorf("work %s references missing intent %s", id, state.Value.IntentID)
-		}
-		if state.Value.GoalID != intent.Value.GoalID {
-			return fmt.Errorf("work %s does not match its accepted intent goal", id)
-		}
-		if state.Value.Objective != intent.Value.NormalizedObjective {
-			return fmt.Errorf("work %s does not match its accepted intent objective", id)
-		}
-		if state.CorrelationID == "" || intent.CorrelationID != state.CorrelationID {
-			return fmt.Errorf("work %s crosses its intent correlation boundary", id)
-		}
-		if state.Value.GoalID != "" {
-			goal, ok := snapshot.Goals[state.Value.GoalID]
-			if !ok || goal.Value.OrganizationID != intent.Value.OrganizationID {
-				return fmt.Errorf("work %s references invalid goal %s", id, state.Value.GoalID)
-			}
-		}
-	}
-	for id, state := range snapshot.Tasks {
-		task := state.Value
-		if err := validateIdentity("task", id, task.ID); err != nil {
-			return err
-		}
-		work, ok := snapshot.Works[task.WorkID]
-		if !ok {
-			return fmt.Errorf("task %s references missing work %s", id, task.WorkID)
-		}
-		if state.CorrelationID == "" || work.CorrelationID != state.CorrelationID {
-			return fmt.Errorf("task %s crosses its work correlation boundary", id)
-		}
-		intent := snapshot.Intents[work.Value.IntentID]
-		switch task.AssigneeType {
-		case "":
-			if task.AssigneeID != "" || task.AgentConfig != nil {
-				return fmt.Errorf("task %s has assignment details without an assignee type", id)
-			}
-		case "AGENT":
-			agent, ok := snapshot.Agents[task.AssigneeID]
-			if !ok || agent.Value.OrganizationID != intent.Value.OrganizationID {
-				return fmt.Errorf("task %s references invalid assignee agent %s", id, task.AssigneeID)
-			}
-			if err := validateTaskAgentConfig(id, task.AgentConfig, intent.Value.OrganizationID, snapshot); err != nil {
-				return err
-			}
-		case "TEAM":
-			if task.AgentConfig != nil {
-				return fmt.Errorf("task %s has Agent configuration for a Team assignment", id)
-			}
-			team, ok := snapshot.Teams[task.AssigneeID]
-			if !ok || team.Value.OrganizationID != intent.Value.OrganizationID {
-				return fmt.Errorf("task %s references invalid assignee team %s", id, task.AssigneeID)
-			}
-		default:
-			return fmt.Errorf("task %s has unsupported assignee type %s", id, task.AssigneeType)
-		}
-		if task.ParentID != "" {
-			parent, ok := snapshot.Tasks[task.ParentID]
-			if !ok || parent.Value.WorkID != task.WorkID || parent.CorrelationID != state.CorrelationID || task.ParentID == id {
-				return fmt.Errorf("task %s references invalid parent %s", id, task.ParentID)
-			}
-		}
-		for _, dependencyID := range task.DependsOn {
-			dependency, ok := snapshot.Tasks[dependencyID]
-			if !ok || dependency.Value.WorkID != task.WorkID || dependency.CorrelationID != state.CorrelationID || dependencyID == id {
-				return fmt.Errorf("task %s references invalid dependency %s", id, dependencyID)
-			}
-		}
-	}
-	return nil
+	return core.ValidateDurableGraph(core.DurableGraph{
+		Organizations:     durableStates(snapshot.Organizations),
+		Missions:          durableStates(snapshot.Missions),
+		Goals:             durableStates(snapshot.Goals),
+		Teams:             durableStates(snapshot.Teams),
+		AgentBlueprints:   durableStates(snapshot.AgentBlueprints),
+		ExecutionProfiles: durableStates(snapshot.ExecutionProfiles),
+		Agents:            durableStates(snapshot.Agents),
+		Intents:           durableStates(snapshot.Intents),
+		Works:             durableStates(snapshot.Works),
+		Tasks:             durableStates(snapshot.Tasks),
+	})
 }
 
-func validateTaskAgentConfig(taskID core.ID, config *core.AgentConfig, organizationID core.ID, snapshot Snapshot) error {
-	if config == nil || config.BlueprintID == "" || config.BlueprintVersion == "" || config.ProfileID == "" || config.ProfileVersion == "" || config.RuntimeAdapter == "" {
-		return fmt.Errorf("task %s has incomplete pinned Agent configuration", taskID)
+func durableStates[T any](source map[core.ID]Versioned[T]) map[core.ID]core.DurableState[T] {
+	target := make(map[core.ID]core.DurableState[T], len(source))
+	for id, state := range source {
+		target[id] = core.DurableState[T]{Version: state.Version, CorrelationID: state.CorrelationID, Value: state.Value}
 	}
-	blueprint, ok := snapshot.AgentBlueprints[config.BlueprintID]
-	if !ok || blueprint.Value.OrganizationID != organizationID || blueprint.Value.Version != config.BlueprintVersion {
-		return fmt.Errorf("task %s references invalid pinned blueprint %s", taskID, config.BlueprintID)
-	}
-	profile, ok := snapshot.ExecutionProfiles[config.ProfileID]
-	if !ok || profile.Value.OrganizationID != organizationID || profile.Value.Version != config.ProfileVersion {
-		return fmt.Errorf("task %s references invalid pinned execution profile %s", taskID, config.ProfileID)
-	}
-	return nil
-}
-
-func validateRoster(snapshot Snapshot) error {
-	for id, state := range snapshot.AgentBlueprints {
-		blueprint := state.Value
-		if blueprint.Version == "" || blueprint.Role == "" || blueprint.OperatingInstructions == "" || !validRosterStatus(blueprint.Status) {
-			return fmt.Errorf("agent blueprint %s is incomplete", id)
-		}
-		if err := validateDistinctStrings("agent blueprint required capability classes", id, blueprint.RequiredCapabilityClasses); err != nil {
-			return err
-		}
-	}
-	for id, state := range snapshot.ExecutionProfiles {
-		profile := state.Value
-		if profile.Version == "" || profile.ModelProvider == "" || profile.Model == "" || profile.PromptVersion == "" || !validRosterStatus(profile.Status) {
-			return fmt.Errorf("execution profile %s is incomplete", id)
-		}
-		if err := validateDistinctStrings("execution profile tool refs", id, profile.ToolRefs); err != nil {
-			return err
-		}
-	}
-	for id, state := range snapshot.Agents {
-		agent := state.Value
-		if agent.BlueprintID == "" || agent.BlueprintVersion == "" || agent.ExecutionProfileID == "" || agent.ExecutionProfileVersion == "" || agent.RuntimeAdapter == "" || !validRosterStatus(agent.Status) {
-			return fmt.Errorf("agent %s is incomplete", id)
-		}
-		blueprint, ok := snapshot.AgentBlueprints[agent.BlueprintID]
-		if !ok || blueprint.Value.OrganizationID != agent.OrganizationID || blueprint.Value.Version != agent.BlueprintVersion {
-			return fmt.Errorf("agent %s references invalid blueprint %s", id, agent.BlueprintID)
-		}
-		profile, ok := snapshot.ExecutionProfiles[agent.ExecutionProfileID]
-		if !ok || profile.Value.OrganizationID != agent.OrganizationID || profile.Value.Version != agent.ExecutionProfileVersion {
-			return fmt.Errorf("agent %s references invalid execution profile %s", id, agent.ExecutionProfileID)
-		}
-	}
-	return nil
-}
-
-func validRosterStatus(status string) bool {
-	return status == "ACTIVE" || status == "INACTIVE"
-}
-
-func validateDistinctStrings(kind string, id core.ID, values []string) error {
-	seen := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		if value == "" {
-			return fmt.Errorf("%s %s contains an empty value", kind, id)
-		}
-		if _, duplicate := seen[value]; duplicate {
-			return fmt.Errorf("%s %s contains duplicate value %s", kind, id, value)
-		}
-		seen[value] = struct{}{}
-	}
-	return nil
-}
-
-type organizedIdentity struct {
-	kind           string
-	recordID       core.ID
-	valueID        core.ID
-	organizationID core.ID
-}
-
-func validateIdentity(kind string, recordID, valueID core.ID) error {
-	if recordID == "" || valueID != recordID {
-		return fmt.Errorf("%s record %s has mismatched identity %s", kind, recordID, valueID)
-	}
-	return nil
-}
-
-func validateOrganizedIdentity(kind string, recordID, valueID, organizationID core.ID, organizations map[core.ID]Versioned[core.Organization]) error {
-	if err := validateIdentity(kind, recordID, valueID); err != nil {
-		return err
-	}
-	if _, ok := organizations[organizationID]; !ok {
-		return fmt.Errorf("%s %s references missing organization %s", kind, recordID, organizationID)
-	}
-	return nil
+	return target
 }

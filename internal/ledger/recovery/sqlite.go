@@ -20,7 +20,6 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
-	"github.com/dominicnunez/agentos/internal/projections"
 	"modernc.org/sqlite"
 )
 
@@ -256,17 +255,17 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 }
 
 func validateProjectionOrganizationBindings(admitted map[string]admittedProjectionEvent) error {
-	snapshot := projections.Snapshot{
-		Organizations:     map[core.ID]projections.Versioned[core.Organization]{},
-		Missions:          map[core.ID]projections.Versioned[core.Mission]{},
-		Goals:             map[core.ID]projections.Versioned[core.Goal]{},
-		Teams:             map[core.ID]projections.Versioned[core.Team]{},
-		AgentBlueprints:   map[core.ID]projections.Versioned[core.AgentBlueprint]{},
-		ExecutionProfiles: map[core.ID]projections.Versioned[core.ExecutionProfile]{},
-		Agents:            map[core.ID]projections.Versioned[core.Agent]{},
-		Intents:           map[core.ID]projections.Versioned[core.Intent]{},
-		Works:             map[core.ID]projections.Versioned[core.Work]{},
-		Tasks:             map[core.ID]projections.Versioned[core.Task]{},
+	snapshot := core.DurableGraph{
+		Organizations:     map[core.ID]core.DurableState[core.Organization]{},
+		Missions:          map[core.ID]core.DurableState[core.Mission]{},
+		Goals:             map[core.ID]core.DurableState[core.Goal]{},
+		Teams:             map[core.ID]core.DurableState[core.Team]{},
+		AgentBlueprints:   map[core.ID]core.DurableState[core.AgentBlueprint]{},
+		ExecutionProfiles: map[core.ID]core.DurableState[core.ExecutionProfile]{},
+		Agents:            map[core.ID]core.DurableState[core.Agent]{},
+		Intents:           map[core.ID]core.DurableState[core.Intent]{},
+		Works:             map[core.ID]core.DurableState[core.Work]{},
+		Tasks:             map[core.ID]core.DurableState[core.Task]{},
 	}
 	directOrganizations := map[string]core.ID{}
 
@@ -358,7 +357,7 @@ func validateProjectionOrganizationBindings(admitted map[string]admittedProjecti
 			return fmt.Errorf("event %s projection references a missing Organization", eventID)
 		}
 	}
-	if err := projections.ValidateSnapshot(snapshot); err != nil {
+	if err := core.ValidateDurableGraph(snapshot); err != nil {
 		return err
 	}
 	for _, admission := range admitted {
@@ -390,10 +389,10 @@ func validateProjectionOrganizationBindings(admitted map[string]admittedProjecti
 	return nil
 }
 
-func setRecoveryProjection[T any](target map[core.ID]projections.Versioned[T], record events.ProjectionRecord, value T) {
+func setRecoveryProjection[T any](target map[core.ID]core.DurableState[T], record events.ProjectionRecord, value T) {
 	id := core.ID(record.RecordID)
 	if current, found := target[id]; !found || record.Version > current.Version {
-		target[id] = projections.Versioned[T]{Version: record.Version, CorrelationID: record.CorrelationID, Value: value}
+		target[id] = core.DurableState[T]{Version: record.Version, CorrelationID: record.CorrelationID, Value: value}
 	}
 }
 
