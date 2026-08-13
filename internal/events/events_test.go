@@ -99,6 +99,47 @@ func TestAgentProjectionTransitionsAreExact(t *testing.T) {
 	}
 }
 
+func TestGoalProjectionTransitionsAreExact(t *testing.T) {
+	now := time.Now().UTC()
+	active := core.Goal{
+		ID: "goal-1", OrganizationID: "org-1", MissionID: "mission-1", Objective: "deliver a bounded outcome",
+		Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "verified outcome", Origin: "USER"}}, Status: core.GoalActive, CreatedAt: now,
+	}
+	refined, paused, retired, achieved := active, active, active, active
+	refined.Objective = "deliver a verified bounded outcome"
+	paused.Status = core.GoalPaused
+	retired.Status = core.GoalRetired
+	achieved.Status = core.GoalAchieved
+	for name, test := range map[string]struct {
+		eventType string
+		version   int
+		previous  *core.Goal
+		next      core.Goal
+		valid     bool
+	}{
+		"active creation":               {"GOAL_CREATED", 1, nil, active, true},
+		"refinement":                    {"GOAL_REFINED", 2, &active, refined, true},
+		"pause":                         {"GOAL_PAUSED", 2, &active, paused, true},
+		"resume":                        {"GOAL_RESUMED", 3, &paused, active, true},
+		"retire":                        {"GOAL_RETIRED", 2, &active, retired, true},
+		"achievement":                   {"GOAL_ACHIEVED", 2, &active, achieved, true},
+		"pause label with active state": {"GOAL_PAUSED", 2, &active, active, false},
+		"refinement label with pause":   {"GOAL_REFINED", 2, &active, paused, false},
+		"unchanged refinement":          {"GOAL_REFINED", 2, &active, active, false},
+		"creation without prior state":  {"GOAL_REFINED", 2, nil, refined, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateGoalProjectionTransition(test.eventType, test.version, test.previous, test.next)
+			if test.valid && err != nil {
+				t.Fatalf("valid transition was rejected: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("invalid transition was accepted")
+			}
+		})
+	}
+}
+
 func TestHumanCompletionRejectsEnvelopeArtifactsAbsentFromSubmission(t *testing.T) {
 	contract := core.StructuredUserCompletionContract("task-1")
 	task := WorkCompletionTaskBinding{Task: core.Task{

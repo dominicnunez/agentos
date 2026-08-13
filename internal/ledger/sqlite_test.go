@@ -226,7 +226,12 @@ func TestProjectionVersionConflictRollsBackItsEvent(t *testing.T) {
 			TaskContractVersion: "1", Status: core.TaskBlocked,
 		},
 	}
-	if _, err := l.AppendProjection(ctx, draft); err != nil {
+	parent := core.Task{ID: "task-parent", WorkID: "work-1", Description: "handle blocked child", ExecutionKind: core.ExecutionHuman, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
+	parentDraft := events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(parent.ID), CorrelationID: "request-1"},
+		ProjectionKind: "task", RecordID: string(parent.ID), Version: 1, Value: parent,
+	}
+	if _, err := l.AppendProjections(ctx, []events.ProjectionDraft{draft, parentDraft}); err != nil {
 		t.Fatal(err)
 	}
 	before, err := l.Events(ctx, "request-1")
@@ -240,11 +245,21 @@ func TestProjectionVersionConflictRollsBackItsEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stream) != len(before) || stream[len(stream)-1].EventType != "TASK_BLOCKED" {
+	if len(stream) != len(before) {
 		t.Fatalf("projection failure left an orphan event: %+v", stream)
 	}
+	var blockedEvent events.Event
+	for _, event := range stream {
+		if event.EventType == "TASK_BLOCKED" && event.TaskID == "task-1" {
+			blockedEvent = event
+			break
+		}
+	}
+	if blockedEvent.EventID == "" {
+		t.Fatal("initial blocked Task event is missing")
+	}
 	available, err := l.Inbox(ctx, events.RecipientTask, "task-parent")
-	if err != nil || len(available) != 1 || available[0].EventID != stream[len(stream)-1].EventID {
+	if err != nil || len(available) != 1 || available[0].EventID != blockedEvent.EventID {
 		t.Fatalf("projection failure changed addressed availability: inbox=%+v err=%v", available, err)
 	}
 }
@@ -600,6 +615,68 @@ func TestProjectionBatchRollsBackCompleteTaskGraph(t *testing.T) {
 	records, err := l.Records(ctx, "task", "task-1")
 	if err != nil || len(records) != 0 {
 		t.Fatalf("failed Task-DAG batch left records=%d err=%v", len(records), err)
+	}
+}
+
+func TestProjectionBatchRejectsInvalidClosedTaskGraph(t *testing.T) {
+	for name, tasks := range map[string][]core.Task{
+		"dependency cycle": {
+			{ID: "task-a", DependsOn: []core.ID{"task-b"}},
+			{ID: "task-b", DependsOn: []core.ID{"task-a"}},
+		},
+		"missing dependency": {{ID: "task-a", DependsOn: []core.ID{"task-missing"}}},
+		"missing parent":     {{ID: "task-a", ParentID: "task-missing"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			appendTaskProjectionParents(t, ctx, store, "org-1", "request-1", "work-1")
+			drafts := make([]events.ProjectionDraft, 0, len(tasks))
+			for _, task := range tasks {
+				task.WorkID = "work-1"
+				task.Description = "bounded task"
+				task.ExecutionKind = core.ExecutionDeterministic
+				task.ModelInferencePolicy = core.InferenceForbidden
+				task.TaskContractVersion = "1"
+				task.Status = core.TaskPending
+				drafts = append(drafts, events.ProjectionDraft{
+					Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "request-1"},
+					ProjectionKind: "task", RecordID: string(task.ID), Version: 1, Value: task,
+				})
+			}
+			if _, err := store.AppendProjections(ctx, drafts); err == nil {
+				t.Fatalf("%s was committed", name)
+			}
+			records, err := store.Records(ctx, "task", "")
+			if err != nil || len(records) != 0 {
+				t.Fatalf("rejected %s left Task records=%d err=%v", name, len(records), err)
+			}
+		})
+	}
+}
+
+func TestProjectionBatchAllowsForwardTaskReferences(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	appendTaskProjectionParents(t, ctx, store, "org-1", "request-1", "work-1")
+	base := core.Task{WorkID: "work-1", Description: "bounded task", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
+	child, root := base, base
+	child.ID, child.ParentID, child.DependsOn = "task-child", "task-root", []core.ID{"task-root"}
+	root.ID = "task-root"
+	drafts := []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(child.ID), CorrelationID: "request-1"}, ProjectionKind: "task", RecordID: string(child.ID), Version: 1, Value: child},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(root.ID), CorrelationID: "request-1"}, ProjectionKind: "task", RecordID: string(root.ID), Version: 1, Value: root},
+	}
+	if _, err := store.AppendProjections(ctx, drafts); err != nil {
+		t.Fatalf("valid forward Task references were rejected: %v", err)
 	}
 }
 

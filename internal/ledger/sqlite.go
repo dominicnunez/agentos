@@ -1065,16 +1065,75 @@ func prepareProjection(draft events.ProjectionDraft, allowWorkCompletion, allowG
 func (l *SQLite) appendPreparedProjections(ctx context.Context, prepared []preparedProjection) ([]events.Event, error) {
 	appended := make([]events.Event, 0, len(prepared))
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		containsTask := false
 		for _, item := range prepared {
 			event, err := appendPreparedProjection(ctx, tx, item)
 			if err != nil {
 				return err
 			}
 			appended = append(appended, event)
+			containsTask = containsTask || item.task != nil
+		}
+		if containsTask {
+			if err := validateClosedTaskGraph(ctx, tx); err != nil {
+				return fmt.Errorf("validate closed Task graph: %w", err)
+			}
 		}
 		return nil
 	})
 	return appended, err
+}
+
+func validateClosedTaskGraph(ctx context.Context, tx *sql.Tx) (finalErr error) {
+	rows, err := tx.QueryContext(ctx, `SELECT body FROM records AS current
+WHERE kind='task' AND version=(SELECT MAX(version) FROM records AS latest WHERE latest.kind=current.kind AND latest.record_id=current.record_id)
+ORDER BY record_id`)
+	if err != nil {
+		return fmt.Errorf("read current Task graph: %w", err)
+	}
+	defer func() {
+		finalErr = errors.Join(finalErr, rows.Close())
+	}()
+	type admittedTask struct {
+		task          core.Task
+		correlationID string
+	}
+	admitted := make(map[core.ID]admittedTask)
+	tasks := make(map[core.ID]core.Task)
+	for rows.Next() {
+		var body []byte
+		var record events.ProjectionRecord
+		var task core.Task
+		if err := rows.Scan(&body); err != nil || decodeExactJSONBytes(body, &record) != nil || decodeExactJSONBytes(record.Value, &task) != nil || record.ProjectionKind != "task" || record.RecordID != string(task.ID) || record.Version < 1 || record.CorrelationID == "" || !core.ValidTask(task) {
+			return fmt.Errorf("current Task graph contains an invalid admission")
+		}
+		admitted[task.ID] = admittedTask{task: task, correlationID: record.CorrelationID}
+		tasks[task.ID] = task
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate current Task graph: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close current Task graph: %w", err)
+	}
+	if err := core.ValidateTaskDAG(tasks); err != nil {
+		return err
+	}
+	for id, state := range admitted {
+		if state.task.ParentID != "" {
+			parent, ok := admitted[state.task.ParentID]
+			if !ok || parent.task.WorkID != state.task.WorkID || parent.correlationID != state.correlationID {
+				return fmt.Errorf("task %s references invalid parent %s", id, state.task.ParentID)
+			}
+		}
+		for _, dependencyID := range state.task.DependsOn {
+			dependency := admitted[dependencyID]
+			if dependency.task.WorkID != state.task.WorkID || dependency.correlationID != state.correlationID {
+				return fmt.Errorf("task %s references cross-boundary dependency %s", id, dependencyID)
+			}
+		}
+	}
+	return nil
 }
 
 func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProjection) (events.Event, error) {
@@ -1336,26 +1395,17 @@ func validateGoalRevision(ctx context.Context, tx *sql.Tx, item preparedProjecti
 	if !missionFound || json.Unmarshal(missionBody, &missionRecord) != nil || json.Unmarshal(missionRecord.Value, &mission) != nil || missionRecord.ProjectionKind != "mission" || missionRecord.RecordID != string(goal.MissionID) || mission.ID != goal.MissionID || mission.OrganizationID != goal.OrganizationID || !core.ValidMission(mission) {
 		return fmt.Errorf("goal requires a valid parent mission in its organization")
 	}
-	return validateProjectionLifecycle(ctx, tx, item, "goal", goal,
-		func(value core.Goal) bool { return value.Status == core.GoalActive },
-		core.ValidGoalRevision, goalRevisionEvent,
-		"changes immutable identity, direction during a lifecycle transition, or lifecycle order")
-}
-
-func goalRevisionEvent(previous, current core.Goal) string {
-	switch {
-	case previous.Status == current.Status && !reflect.DeepEqual(previous, current):
-		return "GOAL_REFINED"
-	case previous.Status == core.GoalActive && current.Status == core.GoalPaused:
-		return "GOAL_PAUSED"
-	case previous.Status == core.GoalPaused && current.Status == core.GoalActive:
-		return "GOAL_RESUMED"
-	case current.Status == core.GoalRetired && previous.Status != core.GoalRetired:
-		return "GOAL_RETIRED"
-	case previous.Status == core.GoalActive && current.Status == core.GoalAchieved:
-		return "GOAL_ACHIEVED"
+	record, previous, found, err := latestProjectionRevision[core.Goal](ctx, tx, "goal", item.draft.RecordID)
+	if err != nil {
+		return err
 	}
-	return ""
+	if !found {
+		return events.ValidateGoalProjectionTransition(item.draft.Event.EventType, item.draft.Version, nil, goal)
+	}
+	if item.draft.Version != record.Version+1 {
+		return fmt.Errorf("goal version %d follows %d", item.draft.Version, record.Version)
+	}
+	return events.ValidateGoalProjectionTransition(item.draft.Event.EventType, item.draft.Version, &previous, goal)
 }
 
 func validateProjectionLifecycle[T any](ctx context.Context, tx *sql.Tx, item preparedProjection, kind string, value T, activeCreation func(T) bool, validRevision func(T, T) bool, revisionEvent func(T, T) string, invalidRevision string) error {

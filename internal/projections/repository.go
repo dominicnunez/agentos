@@ -344,6 +344,7 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 	sequences := make(map[int64]struct{}, len(stream))
 	tasks := make(map[core.ID]Versioned[core.Task])
 	agents := make(map[core.ID]Versioned[core.Agent])
+	goals := make(map[core.ID]Versioned[core.Goal])
 	for _, event := range stream {
 		if event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() {
 			return fmt.Errorf("event stream contains an incomplete envelope")
@@ -364,46 +365,42 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 			if err := events.ValidateProjectionEventBoundary(event, payload); err != nil {
 				return fmt.Errorf("event %s: %w", event.EventID, err)
 			}
-			if payload.Projection.ProjectionKind == KindTask {
-				var task core.Task
-				if decodeExactProjectionJSON(payload.Projection.Value, &task) != nil {
-					return fmt.Errorf("event %s contains an invalid Task projection", event.EventID)
-				}
-				previous, found := tasks[task.ID]
-				var prior *core.Task
-				if found {
-					prior = &previous.Value
-					if payload.Projection.Version != previous.Version+1 || payload.Projection.CorrelationID != previous.CorrelationID {
-						return fmt.Errorf("event %s contains noncontiguous Task history", event.EventID)
-					}
-				}
-				if err := events.ValidateTaskProjectionTransition(event.EventType, payload.Projection.Version, prior, task); err != nil {
-					return fmt.Errorf("event %s: %w", event.EventID, err)
-				}
-				tasks[task.ID] = Versioned[core.Task]{Version: payload.Projection.Version, CorrelationID: payload.Projection.CorrelationID, Value: task}
+			switch payload.Projection.ProjectionKind {
+			case KindTask:
+				err = validateProjectionEventLifecycle(event, payload.Projection, "Task", tasks, func(value core.Task) core.ID { return value.ID }, true, events.ValidateTaskProjectionTransition)
+			case KindAgent:
+				err = validateProjectionEventLifecycle(event, payload.Projection, "Agent", agents, func(value core.Agent) core.ID { return value.ID }, false, events.ValidateAgentProjectionTransition)
+			case KindGoal:
+				err = validateProjectionEventLifecycle(event, payload.Projection, "Goal", goals, func(value core.Goal) core.ID { return value.ID }, false, events.ValidateGoalProjectionTransition)
 			}
-			if payload.Projection.ProjectionKind == KindAgent {
-				var agent core.Agent
-				if decodeExactProjectionJSON(payload.Projection.Value, &agent) != nil {
-					return fmt.Errorf("event %s contains an invalid Agent projection", event.EventID)
-				}
-				previous, found := agents[agent.ID]
-				var prior *core.Agent
-				if found {
-					prior = &previous.Value
-					if payload.Projection.Version != previous.Version+1 {
-						return fmt.Errorf("event %s contains noncontiguous Agent history", event.EventID)
-					}
-				}
-				if err := events.ValidateAgentProjectionTransition(event.EventType, payload.Projection.Version, prior, agent); err != nil {
-					return fmt.Errorf("event %s: %w", event.EventID, err)
-				}
-				agents[agent.ID] = Versioned[core.Agent]{Version: payload.Projection.Version, CorrelationID: payload.Projection.CorrelationID, Value: agent}
+			if err != nil {
+				return fmt.Errorf("event %s: %w", event.EventID, err)
 			}
 		} else if events.RequiresProjectionAdmission(event.EventType, event.SourceActorID) {
 			return fmt.Errorf("event %s uses a projection lifecycle event without typed admission", event.EventID)
 		}
 	}
+	return nil
+}
+
+func validateProjectionEventLifecycle[T any](event events.Event, record events.ProjectionRecord, kind string, history map[core.ID]Versioned[T], identity func(T) core.ID, correlationStable bool, validate func(string, int, *T, T) error) error {
+	var value T
+	if decodeExactProjectionJSON(record.Value, &value) != nil || identity(value) != core.ID(record.RecordID) {
+		return fmt.Errorf("contains an invalid %s projection", kind)
+	}
+	id := identity(value)
+	previous, found := history[id]
+	var prior *T
+	if found {
+		prior = &previous.Value
+		if record.Version != previous.Version+1 || correlationStable && record.CorrelationID != previous.CorrelationID {
+			return fmt.Errorf("contains noncontiguous %s history", kind)
+		}
+	}
+	if err := validate(event.EventType, record.Version, prior, value); err != nil {
+		return err
+	}
+	history[id] = Versioned[T]{Version: record.Version, CorrelationID: record.CorrelationID, Value: value}
 	return nil
 }
 

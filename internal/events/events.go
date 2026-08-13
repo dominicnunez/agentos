@@ -1657,6 +1657,15 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 	if !validProjectionEventType(record.ProjectionKind, record.Version, event.EventType) {
 		return fmt.Errorf("projection %s/%s/%d uses unsupported event %s", record.ProjectionKind, record.RecordID, record.Version, event.EventType)
 	}
+	if record.ProjectionKind == "goal" {
+		var goal core.Goal
+		if decodeExactEventJSON(record.Value, &goal) != nil || goal.ID != core.ID(record.RecordID) || string(goal.OrganizationID) != event.OrganizationID {
+			return fmt.Errorf("goal projection value is invalid")
+		}
+		if err := ValidateGoalProjectionTarget(event.EventType, record.Version, goal); err != nil {
+			return err
+		}
+	}
 	if record.ProjectionKind == "agent" {
 		var agent core.Agent
 		if decodeExactEventJSON(record.Value, &agent) != nil || agent.ID != core.ID(record.RecordID) || string(agent.OrganizationID) != event.OrganizationID {
@@ -1690,6 +1699,68 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 	}
 	if event.TaskID != "" || event.RecipientScope != "" || event.RecipientID != "" {
 		return fmt.Errorf("organizational projection uses a Task or recipient route")
+	}
+	return nil
+}
+
+// ValidateGoalProjectionTarget couples each Goal lifecycle label to the state
+// that label is permitted to materialize, even before prior state is loaded.
+func ValidateGoalProjectionTarget(eventType string, version int, goal core.Goal) error {
+	if version < 1 || !core.ValidGoal(goal) {
+		return fmt.Errorf("goal projection is incomplete")
+	}
+	valid := false
+	switch eventType {
+	case "GOAL_CREATED":
+		valid = version == 1 && goal.Status == core.GoalActive
+	case "GOAL_REFINED":
+		valid = version > 1 && (goal.Status == core.GoalActive || goal.Status == core.GoalPaused)
+	case "GOAL_PAUSED":
+		valid = version > 1 && goal.Status == core.GoalPaused
+	case "GOAL_RESUMED":
+		valid = version > 1 && goal.Status == core.GoalActive
+	case "GOAL_RETIRED":
+		valid = version > 1 && goal.Status == core.GoalRetired
+	case "GOAL_ACHIEVED":
+		valid = version > 1 && goal.Status == core.GoalAchieved
+	}
+	if !valid {
+		return fmt.Errorf("goal lifecycle event %s cannot materialize status %s at version %d", eventType, goal.Status, version)
+	}
+	return nil
+}
+
+// ValidateGoalProjectionTransition binds every Goal target to its exact prior
+// state and keeps refinement distinct from pause, resume, retirement, and
+// evidence-backed achievement.
+func ValidateGoalProjectionTransition(eventType string, version int, previous *core.Goal, next core.Goal) error {
+	if err := ValidateGoalProjectionTarget(eventType, version, next); err != nil {
+		return err
+	}
+	if previous == nil {
+		if version != 1 || eventType != "GOAL_CREATED" {
+			return fmt.Errorf("goal history must begin with creation at version one")
+		}
+		return nil
+	}
+	if version < 2 || !core.ValidGoalRevision(*previous, next) {
+		return fmt.Errorf("goal revision changes immutable identity, direction during a lifecycle transition, or lifecycle order")
+	}
+	expected := ""
+	switch {
+	case previous.Status == next.Status && !reflect.DeepEqual(*previous, next):
+		expected = "GOAL_REFINED"
+	case previous.Status == core.GoalActive && next.Status == core.GoalPaused:
+		expected = "GOAL_PAUSED"
+	case previous.Status == core.GoalPaused && next.Status == core.GoalActive:
+		expected = "GOAL_RESUMED"
+	case next.Status == core.GoalRetired && previous.Status != core.GoalRetired:
+		expected = "GOAL_RETIRED"
+	case previous.Status == core.GoalActive && next.Status == core.GoalAchieved:
+		expected = "GOAL_ACHIEVED"
+	}
+	if expected == "" || eventType != expected {
+		return fmt.Errorf("goal lifecycle event %s does not match the exact state transition", eventType)
 	}
 	return nil
 }
