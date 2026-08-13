@@ -40,14 +40,7 @@ var projectionKinds = [...]string{
 	KindTask,
 }
 
-type Versioned[T any] struct {
-	Version       int
-	CorrelationID string
-	// Generic instantiations read Value throughout app and projection code, but
-	// Gallow cannot currently connect those reads to this generic declaration.
-	// gallow-ignore-next-line unused-field
-	Value T
-}
+type Versioned[T any] = core.DurableState[T]
 
 type Snapshot struct {
 	Organizations     map[core.ID]Versioned[core.Organization]
@@ -883,37 +876,19 @@ func decodeKind[T any](bodies [][]byte, target map[core.ID]Versioned[T], correla
 			return err
 		}
 		id := core.ID(record.RecordID)
-		previous, exists := target[id]
-		wantVersion := 1
-		if exists {
-			wantVersion = previous.Version + 1
-		}
-		if record.Version != wantVersion {
-			return fmt.Errorf("record %s version %d follows %d", id, record.Version, previous.Version)
-		}
-		if correlationStable {
-			if record.CorrelationID == "" {
-				return fmt.Errorf("record %s version %d has no correlation boundary", id, record.Version)
-			}
-			if exists && record.CorrelationID != previous.CorrelationID {
-				return fmt.Errorf("record %s changes correlation boundary at version %d", id, record.Version)
-			}
-		}
 		var value T
 		if err := json.Unmarshal(record.Value, &value); err != nil {
 			return err
 		}
-		if exists && sameRecordConfiguration != nil && !sameRecordConfiguration(previous.Value, value) {
-			return fmt.Errorf("record %s changes immutable configuration at version %d", id, record.Version)
+		if err := core.AdmitDurableRevision(target, id, record.Version, record.CorrelationID, value, correlationStable, sameRecordConfiguration); err != nil {
+			return err
 		}
-		target[id] = Versioned[T]{Version: record.Version, CorrelationID: record.CorrelationID, Value: value}
 	}
 	return nil
 }
 
 func sameAgentBlueprintRecord(left, right core.AgentBlueprint) bool {
-	right.Status = left.Status
-	return reflect.DeepEqual(left, right)
+	return core.ValidAgentBlueprintRevision(left, right)
 }
 
 func sameMissionRecord(left, right core.Mission) bool {
@@ -929,12 +904,11 @@ func sameWorkRecord(left, right core.Work) bool {
 }
 
 func sameExecutionProfileRecord(left, right core.ExecutionProfile) bool {
-	right.Status = left.Status
-	return reflect.DeepEqual(left, right)
+	return core.ValidExecutionProfileRevision(left, right)
 }
 
 func sameAgentRecord(left, right core.Agent) bool {
-	return left.ID == right.ID && left.OrganizationID == right.OrganizationID
+	return core.ValidAgentRevision(left, right)
 }
 
 // ValidateSnapshot applies the complete fail-closed projection graph contract.
@@ -942,23 +916,15 @@ func sameAgentRecord(left, right core.Agent) bool {
 // from routine materialization as the organizational model evolves.
 func ValidateSnapshot(snapshot Snapshot) error {
 	return core.ValidateDurableGraph(core.DurableGraph{
-		Organizations:     durableStates(snapshot.Organizations),
-		Missions:          durableStates(snapshot.Missions),
-		Goals:             durableStates(snapshot.Goals),
-		Teams:             durableStates(snapshot.Teams),
-		AgentBlueprints:   durableStates(snapshot.AgentBlueprints),
-		ExecutionProfiles: durableStates(snapshot.ExecutionProfiles),
-		Agents:            durableStates(snapshot.Agents),
-		Intents:           durableStates(snapshot.Intents),
-		Works:             durableStates(snapshot.Works),
-		Tasks:             durableStates(snapshot.Tasks),
+		Organizations:     snapshot.Organizations,
+		Missions:          snapshot.Missions,
+		Goals:             snapshot.Goals,
+		Teams:             snapshot.Teams,
+		AgentBlueprints:   snapshot.AgentBlueprints,
+		ExecutionProfiles: snapshot.ExecutionProfiles,
+		Agents:            snapshot.Agents,
+		Intents:           snapshot.Intents,
+		Works:             snapshot.Works,
+		Tasks:             snapshot.Tasks,
 	})
-}
-
-func durableStates[T any](source map[core.ID]Versioned[T]) map[core.ID]core.DurableState[T] {
-	target := make(map[core.ID]core.DurableState[T], len(source))
-	for id, state := range source {
-		target[id] = core.DurableState[T]{Version: state.Version, CorrelationID: state.CorrelationID, Value: state.Value}
-	}
-	return target
 }

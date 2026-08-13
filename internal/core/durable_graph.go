@@ -1,13 +1,65 @@
 package core
 
-import "fmt"
+import (
+	"fmt"
+	"reflect"
+)
 
 // DurableState is the current admitted value of one versioned organizational
 // record. CorrelationID binds Intent, Work, and Task streams.
 type DurableState[T any] struct {
 	Version       int
 	CorrelationID string
-	Value         T
+	// Generic instantiations are read throughout validation, but Gallow cannot
+	// currently connect those reads to this generic declaration.
+	// gallow-ignore-next-line unused-field
+	Value T
+}
+
+// AdmitDurableRevision applies the ordering, correlation, and immutable-value
+// rules shared by routine materialization and recovery certification.
+func AdmitDurableRevision[T any](target map[ID]DurableState[T], recordID ID, version int, correlationID string, value T, correlationStable bool, validRevision func(T, T) bool) error {
+	previous, exists := target[recordID]
+	wantVersion := 1
+	if exists {
+		wantVersion = previous.Version + 1
+	}
+	if version != wantVersion {
+		return fmt.Errorf("record %s version %d follows %d", recordID, version, previous.Version)
+	}
+	if correlationStable {
+		if correlationID == "" {
+			return fmt.Errorf("record %s version %d has no correlation boundary", recordID, version)
+		}
+		if exists && correlationID != previous.CorrelationID {
+			return fmt.Errorf("record %s changes correlation boundary at version %d", recordID, version)
+		}
+	}
+	if exists && validRevision != nil && !validRevision(previous.Value, value) {
+		return fmt.Errorf("record %s changes immutable configuration at version %d", recordID, version)
+	}
+	target[recordID] = DurableState[T]{Version: version, CorrelationID: correlationID, Value: value}
+	return nil
+}
+
+// ValidAgentBlueprintRevision permits status changes while preserving the
+// exact blueprint definition selected by durable Agent configurations.
+func ValidAgentBlueprintRevision(previous, next AgentBlueprint) bool {
+	next.Status = previous.Status
+	return reflect.DeepEqual(previous, next)
+}
+
+// ValidExecutionProfileRevision permits status changes while preserving the
+// exact provider, model, prompt, and tool configuration.
+func ValidExecutionProfileRevision(previous, next ExecutionProfile) bool {
+	next.Status = previous.Status
+	return reflect.DeepEqual(previous, next)
+}
+
+// ValidAgentRevision preserves durable Agent identity and tenant ownership
+// while allowing reviewed configuration and lifecycle changes.
+func ValidAgentRevision(previous, next Agent) bool {
+	return previous.ID == next.ID && previous.OrganizationID == next.OrganizationID
 }
 
 // DurableGraph is the current organizational state whose cross-record

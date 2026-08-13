@@ -198,6 +198,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	}
 	defer func() { _ = recordRows.Close() }()
 	used := map[string]struct{}{}
+	orderedAdmissions := make([]admittedProjectionEvent, 0, len(admitted))
 	lastProjectionVersions := map[string]int{}
 	for recordRows.Next() {
 		var kind, recordID, admissionEventID, admissionFingerprint string
@@ -238,6 +239,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("projection admission event %s authorizes multiple records", admissionEventID)
 		}
 		used[admissionEventID] = struct{}{}
+		orderedAdmissions = append(orderedAdmissions, admission)
 	}
 	if err := recordRows.Err(); err != nil {
 		_ = recordRows.Close()
@@ -251,10 +253,10 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("projection admission event %s has no materialized record", eventID)
 		}
 	}
-	return validateProjectionOrganizationBindings(admitted)
+	return validateProjectionOrganizationBindings(orderedAdmissions)
 }
 
-func validateProjectionOrganizationBindings(admitted map[string]admittedProjectionEvent) error {
+func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) error {
 	snapshot := core.DurableGraph{
 		Organizations:     map[core.ID]core.DurableState[core.Organization]{},
 		Missions:          map[core.ID]core.DurableState[core.Mission]{},
@@ -279,69 +281,89 @@ func validateProjectionOrganizationBindings(admitted map[string]admittedProjecti
 				return fmt.Errorf("event %s contains an invalid Organization projection", event.EventID)
 			}
 			organizationID = value.ID
-			setRecoveryProjection(snapshot.Organizations, record, value)
+			if err := setRecoveryProjection(snapshot.Organizations, record, value, false, nil); err != nil {
+				return fmt.Errorf("event %s contains invalid Organization history: %w", event.EventID, err)
+			}
 		case "mission":
 			var value core.Mission
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Mission projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
-			setRecoveryProjection(snapshot.Missions, record, value)
+			if err := setRecoveryProjection(snapshot.Missions, record, value, false, core.ValidMissionRevision); err != nil {
+				return fmt.Errorf("event %s contains invalid Mission history: %w", event.EventID, err)
+			}
 		case "goal":
 			var value core.Goal
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Goal projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
-			setRecoveryProjection(snapshot.Goals, record, value)
+			if err := setRecoveryProjection(snapshot.Goals, record, value, false, core.ValidGoalRevision); err != nil {
+				return fmt.Errorf("event %s contains invalid Goal history: %w", event.EventID, err)
+			}
 		case "team":
 			var value core.Team
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Team projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
-			setRecoveryProjection(snapshot.Teams, record, value)
+			if err := setRecoveryProjection(snapshot.Teams, record, value, false, nil); err != nil {
+				return fmt.Errorf("event %s contains invalid Team history: %w", event.EventID, err)
+			}
 		case "agent_blueprint":
 			var value core.AgentBlueprint
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Agent blueprint projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
-			setRecoveryProjection(snapshot.AgentBlueprints, record, value)
+			if err := setRecoveryProjection(snapshot.AgentBlueprints, record, value, false, core.ValidAgentBlueprintRevision); err != nil {
+				return fmt.Errorf("event %s contains invalid Agent blueprint history: %w", event.EventID, err)
+			}
 		case "execution_profile":
 			var value core.ExecutionProfile
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid execution profile projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
-			setRecoveryProjection(snapshot.ExecutionProfiles, record, value)
+			if err := setRecoveryProjection(snapshot.ExecutionProfiles, record, value, false, core.ValidExecutionProfileRevision); err != nil {
+				return fmt.Errorf("event %s contains invalid execution profile history: %w", event.EventID, err)
+			}
 		case "agent":
 			var value core.Agent
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Agent projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
-			setRecoveryProjection(snapshot.Agents, record, value)
+			if err := setRecoveryProjection(snapshot.Agents, record, value, false, core.ValidAgentRevision); err != nil {
+				return fmt.Errorf("event %s contains invalid Agent history: %w", event.EventID, err)
+			}
 		case "intent":
 			var value core.Intent
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Intent projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
-			setRecoveryProjection(snapshot.Intents, record, value)
+			if err := setRecoveryProjection(snapshot.Intents, record, value, true, nil); err != nil {
+				return fmt.Errorf("event %s contains invalid Intent history: %w", event.EventID, err)
+			}
 		case "work":
 			var value core.Work
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Work projection", event.EventID)
 			}
-			setRecoveryProjection(snapshot.Works, record, value)
+			if err := setRecoveryProjection(snapshot.Works, record, value, true, core.ValidWorkRevision); err != nil {
+				return fmt.Errorf("event %s contains invalid Work history: %w", event.EventID, err)
+			}
 			continue
 		case "task":
 			var value core.Task
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Task projection", event.EventID)
 			}
-			setRecoveryProjection(snapshot.Tasks, record, value)
+			if err := setRecoveryProjection(snapshot.Tasks, record, value, true, nil); err != nil {
+				return fmt.Errorf("event %s contains invalid Task history: %w", event.EventID, err)
+			}
 			continue
 		default:
 			return fmt.Errorf("event %s contains unsupported projection kind %s", event.EventID, record.ProjectionKind)
@@ -389,11 +411,8 @@ func validateProjectionOrganizationBindings(admitted map[string]admittedProjecti
 	return nil
 }
 
-func setRecoveryProjection[T any](target map[core.ID]core.DurableState[T], record events.ProjectionRecord, value T) {
-	id := core.ID(record.RecordID)
-	if current, found := target[id]; !found || record.Version > current.Version {
-		target[id] = core.DurableState[T]{Version: record.Version, CorrelationID: record.CorrelationID, Value: value}
-	}
+func setRecoveryProjection[T any](target map[core.ID]core.DurableState[T], record events.ProjectionRecord, value T, correlationStable bool, validRevision func(T, T) bool) error {
+	return core.AdmitDurableRevision(target, core.ID(record.RecordID), record.Version, record.CorrelationID, value, correlationStable, validRevision)
 }
 
 func sqliteBytes(value any) ([]byte, error) {
