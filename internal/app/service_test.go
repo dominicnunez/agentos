@@ -617,8 +617,8 @@ func TestReplayRetainsDurableAssignmentWhenConfiguredModelChanges(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Agents) != 2 {
-		t.Fatalf("configured model change did not create a distinct roster identity: agents=%d", len(snapshot.Agents))
+	if len(snapshot.Agents) != 1 {
+		t.Fatalf("deterministic replay bootstrapped an unrelated model roster: agents=%d", len(snapshot.Agents))
 	}
 }
 
@@ -1239,6 +1239,132 @@ func TestDispatchFailsClosedWhenDurableRosterEligibilityChanges(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRecoverResumesOnlyRevalidatedAssignmentBlock(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1"}
+	if err := repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "assignment-resume", 1, organization, nil); err != nil {
+		t.Fatal(err)
+	}
+	agent := seedTestAgents(t, ctx, repository, "assignment-resume", organization.ID, execution.FakeModel{}.Descriptor(), "agent-1")[0]
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "echo resumed", NormalizedObjective: "echo resumed"}
+	goal := core.Goal{ID: "goal-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: "ACTIVE"}
+	task := core.Task{ID: "task-assignment-resume", GoalID: goal.ID, Description: "echo resumed", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, TaskContractVersion: "1", Status: core.TaskPending}
+	for _, save := range []func() error{
+		func() error {
+			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "assignment-resume", 1, intent, nil)
+		},
+		func() error {
+			return repository.SaveGoal(ctx, organization.ID, "GOAL_CREATED", "runtime", "assignment-resume", 1, goal, nil)
+		},
+		func() error {
+			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "assignment-resume", 1, task, nil)
+		},
+	} {
+		if err := save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agent.Status = "INACTIVE"
+	if err := repository.SaveAgent(ctx, "AGENT_DEACTIVATED", "runtime", "assignment-resume", 2, agent, nil); err != nil {
+		t.Fatal(err)
+	}
+	service := New(gateway)
+	if _, err := service.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tasks[task.ID].Value.Status != core.TaskBlocked {
+		t.Fatalf("ineligible assignment was not blocked: %+v", snapshot.Tasks[task.ID].Value)
+	}
+	agent.Status = "ACTIVE"
+	if err := repository.SaveAgent(ctx, "AGENT_REACTIVATED", "runtime", "assignment-resume", 3, agent, nil); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := service.Recover(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.TasksExecuted != 1 {
+		t.Fatalf("revalidated assignment did not resume exactly once: %+v", recovered)
+	}
+	snapshot, err = repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tasks[task.ID].Value.Status != core.TaskCompleted {
+		t.Fatalf("revalidated task did not complete: %+v", snapshot.Tasks[task.ID].Value)
+	}
+	stream, err := gateway.Events(ctx, "assignment-resume")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEventOrder(t, stream, "TASK_BLOCKED", "TASK_ASSIGNMENT_REVALIDATED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE")
+}
+
+func TestUserWorkDoesNotBootstrapOrDependOnDefaultAgent(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	service := New(gateway)
+
+	first, err := service.Submit(ctx, Submit{RequestID: "seed-default", OrganizationID: "org-1", Statement: "echo seed", Kind: core.ExecutionDeterministic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := service.state.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultState := snapshot.Agents[first.Task.AssigneeID]
+	defaultAgent := defaultState.Value
+	defaultAgent.Status = "INACTIVE"
+	if err := service.state.SaveAgent(ctx, "AGENT_DEACTIVATED", "runtime", "deactivate-default", defaultState.Version+1, defaultAgent, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	userWork, err := service.Submit(ctx, Submit{RequestID: "user-only", OrganizationID: "org-1", Statement: "provide the launch date", Kind: core.ExecutionHuman})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if userWork.Task.Status != core.TaskBlocked || userWork.Task.AssigneeType != "" || userWork.Task.AssigneeID != "" {
+		t.Fatalf("user work depended on an Agent assignment: %+v", userWork.Task)
+	}
+	snapshot, err = service.state.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Agents) != 1 || snapshot.Agents[first.Task.AssigneeID].Value.Status != "INACTIVE" {
+		t.Fatalf("user work changed the deliberate roster state: %+v", snapshot.Agents)
+	}
+
+	alternative := defaultState.Value
+	alternative.ID = "agent-alternative"
+	if err := service.state.SaveAgent(ctx, "AGENT_CREATED", "runtime", "alternative", 1, alternative, nil); err != nil {
+		t.Fatal(err)
+	}
+	agentWork, err := service.Submit(ctx, Submit{RequestID: "use-alternative", OrganizationID: "org-1", Statement: "summarize the launch", Kind: core.ExecutionAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agentWork.Task.AssigneeID != alternative.ID {
+		t.Fatalf("eligible alternative Agent was not selected: %+v", agentWork.Task)
 	}
 }
 

@@ -29,6 +29,7 @@ const (
 	defaultBlueprintVersion = "v1-general-worker"
 	defaultPromptVersion    = "v1"
 	localRuntimeAdapter     = "local"
+	assignmentBlockedCode   = "ASSIGNMENT_INELIGIBLE"
 )
 
 type Submit struct {
@@ -70,6 +71,11 @@ type planningFailureDetail struct {
 type planningAttemptError struct {
 	EvidenceEventRef string
 	Err              error
+}
+
+type assignmentRevalidatedDetail struct {
+	Code            string `json:"code"`
+	BlockedEventRef string `json:"blocked_event_ref"`
 }
 
 func (e *planningAttemptError) Error() string {
@@ -414,6 +420,28 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 				}
 				continuedInputs++
 				continue
+			}
+		}
+		if state.Value.Status == core.TaskBlocked && (state.Value.ExecutionKind == core.ExecutionDeterministic || state.Value.ExecutionKind == core.ExecutionAgent) {
+			stream, err := s.gateway.Events(ctx, state.CorrelationID)
+			if err != nil {
+				return RecoveryResult{}, err
+			}
+			blockedEvent, assignmentBlocked, err := recordedAssignmentBlock(stream, organizationID, state)
+			if err != nil {
+				return RecoveryResult{}, fmt.Errorf("validate assignment block for task %s: %w", state.Value.ID, err)
+			}
+			if assignmentBlocked {
+				if _, resolveErr := assignment.ResolveAssigned(assignmentRoster(snapshot), state.Value, s.assignmentRequirement(organizationID, state.Value.ExecutionKind)); resolveErr == nil {
+					task := state.Value
+					task.Status = core.TaskPending
+					detail := assignmentRevalidatedDetail{Code: "ASSIGNMENT_REVALIDATED", BlockedEventRef: blockedEvent.EventID}
+					if err := s.state.SaveTask(ctx, organizationID, "TASK_ASSIGNMENT_REVALIDATED", "runtime", state.CorrelationID, state.Version+1, task, detail); err != nil {
+						return RecoveryResult{}, fmt.Errorf("resume revalidated assignment for task %s: %w", task.ID, err)
+					}
+					result.PendingFound++
+					continue
+				}
 			}
 		}
 		switch state.Value.Status {
@@ -1348,10 +1376,6 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 		return core.Intent{}, core.Goal{}, core.Task{}, fmt.Errorf("organization projection mismatch")
 	}
 
-	if _, err := s.ensureDefaultAgent(ctx, &snapshot, organizationID, correlationID, now); err != nil {
-		return core.Intent{}, core.Goal{}, core.Task{}, err
-	}
-
 	acceptedDraft, err := acceptedDraftForSubmission(in, correlationID)
 	if err != nil {
 		return core.Intent{}, core.Goal{}, core.Task{}, err
@@ -1423,6 +1447,26 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 		}
 		return core.Intent{}, core.Goal{}, core.Task{}, err
 	}
+	needsDefaultAgent := false
+	checkedKinds := make(map[core.ExecutionKind]struct{})
+	for _, planned := range plan.Tasks {
+		if planned.ExecutionKind != core.ExecutionDeterministic && planned.ExecutionKind != core.ExecutionAgent {
+			continue
+		}
+		if _, checked := checkedKinds[planned.ExecutionKind]; checked {
+			continue
+		}
+		checkedKinds[planned.ExecutionKind] = struct{}{}
+		if _, selectErr := assignment.Select(assignmentRoster(snapshot), s.assignmentRequirement(organizationID, planned.ExecutionKind)); selectErr != nil {
+			needsDefaultAgent = true
+			break
+		}
+	}
+	if needsDefaultAgent {
+		if _, err := s.ensureDefaultAgent(ctx, &snapshot, organizationID, correlationID, now); err != nil {
+			return core.Intent{}, core.Goal{}, core.Task{}, err
+		}
+	}
 	task, err := s.ensurePlanTasks(ctx, organizationID, correlationID, snapshot, goal, acceptedDraft, plan, intent.SourcePrincipalKind == core.PrincipalHuman)
 	if err != nil {
 		return core.Intent{}, core.Goal{}, core.Task{}, err
@@ -1464,7 +1508,9 @@ func (s *Service) ensureDefaultAgent(ctx context.Context, snapshot *projections.
 		RuntimeAdapter: localRuntimeAdapter, Status: assignment.Active,
 	}
 	if existing, ok := snapshot.Agents[agent.ID]; ok {
-		if existing.Value != agent {
+		expected := agent
+		expected.Status = existing.Value.Status
+		if existing.Value != expected {
 			return core.Agent{}, fmt.Errorf("durable Agent identity is bound to different configuration")
 		}
 		return existing.Value, nil
@@ -1501,12 +1547,12 @@ func rosterID(kind string, parts ...string) core.ID {
 
 func sameAgentBlueprint(left, right core.AgentBlueprint) bool {
 	return left.ID == right.ID && left.OrganizationID == right.OrganizationID && left.Version == right.Version && left.Role == right.Role &&
-		left.OperatingInstructions == right.OperatingInstructions && slices.Equal(left.RequiredCapabilityClasses, right.RequiredCapabilityClasses) && left.Status == right.Status
+		left.OperatingInstructions == right.OperatingInstructions && slices.Equal(left.RequiredCapabilityClasses, right.RequiredCapabilityClasses)
 }
 
 func sameExecutionProfile(left, right core.ExecutionProfile) bool {
 	return left.ID == right.ID && left.OrganizationID == right.OrganizationID && left.Version == right.Version && left.ModelProvider == right.ModelProvider &&
-		left.Model == right.Model && left.ReasoningSetting == right.ReasoningSetting && left.PromptVersion == right.PromptVersion && slices.Equal(left.ToolRefs, right.ToolRefs) && left.Status == right.Status
+		left.Model == right.Model && left.ReasoningSetting == right.ReasoningSetting && left.PromptVersion == right.PromptVersion && slices.Equal(left.ToolRefs, right.ToolRefs)
 }
 
 func acceptedDraftForSubmission(in Submit, correlationID string) (core.IntentDraft, error) {
@@ -2251,6 +2297,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		if err != nil {
 			task.Status = core.TaskBlocked
 			detail := blockedDetail("the durable Agent assignment is unavailable or no longer eligible", "an active same-organization Agent with the exact reviewed blueprint, execution profile, runtime adapter, and capability prerequisites", "the runtime cannot substitute another Agent, infer capabilities, or change provider identity at dispatch")
+			detail.Code = assignmentBlockedCode
 			if saveErr := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); saveErr != nil {
 				return taskRun{}, fmt.Errorf("persist assignment block for task %s: %w", task.ID, saveErr)
 			}
@@ -2735,6 +2782,37 @@ func (s *Service) saveBlockedTask(ctx context.Context, snapshot projections.Snap
 
 func blockedDetail(reason, missing, whyNeeded string) events.TaskBlockedPayload {
 	return events.TaskBlockedPayload{Reason: reason, Missing: missing, WhyNeeded: whyNeeded, WorkCompleted: "none"}
+}
+
+func recordedAssignmentBlock(stream []events.Event, organizationID core.ID, state projections.Versioned[core.Task]) (events.Event, bool, error) {
+	var matched events.Event
+	for _, event := range stream {
+		var payload events.ProjectionEventPayload
+		if json.Unmarshal(event.Payload, &payload) != nil || payload.Projection.ProjectionKind != projections.KindTask || payload.Projection.RecordID != string(state.Value.ID) || payload.Projection.Version != state.Version {
+			continue
+		}
+		if matched.EventID != "" {
+			return events.Event{}, false, fmt.Errorf("task version has multiple authoritative projection events")
+		}
+		matched = event
+	}
+	if matched.EventID == "" {
+		return events.Event{}, false, fmt.Errorf("blocked task version has no authoritative projection event")
+	}
+	var payload events.ProjectionEventPayload
+	var projected core.Task
+	if matched.OrganizationID != string(organizationID) || matched.CorrelationID != state.CorrelationID || matched.TaskID != string(state.Value.ID) || matched.SourceActorID != "runtime" ||
+		json.Unmarshal(matched.Payload, &payload) != nil || json.Unmarshal(payload.Projection.Value, &projected) != nil || !reflect.DeepEqual(projected, state.Value) {
+		return events.Event{}, false, fmt.Errorf("blocked task projection crosses its durable identity boundary")
+	}
+	if matched.EventType != "TASK_BLOCKED" {
+		return events.Event{}, false, nil
+	}
+	var detail events.TaskBlockedPayload
+	if json.Unmarshal(payload.Detail, &detail) != nil {
+		return events.Event{}, false, fmt.Errorf("decode blocked task detail")
+	}
+	return matched, detail.Code == assignmentBlockedCode, nil
 }
 
 type inboxBatch struct {

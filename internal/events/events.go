@@ -27,6 +27,7 @@ type Draft struct {
 }
 
 type TaskBlockedPayload struct {
+	Code          string   `json:"code,omitempty"`
 	Reason        string   `json:"reason"`
 	Missing       string   `json:"missing"`
 	WhyNeeded     string   `json:"why_needed"`
