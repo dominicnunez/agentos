@@ -200,6 +200,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	used := map[string]struct{}{}
 	orderedAdmissions := make([]admittedProjectionEvent, 0, len(admitted))
 	lastProjectionVersions := map[string]int{}
+	lastProjectionSequences := map[string]int64{}
 	for recordRows.Next() {
 		var kind, recordID, admissionEventID, admissionFingerprint string
 		var version int
@@ -234,6 +235,11 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			_ = recordRows.Close()
 			return fmt.Errorf("projection record %s/%s/%d lacks exact event admission", kind, recordID, version)
 		}
+		if previousSequence := lastProjectionSequences[versionKey]; previousSequence != 0 && admission.event.Sequence <= previousSequence {
+			_ = recordRows.Close()
+			return fmt.Errorf("projection record %s/%s version %d precedes its prior admission event", kind, recordID, version)
+		}
+		lastProjectionSequences[versionKey] = admission.event.Sequence
 		if _, duplicate := used[admissionEventID]; duplicate {
 			_ = recordRows.Close()
 			return fmt.Errorf("projection admission event %s authorizes multiple records", admissionEventID)

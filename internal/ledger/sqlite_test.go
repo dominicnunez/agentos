@@ -350,6 +350,38 @@ func TestProjectionWriterRejectsInvalidBoundaryBeforePersistence(t *testing.T) {
 	}
 }
 
+func TestProjectionWriterRejectsUnknownFieldsBeforePersistence(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	value := struct {
+		core.Organization
+		Unexpected string `json:"unexpected"`
+	}{
+		Organization: core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: time.Now().UTC()},
+		Unexpected:   "unreviewed",
+	}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event: events.TrustedDraft{
+			OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup-1",
+		},
+		ProjectionKind: "organization", RecordID: "org-1", Version: 1, Value: value,
+	}); err == nil {
+		t.Fatal("projection writer accepted an unknown value field")
+	}
+	stream, err := store.Events(ctx, "")
+	if err != nil || len(stream) != 0 {
+		t.Fatalf("unknown projection field changed ledger: events=%d err=%v", len(stream), err)
+	}
+	records, err := store.Records(ctx, "organization", "org-1")
+	if err != nil || len(records) != 0 {
+		t.Fatalf("unknown projection field materialized state: records=%d err=%v", len(records), err)
+	}
+}
+
 func TestProjectionWriterRejectsMalformedSealedJSONBeforePersistence(t *testing.T) {
 	for name, draft := range map[string]events.ProjectionDraft{
 		"projection value": {

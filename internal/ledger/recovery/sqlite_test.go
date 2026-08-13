@@ -315,6 +315,109 @@ func TestRecoveryRejectsNoncontiguousProjectionRevisions(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsReorderedProjectionRevisionEvents(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	mission := core.Mission{ID: "mission-1", OrganizationID: organization.ID, Statement: "Mission", Status: core.MissionActive, CreatedAt: now}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup-1"},
+		ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	first, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "mission-1"},
+		ProjectionKind: "mission", RecordID: string(mission.ID), Version: 1, Value: mission,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	mission.Statement = "Revised mission"
+	second, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "MISSION_REVISED", SourceActorID: "runtime", CorrelationID: "mission-1"},
+		ProjectionKind: "mission", RecordID: string(mission.ID), Version: 2, Value: mission,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	firstBody, firstFingerprint := resealRecoveryProjectionAtSequence(t, first, second.Sequence)
+	secondBody, secondFingerprint := resealRecoveryProjectionAtSequence(t, second, first.Sequence)
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE events SET sequence=-sequence WHERE event_id IN (?,?)`, first.EventID, second.EventID); err != nil {
+		_ = tx.Rollback()
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	for _, update := range []struct {
+		eventID     string
+		sequence    int64
+		body        []byte
+		fingerprint string
+	}{
+		{first.EventID, second.Sequence, firstBody, firstFingerprint},
+		{second.EventID, first.Sequence, secondBody, secondFingerprint},
+	} {
+		if _, err := tx.ExecContext(ctx, `UPDATE events SET sequence=?,payload=? WHERE event_id=?`, update.sequence, update.body, update.eventID); err != nil {
+			_ = tx.Rollback()
+			_ = db.Close()
+			t.Fatal(err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE records SET admission_fingerprint=? WHERE admission_event_id=?`, update.fingerprint, update.eventID); err != nil {
+			_ = tx.Rollback()
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil {
+		t.Fatal("recovery verification accepted projection events in reverse revision order")
+	}
+}
+
+func resealRecoveryProjectionAtSequence(t *testing.T, event events.Event, sequence int64) ([]byte, string) {
+	t.Helper()
+	payload, present, err := events.AdmittedProjection(event)
+	if err != nil || !present {
+		t.Fatalf("projection admission is invalid: present=%t err=%v", present, err)
+	}
+	event.Sequence = sequence
+	sealed, err := events.SealProjectionEvent(event, payload.Projection, payload.Detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body, sealed.Admission.Fingerprint
+}
+
 func TestRecoveryRejectsInvalidProjectionRevisionHistory(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.db")

@@ -932,15 +932,20 @@ func prepareProjection(draft events.ProjectionDraft, allowWorkCompletion, allowG
 		return preparedProjection{}, fmt.Errorf("projection boundary: %w", err)
 	}
 	switch draft.ProjectionKind {
+	case "organization":
+		var organization core.Organization
+		if err := decodeExactJSONBytes(value, &organization); err != nil {
+			return preparedProjection{}, fmt.Errorf("decode organization projection: %w", err)
+		}
 	case "mission":
 		var mission core.Mission
-		if err := json.Unmarshal(value, &mission); err != nil {
+		if err := decodeExactJSONBytes(value, &mission); err != nil {
 			return preparedProjection{}, fmt.Errorf("decode mission projection: %w", err)
 		}
 		item.mission = &mission
 	case "goal":
 		var goal core.Goal
-		if err := json.Unmarshal(value, &goal); err != nil {
+		if err := decodeExactJSONBytes(value, &goal); err != nil {
 			return preparedProjection{}, fmt.Errorf("decode goal projection: %w", err)
 		}
 		if !allowGoalAchievement && (goal.Status == core.GoalAchieved || draft.Event.EventType == "GOAL_ACHIEVED") {
@@ -949,37 +954,42 @@ func prepareProjection(draft events.ProjectionDraft, allowWorkCompletion, allowG
 		item.goal = &goal
 	case "team":
 		var team core.Team
-		if err := json.Unmarshal(value, &team); err != nil {
+		if err := decodeExactJSONBytes(value, &team); err != nil {
 			return preparedProjection{}, fmt.Errorf("decode Team projection: %w", err)
 		}
 		item.team = &team
 	case "agent_blueprint":
 		var blueprint core.AgentBlueprint
-		if err := json.Unmarshal(value, &blueprint); err != nil {
+		if err := decodeExactJSONBytes(value, &blueprint); err != nil {
 			return preparedProjection{}, fmt.Errorf("decode Agent blueprint projection: %w", err)
 		}
 		item.blueprint = &blueprint
 	case "execution_profile":
 		var profile core.ExecutionProfile
-		if err := json.Unmarshal(value, &profile); err != nil {
+		if err := decodeExactJSONBytes(value, &profile); err != nil {
 			return preparedProjection{}, fmt.Errorf("decode execution profile projection: %w", err)
 		}
 		item.profile = &profile
+	case "agent":
+		var agent core.Agent
+		if err := decodeExactJSONBytes(value, &agent); err != nil {
+			return preparedProjection{}, fmt.Errorf("decode Agent projection: %w", err)
+		}
 	case "intent":
 		var intent core.Intent
-		if err := json.Unmarshal(value, &intent); err != nil {
+		if err := decodeExactJSONBytes(value, &intent); err != nil {
 			return preparedProjection{}, fmt.Errorf("decode intent for external work index: %w", err)
 		}
 		item.intent = &intent
 	case "task":
 		var task core.Task
-		if err := json.Unmarshal(value, &task); err != nil {
+		if err := decodeExactJSONBytes(value, &task); err != nil {
 			return preparedProjection{}, fmt.Errorf("decode task for external work index: %w", err)
 		}
 		item.task = &task
 	case "work":
 		var work core.Work
-		if err := json.Unmarshal(value, &work); err != nil {
+		if err := decodeExactJSONBytes(value, &work); err != nil {
 			return preparedProjection{}, fmt.Errorf("decode work projection: %w", err)
 		}
 		if !allowWorkCompletion && (work.Status == core.WorkCompleted || draft.Event.EventType == "WORK_COMPLETED") {
