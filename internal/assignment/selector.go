@@ -93,6 +93,8 @@ func validateRequirement(requirement Requirement) error {
 		if requirement.ModelProvider == "" || requirement.Model == "" || requirement.ExecutionProfileVersion == "" {
 			return fmt.Errorf("adaptive assignment requires an exact model execution profile")
 		}
+	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionHuman, core.ExecutionMixed:
+		return fmt.Errorf("execution kind %s is not assignable to an Agent", requirement.ExecutionKind)
 	default:
 		return fmt.Errorf("execution kind %s is not assignable to an Agent", requirement.ExecutionKind)
 	}

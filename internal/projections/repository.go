@@ -356,9 +356,9 @@ func validateRoster(snapshot Snapshot) error {
 	for id, state := range snapshot.AgentBlueprints {
 		blueprint := state.Value
 		if blueprint.Version == "" || blueprint.Role == "" || blueprint.OperatingInstructions == "" || !validRosterStatus(blueprint.Status) {
-			return fmt.Errorf("Agent blueprint %s is incomplete", id)
+			return fmt.Errorf("agent blueprint %s is incomplete", id)
 		}
-		if err := validateDistinctStrings("Agent blueprint required capability classes", id, blueprint.RequiredCapabilityClasses); err != nil {
+		if err := validateDistinctStrings("agent blueprint required capability classes", id, blueprint.RequiredCapabilityClasses); err != nil {
 			return err
 		}
 	}
@@ -374,15 +374,15 @@ func validateRoster(snapshot Snapshot) error {
 	for id, state := range snapshot.Agents {
 		agent := state.Value
 		if agent.BlueprintID == "" || agent.BlueprintVersion == "" || agent.ExecutionProfileID == "" || agent.ExecutionProfileVersion == "" || agent.RuntimeAdapter == "" || !validRosterStatus(agent.Status) {
-			return fmt.Errorf("Agent %s is incomplete", id)
+			return fmt.Errorf("agent %s is incomplete", id)
 		}
 		blueprint, ok := snapshot.AgentBlueprints[agent.BlueprintID]
 		if !ok || blueprint.Value.OrganizationID != agent.OrganizationID || blueprint.Value.Version != agent.BlueprintVersion {
-			return fmt.Errorf("Agent %s references invalid blueprint %s", id, agent.BlueprintID)
+			return fmt.Errorf("agent %s references invalid blueprint %s", id, agent.BlueprintID)
 		}
 		profile, ok := snapshot.ExecutionProfiles[agent.ExecutionProfileID]
 		if !ok || profile.Value.OrganizationID != agent.OrganizationID || profile.Value.Version != agent.ExecutionProfileVersion {
-			return fmt.Errorf("Agent %s references invalid execution profile %s", id, agent.ExecutionProfileID)
+			return fmt.Errorf("agent %s references invalid execution profile %s", id, agent.ExecutionProfileID)
 		}
 	}
 	return nil
