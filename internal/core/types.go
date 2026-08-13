@@ -46,9 +46,10 @@ const (
 type GoalStatus string
 
 const (
-	GoalActive  GoalStatus = "ACTIVE"
-	GoalPaused  GoalStatus = "PAUSED"
-	GoalRetired GoalStatus = "RETIRED"
+	GoalActive   GoalStatus = "ACTIVE"
+	GoalPaused   GoalStatus = "PAUSED"
+	GoalAchieved GoalStatus = "ACHIEVED"
+	GoalRetired  GoalStatus = "RETIRED"
 )
 
 // Goal is a measurable outcome under a Mission. Projection versions preserve

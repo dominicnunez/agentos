@@ -305,6 +305,23 @@ func TestGoalBoundIntentCannotBypassAtomicAdmission(t *testing.T) {
 	}
 }
 
+func TestTerminalEvidenceCannotUseGenericTrustedAdmission(t *testing.T) {
+	for _, eventType := range []string{"WORK_COMPLETION_EVALUATED", "WORK_COMPLETED", "GOAL_PROGRESS_EVALUATED", "GOAL_ACHIEVED"} {
+		t.Run(eventType, func(t *testing.T) {
+			ledger := &memoryLedger{}
+			gateway := NewGateway(ledger)
+			if _, err := gateway.PublishTrusted(context.Background(), TrustedDraft{
+				OrganizationID: "org-1", EventType: eventType, SourceActorID: "runtime", CorrelationID: "run-1",
+			}); err == nil {
+				t.Fatalf("generic trusted admission accepted %s", eventType)
+			}
+			if len(ledger.events) != 0 {
+				t.Fatalf("rejected %s reached the ledger", eventType)
+			}
+		})
+	}
+}
+
 func TestInboxObservationCannotBypassAtomicAdmission(t *testing.T) {
 	ledger := &memoryLedger{}
 	gateway := NewGateway(ledger)

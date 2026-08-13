@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -677,16 +678,11 @@ func TestCompletedWorkRequiresExactDurableEvidence(t *testing.T) {
 	if err != nil || !evidence.Valid() {
 		t.Fatalf("test evidence is invalid: evidence=%+v err=%v", evidence, err)
 	}
-	evidenceEvent, err := l.Append(ctx, events.TrustedDraft{
+	if _, err := l.AppendWorkCompletionEvidence(ctx, events.TrustedDraft{
 		OrganizationID: "org-1", EventType: "WORK_COMPLETION_EVALUATED", SourceActorID: "runtime",
 		ArtifactRefs: evidence.ArtifactRefs, Payload: evidence, CorrelationID: "run-1",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	draft.Event.Payload = events.WorkCompletionTransitionPayload{EvidenceEventRef: evidenceEvent.EventID, Fingerprint: evidence.Fingerprint}
-	if _, err := l.AppendWorkCompletion(ctx, draft); err == nil {
-		t.Fatal("nonexistent Task evidence references authorized Work completion")
+	}); err == nil {
+		t.Fatal("typed admission accepted nonexistent Task evidence references")
 	}
 	forgedEvidence := evidence
 	forgedEvidence.Tasks = append([]events.WorkCompletionTaskEvidencePayload(nil), evidence.Tasks...)
@@ -696,20 +692,164 @@ func TestCompletedWorkRequiresExactDurableEvidence(t *testing.T) {
 	if err != nil || !forgedEvidence.Valid() {
 		t.Fatalf("forged test evidence is invalid: evidence=%+v err=%v", forgedEvidence, err)
 	}
-	forgedEvent, err := l.Append(ctx, events.TrustedDraft{
+	if _, err := l.AppendWorkCompletionEvidence(ctx, events.TrustedDraft{
 		OrganizationID: "org-1", EventType: "WORK_COMPLETION_EVALUATED", SourceActorID: "runtime",
 		ArtifactRefs: forgedEvidence.ArtifactRefs, Payload: forgedEvidence, CorrelationID: "run-1",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	draft.Event.Payload = events.WorkCompletionTransitionPayload{EvidenceEventRef: forgedEvent.EventID, Fingerprint: forgedEvidence.Fingerprint}
-	if _, err := l.AppendWorkCompletion(ctx, draft); err == nil {
-		t.Fatal("forged completion decision authorized Work completion")
+	}); err == nil {
+		t.Fatal("typed admission accepted a forged completion decision")
 	}
 	records, err := l.Records(ctx, "work", "work-1")
 	if err != nil || len(records) != 1 {
 		t.Fatalf("rejected Work completion changed durable projection: records=%d err=%v", len(records), err)
+	}
+}
+
+func TestGenericAppendRejectsTypedTerminalEvidence(t *testing.T) {
+	l, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	for _, eventType := range []string{"WORK_COMPLETION_EVALUATED", "WORK_COMPLETED", "GOAL_PROGRESS_EVALUATED", "GOAL_ACHIEVED"} {
+		if _, err := l.Append(context.Background(), events.TrustedDraft{
+			OrganizationID: "org-1", EventType: eventType, SourceActorID: "runtime", CorrelationID: "run-1",
+		}); err == nil {
+			t.Fatalf("generic ledger append accepted %s", eventType)
+		}
+	}
+	stream, err := l.Events(context.Background(), "run-1")
+	if err != nil || len(stream) != 0 {
+		t.Fatalf("rejected terminal evidence changed the ledger: events=%d err=%v", len(stream), err)
+	}
+}
+
+func TestGoalProgressWitnessSelectionCrossesFormerEvidenceWindow(t *testing.T) {
+	ctx := context.Background()
+	l, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	wanted := core.IntentValue{Value: "verified recurring outcome", Origin: "RUNTIME_TEST"}
+	goal := core.Goal{ID: "goal-1", OrganizationID: "org-1", MissionID: "mission-1", Objective: "keep producing verified outcomes", Mode: core.GoalContinuous, SuccessCriteria: []core.IntentValue{wanted}, Status: core.GoalActive, CreatedAt: time.Now().UTC()}
+	var selectedID, finalTransitionID string
+	err = l.withTx(ctx, func(tx *sql.Tx) error {
+		for index := 0; index < 4097; index++ {
+			criteria := []core.IntentValue{{Value: "unrelated outcome", Origin: "RUNTIME_TEST"}}
+			if index == 4096 {
+				criteria = []core.IntentValue{wanted}
+			}
+			correlationID := fmt.Sprintf("work-%d", index)
+			evidenceEvent, err := appendEvent(ctx, tx, events.TrustedDraft{
+				OrganizationID: "org-1", EventType: "WORK_COMPLETION_EVALUATED", SourceActorID: "runtime",
+				CorrelationID: correlationID, Payload: map[string]any{"criteria": criteria},
+			})
+			if err != nil {
+				return err
+			}
+			workID := core.ID(correlationID)
+			workValue, err := json.Marshal(core.Work{ID: workID, GoalID: goal.ID, Status: core.WorkCompleted})
+			if err != nil {
+				return err
+			}
+			detail, err := json.Marshal(events.WorkCompletionTransitionPayload{EvidenceEventRef: evidenceEvent.EventID, Fingerprint: fmt.Sprintf("%064d", index)})
+			if err != nil {
+				return err
+			}
+			transition, err := appendEvent(ctx, tx, events.TrustedDraft{
+				OrganizationID: "org-1", EventType: "WORK_COMPLETED", SourceActorID: "runtime", CorrelationID: correlationID,
+				Payload: events.ProjectionEventPayload{Projection: events.ProjectionRecord{ProjectionKind: "work", RecordID: string(workID), Version: 2, CorrelationID: correlationID, Value: workValue}, Detail: detail},
+			})
+			if err != nil {
+				return err
+			}
+			if index == 4096 {
+				finalTransitionID = transition.EventID
+			}
+		}
+		selected, err := goalProgressWitnessTransitions(ctx, tx, "org-1", goal)
+		if err != nil {
+			return err
+		}
+		if len(selected) != 1 {
+			return fmt.Errorf("selected %d witnesses, want 1", len(selected))
+		}
+		selectedID = selected[0].EventID
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selectedID != finalTransitionID {
+		t.Fatalf("criterion evidence after the former 4096-Work window was not selected: got=%s want=%s", selectedID, finalTransitionID)
+	}
+}
+
+func TestGoalRevisionMustPrecedeProgressEvaluation(t *testing.T) {
+	ctx := context.Background()
+	l, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	goal := core.Goal{
+		ID: "goal-1", OrganizationID: "org-1", MissionID: "mission-1", Objective: "produce evidence",
+		Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "verified", Origin: "RUNTIME_TEST"}}, Status: core.GoalActive, CreatedAt: time.Now().UTC(),
+	}
+	value, err := json.Marshal(goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := events.ProjectionRecord{ProjectionKind: "goal", RecordID: string(goal.ID), Version: 1, CorrelationID: "goal-1", Value: value}
+	err = l.withTx(ctx, func(tx *sql.Tx) error {
+		revision, err := appendEvent(ctx, tx, events.TrustedDraft{
+			OrganizationID: "org-1", EventType: "GOAL_CREATED", SourceActorID: "runtime", CorrelationID: "goal-1",
+			Payload: events.ProjectionEventPayload{Projection: record},
+		})
+		if err != nil {
+			return err
+		}
+		if err := validateGoalRevisionBeforeEvaluation(ctx, tx, "org-1", record, revision.Sequence+1); err != nil {
+			return fmt.Errorf("valid causal Goal revision was rejected: %w", err)
+		}
+		if err := validateGoalRevisionBeforeEvaluation(ctx, tx, "org-1", record, revision.Sequence); err == nil {
+			return errors.New("Goal evaluation was accepted before its revision")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGoalMissionMustBeActiveAtEvaluation(t *testing.T) {
+	ctx := context.Background()
+	l, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	now := time.Now().UTC()
+	appendTestMission(t, ctx, l, "org-1", "mission-1", now)
+	retired := core.Mission{ID: "mission-1", OrganizationID: "org-1", Statement: "durable direction", Status: core.MissionRetired, CreatedAt: now}
+	retirement, err := l.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "MISSION_RETIRED", SourceActorID: "runtime", CorrelationID: "mission-1"},
+		ProjectionKind: "mission", RecordID: "mission-1", Version: 2, Value: retired,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = l.withTx(ctx, func(tx *sql.Tx) error {
+		if err := validateActiveMissionAt(ctx, tx, "org-1", "mission-1", retirement.Sequence); err != nil {
+			return fmt.Errorf("legitimate post-evaluation retirement was rejected: %w", err)
+		}
+		if err := validateActiveMissionAt(ctx, tx, "org-1", "mission-1", retirement.Sequence+1); err == nil {
+			return errors.New("evaluation after Mission retirement was accepted")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

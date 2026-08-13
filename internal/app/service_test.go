@@ -786,6 +786,277 @@ func TestSubmitBindsOnlyActiveGoalFromAcceptedIntent(t *testing.T) {
 	}
 }
 
+func TestCompletedWorkDrivesEvidenceBackedGoalProgress(t *testing.T) {
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "goal-progress.db")
+	l, err := ledger.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	seedTestGoal(t, ctx, repository, "org-1", "mission-1", "goal-1", core.GoalActive)
+
+	snapshot, err := repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goalState := snapshot.Goals["goal-1"]
+	bare := goalState.Value
+	bare.Status = core.GoalAchieved
+	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_ACHIEVED", SourceActorID: "runtime", CorrelationID: goalState.CorrelationID},
+		ProjectionKind: projections.KindGoal, RecordID: "goal-1", Version: goalState.Version + 1, Value: bare,
+	}); err == nil {
+		t.Fatal("generic projection path admitted Goal achievement")
+	}
+	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_PROGRESS_EVALUATED", SourceActorID: "runtime", CorrelationID: goalState.CorrelationID, Payload: map[string]string{"result": "forged"}}); err == nil {
+		t.Fatal("generic event path admitted Goal progress")
+	}
+
+	goal := goalState.Value
+	goal.SuccessCriteria = []core.IntentValue{{Value: "The requested outcome is produced and independently evaluated.", Origin: "RUNTIME_DEFAULT"}}
+	if err := repository.SaveGoal(ctx, "GOAL_REFINED", "runtime", goalState.CorrelationID, goalState.Version+1, goal, nil); err != nil {
+		t.Fatal(err)
+	}
+	service := New(gateway)
+	submission := confirmedGoalSubmit(t, ctx, gateway, "goal-progress", "org-1", "goal-1", "echo verified Goal result", core.ExecutionDeterministic)
+	result, err := service.Submit(ctx, submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Work.Status != core.WorkCompleted {
+		t.Fatalf("Goal Work did not complete: %+v", result.Work)
+	}
+	snapshot, err = repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	achieved := snapshot.Goals["goal-1"]
+	if achieved.Value.Status != core.GoalAchieved || achieved.Version != 3 {
+		t.Fatalf("target Goal was not atomically achieved: %+v", achieved)
+	}
+	stream, err := gateway.Events(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	progressCount, achievementCount := 0, 0
+	var progressEvent events.Event
+	var progress events.GoalProgressEvaluatedPayload
+	var achievement events.GoalAchievementTransitionPayload
+	for _, event := range stream {
+		switch event.EventType {
+		case "GOAL_PROGRESS_EVALUATED":
+			progressCount++
+			progressEvent = event
+			if err := json.Unmarshal(event.Payload, &progress); err != nil {
+				t.Fatal(err)
+			}
+		case "GOAL_ACHIEVED":
+			achievementCount++
+			var payload events.ProjectionEventPayload
+			if err := json.Unmarshal(event.Payload, &payload); err != nil || json.Unmarshal(payload.Detail, &achievement) != nil {
+				t.Fatalf("decode Goal achievement: %v", err)
+			}
+		}
+	}
+	if progressCount != 1 || achievementCount != 1 || progress.Result != events.GoalProgressTargetAchieved || progress.GoalVersion != 2 || !progress.Valid() || achievement.EvidenceEventRef != progressEvent.EventID || achievement.Fingerprint != progress.Fingerprint {
+		t.Fatalf("Goal terminal evidence is incomplete: progress=%+v achievement=%+v counts=%d/%d", progress, achievement, progressCount, achievementCount)
+	}
+	if err := gateway.ValidateGoalAchievement(ctx, "org-1", "goal-1"); err != nil {
+		t.Fatalf("valid Goal achievement was rejected: %v", err)
+	}
+	replayLedger := &eventOnlyGoalReplayLedger{stream: stream}
+	rebuilt, err := projections.New(events.NewGateway(replayLedger)).Rebuild(ctx)
+	if err != nil {
+		t.Fatalf("event-only replay rejected valid Goal achievement: %v", err)
+	}
+	if replayLedger.validationCalls != 0 {
+		t.Fatal("event replay consulted the records-backed Goal validator")
+	}
+	if replayed := rebuilt.Goals["goal-1"]; replayed.Value.Status != core.GoalAchieved || replayed.Version != 3 {
+		t.Fatalf("event-only replay lost Goal achievement: %+v", replayed)
+	}
+	tampered := append([]events.Event(nil), stream...)
+	for index := range tampered {
+		tampered[index].Payload = append([]byte(nil), tampered[index].Payload...)
+		if tampered[index].EventID != progressEvent.EventID {
+			continue
+		}
+		var forged events.GoalProgressEvaluatedPayload
+		if err := json.Unmarshal(tampered[index].Payload, &forged); err != nil {
+			t.Fatal(err)
+		}
+		forged.Fingerprint = strings.Repeat("0", 64)
+		tampered[index].Payload, err = json.Marshal(forged)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := projections.New(events.NewGateway(&eventOnlyGoalReplayLedger{stream: tampered})).Rebuild(ctx); err == nil {
+		t.Fatal("event-only replay admitted tampered Goal progress evidence")
+	}
+	reordered := append([]events.Event(nil), stream...)
+	for index := range reordered {
+		reordered[index].Payload = append([]byte(nil), reordered[index].Payload...)
+		if reordered[index].EventType != "WORK_COMPLETED" {
+			continue
+		}
+		var payload events.ProjectionEventPayload
+		var detail events.WorkCompletionTransitionPayload
+		if json.Unmarshal(reordered[index].Payload, &payload) != nil || json.Unmarshal(payload.Detail, &detail) != nil || !slices.Contains(progress.WorkEvidenceRefs, detail.EvidenceEventRef) {
+			continue
+		}
+		reordered[index].Sequence = progressEvent.Sequence
+	}
+	if _, err := projections.New(events.NewGateway(&eventOnlyGoalReplayLedger{stream: reordered})).Rebuild(ctx); err == nil {
+		t.Fatal("event-only replay admitted Work completed after its Goal evaluation")
+	}
+	reorderedGoal := append([]events.Event(nil), stream...)
+	for index := range reorderedGoal {
+		reorderedGoal[index].Payload = append([]byte(nil), reorderedGoal[index].Payload...)
+		if reorderedGoal[index].EventType == "GOAL_REFINED" {
+			reorderedGoal[index].Sequence = progressEvent.Sequence
+		}
+	}
+	if _, err := projections.New(events.NewGateway(&eventOnlyGoalReplayLedger{stream: reorderedGoal})).Rebuild(ctx); err == nil {
+		t.Fatal("event-only replay admitted a Goal evaluation that preceded its active revision")
+	}
+	if _, err := gateway.EvaluateGoalProgress(ctx, "org-2", "goal-1"); err == nil {
+		t.Fatal("cross-tenant Goal evaluation was accepted")
+	}
+	if _, err := repository.EvaluateGoalProgress(ctx, "org-1", "goal-1"); err != nil {
+		t.Fatalf("Goal achievement retry was not idempotent: %v", err)
+	}
+	afterRetry, err := gateway.Events(ctx, "")
+	if err != nil || len(afterRetry) != len(stream) {
+		t.Fatalf("Goal retry duplicated durable state: before=%d after=%d err=%v", len(stream), len(afterRetry), err)
+	}
+	if _, err := service.Recover(ctx); err != nil {
+		t.Fatalf("restart rejected durable Goal achievement: %v", err)
+	}
+
+	continuous := goal
+	continuous.ID = "goal-continuous"
+	continuous.Mode = core.GoalContinuous
+	continuous.Status = core.GoalActive
+	if err := repository.SaveGoal(ctx, "GOAL_CREATED", "runtime", "seed-goal-continuous", 1, continuous, nil); err != nil {
+		t.Fatal(err)
+	}
+	continuousSubmission := confirmedGoalSubmit(t, ctx, gateway, "continuous-progress", "org-1", continuous.ID, "echo continuous result", core.ExecutionDeterministic)
+	if _, err := service.Submit(ctx, continuousSubmission); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := snapshot.Goals[continuous.ID]; state.Value.Status != core.GoalActive || state.Version != 1 {
+		t.Fatalf("continuous Goal became terminal: %+v", state)
+	}
+	continuousStream, err := gateway.Events(ctx, "seed-goal-continuous")
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuousCount := 0
+	for _, event := range continuousStream {
+		if event.EventType != "GOAL_PROGRESS_EVALUATED" {
+			continue
+		}
+		var recorded events.GoalProgressEvaluatedPayload
+		if json.Unmarshal(event.Payload, &recorded) == nil && recorded.Result == events.GoalProgressContinuous {
+			continuousCount++
+		}
+	}
+	if continuousCount != 1 {
+		t.Fatal("continuous Goal progress was not recorded")
+	}
+	secondContinuous := confirmedGoalSubmit(t, ctx, gateway, "continuous-progress-2", "org-1", continuous.ID, "echo another continuous result", core.ExecutionDeterministic)
+	if _, err := service.Submit(ctx, secondContinuous); err != nil {
+		t.Fatal(err)
+	}
+	continuousStream, err = gateway.Events(ctx, "seed-goal-continuous")
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuousCount = 0
+	for _, event := range continuousStream {
+		if event.EventType == "GOAL_PROGRESS_EVALUATED" {
+			continuousCount++
+		}
+	}
+	if continuousCount != 1 {
+		t.Fatalf("unchanged continuous Goal criteria created %d progress events, want one stable witness evaluation", continuousCount)
+	}
+	snapshot, err = repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missionState := snapshot.Missions["mission-1"]
+	retiredMission := missionState.Value
+	retiredMission.Status = core.MissionRetired
+	if err := repository.SaveMission(ctx, "MISSION_RETIRED", "runtime", "retire-mission-1", missionState.Version+1, retiredMission, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := gateway.ValidateGoalAchievement(ctx, "org-1", "goal-1"); err != nil {
+		t.Fatalf("legitimate Mission retirement after Goal achievement was rejected: %v", err)
+	}
+	retiredStream, err := gateway.Events(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := projections.New(events.NewGateway(&eventOnlyGoalReplayLedger{stream: retiredStream})).Rebuild(ctx); err != nil {
+		t.Fatalf("event-only replay rejected legitimate post-achievement Mission retirement: %v", err)
+	}
+	for name, sequence := range map[string]int64{"before": progressEvent.Sequence - 1, "at": progressEvent.Sequence} {
+		t.Run("Mission retirement "+name+" evaluation", func(t *testing.T) {
+			reorderedMission := append([]events.Event(nil), retiredStream...)
+			for index := range reorderedMission {
+				if reorderedMission[index].EventType == "MISSION_RETIRED" {
+					reorderedMission[index].Sequence = sequence
+				}
+			}
+			if _, err := projections.New(events.NewGateway(&eventOnlyGoalReplayLedger{stream: reorderedMission})).Rebuild(ctx); err == nil {
+				t.Fatal("event-only replay admitted Goal achievement after Mission retirement")
+			} else if !strings.Contains(strings.ToLower(err.Error()), "mission") {
+				t.Fatalf("event-only replay failed outside the Mission evaluation boundary: %v", err)
+			}
+		})
+	}
+}
+
+type eventOnlyGoalReplayLedger struct {
+	stream          []events.Event
+	validationCalls int
+}
+
+func (l *eventOnlyGoalReplayLedger) Append(context.Context, events.TrustedDraft) (events.Event, error) {
+	return events.Event{}, errors.New("event-only replay ledger is read-only")
+}
+
+func (l *eventOnlyGoalReplayLedger) Events(_ context.Context, correlationID string) ([]events.Event, error) {
+	if correlationID == "" {
+		return append([]events.Event(nil), l.stream...), nil
+	}
+	filtered := make([]events.Event, 0)
+	for _, event := range l.stream {
+		if event.CorrelationID == correlationID {
+			filtered = append(filtered, event)
+		}
+	}
+	return filtered, nil
+}
+
+func (*eventOnlyGoalReplayLedger) InboxObservations(context.Context) (map[string]events.InboxObservationBinding, error) {
+	return map[string]events.InboxObservationBinding{}, nil
+}
+
+func (l *eventOnlyGoalReplayLedger) ValidateGoalAchievement(context.Context, string, core.ID) error {
+	l.validationCalls++
+	return errors.New("records-backed Goal validation is unavailable")
+}
+
 func TestSubmitDeadlineIncludesServiceQueueWait(t *testing.T) {
 	l, err := ledger.Open(":memory:")
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -256,7 +257,7 @@ func (l *SQLite) AppendProjections(ctx context.Context, drafts []events.Projecti
 	}
 	prepared := make([]preparedProjection, 0, len(drafts))
 	for _, draft := range drafts {
-		item, err := prepareProjection(draft, false)
+		item, err := prepareProjection(draft, false, false)
 		if err != nil {
 			return nil, err
 		}
@@ -275,7 +276,7 @@ func (l *SQLite) AppendWorkCompletion(ctx context.Context, draft events.Projecti
 	if draft.Event.EventType != "WORK_COMPLETED" || draft.Event.OrganizationID == "" || draft.Event.SourceActorID != "runtime" || draft.Event.SourceExecutionID != "" || draft.Event.TaskID != "" || draft.Event.CorrelationID == "" || draft.ProjectionKind != "work" || draft.RecordID == "" || draft.Version < 2 {
 		return events.Event{}, fmt.Errorf("complete work transition identity is required")
 	}
-	item, err := prepareProjection(draft, true)
+	item, err := prepareProjection(draft, true, false)
 	if err != nil {
 		return events.Event{}, err
 	}
@@ -302,6 +303,481 @@ func (l *SQLite) AppendWorkCompletion(ctx context.Context, draft events.Projecti
 	return appended, err
 }
 
+// AppendWorkCompletionEvidence validates the runtime-owned aggregate against
+// current durable Work and its complete Task evidence before persisting it.
+// A crash may leave admitted evidence without the terminal transition; the
+// normal recovery path can safely reuse that immutable event.
+func (l *SQLite) AppendWorkCompletionEvidence(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {
+	var evidence events.WorkCompletionEvidencePayload
+	if draft.OrganizationID == "" || draft.EventType != "WORK_COMPLETION_EVALUATED" || draft.SourceActorID != "runtime" || draft.SourceExecutionID != "" || draft.RecipientScope != "" || draft.RecipientID != "" || draft.TaskID != "" || len(draft.AuthorizationRefs) != 0 || draft.CorrelationID == "" || decodeExactJSON(draft.Payload, &evidence) != nil || !evidence.Valid() || !slices.Equal(draft.ArtifactRefs, evidence.ArtifactRefs) {
+		return events.Event{}, fmt.Errorf("work completion evidence requires a complete typed runtime admission")
+	}
+	var appended events.Event
+	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		body, found, err := latestRecordBody(ctx, tx, "work", string(evidence.WorkID))
+		if err != nil {
+			return fmt.Errorf("read Work completion evidence projection: %w", err)
+		}
+		var record events.ProjectionRecord
+		var work core.Work
+		if !found || json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &work) != nil || record.ProjectionKind != "work" || record.RecordID != string(evidence.WorkID) || record.Version+1 != evidence.WorkVersion || record.CorrelationID != draft.CorrelationID || work.ID != evidence.WorkID || work.Status != core.WorkActive {
+			return fmt.Errorf("work completion evidence requires its exact active Work revision")
+		}
+		completed := work
+		completed.Status = core.WorkCompleted
+		detail := events.WorkCompletionTransitionPayload{Fingerprint: evidence.Fingerprint}
+		item, err := prepareProjection(events.ProjectionDraft{
+			Event: events.TrustedDraft{
+				OrganizationID: draft.OrganizationID, EventType: "WORK_COMPLETED", SourceActorID: "runtime",
+				CorrelationID: draft.CorrelationID, Payload: detail,
+			},
+			ProjectionKind: "work", RecordID: string(work.ID), Version: evidence.WorkVersion, Value: completed,
+		}, true, false)
+		if err != nil {
+			return err
+		}
+		existing, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? AND event_type='WORK_COMPLETION_EVALUATED' AND correlation_id=? ORDER BY sequence LIMIT 2`, draft.OrganizationID, draft.CorrelationID))
+		if err != nil {
+			return fmt.Errorf("read existing Work completion evidence: %w", err)
+		}
+		if len(existing) > 1 {
+			return fmt.Errorf("multiple Work completion evidence records")
+		}
+		if len(existing) == 1 {
+			var recorded events.WorkCompletionEvidencePayload
+			candidate := existing[0]
+			if decodeExactJSONBytes(candidate.Payload, &recorded) != nil || !reflect.DeepEqual(recorded, evidence) || candidate.SourceActorID != "runtime" || candidate.SourceExecutionID != "" || candidate.RecipientScope != "" || candidate.RecipientID != "" || candidate.TaskID != "" || len(candidate.AuthorizationRefs) != 0 || candidate.CorrelationID != draft.CorrelationID || candidate.SchemaVersion != events.SchemaVersion || !slices.Equal(candidate.ArtifactRefs, evidence.ArtifactRefs) {
+				return fmt.Errorf("durable Work completion evidence conflicts with current state")
+			}
+			appended = candidate
+		} else {
+			appended, err = appendEvent(ctx, tx, draft)
+			if err != nil {
+				return err
+			}
+		}
+		detail.EvidenceEventRef = appended.EventID
+		if err := validateWorkCompletionEvidence(ctx, tx, item, detail); err != nil {
+			return fmt.Errorf("admit Work completion evidence: %w", err)
+		}
+		return nil
+	})
+	return appended, err
+}
+
+// AppendGoalProgress is the only path that may append Goal progress evidence
+// or admit GOAL_ACHIEVED. Evidence selection, deterministic evaluation, and
+// the optional terminal projection occur under the same SQLite transaction.
+func (l *SQLite) AppendGoalProgress(ctx context.Context, organizationID string, goalID core.ID) (events.GoalProgressAdmission, error) {
+	if organizationID == "" || goalID == "" {
+		return events.GoalProgressAdmission{}, fmt.Errorf("goal progress organization and identity are required")
+	}
+	var admitted events.GoalProgressAdmission
+	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		record, goal, err := currentGoalRevision(ctx, tx, organizationID, goalID)
+		if err != nil {
+			return err
+		}
+		if goal.Status == core.GoalAchieved {
+			admitted, err = validateAchievedGoal(ctx, tx, organizationID, record, goal)
+			return err
+		}
+		if goal.Status != core.GoalActive {
+			return fmt.Errorf("goal progress requires an active Goal")
+		}
+		if err := validateGoalMissionForProgress(ctx, tx, organizationID, goal, true); err != nil {
+			return err
+		}
+		workEvidence, err := authoritativeGoalWorkEvidence(ctx, tx, organizationID, goal, nil, 0)
+		if err != nil {
+			return err
+		}
+		evaluation, err := events.NewGoalProgressEvaluation(goal, record.Version, workEvidence)
+		if err != nil {
+			return err
+		}
+		existing, found, err := existingGoalProgressEvaluation(ctx, tx, organizationID, record, goal, evaluation)
+		if err != nil {
+			return err
+		}
+		if found {
+			admitted = existing
+			return nil
+		}
+		evaluationEvent, err := appendEvent(ctx, tx, events.TrustedDraft{
+			OrganizationID: organizationID, EventType: "GOAL_PROGRESS_EVALUATED", SourceActorID: "runtime",
+			CorrelationID: record.CorrelationID, Payload: evaluation,
+		})
+		if err != nil {
+			return err
+		}
+		admitted = events.GoalProgressAdmission{Evaluation: evaluation, EvaluationEvent: evaluationEvent}
+		if evaluation.Result != events.GoalProgressTargetAchieved {
+			return nil
+		}
+		achieved := goal
+		achieved.Status = core.GoalAchieved
+		detail := events.GoalAchievementTransitionPayload{EvidenceEventRef: evaluationEvent.EventID, Fingerprint: evaluation.Fingerprint}
+		item, err := prepareProjection(events.ProjectionDraft{
+			Event: events.TrustedDraft{
+				OrganizationID: organizationID, EventType: "GOAL_ACHIEVED", SourceActorID: "runtime",
+				CorrelationID: record.CorrelationID, Payload: detail,
+			},
+			ProjectionKind: "goal", RecordID: string(goalID), Version: record.Version + 1, Value: achieved,
+		}, false, true)
+		if err != nil {
+			return err
+		}
+		transition, err := appendPreparedProjection(ctx, tx, item)
+		if err != nil {
+			return err
+		}
+		admitted.GoalTransition = &transition
+		return nil
+	})
+	return admitted, err
+}
+
+func (l *SQLite) ValidateGoalAchievement(ctx context.Context, organizationID string, goalID core.ID) error {
+	if organizationID == "" || goalID == "" {
+		return fmt.Errorf("goal achievement organization and identity are required")
+	}
+	return l.withTx(ctx, func(tx *sql.Tx) error {
+		record, goal, err := currentGoalRevision(ctx, tx, organizationID, goalID)
+		if err != nil {
+			return err
+		}
+		if goal.Status != core.GoalAchieved {
+			return fmt.Errorf("goal is not achieved")
+		}
+		_, err = validateAchievedGoal(ctx, tx, organizationID, record, goal)
+		return err
+	})
+}
+
+func currentGoalRevision(ctx context.Context, tx *sql.Tx, organizationID string, goalID core.ID) (events.ProjectionRecord, core.Goal, error) {
+	body, found, err := latestRecordBody(ctx, tx, "goal", string(goalID))
+	if err != nil {
+		return events.ProjectionRecord{}, core.Goal{}, fmt.Errorf("read Goal progress projection: %w", err)
+	}
+	var record events.ProjectionRecord
+	var goal core.Goal
+	if !found || json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &goal) != nil || record.ProjectionKind != "goal" || record.RecordID != string(goalID) || record.Version < 1 || record.CorrelationID == "" || goal.ID != goalID || string(goal.OrganizationID) != organizationID || !core.ValidGoal(goal) {
+		return events.ProjectionRecord{}, core.Goal{}, fmt.Errorf("goal progress requires an exact durable Goal revision")
+	}
+	return record, goal, nil
+}
+
+func validateGoalMissionForProgress(ctx context.Context, tx *sql.Tx, organizationID string, goal core.Goal, requireActive bool) error {
+	body, found, err := latestRecordBody(ctx, tx, "mission", string(goal.MissionID))
+	if err != nil {
+		return fmt.Errorf("read Goal progress Mission: %w", err)
+	}
+	var record events.ProjectionRecord
+	var mission core.Mission
+	if !found || json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &mission) != nil || record.ProjectionKind != "mission" || record.RecordID != string(goal.MissionID) || mission.ID != goal.MissionID || string(mission.OrganizationID) != organizationID || !core.ValidMission(mission) || requireActive && mission.Status != core.MissionActive {
+		return fmt.Errorf("goal progress requires its valid Mission in the same organization")
+	}
+	return nil
+}
+
+func existingGoalProgressEvaluation(ctx context.Context, tx *sql.Tx, organizationID string, goalRecord events.ProjectionRecord, goal core.Goal, expected events.GoalProgressEvaluatedPayload) (events.GoalProgressAdmission, bool, error) {
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? AND event_type='GOAL_PROGRESS_EVALUATED' AND json_extract(payload,'$.goal_id')=? AND json_extract(payload,'$.goal_version')=? ORDER BY sequence LIMIT 4097`, organizationID, string(goal.ID), goalRecord.Version))
+	if err != nil {
+		return events.GoalProgressAdmission{}, false, fmt.Errorf("read Goal progress evaluations: %w", err)
+	}
+	if len(stream) > 4096 {
+		return events.GoalProgressAdmission{}, false, fmt.Errorf("goal progress evaluation history exceeds its admission bound")
+	}
+	var matched events.Event
+	for _, event := range stream {
+		var recorded events.GoalProgressEvaluatedPayload
+		if decodeExactJSONBytes(event.Payload, &recorded) != nil || event.OrganizationID != organizationID || event.EventType != "GOAL_PROGRESS_EVALUATED" || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != "" || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID != goalRecord.CorrelationID || event.SchemaVersion != events.SchemaVersion || !recorded.Valid() {
+			return events.GoalProgressAdmission{}, false, fmt.Errorf("goal progress evaluation crosses its runtime-owned boundary")
+		}
+		if err := validateGoalRevisionBeforeEvaluation(ctx, tx, organizationID, goalRecord, event.Sequence); err != nil {
+			return events.GoalProgressAdmission{}, false, fmt.Errorf("goal progress evaluation predates its Goal revision: %w", err)
+		}
+		if err := validateActiveMissionAt(ctx, tx, organizationID, goal.MissionID, event.Sequence); err != nil {
+			return events.GoalProgressAdmission{}, false, fmt.Errorf("goal progress evaluation lacks its active mission: %w", err)
+		}
+		selected, err := authoritativeGoalWorkEvidence(ctx, tx, organizationID, goal, recorded.WorkEvidenceRefs, event.Sequence)
+		if err != nil || events.ValidateGoalProgressEvaluation(goal, goalRecord.Version, selected, recorded) != nil {
+			return events.GoalProgressAdmission{}, false, fmt.Errorf("goal progress evaluation lacks authoritative Work evidence")
+		}
+		if recorded.Fingerprint != expected.Fingerprint {
+			continue
+		}
+		if !reflect.DeepEqual(recorded, expected) || matched.EventID != "" {
+			return events.GoalProgressAdmission{}, false, fmt.Errorf("goal progress evaluation conflicts with durable state")
+		}
+		matched = event
+	}
+	if matched.EventID == "" {
+		return events.GoalProgressAdmission{}, false, nil
+	}
+	if expected.Result == events.GoalProgressTargetAchieved {
+		return events.GoalProgressAdmission{}, false, fmt.Errorf("achieved Goal evaluation lacks its atomic terminal transition")
+	}
+	return events.GoalProgressAdmission{Evaluation: expected, EvaluationEvent: matched}, true, nil
+}
+
+func validateAchievedGoal(ctx context.Context, tx *sql.Tx, organizationID string, record events.ProjectionRecord, goal core.Goal) (events.GoalProgressAdmission, error) {
+	if record.Version < 2 || goal.Mode != core.GoalTarget || goal.Status != core.GoalAchieved {
+		return events.GoalProgressAdmission{}, fmt.Errorf("achieved Goal projection is invalid")
+	}
+	if err := validateGoalMissionForProgress(ctx, tx, organizationID, goal, false); err != nil {
+		return events.GoalProgressAdmission{}, err
+	}
+	var priorBody []byte
+	if err := tx.QueryRowContext(ctx, `SELECT body FROM records WHERE kind='goal' AND record_id=? AND version=?`, string(goal.ID), record.Version-1).Scan(&priorBody); err != nil {
+		return events.GoalProgressAdmission{}, fmt.Errorf("read pre-achievement Goal revision: %w", err)
+	}
+	var priorRecord events.ProjectionRecord
+	var prior core.Goal
+	if json.Unmarshal(priorBody, &priorRecord) != nil || json.Unmarshal(priorRecord.Value, &prior) != nil || priorRecord.ProjectionKind != "goal" || priorRecord.RecordID != string(goal.ID) || priorRecord.Version != record.Version-1 || priorRecord.CorrelationID != record.CorrelationID || prior.Status != core.GoalActive || !core.ValidGoalRevision(prior, goal) {
+		return events.GoalProgressAdmission{}, fmt.Errorf("achieved Goal does not exactly follow its active revision")
+	}
+	transitions, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? AND event_type='GOAL_ACHIEVED' AND json_extract(payload,'$.projection.record_id')=? AND json_extract(payload,'$.projection.version')=? ORDER BY sequence LIMIT 2`, organizationID, string(goal.ID), record.Version))
+	if err != nil || len(transitions) != 1 {
+		return events.GoalProgressAdmission{}, fmt.Errorf("achieved Goal requires one authoritative transition")
+	}
+	transition := transitions[0]
+	var projection events.ProjectionEventPayload
+	var detail events.GoalAchievementTransitionPayload
+	if decodeExactJSONBytes(transition.Payload, &projection) != nil || !reflect.DeepEqual(projection.Projection, record) || decodeExactJSONBytes(projection.Detail, &detail) != nil || detail.EvidenceEventRef == "" || detail.Fingerprint == "" || transition.SourceActorID != "runtime" || transition.SourceExecutionID != "" || transition.RecipientScope != "" || transition.RecipientID != "" || transition.TaskID != "" || len(transition.AuthorizationRefs) != 0 || len(transition.ArtifactRefs) != 0 || transition.CorrelationID != record.CorrelationID || transition.SchemaVersion != events.SchemaVersion {
+		return events.GoalProgressAdmission{}, fmt.Errorf("achieved Goal transition crosses its runtime-owned boundary")
+	}
+	row := tx.QueryRowContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_id=?`, detail.EvidenceEventRef)
+	evaluationEvent, err := scanEvent(row)
+	if err != nil {
+		return events.GoalProgressAdmission{}, fmt.Errorf("read Goal achievement evidence: %w", err)
+	}
+	var evaluation events.GoalProgressEvaluatedPayload
+	if decodeExactJSONBytes(evaluationEvent.Payload, &evaluation) != nil || evaluationEvent.Sequence >= transition.Sequence || evaluationEvent.OrganizationID != organizationID || evaluationEvent.EventType != "GOAL_PROGRESS_EVALUATED" || evaluationEvent.SourceActorID != "runtime" || evaluationEvent.SourceExecutionID != "" || evaluationEvent.RecipientScope != "" || evaluationEvent.RecipientID != "" || evaluationEvent.TaskID != "" || len(evaluationEvent.AuthorizationRefs) != 0 || len(evaluationEvent.ArtifactRefs) != 0 || evaluationEvent.CorrelationID != record.CorrelationID || evaluationEvent.SchemaVersion != events.SchemaVersion || evaluation.Result != events.GoalProgressTargetAchieved || evaluation.Fingerprint != detail.Fingerprint {
+		return events.GoalProgressAdmission{}, fmt.Errorf("goal achievement evidence crosses its runtime-owned boundary")
+	}
+	if err := validateGoalRevisionBeforeEvaluation(ctx, tx, organizationID, priorRecord, evaluationEvent.Sequence); err != nil {
+		return events.GoalProgressAdmission{}, fmt.Errorf("goal achievement evaluation predates its active revision: %w", err)
+	}
+	if err := validateActiveMissionAt(ctx, tx, organizationID, prior.MissionID, evaluationEvent.Sequence); err != nil {
+		return events.GoalProgressAdmission{}, fmt.Errorf("goal achievement evaluation lacks its active mission: %w", err)
+	}
+	selected, err := authoritativeGoalWorkEvidence(ctx, tx, organizationID, prior, evaluation.WorkEvidenceRefs, evaluationEvent.Sequence)
+	if err != nil {
+		return events.GoalProgressAdmission{}, fmt.Errorf("goal achievement lacks authoritative completed-Work evidence: %w", err)
+	}
+	if err := events.ValidateGoalProgressEvaluation(prior, priorRecord.Version, selected, evaluation); err != nil {
+		return events.GoalProgressAdmission{}, fmt.Errorf("goal achievement does not match authoritative completed-Work evidence: %w", err)
+	}
+	return events.GoalProgressAdmission{Evaluation: evaluation, EvaluationEvent: evaluationEvent, GoalTransition: &transition}, nil
+}
+
+func validateGoalRevisionBeforeEvaluation(ctx context.Context, tx *sql.Tx, organizationID string, record events.ProjectionRecord, evaluationSequence int64) error {
+	if evaluationSequence < 1 {
+		return fmt.Errorf("evaluation sequence is invalid")
+	}
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? AND json_extract(payload,'$.projection.projection_kind')='goal' AND json_extract(payload,'$.projection.record_id')=? AND json_extract(payload,'$.projection.version')=? ORDER BY sequence LIMIT 2`, organizationID, record.RecordID, record.Version))
+	if err != nil || len(stream) != 1 {
+		return fmt.Errorf("goal revision requires one authoritative transition")
+	}
+	event := stream[0]
+	var payload events.ProjectionEventPayload
+	validType := record.Version == 1 && event.EventType == "GOAL_CREATED" || record.Version > 1 && (event.EventType == "GOAL_REFINED" || event.EventType == "GOAL_RESUMED")
+	if event.Sequence >= evaluationSequence || !validType || decodeExactJSONBytes(event.Payload, &payload) != nil || !reflect.DeepEqual(payload.Projection, record) || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != "" || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID != record.CorrelationID || event.SchemaVersion != events.SchemaVersion {
+		return fmt.Errorf("goal revision does not precede its evaluation on the runtime-owned boundary")
+	}
+	return nil
+}
+
+func validateActiveMissionAt(ctx context.Context, tx *sql.Tx, organizationID string, missionID core.ID, evaluationSequence int64) error {
+	if organizationID == "" || missionID == "" || evaluationSequence < 1 {
+		return fmt.Errorf("mission evaluation boundary is invalid")
+	}
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? AND sequence<? AND json_extract(payload,'$.projection.projection_kind')='mission' AND json_extract(payload,'$.projection.record_id')=? ORDER BY sequence DESC LIMIT 1`, organizationID, evaluationSequence, string(missionID)))
+	if err != nil || len(stream) != 1 {
+		return fmt.Errorf("active mission revision is unavailable")
+	}
+	event := stream[0]
+	var payload events.ProjectionEventPayload
+	var mission core.Mission
+	if decodeExactJSONBytes(event.Payload, &payload) != nil || decodeExactJSONBytes(payload.Projection.Value, &mission) != nil ||
+		payload.Projection.ProjectionKind != "mission" || payload.Projection.RecordID != string(missionID) || payload.Projection.Version < 1 || payload.Projection.CorrelationID == "" ||
+		mission.ID != missionID || string(mission.OrganizationID) != organizationID || mission.Status != core.MissionActive || !core.ValidMission(mission) ||
+		event.EventType != activeMissionEvent(payload.Projection.Version) || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != "" || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID != payload.Projection.CorrelationID || event.SchemaVersion != events.SchemaVersion {
+		return fmt.Errorf("mission was not active on its runtime-owned evaluation boundary")
+	}
+	var body []byte
+	if err := tx.QueryRowContext(ctx, `SELECT body FROM records WHERE kind='mission' AND record_id=? AND version=?`, string(missionID), payload.Projection.Version).Scan(&body); err != nil {
+		return fmt.Errorf("read mission revision at evaluation: %w", err)
+	}
+	var record events.ProjectionRecord
+	if decodeExactJSONBytes(body, &record) != nil || !reflect.DeepEqual(record, payload.Projection) {
+		return fmt.Errorf("mission evaluation revision is not authoritative")
+	}
+	return nil
+}
+
+func activeMissionEvent(version int) string {
+	if version == 1 {
+		return "MISSION_CREATED"
+	}
+	return "MISSION_REVISED"
+}
+
+func authoritativeGoalWorkEvidence(ctx context.Context, tx *sql.Tx, organizationID string, goal core.Goal, selectedRefs []string, beforeSequence int64) ([]events.GoalWorkEvidence, error) {
+	if beforeSequence < 0 {
+		return nil, fmt.Errorf("goal evidence sequence boundary is invalid")
+	}
+	if len(selectedRefs) > 4096 {
+		return nil, fmt.Errorf("goal completed-Work evidence exceeds its admission bound")
+	}
+	selected := make(map[string]struct{}, len(selectedRefs))
+	for _, ref := range selectedRefs {
+		if ref == "" {
+			return nil, fmt.Errorf("goal Work evidence reference is empty")
+		}
+		if _, duplicate := selected[ref]; duplicate {
+			return nil, fmt.Errorf("goal Work evidence reference is duplicated")
+		}
+		selected[ref] = struct{}{}
+	}
+	var transitions []events.Event
+	if len(selected) == 0 {
+		var err error
+		transitions, err = goalProgressWitnessTransitions(ctx, tx, organizationID, goal)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		orderedRefs := append([]string(nil), selectedRefs...)
+		sort.Strings(orderedRefs)
+		for _, ref := range orderedRefs {
+			matches, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? AND event_type='WORK_COMPLETED' AND json_extract(payload,'$.projection.value.goal_id')=? AND json_extract(payload,'$.detail.evidence_event_ref')=? ORDER BY sequence LIMIT 2`, organizationID, string(goal.ID), ref))
+			if err != nil {
+				return nil, fmt.Errorf("read selected Goal Work transition: %w", err)
+			}
+			if len(matches) != 1 {
+				return nil, fmt.Errorf("goal progress references missing, duplicated, or cross-tenant Work evidence")
+			}
+			transitions = append(transitions, matches[0])
+		}
+	}
+	result := make([]events.GoalWorkEvidence, 0, len(transitions))
+	seenWorks := make(map[core.ID]struct{}, len(transitions))
+	foundRefs := make(map[string]struct{}, len(selected))
+	for _, transition := range transitions {
+		if beforeSequence > 0 && transition.Sequence >= beforeSequence {
+			return nil, fmt.Errorf("goal Work completion does not precede its progress evaluation")
+		}
+		var payload events.ProjectionEventPayload
+		var detail events.WorkCompletionTransitionPayload
+		var work core.Work
+		if decodeExactJSONBytes(transition.Payload, &payload) != nil || payload.Projection.ProjectionKind != "work" || payload.Projection.RecordID == "" || payload.Projection.Version < 2 || payload.Projection.CorrelationID == "" || decodeExactJSONBytes(payload.Projection.Value, &work) != nil || decodeExactJSONBytes(payload.Detail, &detail) != nil || work.ID != core.ID(payload.Projection.RecordID) || work.GoalID != goal.ID || work.Status != core.WorkCompleted || detail.EvidenceEventRef == "" || detail.Fingerprint == "" || transition.SourceActorID != "runtime" || transition.SourceExecutionID != "" || transition.RecipientScope != "" || transition.RecipientID != "" || transition.TaskID != "" || len(transition.AuthorizationRefs) != 0 || len(transition.ArtifactRefs) != 0 || transition.CorrelationID != payload.Projection.CorrelationID || transition.SchemaVersion != events.SchemaVersion {
+			return nil, fmt.Errorf("goal completed-Work transition is invalid")
+		}
+		if _, duplicate := seenWorks[work.ID]; duplicate {
+			return nil, fmt.Errorf("goal Work has multiple completion transitions")
+		}
+		seenWorks[work.ID] = struct{}{}
+		currentBody, found, err := latestRecordBody(ctx, tx, "work", string(work.ID))
+		if err != nil || !found {
+			return nil, fmt.Errorf("read current Goal Work projection")
+		}
+		var current events.ProjectionRecord
+		if json.Unmarshal(currentBody, &current) != nil || !reflect.DeepEqual(current, payload.Projection) {
+			return nil, fmt.Errorf("goal Work completion is stale or superseded")
+		}
+		if len(selected) > 0 {
+			if _, wanted := selected[detail.EvidenceEventRef]; !wanted {
+				continue
+			}
+		}
+		item, err := prepareProjection(events.ProjectionDraft{
+			Event: events.TrustedDraft{
+				OrganizationID: organizationID, EventType: "WORK_COMPLETED", SourceActorID: "runtime",
+				CorrelationID: payload.Projection.CorrelationID, Payload: detail,
+			},
+			ProjectionKind: "work", RecordID: string(work.ID), Version: payload.Projection.Version, Value: work,
+		}, true, false)
+		if err != nil || validateWorkCompletionEvidence(ctx, tx, item, detail) != nil {
+			return nil, fmt.Errorf("goal Work completion lacks authoritative evidence")
+		}
+		row := tx.QueryRowContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_id=?`, detail.EvidenceEventRef)
+		evidenceEvent, err := scanEvent(row)
+		var evidence events.WorkCompletionEvidencePayload
+		if err != nil || decodeExactJSONBytes(evidenceEvent.Payload, &evidence) != nil || evidenceEvent.Sequence >= transition.Sequence || evidence.Fingerprint != detail.Fingerprint {
+			return nil, fmt.Errorf("goal Work evidence event is invalid")
+		}
+		result = append(result, events.GoalWorkEvidence{EventRef: evidenceEvent.EventID, EventAt: evidenceEvent.CreatedAt, Evidence: evidence})
+		foundRefs[evidenceEvent.EventID] = struct{}{}
+	}
+	if len(selected) > 0 && len(foundRefs) != len(selected) {
+		return nil, fmt.Errorf("goal progress references missing, stale, or cross-tenant Work evidence")
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("goal progress requires completed-Work evidence")
+	}
+	return result, nil
+}
+
+// goalProgressWitnessTransitions selects a stable, bounded proof set instead
+// of embedding every completed Work in each evaluation. The earliest current
+// completion that exactly matches each criterion is retained. Before any
+// criterion is satisfied, the earliest completion is retained as evidence of
+// the evaluation. A Goal revision therefore creates no more than one initial
+// evaluation plus one material evaluation per criterion.
+func goalProgressWitnessTransitions(ctx context.Context, tx *sql.Tx, organizationID string, goal core.Goal) ([]events.Event, error) {
+	byID := make(map[string]events.Event, len(goal.SuccessCriteria))
+	for _, criterion := range goal.SuccessCriteria {
+		matches, err := collectEvents(tx.QueryContext(ctx, `SELECT transition.event_id,transition.sequence,transition.organization_id,transition.event_type,transition.source_actor_id,transition.source_execution_id,transition.recipient_scope,transition.recipient_id,transition.task_id,transition.authorization_refs,transition.artifact_refs,transition.payload,transition.correlation_id,transition.created_at,transition.schema_version
+FROM events AS transition
+JOIN events AS evidence ON evidence.event_id=json_extract(transition.payload,'$.detail.evidence_event_ref')
+JOIN json_each(evidence.payload,'$.criteria') AS criterion
+WHERE transition.organization_id=? AND transition.event_type='WORK_COMPLETED'
+  AND json_extract(transition.payload,'$.projection.value.goal_id')=?
+  AND evidence.organization_id=? AND evidence.event_type='WORK_COMPLETION_EVALUATED'
+  AND json_extract(criterion.value,'$.value')=?
+  AND json_extract(criterion.value,'$.origin')=?
+  AND COALESCE(json_extract(criterion.value,'$.source_message_id'),'')=?
+ORDER BY transition.sequence,transition.event_id LIMIT 1`, organizationID, string(goal.ID), organizationID, criterion.Value, criterion.Origin, criterion.SourceMessageID))
+		if err != nil {
+			return nil, fmt.Errorf("read Goal criterion witness: %w", err)
+		}
+		if len(matches) == 1 {
+			byID[matches[0].EventID] = matches[0]
+		}
+	}
+	if len(byID) == 0 {
+		matches, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? AND event_type='WORK_COMPLETED' AND json_extract(payload,'$.projection.value.goal_id')=? ORDER BY sequence,event_id LIMIT 1`, organizationID, string(goal.ID)))
+		if err != nil {
+			return nil, fmt.Errorf("read initial Goal Work witness: %w", err)
+		}
+		if len(matches) == 0 {
+			return nil, fmt.Errorf("goal progress requires completed-Work evidence")
+		}
+		byID[matches[0].EventID] = matches[0]
+	}
+	transitions := make([]events.Event, 0, len(byID))
+	for _, transition := range byID {
+		transitions = append(transitions, transition)
+	}
+	sort.Slice(transitions, func(i, j int) bool {
+		if transitions[i].Sequence == transitions[j].Sequence {
+			return transitions[i].EventID < transitions[j].EventID
+		}
+		return transitions[i].Sequence < transitions[j].Sequence
+	})
+	return transitions, nil
+}
+
 func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.ProjectionDraft, routes []events.InboxRoute) (events.Event, []events.InboxSelection, error) {
 	var requested events.ExecutionStartDetail
 	if draft.Event.EventType != "EXECUTION_STARTED" || draft.Event.OrganizationID == "" || draft.Event.SourceActorID != "runtime" || draft.Event.SourceExecutionID != "" || draft.Event.TaskID == "" || draft.Event.TaskID != draft.RecordID || draft.Event.CorrelationID == "" || draft.ProjectionKind != "task" || draft.RecordID == "" || draft.Version < 2 || len(routes) < 2 || decodeExactJSON(draft.Event.Payload, &requested) != nil || requested.InboxCutoffSequence != 0 || requested.Mode != "" && requested.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
@@ -326,7 +802,7 @@ func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.Projecti
 			return fmt.Errorf("read Agent execution inbox cutoff: %w", err)
 		}
 		draft.Event.Payload = events.ExecutionStartDetail{Mode: requested.Mode, InboxCutoffSequence: cutoff}
-		item, err := prepareProjection(draft, false)
+		item, err := prepareProjection(draft, false, false)
 		if err != nil {
 			return err
 		}
@@ -383,7 +859,7 @@ func validatePriorAgentExecutionTask(ctx context.Context, tx *sql.Tx, draft even
 	return nil
 }
 
-func prepareProjection(draft events.ProjectionDraft, allowWorkCompletion bool) (preparedProjection, error) {
+func prepareProjection(draft events.ProjectionDraft, allowWorkCompletion, allowGoalAchievement bool) (preparedProjection, error) {
 	if draft.Event.EventType == "" || draft.ProjectionKind == "" || draft.RecordID == "" || draft.Version < 1 {
 		return preparedProjection{}, fmt.Errorf("event type, projection kind, record id, and positive version are required")
 	}
@@ -414,6 +890,9 @@ func prepareProjection(draft events.ProjectionDraft, allowWorkCompletion bool) (
 		var goal core.Goal
 		if err := json.Unmarshal(value, &goal); err != nil {
 			return preparedProjection{}, fmt.Errorf("decode goal projection: %w", err)
+		}
+		if !allowGoalAchievement && (goal.Status == core.GoalAchieved || draft.Event.EventType == "GOAL_ACHIEVED") {
+			return preparedProjection{}, fmt.Errorf("achieved Goal requires evidence-backed admission")
 		}
 		item.goal = &goal
 	case "team":
@@ -637,6 +1116,8 @@ func goalRevisionEvent(previous, current core.Goal) string {
 		return "GOAL_RESUMED"
 	case current.Status == core.GoalRetired && previous.Status != core.GoalRetired:
 		return "GOAL_RETIRED"
+	case previous.Status == core.GoalActive && current.Status == core.GoalAchieved:
+		return "GOAL_ACHIEVED"
 	}
 	return ""
 }
@@ -1369,6 +1850,10 @@ func collectRecordBodies(rows *sql.Rows, err error) ([][]byte, error) {
 func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Event, error) {
 	if d.EventType == "INBOX_EVENTS_OBSERVED" {
 		return events.Event{}, fmt.Errorf("inbox observations require atomic inbox admission")
+	}
+	switch d.EventType {
+	case "WORK_COMPLETION_EVALUATED", "WORK_COMPLETED", "GOAL_PROGRESS_EVALUATED", "GOAL_ACHIEVED":
+		return events.Event{}, fmt.Errorf("terminal evidence requires its typed admission")
 	}
 	if d.EventType == "INTENT_CONFIRMED" {
 		var confirmation events.IntentConfirmedPayload
