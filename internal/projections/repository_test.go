@@ -3,6 +3,7 @@ package projections
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -793,6 +794,44 @@ func TestRebuildRejectsProjectionCorrelationMismatch(t *testing.T) {
 	}
 }
 
+func TestRebuildRejectsMislabeledTaskLifecycle(t *testing.T) {
+	base := core.Task{
+		ID: "task-1", WorkID: "work-1", Description: "bounded work",
+		ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden,
+		TaskContractVersion: "1", Status: core.TaskPending,
+	}
+	completed := base
+	completed.Status = core.TaskCompleted
+	stream := make([]events.Event, 0, 2)
+	for index, revision := range []struct {
+		eventType string
+		version   int
+		value     core.Task
+	}{{"TASK_CREATED", 1, base}, {"TASK_RESUMED", 2, completed}} {
+		value, err := json.Marshal(revision.value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := events.ProjectionRecord{ProjectionKind: KindTask, RecordID: string(base.ID), Version: revision.version, CorrelationID: "work-1", Value: value}
+		boundary := events.Event{
+			EventID: fmt.Sprintf("event-%d", index+1), Sequence: int64(index + 1), OrganizationID: "org-1", EventType: revision.eventType,
+			SourceActorID: "runtime", TaskID: string(base.ID), CorrelationID: "work-1", CreatedAt: time.Unix(int64(index+1), 0).UTC(), SchemaVersion: events.SchemaVersion,
+		}
+		sealed, err := events.SealProjectionEvent(boundary, record, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		boundary.Payload, err = json.Marshal(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream = append(stream, boundary)
+	}
+	if _, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background()); err == nil {
+		t.Fatal("event replay accepted a Task status under the wrong lifecycle event")
+	}
+}
+
 func TestFullAuditRejectsProjectionEventWithoutMaterializedRecord(t *testing.T) {
 	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: time.Unix(1, 0).UTC()}
 	value, err := json.Marshal(organization)
@@ -918,8 +957,8 @@ func validBoundarySnapshot() Snapshot {
 		"work-2": {CorrelationID: "work-2", Value: core.Work{ID: "work-2", IntentID: "intent-2", Status: core.WorkActive}},
 	}
 	tasks := map[core.ID]Versioned[core.Task]{
-		"task-1": {CorrelationID: "work-1", Value: core.Task{ID: "task-1", WorkID: "work-1"}},
-		"task-2": {CorrelationID: "work-2", Value: core.Task{ID: "task-2", WorkID: "work-2"}},
+		"task-1": {CorrelationID: "work-1", Value: core.Task{ID: "task-1", WorkID: "work-1", Description: "test work one", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}},
+		"task-2": {CorrelationID: "work-2", Value: core.Task{ID: "task-2", WorkID: "work-2", Description: "test work two", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}},
 	}
 	return Snapshot{
 		Organizations: organizations, Teams: map[core.ID]Versioned[core.Team]{}, AgentBlueprints: map[core.ID]Versioned[core.AgentBlueprint]{}, ExecutionProfiles: map[core.ID]Versioned[core.ExecutionProfile]{}, Agents: map[core.ID]Versioned[core.Agent]{},

@@ -12,6 +12,54 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 )
 
+func TestTaskProjectionTransitionsAreExact(t *testing.T) {
+	base := core.Task{
+		ID: "task-1", WorkID: "work-1", Description: "bounded work",
+		ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden,
+		TaskContractVersion: "1", Status: core.TaskPending,
+	}
+	blocked, running, completed, failed := base, base, base, base
+	blocked.Status = core.TaskBlocked
+	running.Status = core.TaskRunning
+	completed.Status = core.TaskCompleted
+	failed.Status = core.TaskFailed
+	for name, test := range map[string]struct {
+		eventType string
+		version   int
+		previous  *core.Task
+		next      core.Task
+		valid     bool
+	}{
+		"pending creation":            {"TASK_CREATED", 1, nil, base, true},
+		"blocked creation":            {"TASK_BLOCKED", 1, nil, blocked, true},
+		"execution start":             {"EXECUTION_STARTED", 2, &base, running, true},
+		"runtime recovery":            {"TASK_RECOVERED", 3, &running, base, true},
+		"verified completion":         {"TASK_VERIFIED_COMPLETE", 3, &running, completed, true},
+		"reviewed completion":         {"TASK_VERIFIED_COMPLETE", 3, &blocked, completed, true},
+		"failed dependency":           {"TASK_DEPENDENCY_FAILED", 2, &base, failed, true},
+		"mislabeled completion":       {"TASK_RESUMED", 3, &running, completed, false},
+		"completion from pending":     {"TASK_VERIFIED_COMPLETE", 2, &base, completed, false},
+		"execution without resume":    {"EXECUTION_STARTED", 3, &blocked, running, false},
+		"terminal state reopened":     {"TASK_RESUMED", 4, &completed, base, false},
+		"creation label after create": {"TASK_CREATED", 2, &base, base, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateTaskProjectionTransition(test.eventType, test.version, test.previous, test.next)
+			if test.valid && err != nil {
+				t.Fatalf("valid transition was rejected: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("invalid transition was accepted")
+			}
+		})
+	}
+	changed := running
+	changed.Description = "substituted work"
+	if err := ValidateTaskProjectionTransition("EXECUTION_STARTED", 2, &base, changed); err == nil {
+		t.Fatal("Task lifecycle transition changed its immutable contract")
+	}
+}
+
 func TestHumanCompletionRejectsEnvelopeArtifactsAbsentFromSubmission(t *testing.T) {
 	contract := core.StructuredUserCompletionContract("task-1")
 	task := WorkCompletionTaskBinding{Task: core.Task{

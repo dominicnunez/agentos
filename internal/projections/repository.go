@@ -158,6 +158,12 @@ func (r *Repository) SaveCompletedWork(ctx context.Context, organizationID core.
 }
 
 func (r *Repository) SaveTask(ctx context.Context, organizationID core.ID, eventType, actorID, correlationID string, version int, value core.Task, detail any) error {
+	if actorID != "runtime" || organizationID == "" || correlationID == "" || value.ID == "" {
+		return fmt.Errorf("complete runtime-owned Task transition is required")
+	}
+	if err := events.ValidateTaskProjectionTarget(eventType, version, value); err != nil {
+		return err
+	}
 	return r.save(ctx, string(organizationID), eventType, actorID, string(value.ID), correlationID, KindTask, value.ID, version, value, detail)
 }
 
@@ -330,6 +336,7 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 func validateProjectionEventAdmissions(stream []events.Event) error {
 	eventIDs := make(map[string]struct{}, len(stream))
 	sequences := make(map[int64]struct{}, len(stream))
+	tasks := make(map[core.ID]Versioned[core.Task])
 	for _, event := range stream {
 		if event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() {
 			return fmt.Errorf("event stream contains an incomplete envelope")
@@ -349,6 +356,24 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 		if present {
 			if err := events.ValidateProjectionEventBoundary(event, payload); err != nil {
 				return fmt.Errorf("event %s: %w", event.EventID, err)
+			}
+			if payload.Projection.ProjectionKind == KindTask {
+				var task core.Task
+				if decodeExactProjectionJSON(payload.Projection.Value, &task) != nil {
+					return fmt.Errorf("event %s contains an invalid Task projection", event.EventID)
+				}
+				previous, found := tasks[task.ID]
+				var prior *core.Task
+				if found {
+					prior = &previous.Value
+					if payload.Projection.Version != previous.Version+1 || payload.Projection.CorrelationID != previous.CorrelationID {
+						return fmt.Errorf("event %s contains noncontiguous Task history", event.EventID)
+					}
+				}
+				if err := events.ValidateTaskProjectionTransition(event.EventType, payload.Projection.Version, prior, task); err != nil {
+					return fmt.Errorf("event %s: %w", event.EventID, err)
+				}
+				tasks[task.ID] = Versioned[core.Task]{Version: payload.Projection.Version, CorrelationID: payload.Projection.CorrelationID, Value: task}
 			}
 		} else if events.RequiresProjectionAdmission(event.EventType, event.SourceActorID) {
 			return fmt.Errorf("event %s uses a projection lifecycle event without typed admission", event.EventID)
@@ -860,7 +885,7 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 	if err := decodeKind(records[KindWork], snapshot.Works, true, sameWorkRecord); err != nil {
 		return Snapshot{}, fmt.Errorf("decode works: %w", err)
 	}
-	if err := decodeKind(records[KindTask], snapshot.Tasks, true, nil); err != nil {
+	if err := decodeKind(records[KindTask], snapshot.Tasks, true, sameTaskRecord); err != nil {
 		return Snapshot{}, fmt.Errorf("decode tasks: %w", err)
 	}
 	if err := ValidateSnapshot(snapshot); err != nil {
@@ -901,6 +926,10 @@ func sameGoalRecord(left, right core.Goal) bool {
 
 func sameWorkRecord(left, right core.Work) bool {
 	return core.ValidWorkRevision(left, right)
+}
+
+func sameTaskRecord(left, right core.Task) bool {
+	return core.ValidTaskRevision(left, right)
 }
 
 func sameExecutionProfileRecord(left, right core.ExecutionProfile) bool {

@@ -1658,19 +1658,112 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 		return fmt.Errorf("projection %s/%s/%d uses unsupported event %s", record.ProjectionKind, record.RecordID, record.Version, event.EventType)
 	}
 	if record.ProjectionKind == "task" {
+		var task core.Task
+		if decodeExactEventJSON(record.Value, &task) != nil || task.ID != core.ID(record.RecordID) {
+			return fmt.Errorf("task projection value is invalid")
+		}
+		if err := ValidateTaskProjectionTarget(event.EventType, record.Version, task); err != nil {
+			return err
+		}
 		if event.TaskID != record.RecordID {
 			return fmt.Errorf("task projection crosses its Task envelope")
 		}
 		if event.RecipientScope == "" && event.RecipientID == "" {
+			if event.EventType == "TASK_BLOCKED" && task.ParentID != "" {
+				return fmt.Errorf("blocked child Task lacks its parent route")
+			}
 			return nil
 		}
-		if event.EventType != "TASK_BLOCKED" || event.RecipientScope != RecipientTask || event.RecipientID == "" {
+		if event.EventType != "TASK_BLOCKED" || task.ParentID == "" || event.RecipientScope != RecipientTask || event.RecipientID != string(task.ParentID) {
 			return fmt.Errorf("task projection uses unsupported routing")
 		}
 		return nil
 	}
 	if event.TaskID != "" || event.RecipientScope != "" || event.RecipientID != "" {
 		return fmt.Errorf("organizational projection uses a Task or recipient route")
+	}
+	return nil
+}
+
+// ValidateTaskProjectionTarget couples every Task lifecycle label to the only
+// status it is allowed to materialize. It rejects mislabeled state even when a
+// caller cannot yet supply the preceding durable revision.
+func ValidateTaskProjectionTarget(eventType string, version int, task core.Task) error {
+	if version < 1 || !core.ValidTask(task) {
+		return fmt.Errorf("task projection is incomplete")
+	}
+	var expected core.TaskStatus
+	switch eventType {
+	case "TASK_CREATED", "TASK_ASSIGNMENT_REVALIDATED", "TASK_RECOVERED", "TASK_RESUMED":
+		expected = core.TaskPending
+	case "TASK_BLOCKED":
+		expected = core.TaskBlocked
+	case "EXECUTION_STARTED":
+		expected = core.TaskRunning
+	case "TASK_VERIFIED_COMPLETE":
+		expected = core.TaskCompleted
+	case "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED":
+		expected = core.TaskFailed
+	default:
+		return fmt.Errorf("task projection uses unsupported lifecycle event %s", eventType)
+	}
+	if task.Status != expected {
+		return fmt.Errorf("task lifecycle event %s cannot materialize status %s", eventType, task.Status)
+	}
+	if version == 1 && eventType != "TASK_CREATED" && eventType != "TASK_BLOCKED" || version > 1 && eventType == "TASK_CREATED" {
+		return fmt.Errorf("task lifecycle event %s is invalid at version %d", eventType, version)
+	}
+	return nil
+}
+
+// ValidateTaskProjectionTransition binds a Task target to its exact preceding
+// status and preserves all planned, assignment, routing, and completion fields.
+func ValidateTaskProjectionTransition(eventType string, version int, previous *core.Task, next core.Task) error {
+	if err := ValidateTaskProjectionTarget(eventType, version, next); err != nil {
+		return err
+	}
+	if previous == nil {
+		if version != 1 {
+			return fmt.Errorf("task revision %d lacks its prior durable state", version)
+		}
+		return nil
+	}
+	if version < 2 || !core.ValidTaskRevision(*previous, next) {
+		return fmt.Errorf("task revision changes its immutable contract")
+	}
+	valid := false
+	switch eventType {
+	case "TASK_ASSIGNMENT_REVALIDATED", "TASK_RESUMED":
+		valid = previous.Status == core.TaskBlocked
+	case "TASK_RECOVERED":
+		valid = previous.Status == core.TaskRunning
+	case "TASK_BLOCKED":
+		valid = previous.Status == core.TaskPending || previous.Status == core.TaskRunning
+	case "EXECUTION_STARTED":
+		valid = previous.Status == core.TaskPending
+	case "TASK_VERIFIED_COMPLETE":
+		valid = previous.Status == core.TaskRunning || previous.Status == core.TaskBlocked
+	case "COMPLETION_REJECTED":
+		valid = previous.Status == core.TaskRunning || previous.Status == core.TaskBlocked
+	case "TASK_DEPENDENCY_FAILED", "TASK_WORK_FAILED":
+		valid = previous.Status == core.TaskPending || previous.Status == core.TaskBlocked
+	case "TASK_REMEDIATION_FAILED":
+		valid = previous.Status == core.TaskRunning
+	}
+	if !valid {
+		return fmt.Errorf("task lifecycle event %s cannot transition %s to %s", eventType, previous.Status, next.Status)
+	}
+	return nil
+}
+
+func decodeExactEventJSON(data []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("unexpected trailing JSON")
 	}
 	return nil
 }

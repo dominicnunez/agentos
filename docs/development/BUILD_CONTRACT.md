@@ -129,7 +129,11 @@ labels. Routine record reads, full startup audit, event-only rebuild, and
 backup/restore verification reject missing, copied, duplicated, malformed,
 cross-organization, or mismatched admission. Nonempty pre-admission projection
 schemas are unsupported pre-release state and fail closed rather than receiving
-an inferred compatibility migration. Startup validates that state before
+an inferred compatibility migration. Task revisions additionally bind each
+lifecycle label to its exact prior and resulting status, preserve the immutable
+planned and assigned contract, retain one Work/correlation boundary, and route
+a blocked child only to its durable parent. The same contract is enforced at
+write, event-only rebuild, and recovery verification. Startup validates state before
 opening the operator endpoint, preserves blocked work, runs dependency-ready
 pending work, retries only known-safe interrupted deterministic work, and
 blocks interrupted adaptive execution whose outcome is uncertain.

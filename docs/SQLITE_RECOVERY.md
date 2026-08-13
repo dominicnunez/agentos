@@ -43,7 +43,9 @@ Verification is read-only. It rejects corruption, valid SQLite databases that
 do not contain the required Agent OS ledger tables and columns, unsupported
 pre-admission projection state, projection lifecycle events without typed
 admission, and materialized projections that do not match their authorizing
-event or durable Organization/Intent/Work relationship exactly.
+event or durable Organization/Intent/Work relationship exactly. Task history
+must also preserve its immutable execution contract and correlation boundary;
+every lifecycle event must match the exact prior and resulting Task status.
 
 ## Restore without overwrite
 

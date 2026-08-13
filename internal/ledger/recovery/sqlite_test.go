@@ -400,6 +400,62 @@ func TestRecoveryRejectsReorderedProjectionRevisionEvents(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsMislabeledTaskLifecycle(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = appendRecoveryProjectionChain(t, ctx, store)
+	task := core.Task{ID: "task-1", WorkID: "work-1", Description: "recovery task", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskRunning}
+	started, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1"},
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	payload, present, err := events.AdmittedProjection(started)
+	if err != nil || !present {
+		_ = store.Close()
+		t.Fatalf("execution start admission is invalid: present=%t err=%v", present, err)
+	}
+	started.EventType = "TASK_RESUMED"
+	sealed, err := events.SealProjectionEvent(started, payload.Projection, payload.Detail)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(sealed)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE events SET event_type=?,payload=? WHERE event_id=?`, started.EventType, body, started.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE records SET admission_fingerprint=? WHERE admission_event_id=?`, sealed.Admission.Fingerprint, started.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil {
+		t.Fatal("recovery verification accepted a Task status under the wrong lifecycle event")
+	}
+}
+
 func resealRecoveryProjectionAtSequence(t *testing.T, event events.Event, sequence int64) ([]byte, string) {
 	t.Helper()
 	payload, present, err := events.AdmittedProjection(event)
@@ -538,7 +594,7 @@ func TestRecoveryRejectsInvalidTaskDAGBinding(t *testing.T) {
 		_ = store.Close()
 		return
 	}
-	child := core.Task{ID: "task-2", WorkID: "work-1", ParentID: "task-1", Status: core.TaskPending}
+	child := core.Task{ID: "task-2", WorkID: "work-1", ParentID: "task-1", Description: "child task", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
 	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(child.ID), CorrelationID: "work-1"},
 		ProjectionKind: "task", RecordID: string(child.ID), Version: 1, Value: child,
@@ -594,7 +650,7 @@ func appendRecoveryProjectionState(t *testing.T, ctx context.Context, store *led
 	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
 	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, NormalizedObjective: "objective", CreatedAt: now}
 	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
-	task := core.Task{ID: "task-1", WorkID: work.ID, Status: core.TaskPending}
+	task := core.Task{ID: "task-1", WorkID: work.ID, Description: "recovery task", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
 	drafts := []events.ProjectionDraft{
 		{Event: events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"}, ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent},
 		{Event: events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"}, ProjectionKind: "work", RecordID: string(work.ID), Version: 1, Value: work},

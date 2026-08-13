@@ -892,7 +892,7 @@ func validatePriorAgentExecutionTask(ctx context.Context, tx *sql.Tx, draft even
 	}
 	var record events.ProjectionRecord
 	var prior core.Task
-	if !found || json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &prior) != nil || record.ProjectionKind != "task" || record.RecordID != draft.RecordID || record.Version < 1 || record.CorrelationID != draft.Event.CorrelationID || draft.Version != record.Version+1 || prior.ID != task.ID || prior.Status != core.TaskPending && prior.Status != core.TaskBlocked {
+	if !found || json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &prior) != nil || record.ProjectionKind != "task" || record.RecordID != draft.RecordID || record.Version < 1 || record.CorrelationID != draft.Event.CorrelationID || draft.Version != record.Version+1 || prior.ID != task.ID || prior.Status != core.TaskPending {
 		return fmt.Errorf("agent execution start does not follow an eligible exact task revision")
 	}
 	prior.Status = task.Status
@@ -1041,6 +1041,14 @@ func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProj
 			return events.Event{}, err
 		}
 	}
+	if item.task != nil {
+		if err := validateTaskRevision(ctx, tx, item); err != nil {
+			return events.Event{}, err
+		}
+		if err := validateTaskWorkBinding(ctx, tx, item); err != nil {
+			return events.Event{}, err
+		}
+	}
 	if item.work != nil {
 		if err := validateWorkRevision(ctx, tx, item); err != nil {
 			return events.Event{}, err
@@ -1083,6 +1091,53 @@ func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProj
 		}
 	}
 	return event, nil
+}
+
+func validateTaskRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+	task := *item.task
+	if task.ID != core.ID(item.draft.RecordID) || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != item.draft.RecordID {
+		return fmt.Errorf("task projection crosses its runtime-owned lifecycle boundary")
+	}
+	record, previous, found, err := latestProjectionRevision[core.Task](ctx, tx, "task", item.draft.RecordID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		if err := events.ValidateTaskProjectionTransition(item.draft.Event.EventType, item.draft.Version, nil, task); err != nil {
+			return fmt.Errorf("task creation: %w", err)
+		}
+		return nil
+	}
+	if item.draft.Version != record.Version+1 || record.CorrelationID == "" || record.CorrelationID != item.draft.Event.CorrelationID {
+		return fmt.Errorf("task revision is noncontiguous or crosses its correlation boundary")
+	}
+	if err := events.ValidateTaskProjectionTransition(item.draft.Event.EventType, item.draft.Version, &previous, task); err != nil {
+		return fmt.Errorf("task revision: %w", err)
+	}
+	return nil
+}
+
+func validateTaskWorkBinding(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+	task := *item.task
+	body, found, err := latestRecordBody(ctx, tx, "work", string(task.WorkID))
+	if err != nil {
+		return fmt.Errorf("read task parent Work: %w", err)
+	}
+	var record events.ProjectionRecord
+	var work core.Work
+	if !found || decodeExactJSONBytes(body, &record) != nil || decodeExactJSONBytes(record.Value, &work) != nil || record.ProjectionKind != "work" || record.RecordID != string(task.WorkID) || record.CorrelationID != item.draft.Event.CorrelationID || work.ID != task.WorkID || work.Status != core.WorkActive {
+		return fmt.Errorf("task requires its exact active Work on the same correlation boundary")
+	}
+	intentBody, intentFound, err := latestRecordBody(ctx, tx, "intent", string(work.IntentID))
+	if err != nil {
+		return fmt.Errorf("read task parent Intent: %w", err)
+	}
+	var intentRecord events.ProjectionRecord
+	var intent core.Intent
+	if !intentFound || decodeExactJSONBytes(intentBody, &intentRecord) != nil || decodeExactJSONBytes(intentRecord.Value, &intent) != nil || intentRecord.ProjectionKind != "intent" || intentRecord.RecordID != string(work.IntentID) || intentRecord.CorrelationID != item.draft.Event.CorrelationID || intent.ID != work.IntentID || string(intent.OrganizationID) != item.draft.Event.OrganizationID {
+		return fmt.Errorf("task requires its exact Intent organization and correlation boundary")
+	}
+	return nil
 }
 
 func validateWorkRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {

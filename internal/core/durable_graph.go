@@ -170,6 +170,9 @@ func ValidateDurableGraph(graph DurableGraph) error {
 		if err := validateDurableIdentity("task", id, task.ID); err != nil {
 			return err
 		}
+		if !ValidTask(task) {
+			return fmt.Errorf("task %s has an incomplete or unsupported execution contract", id)
+		}
 		work, ok := graph.Works[task.WorkID]
 		if !ok {
 			return fmt.Errorf("task %s references missing work %s", id, task.WorkID)

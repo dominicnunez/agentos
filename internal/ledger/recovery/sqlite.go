@@ -201,6 +201,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	orderedAdmissions := make([]admittedProjectionEvent, 0, len(admitted))
 	lastProjectionVersions := map[string]int{}
 	lastProjectionSequences := map[string]int64{}
+	lastTasks := map[core.ID]core.Task{}
 	for recordRows.Next() {
 		var kind, recordID, admissionEventID, admissionFingerprint string
 		var version int
@@ -240,6 +241,23 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("projection record %s/%s version %d precedes its prior admission event", kind, recordID, version)
 		}
 		lastProjectionSequences[versionKey] = admission.event.Sequence
+		if kind == "task" {
+			var task core.Task
+			if decodeExactJSON(record.Value, &task) != nil || task.ID != core.ID(recordID) {
+				_ = recordRows.Close()
+				return fmt.Errorf("projection record %s/%s/%d contains an invalid Task", kind, recordID, version)
+			}
+			previous, previousFound := lastTasks[task.ID]
+			var prior *core.Task
+			if previousFound {
+				prior = &previous
+			}
+			if err := events.ValidateTaskProjectionTransition(admission.event.EventType, version, prior, task); err != nil {
+				_ = recordRows.Close()
+				return fmt.Errorf("projection record %s/%s/%d: %w", kind, recordID, version, err)
+			}
+			lastTasks[task.ID] = task
+		}
 		if _, duplicate := used[admissionEventID]; duplicate {
 			_ = recordRows.Close()
 			return fmt.Errorf("projection admission event %s authorizes multiple records", admissionEventID)
@@ -367,7 +385,7 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Task projection", event.EventID)
 			}
-			if err := setRecoveryProjection(snapshot.Tasks, record, value, true, nil); err != nil {
+			if err := setRecoveryProjection(snapshot.Tasks, record, value, true, core.ValidTaskRevision); err != nil {
 				return fmt.Errorf("event %s contains invalid Task history: %w", event.EventID, err)
 			}
 			continue
