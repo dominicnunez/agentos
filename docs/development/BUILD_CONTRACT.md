@@ -181,10 +181,21 @@ retirement blocks new Work admission without stranding a previously confirmed
 Work retry or recovery.
 
 Work is the terminalizable layer in the `Mission > Goal > Work > Task`
-hierarchy. This evidence may contribute to later Goal progress evaluation, but
-it neither achieves a Goal nor revises organizational direction. Until the
-separate progress evaluator supplies and validates durable evidence, Goal
-achievement is not an admitted projection transition.
+hierarchy. Work completion does not itself achieve a Goal or revise
+organizational direction. A deterministic Goal evaluator selects only current,
+tenant-matched `WORK_COMPLETION_EVALUATED` records, compares their exact
+criteria with the current Goal revision, and appends a fingerprinted
+`GOAL_PROGRESS_EVALUATED` contract. Target Goals enter `ACHIEVED` only when all
+criteria have authoritative coverage; the evaluation and `GOAL_ACHIEVED`
+projection commit in one SQLite transaction. Continuous Goals record progress
+without becoming terminal. Each Goal revision keeps a stable bounded proof set:
+the earliest current Work completion that exactly covers each criterion, or
+the earliest completion before any criterion is covered. Evidence growth is
+therefore bounded by the Goal's criteria rather than its lifetime Work count,
+and unchanged continuous progress is idempotent. Generic event writers reject
+Work/Goal terminal evidence event names, projection writers reject bare
+terminal state, retries reuse exact evidence, and event-only rebuild validates
+the complete achievement chain before serving.
 
 Terminal work records one typed `RUN_TELEMETRY_RECORDED` Event Contract before
 the work enters `COMPLETED` or `FAILED`. The telemetry module deterministically

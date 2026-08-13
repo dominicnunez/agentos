@@ -146,6 +146,49 @@ type WorkCompletionEvidencePayload struct {
 	Fingerprint       string                              `json:"fingerprint"`
 }
 
+type GoalProgressResult string
+
+const (
+	GoalProgressMethodExactCriteria                    = "EXACT_CRITERIA_COVERAGE_V1"
+	GoalProgressTargetInProgress    GoalProgressResult = "TARGET_IN_PROGRESS"
+	GoalProgressTargetAchieved      GoalProgressResult = "TARGET_ACHIEVED"
+	GoalProgressContinuous          GoalProgressResult = "CONTINUOUS_PROGRESS"
+)
+
+type GoalCriterionProgressPayload struct {
+	Criterion        core.IntentValue `json:"criterion"`
+	Satisfied        bool             `json:"satisfied"`
+	WorkEvidenceRefs []string         `json:"work_evidence_refs"`
+}
+
+// GoalProgressEvaluatedPayload binds one deterministic Goal evaluation to the
+// exact Goal revision and authoritative completed-Work evidence selected by
+// the ledger. It is evidence, not authority; only the specialized atomic Goal
+// admission path may turn an achieved result into a terminal projection.
+type GoalProgressEvaluatedPayload struct {
+	GoalID           core.ID                        `json:"goal_id"`
+	GoalVersion      int                            `json:"goal_version"`
+	MissionID        core.ID                        `json:"mission_id"`
+	Mode             core.GoalMode                  `json:"mode"`
+	Criteria         []GoalCriterionProgressPayload `json:"criteria"`
+	WorkEvidenceRefs []string                       `json:"work_evidence_refs"`
+	Method           string                         `json:"method"`
+	Result           GoalProgressResult             `json:"result"`
+	EvaluatedAt      time.Time                      `json:"evaluated_at"`
+	Fingerprint      string                         `json:"fingerprint"`
+}
+
+type GoalAchievementTransitionPayload struct {
+	EvidenceEventRef string `json:"evidence_event_ref"`
+	Fingerprint      string `json:"fingerprint"`
+}
+
+type GoalWorkEvidence struct {
+	EventRef string
+	EventAt  time.Time
+	Evidence WorkCompletionEvidencePayload
+}
+
 type WorkCompletionTaskBinding struct {
 	Task          core.Task
 	Version       int
@@ -267,6 +310,135 @@ func (p WorkCompletionEvidencePayload) Valid() bool {
 	return err == nil && validSHA256(p.Fingerprint) && p.Fingerprint == expected
 }
 
+func NewGoalProgressEvaluation(goal core.Goal, goalVersion int, workEvidence []GoalWorkEvidence) (GoalProgressEvaluatedPayload, error) {
+	if !core.ValidGoal(goal) || goal.Status != core.GoalActive || goalVersion < 1 || len(workEvidence) == 0 || len(workEvidence) > 4096 {
+		return GoalProgressEvaluatedPayload{}, fmt.Errorf("active Goal revision and bounded Work evidence are required")
+	}
+	selected := append([]GoalWorkEvidence(nil), workEvidence...)
+	sort.Slice(selected, func(i, j int) bool { return selected[i].EventRef < selected[j].EventRef })
+	seenRefs := make(map[string]struct{}, len(selected))
+	seenWorks := make(map[core.ID]struct{}, len(selected))
+	evaluatedAt := time.Time{}
+	for _, selectedEvidence := range selected {
+		_, offset := selectedEvidence.EventAt.Zone()
+		if !validEvidenceRef(selectedEvidence.EventRef) || selectedEvidence.EventAt.IsZero() || offset != 0 || !selectedEvidence.Evidence.Valid() || selectedEvidence.Evidence.GoalID != goal.ID {
+			return GoalProgressEvaluatedPayload{}, fmt.Errorf("goal Work evidence is invalid")
+		}
+		if _, duplicate := seenRefs[selectedEvidence.EventRef]; duplicate {
+			return GoalProgressEvaluatedPayload{}, fmt.Errorf("goal Work evidence reference is duplicated")
+		}
+		if _, duplicate := seenWorks[selectedEvidence.Evidence.WorkID]; duplicate {
+			return GoalProgressEvaluatedPayload{}, fmt.Errorf("goal Work evidence identity is duplicated")
+		}
+		seenRefs[selectedEvidence.EventRef] = struct{}{}
+		seenWorks[selectedEvidence.Evidence.WorkID] = struct{}{}
+		if selectedEvidence.EventAt.After(evaluatedAt) {
+			evaluatedAt = selectedEvidence.EventAt
+		}
+	}
+	record := GoalProgressEvaluatedPayload{
+		GoalID: goal.ID, GoalVersion: goalVersion, MissionID: goal.MissionID, Mode: goal.Mode,
+		Criteria:         make([]GoalCriterionProgressPayload, 0, len(goal.SuccessCriteria)),
+		WorkEvidenceRefs: make([]string, 0, len(selected)), Method: GoalProgressMethodExactCriteria,
+		EvaluatedAt: evaluatedAt.UTC(),
+	}
+	allSatisfied := true
+	for _, criterion := range goal.SuccessCriteria {
+		progress := GoalCriterionProgressPayload{Criterion: criterion}
+		for _, selectedEvidence := range selected {
+			for _, completedCriterion := range selectedEvidence.Evidence.Criteria {
+				if reflect.DeepEqual(completedCriterion, criterion) {
+					progress.WorkEvidenceRefs = append(progress.WorkEvidenceRefs, selectedEvidence.EventRef)
+					break
+				}
+			}
+		}
+		progress.Satisfied = len(progress.WorkEvidenceRefs) > 0
+		allSatisfied = allSatisfied && progress.Satisfied
+		record.Criteria = append(record.Criteria, progress)
+	}
+	for _, selectedEvidence := range selected {
+		record.WorkEvidenceRefs = append(record.WorkEvidenceRefs, selectedEvidence.EventRef)
+	}
+	switch goal.Mode {
+	case core.GoalTarget:
+		record.Result = GoalProgressTargetInProgress
+		if allSatisfied {
+			record.Result = GoalProgressTargetAchieved
+		}
+	case core.GoalContinuous:
+		record.Result = GoalProgressContinuous
+	default:
+		return GoalProgressEvaluatedPayload{}, fmt.Errorf("goal mode is invalid")
+	}
+	fingerprint, err := record.ExpectedFingerprint()
+	if err != nil {
+		return GoalProgressEvaluatedPayload{}, err
+	}
+	record.Fingerprint = fingerprint
+	if !record.Valid() {
+		return GoalProgressEvaluatedPayload{}, fmt.Errorf("goal progress evaluation is invalid")
+	}
+	return record, nil
+}
+
+func (p GoalProgressEvaluatedPayload) Valid() bool {
+	_, offset := p.EvaluatedAt.Zone()
+	if p.GoalID == "" || p.GoalVersion < 1 || p.MissionID == "" || p.Method != GoalProgressMethodExactCriteria || p.EvaluatedAt.IsZero() || offset != 0 || len(p.Criteria) == 0 || len(p.Criteria) > 256 || len(p.WorkEvidenceRefs) == 0 || len(p.WorkEvidenceRefs) > 4096 || !distinctEvidenceRefs(p.WorkEvidenceRefs) {
+		return false
+	}
+	for index := 1; index < len(p.WorkEvidenceRefs); index++ {
+		if p.WorkEvidenceRefs[index-1] >= p.WorkEvidenceRefs[index] {
+			return false
+		}
+	}
+	allSatisfied := true
+	for _, criterion := range p.Criteria {
+		if strings.TrimSpace(criterion.Criterion.Value) == "" || strings.TrimSpace(criterion.Criterion.Origin) == "" || !utf8.ValidString(criterion.Criterion.Value) || !utf8.ValidString(criterion.Criterion.Origin) || !utf8.ValidString(criterion.Criterion.SourceMessageID) || criterion.Satisfied != (len(criterion.WorkEvidenceRefs) > 0) || len(criterion.WorkEvidenceRefs) > len(p.WorkEvidenceRefs) || !distinctEvidenceRefs(criterion.WorkEvidenceRefs) {
+			return false
+		}
+		for index := 1; index < len(criterion.WorkEvidenceRefs); index++ {
+			if criterion.WorkEvidenceRefs[index-1] >= criterion.WorkEvidenceRefs[index] {
+				return false
+			}
+		}
+		for _, ref := range criterion.WorkEvidenceRefs {
+			if _, found := slices.BinarySearch(p.WorkEvidenceRefs, ref); !found {
+				return false
+			}
+		}
+		allSatisfied = allSatisfied && criterion.Satisfied
+	}
+	validResult := p.Mode == core.GoalTarget && (p.Result == GoalProgressTargetInProgress && !allSatisfied || p.Result == GoalProgressTargetAchieved && allSatisfied) ||
+		p.Mode == core.GoalContinuous && p.Result == GoalProgressContinuous
+	if !validResult {
+		return false
+	}
+	expected, err := p.ExpectedFingerprint()
+	return err == nil && validSHA256(p.Fingerprint) && p.Fingerprint == expected
+}
+
+func (p GoalProgressEvaluatedPayload) ExpectedFingerprint() (string, error) {
+	p.Fingerprint = ""
+	body, err := json.Marshal(p)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(body)
+	return fmt.Sprintf("%x", digest), nil
+}
+
+func ValidateGoalProgressEvaluation(goal core.Goal, goalVersion int, workEvidence []GoalWorkEvidence, recorded GoalProgressEvaluatedPayload) error {
+	expected, err := NewGoalProgressEvaluation(goal, goalVersion, workEvidence)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(expected, recorded) {
+		return fmt.Errorf("goal progress evaluation does not match authoritative Work evidence")
+	}
+	return nil
+}
+
 // ValidateWorkCompletionEvidenceChain resolves every event and current-state
 // claim behind one aggregate Work completion record. Structural validity alone
 // is insufficient: the immutable Intent, Plan, and complete Task set must all
@@ -277,7 +449,7 @@ func ValidateWorkCompletionEvidenceChain(binding WorkCompletionBinding, evidence
 		binding.Intent.ID != binding.Work.IntentID || binding.Intent.GoalID != binding.Work.GoalID || binding.Intent.NormalizedObjective != binding.Work.Objective || string(binding.Intent.OrganizationID) != binding.OrganizationID || json.Unmarshal(evidenceEvent.Payload, &evidence) != nil || !evidence.Valid() {
 		return WorkCompletionEvidencePayload{}, fmt.Errorf("work completion binding or evidence is invalid")
 	}
-	if evidenceEvent.EventType != "WORK_COMPLETION_EVALUATED" || evidenceEvent.OrganizationID != binding.OrganizationID || evidenceEvent.SourceActorID != "runtime" || evidenceEvent.SourceExecutionID != "" || evidenceEvent.TaskID != "" || evidenceEvent.CorrelationID != binding.CorrelationID || !slices.Equal(evidenceEvent.ArtifactRefs, evidence.ArtifactRefs) {
+	if evidenceEvent.EventType != "WORK_COMPLETION_EVALUATED" || evidenceEvent.OrganizationID != binding.OrganizationID || evidenceEvent.SourceActorID != "runtime" || evidenceEvent.SourceExecutionID != "" || evidenceEvent.RecipientScope != "" || evidenceEvent.RecipientID != "" || evidenceEvent.TaskID != "" || len(evidenceEvent.AuthorizationRefs) != 0 || evidenceEvent.CorrelationID != binding.CorrelationID || evidenceEvent.SchemaVersion != SchemaVersion || !slices.Equal(evidenceEvent.ArtifactRefs, evidence.ArtifactRefs) {
 		return WorkCompletionEvidencePayload{}, fmt.Errorf("work completion evidence crosses its runtime boundary")
 	}
 	if evidence.WorkID != binding.Work.ID || evidence.WorkVersion != binding.WorkVersion || evidence.GoalID != binding.Work.GoalID || evidence.IntentID != binding.Intent.ID || evidence.IntentFingerprint != binding.Intent.AcceptedFingerprint || !reflect.DeepEqual(evidence.Criteria, binding.Intent.CompletionCriteria) {
@@ -1406,6 +1578,20 @@ type ProjectionBatchAppender interface {
 type WorkCompletionAppender interface {
 	AppendWorkCompletion(context.Context, ProjectionDraft) (Event, error)
 }
+type WorkCompletionEvidenceAppender interface {
+	AppendWorkCompletionEvidence(context.Context, TrustedDraft) (Event, error)
+}
+type GoalProgressAdmission struct {
+	Evaluation      GoalProgressEvaluatedPayload
+	EvaluationEvent Event
+	GoalTransition  *Event
+}
+type GoalProgressAppender interface {
+	AppendGoalProgress(context.Context, string, core.ID) (GoalProgressAdmission, error)
+}
+type GoalAchievementValidator interface {
+	ValidateGoalAchievement(context.Context, string, core.ID) error
+}
 type ExecutionStartAppender interface {
 	AppendExecutionStart(context.Context, ProjectionDraft, []InboxRoute) (Event, []InboxSelection, error)
 }
@@ -1537,6 +1723,10 @@ func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event
 	if draft.EventType == "INBOX_EVENTS_OBSERVED" {
 		return Event{}, fmt.Errorf("inbox observations require atomic inbox admission")
 	}
+	switch draft.EventType {
+	case "WORK_COMPLETION_EVALUATED", "WORK_COMPLETED", "GOAL_PROGRESS_EVALUATED", "GOAL_ACHIEVED":
+		return Event{}, fmt.Errorf("terminal evidence requires its typed admission")
+	}
 	if draft.EventType == "INTENT_CONFIRMED" {
 		var confirmation IntentConfirmedPayload
 		if decodePayload(draft.Payload, &confirmation) != nil {
@@ -1550,6 +1740,21 @@ func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event
 		return Event{}, err
 	}
 	return g.ledger.Append(ctx, draft)
+}
+
+// PublishWorkCompletionEvidence admits the aggregate evidence only through a
+// ledger implementation that can validate it against current durable Work.
+// The later terminal projection remains a separate atomic admission.
+func (g *Gateway) PublishWorkCompletionEvidence(ctx context.Context, draft TrustedDraft) (Event, error) {
+	var evidence WorkCompletionEvidencePayload
+	if draft.OrganizationID == "" || draft.EventType != "WORK_COMPLETION_EVALUATED" || draft.SourceActorID != "runtime" || draft.SourceExecutionID != "" || draft.RecipientScope != "" || draft.RecipientID != "" || draft.TaskID != "" || len(draft.AuthorizationRefs) != 0 || draft.CorrelationID == "" || decodePayload(draft.Payload, &evidence) != nil || !evidence.Valid() || !slices.Equal(draft.ArtifactRefs, evidence.ArtifactRefs) {
+		return Event{}, fmt.Errorf("work completion evidence requires a complete typed runtime admission")
+	}
+	appender, ok := g.ledger.(WorkCompletionEvidenceAppender)
+	if !ok {
+		return Event{}, fmt.Errorf("event ledger does not support Work completion evidence admission")
+	}
+	return appender.AppendWorkCompletionEvidence(ctx, draft)
 }
 
 // PublishIntentConfirmation atomically proves that an optional Goal is active
@@ -1579,7 +1784,7 @@ func (g *Gateway) PublishProjection(ctx context.Context, draft ProjectionDraft) 
 	if err := g.validateAddressed(ctx, draft.Event, false); err != nil {
 		return Event{}, err
 	}
-	if err := rejectBareWorkCompletion(draft); err != nil {
+	if err := rejectBareTerminalProjection(draft); err != nil {
 		return Event{}, err
 	}
 	if draft.Event.EventType == "EXECUTION_STARTED" && draft.ProjectionKind == "task" {
@@ -1631,6 +1836,31 @@ func (g *Gateway) PublishWorkCompletion(ctx context.Context, draft ProjectionDra
 	return appender.AppendWorkCompletion(ctx, draft)
 }
 
+// EvaluateGoalProgress delegates evidence selection and terminal admission to
+// the ledger transaction. Callers cannot supply a claimed result or evidence
+// set and therefore cannot turn model or worker content into Goal authority.
+func (g *Gateway) EvaluateGoalProgress(ctx context.Context, organizationID string, goalID core.ID) (GoalProgressAdmission, error) {
+	if organizationID == "" || goalID == "" {
+		return GoalProgressAdmission{}, fmt.Errorf("goal progress organization and identity are required")
+	}
+	appender, ok := g.ledger.(GoalProgressAppender)
+	if !ok {
+		return GoalProgressAdmission{}, fmt.Errorf("event ledger does not support evidence-backed Goal progress")
+	}
+	return appender.AppendGoalProgress(ctx, organizationID, goalID)
+}
+
+func (g *Gateway) ValidateGoalAchievement(ctx context.Context, organizationID string, goalID core.ID) error {
+	if organizationID == "" || goalID == "" {
+		return fmt.Errorf("goal achievement organization and identity are required")
+	}
+	validator, ok := g.ledger.(GoalAchievementValidator)
+	if !ok {
+		return fmt.Errorf("event ledger does not support Goal achievement validation")
+	}
+	return validator.ValidateGoalAchievement(ctx, organizationID, goalID)
+}
+
 // PublishProjections atomically admits a closed set of trusted projection
 // transitions. It is used for Task-DAG creation so a restart can never observe
 // a graph with only some of its dependency nodes.
@@ -1645,7 +1875,7 @@ func (g *Gateway) PublishProjections(ctx context.Context, drafts []ProjectionDra
 		if err := g.validateAddressed(ctx, draft.Event, false); err != nil {
 			return nil, err
 		}
-		if err := rejectBareWorkCompletion(draft); err != nil {
+		if err := rejectBareTerminalProjection(draft); err != nil {
 			return nil, err
 		}
 	}
@@ -1656,16 +1886,24 @@ func (g *Gateway) PublishProjections(ctx context.Context, drafts []ProjectionDra
 	return store.AppendProjections(ctx, drafts)
 }
 
-func rejectBareWorkCompletion(draft ProjectionDraft) error {
-	if draft.ProjectionKind != "work" {
-		return nil
-	}
-	var work core.Work
-	if decodePayload(draft.Value, &work) != nil {
-		return fmt.Errorf("work projection value is invalid")
-	}
-	if work.Status == core.WorkCompleted || draft.Event.EventType == "WORK_COMPLETED" {
-		return fmt.Errorf("completed work requires evidence-backed admission")
+func rejectBareTerminalProjection(draft ProjectionDraft) error {
+	switch draft.ProjectionKind {
+	case "work":
+		var work core.Work
+		if decodePayload(draft.Value, &work) != nil {
+			return fmt.Errorf("work projection value is invalid")
+		}
+		if work.Status == core.WorkCompleted || draft.Event.EventType == "WORK_COMPLETED" {
+			return fmt.Errorf("completed work requires evidence-backed admission")
+		}
+	case "goal":
+		var goal core.Goal
+		if decodePayload(draft.Value, &goal) != nil {
+			return fmt.Errorf("goal projection value is invalid")
+		}
+		if goal.Status == core.GoalAchieved || draft.Event.EventType == "GOAL_ACHIEVED" {
+			return fmt.Errorf("achieved Goal requires evidence-backed admission")
+		}
 	}
 	return nil
 }

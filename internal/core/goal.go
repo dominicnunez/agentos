@@ -6,12 +6,12 @@ import (
 )
 
 // ValidGoal reports whether a Goal contains the complete runtime-owned shape
-// required for durable admission. Achievement is deliberately not a Goal
-// status; it is established by a separate evidence evaluation.
+// required for durable admission. Achievement is a terminal projection state,
+// but only the evidence-backed Goal admission path may create it.
 func ValidGoal(goal Goal) bool {
 	validMode := goal.Mode == GoalTarget || goal.Mode == GoalContinuous
-	validStatus := goal.Status == GoalActive || goal.Status == GoalPaused || goal.Status == GoalRetired
-	if goal.ID == "" || goal.OrganizationID == "" || goal.MissionID == "" || strings.TrimSpace(goal.Objective) == "" || len(goal.SuccessCriteria) == 0 || len(goal.SuccessCriteria) > 256 || !validMode || !validStatus {
+	validStatus := goal.Status == GoalActive || goal.Status == GoalPaused || goal.Status == GoalAchieved || goal.Status == GoalRetired
+	if goal.ID == "" || goal.OrganizationID == "" || goal.MissionID == "" || strings.TrimSpace(goal.Objective) == "" || len(goal.SuccessCriteria) == 0 || len(goal.SuccessCriteria) > 256 || !validMode || !validStatus || goal.Status == GoalAchieved && goal.Mode != GoalTarget {
 		return false
 	}
 	for _, criterion := range goal.SuccessCriteria {
@@ -29,14 +29,15 @@ func ValidGoalRevision(previous, next Goal) bool {
 	if !ValidGoal(previous) || !ValidGoal(next) || previous.ID != next.ID || previous.OrganizationID != next.OrganizationID || previous.MissionID != next.MissionID || !previous.CreatedAt.Equal(next.CreatedAt) {
 		return false
 	}
-	if previous.Status == GoalRetired {
+	if previous.Status == GoalRetired || previous.Status == GoalAchieved {
 		return reflect.DeepEqual(previous, next)
 	}
 	if previous.Status == next.Status {
 		return true
 	}
 	transition := previous.Status == GoalActive && (next.Status == GoalPaused || next.Status == GoalRetired) ||
-		previous.Status == GoalPaused && (next.Status == GoalActive || next.Status == GoalRetired)
+		previous.Status == GoalPaused && (next.Status == GoalActive || next.Status == GoalRetired) ||
+		previous.Status == GoalActive && previous.Mode == GoalTarget && next.Status == GoalAchieved
 	next.Status = previous.Status
 	return transition && reflect.DeepEqual(previous, next)
 }

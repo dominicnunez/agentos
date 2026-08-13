@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"reflect"
 
 	"github.com/dominicnunez/agentos/internal/core"
@@ -68,6 +69,13 @@ func (r *Repository) SaveGoal(ctx context.Context, eventType, actorID, correlati
 		return fmt.Errorf("goal revisions require a runtime-owned lifecycle event")
 	}
 	return r.save(ctx, string(value.OrganizationID), eventType, actorID, "", correlationID, KindGoal, value.ID, version, value, detail)
+}
+
+func (r *Repository) EvaluateGoalProgress(ctx context.Context, organizationID core.ID, goalID core.ID) (events.GoalProgressAdmission, error) {
+	if r == nil || r.gateway == nil || organizationID == "" || goalID == "" {
+		return events.GoalProgressAdmission{}, fmt.Errorf("durable Goal progress gateway is required")
+	}
+	return r.gateway.EvaluateGoalProgress(ctx, string(organizationID), goalID)
 }
 
 func validMissionEventType(eventType string) bool {
@@ -246,7 +254,10 @@ func (r *Repository) ValidateCompletionAdmissions(ctx context.Context, snapshot 
 	if err != nil {
 		return err
 	}
-	return validateWorkCompletionAdmissions(snapshot, stream, teamRecords, inboxObservations)
+	if err := validateWorkCompletionAdmissions(snapshot, stream, teamRecords, inboxObservations); err != nil {
+		return err
+	}
+	return r.validateGoalAchievementAdmissions(ctx, snapshot)
 }
 
 // Rebuild ignores the records table and deterministically replays projection
@@ -286,7 +297,240 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 	if err := validateWorkCompletionAdmissions(snapshot, stream, records[KindTeam], inboxObservations); err != nil {
 		return Snapshot{}, err
 	}
+	if err := validateGoalAchievementAdmissionsFromEvents(snapshot, stream); err != nil {
+		return Snapshot{}, err
+	}
 	return snapshot, nil
+}
+
+func (r *Repository) validateGoalAchievementAdmissions(ctx context.Context, snapshot Snapshot) error {
+	for goalID, state := range snapshot.Goals {
+		if state.Value.Status != core.GoalAchieved {
+			continue
+		}
+		if err := r.gateway.ValidateGoalAchievement(ctx, string(state.Value.OrganizationID), goalID); err != nil {
+			return fmt.Errorf("achieved Goal %s lacks exact durable evidence: %w", goalID, err)
+		}
+	}
+	return nil
+}
+
+// validateGoalAchievementAdmissionsFromEvents keeps Rebuild independent of
+// the records table. The completed-Work admission audit runs first, so this
+// pass may safely index only Work evidence that is bound to an exact current
+// terminal projection in the same authoritative stream.
+func validateGoalAchievementAdmissionsFromEvents(snapshot Snapshot, stream []events.Event) error {
+	type workEvidenceBinding struct {
+		Evidence           events.GoalWorkEvidence
+		CompletionSequence int64
+	}
+	workEvidence := make(map[string]workEvidenceBinding)
+	for workID, state := range snapshot.Works {
+		if state.Value.Status != core.WorkCompleted || state.Value.GoalID == "" {
+			continue
+		}
+		intent, ok := snapshot.Intents[state.Value.IntentID]
+		if !ok {
+			return fmt.Errorf("completed work %s references missing intent", workID)
+		}
+		expectedRecord, err := exactProjectionRecord(KindWork, workID, state)
+		if err != nil {
+			return err
+		}
+		matched, detail, err := exactRuntimeProjectionTransition(stream, "WORK_COMPLETED", string(intent.Value.OrganizationID), state.CorrelationID, expectedRecord)
+		if err != nil {
+			return fmt.Errorf("completed work %s: %w", workID, err)
+		}
+		evidenceEvent, found := eventByID(stream, detail.EvidenceEventRef)
+		var evidence events.WorkCompletionEvidencePayload
+		if !found || evidenceEvent.Sequence >= matched.Sequence || decodeExactProjectionJSON(evidenceEvent.Payload, &evidence) != nil || !evidence.Valid() || evidence.Fingerprint != detail.Fingerprint || evidence.GoalID != state.Value.GoalID {
+			return fmt.Errorf("completed work %s lacks exact Goal evidence", workID)
+		}
+		if _, duplicate := workEvidence[evidenceEvent.EventID]; duplicate {
+			return fmt.Errorf("completed Work evidence is reused across Goal bindings")
+		}
+		workEvidence[evidenceEvent.EventID] = workEvidenceBinding{
+			Evidence:           events.GoalWorkEvidence{EventRef: evidenceEvent.EventID, EventAt: evidenceEvent.CreatedAt, Evidence: evidence},
+			CompletionSequence: matched.Sequence,
+		}
+	}
+
+	for goalID, state := range snapshot.Goals {
+		if state.Value.Status != core.GoalAchieved {
+			continue
+		}
+		if state.Version < 2 || state.Value.Mode != core.GoalTarget {
+			return fmt.Errorf("achieved Goal %s has an invalid terminal projection", goalID)
+		}
+		expectedRecord, err := exactProjectionRecord(KindGoal, goalID, state)
+		if err != nil {
+			return err
+		}
+		transition, transitionDetail, err := exactRuntimeProjectionTransition(stream, "GOAL_ACHIEVED", string(state.Value.OrganizationID), state.CorrelationID, expectedRecord)
+		if err != nil {
+			return fmt.Errorf("achieved Goal %s: %w", goalID, err)
+		}
+		prior, priorSequence, err := priorGoalRevisionFromEvents(stream, state, transition.Sequence)
+		if err != nil {
+			return fmt.Errorf("achieved Goal %s: %w", goalID, err)
+		}
+		evaluationEvent, found := eventByID(stream, transitionDetail.EvidenceEventRef)
+		var evaluation events.GoalProgressEvaluatedPayload
+		if !found || priorSequence >= evaluationEvent.Sequence || evaluationEvent.Sequence >= transition.Sequence || evaluationEvent.EventType != "GOAL_PROGRESS_EVALUATED" || evaluationEvent.OrganizationID != string(state.Value.OrganizationID) || !runtimeOwnedProjectionEvent(evaluationEvent, state.CorrelationID) || decodeExactProjectionJSON(evaluationEvent.Payload, &evaluation) != nil || evaluation.Result != events.GoalProgressTargetAchieved || evaluation.Fingerprint != transitionDetail.Fingerprint {
+			return fmt.Errorf("achieved Goal %s lacks exact progress evidence", goalID)
+		}
+		if err := validateActiveMissionAtEvent(stream, string(state.Value.OrganizationID), prior.Value.MissionID, evaluationEvent.Sequence); err != nil {
+			return fmt.Errorf("achieved Goal %s lacks its active mission: %w", goalID, err)
+		}
+		selected := make([]events.GoalWorkEvidence, 0, len(evaluation.WorkEvidenceRefs))
+		for _, ref := range evaluation.WorkEvidenceRefs {
+			binding, ok := workEvidence[ref]
+			if !ok || binding.Evidence.Evidence.GoalID != goalID {
+				return fmt.Errorf("achieved Goal %s references missing or cross-Goal Work evidence", goalID)
+			}
+			if binding.CompletionSequence >= evaluationEvent.Sequence {
+				return fmt.Errorf("achieved Goal %s references Work completed after its evaluation", goalID)
+			}
+			selected = append(selected, binding.Evidence)
+		}
+		if err := events.ValidateGoalProgressEvaluation(prior.Value, prior.Version, selected, evaluation); err != nil {
+			return fmt.Errorf("achieved Goal %s lacks authoritative completed-Work evidence: %w", goalID, err)
+		}
+	}
+	return nil
+}
+
+type evidenceTransitionDetail struct {
+	EvidenceEventRef string `json:"evidence_event_ref"`
+	Fingerprint      string `json:"fingerprint"`
+}
+
+func exactProjectionRecord[T any](kind string, id core.ID, state Versioned[T]) (events.ProjectionRecord, error) {
+	value, err := json.Marshal(state.Value)
+	if err != nil {
+		return events.ProjectionRecord{}, err
+	}
+	return events.ProjectionRecord{ProjectionKind: kind, RecordID: string(id), Version: state.Version, CorrelationID: state.CorrelationID, Value: value}, nil
+}
+
+func exactRuntimeProjectionTransition(stream []events.Event, eventType, organizationID, correlationID string, expected events.ProjectionRecord) (events.Event, evidenceTransitionDetail, error) {
+	var matched events.Event
+	var matchedDetail evidenceTransitionDetail
+	for _, event := range stream {
+		if event.EventType != eventType || event.OrganizationID != organizationID {
+			continue
+		}
+		var payload events.ProjectionEventPayload
+		var detail evidenceTransitionDetail
+		if decodeExactProjectionJSON(event.Payload, &payload) != nil || !reflect.DeepEqual(payload.Projection, expected) || decodeExactProjectionJSON(payload.Detail, &detail) != nil || detail.EvidenceEventRef == "" || detail.Fingerprint == "" || !runtimeOwnedProjectionEvent(event, correlationID) {
+			continue
+		}
+		if matched.EventID != "" {
+			return events.Event{}, evidenceTransitionDetail{}, fmt.Errorf("multiple authoritative %s transitions", eventType)
+		}
+		matched, matchedDetail = event, detail
+	}
+	if matched.EventID == "" {
+		return events.Event{}, evidenceTransitionDetail{}, fmt.Errorf("authoritative %s transition is missing", eventType)
+	}
+	return matched, matchedDetail, nil
+}
+
+func priorGoalRevisionFromEvents(stream []events.Event, achieved Versioned[core.Goal], beforeSequence int64) (Versioned[core.Goal], int64, error) {
+	var prior Versioned[core.Goal]
+	var priorSequence int64
+	for _, event := range stream {
+		if event.Sequence >= beforeSequence || event.OrganizationID != string(achieved.Value.OrganizationID) || !runtimeOwnedProjectionEvent(event, achieved.CorrelationID) {
+			continue
+		}
+		var payload events.ProjectionEventPayload
+		var goal core.Goal
+		if decodeExactProjectionJSON(event.Payload, &payload) != nil || payload.Projection.ProjectionKind != KindGoal || payload.Projection.RecordID != string(achieved.Value.ID) || payload.Projection.Version != achieved.Version-1 || payload.Projection.CorrelationID != achieved.CorrelationID || decodeExactProjectionJSON(payload.Projection.Value, &goal) != nil || !validActiveGoalProjectionEventType(event.EventType, payload.Projection.Version) {
+			continue
+		}
+		if prior.Version != 0 {
+			return Versioned[core.Goal]{}, 0, fmt.Errorf("pre-achievement revision has multiple authoritative transitions")
+		}
+		prior = Versioned[core.Goal]{Version: payload.Projection.Version, CorrelationID: payload.Projection.CorrelationID, Value: goal}
+		priorSequence = event.Sequence
+	}
+	if prior.Version == 0 || prior.Value.Status != core.GoalActive || !core.ValidGoalRevision(prior.Value, achieved.Value) {
+		return Versioned[core.Goal]{}, 0, fmt.Errorf("terminal projection does not follow one exact active revision")
+	}
+	return prior, priorSequence, nil
+}
+
+func validActiveGoalProjectionEventType(eventType string, version int) bool {
+	if version == 1 {
+		return eventType == "GOAL_CREATED"
+	}
+	return eventType == "GOAL_REFINED" || eventType == "GOAL_RESUMED"
+}
+
+func validateActiveMissionAtEvent(stream []events.Event, organizationID string, missionID core.ID, evaluationSequence int64) error {
+	var matched events.Event
+	var record events.ProjectionRecord
+	for _, event := range stream {
+		if event.Sequence < 1 || event.OrganizationID != organizationID {
+			continue
+		}
+		var payload events.ProjectionEventPayload
+		if decodeExactProjectionJSON(event.Payload, &payload) != nil || payload.Projection.ProjectionKind != KindMission || payload.Projection.RecordID != string(missionID) {
+			continue
+		}
+		if event.Sequence == evaluationSequence {
+			return fmt.Errorf("mission transition collides with the Goal evaluation boundary")
+		}
+		if event.Sequence > evaluationSequence {
+			continue
+		}
+		if matched.EventID != "" && event.Sequence == matched.Sequence {
+			return fmt.Errorf("mission evaluation boundary is ambiguous")
+		}
+		if matched.EventID == "" || event.Sequence > matched.Sequence {
+			matched = event
+			record = payload.Projection
+		}
+	}
+	var mission core.Mission
+	if matched.EventID == "" || record.Version < 1 || record.CorrelationID == "" || decodeExactProjectionJSON(record.Value, &mission) != nil ||
+		mission.ID != missionID || string(mission.OrganizationID) != organizationID || mission.Status != core.MissionActive || !core.ValidMission(mission) ||
+		matched.EventType != activeMissionEventType(record.Version) || !runtimeOwnedProjectionEvent(matched, record.CorrelationID) {
+		return fmt.Errorf("mission was not active at the Goal evaluation")
+	}
+	return nil
+}
+
+func activeMissionEventType(version int) string {
+	if version == 1 {
+		return "MISSION_CREATED"
+	}
+	return "MISSION_REVISED"
+}
+
+func runtimeOwnedProjectionEvent(event events.Event, correlationID string) bool {
+	return event.SourceActorID == "runtime" && event.SourceExecutionID == "" && event.RecipientScope == "" && event.RecipientID == "" && event.TaskID == "" && len(event.AuthorizationRefs) == 0 && len(event.ArtifactRefs) == 0 && event.CorrelationID == correlationID && event.SchemaVersion == events.SchemaVersion
+}
+
+func eventByID(stream []events.Event, eventID string) (events.Event, bool) {
+	for _, event := range stream {
+		if event.EventID == eventID {
+			return event, true
+		}
+	}
+	return events.Event{}, false
+}
+
+func decodeExactProjectionJSON(data []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("unexpected trailing JSON")
+	}
+	return nil
 }
 
 func validateWorkCompletionAdmissions(snapshot Snapshot, stream []events.Event, teamRecords [][]byte, inboxObservations map[string]events.InboxObservationBinding) error {

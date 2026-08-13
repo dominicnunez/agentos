@@ -230,6 +230,13 @@ policy:
       to:
         module: ledger
 
+    - name: ledger-recovery-test-adapter
+      from:
+        module: ledger
+        tests: true
+      to:
+        module: app
+
     - name: projections-test-adapter
       from:
         module: projections

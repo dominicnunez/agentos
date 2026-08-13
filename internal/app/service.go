@@ -2606,11 +2606,7 @@ func (s *Service) reconcileWorks(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	workIDs := make([]core.ID, 0, len(snapshot.Works))
-	for id := range snapshot.Works {
-		workIDs = append(workIDs, id)
-	}
-	sort.Slice(workIDs, func(i, j int) bool { return workIDs[i] < workIDs[j] })
+	workIDs := sortedProjectionIDs(snapshot.Works)
 	for _, workID := range workIDs {
 		state := snapshot.Works[workID]
 		if state.Value.Status != core.WorkActive {
@@ -2700,7 +2696,51 @@ func (s *Service) reconcileWorks(ctx context.Context) error {
 			return fmt.Errorf("persist terminal work %s: %w", workID, err)
 		}
 	}
+	return s.reconcileGoals(ctx)
+}
+
+// reconcileGoals records deterministic progress only after authoritative Work
+// completion exists. The ledger reselects and validates the evidence inside
+// its transaction, so this discovery pass conveys no completion authority.
+func (s *Service) reconcileGoals(ctx context.Context) error {
+	snapshot, err := s.state.Load(ctx)
+	if err != nil {
+		return err
+	}
+	goalIDs := sortedProjectionIDs(snapshot.Goals)
+	for _, goalID := range goalIDs {
+		goalState := snapshot.Goals[goalID]
+		if goalState.Value.Status != core.GoalActive {
+			continue
+		}
+		mission, found := snapshot.Missions[goalState.Value.MissionID]
+		if !found || mission.Value.Status != core.MissionActive {
+			continue
+		}
+		hasCompletedWork := false
+		for _, workState := range snapshot.Works {
+			if workState.Value.GoalID == goalID && workState.Value.Status == core.WorkCompleted {
+				hasCompletedWork = true
+				break
+			}
+		}
+		if !hasCompletedWork {
+			continue
+		}
+		if _, err := s.state.EvaluateGoalProgress(ctx, goalState.Value.OrganizationID, goalID); err != nil {
+			return fmt.Errorf("evaluate Goal progress %s: %w", goalID, err)
+		}
+	}
 	return nil
+}
+
+func sortedProjectionIDs[T any](records map[core.ID]projections.Versioned[T]) []core.ID {
+	ids := make([]core.ID, 0, len(records))
+	for id := range records {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
 }
 
 func workCompletionPlan(stream []events.Event, intent core.Intent, correlationID string) (core.Plan, error) {
@@ -2828,7 +2868,7 @@ func (s *Service) ensureWorkCompletionEvidence(ctx context.Context, stream []eve
 	if err != nil {
 		return events.Event{}, completion.WorkEvidence{}, err
 	}
-	event, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
+	event, err := s.gateway.PublishWorkCompletionEvidence(ctx, events.TrustedDraft{
 		OrganizationID: string(intent.OrganizationID), EventType: "WORK_COMPLETION_EVALUATED", SourceActorID: "runtime",
 		ArtifactRefs: record.ArtifactRefs, Payload: record, CorrelationID: state.CorrelationID,
 	})
@@ -2848,7 +2888,7 @@ func recordedWorkCompletionEvidence(stream []events.Event, organizationID core.I
 		if recordedEvent.EventID != "" {
 			return events.Event{}, completion.WorkEvidence{}, fmt.Errorf("multiple Work completion evidence records")
 		}
-		if event.OrganizationID != string(organizationID) || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.TaskID != "" || event.CorrelationID != correlationID || json.Unmarshal(event.Payload, &recorded) != nil || !recorded.Valid() || !slices.Equal(event.ArtifactRefs, recorded.ArtifactRefs) {
+		if event.OrganizationID != string(organizationID) || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != "" || len(event.AuthorizationRefs) != 0 || event.CorrelationID != correlationID || event.SchemaVersion != events.SchemaVersion || json.Unmarshal(event.Payload, &recorded) != nil || !recorded.Valid() || !slices.Equal(event.ArtifactRefs, recorded.ArtifactRefs) {
 			return events.Event{}, completion.WorkEvidence{}, fmt.Errorf("durable Work completion evidence is invalid")
 		}
 		recordedEvent = event

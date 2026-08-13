@@ -355,10 +355,11 @@ func TestMissionGoalWorkHierarchyIsTenantBounded(t *testing.T) {
 		bareAchievement.Goals[id] = state
 	}
 	achieved := bareAchievement.Goals["goal-1"]
-	achieved.Value.Status = core.GoalStatus("ACHIEVED")
+	achieved.Value.Mode = core.GoalContinuous
+	achieved.Value.Status = core.GoalAchieved
 	bareAchievement.Goals["goal-1"] = achieved
 	if err := validateSnapshot(bareAchievement); err == nil {
-		t.Fatal("Goal was accepted as achieved without an evidence-backed transition")
+		t.Fatal("continuous Goal was accepted as terminally achieved")
 	}
 }
 
@@ -394,9 +395,9 @@ func TestHierarchyRevisionsPreserveIdentityAndDirectionBoundaries(t *testing.T) 
 		t.Fatal("Goal revision changed parent Mission")
 	}
 	bareAchievement := goal
-	bareAchievement.Status = core.GoalStatus("ACHIEVED")
-	if err := decodeKind(projectionBodies(t, KindGoal, string(goal.ID), goal, bareAchievement), map[core.ID]Versioned[core.Goal]{}, false, sameGoalRecord); err == nil {
-		t.Fatal("Goal achievement bypassed durable evaluation evidence")
+	bareAchievement.Status = core.GoalAchieved
+	if err := decodeKind(projectionBodies(t, KindGoal, string(goal.ID), goal, bareAchievement), map[core.ID]Versioned[core.Goal]{}, false, sameGoalRecord); err != nil {
+		t.Fatalf("evidence-backed Goal achievement could not be rebuilt: %v", err)
 	}
 
 	work := core.Work{ID: "work-1", IntentID: "intent-1", GoalID: goal.ID, Objective: "bounded work", Status: core.WorkActive, CreatedAt: now}

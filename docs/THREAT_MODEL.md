@@ -55,6 +55,7 @@ does not claim to defend against a compromised operating-system administrator.
 | Task-DAG planning | prompt injection, authority invention, graph bombs, dependency cycles, partial persistence, internal-task disclosure | exact accepted-Intent fingerprint; bounded closed-schema output; runtime-owned root; execution-kind allowlist; 16-Task ceiling; deterministic handler registry; cycle and dependency validation; atomic graph commit; durable replay; root-only A2A lookup | a valid but poor Plan can waste bounded model work or require independent review |
 | Structured user completion | self-reported completion, missing documents, duplicate evidence, media spoofing, oversized files | durable CompletionContract; exact fields, roles, counts, and media types; duplicate-reference rejection; 16 MiB file and 32 MiB request totals; content sniffing; SHA-256 private storage; authenticated origin binding | files may still contain malicious content and remain untrusted to later consumers |
 | Model completion review | Agent self-certification, stale review, result disclosure | owner-only private control; exact candidate/evidence fingerprint; no-store responses; durable idempotent decision and recovery | the user's subjective judgment can be wrong |
+| Goal progress | worker self-certification, forged, stale, or causally reordered Goal, Mission, or Work evidence, tenant crossing, duplicate terminal transitions, unbounded continuous history | ledger-selected current Work witnesses bounded by Goal criteria; exact active Goal revision and active-at-evaluation Mission binding; causal sequence checks; deterministic criterion coverage; fingerprinted evaluation; atomic target achievement; continuous Goals remain non-terminal; generic writers reject terminal evidence names; event-only rebuild revalidates the chain | exact criterion equality may require a reviewed Goal refinement when independently valid evidence uses different wording or provenance |
 | Exact-effect approval | approval through chat, changed effect, stale or expired decision | owner-only private control; full ledger-sourced effect view; typed confirmation; immutable fingerprint; revalidation on every transition and at transactional use | a compromised owner can approve within that account's V1 authority |
 | SQLite and recovery | corruption, partial state, unsafe overwrite, unauthorized access | append-only events and versioned records; transactional projections; read-only integrity/schema verification; no-overwrite backup and restore; private data paths; service umask `0077` | host file access can reveal or alter data; storage encryption is external |
 | Consequential effects | duplicate action, revoked authority, crash after send, false success | persist-before-effect obligation; exact lease/freeze/approval checks in the attempt transaction; single-use consumption; idempotency key; evidence-required confirmation; no blind resend | production effect-writing adapters remain absent |
@@ -71,8 +72,8 @@ does not claim to defend against a compromised operating-system administrator.
 - A ToolOutcome is not proof of an external effect, and nonempty model text is
   not proof of completion.
 - Work may join a Goal only through an explicit, reviewed, tenant-checked
-  Intent reference; neither Work completion nor a bare projection update can
-  certify Goal achievement.
+  Intent reference. Work completion supplies evidence but cannot certify Goal
+  achievement; only the atomic Goal evaluator may admit the terminal state.
 - User-originated `HUMAN` Tasks require their structured CompletionContract;
   an A2A Agent cannot complete them through a text continuation.
 - Unknown roles, fields, states, grants, boundaries, and execution mechanisms
