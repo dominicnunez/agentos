@@ -239,6 +239,46 @@ func TestRecoveryRejectsMissingProjectionOrganization(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsMissingGoalMission(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	mission := core.Mission{ID: "mission-1", OrganizationID: organization.ID, Statement: "Mission", Status: core.MissionActive, CreatedAt: now}
+	goal := core.Goal{ID: "goal-1", OrganizationID: organization.ID, MissionID: mission.ID, Objective: "Outcome", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "verified", Origin: "TEST"}}, Status: core.GoalActive, CreatedAt: now}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup-1"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "mission-1"}, ProjectionKind: "mission", RecordID: string(mission.ID), Version: 1, Value: mission},
+		{Event: events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "GOAL_CREATED", SourceActorID: "runtime", CorrelationID: "goal-1"}, ProjectionKind: "goal", RecordID: string(goal.ID), Version: 1, Value: goal},
+	} {
+		if _, err := store.AppendProjection(ctx, draft); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM events WHERE event_type='MISSION_CREATED'; DELETE FROM records WHERE kind='mission'`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil {
+		t.Fatal("recovery verification accepted a Goal with a missing Mission")
+	}
+}
+
 func appendRecoveryProjectionChain(t *testing.T, ctx context.Context, store *ledger.SQLite) (events.Event, events.ProjectionRecord) {
 	return appendRecoveryProjectionState(t, ctx, store, true)
 }

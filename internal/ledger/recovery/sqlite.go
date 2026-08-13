@@ -250,6 +250,9 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 func validateProjectionOrganizationBindings(admitted map[string]admittedProjectionEvent) error {
 	organizations := map[core.ID]struct{}{}
 	directOrganizations := map[string]core.ID{}
+	missionOrganizations := map[core.ID]core.ID{}
+	goalOrganizations := map[core.ID]core.ID{}
+	goalMissions := map[core.ID]core.ID{}
 	intentOrganizations := map[core.ID]core.ID{}
 	workIntents := map[core.ID]core.ID{}
 	for _, admission := range admitted {
@@ -265,13 +268,13 @@ func validateProjectionOrganizationBindings(admitted map[string]admittedProjecti
 			organizations[value.ID] = struct{}{}
 		case "mission":
 			var value core.Mission
-			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID || bindRecoveryReference(missionOrganizations, value.ID, value.OrganizationID) != nil {
 				return fmt.Errorf("event %s contains an invalid Mission projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
 		case "goal":
 			var value core.Goal
-			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID || bindRecoveryReference(goalOrganizations, value.ID, value.OrganizationID) != nil || bindRecoveryReference(goalMissions, value.ID, value.MissionID) != nil {
 				return fmt.Errorf("event %s contains an invalid Goal projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
@@ -324,6 +327,13 @@ func validateProjectionOrganizationBindings(admitted map[string]admittedProjecti
 	for eventID, organizationID := range directOrganizations {
 		if _, found := organizations[organizationID]; !found {
 			return fmt.Errorf("event %s projection references a missing Organization", eventID)
+		}
+	}
+	for goalID, missionID := range goalMissions {
+		goalOrganizationID := goalOrganizations[goalID]
+		missionOrganizationID, found := missionOrganizations[missionID]
+		if !found || missionOrganizationID != goalOrganizationID {
+			return fmt.Errorf("goal %s references a missing or cross-organization Mission %s", goalID, missionID)
 		}
 	}
 	for _, admission := range admitted {
