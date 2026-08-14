@@ -157,6 +157,16 @@ opening the operator endpoint, preserves blocked work, runs dependency-ready
 pending work, retries only known-safe interrupted deterministic work, and
 blocks interrupted adaptive execution whose outcome is uncertain.
 
+Starting adaptive Agent work is also a roster time-of-use boundary. The SQLite
+transaction that moves the exact pending Task to `RUNNING` reloads the assigned
+Agent, blueprint, and execution profile, requires every component to be active,
+and records their exact projection versions and authorizing Event references in
+the sealed `EXECUTION_STARTED` detail. Roster mutations serialize with that
+transaction: a deactivation admitted first blocks dispatch, while a dispatch
+admitted first may finish and is not retroactively cancelled. The binding is
+one-shot because it consumes that Task revision, grants no effect or capability
+authority, and cannot authorize a substitute Agent or later configuration.
+
 Agent-proposed addressed events use runtime-stamped sender and recipient
 envelopes. The SQLite ledger commits each addressed Event Contract and its
 Agent, Team, or Task inbox availability in one transaction. Available events

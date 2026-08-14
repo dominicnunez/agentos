@@ -41,6 +41,16 @@ write leaves no Task executable, and recovery rejects a partial or conflicting
 graph. Delivery retries reuse the durable Plan instead of repeating planning
 inference.
 
+An Agent assignment is revalidated again when execution actually starts. In
+the same SQLite transaction that moves the Task from `PENDING` to `RUNNING`,
+Agent OS requires the exact assigned Agent, blueprint, and execution profile to
+remain active and records their immutable revision references. If a roster or
+Lab promotion changed that assignment first, dispatch fails rather than
+silently selecting a replacement. If execution start committed first, a later
+deactivation prevents future dispatches but does not cancel that already
+admitted invocation. Interrupted adaptive work remains uncertain and is never
+blindly replayed.
+
 Dependencies become eligible only after their durable Task state is verified
 complete. A downstream AgentExecution receives only the latest valid
 `RESULT_PUBLISHED` contract for each declared dependency. The execution

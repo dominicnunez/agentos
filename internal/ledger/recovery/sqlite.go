@@ -485,6 +485,11 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, 
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Task projection", event.EventID)
 			}
+			if event.EventType == "EXECUTION_STARTED" && value.ExecutionKind == core.ExecutionAgent {
+				if err := events.ValidateAgentDispatchStart(event, value, record.Version, stream); err != nil {
+					return fmt.Errorf("event %s contains invalid Agent dispatch admission: %w", event.EventID, err)
+				}
+			}
 			if err := validateRecoveryTaskWorkBinding(event, record, value, snapshot); err != nil {
 				return fmt.Errorf("event %s contains an invalid Task binding: %w", event.EventID, err)
 			}
