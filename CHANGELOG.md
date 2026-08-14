@@ -41,6 +41,8 @@ Target: `1.0.0-rc.1`
   runtime-owned event envelope that admitted them; routine loads, rebuild,
   startup, backup, and restore reject forged, copied, reordered, or orphaned
   admission.
+- Routine Work reconciliation ignores immutable terminal history; atomic
+  completion admission and startup/recovery retain the full evidence audit.
 - Kernel-provided local peer identity, owner-only exact-effect controls, strict
   Agent registries, role isolation, rate and concurrency limits, remote TLS
   requirements, bounded decoding, and authority-shaped input rejection.

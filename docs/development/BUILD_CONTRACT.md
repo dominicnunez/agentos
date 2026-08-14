@@ -148,6 +148,11 @@ migration. Agent, Mission, Goal, Work, and Task revisions
 additionally bind each lifecycle label to its exact prior and resulting status,
 and an Agent history must begin with its version-one creation. Completed Work
 must retain the exact verified Task evidence that authorized its transition.
+Routine scheduling reads the admitted projection and reconciles only active
+Work; it does not reopen every immutable terminal Work stream as history grows.
+The atomic terminal writer validates the complete evidence chain at admission,
+while startup, event-only rebuild, backup, and restore perform the full
+authoritative replay audit before work is served.
 Agent configuration updates cannot masquerade as activation changes. Task creation validates the complete
 post-batch graph before commit while allowing references within that batch. Task revisions preserve the
 immutable planned and assigned contract, retain one Work/correlation boundary,

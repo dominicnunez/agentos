@@ -395,6 +395,57 @@ func TestVerticalSlice(t *testing.T) {
 	}
 }
 
+type eventReadCountingLedger struct {
+	*ledger.SQLite
+	eventReads int
+}
+
+func (l *eventReadCountingLedger) Events(ctx context.Context, correlationID string) ([]events.Event, error) {
+	l.eventReads++
+	return l.SQLite.Events(ctx, correlationID)
+}
+
+func TestRoutineReconciliationDoesNotReplayCompletedWorkHistory(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	seed := New(events.NewGateway(store))
+	const completedWorks = 8
+	for index := range completedWorks {
+		requestID := fmt.Sprintf("completed-history-%02d", index)
+		result, err := seed.Submit(ctx, Submit{
+			RequestID: requestID, OrganizationID: "org-1", Statement: "echo " + requestID,
+			Kind: core.ExecutionDeterministic,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Work.Status != core.WorkCompleted {
+			t.Fatalf("seeded Work %s status=%s", result.Work.ID, result.Work.Status)
+		}
+	}
+
+	counted := &eventReadCountingLedger{SQLite: store}
+	routine := New(events.NewGateway(counted))
+	if err := routine.reconcileWorks(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if counted.eventReads != 0 {
+		t.Fatalf("routine reconciliation replayed %d completed Work streams", counted.eventReads)
+	}
+
+	if _, err := routine.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if counted.eventReads == 0 {
+		t.Fatal("startup recovery skipped authoritative completion-chain validation")
+	}
+}
+
 func TestWorkCompletionAdmissionBindsPlanAndRuntimeContract(t *testing.T) {
 	ctx := context.Background()
 	l, err := ledger.Open(":memory:")
