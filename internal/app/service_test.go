@@ -395,6 +395,46 @@ func TestVerticalSlice(t *testing.T) {
 	}
 }
 
+func TestSubmitRejectsMismatchedOperatorIdentity(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	service := New(gateway)
+
+	tests := []struct {
+		name          string
+		channel       string
+		principalKind core.PrincipalKind
+	}{
+		{name: "A2A caller labeled as user", channel: "A2A", principalKind: core.PrincipalHuman},
+		{name: "direct caller labeled as external Agent", channel: "HUMAN_DIRECT", principalKind: core.PrincipalExternalAgent},
+		{name: "A2A caller labeled as runtime", channel: "A2A", principalKind: core.PrincipalRuntime},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requestID := fmt.Sprintf("mismatched-operator-%d", index)
+			_, err := service.Submit(ctx, Submit{
+				RequestID: requestID, OrganizationID: "org-1", Statement: "echo rejected",
+				Kind: core.ExecutionDeterministic, MessageID: "message-" + requestID,
+				SourcePrincipalID: "operator-1", SourcePrincipalKind: test.principalKind,
+				SourceChannel: test.channel,
+			})
+			if err == nil {
+				t.Fatal("mismatched operator identity was accepted")
+			}
+			if _, found, err := gateway.ResolveExternalWork(ctx, "org-1", requestID); err != nil {
+				t.Fatal(err)
+			} else if found {
+				t.Fatal("rejected operator identity reserved durable external work")
+			}
+		})
+	}
+}
+
 type eventReadCountingLedger struct {
 	*ledger.SQLite
 	eventReads int

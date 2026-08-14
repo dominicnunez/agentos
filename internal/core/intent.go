@@ -9,6 +9,26 @@ import (
 	"unicode/utf8"
 )
 
+// ValidIntentSourceIdentity binds each durable source channel to the only
+// principal kind that may use it. Authentication and capability checks remain
+// boundary responsibilities; this prevents mislabeled provenance from
+// bypassing reviewed external-work admission.
+func ValidIntentSourceIdentity(id ID, kind PrincipalKind, channel string) bool {
+	if id == "" {
+		return false
+	}
+	switch channel {
+	case "INTERNAL":
+		return kind == PrincipalRuntime
+	case "HUMAN_DIRECT":
+		return kind == PrincipalHuman
+	case "A2A":
+		return kind == PrincipalExternalAgent
+	default:
+		return false
+	}
+}
+
 // ValidGoalReferenceID keeps Goal identifiers admitted through untrusted
 // natural-language intake unambiguous and safe to match as exact tokens.
 func ValidGoalReferenceID(value string) bool {

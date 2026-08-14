@@ -1247,6 +1247,9 @@ func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 	if in.SourceChannel != "INTERNAL" && !operatorSubmission {
 		return Result{}, fmt.Errorf("operator work channel is not supported")
 	}
+	if !core.ValidIntentSourceIdentity(in.SourcePrincipalID, in.SourcePrincipalKind, in.SourceChannel) {
+		return Result{}, fmt.Errorf("submission principal kind does not match its source channel")
+	}
 	if operatorSubmission && in.MessageID == "" {
 		return Result{}, fmt.Errorf("operator submission message id is required")
 	}

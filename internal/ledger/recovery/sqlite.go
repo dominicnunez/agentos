@@ -585,7 +585,7 @@ func validateRecoveryWorkIntentBinding(event events.Event, record events.Project
 }
 
 func intentRequiresConfirmation(intent core.Intent) bool {
-	return intent.GoalID != "" || intent.SourcePrincipalKind == core.PrincipalHuman || intent.SourcePrincipalKind == core.PrincipalExternalAgent
+	return intent.GoalID != "" || intent.SourceChannel == "HUMAN_DIRECT" || intent.SourceChannel == "A2A" || intent.SourcePrincipalKind == core.PrincipalHuman || intent.SourcePrincipalKind == core.PrincipalExternalAgent
 }
 
 func recoveryActiveGoalAtSequence(stream []events.Event, goalID core.ID, confirmationSequence int64) (core.Goal, error) {
