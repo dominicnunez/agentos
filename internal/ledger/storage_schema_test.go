@@ -162,6 +162,15 @@ func TestOpenRejectsUnsupportedOrMismatchedStorageContract(t *testing.T) {
 			want: "metadata does not match",
 		},
 		{
+			name: "schema fingerprint drift",
+			mutate: func(t *testing.T, db *sql.DB) {
+				if _, err := db.ExecContext(t.Context(), `CREATE INDEX unreviewed_events_type_idx ON events(event_type)`); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "schema fingerprint does not match",
+		},
+		{
 			name: "durable event schema mismatch",
 			mutate: func(t *testing.T, db *sql.DB) {
 				if _, err := db.ExecContext(t.Context(), `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,authorization_refs,artifact_refs,payload,created_at,schema_version) VALUES('future-event','org-1','AUDIT_NOTE','runtime',?,?,?,'2026-08-13T12:00:00Z',?)`, []byte("[]"), []byte("[]"), []byte("{}"), events.SchemaVersion+1); err != nil {
