@@ -358,7 +358,7 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 		Agents: map[core.ID]core.DurableState[core.Agent]{}, Intents: map[core.ID]core.DurableState[core.Intent]{},
 		Works: map[core.ID]core.DurableState[core.Work]{}, Tasks: map[core.ID]core.DurableState[core.Task]{},
 	}
-	confirmations := make(map[string]events.Event)
+	confirmations := make(map[string][]events.Event)
 	for _, event := range ordered {
 		if event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() {
 			return fmt.Errorf("event stream contains an incomplete envelope")
@@ -384,11 +384,9 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 				if decodeExactProjectionJSON(event.Payload, &confirmation) != nil {
 					return fmt.Errorf("event %s contains an invalid intent confirmation", event.EventID)
 				}
+				confirmations[event.CorrelationID] = append(confirmations[event.CorrelationID], event)
 				if confirmation.GoalID == "" {
 					continue
-				}
-				if _, duplicate := confirmations[event.CorrelationID]; duplicate {
-					return fmt.Errorf("event %s duplicates a Goal-bound intent confirmation", event.EventID)
 				}
 				goal, found := graph.Goals[core.ID(confirmation.GoalID)]
 				if !found || goal.Value.ID != core.ID(confirmation.GoalID) || goal.Value.Status != core.GoalActive {
@@ -397,7 +395,6 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 				if err := events.ValidateReviewedGoalIntentAdmission(ordered, event, goal.Value); err != nil {
 					return fmt.Errorf("event %s: %w", event.EventID, err)
 				}
-				confirmations[event.CorrelationID] = event
 			}
 			if events.RequiresProjectionAdmission(event.EventType, event.SourceActorID) {
 				return fmt.Errorf("event %s uses a projection lifecycle event without typed admission", event.EventID)
@@ -450,7 +447,7 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 			}
 		case KindAgentBlueprint:
 			var value core.AgentBlueprint
-			if decodeExactProjectionJSON(record.Value, &value) != nil || value.ID != core.ID(record.RecordID) || value.Version == "" || strings.TrimSpace(value.Role) == "" || strings.TrimSpace(value.OperatingInstructions) == "" || !validProjectionRosterStatus(value.Status) || !distinctProjectionStrings(value.RequiredCapabilityClasses) {
+			if decodeExactProjectionJSON(record.Value, &value) != nil || value.ID != core.ID(record.RecordID) || !core.ValidAgentBlueprint(value) {
 				err = fmt.Errorf("contains an invalid Agent blueprint projection")
 			} else {
 				err = validateProjectionOrganizationAtAdmission(value.OrganizationID, event, graph)
@@ -460,7 +457,7 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 			}
 		case KindExecutionProfile:
 			var value core.ExecutionProfile
-			if decodeExactProjectionJSON(record.Value, &value) != nil || value.ID != core.ID(record.RecordID) || value.Version == "" || value.ModelProvider == "" || value.Model == "" || value.PromptVersion == "" || !validProjectionRosterStatus(value.Status) || !distinctProjectionStrings(value.ToolRefs) {
+			if decodeExactProjectionJSON(record.Value, &value) != nil || value.ID != core.ID(record.RecordID) || !core.ValidExecutionProfile(value) {
 				err = fmt.Errorf("contains an invalid execution profile projection")
 			} else {
 				err = validateProjectionOrganizationAtAdmission(value.OrganizationID, event, graph)
@@ -552,24 +549,6 @@ func validateProjectionOrganizationAtAdmission(organizationID core.ID, event eve
 	return nil
 }
 
-func validProjectionRosterStatus(status string) bool {
-	return status == "ACTIVE" || status == "INACTIVE"
-}
-
-func distinctProjectionStrings(values []string) bool {
-	seen := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		if strings.TrimSpace(value) == "" {
-			return false
-		}
-		if _, duplicate := seen[value]; duplicate {
-			return false
-		}
-		seen[value] = struct{}{}
-	}
-	return true
-}
-
 func validateProjectionTeamAtAdmission(team core.Team, event events.Event, graph core.DurableGraph) error {
 	if strings.TrimSpace(team.Name) == "" || strings.TrimSpace(team.Status) == "" {
 		return fmt.Errorf("team is incomplete")
@@ -594,17 +573,17 @@ func validateProjectionTeamAtAdmission(team core.Team, event events.Event, graph
 	return nil
 }
 
-func validateProjectionWorkAtAdmission(work core.Work, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, confirmations map[string]events.Event) error {
+func validateProjectionWorkAtAdmission(work core.Work, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, confirmations map[string][]events.Event) error {
 	intent, found := graph.Intents[work.IntentID]
 	if !found || intent.CorrelationID != record.CorrelationID || intent.Value.ID != work.IntentID || intent.Value.GoalID != work.GoalID || intent.Value.NormalizedObjective != work.Objective || string(intent.Value.OrganizationID) != event.OrganizationID {
 		return fmt.Errorf("work requires its exact prior Intent on the same organization and correlation boundary")
 	}
 	if intent.Value.GoalID != "" {
-		confirmation, found := confirmations[record.CorrelationID]
-		if !found || confirmation.Sequence >= event.Sequence {
+		matching := confirmations[record.CorrelationID]
+		if len(matching) != 1 || matching[0].Sequence >= event.Sequence {
 			return fmt.Errorf("goal-bound Work requires one prior reviewed intent confirmation")
 		}
-		if err := events.ValidateGoalBoundIntentConfirmation(confirmation, intent.Value); err != nil {
+		if err := events.ValidateGoalBoundIntentConfirmation(matching[0], intent.Value); err != nil {
 			return err
 		}
 	}

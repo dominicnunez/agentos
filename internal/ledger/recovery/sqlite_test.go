@@ -1397,6 +1397,57 @@ func TestRecoveryRejectsInvalidProjectionRevisionHistory(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsInvalidHistoricalBlueprintValue(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	blueprint := core.AgentBlueprint{ID: "blueprint-1", OrganizationID: organization.ID, Version: "v1", Role: "worker", OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE", CreatedAt: now}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"},
+		ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	created, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "AGENT_BLUEPRINT_CREATED", SourceActorID: "runtime", CorrelationID: "roster"},
+		ProjectionKind: "agent_blueprint", RecordID: string(blueprint.ID), Version: 1, Value: blueprint,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	blueprint.Status = "INACTIVE"
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "AGENT_BLUEPRINT_UPDATED", SourceActorID: "runtime", CorrelationID: "roster"},
+		ProjectionKind: "agent_blueprint", RecordID: string(blueprint.ID), Version: 2, Value: blueprint,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	payload, present, err := events.AdmittedProjection(created)
+	if err != nil || !present {
+		_ = store.Close()
+		t.Fatalf("blueprint creation admission is invalid: present=%t err=%v", present, err)
+	}
+	invalid := blueprint
+	invalid.Status = "UNSUPPORTED"
+	payload.Projection.Value, err = json.Marshal(invalid)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	resealRecoveryProjection(t, ctx, store, path, created, payload)
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "invalid Agent blueprint projection") {
+		t.Fatalf("recovery accepted an invalid blueprint v1 hidden by valid v2: %v", err)
+	}
+}
+
 func TestRecoveryRejectsTeamTenantReassignment(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.db")

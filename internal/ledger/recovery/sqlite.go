@@ -383,7 +383,7 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, 
 			}
 		case "agent_blueprint":
 			var value core.AgentBlueprint
-			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID || !core.ValidAgentBlueprint(value) {
 				return fmt.Errorf("event %s contains an invalid Agent blueprint projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
@@ -395,7 +395,7 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, 
 			}
 		case "execution_profile":
 			var value core.ExecutionProfile
-			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
+			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID || !core.ValidExecutionProfile(value) {
 				return fmt.Errorf("event %s contains an invalid execution profile projection", event.EventID)
 			}
 			organizationID = value.OrganizationID

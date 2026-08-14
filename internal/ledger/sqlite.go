@@ -1660,7 +1660,7 @@ func validateAgentBlueprintRevision(ctx context.Context, tx *sql.Tx, item prepar
 	if item.draft.Version == 1 {
 		expectedEventType = "AGENT_BLUEPRINT_CREATED"
 	}
-	if blueprint.ID != core.ID(item.draft.RecordID) || string(blueprint.OrganizationID) != item.draft.Event.OrganizationID || blueprint.Version == "" || strings.TrimSpace(blueprint.Role) == "" || strings.TrimSpace(blueprint.OperatingInstructions) == "" || !validRosterProjectionStatus(blueprint.Status) || !distinctNonemptyStrings(blueprint.RequiredCapabilityClasses) || item.draft.Event.EventType != expectedEventType || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" {
+	if blueprint.ID != core.ID(item.draft.RecordID) || string(blueprint.OrganizationID) != item.draft.Event.OrganizationID || !core.ValidAgentBlueprint(blueprint) || item.draft.Event.EventType != expectedEventType || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" {
 		return fmt.Errorf("agent blueprint projection is incomplete or crosses its runtime-owned lifecycle boundary")
 	}
 	if err := validateRosterParentOrganization(ctx, tx, blueprint.OrganizationID); err != nil {
@@ -1697,7 +1697,7 @@ func validateExecutionProfileRevision(ctx context.Context, tx *sql.Tx, item prep
 	if item.draft.Version == 1 {
 		expectedEventType = "EXECUTION_PROFILE_CREATED"
 	}
-	if profile.ID != core.ID(item.draft.RecordID) || string(profile.OrganizationID) != item.draft.Event.OrganizationID || profile.Version == "" || profile.ModelProvider == "" || profile.Model == "" || profile.PromptVersion == "" || !validRosterProjectionStatus(profile.Status) || !distinctNonemptyStrings(profile.ToolRefs) || item.draft.Event.EventType != expectedEventType || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" {
+	if profile.ID != core.ID(item.draft.RecordID) || string(profile.OrganizationID) != item.draft.Event.OrganizationID || !core.ValidExecutionProfile(profile) || item.draft.Event.EventType != expectedEventType || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" {
 		return fmt.Errorf("execution profile projection is incomplete or crosses its runtime-owned lifecycle boundary")
 	}
 	if err := validateRosterParentOrganization(ctx, tx, profile.OrganizationID); err != nil {
@@ -1739,24 +1739,6 @@ func validateRosterParentOrganization(ctx context.Context, tx *sql.Tx, organizat
 		return fmt.Errorf("durable parent organization is unavailable")
 	}
 	return nil
-}
-
-func validRosterProjectionStatus(status string) bool {
-	return status == "ACTIVE" || status == "INACTIVE"
-}
-
-func distinctNonemptyStrings(values []string) bool {
-	seen := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		if value == "" {
-			return false
-		}
-		if _, duplicate := seen[value]; duplicate {
-			return false
-		}
-		seen[value] = struct{}{}
-	}
-	return true
 }
 
 func validateWorkIntentBinding(ctx context.Context, tx *sql.Tx, item preparedProjection) error {

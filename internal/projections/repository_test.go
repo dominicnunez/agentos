@@ -177,6 +177,10 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 	if _, err := New(events.NewGateway(replayLedger{stream: withoutConfirmation})).Rebuild(ctx); err == nil || !strings.Contains(err.Error(), "prior reviewed intent confirmation") {
 		t.Fatalf("startup admitted Goal-bound Work without review evidence: %v", err)
 	}
+	withUnboundConfirmation := insertUnboundReplayConfirmation(t, stream, "request-1", intent)
+	if _, err := New(events.NewGateway(replayLedger{stream: withUnboundConfirmation})).Rebuild(ctx); err == nil || !strings.Contains(err.Error(), "one prior reviewed intent confirmation") {
+		t.Fatalf("startup admitted Goal-bound Work after conflicting unbound confirmation: %v", err)
+	}
 	workBeforeIntent := swapReplayProjectionSequences(t, stream, "INTENT_CREATED", "WORK_CREATED")
 	if _, err := New(events.NewGateway(replayLedger{stream: workBeforeIntent})).Rebuild(ctx); err == nil || !strings.Contains(err.Error(), "prior Intent") {
 		t.Fatalf("startup admitted Work before its Intent: %v", err)
@@ -731,6 +735,18 @@ func TestRosterConfigurationRevisionRejectedBeforeCommit(t *testing.T) {
 		ID: "profile-1", OrganizationID: organization.ID, Version: "v1", ModelProvider: "review-provider",
 		Model: "review-model", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE",
 	}
+	whitespaceBlueprint := blueprint
+	whitespaceBlueprint.ID = "blueprint-whitespace"
+	whitespaceBlueprint.RequiredCapabilityClasses = []string{"   "}
+	if err := repository.SaveAgentBlueprint(ctx, "AGENT_BLUEPRINT_CREATED", "runtime", "whitespace-blueprint", 1, whitespaceBlueprint, nil); err == nil {
+		t.Fatal("whitespace-only Agent blueprint capability reached persistence")
+	}
+	whitespaceProfile := profile
+	whitespaceProfile.ID = "profile-whitespace"
+	whitespaceProfile.ToolRefs = []string{"\t"}
+	if err := repository.SaveExecutionProfile(ctx, "EXECUTION_PROFILE_CREATED", "runtime", "whitespace-profile", 1, whitespaceProfile, nil); err == nil {
+		t.Fatal("whitespace-only execution profile tool reference reached persistence")
+	}
 	if err := repository.SaveAgentBlueprint(ctx, "AGENT_BLUEPRINT_CREATED", "runtime", "setup", 1, blueprint, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -748,7 +764,7 @@ func TestRosterConfigurationRevisionRejectedBeforeCommit(t *testing.T) {
 	if err := repository.SaveExecutionProfile(ctx, "EXECUTION_PROFILE_UPDATED", "runtime", "forged-profile", 2, forgedProfile, nil); err == nil {
 		t.Fatal("execution profile configuration changed under its pinned domain version")
 	}
-	for _, correlationID := range []string{"forged-blueprint", "forged-profile"} {
+	for _, correlationID := range []string{"whitespace-blueprint", "whitespace-profile", "forged-blueprint", "forged-profile"} {
 		stream, err := gateway.Events(ctx, correlationID)
 		if err != nil {
 			t.Fatal(err)
@@ -1178,6 +1194,58 @@ func swapReplayProjectionSequences(t *testing.T, stream []events.Event, firstTyp
 			t.Fatal(err)
 		}
 	}
+	return result
+}
+
+func insertUnboundReplayConfirmation(t *testing.T, stream []events.Event, correlationID string, intent core.Intent) []events.Event {
+	t.Helper()
+	result := append([]events.Event(nil), stream...)
+	insertSequence := int64(0)
+	var template events.Event
+	for _, event := range result {
+		if event.CorrelationID == correlationID && event.EventType == "INTENT_CONFIRMED" {
+			insertSequence = event.Sequence
+			template = event
+			break
+		}
+	}
+	if insertSequence == 0 {
+		t.Fatal("Goal-bound confirmation was not found")
+	}
+	for index := range result {
+		if result[index].Sequence < insertSequence {
+			continue
+		}
+		payload, present, err := events.AdmittedProjection(result[index])
+		result[index].Sequence++
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !present {
+			continue
+		}
+		sealed, err := events.SealProjectionEvent(result[index], payload.Projection, payload.Detail)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result[index].Payload, err = json.Marshal(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	unbound := events.IntentConfirmedPayload{
+		IntentID: string(intent.ID), Version: 1, Fingerprint: intent.AcceptedFingerprint,
+		ConfirmingActorID: string(intent.SourcePrincipalID), ConfirmingActorKind: string(intent.SourcePrincipalKind),
+		SourceChannel: intent.SourceChannel, MessageID: "unbound-confirmation",
+	}
+	body, err := json.Marshal(unbound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template.EventID = "event-unbound-confirmation"
+	template.Sequence = insertSequence
+	template.Payload = body
+	result = append(result, template)
 	return result
 }
 

@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"reflect"
+	"strings"
 )
 
 // DurableState is the current admitted value of one versioned organizational
@@ -81,6 +82,37 @@ func ValidAgent(agent Agent) bool {
 func ValidAgentConfigurationBinding(agent Agent, blueprint AgentBlueprint, profile ExecutionProfile) bool {
 	return blueprint.ID == agent.BlueprintID && blueprint.OrganizationID == agent.OrganizationID && blueprint.Version == agent.BlueprintVersion &&
 		profile.ID == agent.ExecutionProfileID && profile.OrganizationID == agent.OrganizationID && profile.Version == agent.ExecutionProfileVersion
+}
+
+// ValidAgentBlueprint reports whether one complete blueprint definition can
+// enter durable organizational state.
+func ValidAgentBlueprint(blueprint AgentBlueprint) bool {
+	return blueprint.ID != "" && blueprint.OrganizationID != "" && blueprint.Version != "" &&
+		strings.TrimSpace(blueprint.Role) != "" && strings.TrimSpace(blueprint.OperatingInstructions) != "" &&
+		validDurableRosterStatus(blueprint.Status) && DistinctNonemptyStrings(blueprint.RequiredCapabilityClasses)
+}
+
+// ValidExecutionProfile reports whether one complete execution profile can
+// enter durable organizational state.
+func ValidExecutionProfile(profile ExecutionProfile) bool {
+	return profile.ID != "" && profile.OrganizationID != "" && profile.Version != "" && profile.ModelProvider != "" &&
+		profile.Model != "" && profile.PromptVersion != "" && validDurableRosterStatus(profile.Status) && DistinctNonemptyStrings(profile.ToolRefs)
+}
+
+// DistinctNonemptyStrings rejects empty, whitespace-only, and duplicate
+// durable references without normalizing their security-relevant identity.
+func DistinctNonemptyStrings(values []string) bool {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			return false
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return false
+		}
+		seen[value] = struct{}{}
+	}
+	return true
 }
 
 // DurableGraph is the current organizational state whose cross-record
@@ -274,20 +306,14 @@ func validateDurableTaskAgentConfig(taskID ID, config *AgentConfig, organization
 func validateDurableRoster(graph DurableGraph) error {
 	for id, state := range graph.AgentBlueprints {
 		blueprint := state.Value
-		if blueprint.Version == "" || blueprint.Role == "" || blueprint.OperatingInstructions == "" || !validDurableRosterStatus(blueprint.Status) {
+		if !ValidAgentBlueprint(blueprint) {
 			return fmt.Errorf("agent blueprint %s is incomplete", id)
-		}
-		if err := validateDurableDistinctStrings("agent blueprint required capability classes", id, blueprint.RequiredCapabilityClasses); err != nil {
-			return err
 		}
 	}
 	for id, state := range graph.ExecutionProfiles {
 		profile := state.Value
-		if profile.Version == "" || profile.ModelProvider == "" || profile.Model == "" || profile.PromptVersion == "" || !validDurableRosterStatus(profile.Status) {
+		if !ValidExecutionProfile(profile) {
 			return fmt.Errorf("execution profile %s is incomplete", id)
-		}
-		if err := validateDurableDistinctStrings("execution profile tool refs", id, profile.ToolRefs); err != nil {
-			return err
 		}
 	}
 	for id, state := range graph.Agents {
@@ -306,20 +332,6 @@ func validateDurableRoster(graph DurableGraph) error {
 
 func validDurableRosterStatus(status string) bool {
 	return status == "ACTIVE" || status == "INACTIVE"
-}
-
-func validateDurableDistinctStrings(kind string, id ID, values []string) error {
-	seen := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		if value == "" {
-			return fmt.Errorf("%s %s contains an empty value", kind, id)
-		}
-		if _, duplicate := seen[value]; duplicate {
-			return fmt.Errorf("%s %s contains duplicate value %s", kind, id, value)
-		}
-		seen[value] = struct{}{}
-	}
-	return nil
 }
 
 type durableOrganizedIdentity struct {
