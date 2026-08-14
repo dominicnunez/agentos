@@ -2,14 +2,13 @@ package main
 
 import (
 	"strconv"
-	"time"
 
 	"github.com/dominicnunez/agentos/internal/bootstrap"
 	"github.com/dominicnunez/agentos/internal/inference"
 )
 
 func testOpenAIProvider(config bootstrap.Config, model, secretRef string) bootstrap.Provider {
-	now := time.Now().UTC()
+	now := config.CreatedAt
 	return bootstrap.Provider{
 		Kind: bootstrap.ProviderOpenAIAPI, Model: model, SecretRef: secretRef,
 		InferencePolicy: inference.Policy{
