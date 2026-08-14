@@ -42,6 +42,8 @@ modules:
     path: internal/intake
   - name: knowledge
     path: internal/knowledge
+  - name: lab
+    path: internal/lab
   - name: modelid
     path: internal/modelid
   - name: modeloutput
@@ -74,7 +76,7 @@ policy:
       from:
         module: app
       to:
-        modules: [assignment, completion, core, events, execution, inference, planning, projections, telemetry, workflow]
+        modules: [assignment, completion, core, events, execution, inference, lab, planning, projections, telemetry, workflow]
 
     - name: assignment-domain
       from:
@@ -165,6 +167,19 @@ policy:
         module: knowledge
       to:
         module: core
+
+    - name: lab-composition
+      from:
+        module: lab
+      to:
+        modules: [core, events, projections]
+
+    - name: lab-test-adapter
+      from:
+        module: lab
+        tests: true
+      to:
+        modules: [app, execution, ledger]
 
     - name: event-persistence
       from:

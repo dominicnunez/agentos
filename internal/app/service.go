@@ -18,6 +18,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/inference"
+	"github.com/dominicnunez/agentos/internal/lab"
 	"github.com/dominicnunez/agentos/internal/planning"
 	"github.com/dominicnunez/agentos/internal/projections"
 	"github.com/dominicnunez/agentos/internal/telemetry"
@@ -45,6 +46,7 @@ type Submit struct {
 	SourceChannel       string
 	NormalizedIntent    *core.IntentDraft
 	correlationID       string
+	experimentSpec      *lab.Spec
 }
 
 type Result struct {
@@ -54,6 +56,7 @@ type Result struct {
 	Outcome    core.ToolOutcome  `json:"outcome"`
 	Completion completion.Result `json:"completion"`
 	Events     []events.Event    `json:"events"`
+	Experiment *core.Experiment  `json:"experiment,omitempty"`
 }
 
 type RecoveryResult struct {
@@ -100,6 +103,7 @@ type Service struct {
 	verifier         completion.Verifier
 	completion       completion.Engine
 	modelTurnTimeout time.Duration
+	lab              *lab.Service
 }
 
 func New(g *events.Gateway) *Service {
@@ -132,6 +136,7 @@ func NewWithModelAndPlanner(g *events.Gateway, model execution.ModelAdapter, pla
 		planner:          planner,
 		verifier:         completion.Verifier{},
 		modelTurnTimeout: defaultModelTurnTimeout,
+		lab:              lab.New(g),
 	}
 	g.SetRouteValidator(service)
 	return service
@@ -490,6 +495,9 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 	result.TasksExecuted = len(runs) + continuedInputs
 	if err := s.reconcileWorks(ctx); err != nil {
 		return RecoveryResult{}, err
+	}
+	if err := s.lab.ReconcileAll(ctx); err != nil {
+		return RecoveryResult{}, fmt.Errorf("reconcile Lab experiments: %w", err)
 	}
 	return result, nil
 }
@@ -1249,6 +1257,11 @@ func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 	in.correlationID = correlationID
 	intent, work, task, err := s.ensureSubmission(ctx, in)
 	if err != nil {
+		if in.experimentSpec != nil {
+			if reconcileErr := s.lab.ReconcileAll(ctx); reconcileErr != nil {
+				err = errors.Join(err, fmt.Errorf("reconcile failed Lab submission: %w", reconcileErr))
+			}
+		}
 		return Result{}, err
 	}
 	if err := s.ensureOperatorAcceptance(ctx, in, task.ID); err != nil {
@@ -1261,6 +1274,9 @@ func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 	if err := s.reconcileWorks(ctx); err != nil {
 		return Result{}, err
 	}
+	if err := s.lab.ReconcileAll(ctx); err != nil {
+		return Result{}, fmt.Errorf("reconcile Lab experiments: %w", err)
+	}
 	snapshot, err := s.state.Load(ctx)
 	if err != nil {
 		return Result{}, err
@@ -1268,6 +1284,11 @@ func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 	intent = snapshot.Intents[intent.ID].Value
 	work = snapshot.Works[work.ID].Value
 	task = snapshot.Tasks[task.ID].Value
+	var experiment *core.Experiment
+	if admitted, ok := snapshot.Experiments[core.ID("experiment-"+string(work.ID))]; ok {
+		value := admitted.Value
+		experiment = &value
+	}
 	run, ok := runs[task.ID]
 	if !ok {
 		run, err = s.readTaskResult(ctx, correlationID, task.ID)
@@ -1279,7 +1300,20 @@ func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Intent: intent, Work: work, Task: task, Outcome: run.Outcome, Completion: run.Completion, Events: eventStream}, run.ExecutionError
+	return Result{Intent: intent, Work: work, Task: task, Outcome: run.Outcome, Completion: run.Completion, Events: eventStream, Experiment: experiment}, run.ExecutionError
+}
+
+// SubmitExperiment executes the ordinary governed Work loop while adding the
+// Lab's explicit containment, budget, and unverified trust boundary.
+func (s *Service) SubmitExperiment(ctx context.Context, in Submit, spec lab.Spec) (Result, error) {
+	if in.Kind != core.ExecutionDeterministic {
+		return Result{}, fmt.Errorf("V1 Lab executes only deterministic no-inference Work")
+	}
+	if err := lab.ValidateDeterministicSpec(spec); err != nil {
+		return Result{}, err
+	}
+	in.experimentSpec = &spec
+	return s.Submit(ctx, in)
 }
 
 func (s *Service) acquire(ctx context.Context) error {
@@ -1409,6 +1443,7 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 	if in.SourcePrincipalKind == core.PrincipalHuman {
 		intent.SourceHumanID = in.SourcePrincipalID
 	}
+	intentExists := false
 	if existing, ok := snapshot.Intents[intent.ID]; ok {
 		if existing.Value.OrganizationID != organizationID || existing.Value.GoalID != goalID || existing.Value.OriginalInstruction != in.Statement || existing.Value.NormalizedObjective != acceptedDraft.Objective ||
 			!slices.Equal(existing.Value.HardConstraints, hardConstraints) || !slices.Equal(existing.Value.ConsequenceBoundaries, acceptedDraft.ConsequenceCandidates) ||
@@ -1419,7 +1454,8 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 			return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("request id is already bound to different work")
 		}
 		intent = existing.Value
-	} else {
+		intentExists = true
+	} else if in.experimentSpec == nil {
 		if err := s.state.SaveIntent(ctx, "INTENT_CREATED", "runtime", correlationID, 1, intent, nil); err != nil {
 			return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("persist intent: %w", err)
 		}
@@ -1427,19 +1463,49 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 	}
 
 	work := core.Work{ID: core.ID("work-" + correlationID), IntentID: intent.ID, GoalID: goalID, Objective: acceptedDraft.Objective, Status: core.WorkActive, CreatedAt: now}
+	workExists := false
 	if existing, ok := snapshot.Works[work.ID]; ok {
 		if existing.Value.IntentID != intent.ID || existing.Value.GoalID != goalID || existing.Value.Objective != acceptedDraft.Objective {
 			return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("request work projection does not match submitted work")
 		}
 		work = existing.Value
-	} else {
+		workExists = true
+	} else if in.experimentSpec == nil {
 		if err := s.state.SaveWork(ctx, organizationID, "WORK_CREATED", "runtime", correlationID, 1, work, nil); err != nil {
 			return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("persist work: %w", err)
 		}
 		snapshot.Works[work.ID] = projections.Versioned[core.Work]{Version: 1, CorrelationID: correlationID, Value: work}
 	}
+	experimentID := core.ID("experiment-" + string(work.ID))
+	_, hasExperiment := snapshot.Experiments[experimentID]
+	if in.experimentSpec == nil {
+		if hasExperiment {
+			return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("request id is already bound to experimental Work")
+		}
+	} else if workExists {
+		if !hasExperiment {
+			return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("existing Work lacks its immutable experimental containment")
+		}
+		if _, err := s.lab.Resume(ctx, organizationID, work.ID, *in.experimentSpec); err != nil {
+			return core.Intent{}, core.Work{}, core.Task{}, err
+		}
+	} else {
+		if intentExists {
+			return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("existing Intent lacks its immutable experimental containment")
+		}
+		experiment, err := s.lab.StartSubmission(ctx, correlationID, intent, work, *in.experimentSpec)
+		if err != nil {
+			return core.Intent{}, core.Work{}, core.Task{}, err
+		}
+		snapshot.Intents[intent.ID] = projections.Versioned[core.Intent]{Version: 1, CorrelationID: correlationID, Value: intent}
+		snapshot.Works[work.ID] = projections.Versioned[core.Work]{Version: 1, CorrelationID: correlationID, Value: work}
+		snapshot.Experiments[experiment.ID] = projections.Versioned[core.Experiment]{Version: 1, CorrelationID: correlationID, Value: experiment}
+	}
 
 	plan, err := s.ensurePlan(ctx, organizationID, correlationID, intent, acceptedDraft, in.Kind)
+	if err == nil && in.experimentSpec != nil {
+		err = lab.ValidatePlan(in.experimentSpec.Budget, plan.Tasks)
+	}
 	if err != nil {
 		var attemptErr *planningAttemptError
 		if work.Status == core.WorkActive {

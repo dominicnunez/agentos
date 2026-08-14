@@ -207,6 +207,49 @@ func TestWorkProjectionTransitionsAreExact(t *testing.T) {
 	}
 }
 
+func TestLabProjectionTransitionsAreExact(t *testing.T) {
+	started := time.Now().UTC()
+	running := core.Experiment{
+		ID: "experiment-1", OrganizationID: "org-1", WorkID: "work-1", Objective: "bounded experiment",
+		SandboxRef: "sandbox-1", CapabilityProfileRef: "lab-no-effects-v1", Status: core.ExperimentRunning,
+		TrustLabel: core.ExperimentTrustUnverified, StartedAt: started,
+		Budget: core.ExperimentBudget{MaxExecutions: 1, MaxUsageUnits: 1, MaxWallTimeSeconds: 60, AllowedInferencePools: []string{"deterministic"}},
+	}
+	finished := started.Add(time.Second)
+	completed, failed := running, running
+	completed.Status = core.ExperimentCompleted
+	completed.ResultEventRefs = []string{"work-completed-event"}
+	completed.FinishedAt = &finished
+	failed.Status = core.ExperimentFailed
+	failed.FailureCode = core.ExperimentFailureWorkFailed
+	failed.FinishedAt = &finished
+	rewritten := completed
+	rewritten.Budget.MaxExecutions++
+	for name, test := range map[string]struct {
+		eventType string
+		version   int
+		previous  *core.Experiment
+		next      core.Experiment
+		valid     bool
+	}{
+		"start":                         {"LAB_EXPERIMENT_STARTED", 1, nil, running, true},
+		"complete unverified":           {"LAB_EXPERIMENT_COMPLETED", 2, &running, completed, true},
+		"fail":                          {"LAB_EXPERIMENT_FAILED", 2, &running, failed, true},
+		"completion label with running": {"LAB_EXPERIMENT_COMPLETED", 2, &running, running, false},
+		"rewrite budget":                {"LAB_EXPERIMENT_COMPLETED", 2, &running, rewritten, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateExperimentProjectionTransition(test.eventType, test.version, test.previous, test.next)
+			if test.valid && err != nil {
+				t.Fatalf("valid transition was rejected: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("invalid transition was accepted")
+			}
+		})
+	}
+}
+
 func TestHumanCompletionRejectsEnvelopeArtifactsAbsentFromSubmission(t *testing.T) {
 	contract := core.StructuredUserCompletionContract("task-1")
 	task := WorkCompletionTaskBinding{Task: core.Task{
