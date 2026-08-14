@@ -45,6 +45,12 @@ func ValidateAcceptedIntentDraft(draft IntentDraft, organizationID ID, kind Exec
 	if draft.ID == "" || draft.OrganizationID != organizationID || draft.Version < 1 || draft.Status != IntentStatusReadyForReview || draft.RequestedExecutionKind != kind {
 		return fmt.Errorf("identity, version, review state, and requested execution kind must match")
 	}
+	if draft.Mode != IntentModeStandard && draft.Mode != IntentModeExperiment {
+		return fmt.Errorf("intent mode must be standard or experiment")
+	}
+	if draft.Mode == IntentModeExperiment && kind != ExecutionDeterministic {
+		return fmt.Errorf("V1 experimental intent requires deterministic execution")
+	}
 	if strings.TrimSpace(draft.Objective) == "" || len(draft.Deliverables) == 0 || len(draft.CompletionCriteria) == 0 || len(draft.MissingUserInputs) != 0 {
 		return fmt.Errorf("objective, deliverables, and completion criteria are required and missing user inputs are forbidden")
 	}

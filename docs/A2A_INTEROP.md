@@ -64,8 +64,10 @@ The gateway exposes only the A2A v1.0 surface:
   the same initial delivery remains idempotent across restart;
 - initial submission returns a durable input-required Task carrying the current
   Intent draft in extension metadata. When the draft is complete, it includes
-  the exact review fingerprint. Exact retries do not repeat normalization or
-  append ledger events;
+  the exact review fingerprint and explicit `STANDARD` or `EXPERIMENT` mode.
+  Mode is a reviewed routing value only; the Agent cannot supply Lab
+  containment, budgets, authority, or effect permission. Exact retries do not
+  repeat normalization or append ledger events;
 - confirmation requires the durable `taskId`, matching `contextId`, a new
   `messageId`, and `{ "action": "CONFIRM", "fingerprint": "..." }` beneath
   the declared Intent-confirmation extension. It begins planning but grants no

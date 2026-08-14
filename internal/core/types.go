@@ -113,6 +113,13 @@ const (
 	IntentStatusReadyForReview IntentStatus = "READY_FOR_REVIEW"
 )
 
+type IntentMode string
+
+const (
+	IntentModeStandard   IntentMode = "STANDARD"
+	IntentModeExperiment IntentMode = "EXPERIMENT"
+)
+
 type IntentValue struct {
 	Value           string `json:"value"`
 	Origin          string `json:"origin"`
@@ -134,6 +141,7 @@ type IntentDraft struct {
 	OrganizationID         ID               `json:"organization_id"`
 	Version                int              `json:"version"`
 	Status                 IntentStatus     `json:"status"`
+	Mode                   IntentMode       `json:"mode"`
 	RequestedExecutionKind ExecutionKind    `json:"requested_execution_kind"`
 	Goal                   *IntentValue     `json:"goal,omitempty"`
 	Objective              string           `json:"objective"`

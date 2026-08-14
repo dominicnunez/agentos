@@ -1690,7 +1690,7 @@ func acceptedDraftForSubmission(in Submit, correlationID string) (core.IntentDra
 	}
 	draft := core.IntentDraft{
 		ID: core.ID("intent-draft-" + correlationID), OrganizationID: core.ID(in.OrganizationID), Version: 1,
-		Status: core.IntentStatusReadyForReview, RequestedExecutionKind: in.Kind, Goal: goal, Objective: in.Statement,
+		Status: core.IntentStatusReadyForReview, Mode: core.IntentModeStandard, RequestedExecutionKind: in.Kind, Goal: goal, Objective: in.Statement,
 		Context: []core.IntentValue{},
 		Deliverables: []core.IntentValue{{
 			Value: "The submitted work is performed.", Origin: "RUNTIME_DEFAULT",

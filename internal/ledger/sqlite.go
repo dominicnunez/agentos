@@ -2031,26 +2031,30 @@ func validateWorkIntentBinding(ctx context.Context, tx *sql.Tx, item preparedPro
 	if json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &intent) != nil || record.RecordID != string(item.work.IntentID) || record.CorrelationID != item.draft.Event.CorrelationID || intent.ID != item.work.IntentID || intent.GoalID != item.work.GoalID || intent.NormalizedObjective != item.work.Objective || string(intent.OrganizationID) != item.draft.Event.OrganizationID {
 		return fmt.Errorf("work does not match its accepted intent boundary")
 	}
-	if intent.GoalID != "" {
-		if err := validateGoalBoundIntentConfirmation(ctx, tx, item, intent); err != nil {
+	if intentRequiresConfirmation(intent) {
+		if err := validateExternalIntentConfirmation(ctx, tx, item, intent); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateGoalBoundIntentConfirmation(ctx context.Context, tx *sql.Tx, item preparedProjection, intent core.Intent) error {
+func intentRequiresConfirmation(intent core.Intent) bool {
+	return intent.GoalID != "" || intent.SourcePrincipalKind == core.PrincipalHuman || intent.SourcePrincipalKind == core.PrincipalExternalAgent
+}
+
+func validateExternalIntentConfirmation(ctx context.Context, tx *sql.Tx, item preparedProjection, intent core.Intent) error {
 	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type='INTENT_CONFIRMED' ORDER BY sequence`, item.draft.Event.CorrelationID))
 	if err != nil {
-		return fmt.Errorf("read goal-bound intent confirmation: %w", err)
+		return fmt.Errorf("read reviewed intent confirmation: %w", err)
 	}
 	if len(stream) != 1 {
-		return fmt.Errorf("goal-bound work requires one atomic intent confirmation")
+		return fmt.Errorf("external Work requires one atomic intent confirmation")
 	}
 	if stream[0].CorrelationID != item.draft.Event.CorrelationID {
-		return fmt.Errorf("goal-bound work intent confirmation crosses its correlation boundary")
+		return fmt.Errorf("Work intent confirmation crosses its correlation boundary")
 	}
-	return events.ValidateGoalBoundIntentConfirmation(stream[0], intent)
+	return events.ValidateIntentConfirmation(stream[0], intent)
 }
 
 func validatePriorActiveWork(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
@@ -2637,13 +2641,7 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 		return events.Event{}, fmt.Errorf("terminal evidence requires its typed admission")
 	}
 	if d.EventType == "INTENT_CONFIRMED" {
-		var confirmation events.IntentConfirmedPayload
-		if err := decodeExactJSON(d.Payload, &confirmation); err != nil {
-			return events.Event{}, fmt.Errorf("intent confirmation payload is invalid")
-		}
-		if confirmation.GoalID != "" {
-			return events.Event{}, fmt.Errorf("goal-bound intent confirmation requires atomic Goal admission")
-		}
+		return events.Event{}, fmt.Errorf("intent confirmation requires typed review admission")
 	}
 	if d.EventType == "MESSAGE" || d.RecipientScope != "" || d.RecipientID != "" {
 		return l.appendAddressed(ctx, d)
@@ -2652,22 +2650,22 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 }
 
 func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.TrustedDraft, goalID core.ID) (events.Event, error) {
-	if draft.EventType != "INTENT_CONFIRMED" || draft.OrganizationID == "" || goalID == "" {
-		return events.Event{}, fmt.Errorf("complete goal-bound intent confirmation is required")
+	if draft.EventType != "INTENT_CONFIRMED" || draft.OrganizationID == "" {
+		return events.Event{}, fmt.Errorf("complete intent confirmation is required")
 	}
 	var confirmation events.IntentConfirmedPayload
 	if err := decodeExactJSON(draft.Payload, &confirmation); err != nil || confirmation.GoalID != string(goalID) || confirmation.IntentID != "intent-"+draft.CorrelationID || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.ConfirmingActorID == "" || confirmation.ConfirmingActorKind == "" || confirmation.SourceChannel == "" || confirmation.MessageID == "" ||
 		draft.SourceActorID != confirmation.ConfirmingActorID || draft.SourceExecutionID != "" || draft.RecipientScope != "" || draft.RecipientID != "" || draft.TaskID != "task-"+draft.CorrelationID || draft.CorrelationID == "" || len(draft.AuthorizationRefs) != 0 || len(draft.ArtifactRefs) != 0 {
-		return events.Event{}, fmt.Errorf("goal-bound intent confirmation does not match its checked goal")
+		return events.Event{}, fmt.Errorf("intent confirmation does not match its reviewed Goal selection")
 	}
 	var event events.Event
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
-		stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_DRAFTED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, draft.CorrelationID, events.ReviewedGoalIntentEvidenceLimit+1))
+		stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_DRAFTED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, draft.CorrelationID, events.ReviewedIntentEvidenceLimit+1))
 		if err != nil {
-			return fmt.Errorf("read reviewed goal-bound intent evidence: %w", err)
+			return fmt.Errorf("read reviewed intent evidence: %w", err)
 		}
-		if len(stream) > events.ReviewedGoalIntentEvidenceLimit {
-			return fmt.Errorf("goal-bound intent review evidence exceeds its admission bound")
+		if len(stream) > events.ReviewedIntentEvidenceLimit {
+			return fmt.Errorf("intent review evidence exceeds its admission bound")
 		}
 		existing := make([]events.Event, 0, 1)
 		for _, candidate := range stream {
@@ -2676,32 +2674,47 @@ func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.Trus
 			}
 		}
 		if len(existing) > 1 {
-			return fmt.Errorf("goal-bound intent has multiple durable confirmations")
+			return fmt.Errorf("intent has multiple durable confirmations")
 		}
 		if len(existing) == 1 {
 			var recorded events.IntentConfirmedPayload
 			candidate := existing[0]
 			if decodeExactJSONBytes(candidate.Payload, &recorded) != nil || !reflect.DeepEqual(recorded, confirmation) || candidate.OrganizationID != draft.OrganizationID || candidate.EventType != draft.EventType || candidate.SourceActorID != draft.SourceActorID || candidate.SourceExecutionID != draft.SourceExecutionID || candidate.RecipientScope != draft.RecipientScope || candidate.RecipientID != draft.RecipientID || candidate.TaskID != draft.TaskID || !slices.Equal(candidate.AuthorizationRefs, draft.AuthorizationRefs) || !slices.Equal(candidate.ArtifactRefs, draft.ArtifactRefs) || candidate.CorrelationID != draft.CorrelationID || candidate.SchemaVersion != events.SchemaVersion {
-				return fmt.Errorf("goal-bound intent confirmation conflicts with durable state")
+				return fmt.Errorf("intent confirmation conflicts with durable state")
+			}
+			if goalID == "" {
+				if err := events.ValidateReviewedIntentAdmission(stream, candidate); err != nil {
+					return err
+				}
+			} else {
+				goal, err := activeGoalAtIntentConfirmation(ctx, tx, draft.OrganizationID, goalID, candidate.Sequence)
+				if err != nil {
+					return err
+				}
+				if err := events.ValidateReviewedGoalIntentAdmission(stream, candidate, goal); err != nil {
+					return err
+				}
 			}
 			event = candidate
 			return nil
 		}
-		body, found, err := latestRecordBody(ctx, tx, "goal", string(goalID))
-		if err != nil {
-			return fmt.Errorf("read confirmed intent goal: %w", err)
-		}
-		if !found {
-			return fmt.Errorf("confirmed intent goal is unavailable")
-		}
-		var record events.ProjectionRecord
 		var goal core.Goal
-		if json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &goal) != nil || goal.ID != goalID || string(goal.OrganizationID) != draft.OrganizationID || goal.Status != core.GoalActive {
-			return fmt.Errorf("confirmed intent requires an active goal in its organization")
+		if goalID != "" {
+			body, found, readErr := latestRecordBody(ctx, tx, "goal", string(goalID))
+			if readErr != nil {
+				return fmt.Errorf("read confirmed intent goal: %w", readErr)
+			}
+			if !found {
+				return fmt.Errorf("confirmed intent goal is unavailable")
+			}
+			var record events.ProjectionRecord
+			if json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &goal) != nil || goal.ID != goalID || string(goal.OrganizationID) != draft.OrganizationID || goal.Status != core.GoalActive {
+				return fmt.Errorf("confirmed intent requires an active goal in its organization")
+			}
 		}
 		confirmationBody, err := json.Marshal(draft.Payload)
 		if err != nil {
-			return fmt.Errorf("encode goal-bound intent confirmation: %w", err)
+			return fmt.Errorf("encode intent confirmation: %w", err)
 		}
 		candidate := events.Event{
 			OrganizationID: draft.OrganizationID, EventType: draft.EventType, SourceActorID: draft.SourceActorID,
@@ -2709,13 +2722,37 @@ func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.Trus
 			TaskID: draft.TaskID, AuthorizationRefs: draft.AuthorizationRefs, ArtifactRefs: draft.ArtifactRefs,
 			Payload: confirmationBody, CorrelationID: draft.CorrelationID, SchemaVersion: events.SchemaVersion,
 		}
-		if err := events.ValidateReviewedGoalIntentAdmission(stream, candidate, goal); err != nil {
+		if goalID == "" {
+			if err := events.ValidateReviewedIntentAdmission(stream, candidate); err != nil {
+				return err
+			}
+		} else if err := events.ValidateReviewedGoalIntentAdmission(stream, candidate, goal); err != nil {
 			return err
 		}
 		event, err = appendEvent(ctx, tx, draft)
 		return err
 	})
 	return event, err
+}
+
+func activeGoalAtIntentConfirmation(ctx context.Context, tx *sql.Tx, organizationID string, goalID core.ID, confirmationSequence int64) (core.Goal, error) {
+	if organizationID == "" || goalID == "" || confirmationSequence < 1 {
+		return core.Goal{}, fmt.Errorf("intent confirmation Goal boundary is invalid")
+	}
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? AND sequence<? AND json_extract(payload,'$.projection.projection_kind')='goal' AND json_extract(payload,'$.projection.record_id')=? ORDER BY sequence DESC LIMIT 1`, organizationID, confirmationSequence, string(goalID)))
+	if err != nil || len(stream) != 1 {
+		return core.Goal{}, fmt.Errorf("intent confirmation lacks its historical active Goal")
+	}
+	payload, present, err := events.AdmittedProjection(stream[0])
+	if err != nil || !present {
+		return core.Goal{}, fmt.Errorf("intent confirmation has invalid historical Goal evidence")
+	}
+	var goal core.Goal
+	if decodeExactJSONBytes(payload.Projection.Value, &goal) != nil || payload.Projection.ProjectionKind != "goal" || payload.Projection.RecordID != string(goalID) || goal.ID != goalID || string(goal.OrganizationID) != organizationID || goal.Status != core.GoalActive || !core.ValidGoal(goal) {
+		return core.Goal{}, fmt.Errorf("intent confirmation Goal was not active at admission")
+	}
+	return goal, nil
 }
 
 func (l *SQLite) appendAddressed(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {

@@ -19,9 +19,9 @@ import (
 
 const SchemaVersion = 3
 
-// ReviewedGoalIntentEvidenceLimit bounds the durable intake/review evidence
-// replayed for one Goal-bound intent confirmation.
-const ReviewedGoalIntentEvidenceLimit = 1024
+// ReviewedIntentEvidenceLimit bounds the durable intake/review evidence
+// replayed for one Intent confirmation.
+const ReviewedIntentEvidenceLimit = 1024
 
 const (
 	RecipientAgent = "AGENT"
@@ -149,16 +149,27 @@ type IntentConfirmedPayload struct {
 	MessageID           string `json:"message_id"`
 }
 
-// ValidateGoalBoundIntentConfirmation proves that one reviewed confirmation
-// exactly authorizes the accepted durable Intent and its Goal binding.
-func ValidateGoalBoundIntentConfirmation(event Event, intent core.Intent) error {
+// ValidateIntentConfirmation proves that one reviewed confirmation exactly
+// authorizes the accepted durable Intent, including an optional Goal binding.
+func ValidateIntentConfirmation(event Event, intent core.Intent) error {
 	var confirmation IntentConfirmedPayload
 	if decodeExactEventJSON(event.Payload, &confirmation) != nil ||
 		event.EventType != "INTENT_CONFIRMED" || event.OrganizationID != string(intent.OrganizationID) || event.SourceActorID == "" || event.SourceActorID != confirmation.ConfirmingActorID || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != "task-"+event.CorrelationID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID == "" || event.SchemaVersion != SchemaVersion ||
-		confirmation.IntentID != string(intent.ID) || confirmation.GoalID != string(intent.GoalID) || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.Fingerprint != intent.AcceptedFingerprint || confirmation.ConfirmingActorID != string(intent.SourcePrincipalID) || confirmation.ConfirmingActorKind != string(intent.SourcePrincipalKind) || confirmation.SourceChannel != intent.SourceChannel || confirmation.MessageID == "" {
-		return fmt.Errorf("goal-bound intent confirmation is invalid")
+		confirmation.IntentID != string(intent.ID) || confirmation.GoalID != string(intent.GoalID) || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.Fingerprint != intent.AcceptedFingerprint || !validReviewedOperatorIdentity(confirmation.ConfirmingActorID, confirmation.ConfirmingActorKind, confirmation.SourceChannel) || confirmation.MessageID == "" {
+		return fmt.Errorf("intent confirmation is invalid")
 	}
 	return nil
+}
+
+// ValidateReviewedIntentAdmission replays the bounded intake and review
+// evidence that authorizes one Intent confirmation without a Goal binding.
+func ValidateReviewedIntentAdmission(stream []Event, confirmationEvent Event) error {
+	var confirmation IntentConfirmedPayload
+	if decodeExactEventJSON(confirmationEvent.Payload, &confirmation) != nil ||
+		!validReviewedIntentConfirmation(confirmationEvent, confirmation, "") {
+		return fmt.Errorf("intent confirmation does not match its reviewed intake")
+	}
+	return validateReviewedIntent(reviewedIntentEvidence(stream, confirmationEvent), confirmationEvent, confirmation, "")
 }
 
 // ValidateReviewedGoalIntentAdmission replays the bounded intake and review
@@ -167,16 +178,24 @@ func ValidateGoalBoundIntentConfirmation(event Event, intent core.Intent) error 
 func ValidateReviewedGoalIntentAdmission(stream []Event, confirmationEvent Event, goal core.Goal) error {
 	var confirmation IntentConfirmedPayload
 	if decodeExactEventJSON(confirmationEvent.Payload, &confirmation) != nil ||
-		confirmationEvent.EventType != "INTENT_CONFIRMED" || confirmationEvent.OrganizationID == "" || confirmationEvent.OrganizationID != string(goal.OrganizationID) ||
-		confirmationEvent.SourceActorID == "" || confirmationEvent.SourceActorID != confirmation.ConfirmingActorID || !validReviewedOperatorIdentity(confirmation.ConfirmingActorID, confirmation.ConfirmingActorKind, confirmation.SourceChannel) ||
-		confirmationEvent.SourceExecutionID != "" || confirmationEvent.RecipientScope != "" || confirmationEvent.RecipientID != "" || confirmationEvent.TaskID != "task-"+confirmationEvent.CorrelationID ||
-		len(confirmationEvent.AuthorizationRefs) != 0 || len(confirmationEvent.ArtifactRefs) != 0 || confirmationEvent.CorrelationID == "" || confirmationEvent.SchemaVersion != SchemaVersion ||
-		confirmation.IntentID != "intent-"+confirmationEvent.CorrelationID || confirmation.GoalID != string(goal.ID) || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.MessageID == "" {
+		confirmationEvent.OrganizationID != string(goal.OrganizationID) || !validReviewedIntentConfirmation(confirmationEvent, confirmation, goal.ID) {
 		return fmt.Errorf("goal-bound intent confirmation does not match its checked goal")
 	}
 	if goal.ID == "" || goal.Status != core.GoalActive {
 		return fmt.Errorf("goal-bound intent confirmation requires its active Goal at admission")
 	}
+	return validateReviewedIntent(reviewedIntentEvidence(stream, confirmationEvent), confirmationEvent, confirmation, goal.ID)
+}
+
+func validReviewedIntentConfirmation(event Event, confirmation IntentConfirmedPayload, goalID core.ID) bool {
+	return event.EventType == "INTENT_CONFIRMED" && event.OrganizationID != "" &&
+		event.SourceActorID != "" && event.SourceActorID == confirmation.ConfirmingActorID && validReviewedOperatorIdentity(confirmation.ConfirmingActorID, confirmation.ConfirmingActorKind, confirmation.SourceChannel) &&
+		event.SourceExecutionID == "" && event.RecipientScope == "" && event.RecipientID == "" && event.TaskID == "task-"+event.CorrelationID &&
+		len(event.AuthorizationRefs) == 0 && len(event.ArtifactRefs) == 0 && event.CorrelationID != "" && event.SchemaVersion == SchemaVersion &&
+		confirmation.IntentID == "intent-"+event.CorrelationID && confirmation.GoalID == string(goalID) && confirmation.Version >= 1 && confirmation.Fingerprint != "" && confirmation.MessageID != ""
+}
+
+func reviewedIntentEvidence(stream []Event, confirmationEvent Event) []Event {
 	reviewStream := make([]Event, 0, len(stream))
 	for _, candidate := range stream {
 		if candidate.CorrelationID != confirmationEvent.CorrelationID || confirmationEvent.Sequence > 0 && candidate.Sequence > confirmationEvent.Sequence {
@@ -187,13 +206,13 @@ func ValidateReviewedGoalIntentAdmission(stream []Event, confirmationEvent Event
 			reviewStream = append(reviewStream, candidate)
 		}
 	}
-	if len(reviewStream) > ReviewedGoalIntentEvidenceLimit {
-		return fmt.Errorf("goal-bound intent review evidence exceeds its admission bound")
-	}
-	return validateReviewedGoalIntent(reviewStream, confirmationEvent, confirmation, goal.ID)
+	return reviewStream
 }
 
-func validateReviewedGoalIntent(stream []Event, confirmationEvent Event, confirmation IntentConfirmedPayload, goalID core.ID) error {
+func validateReviewedIntent(stream []Event, confirmationEvent Event, confirmation IntentConfirmedPayload, goalID core.ID) error {
+	if len(stream) > ReviewedIntentEvidenceLimit {
+		return fmt.Errorf("intent review evidence exceeds its admission bound")
+	}
 	intakeMessages := make(map[string]IntakeMessageRecordedPayload)
 	intakeSequences := make(map[string]int64)
 	var latestIntakeMessageID string
@@ -206,10 +225,10 @@ func validateReviewedGoalIntent(stream []Event, confirmationEvent Event, confirm
 		case "INTAKE_MESSAGE_RECORDED":
 			var payload IntakeMessageRecordedPayload
 			if decodeExactEventJSON(event.Payload, &payload) != nil || !validReviewedIntakeMessage(event, payload, confirmationEvent) {
-				return fmt.Errorf("goal-bound intent has invalid durable intake evidence")
+				return fmt.Errorf("intent has invalid durable intake evidence")
 			}
 			if _, exists := intakeMessages[payload.MessageID]; exists {
-				return fmt.Errorf("goal-bound intent source message is not unique")
+				return fmt.Errorf("intent source message is not unique")
 			}
 			intakeMessages[payload.MessageID] = payload
 			intakeSequences[payload.MessageID] = event.Sequence
@@ -218,7 +237,7 @@ func validateReviewedGoalIntent(stream []Event, confirmationEvent Event, confirm
 		case "INTENT_DRAFTED":
 			var payload IntentDraftedPayload
 			if decodeExactEventJSON(event.Payload, &payload) != nil || event.OrganizationID != confirmationEvent.OrganizationID || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != confirmationEvent.TaskID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID != confirmationEvent.CorrelationID || event.SchemaVersion != SchemaVersion {
-				return fmt.Errorf("goal-bound intent has invalid durable review draft")
+				return fmt.Errorf("intent has invalid durable review draft")
 			}
 			draftCount++
 			latestDraftEvent = event
@@ -226,33 +245,42 @@ func validateReviewedGoalIntent(stream []Event, confirmationEvent Event, confirm
 		}
 	}
 	if latestDraftEvent.EventID == "" || latestIntakeMessageID == "" || latestDraftEvent.Sequence <= latestIntakeSequence || latestDraft.SourceMessageID != latestIntakeMessageID || latestDraft.Draft.CreatedAt.IsZero() || strings.TrimSpace(latestDraft.Reply) == "" {
-		return fmt.Errorf("goal-bound intent confirmation requires the current durable reviewed draft")
+		return fmt.Errorf("intent confirmation requires the current durable reviewed draft")
 	}
 	reviewed := latestDraft.Draft
 	if reviewed.ID != core.ID(confirmation.IntentID) || reviewed.OrganizationID != core.ID(confirmationEvent.OrganizationID) || reviewed.Version != confirmation.Version || reviewed.Version != draftCount || reviewed.Fingerprint != confirmation.Fingerprint {
-		return fmt.Errorf("goal-bound intent confirmation does not match its durable reviewed draft")
+		return fmt.Errorf("intent confirmation does not match its durable reviewed draft")
 	}
 	switch reviewed.RequestedExecutionKind {
 	case core.ExecutionDeterministic, core.ExecutionAgent, core.ExecutionHuman:
 	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed, "":
-		return fmt.Errorf("goal-bound intent reviewed execution kind is unavailable")
+		return fmt.Errorf("intent reviewed execution kind is unavailable")
 	default:
-		return fmt.Errorf("goal-bound intent reviewed execution kind is unavailable")
+		return fmt.Errorf("intent reviewed execution kind is unavailable")
 	}
 	if err := core.ValidateAcceptedIntentDraft(reviewed, core.ID(confirmationEvent.OrganizationID), reviewed.RequestedExecutionKind); err != nil {
-		return fmt.Errorf("goal-bound intent durable reviewed draft is invalid: %w", err)
+		return fmt.Errorf("intent durable reviewed draft is invalid: %w", err)
 	}
 	reviewedGoalID, err := core.AcceptedIntentGoalID(reviewed)
-	if err != nil || reviewedGoalID != goalID || reviewed.Goal == nil || reviewed.Goal.Origin != "EXPLICIT" && reviewed.Goal.Origin != "CONFIRMED" {
-		return fmt.Errorf("goal-bound intent reviewed Goal provenance is invalid")
+	if err != nil || reviewedGoalID != goalID {
+		return fmt.Errorf("intent reviewed Goal provenance is invalid")
 	}
-	goalMessage, found := intakeMessages[reviewed.Goal.SourceMessageID]
-	if !found || intakeSequences[reviewed.Goal.SourceMessageID] >= latestDraftEvent.Sequence || !core.ContainsExactGoalReference(goalMessage.Text, string(goalID)) {
-		return fmt.Errorf("goal-bound intent Goal is not present in its attributed source message")
+	if goalID == "" {
+		if reviewed.Goal != nil {
+			return fmt.Errorf("unbound intent contains a Goal")
+		}
+	} else {
+		if reviewed.Goal == nil || reviewed.Goal.Origin != "EXPLICIT" && reviewed.Goal.Origin != "CONFIRMED" {
+			return fmt.Errorf("goal-bound intent reviewed Goal provenance is invalid")
+		}
+		goalMessage, found := intakeMessages[reviewed.Goal.SourceMessageID]
+		if !found || intakeSequences[reviewed.Goal.SourceMessageID] >= latestDraftEvent.Sequence || !core.ContainsExactGoalReference(goalMessage.Text, string(goalID)) {
+			return fmt.Errorf("goal-bound intent Goal is not present in its attributed source message")
+		}
 	}
 	for _, event := range stream {
 		if event.EventType == "INTENT_CONFIRMED" && event.Sequence <= latestDraftEvent.Sequence {
-			return fmt.Errorf("goal-bound intent confirmation precedes its reviewed draft")
+			return fmt.Errorf("intent confirmation precedes its reviewed draft")
 		}
 	}
 	return nil
@@ -2839,13 +2867,7 @@ func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event
 		return Event{}, fmt.Errorf("terminal evidence requires its typed admission")
 	}
 	if draft.EventType == "INTENT_CONFIRMED" {
-		var confirmation IntentConfirmedPayload
-		if decodePayload(draft.Payload, &confirmation) != nil {
-			return Event{}, fmt.Errorf("intent confirmation payload is invalid")
-		}
-		if confirmation.GoalID != "" {
-			return Event{}, fmt.Errorf("goal-bound intent confirmation requires atomic Goal admission")
-		}
+		return Event{}, fmt.Errorf("intent confirmation requires typed review admission")
 	}
 	if err := g.validateAddressed(ctx, draft, false); err != nil {
 		return Event{}, err
@@ -2868,23 +2890,23 @@ func (g *Gateway) PublishWorkCompletionEvidence(ctx context.Context, draft Trust
 	return appender.AppendWorkCompletionEvidence(ctx, draft)
 }
 
-// PublishIntentConfirmation atomically proves that an optional Goal is active
-// in the same organization while appending the exact Intent confirmation.
+// PublishIntentConfirmation atomically validates the exact reviewed intake and,
+// when present, proves that its Goal is active in the same organization.
 // Later Goal lifecycle changes do not invalidate the admitted Work binding.
 func (g *Gateway) PublishIntentConfirmation(ctx context.Context, draft TrustedDraft, goalID core.ID) (Event, error) {
-	if draft.EventType != "INTENT_CONFIRMED" || goalID == "" {
-		return Event{}, fmt.Errorf("goal-bound intent confirmation is incomplete")
+	if draft.EventType != "INTENT_CONFIRMED" {
+		return Event{}, fmt.Errorf("intent confirmation is incomplete")
 	}
 	var confirmation IntentConfirmedPayload
 	if decodePayload(draft.Payload, &confirmation) != nil || confirmation.GoalID != string(goalID) {
-		return Event{}, fmt.Errorf("goal-bound intent confirmation does not match its checked goal")
+		return Event{}, fmt.Errorf("intent confirmation does not match its reviewed Goal selection")
 	}
 	if err := g.validateAddressed(ctx, draft, false); err != nil {
 		return Event{}, err
 	}
 	confirmer, ok := g.ledger.(IntentConfirmer)
 	if !ok {
-		return Event{}, fmt.Errorf("ledger does not support atomic goal-bound intent confirmation")
+		return Event{}, fmt.Errorf("ledger does not support typed intent confirmation")
 	}
 	return confirmer.AppendIntentConfirmation(ctx, draft, goalID)
 }

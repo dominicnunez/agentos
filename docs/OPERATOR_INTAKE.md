@@ -86,6 +86,16 @@ the Intent in `AWAITING_USER_INPUT`; facts Agent OS can discover belong in the
 later plan. A reviewable Intent has a clear objective, deliverables, testable
 completion criteria, and no missing user inputs.
 
+The review also carries an explicit `STANDARD` or `EXPERIMENT` mode. The
+normalizer may propose `EXPERIMENT` only when the user or Agent explicitly asks
+to treat the work as an experiment, experimental trial, or Lab run. Ordinary
+testing and verification remain `STANDARD`. Mode is untrusted routing data,
+not authority, and is covered by the Intent fingerprint. A confirmed experiment
+uses only the runtime-owned deterministic no-effects Lab profile; text and A2A
+metadata cannot supply or widen its containment or budget. V1 rejects an
+experimental Intent that requires adaptive execution before persisting its
+confirmation.
+
 Every model-backed normalization records its prompt-contract version, provider,
 model, execution profile, exact input event references, and provider-reported
 token usage in the ledger. Exact message retries reuse the durable draft and do

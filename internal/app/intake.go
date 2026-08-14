@@ -8,6 +8,7 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/lab"
 )
 
 type IntakeMessage struct {
@@ -259,6 +260,9 @@ func (s *Service) ConfirmIntent(ctx context.Context, in IntentConfirmation) (Res
 	if err != nil || recomputed != draft.Fingerprint {
 		return Result{}, fmt.Errorf("durable intent fingerprint is invalid")
 	}
+	if err := core.ValidateAcceptedIntentDraft(draft, core.ID(in.OrganizationID), in.Kind); err != nil {
+		return Result{}, fmt.Errorf("reviewed intent is not executable: %w", err)
+	}
 	goalID, err := acceptedGoalID(draft)
 	if err != nil {
 		return Result{}, fmt.Errorf("accepted Intent Goal is invalid: %w", err)
@@ -276,19 +280,26 @@ func (s *Service) ConfirmIntent(ctx context.Context, in IntentConfirmation) (Res
 			recorded.ConfirmingActorID != string(in.SourcePrincipalID) || recorded.ConfirmingActorKind != string(in.SourcePrincipalKind) || recorded.SourceChannel != in.SourceChannel {
 			return Result{}, fmt.Errorf("intent confirmation conflicts with durable state")
 		}
-		return s.Submit(ctx, submitFromIntent(in, draft, original, correlationID))
+		return s.submitConfirmedIntent(ctx, submitFromIntent(in, draft, original, correlationID), draft.Mode)
 	}
 	payload := events.IntentConfirmedPayload{IntentID: string(draft.ID), GoalID: string(goalID), Version: draft.Version, Fingerprint: draft.Fingerprint, ConfirmingActorID: string(in.SourcePrincipalID), ConfirmingActorKind: string(in.SourcePrincipalKind), SourceChannel: in.SourceChannel, MessageID: in.MessageID}
 	confirmation := events.TrustedDraft{OrganizationID: in.OrganizationID, EventType: "INTENT_CONFIRMED", SourceActorID: string(in.SourcePrincipalID), TaskID: "task-" + correlationID, CorrelationID: correlationID, Payload: payload}
-	if goalID == "" {
-		_, err = s.gateway.PublishTrusted(ctx, confirmation)
-	} else {
-		_, err = s.gateway.PublishIntentConfirmation(ctx, confirmation, goalID)
-	}
+	_, err = s.gateway.PublishIntentConfirmation(ctx, confirmation, goalID)
 	if err != nil {
 		return Result{}, fmt.Errorf("persist intent confirmation: %w", err)
 	}
-	return s.Submit(ctx, submitFromIntent(in, draft, original, correlationID))
+	return s.submitConfirmedIntent(ctx, submitFromIntent(in, draft, original, correlationID), draft.Mode)
+}
+
+func (s *Service) submitConfirmedIntent(ctx context.Context, submit Submit, mode core.IntentMode) (Result, error) {
+	switch mode {
+	case core.IntentModeStandard:
+		return s.Submit(ctx, submit)
+	case core.IntentModeExperiment:
+		return s.SubmitExperiment(ctx, submit, lab.DefaultSpec())
+	default:
+		return Result{}, fmt.Errorf("confirmed intent mode is unsupported")
+	}
 }
 
 func submitFromIntent(in IntentConfirmation, draft core.IntentDraft, original events.IntakeMessageRecordedPayload, correlationID string) Submit {
