@@ -147,6 +147,15 @@ func loadOrBeginInit(mode bootstrap.Mode, owner bootstrap.Owner, paths bootstrap
 		if config.Owner != owner {
 			return bootstrap.Config{}, bootstrap.State{}, fmt.Errorf("installation belongs to Linux user %s (UID %d), not the user who started this command", config.Owner.Username, config.Owner.UID)
 		}
+		if config.Version != bootstrap.ConfigVersion || state.Version != bootstrap.ConfigVersion {
+			config, state, err = bootstrap.UpgradeVersion1Checkpoint(config, state)
+			if err != nil {
+				return bootstrap.Config{}, bootstrap.State{}, err
+			}
+			if err := checkpoint(configPath, statePath, &config, &state); err != nil {
+				return bootstrap.Config{}, bootstrap.State{}, fmt.Errorf("persist upgraded setup checkpoint: %w", err)
+			}
+		}
 		return config, state, nil
 	}
 	if !os.IsNotExist(stateErr) || !os.IsNotExist(configErr) {
@@ -350,13 +359,17 @@ func collectOpenAIProvider(ctx context.Context, config bootstrap.Config, ui *ter
 		return bootstrap.Provider{}, err
 	}
 	model := ""
-	if selected == len(models) {
+	manual := selected == len(models)
+	if manual {
 		model, err = ui.line("Model snapshot:", true)
 		if err != nil {
 			return bootstrap.Provider{}, err
 		}
 	} else {
 		model = models[selected]
+	}
+	if err := verifyManualOpenAIModel(ctx, manual, model, string(secret), probeOpenAIModel); err != nil {
+		return bootstrap.Provider{}, err
 	}
 	provider := bootstrap.Provider{Kind: bootstrap.ProviderOpenAIAPI, Model: model, SecretRef: "openai-api-key"}
 	provider.InferencePolicy, err = collectInferencePolicy(config, provider, ui)
@@ -370,6 +383,19 @@ func collectOpenAIProvider(ctx context.Context, config bootstrap.Config, ui *ter
 		return bootstrap.Provider{}, err
 	}
 	return provider, nil
+}
+
+func verifyManualOpenAIModel(ctx context.Context, manual bool, model, key string, probe func(context.Context, string, string) error) error {
+	if !manual {
+		return nil
+	}
+	if probe == nil {
+		return fmt.Errorf("manual OpenAI model verifier is unavailable")
+	}
+	if err := probe(ctx, model, key); err != nil {
+		return fmt.Errorf("manually entered OpenAI model verification failed: %w", err)
+	}
+	return nil
 }
 
 func collectInferencePolicy(config bootstrap.Config, provider bootstrap.Provider, ui *terminalUI) (inference.Policy, error) {

@@ -201,6 +201,10 @@ func (r inferenceValidationRow) validate(policy inference.Policy) error {
 		if r.chargedInput < r.reservedInput || r.chargedOutput < r.reservedOutput || r.chargedCost < r.reservedCost {
 			return fmt.Errorf("inference violation did not retain its conservative charge")
 		}
+	case inferenceStateNotSent:
+		if r.chargedInput != 0 || r.chargedOutput != 0 || r.chargedCost != 0 {
+			return fmt.Errorf("unsent inference reservation retained a charge")
+		}
 	default:
 		return fmt.Errorf("inference reservation state is invalid")
 	}

@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -45,6 +46,26 @@ type ModelResponse struct {
 	Text  string
 	Usage events.InferenceUsageRecordedPayload
 }
+
+type requestNotSentError struct{ err error }
+
+func (e requestNotSentError) Error() string { return e.err.Error() }
+func (e requestNotSentError) Unwrap() error { return e.err }
+
+// RequestNotSent marks a definite local rejection before a model provider was
+// contacted. Ambiguous transport or provider failures must not use this mark.
+func RequestNotSent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return requestNotSentError{err: err}
+}
+
+func WasRequestNotSent(err error) bool {
+	var target requestNotSentError
+	return errors.As(err, &target)
+}
+
 type FakeModel struct{}
 
 func (FakeModel) Name() string { return "fake-model/v1" }

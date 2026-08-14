@@ -86,21 +86,21 @@ func (a *OpenAIAPI) Descriptor() ModelDescriptor {
 
 func (a *OpenAIAPI) Complete(ctx context.Context, prompt string) (ModelResponse, error) {
 	if ctx == nil {
-		return ModelResponse{}, fmt.Errorf("OpenAI API context is required")
+		return ModelResponse{}, RequestNotSent(fmt.Errorf("OpenAI API context is required"))
 	}
 	if !utf8.ValidString(prompt) || strings.TrimSpace(prompt) == "" || len(prompt) > openAIMaximumPromptBytes {
-		return ModelResponse{}, fmt.Errorf("OpenAI API prompt must contain 1 to %d valid UTF-8 bytes", openAIMaximumPromptBytes)
+		return ModelResponse{}, RequestNotSent(fmt.Errorf("OpenAI API prompt must contain 1 to %d valid UTF-8 bytes", openAIMaximumPromptBytes))
 	}
 	key, err := a.apiKey(ctx)
 	if err != nil {
-		return ModelResponse{}, fmt.Errorf("OpenAI API credential is unavailable")
+		return ModelResponse{}, RequestNotSent(fmt.Errorf("OpenAI API credential is unavailable"))
 	}
 	if err := validateOpenAIKey(key); err != nil {
-		return ModelResponse{}, err
+		return ModelResponse{}, RequestNotSent(err)
 	}
 	clientRequestID, err := newOpenAIClientRequestID()
 	if err != nil {
-		return ModelResponse{}, fmt.Errorf("create OpenAI API request identity: %w", err)
+		return ModelResponse{}, RequestNotSent(fmt.Errorf("create OpenAI API request identity: %w", err))
 	}
 	body, err := json.Marshal(openAIRequest{
 		Model:           a.model,
@@ -113,13 +113,13 @@ func (a *OpenAIAPI) Complete(ctx context.Context, prompt string) (ModelResponse,
 		Truncation:      "disabled",
 	})
 	if err != nil {
-		return ModelResponse{}, fmt.Errorf("encode OpenAI API request: %w", err)
+		return ModelResponse{}, RequestNotSent(fmt.Errorf("encode OpenAI API request: %w", err))
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, openAIAPITimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, a.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return ModelResponse{}, fmt.Errorf("create OpenAI API request: %w", err)
+		return ModelResponse{}, RequestNotSent(fmt.Errorf("create OpenAI API request: %w", err))
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Authorization", "Bearer "+key)

@@ -231,6 +231,7 @@ type Reconciliation string
 
 const (
 	ReconciliationCompleted Reconciliation = "COMPLETED"
+	ReconciliationNotSent   Reconciliation = "NOT_SENT"
 	ReconciliationUncertain Reconciliation = "UNCERTAIN"
 	ReconciliationViolation Reconciliation = "VIOLATION"
 )
@@ -277,8 +278,12 @@ func (a *GuardedAdapter) Complete(ctx context.Context, prompt string) (execution
 	}
 	response, providerErr := a.adapter.Complete(ctx, prompt)
 	if providerErr != nil {
+		result := ReconciliationUncertain
+		if execution.WasRequestNotSent(providerErr) {
+			result = ReconciliationNotSent
+		}
 		reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reconciliationTimeout)
-		_, reconcileErr := a.store.ReconcileInference(reconcileCtx, reservation, nil, ReconciliationUncertain)
+		_, reconcileErr := a.store.ReconcileInference(reconcileCtx, reservation, nil, result)
 		cancel()
 		return execution.ModelResponse{}, errors.Join(providerErr, reconcileErr)
 	}

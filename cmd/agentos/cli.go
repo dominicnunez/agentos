@@ -30,7 +30,7 @@ func execute(ctx context.Context, args []string, input *os.File, output, errorOu
 	if len(args) == 0 {
 		configPath, config, state, err := discoverInstallation()
 		switch {
-		case err == nil && state.Stage == bootstrap.StageReady:
+		case err == nil && state.Version == bootstrap.ConfigVersion && config.Version == bootstrap.ConfigVersion && state.Stage == bootstrap.StageReady:
 			return runTUI(ctx, configPath, config, input, output)
 		case err == nil:
 			return runInit(ctx, config.Mode, true, input, output)
@@ -145,6 +145,9 @@ func runProviderSetup(ctx context.Context, input *os.File, output io.Writer) err
 	configPath, config, state, err := discoverInstallation()
 	if err != nil {
 		return fmt.Errorf("initialize Agent OS first: %w", err)
+	}
+	if state.Version != bootstrap.ConfigVersion || config.Version != bootstrap.ConfigVersion {
+		return runInit(ctx, config.Mode, true, input, output)
 	}
 	if state.Stage != bootstrap.StageReady {
 		return fmt.Errorf("initialization is incomplete; run agentos")

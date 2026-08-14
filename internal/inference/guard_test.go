@@ -104,6 +104,14 @@ func TestGuardedAdapterReconcilesUsageBeforeReturning(t *testing.T) {
 }
 
 func TestGuardedAdapterRetainsUncertainAndViolatingReservations(t *testing.T) {
+	t.Run("definite pre-send rejection", func(t *testing.T) {
+		store := &guardStore{}
+		model := &guardModel{err: execution.RequestNotSent(errors.New("invalid local prompt"))}
+		adapter, _ := NewGuardedAdapter(store, model)
+		if _, err := adapter.Complete(guardedContext(t), "prompt"); err == nil || store.result != ReconciliationNotSent || store.usage != nil {
+			t.Fatalf("definite pre-send rejection retained a quota charge: %v %#v", err, store)
+		}
+	})
 	t.Run("provider error", func(t *testing.T) {
 		store := &guardStore{}
 		model := &guardModel{err: errors.New("connection lost")}

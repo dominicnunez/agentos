@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -34,6 +36,27 @@ func TestDiscoveredOpenAIModelsRequireDatedSnapshots(t *testing.T) {
 		if validDiscoveredOpenAIModel(model) {
 			t.Fatalf("unsafe model %q was accepted", model)
 		}
+	}
+}
+
+func TestManualOpenAIModelIsVerifiedBeforeSetupAcceptsIt(t *testing.T) {
+	called := false
+	probe := func(_ context.Context, model, key string) error {
+		called = true
+		if model != "gpt-manual-2026-08-14" || key != "secret" {
+			t.Fatalf("probe received model=%q key=%q", model, key)
+		}
+		return nil
+	}
+	if err := verifyManualOpenAIModel(t.Context(), false, "ignored", "ignored", probe); err != nil || called {
+		t.Fatalf("discovered model was redundantly probed: called=%v err=%v", called, err)
+	}
+	if err := verifyManualOpenAIModel(t.Context(), true, "gpt-manual-2026-08-14", "secret", probe); err != nil || !called {
+		t.Fatalf("manual model was not probed: called=%v err=%v", called, err)
+	}
+	want := errors.New("unavailable")
+	if err := verifyManualOpenAIModel(t.Context(), true, "gpt-manual-2026-08-14", "secret", func(context.Context, string, string) error { return want }); !errors.Is(err, want) {
+		t.Fatalf("manual model probe failure was not preserved: %v", err)
 	}
 }
 

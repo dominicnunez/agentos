@@ -175,6 +175,67 @@ func TestInferenceCompletedUsageReleasesUnusedReservation(t *testing.T) {
 	}
 }
 
+func TestInferenceNotSentReleasesChargeButCannotReplay(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	store, err := Open(filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	store.now = func() time.Time { return now }
+	if err := store.ActivateInferencePolicy(t.Context(), testInferencePolicy(now)); err != nil {
+		t.Fatal(err)
+	}
+	request := testInferenceRequest("request-not-sent")
+	reservation, err := store.ReserveInference(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cost, err := store.ReconcileInference(t.Context(), reservation, nil, inference.ReconciliationNotSent); err != nil || cost != 0 {
+		t.Fatalf("not-sent reconciliation cost=%d err=%v", cost, err)
+	}
+	var state string
+	var input, output, cost int64
+	if err := store.db.QueryRowContext(t.Context(), `SELECT state,charged_input_tokens,charged_output_tokens,charged_cost_nano_usd FROM inference_reservations WHERE reservation_id=?`, reservation.ID).Scan(&state, &input, &output, &cost); err != nil {
+		t.Fatal(err)
+	}
+	if state != inferenceStateNotSent || input != 0 || output != 0 || cost != 0 {
+		t.Fatalf("not-sent reservation retained charge: state=%s input=%d output=%d cost=%d", state, input, output, cost)
+	}
+	if err := store.ValidateInferenceAdmissions(t.Context()); err != nil {
+		t.Fatalf("not-sent accounting failed validation: %v", err)
+	}
+	if _, err := store.ReserveInference(t.Context(), testInferenceRequest("request-after-not-sent")); err != nil {
+		t.Fatalf("released capacity was not reusable: %v", err)
+	}
+	if _, err := store.ReserveInference(t.Context(), request); err == nil || !strings.Contains(err.Error(), "retries fail closed") {
+		t.Fatalf("not-sent request replay was accepted: %v", err)
+	}
+}
+
+func TestInferenceAdmissionUsesLocalPoolWithoutMonetaryPricing(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	store, err := Open(filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	store.now = func() time.Time { return now }
+	policy := testInferencePolicy(now)
+	policy.Mode = inference.Local
+	policy.Pricing = nil
+	if err := store.ActivateInferencePolicy(t.Context(), policy); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := store.ReserveInference(t.Context(), testInferenceRequest("local-request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reservation.Mode != inference.Local || reservation.ReservedCostNanoUSD != 0 {
+		t.Fatalf("local pool reservation=%+v", reservation)
+	}
+}
+
 func TestInferenceRejectsExpiredAuthorizationPricingAndCrossTenantRequests(t *testing.T) {
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 	for _, test := range []struct {

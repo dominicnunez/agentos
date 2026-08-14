@@ -190,3 +190,51 @@ func TestConfigurationRoundTripIsStrictAndRefusesSymlink(t *testing.T) {
 		}
 	}
 }
+
+func TestVersion1CheckpointUpgradeRequiresReconfirmedProviderPolicy(t *testing.T) {
+	now := time.Now().UTC()
+	paths, err := UserPaths(filepath.Join(t.TempDir(), "home"), filepath.Join(t.TempDir(), "run"), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := NewConfig(ModeUser, Owner{Username: "alice", UID: 1000, GID: 1000}, paths, now)
+	legacy.Version = legacyConfigVersion
+	provider := testOpenAIProvider(legacy, "gpt-test-2026-01-01")
+	provider.InferencePolicy = inference.Policy{}
+	legacy.Providers = []Provider{provider}
+	state := State{Version: legacyConfigVersion, Mode: ModeUser, Stage: StageReady, UpdatedAt: now}
+
+	upgraded, upgradedState, err := UpgradeVersion1Checkpoint(legacy, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upgraded.Version != ConfigVersion || upgradedState.Version != ConfigVersion || upgradedState.Stage != StageProvider || len(upgraded.Providers) != 0 {
+		t.Fatalf("upgrade did not require provider policy confirmation: config=%+v state=%+v", upgraded, upgradedState)
+	}
+	legacy.Owner.Username = "../root"
+	if _, _, err := UpgradeVersion1Checkpoint(legacy, state); err == nil {
+		t.Fatal("unsafe version-1 checkpoint was upgraded")
+	}
+	if _, _, err := UpgradeVersion1Checkpoint(upgraded, upgradedState); err == nil {
+		t.Fatal("current checkpoint was accepted by the one-way version-1 upgrader")
+	}
+}
+
+func TestLoadStateRecognizesVersion1OnlyForExplicitUpgrade(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "init.json")
+	state := State{Version: legacyConfigVersion, Mode: ModeUser, Stage: StageReady, UpdatedAt: time.Now().UTC()}
+	if err := SaveState(path, state); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadState(path)
+	if err != nil || loaded.Version != legacyConfigVersion {
+		t.Fatalf("version-1 state was not discoverable for upgrade: %+v %v", loaded, err)
+	}
+	state.Version = 0
+	if err := SaveState(path, state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadState(path); err == nil {
+		t.Fatal("unsupported initialization state was accepted")
+	}
+}

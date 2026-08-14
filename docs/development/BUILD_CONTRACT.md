@@ -76,6 +76,12 @@ adaptive planning, and Agent execution each attach an exact organization,
 Intent/Task, execution, request, and correlation scope before the shared gate
 can call it. There is no production model-call path outside this wrapper.
 
+The admission gate uses one deterministic, reserve-aware resource selector for
+subscription, metered API, and local policies. Current setup installs Codex
+subscription or OpenAI API adapters; local policy support is retained at the
+resource and durable-admission boundaries without claiming a bundled local
+runtime adapter.
+
 The A2A adapter and first-party user gateway translate into one principal-aware
 Intake Service. The Intent records the authenticated principal ID/kind and source
 channel. Known deterministic handlers are selected without inference; otherwise

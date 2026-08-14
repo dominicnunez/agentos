@@ -18,6 +18,7 @@ import (
 const (
 	inferenceStateReserved  = "RESERVED"
 	inferenceStateCompleted = "COMPLETED"
+	inferenceStateNotSent   = "NOT_SENT"
 	inferenceStateUncertain = "UNCERTAIN"
 	inferenceStateViolation = "VIOLATION"
 )
@@ -187,15 +188,6 @@ func (l *SQLite) ReserveInference(ctx context.Context, request inference.Inferen
 		if err != nil {
 			return err
 		}
-		if policy.Provider != request.Descriptor.Provider || policy.Model != request.Descriptor.Model || policy.ExecutionProfileVersion != request.Descriptor.ExecutionProfileVersion {
-			return fmt.Errorf("inference request does not match the active provider policy")
-		}
-		if now.Before(policy.AuthorizedAt) || !now.Before(policy.AuthorizationExpiresAt) {
-			return fmt.Errorf("inference authorization is missing, not yet valid, or expired")
-		}
-		if policy.Mode == inference.MeteredAPI && (policy.Pricing == nil || !now.Before(policy.Pricing.ExpiresAt)) {
-			return fmt.Errorf("metered inference pricing is missing or stale")
-		}
 		var prior int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inference_reservations WHERE organization_id=? AND request_id=?`, request.Scope.OrganizationID, request.Scope.RequestID).Scan(&prior); err != nil {
 			return fmt.Errorf("inspect inference request replay: %w", err)
@@ -207,9 +199,6 @@ func (l *SQLite) ReserveInference(ctx context.Context, request inference.Inferen
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inference_reservations WHERE organization_id=? AND state=?`, request.Scope.OrganizationID, inferenceStateReserved).Scan(&active); err != nil {
 			return fmt.Errorf("inspect concurrent inference requests: %w", err)
 		}
-		if active >= policy.MaxConcurrentRequests {
-			return fmt.Errorf("inference concurrency limit is exhausted")
-		}
 		windowStart, windowEnd := inferenceWindow(now, time.Duration(policy.WindowDurationSeconds)*time.Second)
 		var chargedTokens, chargedCost int64
 		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(charged_input_tokens+charged_output_tokens),0),COALESCE(SUM(charged_cost_nano_usd),0)
@@ -217,25 +206,24 @@ FROM inference_reservations WHERE organization_id=? AND provider=? AND model=? A
 			policy.OrganizationID, policy.Provider, policy.Model, windowStart.Format(time.RFC3339Nano)).Scan(&chargedTokens, &chargedCost); err != nil {
 			return fmt.Errorf("read inference budget use: %w", err)
 		}
-		reservedTokens := policy.MaxInputTokensPerRequest + policy.MaxOutputTokensPerRequest
-		if chargedTokens > policy.MaxTokensPerWindow-policy.ContinuityReserveTokens-reservedTokens {
-			return fmt.Errorf("inference token budget would consume its continuity reserve")
-		}
-		reservedCost, err := policy.ReservedCostNanoUSD()
+		selection, err := (inference.Manager{Pools: []inference.Pool{{
+			ID: fingerprint, Policy: policy, Available: true, ActiveRequests: active,
+			ChargedTokens: chargedTokens, ChargedCostNanoUSD: chargedCost,
+		}}}).Select(now, inference.PoolRequest{Descriptor: request.Descriptor})
 		if err != nil {
-			return err
+			return fmt.Errorf("select inference pool: %w", err)
 		}
-		if policy.Mode == inference.MeteredAPI && (reservedCost > policy.Pricing.MaxCostNanoUSDPerRequest || chargedCost > policy.Pricing.MaxCostNanoUSDPerWindow-reservedCost) {
-			return fmt.Errorf("inference cost budget is exhausted")
+		if selection.PoolID != fingerprint || selection.PolicyFingerprint != fingerprint {
+			return fmt.Errorf("selected inference pool is not the active durable policy")
 		}
 		reservationID, err := inferenceReservationID(request)
 		if err != nil {
 			return err
 		}
 		reserved = inference.Reservation{
-			ID: reservationID, PolicyFingerprint: fingerprint, Mode: policy.Mode, Request: request,
-			ReservedInputTokens: policy.MaxInputTokensPerRequest, ReservedOutputTokens: policy.MaxOutputTokensPerRequest,
-			ReservedCostNanoUSD: reservedCost, WindowStartedAt: windowStart, WindowExpiresAt: windowEnd,
+			ID: reservationID, PolicyFingerprint: selection.PolicyFingerprint, Mode: selection.Mode, Request: request,
+			ReservedInputTokens: selection.ReservedInputTokens, ReservedOutputTokens: selection.ReservedOutputTokens,
+			ReservedCostNanoUSD: selection.ReservedCostNanoUSD, WindowStartedAt: windowStart, WindowExpiresAt: windowEnd,
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO inference_reservations(
 reservation_id,request_id,organization_id,purpose,intent_id,task_id,execution_id,correlation_id,prompt_sha256,
@@ -275,7 +263,7 @@ func (l *SQLite) ReconcileInference(ctx context.Context, reservation inference.R
 	if reservation.ID == "" || reservation.PolicyFingerprint == "" || reservation.Request.Scope.Validate() != nil {
 		return 0, fmt.Errorf("inference reservation is incomplete")
 	}
-	if result != inference.ReconciliationCompleted && result != inference.ReconciliationUncertain && result != inference.ReconciliationViolation {
+	if result != inference.ReconciliationCompleted && result != inference.ReconciliationNotSent && result != inference.ReconciliationUncertain && result != inference.ReconciliationViolation {
 		return 0, fmt.Errorf("inference reconciliation state is invalid")
 	}
 	chargedInput := reservation.ReservedInputTokens
@@ -300,6 +288,11 @@ func (l *SQLite) ReconcileInference(ctx context.Context, reservation inference.R
 			chargedOutput = int64(usage.OutputTokens)
 		}
 	case inference.ReconciliationUncertain:
+	case inference.ReconciliationNotSent:
+		state = inferenceStateNotSent
+		chargedInput = 0
+		chargedOutput = 0
+		chargedCost = 0
 	}
 	violated := state == inferenceStateViolation
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
@@ -320,7 +313,7 @@ func (l *SQLite) ReconcileInference(ctx context.Context, reservation inference.R
 			if state == inferenceStateViolation && chargedCost < reservation.ReservedCostNanoUSD {
 				chargedCost = reservation.ReservedCostNanoUSD
 			}
-		} else if policy.Mode != inference.MeteredAPI {
+		} else if policy.Mode != inference.MeteredAPI || state == inferenceStateNotSent {
 			chargedCost = 0
 		}
 		var stored inferenceReservationRow
