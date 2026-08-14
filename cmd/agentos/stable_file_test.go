@@ -25,10 +25,14 @@ func TestReadUnchangedBoundedFileRequiresTheOriginalBoundedSnapshot(t *testing.T
 		t.Fatal("oversized snapshot was accepted")
 	}
 
+	replacement := filepath.Join(filepath.Dir(path), "replacement")
+	if err := os.WriteFile(replacement, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, want, 0o600); err != nil {
+	if err := os.Rename(replacement, path); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readUnchangedBoundedFile(path, before, int64(len(want)), "input"); err == nil {
