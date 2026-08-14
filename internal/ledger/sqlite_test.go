@@ -34,7 +34,7 @@ func appendTaskProjectionParents(t *testing.T, ctx context.Context, store *SQLit
 	}
 }
 
-func TestExternalWorkIndexMigratesLegacyCorrelation(t *testing.T) {
+func TestExternalWorkIndexRejectsInferredRequestIdentity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	legacy, err := Open(path)
 	if err != nil {
@@ -67,37 +67,8 @@ func TestExternalWorkIndexMigratesLegacyCorrelation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	migrated, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = migrated.Close() })
-	correlationID, found, err := migrated.ResolveExternalWork(context.Background(), "org-1", "legacy-request")
-	if err != nil || !found || correlationID != "legacy-request" {
-		t.Fatalf("correlation=%q found=%t err=%v", correlationID, found, err)
-	}
-	requestID, found, err := migrated.ResolveExternalRequest(context.Background(), "org-1", correlationID)
-	if err != nil || !found || requestID != "legacy-request" {
-		t.Fatalf("request=%q found=%t err=%v", requestID, found, err)
-	}
-	requestID, taskCorrelationID, found, err := migrated.ResolveExternalTask(context.Background(), "org-1", "task-legacy-request")
-	if err != nil || !found || requestID != "legacy-request" || taskCorrelationID != correlationID {
-		t.Fatalf("task request=%q correlation=%q found=%t err=%v", requestID, taskCorrelationID, found, err)
-	}
-	stream, err := migrated.Events(context.Background(), correlationID)
-	if err != nil || len(stream) != 5 {
-		t.Fatalf("legacy stream=%+v err=%v", stream, err)
-	}
-	if err := migrated.Close(); err != nil {
-		t.Fatal(err)
-	}
-	migrated, err = Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	after, err := migrated.Events(context.Background(), correlationID)
-	if err != nil || len(after) != len(stream) {
-		t.Fatalf("repeated migration changed legacy work: before=%d after=%d err=%v", len(stream), len(after), err)
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "lacks exact durable index identity") {
+		t.Fatalf("startup inferred external request identity: %v", err)
 	}
 }
 
@@ -1388,7 +1359,7 @@ func TestMessageRollbackOnInboxFailure(t *testing.T) {
 	}
 }
 
-func TestOpenMigratesEventRoutingColumns(t *testing.T) {
+func TestOpenRejectsUnversionedNonemptyStorageWithoutMutation(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	db, err := sql.Open("sqlite", path)
@@ -1407,25 +1378,17 @@ correlation_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, schema_versio
 		t.Fatal(err)
 	}
 
-	l, err := Open(path)
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "unversioned nonempty database is unsupported") {
+		t.Fatalf("unversioned database was not rejected: %v", err)
+	}
+	db, err = sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = l.Close() })
-	message, err := l.Append(ctx, events.TrustedDraft{
-		OrganizationID: "org-1",
-		EventType:      "MESSAGE",
-		SourceActorID:  "agent-1",
-		RecipientScope: events.RecipientTask,
-		RecipientID:    "task-1",
-		Payload:        map[string]any{"body": "after migration"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	available, err := l.Inbox(ctx, events.RecipientTask, "task-1")
-	if err != nil || len(available) != 1 || available[0].EventID != message.EventID {
-		t.Fatalf("migrated inbox=%+v err=%v", available, err)
+	t.Cleanup(func() { _ = db.Close() })
+	var routingColumns int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('events') WHERE name IN ('recipient_scope','recipient_id')`).Scan(&routingColumns); err != nil || routingColumns != 0 {
+		t.Fatalf("rejected storage was mutated: routing columns=%d err=%v", routingColumns, err)
 	}
 }
 

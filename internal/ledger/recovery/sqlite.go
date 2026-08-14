@@ -25,24 +25,14 @@ import (
 	"modernc.org/sqlite"
 )
 
-var requiredColumns = map[string][]string{
-	"consumed_approvals":     {"approval_id", "effect_fingerprint", "consumed_at"},
-	"events":                 {"sequence", "event_id", "organization_id", "event_type", "source_actor_id", "source_execution_id", "recipient_scope", "recipient_id", "task_id", "authorization_refs", "artifact_refs", "payload", "correlation_id", "created_at", "schema_version"},
-	"external_tasks":         {"organization_id", "task_id", "correlation_id"},
-	"external_work":          {"organization_id", "request_id", "correlation_id", "intent_id"},
-	"inbox":                  {"recipient_scope", "recipient_id", "event_id", "organization_id", "task_id", "available_at", "observed_at", "observation_event_id"},
-	"inference_policies":     {"organization_id", "policy_fingerprint", "body", "activation_event_id", "activated_at", "active"},
-	"inference_reservations": {"reservation_id", "request_id", "organization_id", "purpose", "intent_id", "task_id", "execution_id", "correlation_id", "prompt_sha256", "provider", "model", "execution_profile_version", "policy_fingerprint", "state", "reserved_input_tokens", "reserved_output_tokens", "reserved_cost_nano_usd", "charged_input_tokens", "charged_output_tokens", "charged_cost_nano_usd", "window_started_at", "window_expires_at", "created_at", "updated_at"},
-	"records":                {"kind", "record_id", "version", "body", "admission_event_id", "admission_fingerprint", "created_at"},
-}
-var requiredTables = []string{"consumed_approvals", "events", "external_tasks", "external_work", "inbox", "inference_policies", "inference_reservations", "records"}
-
 type Result struct {
-	Path        string `json:"path"`
-	SHA256      string `json:"sha256"`
-	SizeBytes   int64  `json:"size_bytes"`
-	EventCount  int64  `json:"event_count"`
-	MaxSequence int64  `json:"max_sequence"`
+	Path               string `json:"path"`
+	SHA256             string `json:"sha256"`
+	SizeBytes          int64  `json:"size_bytes"`
+	EventCount         int64  `json:"event_count"`
+	MaxSequence        int64  `json:"max_sequence"`
+	StorageVersion     int    `json:"storage_version"`
+	EventSchemaVersion int    `json:"event_schema_version"`
 }
 
 type backuper interface {
@@ -92,24 +82,12 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 		return Result{}, err
 	}
 
-	var tableCount int
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(requiredTables)), ",")
-	arguments := make([]any, len(requiredTables))
-	for index, table := range requiredTables {
-		arguments[index] = table
+	contract, err := ledgerstore.ValidateStorageContract(ctx, db)
+	if err != nil {
+		return Result{}, fmt.Errorf("verify Agent OS storage contract: %w", err)
 	}
-	query := `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN (` + placeholders + `)`
-	if err := db.QueryRowContext(ctx, query, arguments...).Scan(&tableCount); err != nil {
-		return Result{}, fmt.Errorf("inspect Agent OS ledger schema: %w", err)
-	}
-	if tableCount != len(requiredColumns) {
-		return Result{}, fmt.Errorf("database is not a complete Agent OS ledger")
-	}
-	for table, columns := range requiredColumns {
-		if err := verifyColumns(ctx, db, table, columns); err != nil {
-			return Result{}, err
-		}
-	}
+	result.StorageVersion = contract.StorageVersion
+	result.EventSchemaVersion = contract.EventSchemaVersion
 	if err := verifyProjectionAdmissions(ctx, db); err != nil {
 		return Result{}, err
 	}
@@ -132,8 +110,10 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 		return Result{}, fmt.Errorf("close verified database before checksum: %w", err)
 	}
 	db = nil
-	result, err = fileResult(resolved, result.EventCount, result.MaxSequence)
-	return result, err
+	verified, err := fileResult(resolved, result.EventCount, result.MaxSequence)
+	verified.StorageVersion = result.StorageVersion
+	verified.EventSchemaVersion = result.EventSchemaVersion
+	return verified, err
 }
 
 type admittedProjectionEvent struct {
@@ -700,33 +680,6 @@ func verifyIntegrity(ctx context.Context, db *sql.DB) (finalErr error) {
 	}
 	if !integrityOK {
 		return fmt.Errorf("SQLite integrity check returned no result")
-	}
-	return nil
-}
-
-func verifyColumns(ctx context.Context, db *sql.DB, table string, required []string) (finalErr error) {
-	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
-	if err != nil {
-		return fmt.Errorf("inspect Agent OS table %s: %w", table, err)
-	}
-	defer func() {
-		finalErr = errors.Join(finalErr, rows.Close())
-	}()
-	found := make(map[string]struct{}, len(required))
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return fmt.Errorf("read Agent OS table %s: %w", table, err)
-		}
-		found[name] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate Agent OS table %s: %w", table, err)
-	}
-	for _, column := range required {
-		if _, ok := found[column]; !ok {
-			return fmt.Errorf("agent OS table %s is missing column %s", table, column)
-		}
 	}
 	return nil
 }

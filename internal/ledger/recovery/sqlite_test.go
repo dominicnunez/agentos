@@ -32,7 +32,7 @@ func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	if _, err := live.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := live.ExecContext(ctx, `INSERT INTO events(event_id,payload,created_at) VALUES('event-1','{}','2026-08-13T12:00:00Z')`); err != nil {
+	if _, err := live.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,authorization_refs,artifact_refs,payload,created_at,schema_version) VALUES('event-1','org-1','MESSAGE','agent-1','[]','[]','{}','2026-08-13T12:00:00Z',?)`, events.SchemaVersion); err != nil {
 		t.Fatal(err)
 	}
 
@@ -41,14 +41,14 @@ func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if backup.Path != backupPath || backup.EventCount != 1 || backup.MaxSequence != 1 || backup.SHA256 == "" || backup.SizeBytes == 0 {
+	if backup.Path != backupPath || backup.EventCount != 1 || backup.MaxSequence != 1 || backup.StorageVersion != ledger.CurrentStorageVersion || backup.EventSchemaVersion != events.SchemaVersion || backup.SHA256 == "" || backup.SizeBytes == 0 {
 		t.Fatalf("backup=%+v", backup)
 	}
-	if _, err := live.ExecContext(ctx, `INSERT INTO events(event_id,payload,created_at) VALUES('event-2','{}','2026-08-13T12:01:00Z')`); err != nil {
+	if _, err := live.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,authorization_refs,artifact_refs,payload,created_at,schema_version) VALUES('event-2','org-1','MESSAGE','agent-1','[]','[]','{}','2026-08-13T12:01:00Z',?)`, events.SchemaVersion); err != nil {
 		t.Fatal(err)
 	}
 	verified, err := Verify(ctx, backupPath)
-	if err != nil || verified.EventCount != 1 || verified.MaxSequence != 1 {
+	if err != nil || verified.EventCount != 1 || verified.MaxSequence != 1 || verified.StorageVersion != ledger.CurrentStorageVersion || verified.EventSchemaVersion != events.SchemaVersion {
 		t.Fatalf("verified=%+v err=%v", verified, err)
 	}
 
@@ -84,6 +84,65 @@ func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	var eventCount int
 	if err := restoredDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events`).Scan(&eventCount); err != nil || eventCount != 1 {
 		t.Fatalf("restored event count=%d err=%v", eventCount, err)
+	}
+}
+
+func TestOldestSupportedStorageFixtureVerifiesBacksUpRestoresAndMigrates(t *testing.T) {
+	ctx := t.Context()
+	directory := t.TempDir()
+	source := filepath.Join(directory, "storage-v1.db")
+	script, err := os.ReadFile(filepath.Join("..", "testdata", "storage-v1.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, string(script)); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version) VALUES('event-v1','org-1','AUDIT_NOTE','runtime','task-1',?,?,?,'work-v1','2026-08-13T12:00:00Z',?)`, []byte("[]"), []byte("[]"), []byte("{}"), events.SchemaVersion); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	verified, err := Verify(ctx, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.StorageVersion != ledger.OldestSupportedStorageVersion || verified.EventSchemaVersion != events.SchemaVersion {
+		t.Fatalf("v1 verification=%+v", verified)
+	}
+	backupPath := filepath.Join(directory, "storage-v1-backup.db")
+	backup, err := Backup(ctx, source, backupPath)
+	if err != nil || backup.StorageVersion != ledger.OldestSupportedStorageVersion {
+		t.Fatalf("v1 backup=%+v err=%v", backup, err)
+	}
+	restoredPath := filepath.Join(directory, "storage-v1-restored.db")
+	restored, err := Restore(ctx, backupPath, restoredPath)
+	if err != nil || restored.StorageVersion != ledger.OldestSupportedStorageVersion {
+		t.Fatalf("v1 restore=%+v err=%v", restored, err)
+	}
+	store, err := ledger.Open(restoredPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := store.Events(ctx, "work-v1")
+	if err != nil || len(stream) != 1 || stream[0].EventID != "event-v1" {
+		_ = store.Close()
+		t.Fatalf("migrated restored stream=%+v err=%v", stream, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := Verify(ctx, restoredPath)
+	if err != nil || migrated.StorageVersion != ledger.CurrentStorageVersion || migrated.EventSchemaVersion != events.SchemaVersion {
+		t.Fatalf("migrated restore=%+v err=%v", migrated, err)
 	}
 }
 
@@ -221,7 +280,7 @@ func TestRecoveryRejectsMissingOrZeroEventTimestamp(t *testing.T) {
 			ctx := context.Background()
 			path := filepath.Join(t.TempDir(), "ledger.db")
 			db := createTestLedger(t, path)
-			if _, err := db.ExecContext(ctx, `INSERT INTO events(event_id,payload,created_at) VALUES('event-1','{}',?)`, test.createdAt); err != nil {
+			if _, err := db.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,authorization_refs,artifact_refs,payload,created_at,schema_version) VALUES('event-1','org-1','MESSAGE','agent-1','[]','[]','{}',?,?)`, test.createdAt, events.SchemaVersion); err != nil {
 				_ = db.Close()
 				t.Fatal(err)
 			}
@@ -249,7 +308,7 @@ func TestRecoveryRejectsIncompleteOrdinaryEventIdentity(t *testing.T) {
 			ctx := context.Background()
 			path := filepath.Join(t.TempDir(), "ledger.db")
 			db := createTestLedger(t, path)
-			if _, err := db.ExecContext(ctx, `INSERT INTO events(sequence,event_id,payload,created_at) VALUES(?,?, '{}','2026-08-13T12:00:00Z')`, test.sequence, test.eventID); err != nil {
+			if _, err := db.ExecContext(ctx, `INSERT INTO events(sequence,event_id,organization_id,event_type,source_actor_id,authorization_refs,artifact_refs,payload,created_at,schema_version) VALUES(?,?,'org-1','MESSAGE','agent-1','[]','[]','{}','2026-08-13T12:00:00Z',?)`, test.sequence, test.eventID, events.SchemaVersion); err != nil {
 				_ = db.Close()
 				t.Fatal(err)
 			}
@@ -270,7 +329,7 @@ func TestRecoveryRejectsUnsupportedOrdinaryEventSchema(t *testing.T) {
 			ctx := context.Background()
 			path := filepath.Join(t.TempDir(), "ledger.db")
 			db := createTestLedger(t, path)
-			if _, err := db.ExecContext(ctx, `INSERT INTO events(event_id,payload,created_at,schema_version) VALUES('event-1','{}','2026-08-13T12:00:00Z',?)`, schemaVersion); err != nil {
+			if _, err := db.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,authorization_refs,artifact_refs,payload,created_at,schema_version) VALUES('event-1','org-1','MESSAGE','agent-1','[]','[]','{}','2026-08-13T12:00:00Z',?)`, schemaVersion); err != nil {
 				_ = db.Close()
 				t.Fatal(err)
 			}
@@ -278,7 +337,7 @@ func TestRecoveryRejectsUnsupportedOrdinaryEventSchema(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "unsupported schema version") {
+			if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "outside supported Event Contract") {
 				t.Fatalf("recovery verification error=%v", err)
 			}
 		})
@@ -2283,25 +2342,15 @@ func TestOpenReadOnlySQLiteRejectsWrites(t *testing.T) {
 
 func createTestLedger(t *testing.T, path string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", path)
+	store, err := ledger.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.ExecContext(context.Background(), fmt.Sprintf(`CREATE TABLE events(
-sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, organization_id TEXT NOT NULL DEFAULT '',
-event_type TEXT NOT NULL DEFAULT '', source_actor_id TEXT NOT NULL DEFAULT '', source_execution_id TEXT NOT NULL DEFAULT '',
-recipient_scope TEXT NOT NULL DEFAULT '', recipient_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '',
-authorization_refs BLOB NOT NULL DEFAULT '[]', artifact_refs BLOB NOT NULL DEFAULT '[]', payload BLOB NOT NULL,
-correlation_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '', schema_version INTEGER NOT NULL DEFAULT %d);
-CREATE TABLE records(kind TEXT NOT NULL, record_id TEXT NOT NULL, version INTEGER NOT NULL, body BLOB NOT NULL, admission_event_id TEXT NOT NULL DEFAULT '', admission_fingerprint TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(kind, record_id, version));
-CREATE TABLE inbox(recipient_scope TEXT NOT NULL, recipient_id TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE, organization_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '', available_at TEXT NOT NULL DEFAULT '', observed_at TEXT NOT NULL DEFAULT '', observation_event_id TEXT NOT NULL DEFAULT '');
-CREATE TABLE consumed_approvals(approval_id TEXT PRIMARY KEY, effect_fingerprint TEXT NOT NULL, consumed_at TEXT NOT NULL);
-CREATE TABLE external_work(organization_id TEXT NOT NULL, request_id TEXT NOT NULL, correlation_id TEXT NOT NULL, intent_id TEXT NOT NULL, PRIMARY KEY(organization_id, request_id));
-CREATE TABLE external_tasks(organization_id TEXT NOT NULL, task_id TEXT NOT NULL, correlation_id TEXT NOT NULL, PRIMARY KEY(organization_id, task_id));
-CREATE TABLE inference_policies(organization_id TEXT NOT NULL, policy_fingerprint TEXT NOT NULL, body BLOB NOT NULL, activation_event_id TEXT NOT NULL UNIQUE, activated_at TEXT NOT NULL, active INTEGER NOT NULL, PRIMARY KEY(organization_id,policy_fingerprint));
-CREATE TABLE inference_reservations(reservation_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, organization_id TEXT NOT NULL, purpose TEXT NOT NULL, intent_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '', execution_id TEXT NOT NULL, correlation_id TEXT NOT NULL, prompt_sha256 TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, execution_profile_version TEXT NOT NULL, policy_fingerprint TEXT NOT NULL, state TEXT NOT NULL, reserved_input_tokens INTEGER NOT NULL, reserved_output_tokens INTEGER NOT NULL, reserved_cost_nano_usd INTEGER NOT NULL, charged_input_tokens INTEGER NOT NULL, charged_output_tokens INTEGER NOT NULL, charged_cost_nano_usd INTEGER NOT NULL, window_started_at TEXT NOT NULL, window_expires_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(organization_id,request_id));`, events.SchemaVersion))
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
-		_ = db.Close()
 		t.Fatal(err)
 	}
 	return db

@@ -138,9 +138,13 @@ that event's runtime-owned envelope, record, and transition detail. Generic
 event writers reserve both projection payload keys and projection lifecycle
 labels. Routine record reads, full startup audit, event-only rebuild, and
 backup/restore verification reject missing, copied, duplicated, malformed,
-cross-organization, or mismatched admission. Nonempty pre-admission projection
-schemas are unsupported pre-release state and fail closed rather than receiving
-an inferred compatibility migration. Agent, Mission, Goal, Work, and Task revisions
+cross-organization, or mismatched admission. SQLite state carries the Agent OS
+application ID and an explicit storage version. Startup validates the complete
+source layout before applying ordered migrations atomically; storage v1 is the
+oldest supported fixture and v2 binds the reviewed layout to Event Contract
+schema v3. Future or ambiguous versions, fingerprint drift, and nonempty
+unversioned pre-release state fail closed without inferred identity or partial
+migration. Agent, Mission, Goal, Work, and Task revisions
 additionally bind each lifecycle label to its exact prior and resulting status,
 and an Agent history must begin with its version-one creation. Completed Work
 must retain the exact verified Task evidence that authorized its transition.

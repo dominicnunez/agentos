@@ -28,6 +28,8 @@ Target: `1.0.0-rc.1`
   adapters with bounded model-only contracts.
 - Backup, verification, no-overwrite restore, and fail-closed effect
   reconciliation tooling.
+- Explicit SQLite application identity, versioned atomic storage migrations,
+  frozen oldest-supported fixtures, and storage/Event Contract diagnostics.
 
 ### Security
 
