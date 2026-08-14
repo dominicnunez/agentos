@@ -84,4 +84,3 @@ func TestStorageV1FixtureMigratesAndRebuildsFromEvents(t *testing.T) {
 		t.Fatalf("rebuilt organization=%+v present=%t", got, ok)
 	}
 }
-
