@@ -297,7 +297,7 @@ func (s *Service) ConfirmIntent(ctx context.Context, principal Principal, confir
 		return View{}, err
 	}
 	if err := core.ValidateAcceptedIntentDraft(draft, core.ID(principal.OrganizationID), kind); err != nil {
-		return View{}, fmt.Errorf("%w: reviewed intent is not executable: %v", ErrInvalid, err)
+		return View{}, fmt.Errorf("%w: reviewed intent is not executable: %w", ErrInvalid, err)
 	}
 	_, err = s.app.ConfirmIntent(ctx, app.IntentConfirmation{
 		RequestID: confirmation.ConversationID, OrganizationID: principal.OrganizationID,

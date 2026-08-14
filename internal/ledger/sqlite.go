@@ -2052,7 +2052,7 @@ func validateExternalIntentConfirmation(ctx context.Context, tx *sql.Tx, item pr
 		return fmt.Errorf("external Work requires one atomic intent confirmation")
 	}
 	if stream[0].CorrelationID != item.draft.Event.CorrelationID {
-		return fmt.Errorf("Work intent confirmation crosses its correlation boundary")
+		return fmt.Errorf("work intent confirmation crosses its correlation boundary")
 	}
 	return events.ValidateIntentConfirmation(stream[0], intent)
 }
