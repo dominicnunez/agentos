@@ -230,7 +230,7 @@ func (p Provider) Validate() error {
 			return fmt.Errorf("codex model, binary, sealed credential store, and key reference are required")
 		}
 		if p.InferencePolicy.Provider != "codex-subscription" || p.InferencePolicy.ExecutionProfileVersion != "v1-codex-subscription-restricted" || p.InferencePolicy.Mode != inference.Subscription {
-			return fmt.Errorf("Codex subscription inference policy classification is invalid")
+			return fmt.Errorf("codex subscription inference policy classification is invalid")
 		}
 	default:
 		return fmt.Errorf("provider must be codex-subscription or openai-api")

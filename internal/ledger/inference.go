@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"time"
@@ -115,7 +116,7 @@ func (l *SQLite) ActivateInferencePolicy(ctx context.Context, policy inference.P
 		var existingFingerprint string
 		var existingBody []byte
 		err := tx.QueryRowContext(ctx, `SELECT policy_fingerprint,body FROM inference_policies WHERE organization_id=? AND active=1`, policy.OrganizationID).Scan(&existingFingerprint, &existingBody)
-		if err != nil && err != sql.ErrNoRows {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("read active inference policy: %w", err)
 		}
 		if err == nil {
@@ -282,14 +283,15 @@ func (l *SQLite) ReconcileInference(ctx context.Context, reservation inference.R
 	chargedCost := reservation.ReservedCostNanoUSD
 	state := inferenceStateUncertain
 	usageMatches := usage != nil && usage.Valid() && usage.Provider == reservation.Request.Descriptor.Provider && usage.Model == reservation.Request.Descriptor.Model
-	if result == inference.ReconciliationCompleted {
+	switch result {
+	case inference.ReconciliationCompleted:
 		if !usageMatches {
 			return 0, fmt.Errorf("inference reconciliation usage is invalid")
 		}
 		chargedInput = int64(usage.InputTokens)
 		chargedOutput = int64(usage.OutputTokens)
 		state = inferenceStateCompleted
-	} else if result == inference.ReconciliationViolation {
+	case inference.ReconciliationViolation:
 		state = inferenceStateViolation
 		if usageMatches && int64(usage.InputTokens) > chargedInput {
 			chargedInput = int64(usage.InputTokens)
@@ -297,6 +299,7 @@ func (l *SQLite) ReconcileInference(ctx context.Context, reservation inference.R
 		if usageMatches && int64(usage.OutputTokens) > chargedOutput {
 			chargedOutput = int64(usage.OutputTokens)
 		}
+	case inference.ReconciliationUncertain:
 	}
 	violated := state == inferenceStateViolation
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
@@ -379,9 +382,9 @@ func inferenceWindow(now time.Time, duration time.Duration) (time.Time, time.Tim
 
 func inferenceReservationID(request inference.InferenceRequest) (string, error) {
 	body, err := json.Marshal(struct {
-		Scope        inference.Scope
-		Descriptor   any
-		PromptSHA256 string
+		Scope        inference.Scope `json:"scope"`
+		Descriptor   any             `json:"descriptor"`
+		PromptSHA256 string          `json:"prompt_sha256"`
 	}{Scope: request.Scope, Descriptor: request.Descriptor, PromptSHA256: request.PromptSHA256})
 	if err != nil {
 		return "", fmt.Errorf("encode inference reservation identity: %w", err)
