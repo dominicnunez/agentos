@@ -222,6 +222,9 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	if err := eventRows.Close(); err != nil {
 		return fmt.Errorf("close projection admission events: %w", err)
 	}
+	if err := validateRecoveryIntentConfirmations(stream); err != nil {
+		return err
+	}
 
 	recordRows, err := db.QueryContext(ctx, `SELECT kind,record_id,version,body,admission_event_id,admission_fingerprint FROM records ORDER BY kind,record_id,version`)
 	if err != nil {
@@ -313,6 +316,29 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return validateProjectionOrganizationBindings(orderedAdmissions, stream)
+}
+
+func validateRecoveryIntentConfirmations(stream []events.Event) error {
+	for _, event := range stream {
+		if event.EventType != "INTENT_CONFIRMED" {
+			continue
+		}
+		var confirmation events.IntentConfirmedPayload
+		if decodeExactJSON(event.Payload, &confirmation) != nil {
+			return fmt.Errorf("event %s contains an invalid intent confirmation", event.EventID)
+		}
+		if confirmation.GoalID == "" {
+			continue
+		}
+		goal, err := recoveryActiveGoalAtSequence(stream, core.ID(confirmation.GoalID), event.Sequence)
+		if err != nil {
+			return fmt.Errorf("event %s: %w", event.EventID, err)
+		}
+		if err := events.ValidateReviewedGoalIntentAdmission(stream, event, goal); err != nil {
+			return fmt.Errorf("event %s: %w", event.EventID, err)
+		}
+	}
+	return nil
 }
 
 func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, stream []events.Event) error {

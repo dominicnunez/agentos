@@ -618,7 +618,7 @@ func ValidateWorkCompletionEvidenceChain(binding WorkCompletionBinding, evidence
 // is the result of the exact runtime-owned completion decision and immutable
 // evidence that precede it. A completed status is not evidence by itself.
 func ValidateTaskCompletionEvidenceChain(binding WorkCompletionBinding, task WorkCompletionTaskBinding, completionEvent Event, stream []Event) (CompletionDecisionPayload, error) {
-	if binding.OrganizationID == "" || binding.CorrelationID == "" || binding.Work.ID == "" || binding.Work.Status != core.WorkActive && binding.Work.Status != core.WorkCompleted || binding.Intent.ID == "" ||
+	if binding.OrganizationID == "" || binding.CorrelationID == "" || binding.Work.ID == "" || binding.Work.Status != core.WorkActive || binding.Intent.ID == "" ||
 		binding.Intent.ID != binding.Work.IntentID || binding.Intent.NormalizedObjective != binding.Work.Objective || string(binding.Intent.OrganizationID) != binding.OrganizationID ||
 		task.Task.ID == "" || task.Task.WorkID != binding.Work.ID || task.Task.Status != core.TaskCompleted || task.Version < 2 || task.CorrelationID != binding.CorrelationID {
 		return CompletionDecisionPayload{}, fmt.Errorf("task completion binding is invalid")

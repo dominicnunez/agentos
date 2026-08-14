@@ -1309,6 +1309,51 @@ func TestGenericAppendRejectsTypedTerminalEvidence(t *testing.T) {
 	}
 }
 
+func TestTaskCompletionBindingUsesWorkAtCompletionSequence(t *testing.T) {
+	ctx := context.Background()
+	l, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, NormalizedObjective: "objective", CreatedAt: now}
+	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"}, ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"}, ProjectionKind: "work", RecordID: string(work.ID), Version: 1, Value: work},
+	} {
+		if _, err := l.AppendProjection(ctx, draft); err != nil {
+			t.Fatal(err)
+		}
+	}
+	boundary, err := l.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "work-1", Payload: map[string]string{"reason": "completion boundary"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	work.Status = core.WorkFailed
+	if _, err := l.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_FAILED", SourceActorID: "runtime", CorrelationID: "work-1"},
+		ProjectionKind: "work", RecordID: string(work.ID), Version: 2, Value: work,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.withTx(ctx, func(tx *sql.Tx) error {
+		binding, err := taskCompletionBinding(ctx, tx, "org-1", "work-1", work.ID, boundary.Sequence, nil, nil, nil)
+		if err != nil {
+			return err
+		}
+		if binding.Work.Status != core.WorkActive || binding.WorkVersion != 1 {
+			return fmt.Errorf("completion binding used Work status=%s version=%d", binding.Work.Status, binding.WorkVersion)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGoalProgressWitnessSelectionCrossesFormerEvidenceWindow(t *testing.T) {
 	ctx := context.Background()
 	l, err := Open(":memory:")

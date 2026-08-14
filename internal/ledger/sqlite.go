@@ -531,18 +531,13 @@ func ValidateWorkCompletionAdmissions(ctx context.Context, db *sql.DB) error {
 			if candidate.value.Status != core.WorkCompleted {
 				continue
 			}
-			matches, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
-FROM events WHERE event_type='WORK_COMPLETED' AND json_extract(payload,'$.projection.projection_kind')='work' AND json_extract(payload,'$.projection.record_id')=? AND json_extract(payload,'$.projection.version')=? ORDER BY sequence LIMIT 2`, candidate.record.RecordID, candidate.record.Version))
+			transition, err := exactProjectionTransition(ctx, tx, "WORK_COMPLETED", candidate.record)
 			if err != nil {
-				return fmt.Errorf("read completed Work %s transition: %w", candidate.value.ID, err)
+				return fmt.Errorf("completed Work %s transition is invalid: %w", candidate.value.ID, err)
 			}
-			if len(matches) != 1 {
-				return fmt.Errorf("completed Work %s lacks one exact transition", candidate.value.ID)
-			}
-			transition := matches[0]
-			payload, present, err := events.AdmittedProjection(transition)
+			payload, _, _ := events.AdmittedProjection(transition)
 			var detail events.WorkCompletionTransitionPayload
-			if err != nil || !present || !reflect.DeepEqual(payload.Projection, candidate.record) || decodeExactJSONBytes(payload.Detail, &detail) != nil || detail.EvidenceEventRef == "" || detail.Fingerprint == "" {
+			if decodeExactJSONBytes(payload.Detail, &detail) != nil || detail.EvidenceEventRef == "" || detail.Fingerprint == "" {
 				return fmt.Errorf("completed Work %s transition is invalid", candidate.value.ID)
 			}
 			item, err := prepareProjection(events.ProjectionDraft{
@@ -595,18 +590,9 @@ func ValidateTaskCompletionAdmissions(ctx context.Context, db *sql.DB) error {
 			if candidate.value.Status != core.TaskCompleted {
 				continue
 			}
-			matches, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
-FROM events WHERE event_type='TASK_VERIFIED_COMPLETE' AND json_extract(payload,'$.projection.projection_kind')='task' AND json_extract(payload,'$.projection.record_id')=? AND json_extract(payload,'$.projection.version')=? ORDER BY sequence LIMIT 2`, candidate.record.RecordID, candidate.record.Version))
+			transition, err := exactProjectionTransition(ctx, tx, "TASK_VERIFIED_COMPLETE", candidate.record)
 			if err != nil {
-				return fmt.Errorf("read completed Task %s transition: %w", candidate.value.ID, err)
-			}
-			if len(matches) != 1 {
-				return fmt.Errorf("completed Task %s lacks one exact transition", candidate.value.ID)
-			}
-			transition := matches[0]
-			payload, present, err := events.AdmittedProjection(transition)
-			if err != nil || !present || !reflect.DeepEqual(payload.Projection, candidate.record) {
-				return fmt.Errorf("completed Task %s transition is invalid", candidate.value.ID)
+				return fmt.Errorf("completed Task %s transition is invalid: %w", candidate.value.ID, err)
 			}
 			stream, found := streams[transition.OrganizationID]
 			if !found {
@@ -624,7 +610,7 @@ FROM events WHERE event_type='TASK_VERIFIED_COMPLETE' AND json_extract(payload,'
 				}
 				teamRevisions[transition.OrganizationID] = revisions
 			}
-			binding, err := taskCompletionBinding(ctx, tx, transition.OrganizationID, candidate.record.CorrelationID, candidate.value.WorkID, current, revisions, inboxObservations)
+			binding, err := taskCompletionBinding(ctx, tx, transition.OrganizationID, candidate.record.CorrelationID, candidate.value.WorkID, transition.Sequence, current, revisions, inboxObservations)
 			if err != nil {
 				return fmt.Errorf("completed Task %s binding: %w", candidate.value.ID, err)
 			}
@@ -636,14 +622,30 @@ FROM events WHERE event_type='TASK_VERIFIED_COMPLETE' AND json_extract(payload,'
 	})
 }
 
-func taskCompletionBinding(ctx context.Context, tx *sql.Tx, organizationID, correlationID string, workID core.ID, current []currentProjectionAdmission[core.Task], teamRevisions map[core.ID][]events.TeamRevisionBinding, inboxObservations map[string]events.InboxObservationBinding) (events.WorkCompletionBinding, error) {
-	workBody, found, err := latestRecordBody(ctx, tx, "work", string(workID))
+func exactProjectionTransition(ctx context.Context, tx *sql.Tx, eventType string, record events.ProjectionRecord) (events.Event, error) {
+	matches, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE event_type=? AND json_extract(payload,'$.projection.projection_kind')=? AND json_extract(payload,'$.projection.record_id')=? AND json_extract(payload,'$.projection.version')=? ORDER BY sequence LIMIT 2`, eventType, record.ProjectionKind, record.RecordID, record.Version))
+	if err != nil {
+		return events.Event{}, err
+	}
+	if len(matches) != 1 {
+		return events.Event{}, fmt.Errorf("requires one exact transition")
+	}
+	payload, present, err := events.AdmittedProjection(matches[0])
+	if err != nil || !present || !reflect.DeepEqual(payload.Projection, record) {
+		return events.Event{}, fmt.Errorf("transition does not match its projection")
+	}
+	return matches[0], nil
+}
+
+func taskCompletionBinding(ctx context.Context, tx *sql.Tx, organizationID, correlationID string, workID core.ID, completionSequence int64, current []currentProjectionAdmission[core.Task], teamRevisions map[core.ID][]events.TeamRevisionBinding, inboxObservations map[string]events.InboxObservationBinding) (events.WorkCompletionBinding, error) {
+	workBodies, err := admittedProjectionRecordBodies(ctx, tx, `WHERE r.kind='work' AND r.record_id=? AND e.sequence<? ORDER BY r.version DESC LIMIT 1`, string(workID), completionSequence)
 	if err != nil {
 		return events.WorkCompletionBinding{}, err
 	}
 	var workRecord events.ProjectionRecord
 	var work core.Work
-	if !found || decodeExactJSONBytes(workBody, &workRecord) != nil || decodeExactJSONBytes(workRecord.Value, &work) != nil || work.ID != workID || workRecord.CorrelationID != correlationID {
+	if len(workBodies) != 1 || decodeExactJSONBytes(workBodies[0], &workRecord) != nil || decodeExactJSONBytes(workRecord.Value, &work) != nil || work.ID != workID || work.Status != core.WorkActive || workRecord.CorrelationID != correlationID {
 		return events.WorkCompletionBinding{}, fmt.Errorf("durable Work is invalid")
 	}
 	intentBody, found, err := latestRecordBody(ctx, tx, "intent", string(work.IntentID))
@@ -667,11 +669,11 @@ func taskCompletionBinding(ctx context.Context, tx *sql.Tx, organizationID, corr
 			continue
 		}
 		config := candidate.value.AgentConfig
-		blueprint, err := semanticBlueprintRevision(ctx, tx, config.BlueprintID, config.BlueprintVersion)
+		blueprint, err := semanticProjectionRevision[core.AgentBlueprint](ctx, tx, "agent_blueprint", config.BlueprintID, config.BlueprintVersion, func(value core.AgentBlueprint) core.ID { return value.ID }, func(value core.AgentBlueprint) string { return value.Version })
 		if err != nil {
 			return events.WorkCompletionBinding{}, err
 		}
-		profile, err := semanticProfileRevision(ctx, tx, config.ProfileID, config.ProfileVersion)
+		profile, err := semanticProjectionRevision[core.ExecutionProfile](ctx, tx, "execution_profile", config.ProfileID, config.ProfileVersion, func(value core.ExecutionProfile) core.ID { return value.ID }, func(value core.ExecutionProfile) string { return value.Version })
 		if err != nil {
 			return events.WorkCompletionBinding{}, err
 		}
@@ -684,46 +686,25 @@ func taskCompletionBinding(ctx context.Context, tx *sql.Tx, organizationID, corr
 	}, nil
 }
 
-func semanticBlueprintRevision(ctx context.Context, tx *sql.Tx, id core.ID, version string) (core.AgentBlueprint, error) {
-	bodies, err := admittedProjectionRecordBodies(ctx, tx, `WHERE r.kind='agent_blueprint' AND r.record_id=? ORDER BY r.version`, string(id))
+func semanticProjectionRevision[T any](ctx context.Context, tx *sql.Tx, kind string, id core.ID, version string, identity func(T) core.ID, semanticVersion func(T) string) (T, error) {
+	var zero T
+	bodies, err := admittedProjectionRecordBodies(ctx, tx, `WHERE r.kind=? AND r.record_id=? ORDER BY r.version`, kind, string(id))
 	if err != nil {
-		return core.AgentBlueprint{}, err
+		return zero, err
 	}
-	var selected core.AgentBlueprint
+	var selected T
 	for _, body := range bodies {
 		var record events.ProjectionRecord
-		var candidate core.AgentBlueprint
+		var candidate T
 		if decodeExactJSONBytes(body, &record) != nil || decodeExactJSONBytes(record.Value, &candidate) != nil {
-			return core.AgentBlueprint{}, fmt.Errorf("decode Agent blueprint revision")
+			return zero, fmt.Errorf("decode %s revision", kind)
 		}
-		if candidate.Version == version {
+		if semanticVersion(candidate) == version {
 			selected = candidate
 		}
 	}
-	if selected.ID != id {
-		return core.AgentBlueprint{}, fmt.Errorf("pinned Agent blueprint revision is unavailable")
-	}
-	return selected, nil
-}
-
-func semanticProfileRevision(ctx context.Context, tx *sql.Tx, id core.ID, version string) (core.ExecutionProfile, error) {
-	bodies, err := admittedProjectionRecordBodies(ctx, tx, `WHERE r.kind='execution_profile' AND r.record_id=? ORDER BY r.version`, string(id))
-	if err != nil {
-		return core.ExecutionProfile{}, err
-	}
-	var selected core.ExecutionProfile
-	for _, body := range bodies {
-		var record events.ProjectionRecord
-		var candidate core.ExecutionProfile
-		if decodeExactJSONBytes(body, &record) != nil || decodeExactJSONBytes(record.Value, &candidate) != nil {
-			return core.ExecutionProfile{}, fmt.Errorf("decode execution profile revision")
-		}
-		if candidate.Version == version {
-			selected = candidate
-		}
-	}
-	if selected.ID != id {
-		return core.ExecutionProfile{}, fmt.Errorf("pinned execution profile revision is unavailable")
+	if identity(selected) != id {
+		return zero, fmt.Errorf("pinned %s revision is unavailable", kind)
 	}
 	return selected, nil
 }
@@ -1586,7 +1567,7 @@ func validateTaskCompletionTransition(ctx context.Context, tx *sql.Tx, item prep
 	if err != nil {
 		return fmt.Errorf("read Task completion inbox observations: %w", err)
 	}
-	binding, err := taskCompletionBinding(ctx, tx, transition.OrganizationID, item.record.CorrelationID, item.task.WorkID, current, teamRevisions, inboxObservations)
+	binding, err := taskCompletionBinding(ctx, tx, transition.OrganizationID, item.record.CorrelationID, item.task.WorkID, transition.Sequence, current, teamRevisions, inboxObservations)
 	if err != nil {
 		return fmt.Errorf("bind Task completion: %w", err)
 	}

@@ -421,10 +421,7 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 			if decodeExactProjectionJSON(record.Value, &value) != nil {
 				err = fmt.Errorf("contains an invalid Mission projection")
 			} else {
-				err = validateProjectionEventLifecycle(event, record, "Mission", missions, func(value core.Mission) core.ID { return value.ID }, false, events.ValidateMissionProjectionTransition)
-			}
-			if err == nil {
-				err = validateProjectionOrganizationAtAdmission(value.OrganizationID, event, graph)
+				err = validateOrganizedProjectionLifecycle(value, event, record, graph, missions, "Mission", func(value core.Mission) core.ID { return value.ID }, func(value core.Mission) core.ID { return value.OrganizationID }, events.ValidateMissionProjectionTransition)
 			}
 			if err == nil {
 				err = core.AdmitDurableRevision(graph.Missions, value.ID, record.Version, record.CorrelationID, value, false, core.ValidMissionRevision)
@@ -434,10 +431,7 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 			if decodeExactProjectionJSON(record.Value, &value) != nil {
 				err = fmt.Errorf("contains an invalid Goal projection")
 			} else {
-				err = validateProjectionEventLifecycle(event, record, "Goal", goals, func(value core.Goal) core.ID { return value.ID }, false, events.ValidateGoalProjectionTransition)
-			}
-			if err == nil {
-				err = validateProjectionOrganizationAtAdmission(value.OrganizationID, event, graph)
+				err = validateOrganizedProjectionLifecycle(value, event, record, graph, goals, "Goal", func(value core.Goal) core.ID { return value.ID }, func(value core.Goal) core.ID { return value.OrganizationID }, events.ValidateGoalProjectionTransition)
 			}
 			if err == nil {
 				mission, found := graph.Missions[value.MissionID]
@@ -626,6 +620,13 @@ func validateProjectionTaskAtAdmission(task core.Task, event events.Event, recor
 		return fmt.Errorf("task requires its exact Intent organization and correlation boundary")
 	}
 	return core.ValidateTaskAssignment(task, intent.Value.OrganizationID, graph)
+}
+
+func validateOrganizedProjectionLifecycle[T any](value T, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, history map[core.ID]Versioned[T], kind string, identity func(T) core.ID, organization func(T) core.ID, validate func(string, int, *T, T) error) error {
+	if err := validateProjectionEventLifecycle(event, record, kind, history, identity, false, validate); err != nil {
+		return err
+	}
+	return validateProjectionOrganizationAtAdmission(organization(value), event, graph)
 }
 
 func validateTaskCompletionAtAdmission(task core.Task, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, stream []events.Event, teamRecords [][]byte, inboxObservations map[string]events.InboxObservationBinding, blueprintRevisions map[core.ID]map[string]core.AgentBlueprint, profileRevisions map[core.ID]map[string]core.ExecutionProfile) error {
