@@ -2619,19 +2619,9 @@ func (s *Service) reconcileWorks(ctx context.Context) error {
 	for _, workID := range workIDs {
 		state := snapshot.Works[workID]
 		if state.Value.Status != core.WorkActive {
-			if state.Value.Status == core.WorkCompleted {
-				intent, ok := snapshot.Intents[state.Value.IntentID]
-				if !ok {
-					return fmt.Errorf("completed work %s references missing intent %s", workID, state.Value.IntentID)
-				}
-				stream, err := s.gateway.Events(ctx, state.CorrelationID)
-				if err != nil {
-					return fmt.Errorf("load completed Work evidence for work %s: %w", workID, err)
-				}
-				if err := validateCompletedWork(stream, snapshot, state, intent.Value); err != nil {
-					return fmt.Errorf("validate completed Work %s: %w", workID, err)
-				}
-			}
+			// Terminal Work is immutable and entered through typed, atomic ledger
+			// admission. Startup and explicit recovery audit its complete evidence
+			// chain; routine scheduling must not replay historical work streams.
 			continue
 		}
 		hasTasks := false
