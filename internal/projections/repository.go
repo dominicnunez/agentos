@@ -439,7 +439,7 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 			if err == nil {
 				mission, found := graph.Missions[value.MissionID]
 				if !found || mission.Value.ID != value.MissionID || mission.Value.OrganizationID != value.OrganizationID {
-					err = fmt.Errorf("Goal requires its durable same-organization Mission")
+					err = fmt.Errorf("goal requires its durable same-organization Mission")
 				}
 			}
 			if err == nil {
@@ -479,7 +479,7 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 				blueprint, blueprintFound := graph.AgentBlueprints[value.BlueprintID]
 				profile, profileFound := graph.ExecutionProfiles[value.ExecutionProfileID]
 				if !blueprintFound || !profileFound || !core.ValidAgentConfigurationBinding(value, blueprint.Value, profile.Value) {
-					err = fmt.Errorf("Agent references invalid pinned configuration at admission")
+					err = fmt.Errorf("agent references invalid pinned configuration at admission")
 				}
 			}
 			if err == nil {
@@ -569,7 +569,7 @@ func distinctProjectionStrings(values []string) bool {
 
 func validateProjectionTeamAtAdmission(team core.Team, event events.Event, graph core.DurableGraph) error {
 	if strings.TrimSpace(team.Name) == "" || strings.TrimSpace(team.Status) == "" {
-		return fmt.Errorf("Team is incomplete")
+		return fmt.Errorf("team is incomplete")
 	}
 	if err := validateProjectionOrganizationAtAdmission(team.OrganizationID, event, graph); err != nil {
 		return err
@@ -577,15 +577,15 @@ func validateProjectionTeamAtAdmission(team core.Team, event events.Event, graph
 	members := make(map[core.ID]struct{}, len(team.MemberAgentIDs))
 	for _, memberID := range team.MemberAgentIDs {
 		if memberID == "" {
-			return fmt.Errorf("Team contains an empty member identity")
+			return fmt.Errorf("team contains an empty member identity")
 		}
 		if _, duplicate := members[memberID]; duplicate {
-			return fmt.Errorf("Team contains a duplicate member identity")
+			return fmt.Errorf("team contains a duplicate member identity")
 		}
 		members[memberID] = struct{}{}
 		agent, found := graph.Agents[memberID]
 		if !found || agent.Value.ID != memberID || agent.Value.OrganizationID != team.OrganizationID {
-			return fmt.Errorf("Team references invalid member Agent %s at admission", memberID)
+			return fmt.Errorf("team references invalid member Agent %s at admission", memberID)
 		}
 	}
 	return nil
@@ -594,12 +594,12 @@ func validateProjectionTeamAtAdmission(team core.Team, event events.Event, graph
 func validateProjectionWorkAtAdmission(work core.Work, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, confirmations map[string]events.Event) error {
 	intent, found := graph.Intents[work.IntentID]
 	if !found || intent.CorrelationID != record.CorrelationID || intent.Value.ID != work.IntentID || intent.Value.GoalID != work.GoalID || intent.Value.NormalizedObjective != work.Objective || string(intent.Value.OrganizationID) != event.OrganizationID {
-		return fmt.Errorf("Work requires its exact prior Intent on the same organization and correlation boundary")
+		return fmt.Errorf("work requires its exact prior Intent on the same organization and correlation boundary")
 	}
 	if intent.Value.GoalID != "" {
 		confirmation, found := confirmations[record.CorrelationID]
 		if !found || confirmation.Sequence >= event.Sequence {
-			return fmt.Errorf("Goal-bound Work requires one prior reviewed intent confirmation")
+			return fmt.Errorf("goal-bound Work requires one prior reviewed intent confirmation")
 		}
 		if err := events.ValidateGoalBoundIntentConfirmation(confirmation, intent.Value); err != nil {
 			return err
@@ -611,11 +611,11 @@ func validateProjectionWorkAtAdmission(work core.Work, event events.Event, recor
 func validateProjectionTaskAtAdmission(task core.Task, event events.Event, record events.ProjectionRecord, graph core.DurableGraph) error {
 	work, found := graph.Works[task.WorkID]
 	if !found || work.CorrelationID != record.CorrelationID || work.Value.ID != task.WorkID || work.Value.Status != core.WorkActive {
-		return fmt.Errorf("Task requires its exact active Work on the same correlation boundary")
+		return fmt.Errorf("task requires its exact active Work on the same correlation boundary")
 	}
 	intent, found := graph.Intents[work.Value.IntentID]
 	if !found || intent.CorrelationID != record.CorrelationID || intent.Value.ID != work.Value.IntentID || string(intent.Value.OrganizationID) != event.OrganizationID {
-		return fmt.Errorf("Task requires its exact Intent organization and correlation boundary")
+		return fmt.Errorf("task requires its exact Intent organization and correlation boundary")
 	}
 	return core.ValidateTaskAssignment(task, intent.Value.OrganizationID, graph)
 }
