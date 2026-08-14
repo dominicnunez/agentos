@@ -1018,6 +1018,59 @@ func TestEventAuditRejectsHistoricalAgentConfigurationBinding(t *testing.T) {
 	}
 }
 
+func TestRebuildRejectsTaskCompletionWithoutEvidenceChain(t *testing.T) {
+	now := time.Unix(1, 0).UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, NormalizedObjective: "objective", CreatedAt: now}
+	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	task := core.Task{ID: "task-1", WorkID: work.ID, Description: "recovery task", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
+	var stream []events.Event
+	appendProjection := func(eventType, kind, id string, version int, value any, detail any) {
+		t.Helper()
+		body, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var detailBody json.RawMessage
+		if detail != nil {
+			detailBody, err = json.Marshal(detail)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		record := events.ProjectionRecord{ProjectionKind: kind, RecordID: id, Version: version, CorrelationID: "work-1", Value: body}
+		boundary := events.Event{
+			EventID: fmt.Sprintf("event-%d", len(stream)+1), Sequence: int64(len(stream) + 1), OrganizationID: string(organization.ID), EventType: eventType,
+			SourceActorID: "runtime", AuthorizationRefs: []string{}, ArtifactRefs: []string{}, CorrelationID: record.CorrelationID, CreatedAt: now.Add(time.Duration(len(stream)) * time.Second), SchemaVersion: events.SchemaVersion,
+		}
+		if kind == KindTask {
+			boundary.TaskID = id
+		}
+		sealed, err := events.SealProjectionEvent(boundary, record, detailBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		boundary.Payload, err = json.Marshal(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream = append(stream, boundary)
+	}
+	appendProjection("ORGANIZATION_CREATED", KindOrganization, string(organization.ID), 1, organization, nil)
+	appendProjection("INTENT_CREATED", KindIntent, string(intent.ID), 1, intent, nil)
+	appendProjection("WORK_CREATED", KindWork, string(work.ID), 1, work, nil)
+	appendProjection("TASK_CREATED", KindTask, string(task.ID), 1, task, nil)
+	task.Status = core.TaskRunning
+	appendProjection("EXECUTION_STARTED", KindTask, string(task.ID), 2, task, nil)
+	task.Status = core.TaskCompleted
+	decision := events.CompletionDecisionPayload{Contract: core.CompletionContract{TaskID: task.ID, TaskVersion: 2}, Result: events.CompletionDecisionResultPayload{Complete: true}, OutcomeEventRef: "missing-outcome"}
+	appendProjection("TASK_VERIFIED_COMPLETE", KindTask, string(task.ID), 3, task, decision)
+
+	if _, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background()); err == nil || !strings.Contains(err.Error(), "exact verification decision") {
+		t.Fatalf("event replay accepted a status-only Task completion: %v", err)
+	}
+}
+
 func TestFullAuditRejectsProjectionEventWithoutMaterializedRecord(t *testing.T) {
 	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: time.Unix(1, 0).UTC()}
 	value, err := json.Marshal(organization)

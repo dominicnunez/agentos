@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -505,47 +504,6 @@ func TestWorkCompletionAdmissionBindsPlanAndRuntimeContract(t *testing.T) {
 	}
 	if _, err := events.ValidateWorkCompletionEvidenceChain(binding, evidenceEvent, forgedOutcomeStream); err == nil {
 		t.Fatal("forged deterministic postcondition authorized Work completion")
-	}
-}
-
-func TestTaskCompletionAdmissionRejectsMissingVerificationOnStartup(t *testing.T) {
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "agentos.db")
-	store, err := ledger.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := New(events.NewGateway(store))
-	result, err := service.Submit(ctx, Submit{RequestID: "task-evidence-recovery", OrganizationID: "org-1", Statement: "echo verified", Kind: core.ExecutionDeterministic})
-	if err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM events WHERE event_type='COMPLETION_VERIFIED' AND task_id=?`, string(result.Task.ID)); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	reopened, err := ledger.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, startupErr := New(events.NewGateway(reopened)).Recover(ctx)
-	if closeErr := reopened.Close(); closeErr != nil {
-		t.Fatal(closeErr)
-	}
-	if startupErr == nil || !strings.Contains(startupErr.Error(), "exact verification decision") {
-		t.Fatalf("startup accepted Task completion without its verification: %v", startupErr)
 	}
 }
 
