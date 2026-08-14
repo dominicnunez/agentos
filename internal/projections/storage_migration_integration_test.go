@@ -1,4 +1,4 @@
-package ledger_test
+package projections_test
 
 import (
 	"database/sql"
@@ -18,7 +18,7 @@ import (
 func TestStorageV1FixtureMigratesAndRebuildsFromEvents(t *testing.T) {
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "storage-v1.db")
-	script, err := os.ReadFile(filepath.Join("testdata", "storage-v1.sql"))
+	script, err := os.ReadFile(filepath.Join("..", "ledger", "testdata", "storage-v1.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,3 +84,4 @@ func TestStorageV1FixtureMigratesAndRebuildsFromEvents(t *testing.T) {
 		t.Fatalf("rebuilt organization=%+v present=%t", got, ok)
 	}
 }
+
