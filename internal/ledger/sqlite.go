@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/dominicnunez/agentos/internal/approvals"
 	"github.com/dominicnunez/agentos/internal/authority"
@@ -27,8 +26,6 @@ type SQLite struct {
 	db                 *sql.DB
 	newWorkCorrelation func() (string, error)
 }
-
-const maximumReviewedIntentEvidenceEvents = 1024
 
 func Open(path string) (*SQLite, error) {
 	db, err := sql.Open("sqlite", path)
@@ -2401,20 +2398,17 @@ func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.Trus
 	}
 	var confirmation events.IntentConfirmedPayload
 	if err := decodeExactJSON(draft.Payload, &confirmation); err != nil || confirmation.GoalID != string(goalID) || confirmation.IntentID != "intent-"+draft.CorrelationID || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.ConfirmingActorID == "" || confirmation.ConfirmingActorKind == "" || confirmation.SourceChannel == "" || confirmation.MessageID == "" ||
-		draft.SourceActorID != confirmation.ConfirmingActorID || !validReviewedOperatorIdentity(confirmation.ConfirmingActorID, confirmation.ConfirmingActorKind, confirmation.SourceChannel) || draft.SourceExecutionID != "" || draft.RecipientScope != "" || draft.RecipientID != "" || draft.TaskID != "task-"+draft.CorrelationID || draft.CorrelationID == "" || len(draft.AuthorizationRefs) != 0 || len(draft.ArtifactRefs) != 0 {
+		draft.SourceActorID != confirmation.ConfirmingActorID || draft.SourceExecutionID != "" || draft.RecipientScope != "" || draft.RecipientID != "" || draft.TaskID != "task-"+draft.CorrelationID || draft.CorrelationID == "" || len(draft.AuthorizationRefs) != 0 || len(draft.ArtifactRefs) != 0 {
 		return events.Event{}, fmt.Errorf("goal-bound intent confirmation does not match its checked goal")
 	}
 	var event events.Event
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
-		stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_DRAFTED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, draft.CorrelationID, maximumReviewedIntentEvidenceEvents+1))
+		stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_DRAFTED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, draft.CorrelationID, events.ReviewedGoalIntentEvidenceLimit+1))
 		if err != nil {
 			return fmt.Errorf("read reviewed goal-bound intent evidence: %w", err)
 		}
-		if len(stream) > maximumReviewedIntentEvidenceEvents {
+		if len(stream) > events.ReviewedGoalIntentEvidenceLimit {
 			return fmt.Errorf("goal-bound intent review evidence exceeds its admission bound")
-		}
-		if err := validateReviewedGoalIntent(stream, draft, confirmation, goalID); err != nil {
-			return err
 		}
 		existing := make([]events.Event, 0, 1)
 		for _, candidate := range stream {
@@ -2456,150 +2450,13 @@ func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.Trus
 			TaskID: draft.TaskID, AuthorizationRefs: draft.AuthorizationRefs, ArtifactRefs: draft.ArtifactRefs,
 			Payload: confirmationBody, CorrelationID: draft.CorrelationID, SchemaVersion: events.SchemaVersion,
 		}
-		if err := ValidateReviewedGoalIntentAdmission(stream, candidate, goal); err != nil {
+		if err := events.ValidateReviewedGoalIntentAdmission(stream, candidate, goal); err != nil {
 			return err
 		}
 		event, err = appendEvent(ctx, tx, draft)
 		return err
 	})
 	return event, err
-}
-
-// ValidateReviewedGoalIntentAdmission replays the bounded intake and review
-// evidence that authorizes one Goal-bound intent confirmation. The supplied
-// Goal must be the exact durable Goal state visible at the confirmation event.
-func ValidateReviewedGoalIntentAdmission(stream []events.Event, confirmationEvent events.Event, goal core.Goal) error {
-	var confirmation events.IntentConfirmedPayload
-	if decodeExactJSONBytes(confirmationEvent.Payload, &confirmation) != nil ||
-		confirmationEvent.EventType != "INTENT_CONFIRMED" || confirmationEvent.OrganizationID == "" || confirmationEvent.OrganizationID != string(goal.OrganizationID) ||
-		confirmationEvent.SourceActorID == "" || confirmationEvent.SourceActorID != confirmation.ConfirmingActorID || !validReviewedOperatorIdentity(confirmation.ConfirmingActorID, confirmation.ConfirmingActorKind, confirmation.SourceChannel) ||
-		confirmationEvent.SourceExecutionID != "" || confirmationEvent.RecipientScope != "" || confirmationEvent.RecipientID != "" || confirmationEvent.TaskID != "task-"+confirmationEvent.CorrelationID ||
-		len(confirmationEvent.AuthorizationRefs) != 0 || len(confirmationEvent.ArtifactRefs) != 0 || confirmationEvent.CorrelationID == "" || confirmationEvent.SchemaVersion != events.SchemaVersion ||
-		confirmation.IntentID != "intent-"+confirmationEvent.CorrelationID || confirmation.GoalID != string(goal.ID) || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.MessageID == "" {
-		return fmt.Errorf("goal-bound intent confirmation does not match its checked goal")
-	}
-	if goal.ID == "" || goal.Status != core.GoalActive {
-		return fmt.Errorf("goal-bound intent confirmation requires its active Goal at admission")
-	}
-	reviewStream := make([]events.Event, 0, len(stream))
-	for _, candidate := range stream {
-		if candidate.CorrelationID != confirmationEvent.CorrelationID || confirmationEvent.Sequence > 0 && candidate.Sequence > confirmationEvent.Sequence {
-			continue
-		}
-		switch candidate.EventType {
-		case "INTAKE_MESSAGE_RECORDED", "INTENT_DRAFTED", "INTENT_CONFIRMED":
-			reviewStream = append(reviewStream, candidate)
-		}
-	}
-	if len(reviewStream) > maximumReviewedIntentEvidenceEvents {
-		return fmt.Errorf("goal-bound intent review evidence exceeds its admission bound")
-	}
-	confirmationDraft := events.TrustedDraft{
-		OrganizationID: confirmationEvent.OrganizationID, EventType: confirmationEvent.EventType, SourceActorID: confirmationEvent.SourceActorID,
-		SourceExecutionID: confirmationEvent.SourceExecutionID, RecipientScope: confirmationEvent.RecipientScope, RecipientID: confirmationEvent.RecipientID,
-		TaskID: confirmationEvent.TaskID, AuthorizationRefs: confirmationEvent.AuthorizationRefs, ArtifactRefs: confirmationEvent.ArtifactRefs,
-		Payload: confirmation, CorrelationID: confirmationEvent.CorrelationID,
-	}
-	return validateReviewedGoalIntent(reviewStream, confirmationDraft, confirmation, goal.ID)
-}
-
-func validateReviewedGoalIntent(stream []events.Event, confirmationDraft events.TrustedDraft, confirmation events.IntentConfirmedPayload, goalID core.ID) error {
-	intakeMessages := make(map[string]events.IntakeMessageRecordedPayload)
-	intakeSequences := make(map[string]int64)
-	var latestIntakeMessageID string
-	var latestIntakeSequence int64
-	var latestDraftEvent events.Event
-	var latestDraft events.IntentDraftedPayload
-	draftCount := 0
-	for _, event := range stream {
-		switch event.EventType {
-		case "INTAKE_MESSAGE_RECORDED":
-			var payload events.IntakeMessageRecordedPayload
-			if decodeExactJSONBytes(event.Payload, &payload) != nil || !validReviewedIntakeMessage(event, payload, confirmationDraft) {
-				return fmt.Errorf("goal-bound intent has invalid durable intake evidence")
-			}
-			if _, exists := intakeMessages[payload.MessageID]; exists {
-				return fmt.Errorf("goal-bound intent source message is not unique")
-			}
-			intakeMessages[payload.MessageID] = payload
-			intakeSequences[payload.MessageID] = event.Sequence
-			latestIntakeMessageID = payload.MessageID
-			latestIntakeSequence = event.Sequence
-		case "INTENT_DRAFTED":
-			var payload events.IntentDraftedPayload
-			if decodeExactJSONBytes(event.Payload, &payload) != nil || event.OrganizationID != confirmationDraft.OrganizationID || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != confirmationDraft.TaskID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID != confirmationDraft.CorrelationID || event.SchemaVersion != events.SchemaVersion {
-				return fmt.Errorf("goal-bound intent has invalid durable review draft")
-			}
-			draftCount++
-			latestDraftEvent = event
-			latestDraft = payload
-		}
-	}
-	if latestDraftEvent.EventID == "" || latestIntakeMessageID == "" || latestDraftEvent.Sequence <= latestIntakeSequence || latestDraft.SourceMessageID != latestIntakeMessageID || latestDraft.Draft.CreatedAt.IsZero() || strings.TrimSpace(latestDraft.Reply) == "" {
-		return fmt.Errorf("goal-bound intent confirmation requires the current durable reviewed draft")
-	}
-	reviewed := latestDraft.Draft
-	if reviewed.ID != core.ID(confirmation.IntentID) || reviewed.OrganizationID != core.ID(confirmationDraft.OrganizationID) || reviewed.Version != confirmation.Version || reviewed.Version != draftCount || reviewed.Fingerprint != confirmation.Fingerprint {
-		return fmt.Errorf("goal-bound intent confirmation does not match its durable reviewed draft")
-	}
-	switch reviewed.RequestedExecutionKind {
-	case core.ExecutionDeterministic, core.ExecutionAgent, core.ExecutionHuman:
-	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed, "":
-		return fmt.Errorf("goal-bound intent reviewed execution kind is unavailable")
-	default:
-		return fmt.Errorf("goal-bound intent reviewed execution kind is unavailable")
-	}
-	if err := core.ValidateAcceptedIntentDraft(reviewed, core.ID(confirmationDraft.OrganizationID), reviewed.RequestedExecutionKind); err != nil {
-		return fmt.Errorf("goal-bound intent durable reviewed draft is invalid: %w", err)
-	}
-	reviewedGoalID, err := core.AcceptedIntentGoalID(reviewed)
-	if err != nil || reviewedGoalID != goalID || reviewed.Goal == nil || reviewed.Goal.Origin != "EXPLICIT" && reviewed.Goal.Origin != "CONFIRMED" {
-		return fmt.Errorf("goal-bound intent reviewed Goal provenance is invalid")
-	}
-	goalMessage, found := intakeMessages[reviewed.Goal.SourceMessageID]
-	if !found || intakeSequences[reviewed.Goal.SourceMessageID] >= latestDraftEvent.Sequence || !core.ContainsExactGoalReference(goalMessage.Text, string(goalID)) {
-		return fmt.Errorf("goal-bound intent Goal is not present in its attributed source message")
-	}
-	for _, event := range stream {
-		if event.EventType == "INTENT_CONFIRMED" && event.Sequence <= latestDraftEvent.Sequence {
-			return fmt.Errorf("goal-bound intent confirmation precedes its reviewed draft")
-		}
-	}
-	return nil
-}
-
-func validReviewedIntakeMessage(event events.Event, payload events.IntakeMessageRecordedPayload, confirmationDraft events.TrustedDraft) bool {
-	if payload.MessageID == "" || strings.TrimSpace(payload.Text) == "" || !utf8.ValidString(payload.Text) || payload.SourcePrincipalID == "" || payload.SourcePrincipalKind == "" || payload.SourceChannel == "" ||
-		event.OrganizationID != confirmationDraft.OrganizationID || event.SourceActorID != payload.SourcePrincipalID || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != confirmationDraft.TaskID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID != confirmationDraft.CorrelationID || event.SchemaVersion != events.SchemaVersion {
-		return false
-	}
-	if !validReviewedOperatorIdentity(payload.SourcePrincipalID, payload.SourcePrincipalKind, payload.SourceChannel) {
-		return false
-	}
-	switch payload.RequestedExecutionKind {
-	case "", core.ExecutionDeterministic, core.ExecutionAgent, core.ExecutionHuman:
-		return true
-	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
-		return false
-	default:
-		return false
-	}
-}
-
-func validReviewedOperatorIdentity(id, kind, channel string) bool {
-	if id == "" {
-		return false
-	}
-	switch core.PrincipalKind(kind) {
-	case core.PrincipalHuman:
-		return channel == "HUMAN_DIRECT"
-	case core.PrincipalExternalAgent:
-		return channel == "A2A"
-	case core.PrincipalRuntime:
-		return false
-	default:
-		return false
-	}
 }
 
 func (l *SQLite) appendAddressed(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {

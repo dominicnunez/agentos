@@ -572,7 +572,7 @@ func validateRecoveryWorkIntentBinding(event events.Event, record events.Project
 		if err != nil {
 			return err
 		}
-		if err := ledgerstore.ValidateReviewedGoalIntentAdmission(stream, confirmations[0], goal); err != nil {
+		if err := events.ValidateReviewedGoalIntentAdmission(stream, confirmations[0], goal); err != nil {
 			return err
 		}
 	}

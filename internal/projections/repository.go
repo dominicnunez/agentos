@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"sort"
+	"strings"
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
@@ -342,12 +344,22 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 func validateProjectionEventAdmissions(stream []events.Event) error {
 	eventIDs := make(map[string]struct{}, len(stream))
 	sequences := make(map[int64]struct{}, len(stream))
+	ordered := append([]events.Event(nil), stream...)
+	sort.Slice(ordered, func(left, right int) bool { return ordered[left].Sequence < ordered[right].Sequence })
 	tasks := make(map[core.ID]Versioned[core.Task])
 	agents := make(map[core.ID]Versioned[core.Agent])
 	missions := make(map[core.ID]Versioned[core.Mission])
 	goals := make(map[core.ID]Versioned[core.Goal])
 	works := make(map[core.ID]Versioned[core.Work])
-	for _, event := range stream {
+	graph := core.DurableGraph{
+		Organizations: map[core.ID]core.DurableState[core.Organization]{}, Missions: map[core.ID]core.DurableState[core.Mission]{},
+		Goals: map[core.ID]core.DurableState[core.Goal]{}, Teams: map[core.ID]core.DurableState[core.Team]{},
+		AgentBlueprints: map[core.ID]core.DurableState[core.AgentBlueprint]{}, ExecutionProfiles: map[core.ID]core.DurableState[core.ExecutionProfile]{},
+		Agents: map[core.ID]core.DurableState[core.Agent]{}, Intents: map[core.ID]core.DurableState[core.Intent]{},
+		Works: map[core.ID]core.DurableState[core.Work]{}, Tasks: map[core.ID]core.DurableState[core.Task]{},
+	}
+	confirmations := make(map[string]events.Event)
+	for _, event := range ordered {
 		if event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() {
 			return fmt.Errorf("event stream contains an incomplete envelope")
 		}
@@ -366,30 +378,246 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 		if err != nil {
 			return fmt.Errorf("event %s: %w", event.EventID, err)
 		}
-		if present {
-			if err := events.ValidateProjectionEventBoundary(event, payload); err != nil {
-				return fmt.Errorf("event %s: %w", event.EventID, err)
+		if !present {
+			if event.EventType == "INTENT_CONFIRMED" {
+				if _, duplicate := confirmations[event.CorrelationID]; duplicate {
+					return fmt.Errorf("event %s duplicates a Goal-bound intent confirmation", event.EventID)
+				}
+				var confirmation events.IntentConfirmedPayload
+				if decodeExactProjectionJSON(event.Payload, &confirmation) != nil {
+					return fmt.Errorf("event %s contains an invalid Goal-bound intent confirmation", event.EventID)
+				}
+				goal, found := graph.Goals[core.ID(confirmation.GoalID)]
+				if !found || goal.Value.ID != core.ID(confirmation.GoalID) || goal.Value.Status != core.GoalActive {
+					return fmt.Errorf("event %s Goal-bound intent confirmation lacks its active Goal", event.EventID)
+				}
+				if err := events.ValidateReviewedGoalIntentAdmission(ordered, event, goal.Value); err != nil {
+					return fmt.Errorf("event %s: %w", event.EventID, err)
+				}
+				confirmations[event.CorrelationID] = event
 			}
-			switch payload.Projection.ProjectionKind {
-			case KindMission:
-				err = validateProjectionEventLifecycle(event, payload.Projection, "Mission", missions, func(value core.Mission) core.ID { return value.ID }, false, events.ValidateMissionProjectionTransition)
-			case KindTask:
-				err = validateProjectionEventLifecycle(event, payload.Projection, "Task", tasks, func(value core.Task) core.ID { return value.ID }, true, events.ValidateTaskProjectionTransition)
-			case KindAgent:
-				err = validateProjectionEventLifecycle(event, payload.Projection, "Agent", agents, func(value core.Agent) core.ID { return value.ID }, false, events.ValidateAgentProjectionTransition)
-			case KindGoal:
-				err = validateProjectionEventLifecycle(event, payload.Projection, "Goal", goals, func(value core.Goal) core.ID { return value.ID }, false, events.ValidateGoalProjectionTransition)
-			case KindWork:
-				err = validateProjectionEventLifecycle(event, payload.Projection, "Work", works, func(value core.Work) core.ID { return value.ID }, true, events.ValidateWorkProjectionTransition)
+			if events.RequiresProjectionAdmission(event.EventType, event.SourceActorID) {
+				return fmt.Errorf("event %s uses a projection lifecycle event without typed admission", event.EventID)
 			}
-			if err != nil {
-				return fmt.Errorf("event %s: %w", event.EventID, err)
+			continue
+		}
+		if err := events.ValidateProjectionEventBoundary(event, payload); err != nil {
+			return fmt.Errorf("event %s: %w", event.EventID, err)
+		}
+		record := payload.Projection
+		switch record.ProjectionKind {
+		case KindOrganization:
+			var value core.Organization
+			if decodeExactProjectionJSON(record.Value, &value) != nil || value.ID != core.ID(record.RecordID) || string(value.ID) != event.OrganizationID {
+				err = fmt.Errorf("contains an invalid Organization projection")
+			} else {
+				err = core.AdmitDurableRevision(graph.Organizations, value.ID, record.Version, record.CorrelationID, value, false, nil)
 			}
-		} else if events.RequiresProjectionAdmission(event.EventType, event.SourceActorID) {
-			return fmt.Errorf("event %s uses a projection lifecycle event without typed admission", event.EventID)
+		case KindMission:
+			var value core.Mission
+			if decodeExactProjectionJSON(record.Value, &value) != nil {
+				err = fmt.Errorf("contains an invalid Mission projection")
+			} else {
+				err = validateProjectionEventLifecycle(event, record, "Mission", missions, func(value core.Mission) core.ID { return value.ID }, false, events.ValidateMissionProjectionTransition)
+			}
+			if err == nil {
+				err = validateProjectionOrganizationAtAdmission(value.OrganizationID, event, graph)
+			}
+			if err == nil {
+				err = core.AdmitDurableRevision(graph.Missions, value.ID, record.Version, record.CorrelationID, value, false, core.ValidMissionRevision)
+			}
+		case KindGoal:
+			var value core.Goal
+			if decodeExactProjectionJSON(record.Value, &value) != nil {
+				err = fmt.Errorf("contains an invalid Goal projection")
+			} else {
+				err = validateProjectionEventLifecycle(event, record, "Goal", goals, func(value core.Goal) core.ID { return value.ID }, false, events.ValidateGoalProjectionTransition)
+			}
+			if err == nil {
+				err = validateProjectionOrganizationAtAdmission(value.OrganizationID, event, graph)
+			}
+			if err == nil {
+				mission, found := graph.Missions[value.MissionID]
+				if !found || mission.Value.ID != value.MissionID || mission.Value.OrganizationID != value.OrganizationID {
+					err = fmt.Errorf("Goal requires its durable same-organization Mission")
+				}
+			}
+			if err == nil {
+				err = core.AdmitDurableRevision(graph.Goals, value.ID, record.Version, record.CorrelationID, value, false, core.ValidGoalRevision)
+			}
+		case KindAgentBlueprint:
+			var value core.AgentBlueprint
+			if decodeExactProjectionJSON(record.Value, &value) != nil || value.ID != core.ID(record.RecordID) || value.Version == "" || strings.TrimSpace(value.Role) == "" || strings.TrimSpace(value.OperatingInstructions) == "" || !validProjectionRosterStatus(value.Status) || !distinctProjectionStrings(value.RequiredCapabilityClasses) {
+				err = fmt.Errorf("contains an invalid Agent blueprint projection")
+			} else {
+				err = validateProjectionOrganizationAtAdmission(value.OrganizationID, event, graph)
+			}
+			if err == nil {
+				err = core.AdmitDurableRevision(graph.AgentBlueprints, value.ID, record.Version, record.CorrelationID, value, false, core.ValidAgentBlueprintRevision)
+			}
+		case KindExecutionProfile:
+			var value core.ExecutionProfile
+			if decodeExactProjectionJSON(record.Value, &value) != nil || value.ID != core.ID(record.RecordID) || value.Version == "" || value.ModelProvider == "" || value.Model == "" || value.PromptVersion == "" || !validProjectionRosterStatus(value.Status) || !distinctProjectionStrings(value.ToolRefs) {
+				err = fmt.Errorf("contains an invalid execution profile projection")
+			} else {
+				err = validateProjectionOrganizationAtAdmission(value.OrganizationID, event, graph)
+			}
+			if err == nil {
+				err = core.AdmitDurableRevision(graph.ExecutionProfiles, value.ID, record.Version, record.CorrelationID, value, false, core.ValidExecutionProfileRevision)
+			}
+		case KindAgent:
+			var value core.Agent
+			if decodeExactProjectionJSON(record.Value, &value) != nil {
+				err = fmt.Errorf("contains an invalid Agent projection")
+			} else {
+				err = validateProjectionEventLifecycle(event, record, "Agent", agents, func(value core.Agent) core.ID { return value.ID }, false, events.ValidateAgentProjectionTransition)
+			}
+			if err == nil {
+				err = validateProjectionOrganizationAtAdmission(value.OrganizationID, event, graph)
+			}
+			if err == nil {
+				blueprint, blueprintFound := graph.AgentBlueprints[value.BlueprintID]
+				profile, profileFound := graph.ExecutionProfiles[value.ExecutionProfileID]
+				if !blueprintFound || !profileFound || !core.ValidAgentConfigurationBinding(value, blueprint.Value, profile.Value) {
+					err = fmt.Errorf("Agent references invalid pinned configuration at admission")
+				}
+			}
+			if err == nil {
+				err = core.AdmitDurableRevision(graph.Agents, value.ID, record.Version, record.CorrelationID, value, false, core.ValidAgentRevision)
+			}
+		case KindTeam:
+			var value core.Team
+			if decodeExactProjectionJSON(record.Value, &value) != nil || value.ID != core.ID(record.RecordID) {
+				err = fmt.Errorf("contains an invalid Team projection")
+			} else {
+				err = validateProjectionTeamAtAdmission(value, event, graph)
+			}
+			if err == nil {
+				err = core.AdmitDurableRevision(graph.Teams, value.ID, record.Version, record.CorrelationID, value, false, core.ValidTeamRevision)
+			}
+		case KindIntent:
+			var value core.Intent
+			if decodeExactProjectionJSON(record.Value, &value) != nil || value.ID != core.ID(record.RecordID) {
+				err = fmt.Errorf("contains an invalid Intent projection")
+			} else {
+				err = validateProjectionOrganizationAtAdmission(value.OrganizationID, event, graph)
+			}
+			if err == nil {
+				err = core.AdmitDurableRevision(graph.Intents, value.ID, record.Version, record.CorrelationID, value, true, nil)
+			}
+		case KindWork:
+			var value core.Work
+			if decodeExactProjectionJSON(record.Value, &value) != nil {
+				err = fmt.Errorf("contains an invalid Work projection")
+			} else {
+				err = validateProjectionEventLifecycle(event, record, "Work", works, func(value core.Work) core.ID { return value.ID }, true, events.ValidateWorkProjectionTransition)
+			}
+			if err == nil {
+				err = validateProjectionWorkAtAdmission(value, event, record, graph, confirmations)
+			}
+			if err == nil {
+				err = core.AdmitDurableRevision(graph.Works, value.ID, record.Version, record.CorrelationID, value, true, core.ValidWorkRevision)
+			}
+		case KindTask:
+			var value core.Task
+			if decodeExactProjectionJSON(record.Value, &value) != nil {
+				err = fmt.Errorf("contains an invalid Task projection")
+			} else {
+				err = validateProjectionEventLifecycle(event, record, "Task", tasks, func(value core.Task) core.ID { return value.ID }, true, events.ValidateTaskProjectionTransition)
+			}
+			if err == nil {
+				err = validateProjectionTaskAtAdmission(value, event, record, graph)
+			}
+			if err == nil {
+				err = core.AdmitDurableRevision(graph.Tasks, value.ID, record.Version, record.CorrelationID, value, true, core.ValidTaskRevision)
+			}
+		default:
+			err = fmt.Errorf("contains unsupported projection kind %s", record.ProjectionKind)
+		}
+		if err != nil {
+			return fmt.Errorf("event %s: %w", event.EventID, err)
 		}
 	}
 	return nil
+}
+
+func validateProjectionOrganizationAtAdmission(organizationID core.ID, event events.Event, graph core.DurableGraph) error {
+	organization, found := graph.Organizations[organizationID]
+	if organizationID == "" || !found || organization.Value.ID != organizationID || event.OrganizationID != string(organizationID) {
+		return fmt.Errorf("requires its durable parent Organization at admission")
+	}
+	return nil
+}
+
+func validProjectionRosterStatus(status string) bool {
+	return status == "ACTIVE" || status == "INACTIVE"
+}
+
+func distinctProjectionStrings(values []string) bool {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			return false
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return false
+		}
+		seen[value] = struct{}{}
+	}
+	return true
+}
+
+func validateProjectionTeamAtAdmission(team core.Team, event events.Event, graph core.DurableGraph) error {
+	if strings.TrimSpace(team.Name) == "" || strings.TrimSpace(team.Status) == "" {
+		return fmt.Errorf("Team is incomplete")
+	}
+	if err := validateProjectionOrganizationAtAdmission(team.OrganizationID, event, graph); err != nil {
+		return err
+	}
+	members := make(map[core.ID]struct{}, len(team.MemberAgentIDs))
+	for _, memberID := range team.MemberAgentIDs {
+		if memberID == "" {
+			return fmt.Errorf("Team contains an empty member identity")
+		}
+		if _, duplicate := members[memberID]; duplicate {
+			return fmt.Errorf("Team contains a duplicate member identity")
+		}
+		members[memberID] = struct{}{}
+		agent, found := graph.Agents[memberID]
+		if !found || agent.Value.ID != memberID || agent.Value.OrganizationID != team.OrganizationID {
+			return fmt.Errorf("Team references invalid member Agent %s at admission", memberID)
+		}
+	}
+	return nil
+}
+
+func validateProjectionWorkAtAdmission(work core.Work, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, confirmations map[string]events.Event) error {
+	intent, found := graph.Intents[work.IntentID]
+	if !found || intent.CorrelationID != record.CorrelationID || intent.Value.ID != work.IntentID || intent.Value.GoalID != work.GoalID || intent.Value.NormalizedObjective != work.Objective || string(intent.Value.OrganizationID) != event.OrganizationID {
+		return fmt.Errorf("Work requires its exact prior Intent on the same organization and correlation boundary")
+	}
+	if intent.Value.GoalID != "" {
+		confirmation, found := confirmations[record.CorrelationID]
+		if !found || confirmation.Sequence >= event.Sequence {
+			return fmt.Errorf("Goal-bound Work requires one prior reviewed intent confirmation")
+		}
+		if err := events.ValidateGoalBoundIntentConfirmation(confirmation, intent.Value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateProjectionTaskAtAdmission(task core.Task, event events.Event, record events.ProjectionRecord, graph core.DurableGraph) error {
+	work, found := graph.Works[task.WorkID]
+	if !found || work.CorrelationID != record.CorrelationID || work.Value.ID != task.WorkID || work.Value.Status != core.WorkActive {
+		return fmt.Errorf("Task requires its exact active Work on the same correlation boundary")
+	}
+	intent, found := graph.Intents[work.Value.IntentID]
+	if !found || intent.CorrelationID != record.CorrelationID || intent.Value.ID != work.Value.IntentID || string(intent.Value.OrganizationID) != event.OrganizationID {
+		return fmt.Errorf("Task requires its exact Intent organization and correlation boundary")
+	}
+	return core.ValidateTaskAssignment(task, intent.Value.OrganizationID, graph)
 }
 
 func validateProjectionEventLifecycle[T any](event events.Event, record events.ProjectionRecord, kind string, history map[core.ID]Versioned[T], identity func(T) core.ID, correlationStable bool, validate func(string, int, *T, T) error) error {

@@ -164,6 +164,23 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	stream, err := l.Events(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutConfirmation := make([]events.Event, 0, len(stream)-1)
+	for _, event := range stream {
+		if event.EventType != "INTENT_CONFIRMED" {
+			withoutConfirmation = append(withoutConfirmation, event)
+		}
+	}
+	if _, err := New(events.NewGateway(replayLedger{stream: withoutConfirmation})).Rebuild(ctx); err == nil || !strings.Contains(err.Error(), "prior reviewed intent confirmation") {
+		t.Fatalf("startup admitted Goal-bound Work without review evidence: %v", err)
+	}
+	workBeforeIntent := swapReplayProjectionSequences(t, stream, "INTENT_CREATED", "WORK_CREATED")
+	if _, err := New(events.NewGateway(replayLedger{stream: workBeforeIntent})).Rebuild(ctx); err == nil || !strings.Contains(err.Error(), "prior Intent") {
+		t.Fatalf("startup admitted Work before its Intent: %v", err)
+	}
 	if !reflect.DeepEqual(loaded, rebuilt) {
 		t.Fatalf("records projection differs from event replay:\nloaded=%+v\nrebuilt=%+v", loaded, rebuilt)
 	}
@@ -1086,6 +1103,82 @@ func TestRebuildRejectsUnsupportedOrdinaryEventSchema(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "unsupported schema version") {
 		t.Fatalf("startup admitted unsupported ordinary event schema: %v", err)
 	}
+}
+
+func TestRebuildRejectsInvalidHistoricalTeamRoster(t *testing.T) {
+	now := time.Unix(1, 0).UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	invalid := core.Team{ID: "team-1", OrganizationID: organization.ID, Name: "Delivery", MemberAgentIDs: []core.ID{"missing-agent"}, Status: "ACTIVE", CreatedAt: now}
+	corrected := invalid
+	corrected.MemberAgentIDs = []core.ID{}
+	stream := []events.Event{
+		sealedReplayProjection(t, 1, "ORGANIZATION_CREATED", KindOrganization, string(organization.ID), 1, "setup", organization.ID, organization),
+		sealedReplayProjection(t, 2, "TEAM_CREATED", KindTeam, string(invalid.ID), 1, "roster", organization.ID, invalid),
+		sealedReplayProjection(t, 3, "TEAM_REVISED", KindTeam, string(corrected.ID), 2, "roster", organization.ID, corrected),
+	}
+	_, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "invalid member Agent") {
+		t.Fatalf("startup accepted an invalid historical Team roster hidden by a later revision: %v", err)
+	}
+}
+
+func sealedReplayProjection(t *testing.T, sequence int64, eventType, kind, recordID string, version int, correlationID string, organizationID core.ID, value any) events.Event {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := events.ProjectionRecord{ProjectionKind: kind, RecordID: recordID, Version: version, CorrelationID: correlationID, Value: encoded}
+	event := events.Event{
+		EventID: fmt.Sprintf("event-%d", sequence), Sequence: sequence, OrganizationID: string(organizationID), EventType: eventType,
+		SourceActorID: "runtime", CorrelationID: correlationID, CreatedAt: time.Unix(sequence, 0).UTC(), SchemaVersion: events.SchemaVersion,
+	}
+	sealed, err := events.SealProjectionEvent(event, record, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.Payload, err = json.Marshal(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return event
+}
+
+func swapReplayProjectionSequences(t *testing.T, stream []events.Event, firstType, secondType string) []events.Event {
+	t.Helper()
+	result := append([]events.Event(nil), stream...)
+	first, second := -1, -1
+	for index, event := range result {
+		switch event.EventType {
+		case firstType:
+			first = index
+		case secondType:
+			second = index
+		}
+	}
+	if first < 0 || second < 0 {
+		t.Fatalf("projection events %s/%s were not found", firstType, secondType)
+	}
+	firstPayload, firstPresent, firstErr := events.AdmittedProjection(result[first])
+	secondPayload, secondPresent, secondErr := events.AdmittedProjection(result[second])
+	if firstErr != nil || secondErr != nil || !firstPresent || !secondPresent {
+		t.Fatalf("projection events cannot be resealed: first=%v/%t second=%v/%t", firstErr, firstPresent, secondErr, secondPresent)
+	}
+	result[first].Sequence, result[second].Sequence = result[second].Sequence, result[first].Sequence
+	for _, item := range []struct {
+		index   int
+		payload events.ProjectionEventPayload
+	}{{first, firstPayload}, {second, secondPayload}} {
+		sealed, err := events.SealProjectionEvent(result[item.index], item.payload.Projection, item.payload.Detail)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result[item.index].Payload, err = json.Marshal(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return result
 }
 
 type replayLedger struct {
