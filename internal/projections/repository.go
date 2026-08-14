@@ -380,12 +380,15 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 		}
 		if !present {
 			if event.EventType == "INTENT_CONFIRMED" {
-				if _, duplicate := confirmations[event.CorrelationID]; duplicate {
-					return fmt.Errorf("event %s duplicates a Goal-bound intent confirmation", event.EventID)
-				}
 				var confirmation events.IntentConfirmedPayload
 				if decodeExactProjectionJSON(event.Payload, &confirmation) != nil {
-					return fmt.Errorf("event %s contains an invalid Goal-bound intent confirmation", event.EventID)
+					return fmt.Errorf("event %s contains an invalid intent confirmation", event.EventID)
+				}
+				if confirmation.GoalID == "" {
+					continue
+				}
+				if _, duplicate := confirmations[event.CorrelationID]; duplicate {
+					return fmt.Errorf("event %s duplicates a Goal-bound intent confirmation", event.EventID)
 				}
 				goal, found := graph.Goals[core.ID(confirmation.GoalID)]
 				if !found || goal.Value.ID != core.ID(confirmation.GoalID) || goal.Value.Status != core.GoalActive {
