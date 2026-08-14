@@ -32,6 +32,8 @@ modules:
     path: internal/events
   - name: execution
     path: internal/execution
+  - name: fileguard
+    path: internal/fileguard
   - name: gateway
     path: internal/gateway
   - name: inference
@@ -120,7 +122,13 @@ policy:
       from:
         module: bootstrap
       to:
-        modules: [inference, modelid]
+        modules: [fileguard, inference, modelid]
+
+    - name: sealed-file-mutation
+      from:
+        module: secrets
+      to:
+        module: fileguard
 
     - name: telemetry-projection
       from:

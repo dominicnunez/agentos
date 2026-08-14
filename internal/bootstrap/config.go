@@ -12,12 +12,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/dominicnunez/agentos/internal/fileguard"
 	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/modelid"
 )
@@ -149,18 +149,7 @@ func (c Config) ValidateReady() error {
 	if c.Version != ConfigVersion {
 		problems = append(problems, fmt.Errorf("unsupported configuration version %d", c.Version))
 	}
-	if c.Mode != ModeSystem && c.Mode != ModeUser {
-		problems = append(problems, fmt.Errorf("mode must be system or user"))
-	}
-	if !validLinuxAccountName(c.Owner.Username) || c.Owner.Username == "agentos" || c.Owner.UID < 0 || c.Owner.GID < 0 {
-		problems = append(problems, fmt.Errorf("owner must be the verified Linux user who started setup"))
-	}
-	if !validIdentifier(c.Organization) {
-		problems = append(problems, fmt.Errorf("organization is required"))
-	}
-	if err := validatePaths(c.Paths); err != nil {
-		problems = append(problems, err)
-	}
+	problems = append(problems, configurationIdentityProblems(c.Mode, c.Owner, c.Organization, c.Paths, "owner must be the verified Linux user who started setup")...)
 	if len(c.Providers) == 0 {
 		problems = append(problems, fmt.Errorf("at least one real model provider is required"))
 	} else if len(c.Providers) != 1 {
@@ -219,19 +208,7 @@ func UpgradeVersion1Checkpoint(config Config, state State) (Config, State, error
 }
 
 func validateVersion1Config(config Config) error {
-	var problems []error
-	if config.Mode != ModeSystem && config.Mode != ModeUser {
-		problems = append(problems, fmt.Errorf("mode must be system or user"))
-	}
-	if !validLinuxAccountName(config.Owner.Username) || config.Owner.Username == "agentos" || config.Owner.UID < 0 || config.Owner.GID < 0 {
-		problems = append(problems, fmt.Errorf("owner must be a verified Linux user"))
-	}
-	if !validIdentifier(config.Organization) {
-		problems = append(problems, fmt.Errorf("organization is required"))
-	}
-	if err := validatePaths(config.Paths); err != nil {
-		problems = append(problems, err)
-	}
+	problems := configurationIdentityProblems(config.Mode, config.Owner, config.Organization, config.Paths, "owner must be a verified Linux user")
 	if len(config.Providers) > 1 {
 		problems = append(problems, fmt.Errorf("version-1 configuration has multiple providers"))
 	}
@@ -255,6 +232,23 @@ func validateVersion1Config(config Config) error {
 		problems = append(problems, fmt.Errorf("configuration timestamps are invalid"))
 	}
 	return errors.Join(problems...)
+}
+
+func configurationIdentityProblems(mode Mode, owner Owner, organization string, paths Paths, ownerProblem string) []error {
+	var problems []error
+	if mode != ModeSystem && mode != ModeUser {
+		problems = append(problems, fmt.Errorf("mode must be system or user"))
+	}
+	if !validLinuxAccountName(owner.Username) || owner.Username == "agentos" || owner.UID < 0 || owner.GID < 0 {
+		problems = append(problems, errors.New(ownerProblem))
+	}
+	if !validIdentifier(organization) {
+		problems = append(problems, fmt.Errorf("organization is required"))
+	}
+	if err := validatePaths(paths); err != nil {
+		problems = append(problems, err)
+	}
+	return problems
 }
 
 func validateVersion1Provider(provider Provider) error {
@@ -492,65 +486,5 @@ func writeJSON(path string, value any, mode os.FileMode) error {
 		return err
 	}
 	encoded = append(bytes.TrimSpace(encoded), '\n')
-	directory := filepath.Dir(path)
-	if err := rejectSymlinkComponents(directory); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return fmt.Errorf("create %s: %w", directory, err)
-	}
-	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refuse to replace symlink %s", path)
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	temporary, err := os.CreateTemp(directory, ".agentos-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer func() { _ = os.Remove(temporaryPath) }()
-	if err := temporary.Chmod(mode); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(encoded); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if runtime.GOOS == "windows" {
-		_ = os.Remove(path)
-	}
-	return os.Rename(temporaryPath, path)
-}
-
-func rejectSymlinkComponents(path string) error {
-	cleaned := filepath.Clean(path)
-	if !filepath.IsAbs(cleaned) {
-		return fmt.Errorf("path must be absolute")
-	}
-	volume := filepath.VolumeName(cleaned)
-	remainder := strings.TrimPrefix(cleaned, volume)
-	current := volume + string(filepath.Separator)
-	for _, component := range strings.FieldsFunc(remainder, func(character rune) bool { return character == '/' || character == '\\' }) {
-		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("path component %s must be a directory, not a link", current)
-		}
-	}
-	return nil
+	return fileguard.WriteAtomically(path, encoded, mode, 0o700)
 }
