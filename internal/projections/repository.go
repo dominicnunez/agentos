@@ -689,7 +689,7 @@ func validateLabExperimentAtAdmission(experiment core.Experiment, event events.E
 			return fmt.Errorf("running Lab experiment requires active Work")
 		}
 	case core.ExperimentCompleted:
-		if work.Value.Status != core.WorkCompleted || len(experiment.ResultEventRefs) != 1 {
+		if !core.ValidTerminalExperimentWorkStatus(experiment, work.Value) || len(experiment.ResultEventRefs) != 1 {
 			return fmt.Errorf("completed Lab experiment requires one exact completed Work transition")
 		}
 		completion, found := priorEventByID(stream, event.Sequence, experiment.ResultEventRefs[0])
@@ -706,8 +706,8 @@ func validateLabExperimentAtAdmission(experiment core.Experiment, event events.E
 			return fmt.Errorf("completed Lab experiment artifacts do not match Work evidence")
 		}
 	case core.ExperimentFailed:
-		if work.Value.Status == core.WorkActive {
-			return fmt.Errorf("failed Lab experiment requires terminal Work")
+		if !core.ValidTerminalExperimentWorkStatus(experiment, work.Value) {
+			return fmt.Errorf("failed Lab experiment conflicts with its Work outcome")
 		}
 	}
 	return nil
@@ -722,6 +722,11 @@ func validateLabPromotionCandidateAtAdmission(candidate core.PromotionCandidate,
 		experiment.Version != candidate.ExperimentVersion || experiment.CorrelationID != event.CorrelationID ||
 		!slices.Equal(experiment.Value.ResultEventRefs, candidate.ExperimentResultEventRefs) || candidate.CreatedAt.Before(*experiment.Value.FinishedAt) {
 		return fmt.Errorf("Lab promotion candidate lacks its exact completed experiment")
+	}
+	work := graph.Works[experiment.Value.WorkID]
+	intent := graph.Intents[work.Value.IntentID]
+	if candidate.NominatedBy != intent.Value.SourcePrincipalID {
+		return fmt.Errorf("Lab promotion candidate does not preserve its commissioning actor")
 	}
 	for _, ref := range candidate.ReproductionEvidenceRefs {
 		reproduction, found := priorEventByID(stream, event.Sequence, ref)

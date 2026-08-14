@@ -304,8 +304,7 @@ func ValidateDurableGraph(graph DurableGraph) error {
 		}
 		// A terminal Work may briefly coexist with a RUNNING experiment after a
 		// crash; startup reconciliation closes it from the durable Work event.
-		if experiment.Status == ExperimentCompleted && work.Value.Status != WorkCompleted ||
-			experiment.Status == ExperimentFailed && work.Value.Status == WorkActive {
+		if experiment.Status != ExperimentRunning && !ValidTerminalExperimentWorkStatus(experiment, work.Value) {
 			return fmt.Errorf("experiment %s conflicts with its Work lifecycle", id)
 		}
 	}
@@ -319,6 +318,11 @@ func ValidateDurableGraph(graph DurableGraph) error {
 			candidate.ExperimentVersion != experiment.Version || state.CorrelationID == "" || state.CorrelationID != experiment.CorrelationID ||
 			!slices.Equal(candidate.ExperimentResultEventRefs, experiment.Value.ResultEventRefs) {
 			return fmt.Errorf("promotion candidate %s lacks its exact completed experiment", id)
+		}
+		work := graph.Works[experiment.Value.WorkID]
+		intent := graph.Intents[work.Value.IntentID]
+		if candidate.NominatedBy != intent.Value.SourcePrincipalID {
+			return fmt.Errorf("promotion candidate %s does not preserve its commissioning actor", id)
 		}
 	}
 	return nil

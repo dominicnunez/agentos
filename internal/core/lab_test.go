@@ -20,6 +20,22 @@ func TestExperimentTrustAndLifecycleStayFailClosed(t *testing.T) {
 	if !ValidExperiment(completed) || !ValidExperimentRevision(running, completed) {
 		t.Fatal("valid terminal experiment revision rejected")
 	}
+	completedWork := Work{Status: WorkCompleted}
+	failedWork := Work{Status: WorkFailed}
+	if !ValidTerminalExperimentWorkStatus(completed, completedWork) || ValidTerminalExperimentWorkStatus(completed, failedWork) {
+		t.Fatal("completed experiment was not bound exclusively to completed Work")
+	}
+	failed := running
+	failed.Status = ExperimentFailed
+	failed.FailureCode = ExperimentFailureWorkFailed
+	failed.FinishedAt = &finished
+	if !ValidTerminalExperimentWorkStatus(failed, failedWork) || ValidTerminalExperimentWorkStatus(failed, completedWork) {
+		t.Fatal("Work-failure experiment was not bound exclusively to failed Work")
+	}
+	failed.FailureCode = ExperimentFailureBudgetExceeded
+	if !ValidTerminalExperimentWorkStatus(failed, completedWork) || ValidTerminalExperimentWorkStatus(failed, failedWork) {
+		t.Fatal("budget-failure experiment was not bound exclusively to completed Work")
+	}
 
 	trusted := completed
 	trusted.TrustLabel = "TRUSTED"

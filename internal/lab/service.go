@@ -67,7 +67,6 @@ type Nomination struct {
 	TargetRef                string
 	Summary                  string
 	ReproductionEvidenceRefs []string
-	NominatedBy              core.ID
 }
 
 type Service struct {
@@ -237,12 +236,21 @@ func (s *Service) Nominate(ctx context.Context, request Nomination) (core.Promot
 	if !found || experiment.Value.OrganizationID != request.OrganizationID || experiment.Value.Status != core.ExperimentCompleted {
 		return core.PromotionCandidate{}, fmt.Errorf("promotion nomination requires a completed experiment in the organization")
 	}
+	work, found := snapshot.Works[experiment.Value.WorkID]
+	if !found {
+		return core.PromotionCandidate{}, fmt.Errorf("promotion nomination requires its experimental Work")
+	}
+	intent, found := snapshot.Intents[work.Value.IntentID]
+	if !found || intent.Value.SourcePrincipalID == "" {
+		return core.PromotionCandidate{}, fmt.Errorf("promotion nomination requires its commissioning actor")
+	}
+	nominatedBy := intent.Value.SourcePrincipalID
 	candidate := core.PromotionCandidate{
-		ID: nominationID(request), OrganizationID: request.OrganizationID, ExperimentID: request.ExperimentID,
+		ID: nominationID(request, nominatedBy), OrganizationID: request.OrganizationID, ExperimentID: request.ExperimentID,
 		ExperimentVersion: experiment.Version, TargetKind: request.TargetKind, TargetRef: request.TargetRef, Summary: request.Summary,
 		ExperimentResultEventRefs: append([]string(nil), experiment.Value.ResultEventRefs...),
 		ReproductionEvidenceRefs:  request.ReproductionEvidenceRefs,
-		NominatedBy:               request.NominatedBy, Status: core.PromotionCandidateStatus, CreatedAt: s.now(),
+		NominatedBy:               nominatedBy, Status: core.PromotionCandidateStatus, CreatedAt: s.now(),
 	}
 	if !core.ValidPromotionCandidate(candidate) {
 		return core.PromotionCandidate{}, fmt.Errorf("promotion nomination is incomplete or reuses experiment evidence")
@@ -336,8 +344,8 @@ func exactWorkCompletion(ctx context.Context, gateway *events.Gateway, organizat
 	return matched, artifacts, nil
 }
 
-func nominationID(request Nomination) core.ID {
-	parts := []string{string(request.ExperimentID), string(request.TargetKind), request.TargetRef, string(request.NominatedBy)}
+func nominationID(request Nomination, nominatedBy core.ID) core.ID {
+	parts := []string{string(request.ExperimentID), string(request.TargetKind), request.TargetRef, string(nominatedBy)}
 	parts = append(parts, request.ReproductionEvidenceRefs...)
 	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return core.ID("promotion-" + hex.EncodeToString(digest[:16]))

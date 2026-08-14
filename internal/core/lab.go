@@ -120,6 +120,22 @@ func ValidExperimentRevision(previous, next Experiment) bool {
 	return true
 }
 
+// ValidTerminalExperimentWorkStatus binds each terminal experiment outcome to
+// the only Work outcome that can justify it.
+func ValidTerminalExperimentWorkStatus(experiment Experiment, work Work) bool {
+	switch experiment.Status {
+	case ExperimentCompleted:
+		return work.Status == WorkCompleted
+	case ExperimentFailed:
+		if experiment.FailureCode == ExperimentFailureWorkFailed {
+			return work.Status == WorkFailed
+		}
+		return (experiment.FailureCode == ExperimentFailureBudgetExceeded || experiment.FailureCode == ExperimentFailureContainmentViolated) && work.Status == WorkCompleted
+	default:
+		return false
+	}
+}
+
 func ValidPromotionCandidate(candidate PromotionCandidate) bool {
 	validTarget := candidate.TargetKind == PromotionTargetKnowledge || candidate.TargetKind == PromotionTargetSkill || candidate.TargetKind == PromotionTargetConfiguration
 	if candidate.ID == "" || candidate.OrganizationID == "" || candidate.ExperimentID == "" || candidate.ExperimentVersion < 2 ||

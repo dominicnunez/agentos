@@ -1723,7 +1723,7 @@ func validateLabExperimentRevision(ctx context.Context, tx *sql.Tx, item prepare
 			return fmt.Errorf("running Lab experiment requires active Work")
 		}
 	case core.ExperimentCompleted:
-		if work.Status != core.WorkCompleted || len(experiment.ResultEventRefs) != 1 {
+		if !core.ValidTerminalExperimentWorkStatus(experiment, work) || len(experiment.ResultEventRefs) != 1 {
 			return fmt.Errorf("completed Lab experiment requires one exact completed Work transition")
 		}
 		completion, found, err := eventByID(ctx, tx, experiment.ResultEventRefs[0])
@@ -1740,8 +1740,8 @@ func validateLabExperimentRevision(ctx context.Context, tx *sql.Tx, item prepare
 			return fmt.Errorf("completed Lab experiment artifacts do not match Work evidence")
 		}
 	case core.ExperimentFailed:
-		if work.Status == core.WorkActive {
-			return fmt.Errorf("failed Lab experiment requires terminal Work")
+		if !core.ValidTerminalExperimentWorkStatus(experiment, work) {
+			return fmt.Errorf("failed Lab experiment conflicts with its Work outcome")
 		}
 	}
 	return nil
@@ -1760,6 +1760,14 @@ func validateLabPromotionCandidateRevision(ctx context.Context, tx *sql.Tx, item
 		experimentRecord.Version != candidate.ExperimentVersion || experimentRecord.CorrelationID != item.draft.Event.CorrelationID ||
 		!slices.Equal(experiment.ResultEventRefs, candidate.ExperimentResultEventRefs) || candidate.CreatedAt.Before(*experiment.FinishedAt) {
 		return fmt.Errorf("Lab promotion candidate lacks its exact completed experiment")
+	}
+	_, work, found, err := latestProjectionRevision[core.Work](ctx, tx, "work", string(experiment.WorkID))
+	if err != nil || !found {
+		return fmt.Errorf("Lab promotion candidate lacks its experimental Work")
+	}
+	_, intent, found, err := latestProjectionRevision[core.Intent](ctx, tx, "intent", string(work.IntentID))
+	if err != nil || !found || candidate.NominatedBy != intent.SourcePrincipalID {
+		return fmt.Errorf("Lab promotion candidate does not preserve its commissioning actor")
 	}
 	for _, ref := range candidate.ReproductionEvidenceRefs {
 		reproduction, found, err := eventByID(ctx, tx, ref)

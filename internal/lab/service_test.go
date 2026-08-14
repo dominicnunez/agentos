@@ -191,7 +191,7 @@ func TestPromotionNominationRequiresIndependentSameOrganizationWork(t *testing.T
 	candidate, err := labService.Nominate(ctx, lab.Nomination{
 		OrganizationID: "org-1", ExperimentID: experimentResult.Experiment.ID,
 		TargetKind: core.PromotionTargetKnowledge, TargetRef: "knowledge-candidate-1", Summary: "candidate method reproduced",
-		ReproductionEvidenceRefs: reproductionRefs, NominatedBy: "agent-reviewer-1",
+		ReproductionEvidenceRefs: reproductionRefs,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -199,13 +199,16 @@ func TestPromotionNominationRequiresIndependentSameOrganizationWork(t *testing.T
 	if candidate.Status != core.PromotionCandidateStatus {
 		t.Fatalf("candidate status=%s", candidate.Status)
 	}
+	if candidate.NominatedBy != experimentResult.Intent.SourcePrincipalID || candidate.NominatedBy != "runtime" {
+		t.Fatalf("candidate nominator=%s want commissioning actor %s", candidate.NominatedBy, experimentResult.Intent.SourcePrincipalID)
+	}
 	if !slices.IsSorted(candidate.ReproductionEvidenceRefs) {
 		t.Fatalf("candidate evidence is not canonical: %v", candidate.ReproductionEvidenceRefs)
 	}
 	retry, err := labService.Nominate(ctx, lab.Nomination{
 		OrganizationID: "org-1", ExperimentID: experimentResult.Experiment.ID,
 		TargetKind: core.PromotionTargetKnowledge, TargetRef: "knowledge-candidate-1", Summary: "candidate method reproduced",
-		ReproductionEvidenceRefs: append([]string(nil), candidate.ReproductionEvidenceRefs...), NominatedBy: "agent-reviewer-1",
+		ReproductionEvidenceRefs: append([]string(nil), candidate.ReproductionEvidenceRefs...),
 	})
 	if err != nil || retry.ID != candidate.ID {
 		t.Fatalf("permuted evidence did not replay idempotently: retry=%+v err=%v", retry, err)
@@ -221,7 +224,7 @@ func TestPromotionNominationRequiresIndependentSameOrganizationWork(t *testing.T
 	_, err = labService.Nominate(ctx, lab.Nomination{
 		OrganizationID: "org-1", ExperimentID: experimentResult.Experiment.ID,
 		TargetKind: core.PromotionTargetSkill, TargetRef: "skill-candidate-1", Summary: "reused experiment result",
-		ReproductionEvidenceRefs: append([]string(nil), experimentResult.Experiment.ResultEventRefs...), NominatedBy: "agent-reviewer-1",
+		ReproductionEvidenceRefs: append([]string(nil), experimentResult.Experiment.ResultEventRefs...),
 	})
 	if err == nil {
 		t.Fatal("experiment-selected result was reused as independent reproduction")
@@ -236,7 +239,7 @@ func TestPromotionNominationRequiresIndependentSameOrganizationWork(t *testing.T
 	_, err = labService.Nominate(ctx, lab.Nomination{
 		OrganizationID: "org-1", ExperimentID: experimentResult.Experiment.ID,
 		TargetKind: core.PromotionTargetConfiguration, TargetRef: "config-candidate-1", Summary: "foreign evidence",
-		ReproductionEvidenceRefs: []string{eventOfType(t, foreign.Events, "WORK_COMPLETED").EventID}, NominatedBy: "agent-reviewer-1",
+		ReproductionEvidenceRefs: []string{eventOfType(t, foreign.Events, "WORK_COMPLETED").EventID},
 	})
 	if err == nil || !strings.Contains(err.Error(), "same-organization") {
 		t.Fatalf("foreign-organization evidence was accepted: %v", err)
