@@ -1,6 +1,6 @@
 module github.com/dominicnunez/agentos
 
-go 1.26.5
+go 1.26.6
 
 tool (
 	github.com/dominicnunez/archguard/cmd/archguard

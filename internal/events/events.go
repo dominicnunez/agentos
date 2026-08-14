@@ -1,10 +1,12 @@
 package events
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"reflect"
 	"slices"
 	"sort"
@@ -15,7 +17,11 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 )
 
-const SchemaVersion = 2
+const SchemaVersion = 3
+
+// ReviewedGoalIntentEvidenceLimit bounds the durable intake/review evidence
+// replayed for one Goal-bound intent confirmation.
+const ReviewedGoalIntentEvidenceLimit = 1024
 
 const (
 	RecipientAgent = "AGENT"
@@ -114,6 +120,149 @@ type IntentConfirmedPayload struct {
 	ConfirmingActorKind string `json:"confirming_actor_kind"`
 	SourceChannel       string `json:"source_channel"`
 	MessageID           string `json:"message_id"`
+}
+
+// ValidateGoalBoundIntentConfirmation proves that one reviewed confirmation
+// exactly authorizes the accepted durable Intent and its Goal binding.
+func ValidateGoalBoundIntentConfirmation(event Event, intent core.Intent) error {
+	var confirmation IntentConfirmedPayload
+	if decodeExactEventJSON(event.Payload, &confirmation) != nil ||
+		event.EventType != "INTENT_CONFIRMED" || event.OrganizationID != string(intent.OrganizationID) || event.SourceActorID == "" || event.SourceActorID != confirmation.ConfirmingActorID || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != "task-"+event.CorrelationID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID == "" || event.SchemaVersion != SchemaVersion ||
+		confirmation.IntentID != string(intent.ID) || confirmation.GoalID != string(intent.GoalID) || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.Fingerprint != intent.AcceptedFingerprint || confirmation.ConfirmingActorID != string(intent.SourcePrincipalID) || confirmation.ConfirmingActorKind != string(intent.SourcePrincipalKind) || confirmation.SourceChannel != intent.SourceChannel || confirmation.MessageID == "" {
+		return fmt.Errorf("goal-bound intent confirmation is invalid")
+	}
+	return nil
+}
+
+// ValidateReviewedGoalIntentAdmission replays the bounded intake and review
+// evidence that authorizes one Goal-bound intent confirmation. The supplied
+// Goal must be the exact durable Goal state visible at the confirmation event.
+func ValidateReviewedGoalIntentAdmission(stream []Event, confirmationEvent Event, goal core.Goal) error {
+	var confirmation IntentConfirmedPayload
+	if decodeExactEventJSON(confirmationEvent.Payload, &confirmation) != nil ||
+		confirmationEvent.EventType != "INTENT_CONFIRMED" || confirmationEvent.OrganizationID == "" || confirmationEvent.OrganizationID != string(goal.OrganizationID) ||
+		confirmationEvent.SourceActorID == "" || confirmationEvent.SourceActorID != confirmation.ConfirmingActorID || !validReviewedOperatorIdentity(confirmation.ConfirmingActorID, confirmation.ConfirmingActorKind, confirmation.SourceChannel) ||
+		confirmationEvent.SourceExecutionID != "" || confirmationEvent.RecipientScope != "" || confirmationEvent.RecipientID != "" || confirmationEvent.TaskID != "task-"+confirmationEvent.CorrelationID ||
+		len(confirmationEvent.AuthorizationRefs) != 0 || len(confirmationEvent.ArtifactRefs) != 0 || confirmationEvent.CorrelationID == "" || confirmationEvent.SchemaVersion != SchemaVersion ||
+		confirmation.IntentID != "intent-"+confirmationEvent.CorrelationID || confirmation.GoalID != string(goal.ID) || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.MessageID == "" {
+		return fmt.Errorf("goal-bound intent confirmation does not match its checked goal")
+	}
+	if goal.ID == "" || goal.Status != core.GoalActive {
+		return fmt.Errorf("goal-bound intent confirmation requires its active Goal at admission")
+	}
+	reviewStream := make([]Event, 0, len(stream))
+	for _, candidate := range stream {
+		if candidate.CorrelationID != confirmationEvent.CorrelationID || confirmationEvent.Sequence > 0 && candidate.Sequence > confirmationEvent.Sequence {
+			continue
+		}
+		switch candidate.EventType {
+		case "INTAKE_MESSAGE_RECORDED", "INTENT_DRAFTED", "INTENT_CONFIRMED":
+			reviewStream = append(reviewStream, candidate)
+		}
+	}
+	if len(reviewStream) > ReviewedGoalIntentEvidenceLimit {
+		return fmt.Errorf("goal-bound intent review evidence exceeds its admission bound")
+	}
+	return validateReviewedGoalIntent(reviewStream, confirmationEvent, confirmation, goal.ID)
+}
+
+func validateReviewedGoalIntent(stream []Event, confirmationEvent Event, confirmation IntentConfirmedPayload, goalID core.ID) error {
+	intakeMessages := make(map[string]IntakeMessageRecordedPayload)
+	intakeSequences := make(map[string]int64)
+	var latestIntakeMessageID string
+	var latestIntakeSequence int64
+	var latestDraftEvent Event
+	var latestDraft IntentDraftedPayload
+	draftCount := 0
+	for _, event := range stream {
+		switch event.EventType {
+		case "INTAKE_MESSAGE_RECORDED":
+			var payload IntakeMessageRecordedPayload
+			if decodeExactEventJSON(event.Payload, &payload) != nil || !validReviewedIntakeMessage(event, payload, confirmationEvent) {
+				return fmt.Errorf("goal-bound intent has invalid durable intake evidence")
+			}
+			if _, exists := intakeMessages[payload.MessageID]; exists {
+				return fmt.Errorf("goal-bound intent source message is not unique")
+			}
+			intakeMessages[payload.MessageID] = payload
+			intakeSequences[payload.MessageID] = event.Sequence
+			latestIntakeMessageID = payload.MessageID
+			latestIntakeSequence = event.Sequence
+		case "INTENT_DRAFTED":
+			var payload IntentDraftedPayload
+			if decodeExactEventJSON(event.Payload, &payload) != nil || event.OrganizationID != confirmationEvent.OrganizationID || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != confirmationEvent.TaskID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID != confirmationEvent.CorrelationID || event.SchemaVersion != SchemaVersion {
+				return fmt.Errorf("goal-bound intent has invalid durable review draft")
+			}
+			draftCount++
+			latestDraftEvent = event
+			latestDraft = payload
+		}
+	}
+	if latestDraftEvent.EventID == "" || latestIntakeMessageID == "" || latestDraftEvent.Sequence <= latestIntakeSequence || latestDraft.SourceMessageID != latestIntakeMessageID || latestDraft.Draft.CreatedAt.IsZero() || strings.TrimSpace(latestDraft.Reply) == "" {
+		return fmt.Errorf("goal-bound intent confirmation requires the current durable reviewed draft")
+	}
+	reviewed := latestDraft.Draft
+	if reviewed.ID != core.ID(confirmation.IntentID) || reviewed.OrganizationID != core.ID(confirmationEvent.OrganizationID) || reviewed.Version != confirmation.Version || reviewed.Version != draftCount || reviewed.Fingerprint != confirmation.Fingerprint {
+		return fmt.Errorf("goal-bound intent confirmation does not match its durable reviewed draft")
+	}
+	switch reviewed.RequestedExecutionKind {
+	case core.ExecutionDeterministic, core.ExecutionAgent, core.ExecutionHuman:
+	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed, "":
+		return fmt.Errorf("goal-bound intent reviewed execution kind is unavailable")
+	default:
+		return fmt.Errorf("goal-bound intent reviewed execution kind is unavailable")
+	}
+	if err := core.ValidateAcceptedIntentDraft(reviewed, core.ID(confirmationEvent.OrganizationID), reviewed.RequestedExecutionKind); err != nil {
+		return fmt.Errorf("goal-bound intent durable reviewed draft is invalid: %w", err)
+	}
+	reviewedGoalID, err := core.AcceptedIntentGoalID(reviewed)
+	if err != nil || reviewedGoalID != goalID || reviewed.Goal == nil || reviewed.Goal.Origin != "EXPLICIT" && reviewed.Goal.Origin != "CONFIRMED" {
+		return fmt.Errorf("goal-bound intent reviewed Goal provenance is invalid")
+	}
+	goalMessage, found := intakeMessages[reviewed.Goal.SourceMessageID]
+	if !found || intakeSequences[reviewed.Goal.SourceMessageID] >= latestDraftEvent.Sequence || !core.ContainsExactGoalReference(goalMessage.Text, string(goalID)) {
+		return fmt.Errorf("goal-bound intent Goal is not present in its attributed source message")
+	}
+	for _, event := range stream {
+		if event.EventType == "INTENT_CONFIRMED" && event.Sequence <= latestDraftEvent.Sequence {
+			return fmt.Errorf("goal-bound intent confirmation precedes its reviewed draft")
+		}
+	}
+	return nil
+}
+
+func validReviewedIntakeMessage(event Event, payload IntakeMessageRecordedPayload, confirmationEvent Event) bool {
+	if payload.MessageID == "" || strings.TrimSpace(payload.Text) == "" || !utf8.ValidString(payload.Text) || payload.SourcePrincipalID == "" || payload.SourcePrincipalKind == "" || payload.SourceChannel == "" ||
+		event.OrganizationID != confirmationEvent.OrganizationID || event.SourceActorID != payload.SourcePrincipalID || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != confirmationEvent.TaskID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID != confirmationEvent.CorrelationID || event.SchemaVersion != SchemaVersion {
+		return false
+	}
+	if !validReviewedOperatorIdentity(payload.SourcePrincipalID, payload.SourcePrincipalKind, payload.SourceChannel) {
+		return false
+	}
+	switch payload.RequestedExecutionKind {
+	case "", core.ExecutionDeterministic, core.ExecutionAgent, core.ExecutionHuman:
+		return true
+	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
+		return false
+	default:
+		return false
+	}
+}
+
+func validReviewedOperatorIdentity(id, kind, channel string) bool {
+	if id == "" {
+		return false
+	}
+	switch core.PrincipalKind(kind) {
+	case core.PrincipalHuman:
+		return channel == "HUMAN_DIRECT"
+	case core.PrincipalExternalAgent:
+		return channel == "A2A"
+	case core.PrincipalRuntime:
+		return false
+	default:
+		return false
+	}
 }
 
 type WorkCompletionTransitionPayload struct {
@@ -463,6 +612,62 @@ func ValidateWorkCompletionEvidenceChain(binding WorkCompletionBinding, evidence
 		return WorkCompletionEvidencePayload{}, err
 	}
 	return evidence, nil
+}
+
+// ValidateTaskCompletionEvidenceChain proves that one terminal Task projection
+// is the result of the exact runtime-owned completion decision and immutable
+// evidence that precede it. A completed status is not evidence by itself.
+func ValidateTaskCompletionEvidenceChain(binding WorkCompletionBinding, task WorkCompletionTaskBinding, completionEvent Event, stream []Event) (CompletionDecisionPayload, error) {
+	if binding.OrganizationID == "" || binding.CorrelationID == "" || binding.Work.ID == "" || binding.Work.Status != core.WorkActive || binding.Intent.ID == "" ||
+		binding.Intent.ID != binding.Work.IntentID || binding.Intent.NormalizedObjective != binding.Work.Objective || string(binding.Intent.OrganizationID) != binding.OrganizationID ||
+		task.Task.ID == "" || task.Task.WorkID != binding.Work.ID || task.Task.Status != core.TaskCompleted || task.Version < 2 || task.CorrelationID != binding.CorrelationID {
+		return CompletionDecisionPayload{}, fmt.Errorf("task completion binding is invalid")
+	}
+	payload, present, err := AdmittedProjection(completionEvent)
+	if err != nil || !present {
+		return CompletionDecisionPayload{}, fmt.Errorf("task completion transition is not admitted")
+	}
+	var projected core.Task
+	var decision CompletionDecisionPayload
+	if completionEvent.EventType != "TASK_VERIFIED_COMPLETE" || completionEvent.OrganizationID != binding.OrganizationID || completionEvent.SourceActorID != "runtime" || completionEvent.SourceExecutionID != "" || completionEvent.RecipientScope != "" || completionEvent.RecipientID != "" || completionEvent.TaskID != string(task.Task.ID) || len(completionEvent.AuthorizationRefs) != 0 || len(completionEvent.ArtifactRefs) != 0 || completionEvent.CorrelationID != binding.CorrelationID || completionEvent.SchemaVersion != SchemaVersion ||
+		payload.Projection.ProjectionKind != "task" || payload.Projection.RecordID != string(task.Task.ID) || payload.Projection.Version != task.Version || payload.Projection.CorrelationID != binding.CorrelationID ||
+		decodeExactEventJSON(payload.Projection.Value, &projected) != nil || !reflect.DeepEqual(projected, task.Task) || decodeExactEventJSON(payload.Detail, &decision) != nil || decision.Contract.TaskID != task.Task.ID || decision.Contract.TaskVersion < 1 || decision.Contract.TaskVersion >= task.Version || decision.OutcomeEventRef == "" || !decision.Result.Complete || len(decision.Result.Reasons) != 0 {
+		return CompletionDecisionPayload{}, fmt.Errorf("task completion transition is invalid")
+	}
+	var verification Event
+	for _, event := range stream {
+		if event.EventType != "COMPLETION_VERIFIED" || event.TaskID != string(task.Task.ID) || event.CorrelationID != binding.CorrelationID || event.Sequence >= completionEvent.Sequence {
+			continue
+		}
+		var candidate CompletionDecisionPayload
+		if event.OrganizationID != binding.OrganizationID || event.SourceActorID != "runtime" || event.RecipientScope != "" || event.RecipientID != "" || len(event.AuthorizationRefs) != 0 || event.SchemaVersion != SchemaVersion || decodeExactEventJSON(event.Payload, &candidate) != nil || !reflect.DeepEqual(candidate, decision) {
+			continue
+		}
+		if verification.EventID != "" {
+			return CompletionDecisionPayload{}, fmt.Errorf("task completion has multiple matching verification decisions")
+		}
+		verification = event
+	}
+	if verification.EventID == "" {
+		return CompletionDecisionPayload{}, fmt.Errorf("task completion lacks its exact verification decision")
+	}
+	outcomeEvent, found := eventWithID(stream, decision.OutcomeEventRef)
+	var outcome core.ToolOutcome
+	if !found || outcomeEvent.EventType != "TOOL_OUTCOME_RECORDED" || outcomeEvent.OrganizationID != binding.OrganizationID || outcomeEvent.SourceActorID != "runtime" || outcomeEvent.SourceExecutionID == "" || outcomeEvent.RecipientScope != "" || outcomeEvent.RecipientID != "" || outcomeEvent.TaskID != string(task.Task.ID) || len(outcomeEvent.AuthorizationRefs) != 0 || outcomeEvent.CorrelationID != binding.CorrelationID || outcomeEvent.Sequence >= verification.Sequence || outcomeEvent.SchemaVersion != SchemaVersion ||
+		decodeExactEventJSON(outcomeEvent.Payload, &outcome) != nil || outcome.ToolInvocationID == "" || outcome.ToolID == "" || outcome.StartedAt.IsZero() || outcome.FinishedAt.Before(outcome.StartedAt) || !slices.Equal(outcomeEvent.ArtifactRefs, outcome.ArtifactRefs) || !slices.Equal(verification.ArtifactRefs, outcome.ArtifactRefs) || verification.SourceExecutionID != "" && verification.SourceExecutionID != outcomeEvent.SourceExecutionID {
+		return CompletionDecisionPayload{}, fmt.Errorf("task completion outcome evidence is invalid")
+	}
+	expected, err := completionDecisionResult(binding, task, decision, outcome, outcomeEvent, verification, stream)
+	if err != nil {
+		return CompletionDecisionPayload{}, err
+	}
+	if !reflect.DeepEqual(expected, decision.Result) {
+		return CompletionDecisionPayload{}, fmt.Errorf("task completion decision does not match its durable evidence")
+	}
+	if _, _, err := ResolveVerifiedTaskResult(binding.OrganizationID, binding.CorrelationID, task.Task, task.Version, stream, 0); err != nil {
+		return CompletionDecisionPayload{}, err
+	}
+	return decision, nil
 }
 
 func completionEvidencePlan(binding WorkCompletionBinding, evidence WorkCompletionEvidencePayload, evidenceEvent Event, stream []Event) (core.Plan, error) {
@@ -1466,11 +1671,639 @@ type ProjectionRecord struct {
 	Value          json.RawMessage `json:"value"`
 }
 
+const ProjectionAdmissionMethod = "EVENT_COUPLED_PROJECTION_V1"
+
+// ProjectionAdmission proves that a projection payload was created by the
+// typed ledger admission path for this exact event envelope and identity.
+// Generic events reserve this contract and cannot mint it.
+type ProjectionAdmission struct {
+	Method      string `json:"method"`
+	EventRef    string `json:"event_ref"`
+	Fingerprint string `json:"fingerprint"`
+}
+
 // ProjectionEventPayload preserves transition detail while carrying the
-// complete versioned record needed for deterministic replay.
+// complete versioned record and sealed admission needed for deterministic
+// replay. Presence of either top-level field is reserved to typed projection
+// admission even when the payload is malformed.
 type ProjectionEventPayload struct {
-	Projection ProjectionRecord `json:"projection"`
-	Detail     json.RawMessage  `json:"detail,omitempty"`
+	Projection ProjectionRecord    `json:"projection"`
+	Admission  ProjectionAdmission `json:"admission"`
+	Detail     json.RawMessage     `json:"detail,omitempty"`
+}
+
+type projectionAdmissionFingerprintPayload struct {
+	Method            string           `json:"method"`
+	EventRef          string           `json:"event_ref"`
+	Sequence          int64            `json:"sequence"`
+	OrganizationID    string           `json:"organization_id"`
+	EventType         string           `json:"event_type"`
+	SourceActorID     string           `json:"source_actor_id"`
+	SourceExecutionID string           `json:"source_execution_id"`
+	RecipientScope    string           `json:"recipient_scope"`
+	RecipientID       string           `json:"recipient_id"`
+	TaskID            string           `json:"task_id"`
+	AuthorizationRefs []string         `json:"authorization_refs"`
+	ArtifactRefs      []string         `json:"artifact_refs"`
+	CorrelationID     string           `json:"correlation_id"`
+	CreatedAt         string           `json:"created_at"`
+	SchemaVersion     int              `json:"schema_version"`
+	Projection        ProjectionRecord `json:"projection"`
+	Detail            json.RawMessage  `json:"detail,omitempty"`
+}
+
+func SealProjectionEvent(event Event, record ProjectionRecord, detail json.RawMessage) (ProjectionEventPayload, error) {
+	if event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() || event.SchemaVersion != SchemaVersion || event.EventType == "" || event.OrganizationID == "" || record.ProjectionKind == "" || record.RecordID == "" || record.Version < 1 || record.CorrelationID != event.CorrelationID || len(record.Value) == 0 {
+		return ProjectionEventPayload{}, fmt.Errorf("complete projection admission identity is required")
+	}
+	admission := ProjectionAdmission{Method: ProjectionAdmissionMethod, EventRef: event.EventID}
+	fingerprint, err := projectionAdmissionFingerprint(admission, event, record, detail)
+	if err != nil {
+		return ProjectionEventPayload{}, err
+	}
+	admission.Fingerprint = fingerprint
+	return ProjectionEventPayload{Projection: record, Admission: admission, Detail: detail}, nil
+}
+
+// AdmittedProjection returns present=false only for an ordinary event. Any
+// event that contains a reserved projection/admission key must carry one exact
+// valid sealed contract or fail closed.
+func AdmittedProjection(event Event) (ProjectionEventPayload, bool, error) {
+	if rejectDuplicateJSONKeys(event.Payload) != nil {
+		return ProjectionEventPayload{}, false, fmt.Errorf("event payload is malformed")
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(event.Payload, &object) != nil || object == nil {
+		return ProjectionEventPayload{}, false, fmt.Errorf("event payload is malformed")
+	}
+	_, hasProjection := object["projection"]
+	_, hasAdmission := object["admission"]
+	if !hasProjection && !hasAdmission {
+		return ProjectionEventPayload{}, false, nil
+	}
+	var payload ProjectionEventPayload
+	decoder := json.NewDecoder(bytes.NewReader(event.Payload))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&payload) != nil || decoder.Decode(&struct{}{}) != io.EOF || event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() || payload.Projection.ProjectionKind == "" || payload.Projection.RecordID == "" || payload.Projection.Version < 1 || payload.Projection.CorrelationID != event.CorrelationID || len(payload.Projection.Value) == 0 || payload.Admission.Method != ProjectionAdmissionMethod || payload.Admission.EventRef != event.EventID || !validSHA256(payload.Admission.Fingerprint) {
+		return ProjectionEventPayload{}, true, fmt.Errorf("projection event admission is malformed")
+	}
+	want, fingerprintErr := projectionAdmissionFingerprint(payload.Admission, event, payload.Projection, payload.Detail)
+	if fingerprintErr != nil || want != payload.Admission.Fingerprint || event.SchemaVersion != SchemaVersion {
+		return ProjectionEventPayload{}, true, fmt.Errorf("projection event admission does not match its event boundary")
+	}
+	return payload, true, nil
+}
+
+func rejectDuplicateJSONKeys(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := validateUniqueJSONValue(decoder); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return fmt.Errorf("unexpected trailing JSON")
+	}
+	return nil
+}
+
+func validateUniqueJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, compound := token.(json.Delim)
+	if !compound {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := map[string]struct{}{}
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return fmt.Errorf("JSON object key is invalid")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("JSON object contains duplicate key %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := validateUniqueJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim('}') {
+			return fmt.Errorf("JSON object is incomplete")
+		}
+	case '[':
+		for decoder.More() {
+			if err := validateUniqueJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim(']') {
+			return fmt.Errorf("JSON array is incomplete")
+		}
+	default:
+		return fmt.Errorf("unsupported JSON delimiter")
+	}
+	return nil
+}
+
+// RequiresProjectionAdmission identifies runtime event labels that are owned
+// by the typed projection writer. TASK_BLOCKED remains agent-proposable when
+// the authenticated source is an Agent execution, but runtime lifecycle state
+// always requires the sealed event/record transaction.
+func RequiresProjectionAdmission(eventType, sourceActorID string) bool {
+	switch eventType {
+	case "ORGANIZATION_CREATED",
+		"MISSION_CREATED", "MISSION_REVISED", "MISSION_RETIRED",
+		"GOAL_CREATED", "GOAL_REFINED", "GOAL_PAUSED", "GOAL_RESUMED", "GOAL_RETIRED", "GOAL_ACHIEVED",
+		"TEAM_CREATED", "TEAM_REVISED",
+		"AGENT_BLUEPRINT_CREATED", "AGENT_BLUEPRINT_UPDATED",
+		"EXECUTION_PROFILE_CREATED", "EXECUTION_PROFILE_UPDATED",
+		"AGENT_CREATED", "AGENT_CONFIGURATION_UPDATED", "AGENT_DEACTIVATED", "AGENT_REACTIVATED",
+		"INTENT_CREATED",
+		"WORK_CREATED", "WORK_COMPLETED", "WORK_FAILED", "WORK_PLANNING_FAILED",
+		"TASK_CREATED", "TASK_ASSIGNMENT_REVALIDATED", "TASK_RECOVERED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED":
+		return true
+	case "TASK_BLOCKED":
+		return sourceActorID == "runtime"
+	default:
+		return false
+	}
+}
+
+// ProjectionKindRequiresAdmission identifies the closed set of organizational
+// projections carried by the current Event Contract schema.
+func ProjectionKindRequiresAdmission(kind string) bool {
+	switch kind {
+	case "organization", "mission", "goal", "team", "agent_blueprint", "execution_profile", "agent", "intent", "work", "task":
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidateProjectionEventBoundary proves that a sealed projection uses the
+// runtime-owned label and routing envelope reserved for its kind and version.
+func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload) error {
+	record := payload.Projection
+	if event.OrganizationID == "" || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.SchemaVersion != SchemaVersion {
+		return fmt.Errorf("projection event crosses its runtime-owned envelope")
+	}
+	if !validProjectionEventType(record.ProjectionKind, record.Version, event.EventType) {
+		return fmt.Errorf("projection %s/%s/%d uses unsupported event %s", record.ProjectionKind, record.RecordID, record.Version, event.EventType)
+	}
+	if record.ProjectionKind == "organization" {
+		var organization core.Organization
+		if decodeExactEventJSON(record.Value, &organization) != nil || organization.ID == "" || organization.ID != core.ID(record.RecordID) || string(organization.ID) != event.OrganizationID {
+			return fmt.Errorf("organization projection value is invalid")
+		}
+	}
+	if record.ProjectionKind == "mission" {
+		var mission core.Mission
+		if decodeExactEventJSON(record.Value, &mission) != nil || mission.ID != core.ID(record.RecordID) || string(mission.OrganizationID) != event.OrganizationID {
+			return fmt.Errorf("mission projection value is invalid")
+		}
+		if err := ValidateMissionProjectionTarget(event.EventType, record.Version, mission); err != nil {
+			return err
+		}
+	}
+	if record.ProjectionKind == "goal" {
+		var goal core.Goal
+		if decodeExactEventJSON(record.Value, &goal) != nil || goal.ID != core.ID(record.RecordID) || string(goal.OrganizationID) != event.OrganizationID {
+			return fmt.Errorf("goal projection value is invalid")
+		}
+		if err := ValidateGoalProjectionTarget(event.EventType, record.Version, goal); err != nil {
+			return err
+		}
+	}
+	if record.ProjectionKind == "work" {
+		var work core.Work
+		if decodeExactEventJSON(record.Value, &work) != nil || work.ID != core.ID(record.RecordID) {
+			return fmt.Errorf("work projection value is invalid")
+		}
+		if err := ValidateWorkProjectionTarget(event.EventType, record.Version, work); err != nil {
+			return err
+		}
+	}
+	if record.ProjectionKind == "agent" {
+		var agent core.Agent
+		if decodeExactEventJSON(record.Value, &agent) != nil || agent.ID != core.ID(record.RecordID) || string(agent.OrganizationID) != event.OrganizationID {
+			return fmt.Errorf("agent projection value is invalid")
+		}
+		if err := ValidateAgentProjectionTarget(event.EventType, record.Version, agent); err != nil {
+			return err
+		}
+	}
+	if record.ProjectionKind == "intent" {
+		var intent core.Intent
+		if decodeExactEventJSON(record.Value, &intent) != nil || intent.ID == "" || intent.ID != core.ID(record.RecordID) || intent.OrganizationID == "" || string(intent.OrganizationID) != event.OrganizationID || record.CorrelationID == "" || record.CorrelationID != event.CorrelationID {
+			return fmt.Errorf("intent projection value is invalid or lacks its correlation boundary")
+		}
+	}
+	if record.ProjectionKind == "task" {
+		var task core.Task
+		if decodeExactEventJSON(record.Value, &task) != nil || task.ID != core.ID(record.RecordID) {
+			return fmt.Errorf("task projection value is invalid")
+		}
+		if err := ValidateTaskProjectionTarget(event.EventType, record.Version, task); err != nil {
+			return err
+		}
+		if event.TaskID != record.RecordID {
+			return fmt.Errorf("task projection crosses its Task envelope")
+		}
+		if event.RecipientScope == "" && event.RecipientID == "" {
+			if event.EventType == "TASK_BLOCKED" && task.ParentID != "" {
+				return fmt.Errorf("blocked child Task lacks its parent route")
+			}
+			return nil
+		}
+		if event.EventType != "TASK_BLOCKED" || task.ParentID == "" || event.RecipientScope != RecipientTask || event.RecipientID != string(task.ParentID) {
+			return fmt.Errorf("task projection uses unsupported routing")
+		}
+		return nil
+	}
+	if event.TaskID != "" || event.RecipientScope != "" || event.RecipientID != "" {
+		return fmt.Errorf("organizational projection uses a Task or recipient route")
+	}
+	return nil
+}
+
+// ValidateMissionProjectionTarget couples each Mission lifecycle label to its
+// only permitted materialized state.
+func ValidateMissionProjectionTarget(eventType string, version int, mission core.Mission) error {
+	if version < 1 || !core.ValidMission(mission) {
+		return fmt.Errorf("mission projection is incomplete")
+	}
+	valid := eventType == "MISSION_CREATED" && version == 1 && mission.Status == core.MissionActive ||
+		eventType == "MISSION_REVISED" && version > 1 && mission.Status == core.MissionActive ||
+		eventType == "MISSION_RETIRED" && version > 1 && mission.Status == core.MissionRetired
+	if !valid {
+		return fmt.Errorf("mission lifecycle event %s cannot materialize status %s at version %d", eventType, mission.Status, version)
+	}
+	return nil
+}
+
+// ValidateMissionProjectionTransition preserves one durable direction and
+// keeps active refinement distinct from terminal retirement.
+func ValidateMissionProjectionTransition(eventType string, version int, previous *core.Mission, next core.Mission) error {
+	if err := ValidateMissionProjectionTarget(eventType, version, next); err != nil {
+		return err
+	}
+	if previous == nil {
+		if version != 1 || eventType != "MISSION_CREATED" {
+			return fmt.Errorf("mission history must begin with creation at version one")
+		}
+		return nil
+	}
+	if version < 2 || !core.ValidMissionRevision(*previous, next) {
+		return fmt.Errorf("mission revision changes immutable identity, direction during retirement, or lifecycle order")
+	}
+	expected := ""
+	switch {
+	case previous.Status == core.MissionActive && next.Status == core.MissionActive && !reflect.DeepEqual(*previous, next):
+		expected = "MISSION_REVISED"
+	case previous.Status == core.MissionActive && next.Status == core.MissionRetired:
+		expected = "MISSION_RETIRED"
+	}
+	if expected == "" || eventType != expected {
+		return fmt.Errorf("mission lifecycle event %s does not match the exact state transition", eventType)
+	}
+	return nil
+}
+
+// ValidateWorkProjectionTarget couples each Work lifecycle label to its only
+// permitted materialized state.
+func ValidateWorkProjectionTarget(eventType string, version int, work core.Work) error {
+	if version < 1 || !core.ValidWork(work) {
+		return fmt.Errorf("work projection is incomplete")
+	}
+	valid := false
+	switch eventType {
+	case "WORK_CREATED":
+		valid = version == 1 && work.Status == core.WorkActive
+	case "WORK_COMPLETED":
+		valid = version > 1 && work.Status == core.WorkCompleted
+	case "WORK_FAILED", "WORK_PLANNING_FAILED":
+		valid = version > 1 && work.Status == core.WorkFailed
+	}
+	if !valid {
+		return fmt.Errorf("work lifecycle event %s cannot materialize status %s at version %d", eventType, work.Status, version)
+	}
+	return nil
+}
+
+// ValidateWorkProjectionTransition preserves one accepted Intent, optional
+// Goal, objective, and correlation-owned lifecycle from active to terminal.
+func ValidateWorkProjectionTransition(eventType string, version int, previous *core.Work, next core.Work) error {
+	if err := ValidateWorkProjectionTarget(eventType, version, next); err != nil {
+		return err
+	}
+	if previous == nil {
+		if version != 1 || eventType != "WORK_CREATED" {
+			return fmt.Errorf("work history must begin with creation at version one")
+		}
+		return nil
+	}
+	if version < 2 || !core.ValidWorkRevision(*previous, next) {
+		return fmt.Errorf("work revision changes immutable identity or reopens terminal state")
+	}
+	valid := previous.Status == core.WorkActive && next.Status == core.WorkCompleted && eventType == "WORK_COMPLETED" ||
+		previous.Status == core.WorkActive && next.Status == core.WorkFailed && (eventType == "WORK_FAILED" || eventType == "WORK_PLANNING_FAILED")
+	if !valid {
+		return fmt.Errorf("work lifecycle event %s does not match the exact state transition", eventType)
+	}
+	return nil
+}
+
+// ValidateGoalProjectionTarget couples each Goal lifecycle label to the state
+// that label is permitted to materialize, even before prior state is loaded.
+func ValidateGoalProjectionTarget(eventType string, version int, goal core.Goal) error {
+	if version < 1 || !core.ValidGoal(goal) {
+		return fmt.Errorf("goal projection is incomplete")
+	}
+	valid := false
+	switch eventType {
+	case "GOAL_CREATED":
+		valid = version == 1 && goal.Status == core.GoalActive
+	case "GOAL_REFINED":
+		valid = version > 1 && (goal.Status == core.GoalActive || goal.Status == core.GoalPaused)
+	case "GOAL_PAUSED":
+		valid = version > 1 && goal.Status == core.GoalPaused
+	case "GOAL_RESUMED":
+		valid = version > 1 && goal.Status == core.GoalActive
+	case "GOAL_RETIRED":
+		valid = version > 1 && goal.Status == core.GoalRetired
+	case "GOAL_ACHIEVED":
+		valid = version > 1 && goal.Status == core.GoalAchieved
+	}
+	if !valid {
+		return fmt.Errorf("goal lifecycle event %s cannot materialize status %s at version %d", eventType, goal.Status, version)
+	}
+	return nil
+}
+
+// ValidateGoalProjectionTransition binds every Goal target to its exact prior
+// state and keeps refinement distinct from pause, resume, retirement, and
+// evidence-backed achievement.
+func ValidateGoalProjectionTransition(eventType string, version int, previous *core.Goal, next core.Goal) error {
+	if err := ValidateGoalProjectionTarget(eventType, version, next); err != nil {
+		return err
+	}
+	if previous == nil {
+		if version != 1 || eventType != "GOAL_CREATED" {
+			return fmt.Errorf("goal history must begin with creation at version one")
+		}
+		return nil
+	}
+	if version < 2 || !core.ValidGoalRevision(*previous, next) {
+		return fmt.Errorf("goal revision changes immutable identity, direction during a lifecycle transition, or lifecycle order")
+	}
+	expected := ""
+	switch {
+	case previous.Status == next.Status && !reflect.DeepEqual(*previous, next):
+		expected = "GOAL_REFINED"
+	case previous.Status == core.GoalActive && next.Status == core.GoalPaused:
+		expected = "GOAL_PAUSED"
+	case previous.Status == core.GoalPaused && next.Status == core.GoalActive:
+		expected = "GOAL_RESUMED"
+	case next.Status == core.GoalRetired && previous.Status != core.GoalRetired:
+		expected = "GOAL_RETIRED"
+	case previous.Status == core.GoalActive && next.Status == core.GoalAchieved:
+		expected = "GOAL_ACHIEVED"
+	}
+	if expected == "" || eventType != expected {
+		return fmt.Errorf("goal lifecycle event %s does not match the exact state transition", eventType)
+	}
+	return nil
+}
+
+// ValidateAgentProjectionTarget couples an Agent lifecycle label to the state
+// that label is permitted to materialize.
+func ValidateAgentProjectionTarget(eventType string, version int, agent core.Agent) error {
+	if version < 1 || !core.ValidAgent(agent) {
+		return fmt.Errorf("agent projection is incomplete")
+	}
+	switch eventType {
+	case "AGENT_CREATED":
+		if version != 1 || agent.Status != "ACTIVE" {
+			return fmt.Errorf("agent creation must start ACTIVE at version one")
+		}
+	case "AGENT_CONFIGURATION_UPDATED":
+		if version < 2 {
+			return fmt.Errorf("agent configuration update requires an existing Agent")
+		}
+	case "AGENT_DEACTIVATED":
+		if version < 2 || agent.Status != "INACTIVE" {
+			return fmt.Errorf("agent deactivation must materialize INACTIVE state")
+		}
+	case "AGENT_REACTIVATED":
+		if version < 2 || agent.Status != "ACTIVE" {
+			return fmt.Errorf("agent reactivation must materialize ACTIVE state")
+		}
+	default:
+		return fmt.Errorf("agent projection uses unsupported lifecycle event %s", eventType)
+	}
+	return nil
+}
+
+// ValidateAgentProjectionTransition binds Agent configuration and status
+// changes to mutually exclusive runtime-owned event labels.
+func ValidateAgentProjectionTransition(eventType string, version int, previous *core.Agent, next core.Agent) error {
+	if err := ValidateAgentProjectionTarget(eventType, version, next); err != nil {
+		return err
+	}
+	if previous == nil {
+		if version != 1 || eventType != "AGENT_CREATED" {
+			return fmt.Errorf("agent history must begin with creation at version one")
+		}
+		return nil
+	}
+	if !core.ValidAgentRevision(*previous, next) {
+		return fmt.Errorf("agent revision changes immutable identity or organization")
+	}
+	configurationChanged := previous.BlueprintID != next.BlueprintID || previous.BlueprintVersion != next.BlueprintVersion ||
+		previous.ExecutionProfileID != next.ExecutionProfileID || previous.ExecutionProfileVersion != next.ExecutionProfileVersion ||
+		previous.RuntimeAdapter != next.RuntimeAdapter
+	valid := false
+	switch eventType {
+	case "AGENT_CONFIGURATION_UPDATED":
+		valid = previous.Status == next.Status && configurationChanged
+	case "AGENT_DEACTIVATED":
+		valid = previous.Status == "ACTIVE" && next.Status == "INACTIVE" && !configurationChanged
+	case "AGENT_REACTIVATED":
+		valid = previous.Status == "INACTIVE" && next.Status == "ACTIVE" && !configurationChanged
+	}
+	if !valid {
+		return fmt.Errorf("agent lifecycle event %s does not match its configuration and status transition", eventType)
+	}
+	return nil
+}
+
+// ValidateTaskProjectionTarget couples every Task lifecycle label to the only
+// status it is allowed to materialize. It rejects mislabeled state even when a
+// caller cannot yet supply the preceding durable revision.
+func ValidateTaskProjectionTarget(eventType string, version int, task core.Task) error {
+	if version < 1 || !core.ValidTask(task) {
+		return fmt.Errorf("task projection is incomplete")
+	}
+	var expected core.TaskStatus
+	switch eventType {
+	case "TASK_CREATED", "TASK_ASSIGNMENT_REVALIDATED", "TASK_RECOVERED", "TASK_RESUMED":
+		expected = core.TaskPending
+	case "TASK_BLOCKED":
+		expected = core.TaskBlocked
+	case "EXECUTION_STARTED":
+		expected = core.TaskRunning
+	case "TASK_VERIFIED_COMPLETE":
+		expected = core.TaskCompleted
+	case "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED":
+		expected = core.TaskFailed
+	default:
+		return fmt.Errorf("task projection uses unsupported lifecycle event %s", eventType)
+	}
+	if task.Status != expected {
+		return fmt.Errorf("task lifecycle event %s cannot materialize status %s", eventType, task.Status)
+	}
+	if version == 1 && eventType != "TASK_CREATED" && eventType != "TASK_BLOCKED" || version > 1 && eventType == "TASK_CREATED" {
+		return fmt.Errorf("task lifecycle event %s is invalid at version %d", eventType, version)
+	}
+	return nil
+}
+
+// ValidateTaskProjectionTransition binds a Task target to its exact preceding
+// status and preserves all planned, assignment, routing, and completion fields.
+func ValidateTaskProjectionTransition(eventType string, version int, previous *core.Task, next core.Task) error {
+	if err := ValidateTaskProjectionTarget(eventType, version, next); err != nil {
+		return err
+	}
+	if previous == nil {
+		if version != 1 {
+			return fmt.Errorf("task revision %d lacks its prior durable state", version)
+		}
+		return nil
+	}
+	if version < 2 || !core.ValidTaskRevision(*previous, next) {
+		return fmt.Errorf("task revision changes its immutable contract")
+	}
+	valid := false
+	switch eventType {
+	case "TASK_ASSIGNMENT_REVALIDATED", "TASK_RESUMED":
+		valid = previous.Status == core.TaskBlocked
+	case "TASK_RECOVERED":
+		valid = previous.Status == core.TaskRunning
+	case "TASK_BLOCKED":
+		valid = previous.Status == core.TaskPending || previous.Status == core.TaskRunning
+	case "EXECUTION_STARTED":
+		valid = previous.Status == core.TaskPending
+	case "TASK_VERIFIED_COMPLETE":
+		valid = previous.Status == core.TaskRunning || previous.Status == core.TaskBlocked
+	case "COMPLETION_REJECTED":
+		valid = previous.Status == core.TaskRunning || previous.Status == core.TaskBlocked
+	case "TASK_DEPENDENCY_FAILED", "TASK_WORK_FAILED":
+		valid = previous.Status == core.TaskPending || previous.Status == core.TaskBlocked
+	case "TASK_REMEDIATION_FAILED":
+		valid = previous.Status == core.TaskRunning
+	}
+	if !valid {
+		return fmt.Errorf("task lifecycle event %s cannot transition %s to %s", eventType, previous.Status, next.Status)
+	}
+	return nil
+}
+
+func decodeExactEventJSON(data []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("unexpected trailing JSON")
+	}
+	return nil
+}
+
+func validProjectionEventType(kind string, version int, eventType string) bool {
+	if version < 1 {
+		return false
+	}
+	switch kind {
+	case "organization":
+		return version == 1 && eventType == "ORGANIZATION_CREATED"
+	case "mission":
+		return version == 1 && eventType == "MISSION_CREATED" || version > 1 && (eventType == "MISSION_REVISED" || eventType == "MISSION_RETIRED")
+	case "goal":
+		return version == 1 && eventType == "GOAL_CREATED" || version > 1 && (eventType == "GOAL_REFINED" || eventType == "GOAL_PAUSED" || eventType == "GOAL_RESUMED" || eventType == "GOAL_RETIRED" || eventType == "GOAL_ACHIEVED")
+	case "team":
+		return version == 1 && eventType == "TEAM_CREATED" || version > 1 && eventType == "TEAM_REVISED"
+	case "agent_blueprint":
+		return version == 1 && eventType == "AGENT_BLUEPRINT_CREATED" || version > 1 && eventType == "AGENT_BLUEPRINT_UPDATED"
+	case "execution_profile":
+		return version == 1 && eventType == "EXECUTION_PROFILE_CREATED" || version > 1 && eventType == "EXECUTION_PROFILE_UPDATED"
+	case "agent":
+		return version == 1 && eventType == "AGENT_CREATED" || version > 1 && (eventType == "AGENT_CONFIGURATION_UPDATED" || eventType == "AGENT_DEACTIVATED" || eventType == "AGENT_REACTIVATED")
+	case "intent":
+		return version == 1 && eventType == "INTENT_CREATED"
+	case "work":
+		return version == 1 && eventType == "WORK_CREATED" || version > 1 && (eventType == "WORK_COMPLETED" || eventType == "WORK_FAILED" || eventType == "WORK_PLANNING_FAILED")
+	case "task":
+		if version == 1 {
+			return eventType == "TASK_CREATED" || eventType == "TASK_BLOCKED"
+		}
+		switch eventType {
+		case "TASK_ASSIGNMENT_REVALIDATED", "TASK_BLOCKED", "TASK_RECOVERED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED":
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateOrdinaryEventPayload enforces the object-shaped Event Contract
+// boundary and reserves typed projection authority keys. Writers call this
+// before persistence so startup never discovers a payload they admitted but
+// cannot classify.
+func ValidateOrdinaryEventPayload(value any) error {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("encode event payload: %w", err)
+	}
+	if rejectDuplicateJSONKeys(body) != nil {
+		return fmt.Errorf("event payload is malformed")
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(body, &object) != nil || object == nil {
+		return fmt.Errorf("event payload must be a JSON object")
+	}
+	_, hasProjection := object["projection"]
+	_, hasAdmission := object["admission"]
+	if hasProjection || hasAdmission {
+		return fmt.Errorf("projection payloads require typed admission")
+	}
+	return nil
+}
+
+func projectionAdmissionFingerprint(admission ProjectionAdmission, event Event, record ProjectionRecord, detail json.RawMessage) (string, error) {
+	contract := projectionAdmissionFingerprintPayload{
+		Method: admission.Method, EventRef: admission.EventRef, Sequence: event.Sequence,
+		OrganizationID: event.OrganizationID, EventType: event.EventType, SourceActorID: event.SourceActorID, SourceExecutionID: event.SourceExecutionID,
+		RecipientScope: event.RecipientScope, RecipientID: event.RecipientID, TaskID: event.TaskID,
+		AuthorizationRefs: event.AuthorizationRefs, ArtifactRefs: event.ArtifactRefs, CorrelationID: event.CorrelationID,
+		CreatedAt: event.CreatedAt.UTC().Format(time.RFC3339Nano), SchemaVersion: event.SchemaVersion,
+		Projection: record, Detail: detail,
+	}
+	body, err := json.Marshal(contract)
+	if err != nil {
+		return "", fmt.Errorf("encode projection admission: %w", err)
+	}
+	digest := sha256.Sum256(body)
+	return fmt.Sprintf("%x", digest), nil
 }
 
 // ResolveTeamRevisionBindings couples every Team revision admitted to the
@@ -1720,6 +2553,12 @@ func (g *Gateway) PublishAgentDraft(ctx context.Context, organizationID, actorID
 	return g.ledger.Append(ctx, trusted)
 }
 func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event, error) {
+	if err := ValidateOrdinaryEventPayload(draft.Payload); err != nil {
+		return Event{}, err
+	}
+	if RequiresProjectionAdmission(draft.EventType, draft.SourceActorID) {
+		return Event{}, fmt.Errorf("projection lifecycle events require typed admission")
+	}
 	if draft.EventType == "INBOX_EVENTS_OBSERVED" {
 		return Event{}, fmt.Errorf("inbox observations require atomic inbox admission")
 	}

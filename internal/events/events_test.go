@@ -12,6 +12,200 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 )
 
+func TestTaskProjectionTransitionsAreExact(t *testing.T) {
+	base := core.Task{
+		ID: "task-1", WorkID: "work-1", Description: "bounded work",
+		ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden,
+		TaskContractVersion: "1", Status: core.TaskPending,
+	}
+	blocked, running, completed, failed := base, base, base, base
+	blocked.Status = core.TaskBlocked
+	running.Status = core.TaskRunning
+	completed.Status = core.TaskCompleted
+	failed.Status = core.TaskFailed
+	for name, test := range map[string]struct {
+		eventType string
+		version   int
+		previous  *core.Task
+		next      core.Task
+		valid     bool
+	}{
+		"pending creation":            {"TASK_CREATED", 1, nil, base, true},
+		"blocked creation":            {"TASK_BLOCKED", 1, nil, blocked, true},
+		"execution start":             {"EXECUTION_STARTED", 2, &base, running, true},
+		"runtime recovery":            {"TASK_RECOVERED", 3, &running, base, true},
+		"verified completion":         {"TASK_VERIFIED_COMPLETE", 3, &running, completed, true},
+		"reviewed completion":         {"TASK_VERIFIED_COMPLETE", 3, &blocked, completed, true},
+		"failed dependency":           {"TASK_DEPENDENCY_FAILED", 2, &base, failed, true},
+		"mislabeled completion":       {"TASK_RESUMED", 3, &running, completed, false},
+		"completion from pending":     {"TASK_VERIFIED_COMPLETE", 2, &base, completed, false},
+		"execution without resume":    {"EXECUTION_STARTED", 3, &blocked, running, false},
+		"terminal state reopened":     {"TASK_RESUMED", 4, &completed, base, false},
+		"creation label after create": {"TASK_CREATED", 2, &base, base, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateTaskProjectionTransition(test.eventType, test.version, test.previous, test.next)
+			if test.valid && err != nil {
+				t.Fatalf("valid transition was rejected: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("invalid transition was accepted")
+			}
+		})
+	}
+	changed := running
+	changed.Description = "substituted work"
+	if err := ValidateTaskProjectionTransition("EXECUTION_STARTED", 2, &base, changed); err == nil {
+		t.Fatal("Task lifecycle transition changed its immutable contract")
+	}
+}
+
+func TestAgentProjectionTransitionsAreExact(t *testing.T) {
+	active := core.Agent{
+		ID: "agent-1", OrganizationID: "org-1", BlueprintID: "blueprint-1", BlueprintVersion: "v1",
+		ExecutionProfileID: "profile-1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE",
+	}
+	inactive, configured := active, active
+	inactive.Status = "INACTIVE"
+	configured.RuntimeAdapter = "updated"
+	for name, test := range map[string]struct {
+		eventType string
+		version   int
+		previous  *core.Agent
+		next      core.Agent
+		valid     bool
+	}{
+		"active creation":                {"AGENT_CREATED", 1, nil, active, true},
+		"update without prior state":     {"AGENT_CONFIGURATION_UPDATED", 2, nil, configured, false},
+		"deactivate without prior state": {"AGENT_DEACTIVATED", 2, nil, inactive, false},
+		"configuration update":           {"AGENT_CONFIGURATION_UPDATED", 2, &active, configured, true},
+		"deactivation":                   {"AGENT_DEACTIVATED", 2, &active, inactive, true},
+		"reactivation":                   {"AGENT_REACTIVATED", 3, &inactive, active, true},
+		"inactive creation":              {"AGENT_CREATED", 1, nil, inactive, false},
+		"mislabeled deactivation":        {"AGENT_DEACTIVATED", 2, &active, active, false},
+		"mislabeled reactivation":        {"AGENT_REACTIVATED", 2, &active, active, false},
+		"status-changing config event":   {"AGENT_CONFIGURATION_UPDATED", 2, &active, inactive, false},
+		"config-changing lifecycle":      {"AGENT_DEACTIVATED", 2, &active, func() core.Agent { value := configured; value.Status = "INACTIVE"; return value }(), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateAgentProjectionTransition(test.eventType, test.version, test.previous, test.next)
+			if test.valid && err != nil {
+				t.Fatalf("valid transition was rejected: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("invalid transition was accepted")
+			}
+		})
+	}
+}
+
+func TestGoalProjectionTransitionsAreExact(t *testing.T) {
+	now := time.Now().UTC()
+	active := core.Goal{
+		ID: "goal-1", OrganizationID: "org-1", MissionID: "mission-1", Objective: "deliver a bounded outcome",
+		Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "verified outcome", Origin: "USER"}}, Status: core.GoalActive, CreatedAt: now,
+	}
+	refined, paused, retired, achieved := active, active, active, active
+	refined.Objective = "deliver a verified bounded outcome"
+	paused.Status = core.GoalPaused
+	retired.Status = core.GoalRetired
+	achieved.Status = core.GoalAchieved
+	for name, test := range map[string]struct {
+		eventType string
+		version   int
+		previous  *core.Goal
+		next      core.Goal
+		valid     bool
+	}{
+		"active creation":               {"GOAL_CREATED", 1, nil, active, true},
+		"refinement":                    {"GOAL_REFINED", 2, &active, refined, true},
+		"pause":                         {"GOAL_PAUSED", 2, &active, paused, true},
+		"resume":                        {"GOAL_RESUMED", 3, &paused, active, true},
+		"retire":                        {"GOAL_RETIRED", 2, &active, retired, true},
+		"achievement":                   {"GOAL_ACHIEVED", 2, &active, achieved, true},
+		"pause label with active state": {"GOAL_PAUSED", 2, &active, active, false},
+		"refinement label with pause":   {"GOAL_REFINED", 2, &active, paused, false},
+		"unchanged refinement":          {"GOAL_REFINED", 2, &active, active, false},
+		"creation without prior state":  {"GOAL_REFINED", 2, nil, refined, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateGoalProjectionTransition(test.eventType, test.version, test.previous, test.next)
+			if test.valid && err != nil {
+				t.Fatalf("valid transition was rejected: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("invalid transition was accepted")
+			}
+		})
+	}
+}
+
+func TestMissionProjectionTransitionsAreExact(t *testing.T) {
+	now := time.Now().UTC()
+	active := core.Mission{ID: "mission-1", OrganizationID: "org-1", Statement: "durable direction", Status: core.MissionActive, CreatedAt: now}
+	revised, retired := active, active
+	revised.Statement = "refined durable direction"
+	retired.Status = core.MissionRetired
+	for name, test := range map[string]struct {
+		eventType string
+		version   int
+		previous  *core.Mission
+		next      core.Mission
+		valid     bool
+	}{
+		"active creation":                {"MISSION_CREATED", 1, nil, active, true},
+		"active refinement":              {"MISSION_REVISED", 2, &active, revised, true},
+		"retirement":                     {"MISSION_RETIRED", 2, &active, retired, true},
+		"retirement label with active":   {"MISSION_RETIRED", 2, &active, active, false},
+		"revision label with retirement": {"MISSION_REVISED", 2, &active, retired, false},
+		"unchanged refinement":           {"MISSION_REVISED", 2, &active, active, false},
+		"revision without creation":      {"MISSION_REVISED", 2, nil, revised, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateMissionProjectionTransition(test.eventType, test.version, test.previous, test.next)
+			if test.valid && err != nil {
+				t.Fatalf("valid transition was rejected: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("invalid transition was accepted")
+			}
+		})
+	}
+}
+
+func TestWorkProjectionTransitionsAreExact(t *testing.T) {
+	active := core.Work{ID: "work-1", IntentID: "intent-1", Objective: "bounded work", Status: core.WorkActive, CreatedAt: time.Now().UTC()}
+	completed, failed := active, active
+	completed.Status = core.WorkCompleted
+	failed.Status = core.WorkFailed
+	for name, test := range map[string]struct {
+		eventType string
+		version   int
+		previous  *core.Work
+		next      core.Work
+		valid     bool
+	}{
+		"active creation":                 {"WORK_CREATED", 1, nil, active, true},
+		"completion":                      {"WORK_COMPLETED", 2, &active, completed, true},
+		"execution failure":               {"WORK_FAILED", 2, &active, failed, true},
+		"planning failure":                {"WORK_PLANNING_FAILED", 2, &active, failed, true},
+		"failure label with active state": {"WORK_FAILED", 2, &active, active, false},
+		"completion label with failure":   {"WORK_COMPLETED", 2, &active, failed, false},
+		"terminal state reopened":         {"WORK_FAILED", 3, &completed, failed, false},
+		"revision without creation":       {"WORK_FAILED", 2, nil, failed, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateWorkProjectionTransition(test.eventType, test.version, test.previous, test.next)
+			if test.valid && err != nil {
+				t.Fatalf("valid transition was rejected: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("invalid transition was accepted")
+			}
+		})
+	}
+}
+
 func TestHumanCompletionRejectsEnvelopeArtifactsAbsentFromSubmission(t *testing.T) {
 	contract := core.StructuredUserCompletionContract("task-1")
 	task := WorkCompletionTaskBinding{Task: core.Task{
@@ -228,6 +422,130 @@ func (m *memoryLedger) Append(_ context.Context, d TrustedDraft) (Event, error) 
 	return e, nil
 }
 func (m *memoryLedger) Events(context.Context, string) ([]Event, error) { return m.events, nil }
+
+func TestProjectionAdmissionBindsExactEventBoundary(t *testing.T) {
+	record := ProjectionRecord{
+		ProjectionKind: "task", RecordID: "task-1", Version: 2,
+		CorrelationID: "work-1", Value: json.RawMessage(`{"id":"task-1"}`),
+	}
+	draft := TrustedDraft{
+		OrganizationID: "org-1", EventType: "TASK_BLOCKED", SourceActorID: "runtime",
+		TaskID: "task-1", CorrelationID: "work-1",
+	}
+	event := Event{
+		EventID: "event-1", Sequence: 1, OrganizationID: draft.OrganizationID, EventType: draft.EventType,
+		SourceActorID: draft.SourceActorID, TaskID: draft.TaskID, CorrelationID: draft.CorrelationID,
+		CreatedAt: time.Unix(1, 0).UTC(), SchemaVersion: SchemaVersion,
+	}
+	payload, err := SealProjectionEvent(event, record, json.RawMessage(`{"reason":"bounded"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.Payload = body
+	admitted, present, err := AdmittedProjection(event)
+	if err != nil || !present || admitted.Admission.EventRef != event.EventID || admitted.Admission.Fingerprint == "" {
+		t.Fatalf("admitted=%+v present=%t err=%v", admitted, present, err)
+	}
+
+	for name, mutate := range map[string]func(*Event){
+		"event id":       func(candidate *Event) { candidate.EventID = "event-2" },
+		"organization":   func(candidate *Event) { candidate.OrganizationID = "org-2" },
+		"event type":     func(candidate *Event) { candidate.EventType = "TASK_RESUMED" },
+		"task":           func(candidate *Event) { candidate.TaskID = "task-2" },
+		"correlation":    func(candidate *Event) { candidate.CorrelationID = "work-2" },
+		"schema version": func(candidate *Event) { candidate.SchemaVersion++ },
+		"sequence":       func(candidate *Event) { candidate.Sequence++ },
+		"created at":     func(candidate *Event) { candidate.CreatedAt = candidate.CreatedAt.Add(time.Second) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := event
+			mutate(&candidate)
+			if _, present, err := AdmittedProjection(candidate); err == nil || !present {
+				t.Fatalf("changed %s retained admission: present=%t err=%v", name, present, err)
+			}
+		})
+	}
+
+	duplicate := event
+	duplicate.Payload = []byte(`{"projection":{},"projection":{},"admission":{}}`)
+	if _, _, err := AdmittedProjection(duplicate); err == nil {
+		t.Fatal("duplicate projection declaration was accepted")
+	}
+	trailing := event
+	trailing.Payload = append(append([]byte(nil), body...), []byte(`{}`)...)
+	if _, _, err := AdmittedProjection(trailing); err == nil {
+		t.Fatal("trailing projection payload was accepted")
+	}
+	malformed := event
+	malformed.Payload = []byte(`{"ordinary":`)
+	if _, _, err := AdmittedProjection(malformed); err == nil {
+		t.Fatal("malformed ordinary event payload was accepted")
+	}
+	nullPayload := event
+	nullPayload.Payload = []byte(`null`)
+	if _, _, err := AdmittedProjection(nullPayload); err == nil {
+		t.Fatal("null ordinary event payload was accepted")
+	}
+}
+
+func TestGenericTrustedPublicationCannotMintProjectionAuthority(t *testing.T) {
+	ledger := &memoryLedger{}
+	gateway := NewGateway(ledger)
+	record := ProjectionRecord{ProjectionKind: "team", RecordID: "team-1", Version: 1, CorrelationID: "work-1", Value: json.RawMessage(`{"id":"team-1"}`)}
+	draft := TrustedDraft{OrganizationID: "org-1", EventType: "TEAM_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"}
+	boundary := Event{
+		EventID: "event-1", Sequence: 1, OrganizationID: draft.OrganizationID, EventType: draft.EventType,
+		SourceActorID: draft.SourceActorID, CorrelationID: draft.CorrelationID,
+		CreatedAt: time.Unix(1, 0).UTC(), SchemaVersion: SchemaVersion,
+	}
+	sealed, err := SealProjectionEvent(boundary, record, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, payload := range map[string]any{
+		"projection key":  map[string]any{"projection": map[string]any{"record_id": "team-1"}},
+		"admission key":   map[string]any{"admission": "forged"},
+		"sealed payload":  sealed,
+		"lifecycle label": map[string]string{"note": "ordinary payload"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := draft
+			candidate.Payload = payload
+			if _, err := gateway.PublishTrusted(context.Background(), candidate); err == nil {
+				t.Fatalf("generic trusted publication accepted %s", name)
+			}
+		})
+	}
+	if len(ledger.events) != 0 {
+		t.Fatalf("rejected projection authority reached ledger: %+v", ledger.events)
+	}
+}
+
+func TestTrustedPublicationRequiresObjectPayload(t *testing.T) {
+	for name, payload := range map[string]any{
+		"array":  []string{"value"},
+		"scalar": "value",
+		"null":   nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			ledger := &memoryLedger{}
+			gateway := NewGateway(ledger)
+			if _, err := gateway.PublishTrusted(context.Background(), TrustedDraft{
+				OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime",
+				CorrelationID: "work-1", Payload: payload,
+			}); err == nil {
+				t.Fatalf("trusted publication accepted %s payload", name)
+			}
+			if len(ledger.events) != 0 {
+				t.Fatalf("rejected %s payload reached ledger", name)
+			}
+		})
+	}
+}
 
 type routeValidatorFunc func(context.Context, AddressedRoute) error
 

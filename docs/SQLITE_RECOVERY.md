@@ -17,11 +17,15 @@ agentos-recovery backup \
 
 The output path and its parent directory must already be selected by the
 operator, and the output file must not exist. The utility writes a private
-staging file, verifies SQLite integrity and the Agent OS ledger tables, syncs
-it, then publishes it without an overwrite race. Existing SQLite journal, WAL,
-or shared-memory sidecars at the destination are rejected so stale state cannot
-be applied to a recovered ledger. The utility returns JSON containing the
-resolved path, SHA-256 checksum, size, event count, and maximum sequence.
+staging file, verifies SQLite integrity, the Agent OS ledger schema, and every
+event-coupled projection admission, syncs it, then publishes it without an
+overwrite race. Verification requires a one-to-one match between each
+organizational projection record and its exact sealed event envelope; orphaned,
+copied, malformed, cross-organization, or otherwise mismatched state is
+rejected. Existing SQLite journal,
+WAL, or shared-memory sidecars at the destination are rejected so stale state
+cannot be applied to a recovered ledger. The utility returns JSON containing
+the resolved path, SHA-256 checksum, size, event count, and maximum sequence.
 
 Backups contain the full event ledger and may contain sensitive organizational
 data. Moving one to a new storage or trust boundary requires the established
@@ -35,8 +39,21 @@ Verify an offline backup or restore candidate before use or transfer:
 agentos-recovery verify --database ./agentos-backup.db
 ```
 
-Verification is read-only. It rejects corruption and valid SQLite databases
-that do not contain the required Agent OS ledger tables and columns.
+Verification is read-only. It rejects corruption, valid SQLite databases that
+do not contain the required Agent OS ledger tables and columns, unsupported
+pre-admission projection state, projection lifecycle events without typed
+admission, and materialized projections that do not match their authorizing
+event or durable Organization/Intent/Work relationship exactly. Task
+dependencies must resolve within one Work boundary and remain acyclic. Agent,
+Mission, Goal, Work, and Task lifecycle events must match their exact prior and
+resulting status, and Agent history must begin with version-one creation.
+Completed Work
+must retain the exact verified Task evidence that authorized its transition,
+and achieved Goals must retain their exact atomic transition and authoritative
+progress evidence. Agent configuration changes remain distinct from activation
+changes; Team history cannot change tenant ownership or creation identity;
+Task history also preserves its immutable execution contract and correlation
+boundary.
 
 ## Restore without overwrite
 
@@ -63,6 +80,7 @@ swap paths while Agent OS is running.
 
 ## Evidence
 
-Unit and race tests cover online WAL backup, integrity and schema rejection,
-cancellation, destination no-overwrite behavior, restore continuity, checksum
-output, restart recovery, A2A continuation, and structured user completion.
+Unit and race tests cover online WAL backup, integrity, schema and projection
+admission rejection, cancellation, destination no-overwrite behavior, restore
+continuity, checksum output, restart recovery, A2A continuation, and structured
+user completion.

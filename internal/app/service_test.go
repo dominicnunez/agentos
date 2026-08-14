@@ -120,6 +120,16 @@ func saveTestPlan(ctx context.Context, gateway *events.Gateway, correlationID st
 	return err
 }
 
+func saveTestTaskGraph(ctx context.Context, repository *projections.Repository, organizationID core.ID, correlationID string, intent core.Intent, work core.Work, tasks ...core.Task) error {
+	if err := repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", correlationID, 1, intent, nil); err != nil {
+		return err
+	}
+	if err := repository.SaveWork(ctx, organizationID, "WORK_CREATED", "runtime", correlationID, 1, work, nil); err != nil {
+		return err
+	}
+	return repository.SaveNewTasks(ctx, organizationID, "runtime", correlationID, tasks)
+}
+
 func bindTestAgentExecutionBriefs(t *testing.T, correlationID string, intent core.Intent, tasks ...*core.Task) {
 	t.Helper()
 	values := make([]core.Task, 0, len(tasks))
@@ -2158,23 +2168,8 @@ func TestRunTelemetryCoversDAG(t *testing.T) {
 	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: "two steps", Status: "ACTIVE"}
 	first := core.Task{ID: "task-request-1-first", WorkID: work.ID, ParentID: "task-request-1", Description: "echo first", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
 	second := core.Task{ID: "task-request-1", WorkID: work.ID, Description: "echo second", AcceptanceCriteria: intent.CompletionCriteria, DependsOn: []core.ID{first.ID}, ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
-	for _, save := range []func() error{
-		func() error {
-			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "request-1", 1, intent, nil)
-		},
-		func() error {
-			return repository.SaveWork(ctx, organization.ID, "WORK_CREATED", "runtime", "request-1", 1, work, nil)
-		},
-		func() error {
-			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "request-1", 1, first, nil)
-		},
-		func() error {
-			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "request-1", 1, second, nil)
-		},
-	} {
-		if err := save(); err != nil {
-			t.Fatal(err)
-		}
+	if err := saveTestTaskGraph(ctx, repository, organization.ID, "request-1", intent, work, first, second); err != nil {
+		t.Fatal(err)
 	}
 	if err := saveTestPlan(ctx, gateway, "request-1", intent, first, second); err != nil {
 		t.Fatal(err)
@@ -2227,24 +2222,9 @@ func TestRecoverExecutesPersistedPendingWorkAndPreservesIdentity(t *testing.T) {
 	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: "echo after restart", Status: "ACTIVE"}
 	first := core.Task{ID: "task-request-1-first", WorkID: work.ID, ParentID: "task-request-1", Description: "echo already done", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
 	second := core.Task{ID: "task-request-1", WorkID: work.ID, Description: "echo after restart", AcceptanceCriteria: intent.CompletionCriteria, ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, DependsOn: []core.ID{first.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
-	for _, save := range []func() error{
-		func() error {
-			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "request-1", 1, intent, nil)
-		},
-		func() error {
-			return repository.SaveWork(ctx, organization.ID, "WORK_CREATED", "runtime", "request-1", 1, work, nil)
-		},
-		func() error {
-			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "request-1", 1, first, nil)
-		},
-		func() error {
-			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "request-1", 1, second, nil)
-		},
-	} {
-		if err := save(); err != nil {
-			_ = l.Close()
-			t.Fatal(err)
-		}
+	if err := saveTestTaskGraph(ctx, repository, organization.ID, "request-1", intent, work, first, second); err != nil {
+		_ = l.Close()
+		t.Fatal(err)
 	}
 	if err := saveTestVerifiedTask(ctx, g, repository, organization.ID, "request-1", projections.Versioned[core.Task]{Version: 1, CorrelationID: "request-1", Value: first}); err != nil {
 		_ = l.Close()
@@ -2476,23 +2456,8 @@ func TestAssignmentBlockedDependencyWaitsForRevalidation(t *testing.T) {
 	root := core.Task{ID: "task-" + correlationID, WorkID: work.ID, Description: "echo aggregate", AcceptanceCriteria: intent.CompletionCriteria, ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), DependsOn: []core.ID{"task-child"}, TaskContractVersion: "1", Status: core.TaskPending}
 	child := core.Task{ID: "task-" + correlationID + "-child", WorkID: work.ID, ParentID: root.ID, Description: "echo child", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
 	root.DependsOn = []core.ID{child.ID}
-	for _, save := range []func() error{
-		func() error {
-			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", correlationID, 1, intent, nil)
-		},
-		func() error {
-			return repository.SaveWork(ctx, organization.ID, "WORK_CREATED", "runtime", correlationID, 1, work, nil)
-		},
-		func() error {
-			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", correlationID, 1, root, nil)
-		},
-		func() error {
-			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", correlationID, 1, child, nil)
-		},
-	} {
-		if err := save(); err != nil {
-			t.Fatal(err)
-		}
+	if err := saveTestTaskGraph(ctx, repository, organization.ID, correlationID, intent, work, root, child); err != nil {
+		t.Fatal(err)
 	}
 	if err := saveTestPlan(ctx, gateway, correlationID, intent, root, child); err != nil {
 		t.Fatal(err)
@@ -3289,23 +3254,8 @@ func TestBlockedChildReturnsToParent(t *testing.T) {
 	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: "complete governed work", Status: "ACTIVE"}
 	child := core.Task{ID: "task-child", WorkID: work.ID, ParentID: "task-request-1", Description: "use unavailable tool", ExecutionKind: core.ExecutionTool, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
 	parent := core.Task{ID: "task-request-1", WorkID: work.ID, Description: "govern child remediation", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{child.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
-	for _, save := range []func() error{
-		func() error {
-			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "request-1", 1, intent, nil)
-		},
-		func() error {
-			return repository.SaveWork(ctx, organization.ID, "WORK_CREATED", "runtime", "request-1", 1, work, nil)
-		},
-		func() error {
-			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "request-1", 1, parent, nil)
-		},
-		func() error {
-			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "request-1", 1, child, nil)
-		},
-	} {
-		if err := save(); err != nil {
-			t.Fatal(err)
-		}
+	if err := saveTestTaskGraph(ctx, repository, organization.ID, "request-1", intent, work, parent, child); err != nil {
+		t.Fatal(err)
 	}
 
 	recovery, err := service.Recover(ctx)
@@ -3404,26 +3354,8 @@ func TestDeepBlockedDependencyReachesActionableRoot(t *testing.T) {
 	blocked := core.Task{ID: "task-a", WorkID: work.ID, ParentID: "task-deep-block", Description: "use unavailable tool", ExecutionKind: core.ExecutionTool, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
 	middle := core.Task{ID: "task-b", WorkID: work.ID, ParentID: "task-deep-block", Description: "interpret blocked dependency", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{blocked.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
 	root := core.Task{ID: "task-deep-block", WorkID: work.ID, Description: "govern remediation", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{middle.ID}, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: testAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
-	for _, save := range []func() error{
-		func() error {
-			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "deep-block", 1, intent, nil)
-		},
-		func() error {
-			return repository.SaveWork(ctx, organization.ID, "WORK_CREATED", "runtime", "deep-block", 1, work, nil)
-		},
-		func() error {
-			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "deep-block", 1, root, nil)
-		},
-		func() error {
-			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "deep-block", 1, middle, nil)
-		},
-		func() error {
-			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "deep-block", 1, blocked, nil)
-		},
-	} {
-		if err := save(); err != nil {
-			t.Fatal(err)
-		}
+	if err := saveTestTaskGraph(ctx, repository, organization.ID, "deep-block", intent, work, root, middle, blocked); err != nil {
+		t.Fatal(err)
 	}
 	recovered, err := service.Recover(ctx)
 	if err != nil || recovered.TasksExecuted != 3 {
@@ -3484,25 +3416,13 @@ func TestLateralMessagesAtActionBoundary(t *testing.T) {
 	sourceTask := core.Task{ID: "task-request-1-source", WorkID: work.ID, ParentID: "task-request-1", Description: "prepare handoff", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: sender.ID, AgentConfig: testAgentConfig(sender), TaskContractVersion: "1", Status: core.TaskPending}
 	recipientTask := core.Task{ID: "task-request-1", WorkID: work.ID, Description: "finish work", AcceptanceCriteria: intent.CompletionCriteria, ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []core.ID{sourceTask.ID}, AssigneeType: "AGENT", AssigneeID: recipient.ID, AgentConfig: testAgentConfig(recipient), TaskContractVersion: "1", Status: core.TaskPending}
 	bindTestAgentExecutionBriefs(t, "request-1", intent, &sourceTask, &recipientTask)
-	for _, save := range []func() error{
-		func() error { return repository.SaveTeam(ctx, "TEAM_CREATED", "runtime", "request-1", 1, team, nil) },
-		func() error {
-			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", "request-1", 1, intent, nil)
-		},
-		func() error {
-			return repository.SaveWork(ctx, organization.ID, "WORK_CREATED", "runtime", "request-1", 1, work, nil)
-		},
-		func() error {
-			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "request-1", 1, sourceTask, nil)
-		},
-		func() error {
-			return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", "request-1", 1, recipientTask, nil)
-		},
-	} {
-		if err := save(); err != nil {
-			_ = l.Close()
-			t.Fatal(err)
-		}
+	if err := repository.SaveTeam(ctx, "TEAM_CREATED", "runtime", "request-1", 1, team, nil); err != nil {
+		_ = l.Close()
+		t.Fatal(err)
+	}
+	if err := saveTestTaskGraph(ctx, repository, organization.ID, "request-1", intent, work, sourceTask, recipientTask); err != nil {
+		_ = l.Close()
+		t.Fatal(err)
 	}
 	if err := saveTestVerifiedTask(ctx, gateway, repository, organization.ID, "request-1", projections.Versioned[core.Task]{Version: 1, CorrelationID: "request-1", Value: sourceTask}); err != nil {
 		t.Fatal(err)

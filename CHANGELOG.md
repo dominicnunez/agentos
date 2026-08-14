@@ -35,6 +35,10 @@ Target: `1.0.0-rc.1`
   attempt-time authorization checks.
 - Goal achievement fails closed until a durable progress evaluation is
   validated; a bare projection update cannot certify organizational success.
+- Organizational projection records are bound one-to-one to the exact
+  runtime-owned event envelope that admitted them; routine loads, rebuild,
+  startup, backup, and restore reject forged, copied, reordered, or orphaned
+  admission.
 - Kernel-provided local peer identity, owner-only exact-effect controls, strict
   Agent registries, role isolation, rate and concurrency limits, remote TLS
   requirements, bounded decoding, and authority-shaped input rejection.

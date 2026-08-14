@@ -3,8 +3,10 @@ package projections
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -162,6 +164,27 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	stream, err := l.Events(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutConfirmation := make([]events.Event, 0, len(stream)-1)
+	for _, event := range stream {
+		if event.EventType != "INTENT_CONFIRMED" {
+			withoutConfirmation = append(withoutConfirmation, event)
+		}
+	}
+	if _, err := New(events.NewGateway(replayLedger{stream: withoutConfirmation})).Rebuild(ctx); err == nil || !strings.Contains(err.Error(), "prior reviewed intent confirmation") {
+		t.Fatalf("startup admitted Goal-bound Work without review evidence: %v", err)
+	}
+	withUnboundConfirmation := insertUnboundReplayConfirmation(t, stream, "request-1", intent)
+	if _, err := New(events.NewGateway(replayLedger{stream: withUnboundConfirmation})).Rebuild(ctx); err == nil || !strings.Contains(err.Error(), "one prior reviewed intent confirmation") {
+		t.Fatalf("startup admitted Goal-bound Work after conflicting unbound confirmation: %v", err)
+	}
+	workBeforeIntent := swapReplayProjectionSequences(t, stream, "INTENT_CREATED", "WORK_CREATED")
+	if _, err := New(events.NewGateway(replayLedger{stream: workBeforeIntent})).Rebuild(ctx); err == nil || !strings.Contains(err.Error(), "prior Intent") {
+		t.Fatalf("startup admitted Work before its Intent: %v", err)
+	}
 	if !reflect.DeepEqual(loaded, rebuilt) {
 		t.Fatalf("records projection differs from event replay:\nloaded=%+v\nrebuilt=%+v", loaded, rebuilt)
 	}
@@ -209,7 +232,7 @@ func TestSnapshotRejectsCrossBoundaryTaskGraph(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			snapshot := validBoundarySnapshot()
 			mutate(snapshot)
-			if err := validateSnapshot(snapshot); err == nil {
+			if err := ValidateSnapshot(snapshot); err == nil {
 				t.Fatal("cross-boundary graph was accepted")
 			}
 		})
@@ -221,7 +244,7 @@ func TestSnapshotRejectsUnknownWorkStatus(t *testing.T) {
 	work := snapshot.Works["work-1"]
 	work.Value.Status = "UNKNOWN"
 	snapshot.Works["work-1"] = work
-	if err := validateSnapshot(snapshot); err == nil {
+	if err := ValidateSnapshot(snapshot); err == nil {
 		t.Fatal("unknown Work status was accepted")
 	}
 }
@@ -313,7 +336,7 @@ func TestMissionGoalWorkHierarchyIsTenantBounded(t *testing.T) {
 	intent := snapshot.Intents["intent-1"]
 	intent.Value.GoalID = "goal-1"
 	snapshot.Intents["intent-1"] = intent
-	if err := validateSnapshot(snapshot); err != nil {
+	if err := ValidateSnapshot(snapshot); err != nil {
 		t.Fatalf("valid Mission > Goal > Work hierarchy was rejected: %v", err)
 	}
 
@@ -333,7 +356,7 @@ func TestMissionGoalWorkHierarchyIsTenantBounded(t *testing.T) {
 	work = crossTenant.Works["work-1"]
 	work.Value.GoalID = "goal-2"
 	crossTenant.Works["work-1"] = work
-	if err := validateSnapshot(crossTenant); err == nil {
+	if err := ValidateSnapshot(crossTenant); err == nil {
 		t.Fatal("cross-organization Goal and Work linkage was accepted")
 	}
 
@@ -345,7 +368,7 @@ func TestMissionGoalWorkHierarchyIsTenantBounded(t *testing.T) {
 	intent = mismatched.Intents["intent-1"]
 	intent.Value.GoalID = ""
 	mismatched.Intents["intent-1"] = intent
-	if err := validateSnapshot(mismatched); err == nil {
+	if err := ValidateSnapshot(mismatched); err == nil {
 		t.Fatal("Work Goal differed from its accepted Intent Goal")
 	}
 
@@ -358,7 +381,7 @@ func TestMissionGoalWorkHierarchyIsTenantBounded(t *testing.T) {
 	achieved.Value.Mode = core.GoalContinuous
 	achieved.Value.Status = core.GoalAchieved
 	bareAchievement.Goals["goal-1"] = achieved
-	if err := validateSnapshot(bareAchievement); err == nil {
+	if err := ValidateSnapshot(bareAchievement); err == nil {
 		t.Fatal("continuous Goal was accepted as terminally achieved")
 	}
 }
@@ -398,6 +421,18 @@ func TestHierarchyRevisionsPreserveIdentityAndDirectionBoundaries(t *testing.T) 
 	bareAchievement.Status = core.GoalAchieved
 	if err := decodeKind(projectionBodies(t, KindGoal, string(goal.ID), goal, bareAchievement), map[core.ID]Versioned[core.Goal]{}, false, sameGoalRecord); err != nil {
 		t.Fatalf("evidence-backed Goal achievement could not be rebuilt: %v", err)
+	}
+
+	team := core.Team{ID: "team-1", OrganizationID: "org-1", Name: "Team", MemberAgentIDs: []core.ID{}, Status: "ACTIVE", CreatedAt: now}
+	revisedTeam := team
+	revisedTeam.Name = "Revised Team"
+	if err := decodeKind(projectionBodies(t, KindTeam, string(team.ID), team, revisedTeam), map[core.ID]Versioned[core.Team]{}, false, sameTeamRecord); err != nil {
+		t.Fatalf("valid Team revision was rejected: %v", err)
+	}
+	reassignedTeam := revisedTeam
+	reassignedTeam.OrganizationID = "org-2"
+	if err := decodeKind(projectionBodies(t, KindTeam, string(team.ID), team, reassignedTeam), map[core.ID]Versioned[core.Team]{}, false, sameTeamRecord); err == nil {
+		t.Fatal("Team revision changed tenant ownership")
 	}
 
 	work := core.Work{ID: "work-1", IntentID: "intent-1", GoalID: goal.ID, Objective: "bounded work", Status: core.WorkActive, CreatedAt: now}
@@ -591,7 +626,7 @@ func TestSnapshotRejectsMalformedDurableRoster(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			snapshot := validRosterSnapshot()
 			mutate(snapshot)
-			if err := validateSnapshot(snapshot); err == nil {
+			if err := ValidateSnapshot(snapshot); err == nil {
 				t.Fatal("malformed durable roster was accepted")
 			}
 		})
@@ -616,7 +651,7 @@ func TestSnapshotRejectsMalformedPinnedAgentConfiguration(t *testing.T) {
 			snapshot.Intents[intent.ID] = Versioned[core.Intent]{CorrelationID: "work-1", Value: intent}
 			snapshot.Works[work.ID] = Versioned[core.Work]{CorrelationID: "work-1", Value: work}
 			snapshot.Tasks[task.ID] = Versioned[core.Task]{CorrelationID: "work-1", Value: task}
-			if err := validateSnapshot(snapshot); err == nil {
+			if err := ValidateSnapshot(snapshot); err == nil {
 				t.Fatal("malformed pinned Agent configuration was accepted")
 			}
 		})
@@ -700,6 +735,18 @@ func TestRosterConfigurationRevisionRejectedBeforeCommit(t *testing.T) {
 		ID: "profile-1", OrganizationID: organization.ID, Version: "v1", ModelProvider: "review-provider",
 		Model: "review-model", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE",
 	}
+	whitespaceBlueprint := blueprint
+	whitespaceBlueprint.ID = "blueprint-whitespace"
+	whitespaceBlueprint.RequiredCapabilityClasses = []string{"   "}
+	if err := repository.SaveAgentBlueprint(ctx, "AGENT_BLUEPRINT_CREATED", "runtime", "whitespace-blueprint", 1, whitespaceBlueprint, nil); err == nil {
+		t.Fatal("whitespace-only Agent blueprint capability reached persistence")
+	}
+	whitespaceProfile := profile
+	whitespaceProfile.ID = "profile-whitespace"
+	whitespaceProfile.ToolRefs = []string{"\t"}
+	if err := repository.SaveExecutionProfile(ctx, "EXECUTION_PROFILE_CREATED", "runtime", "whitespace-profile", 1, whitespaceProfile, nil); err == nil {
+		t.Fatal("whitespace-only execution profile tool reference reached persistence")
+	}
 	if err := repository.SaveAgentBlueprint(ctx, "AGENT_BLUEPRINT_CREATED", "runtime", "setup", 1, blueprint, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -717,7 +764,7 @@ func TestRosterConfigurationRevisionRejectedBeforeCommit(t *testing.T) {
 	if err := repository.SaveExecutionProfile(ctx, "EXECUTION_PROFILE_UPDATED", "runtime", "forged-profile", 2, forgedProfile, nil); err == nil {
 		t.Fatal("execution profile configuration changed under its pinned domain version")
 	}
-	for _, correlationID := range []string{"forged-blueprint", "forged-profile"} {
+	for _, correlationID := range []string{"whitespace-blueprint", "whitespace-profile", "forged-blueprint", "forged-profile"} {
 		stream, err := gateway.Events(ctx, correlationID)
 		if err != nil {
 			t.Fatal(err)
@@ -765,22 +812,500 @@ func TestRebuildRejectsProjectionCorrelationMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := json.Marshal(events.ProjectionEventPayload{Projection: events.ProjectionRecord{
+	record := events.ProjectionRecord{
 		ProjectionKind: KindTask, RecordID: "task-1", Version: 1,
 		CorrelationID: "work-a", Value: value,
-	}})
+	}
+	draft := events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: "task-1", CorrelationID: "work-a"}
+	boundary := events.Event{
+		EventID: "evt-1", Sequence: 1, OrganizationID: draft.OrganizationID, EventType: draft.EventType,
+		SourceActorID: draft.SourceActorID, TaskID: draft.TaskID, CorrelationID: draft.CorrelationID,
+		CreatedAt: time.Unix(1, 0).UTC(), SchemaVersion: events.SchemaVersion,
+	}
+	sealed, err := events.SealProjectionEvent(boundary, record, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(sealed)
 	if err != nil {
 		t.Fatal(err)
 	}
 	repository := New(events.NewGateway(replayLedger{stream: []events.Event{{
-		EventID: "evt-1", CorrelationID: "work-b", Payload: payload,
+		EventID: boundary.EventID, Sequence: boundary.Sequence, OrganizationID: boundary.OrganizationID, EventType: boundary.EventType, SourceActorID: boundary.SourceActorID, TaskID: boundary.TaskID,
+		CorrelationID: "work-b", CreatedAt: boundary.CreatedAt, SchemaVersion: boundary.SchemaVersion, Payload: payload,
 	}}}))
 	if _, err := repository.Rebuild(context.Background()); err == nil {
 		t.Fatal("event-to-projection correlation mismatch was accepted")
 	}
 }
 
-type replayLedger struct{ stream []events.Event }
+func TestRebuildRejectsMislabeledTaskLifecycle(t *testing.T) {
+	base := core.Task{
+		ID: "task-1", WorkID: "work-1", Description: "bounded work",
+		ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden,
+		TaskContractVersion: "1", Status: core.TaskPending,
+	}
+	completed := base
+	completed.Status = core.TaskCompleted
+	stream := make([]events.Event, 0, 2)
+	for index, revision := range []struct {
+		eventType string
+		version   int
+		value     core.Task
+	}{{"TASK_CREATED", 1, base}, {"TASK_RESUMED", 2, completed}} {
+		value, err := json.Marshal(revision.value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := events.ProjectionRecord{ProjectionKind: KindTask, RecordID: string(base.ID), Version: revision.version, CorrelationID: "work-1", Value: value}
+		boundary := events.Event{
+			EventID: fmt.Sprintf("event-%d", index+1), Sequence: int64(index + 1), OrganizationID: "org-1", EventType: revision.eventType,
+			SourceActorID: "runtime", TaskID: string(base.ID), CorrelationID: "work-1", CreatedAt: time.Unix(int64(index+1), 0).UTC(), SchemaVersion: events.SchemaVersion,
+		}
+		sealed, err := events.SealProjectionEvent(boundary, record, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		boundary.Payload, err = json.Marshal(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream = append(stream, boundary)
+	}
+	if _, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background()); err == nil {
+		t.Fatal("event replay accepted a Task status under the wrong lifecycle event")
+	}
+}
+
+func TestRebuildRejectsMislabeledAgentLifecycle(t *testing.T) {
+	agent := core.Agent{ID: "agent-1", OrganizationID: "org-1", BlueprintID: "blueprint-1", BlueprintVersion: "v1", ExecutionProfileID: "profile-1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE"}
+	stream := make([]events.Event, 0, 2)
+	for index, revision := range []struct {
+		eventType string
+		version   int
+	}{{"AGENT_CREATED", 1}, {"AGENT_DEACTIVATED", 2}} {
+		value, err := json.Marshal(agent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := events.ProjectionRecord{ProjectionKind: KindAgent, RecordID: string(agent.ID), Version: revision.version, CorrelationID: "setup", Value: value}
+		boundary := events.Event{EventID: fmt.Sprintf("agent-event-%d", index+1), Sequence: int64(index + 1), OrganizationID: "org-1", EventType: revision.eventType, SourceActorID: "runtime", CorrelationID: "setup", CreatedAt: time.Unix(int64(index+1), 0).UTC(), SchemaVersion: events.SchemaVersion}
+		sealed, err := events.SealProjectionEvent(boundary, record, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		boundary.Payload, err = json.Marshal(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream = append(stream, boundary)
+	}
+	if _, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background()); err == nil {
+		t.Fatal("event replay accepted an ACTIVE Agent under AGENT_DEACTIVATED")
+	}
+}
+
+func TestRebuildRejectsMislabeledGoalLifecycle(t *testing.T) {
+	goal := core.Goal{
+		ID: "goal-1", OrganizationID: "org-1", MissionID: "mission-1", Objective: "bounded outcome", Mode: core.GoalTarget,
+		SuccessCriteria: []core.IntentValue{{Value: "verified outcome", Origin: "USER"}}, Status: core.GoalActive, CreatedAt: time.Unix(1, 0).UTC(),
+	}
+	stream := make([]events.Event, 0, 2)
+	for index, revision := range []struct {
+		eventType string
+		version   int
+	}{{"GOAL_CREATED", 1}, {"GOAL_PAUSED", 2}} {
+		value, err := json.Marshal(goal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := events.ProjectionRecord{ProjectionKind: KindGoal, RecordID: string(goal.ID), Version: revision.version, CorrelationID: "goal-1", Value: value}
+		boundary := events.Event{EventID: fmt.Sprintf("goal-event-%d", index+1), Sequence: int64(index + 1), OrganizationID: "org-1", EventType: revision.eventType, SourceActorID: "runtime", CorrelationID: "goal-1", CreatedAt: time.Unix(int64(index+1), 0).UTC(), SchemaVersion: events.SchemaVersion}
+		sealed, err := events.SealProjectionEvent(boundary, record, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		boundary.Payload, err = json.Marshal(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream = append(stream, boundary)
+	}
+	if _, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background()); err == nil {
+		t.Fatal("event replay accepted an ACTIVE Goal under GOAL_PAUSED")
+	}
+}
+
+func TestRebuildRejectsMislabeledWorkLifecycle(t *testing.T) {
+	work := core.Work{ID: "work-1", IntentID: "intent-1", Objective: "bounded work", Status: core.WorkActive, CreatedAt: time.Unix(1, 0).UTC()}
+	stream := make([]events.Event, 0, 2)
+	for index, revision := range []struct {
+		eventType string
+		version   int
+	}{{"WORK_CREATED", 1}, {"WORK_FAILED", 2}} {
+		value, err := json.Marshal(work)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := events.ProjectionRecord{ProjectionKind: KindWork, RecordID: string(work.ID), Version: revision.version, CorrelationID: "work-1", Value: value}
+		boundary := events.Event{EventID: fmt.Sprintf("work-event-%d", index+1), Sequence: int64(index + 1), OrganizationID: "org-1", EventType: revision.eventType, SourceActorID: "runtime", CorrelationID: "work-1", CreatedAt: time.Unix(int64(index+1), 0).UTC(), SchemaVersion: events.SchemaVersion}
+		sealed, err := events.SealProjectionEvent(boundary, record, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		boundary.Payload, err = json.Marshal(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream = append(stream, boundary)
+	}
+	if _, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background()); err == nil {
+		t.Fatal("event replay accepted ACTIVE Work under WORK_FAILED")
+	}
+}
+
+func TestRebuildRejectsMislabeledMissionLifecycle(t *testing.T) {
+	mission := core.Mission{ID: "mission-1", OrganizationID: "org-1", Statement: "durable direction", Status: core.MissionActive, CreatedAt: time.Unix(1, 0).UTC()}
+	stream := make([]events.Event, 0, 2)
+	for index, revision := range []struct {
+		eventType string
+		version   int
+	}{{"MISSION_CREATED", 1}, {"MISSION_RETIRED", 2}} {
+		value, err := json.Marshal(mission)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := events.ProjectionRecord{ProjectionKind: KindMission, RecordID: string(mission.ID), Version: revision.version, CorrelationID: "mission-1", Value: value}
+		boundary := events.Event{EventID: fmt.Sprintf("mission-event-%d", index+1), Sequence: int64(index + 1), OrganizationID: "org-1", EventType: revision.eventType, SourceActorID: "runtime", CorrelationID: "mission-1", CreatedAt: time.Unix(int64(index+1), 0).UTC(), SchemaVersion: events.SchemaVersion}
+		sealed, err := events.SealProjectionEvent(boundary, record, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		boundary.Payload, err = json.Marshal(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream = append(stream, boundary)
+	}
+	if _, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background()); err == nil {
+		t.Fatal("event replay accepted an ACTIVE Mission under MISSION_RETIRED")
+	}
+}
+
+func TestEventAuditRejectsHistoricalAgentConfigurationBinding(t *testing.T) {
+	agent := core.Agent{ID: "agent-1", OrganizationID: "org-1", BlueprintID: "missing-blueprint", BlueprintVersion: "v1", ExecutionProfileID: "profile-1", ExecutionProfileVersion: "v1", RuntimeAdapter: "local", Status: "ACTIVE"}
+	value, err := json.Marshal(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := events.ProjectionRecord{ProjectionKind: KindAgent, RecordID: string(agent.ID), Version: 1, CorrelationID: "setup", Value: value}
+	event := events.Event{EventID: "agent-event-1", Sequence: 1, OrganizationID: "org-1", EventType: "AGENT_CREATED", SourceActorID: "runtime", CorrelationID: "setup", CreatedAt: time.Unix(1, 0).UTC(), SchemaVersion: events.SchemaVersion}
+	sealed, err := events.SealProjectionEvent(event, record, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.Payload, err = json.Marshal(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := Snapshot{
+		Organizations:     map[core.ID]Versioned[core.Organization]{"org-1": {Version: 1, Value: core.Organization{ID: "org-1"}}},
+		AgentBlueprints:   map[core.ID]Versioned[core.AgentBlueprint]{"blueprint-1": {Version: 1, Value: core.AgentBlueprint{ID: "blueprint-1", OrganizationID: "org-1", Version: "v1"}}},
+		ExecutionProfiles: map[core.ID]Versioned[core.ExecutionProfile]{"profile-1": {Version: 1, Value: core.ExecutionProfile{ID: "profile-1", OrganizationID: "org-1", Version: "v1"}}},
+	}
+	if err := validateProjectionEventOrganizationBindings(snapshot, []events.Event{event}); err == nil || !strings.Contains(err.Error(), "invalid pinned configuration") {
+		t.Fatalf("event audit accepted an Agent revision with an unbound blueprint: %v", err)
+	}
+}
+
+func TestRebuildRejectsTaskCompletionWithoutEvidenceChain(t *testing.T) {
+	now := time.Unix(1, 0).UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, NormalizedObjective: "objective", CreatedAt: now}
+	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	task := core.Task{ID: "task-1", WorkID: work.ID, Description: "recovery task", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
+	var stream []events.Event
+	appendProjection := func(eventType, kind, id string, version int, value any, detail any) {
+		t.Helper()
+		body, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var detailBody json.RawMessage
+		if detail != nil {
+			detailBody, err = json.Marshal(detail)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		record := events.ProjectionRecord{ProjectionKind: kind, RecordID: id, Version: version, CorrelationID: "work-1", Value: body}
+		boundary := events.Event{
+			EventID: fmt.Sprintf("event-%d", len(stream)+1), Sequence: int64(len(stream) + 1), OrganizationID: string(organization.ID), EventType: eventType,
+			SourceActorID: "runtime", AuthorizationRefs: []string{}, ArtifactRefs: []string{}, CorrelationID: record.CorrelationID, CreatedAt: now.Add(time.Duration(len(stream)) * time.Second), SchemaVersion: events.SchemaVersion,
+		}
+		if kind == KindTask {
+			boundary.TaskID = id
+		}
+		sealed, err := events.SealProjectionEvent(boundary, record, detailBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		boundary.Payload, err = json.Marshal(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream = append(stream, boundary)
+	}
+	appendProjection("ORGANIZATION_CREATED", KindOrganization, string(organization.ID), 1, organization, nil)
+	appendProjection("INTENT_CREATED", KindIntent, string(intent.ID), 1, intent, nil)
+	appendProjection("WORK_CREATED", KindWork, string(work.ID), 1, work, nil)
+	appendProjection("TASK_CREATED", KindTask, string(task.ID), 1, task, nil)
+	task.Status = core.TaskRunning
+	appendProjection("EXECUTION_STARTED", KindTask, string(task.ID), 2, task, nil)
+	task.Status = core.TaskCompleted
+	decision := events.CompletionDecisionPayload{Contract: core.CompletionContract{TaskID: task.ID, TaskVersion: 2}, Result: events.CompletionDecisionResultPayload{Complete: true}, OutcomeEventRef: "missing-outcome"}
+	appendProjection("TASK_VERIFIED_COMPLETE", KindTask, string(task.ID), 3, task, decision)
+
+	if _, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background()); err == nil || !strings.Contains(err.Error(), "exact verification decision") {
+		t.Fatalf("event replay accepted a status-only Task completion: %v", err)
+	}
+}
+
+func TestFullAuditRejectsProjectionEventWithoutMaterializedRecord(t *testing.T) {
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: time.Unix(1, 0).UTC()}
+	value, err := json.Marshal(organization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := events.ProjectionRecord{
+		ProjectionKind: KindOrganization, RecordID: string(organization.ID), Version: 1,
+		CorrelationID: "setup-1", Value: value,
+	}
+	boundary := events.Event{
+		EventID: "event-1", Sequence: 1, OrganizationID: string(organization.ID), EventType: "ORGANIZATION_CREATED",
+		SourceActorID: "runtime", CorrelationID: record.CorrelationID,
+		CreatedAt: time.Unix(2, 0).UTC(), SchemaVersion: events.SchemaVersion,
+	}
+	sealed, err := events.SealProjectionEvent(boundary, record, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary.Payload, err = json.Marshal(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := Snapshot{
+		Organizations: map[core.ID]Versioned[core.Organization]{organization.ID: {Version: 1, CorrelationID: record.CorrelationID, Value: organization}},
+		Missions:      map[core.ID]Versioned[core.Mission]{}, Goals: map[core.ID]Versioned[core.Goal]{}, Teams: map[core.ID]Versioned[core.Team]{},
+		AgentBlueprints: map[core.ID]Versioned[core.AgentBlueprint]{}, ExecutionProfiles: map[core.ID]Versioned[core.ExecutionProfile]{}, Agents: map[core.ID]Versioned[core.Agent]{},
+		Intents: map[core.ID]Versioned[core.Intent]{}, Works: map[core.ID]Versioned[core.Work]{}, Tasks: map[core.ID]Versioned[core.Task]{},
+	}
+	repository := New(events.NewGateway(replayLedger{stream: []events.Event{boundary}}))
+	err = repository.ValidateCompletionAdmissions(context.Background(), snapshot)
+	if err == nil || !strings.Contains(err.Error(), "lacks one exact materialized record") {
+		t.Fatalf("full audit accepted orphan projection event: %v", err)
+	}
+}
+
+func TestRebuildRejectsProjectionShapedOrdinaryEvents(t *testing.T) {
+	for _, kind := range []string{KindTeam, KindAgentBlueprint, "role", "grant"} {
+		t.Run(kind, func(t *testing.T) {
+			value, err := json.Marshal(map[string]string{"id": kind + "-1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := events.ProjectionRecord{
+				ProjectionKind: kind, RecordID: kind + "-1", Version: 1,
+				CorrelationID: "work-1", Value: value,
+			}
+			ordinaryDraft := events.TrustedDraft{
+				OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "work-1",
+			}
+			boundary := events.Event{
+				EventID: "event-1", Sequence: 1, OrganizationID: ordinaryDraft.OrganizationID, EventType: ordinaryDraft.EventType,
+				SourceActorID: ordinaryDraft.SourceActorID, CorrelationID: ordinaryDraft.CorrelationID,
+				CreatedAt: time.Unix(1, 0).UTC(), SchemaVersion: events.SchemaVersion,
+			}
+			sealed, err := events.SealProjectionEvent(boundary, record, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := json.Marshal(sealed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stream := []events.Event{{
+				EventID: boundary.EventID, Sequence: boundary.Sequence, OrganizationID: boundary.OrganizationID, EventType: boundary.EventType,
+				SourceActorID: boundary.SourceActorID, CorrelationID: boundary.CorrelationID,
+				CreatedAt: boundary.CreatedAt, SchemaVersion: boundary.SchemaVersion, Payload: body,
+			}}
+			if _, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background()); err == nil {
+				t.Fatalf("ordinary event became authoritative %s state", kind)
+			}
+
+			copied := stream[0]
+			copied.EventID = "event-2"
+			if _, err := New(events.NewGateway(replayLedger{stream: []events.Event{copied}})).Rebuild(context.Background()); err == nil {
+				t.Fatalf("copied admission became authoritative %s state", kind)
+			}
+
+			unsealed, err := json.Marshal(events.ProjectionEventPayload{Projection: record})
+			if err != nil {
+				t.Fatal(err)
+			}
+			stream[0].Payload = unsealed
+			if _, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background()); err == nil {
+				t.Fatalf("unsealed event became authoritative %s state", kind)
+			}
+		})
+	}
+}
+
+func TestRebuildRejectsUnsupportedOrdinaryEventSchema(t *testing.T) {
+	stream := []events.Event{{
+		EventID: "event-1", Sequence: 1, OrganizationID: "org-1", EventType: "INTENT_DRAFTED",
+		SourceActorID: "runtime", TaskID: "task-work-1", CorrelationID: "work-1",
+		CreatedAt: time.Unix(1, 0).UTC(), SchemaVersion: events.SchemaVersion + 1,
+		Payload: json.RawMessage(`{"draft":"unsupported"}`),
+	}}
+	_, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "unsupported schema version") {
+		t.Fatalf("startup admitted unsupported ordinary event schema: %v", err)
+	}
+}
+
+func TestRebuildRejectsInvalidHistoricalTeamRoster(t *testing.T) {
+	now := time.Unix(1, 0).UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	invalid := core.Team{ID: "team-1", OrganizationID: organization.ID, Name: "Delivery", MemberAgentIDs: []core.ID{"missing-agent"}, Status: "ACTIVE", CreatedAt: now}
+	corrected := invalid
+	corrected.MemberAgentIDs = []core.ID{}
+	stream := []events.Event{
+		sealedReplayProjection(t, 1, "ORGANIZATION_CREATED", KindOrganization, string(organization.ID), 1, "setup", organization.ID, organization),
+		sealedReplayProjection(t, 2, "TEAM_CREATED", KindTeam, string(invalid.ID), 1, "roster", organization.ID, invalid),
+		sealedReplayProjection(t, 3, "TEAM_REVISED", KindTeam, string(corrected.ID), 2, "roster", organization.ID, corrected),
+	}
+	_, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "invalid member Agent") {
+		t.Fatalf("startup accepted an invalid historical Team roster hidden by a later revision: %v", err)
+	}
+}
+
+func sealedReplayProjection(t *testing.T, sequence int64, eventType, kind, recordID string, version int, correlationID string, organizationID core.ID, value any) events.Event {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := events.ProjectionRecord{ProjectionKind: kind, RecordID: recordID, Version: version, CorrelationID: correlationID, Value: encoded}
+	event := events.Event{
+		EventID: fmt.Sprintf("event-%d", sequence), Sequence: sequence, OrganizationID: string(organizationID), EventType: eventType,
+		SourceActorID: "runtime", CorrelationID: correlationID, CreatedAt: time.Unix(sequence, 0).UTC(), SchemaVersion: events.SchemaVersion,
+	}
+	sealed, err := events.SealProjectionEvent(event, record, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.Payload, err = json.Marshal(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return event
+}
+
+func swapReplayProjectionSequences(t *testing.T, stream []events.Event, firstType, secondType string) []events.Event {
+	t.Helper()
+	result := append([]events.Event(nil), stream...)
+	first, second := -1, -1
+	for index, event := range result {
+		switch event.EventType {
+		case firstType:
+			first = index
+		case secondType:
+			second = index
+		}
+	}
+	if first < 0 || second < 0 {
+		t.Fatalf("projection events %s/%s were not found", firstType, secondType)
+	}
+	firstPayload, firstPresent, firstErr := events.AdmittedProjection(result[first])
+	secondPayload, secondPresent, secondErr := events.AdmittedProjection(result[second])
+	if firstErr != nil || secondErr != nil || !firstPresent || !secondPresent {
+		t.Fatalf("projection events cannot be resealed: first=%v/%t second=%v/%t", firstErr, firstPresent, secondErr, secondPresent)
+	}
+	result[first].Sequence, result[second].Sequence = result[second].Sequence, result[first].Sequence
+	for _, item := range []struct {
+		index   int
+		payload events.ProjectionEventPayload
+	}{{first, firstPayload}, {second, secondPayload}} {
+		sealed, err := events.SealProjectionEvent(result[item.index], item.payload.Projection, item.payload.Detail)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result[item.index].Payload, err = json.Marshal(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return result
+}
+
+func insertUnboundReplayConfirmation(t *testing.T, stream []events.Event, correlationID string, intent core.Intent) []events.Event {
+	t.Helper()
+	result := append([]events.Event(nil), stream...)
+	insertSequence := int64(0)
+	var template events.Event
+	for _, event := range result {
+		if event.CorrelationID == correlationID && event.EventType == "INTENT_CONFIRMED" {
+			insertSequence = event.Sequence
+			template = event
+			break
+		}
+	}
+	if insertSequence == 0 {
+		t.Fatal("Goal-bound confirmation was not found")
+	}
+	for index := range result {
+		if result[index].Sequence < insertSequence {
+			continue
+		}
+		payload, present, err := events.AdmittedProjection(result[index])
+		result[index].Sequence++
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !present {
+			continue
+		}
+		sealed, err := events.SealProjectionEvent(result[index], payload.Projection, payload.Detail)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result[index].Payload, err = json.Marshal(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	unbound := events.IntentConfirmedPayload{
+		IntentID: string(intent.ID), Version: 1, Fingerprint: intent.AcceptedFingerprint,
+		ConfirmingActorID: string(intent.SourcePrincipalID), ConfirmingActorKind: string(intent.SourcePrincipalKind),
+		SourceChannel: intent.SourceChannel, MessageID: "unbound-confirmation",
+	}
+	body, err := json.Marshal(unbound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template.EventID = "event-unbound-confirmation"
+	template.Sequence = insertSequence
+	template.Payload = body
+	result = append(result, template)
+	return result
+}
+
+type replayLedger struct {
+	stream  []events.Event
+	records map[string][][]byte
+}
 
 func (replayLedger) Append(context.Context, events.TrustedDraft) (events.Event, error) {
 	return events.Event{}, nil
@@ -788,6 +1313,14 @@ func (replayLedger) Append(context.Context, events.TrustedDraft) (events.Event, 
 
 func (l replayLedger) Events(context.Context, string) ([]events.Event, error) {
 	return l.stream, nil
+}
+
+func (l replayLedger) Records(_ context.Context, kind, _ string) ([][]byte, error) {
+	return l.records[kind], nil
+}
+
+func (replayLedger) InboxObservations(context.Context) (map[string]events.InboxObservationBinding, error) {
+	return map[string]events.InboxObservationBinding{}, nil
 }
 
 func validBoundarySnapshot() Snapshot {
@@ -804,8 +1337,8 @@ func validBoundarySnapshot() Snapshot {
 		"work-2": {CorrelationID: "work-2", Value: core.Work{ID: "work-2", IntentID: "intent-2", Status: core.WorkActive}},
 	}
 	tasks := map[core.ID]Versioned[core.Task]{
-		"task-1": {CorrelationID: "work-1", Value: core.Task{ID: "task-1", WorkID: "work-1"}},
-		"task-2": {CorrelationID: "work-2", Value: core.Task{ID: "task-2", WorkID: "work-2"}},
+		"task-1": {CorrelationID: "work-1", Value: core.Task{ID: "task-1", WorkID: "work-1", Description: "test work one", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}},
+		"task-2": {CorrelationID: "work-2", Value: core.Task{ID: "task-2", WorkID: "work-2", Description: "test work two", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}},
 	}
 	return Snapshot{
 		Organizations: organizations, Teams: map[core.ID]Versioned[core.Team]{}, AgentBlueprints: map[core.ID]Versioned[core.AgentBlueprint]{}, ExecutionProfiles: map[core.ID]Versioned[core.ExecutionProfile]{}, Agents: map[core.ID]Versioned[core.Agent]{},

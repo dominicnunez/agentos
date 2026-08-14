@@ -121,10 +121,30 @@ with its adapter unreachable until the separately authorized user lifecycle
 records an exact decision.
 
 Durable organization/work projections now commit atomically with their
-authoritative transition events and can be rebuilt by replay. Startup validates
-that state before opening the operator endpoint, preserves blocked work, runs
-dependency-ready pending work, retries only known-safe interrupted deterministic
-work, and blocks interrupted adaptive execution whose outcome is uncertain.
+authoritative transition events and can be rebuilt by replay. Every projection
+record carries the exact authorizing event ID and a schema-v3 fingerprint over
+that event's runtime-owned envelope, record, and transition detail. Generic
+event writers reserve both projection payload keys and projection lifecycle
+labels. Routine record reads, full startup audit, event-only rebuild, and
+backup/restore verification reject missing, copied, duplicated, malformed,
+cross-organization, or mismatched admission. Nonempty pre-admission projection
+schemas are unsupported pre-release state and fail closed rather than receiving
+an inferred compatibility migration. Agent, Mission, Goal, Work, and Task revisions
+additionally bind each lifecycle label to its exact prior and resulting status,
+and an Agent history must begin with its version-one creation. Completed Work
+must retain the exact verified Task evidence that authorized its transition.
+Agent configuration updates cannot masquerade as activation changes. Task creation validates the complete
+post-batch graph before commit while allowing references within that batch. Task revisions preserve the
+immutable planned and assigned contract, retain one Work/correlation boundary,
+form an acyclic dependency graph, and route a blocked child only to its durable
+parent. Organization and Intent creation bind value identity to the exact
+admission envelope; Intent additionally requires its durable parent
+Organization and a nonempty correlation boundary. Team revisions preserve
+tenant ownership and creation identity. The same contracts are enforced at
+write, event-only rebuild, and recovery verification. Startup validates state before
+opening the operator endpoint, preserves blocked work, runs dependency-ready
+pending work, retries only known-safe interrupted deterministic work, and
+blocks interrupted adaptive execution whose outcome is uncertain.
 
 Agent-proposed addressed events use runtime-stamped sender and recipient
 envelopes. The SQLite ledger commits each addressed Event Contract and its
@@ -188,7 +208,8 @@ criteria with the current Goal revision, and appends a fingerprinted
 `GOAL_PROGRESS_EVALUATED` contract. Target Goals enter `ACHIEVED` only when all
 criteria have authoritative coverage; the evaluation and `GOAL_ACHIEVED`
 projection commit in one SQLite transaction. Continuous Goals record progress
-without becoming terminal. Each Goal revision keeps a stable bounded proof set:
+without becoming terminal. Recovery certification replays the same Goal
+achievement evidence contract before accepting a backup. Each Goal revision keeps a stable bounded proof set:
 the earliest current Work completion that exactly covers each criterion, or
 the earliest completion before any criterion is covered. Evidence growth is
 therefore bounded by the Goal's criteria rather than its lifetime Work count,
