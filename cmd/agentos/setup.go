@@ -148,10 +148,11 @@ func loadOrBeginInit(mode bootstrap.Mode, owner bootstrap.Owner, paths bootstrap
 			return bootstrap.Config{}, bootstrap.State{}, fmt.Errorf("installation belongs to Linux user %s (UID %d), not the user who started this command", config.Owner.Username, config.Owner.UID)
 		}
 		if config.Version != bootstrap.ConfigVersion || state.Version != bootstrap.ConfigVersion {
-			config, state, err = bootstrap.UpgradeVersion1Checkpoint(config, state)
-			if err != nil {
-				return bootstrap.Config{}, bootstrap.State{}, err
+			upgradedConfig, upgradedState, upgradeErr := bootstrap.UpgradeVersion1Checkpoint(config, state)
+			if upgradeErr != nil {
+				return bootstrap.Config{}, bootstrap.State{}, upgradeErr
 			}
+			config, state = upgradedConfig, upgradedState
 			if err := checkpoint(configPath, statePath, &config, &state); err != nil {
 				return bootstrap.Config{}, bootstrap.State{}, fmt.Errorf("persist upgraded setup checkpoint: %w", err)
 			}
