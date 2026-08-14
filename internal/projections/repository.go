@@ -673,15 +673,15 @@ func admitVersionedOrganizedProjection[T any](record events.ProjectionRecord, ev
 
 func validateLabExperimentAtAdmission(experiment core.Experiment, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, stream []events.Event) error {
 	if experiment.ID != core.ID(record.RecordID) || experiment.OrganizationID != core.ID(event.OrganizationID) || record.CorrelationID != event.CorrelationID {
-		return fmt.Errorf("Lab experiment crosses its durable identity boundary")
+		return fmt.Errorf("lab experiment crosses its durable identity boundary")
 	}
 	work, found := graph.Works[experiment.WorkID]
 	if !found || work.CorrelationID != event.CorrelationID {
-		return fmt.Errorf("Lab experiment requires its exact bounded Work")
+		return fmt.Errorf("lab experiment requires its exact bounded Work")
 	}
 	intent, found := graph.Intents[work.Value.IntentID]
 	if !found || intent.Value.OrganizationID != experiment.OrganizationID || experiment.Objective != work.Value.Objective {
-		return fmt.Errorf("Lab experiment crosses its Work organization or objective")
+		return fmt.Errorf("lab experiment crosses its Work organization or objective")
 	}
 	switch experiment.Status {
 	case core.ExperimentRunning:
@@ -715,27 +715,27 @@ func validateLabExperimentAtAdmission(experiment core.Experiment, event events.E
 
 func validateLabPromotionCandidateAtAdmission(candidate core.PromotionCandidate, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, stream []events.Event) error {
 	if candidate.ID != core.ID(record.RecordID) || candidate.OrganizationID != core.ID(event.OrganizationID) || record.CorrelationID != event.CorrelationID {
-		return fmt.Errorf("Lab promotion candidate crosses its durable identity boundary")
+		return fmt.Errorf("lab promotion candidate crosses its durable identity boundary")
 	}
 	experiment, found := graph.Experiments[candidate.ExperimentID]
 	if !found || experiment.Value.Status != core.ExperimentCompleted || experiment.Value.OrganizationID != candidate.OrganizationID ||
 		experiment.Version != candidate.ExperimentVersion || experiment.CorrelationID != event.CorrelationID ||
 		!slices.Equal(experiment.Value.ResultEventRefs, candidate.ExperimentResultEventRefs) || candidate.CreatedAt.Before(*experiment.Value.FinishedAt) {
-		return fmt.Errorf("Lab promotion candidate lacks its exact completed experiment")
+		return fmt.Errorf("lab promotion candidate lacks its exact completed experiment")
 	}
 	work := graph.Works[experiment.Value.WorkID]
 	intent := graph.Intents[work.Value.IntentID]
 	if candidate.NominatedBy != intent.Value.SourcePrincipalID {
-		return fmt.Errorf("Lab promotion candidate does not preserve its commissioning actor")
+		return fmt.Errorf("lab promotion candidate does not preserve its commissioning actor")
 	}
 	for _, ref := range candidate.ReproductionEvidenceRefs {
 		reproduction, found := priorEventByID(stream, event.Sequence, ref)
 		if !found || reproduction.OrganizationID != event.OrganizationID || reproduction.CorrelationID == event.CorrelationID || reproduction.EventType != "WORK_COMPLETED" {
-			return fmt.Errorf("Lab promotion candidate lacks independent same-organization reproduction evidence")
+			return fmt.Errorf("lab promotion candidate lacks independent same-organization reproduction evidence")
 		}
 		payload, admitted, err := events.AdmittedProjection(reproduction)
 		if err != nil || !admitted || payload.Projection.ProjectionKind != KindWork || payload.Projection.RecordID == string(experiment.Value.WorkID) {
-			return fmt.Errorf("Lab promotion reproduction is not a distinct admitted Work completion")
+			return fmt.Errorf("lab promotion reproduction is not a distinct admitted Work completion")
 		}
 	}
 	return nil

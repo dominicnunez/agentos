@@ -43,7 +43,7 @@ func ValidateDeterministicSpec(spec Spec) error {
 // executed. Terminal reconciliation repeats these checks against durable Tasks.
 func ValidatePlan(budget core.ExperimentBudget, tasks []core.PlanTask) error {
 	if !core.ValidExperimentBudget(budget) || len(tasks) == 0 || len(tasks) > budget.MaxExecutions {
-		return fmt.Errorf("Lab plan exceeds its execution budget")
+		return fmt.Errorf("lab plan exceeds its execution budget")
 	}
 	children := 0
 	for _, task := range tasks {
@@ -51,11 +51,11 @@ func ValidatePlan(budget core.ExperimentBudget, tasks []core.PlanTask) error {
 			children++
 		}
 		if task.ExecutionKind != core.ExecutionDeterministic || task.ModelInferencePolicy != core.InferenceForbidden {
-			return fmt.Errorf("Lab plan crosses its deterministic no-inference containment")
+			return fmt.Errorf("lab plan crosses its deterministic no-inference containment")
 		}
 	}
 	if children > budget.MaxChildren {
-		return fmt.Errorf("Lab plan exceeds its child budget")
+		return fmt.Errorf("lab plan exceeds its child budget")
 	}
 	return nil
 }
@@ -98,7 +98,7 @@ func (s *Service) StartSubmission(ctx context.Context, correlationID string, int
 	}
 	experiment := newExperiment(intent.OrganizationID, work, spec, s.now())
 	if !core.ValidExperiment(experiment) {
-		return core.Experiment{}, fmt.Errorf("Lab experiment containment or resource budget is invalid")
+		return core.Experiment{}, fmt.Errorf("lab experiment containment or resource budget is invalid")
 	}
 	if _, found := snapshot.Intents[intent.ID]; found {
 		return core.Experiment{}, fmt.Errorf("new Lab submission conflicts with an existing Intent")
@@ -127,22 +127,22 @@ func (s *Service) Resume(ctx context.Context, organizationID, workID core.ID, sp
 	}
 	work, found := snapshot.Works[workID]
 	if !found {
-		return core.Experiment{}, fmt.Errorf("Lab experiment requires bounded Work")
+		return core.Experiment{}, fmt.Errorf("lab experiment requires bounded Work")
 	}
 	intent, found := snapshot.Intents[work.Value.IntentID]
 	if !found || intent.Value.OrganizationID != organizationID {
-		return core.Experiment{}, fmt.Errorf("Lab experiment Work is outside the organization")
+		return core.Experiment{}, fmt.Errorf("lab experiment Work is outside the organization")
 	}
 	experiment := newExperiment(organizationID, work.Value, spec, s.now())
 	if !core.ValidExperiment(experiment) {
-		return core.Experiment{}, fmt.Errorf("Lab experiment containment or resource budget is invalid")
+		return core.Experiment{}, fmt.Errorf("lab experiment containment or resource budget is invalid")
 	}
 	existing, exists := snapshot.Experiments[experiment.ID]
 	if !exists {
 		return core.Experiment{}, fmt.Errorf("ordinary Work cannot be converted into a Lab experiment")
 	}
 	if existing.CorrelationID != work.CorrelationID || !sameExperimentContainment(existing.Value, experiment) {
-		return core.Experiment{}, fmt.Errorf("Lab experiment identity is already bound to different containment")
+		return core.Experiment{}, fmt.Errorf("lab experiment identity is already bound to different containment")
 	}
 	return existing.Value, nil
 }

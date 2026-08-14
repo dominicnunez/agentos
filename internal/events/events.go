@@ -2120,7 +2120,7 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 	if record.ProjectionKind == "lab_experiment" {
 		var experiment core.Experiment
 		if decodeExactEventJSON(record.Value, &experiment) != nil || experiment.ID != core.ID(record.RecordID) || string(experiment.OrganizationID) != event.OrganizationID || record.CorrelationID == "" || record.CorrelationID != event.CorrelationID {
-			return fmt.Errorf("Lab experiment projection value is invalid or lacks its correlation boundary")
+			return fmt.Errorf("lab experiment projection value is invalid or lacks its correlation boundary")
 		}
 		if err := ValidateExperimentProjectionTarget(event.EventType, record.Version, experiment); err != nil {
 			return err
@@ -2129,7 +2129,7 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 	if record.ProjectionKind == "lab_promotion_candidate" {
 		var candidate core.PromotionCandidate
 		if decodeExactEventJSON(record.Value, &candidate) != nil || candidate.ID != core.ID(record.RecordID) || string(candidate.OrganizationID) != event.OrganizationID || record.CorrelationID == "" || record.CorrelationID != event.CorrelationID {
-			return fmt.Errorf("Lab promotion-candidate projection value is invalid or lacks its correlation boundary")
+			return fmt.Errorf("lab promotion-candidate projection value is invalid or lacks its correlation boundary")
 		}
 		if err := ValidatePromotionCandidateProjectionTarget(event.EventType, record.Version, candidate); err != nil {
 			return err
@@ -2254,13 +2254,13 @@ func ValidateWorkProjectionTransition(eventType string, version int, previous *c
 // from trust. No event label in this contract can materialize an active result.
 func ValidateExperimentProjectionTarget(eventType string, version int, experiment core.Experiment) error {
 	if version < 1 || !core.ValidExperiment(experiment) {
-		return fmt.Errorf("Lab experiment projection is incomplete or unsafe")
+		return fmt.Errorf("lab experiment projection is incomplete or unsafe")
 	}
 	valid := version == 1 && eventType == "LAB_EXPERIMENT_STARTED" && experiment.Status == core.ExperimentRunning ||
 		version > 1 && eventType == "LAB_EXPERIMENT_COMPLETED" && experiment.Status == core.ExperimentCompleted ||
 		version > 1 && eventType == "LAB_EXPERIMENT_FAILED" && experiment.Status == core.ExperimentFailed
 	if !valid {
-		return fmt.Errorf("Lab experiment event %s cannot materialize status %s at version %d", eventType, experiment.Status, version)
+		return fmt.Errorf("lab experiment event %s cannot materialize status %s at version %d", eventType, experiment.Status, version)
 	}
 	return nil
 }
@@ -2271,19 +2271,19 @@ func ValidateExperimentProjectionTransition(eventType string, version int, previ
 	}
 	if previous == nil {
 		if version != 1 || eventType != "LAB_EXPERIMENT_STARTED" {
-			return fmt.Errorf("Lab experiment history must begin with runtime start at version one")
+			return fmt.Errorf("lab experiment history must begin with runtime start at version one")
 		}
 		return nil
 	}
 	if version < 2 || !core.ValidExperimentRevision(*previous, next) {
-		return fmt.Errorf("Lab experiment revision changes its containment, budget, trust, or terminal lifecycle")
+		return fmt.Errorf("lab experiment revision changes its containment, budget, trust, or terminal lifecycle")
 	}
 	return nil
 }
 
 func ValidatePromotionCandidateProjectionTarget(eventType string, version int, candidate core.PromotionCandidate) error {
 	if version != 1 || eventType != "LAB_PROMOTION_CANDIDATE_CREATED" || !core.ValidPromotionCandidate(candidate) {
-		return fmt.Errorf("Lab promotion candidate is not a valid version-one nomination")
+		return fmt.Errorf("lab promotion candidate is not a valid version-one nomination")
 	}
 	return nil
 }

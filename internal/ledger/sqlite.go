@@ -1691,7 +1691,7 @@ func validateWorkRevision(ctx context.Context, tx *sql.Tx, item preparedProjecti
 func validateLabExperimentRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
 	experiment := *item.experiment
 	if experiment.ID != core.ID(item.draft.RecordID) || string(experiment.OrganizationID) != item.draft.Event.OrganizationID || item.draft.Event.CorrelationID == "" {
-		return fmt.Errorf("Lab experiment crosses its durable identity boundary")
+		return fmt.Errorf("lab experiment crosses its durable identity boundary")
 	}
 	record, previous, found, err := latestProjectionRevision[core.Experiment](ctx, tx, "lab_experiment", item.draft.RecordID)
 	if err != nil {
@@ -1703,7 +1703,7 @@ func validateLabExperimentRevision(ctx context.Context, tx *sql.Tx, item prepare
 		}
 	} else {
 		if item.draft.Version != record.Version+1 || record.CorrelationID != item.draft.Event.CorrelationID {
-			return fmt.Errorf("Lab experiment revision is noncontiguous or crosses its correlation boundary")
+			return fmt.Errorf("lab experiment revision is noncontiguous or crosses its correlation boundary")
 		}
 		if err := events.ValidateExperimentProjectionTransition(item.draft.Event.EventType, item.draft.Version, &previous, experiment); err != nil {
 			return err
@@ -1711,11 +1711,11 @@ func validateLabExperimentRevision(ctx context.Context, tx *sql.Tx, item prepare
 	}
 	workRecord, work, workFound, err := latestProjectionRevision[core.Work](ctx, tx, "work", string(experiment.WorkID))
 	if err != nil || !workFound || workRecord.CorrelationID != item.draft.Event.CorrelationID || experiment.Objective != work.Objective {
-		return fmt.Errorf("Lab experiment requires its exact bounded Work")
+		return fmt.Errorf("lab experiment requires its exact bounded Work")
 	}
 	intentRecord, intent, intentFound, err := latestProjectionRevision[core.Intent](ctx, tx, "intent", string(work.IntentID))
 	if err != nil || !intentFound || intentRecord.CorrelationID != item.draft.Event.CorrelationID || intent.OrganizationID != experiment.OrganizationID {
-		return fmt.Errorf("Lab experiment crosses its Work organization boundary")
+		return fmt.Errorf("lab experiment crosses its Work organization boundary")
 	}
 	switch experiment.Status {
 	case core.ExperimentRunning:
@@ -1750,33 +1750,33 @@ func validateLabExperimentRevision(ctx context.Context, tx *sql.Tx, item prepare
 func validateLabPromotionCandidateRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
 	candidate := *item.promotionCandidate
 	if candidate.ID != core.ID(item.draft.RecordID) || string(candidate.OrganizationID) != item.draft.Event.OrganizationID || item.draft.Event.CorrelationID == "" || events.ValidatePromotionCandidateProjectionTarget(item.draft.Event.EventType, item.draft.Version, candidate) != nil {
-		return fmt.Errorf("Lab promotion candidate crosses its runtime-owned nomination boundary")
+		return fmt.Errorf("lab promotion candidate crosses its runtime-owned nomination boundary")
 	}
 	if _, _, found, err := latestProjectionRevision[core.PromotionCandidate](ctx, tx, "lab_promotion_candidate", item.draft.RecordID); err != nil || found {
-		return fmt.Errorf("Lab promotion candidate identity is already admitted")
+		return fmt.Errorf("lab promotion candidate identity is already admitted")
 	}
 	experimentRecord, experiment, found, err := latestProjectionRevision[core.Experiment](ctx, tx, "lab_experiment", string(candidate.ExperimentID))
 	if err != nil || !found || experiment.Status != core.ExperimentCompleted || experiment.OrganizationID != candidate.OrganizationID ||
 		experimentRecord.Version != candidate.ExperimentVersion || experimentRecord.CorrelationID != item.draft.Event.CorrelationID ||
 		!slices.Equal(experiment.ResultEventRefs, candidate.ExperimentResultEventRefs) || candidate.CreatedAt.Before(*experiment.FinishedAt) {
-		return fmt.Errorf("Lab promotion candidate lacks its exact completed experiment")
+		return fmt.Errorf("lab promotion candidate lacks its exact completed experiment")
 	}
 	_, work, found, err := latestProjectionRevision[core.Work](ctx, tx, "work", string(experiment.WorkID))
 	if err != nil || !found {
-		return fmt.Errorf("Lab promotion candidate lacks its experimental Work")
+		return fmt.Errorf("lab promotion candidate lacks its experimental Work")
 	}
 	_, intent, found, err := latestProjectionRevision[core.Intent](ctx, tx, "intent", string(work.IntentID))
 	if err != nil || !found || candidate.NominatedBy != intent.SourcePrincipalID {
-		return fmt.Errorf("Lab promotion candidate does not preserve its commissioning actor")
+		return fmt.Errorf("lab promotion candidate does not preserve its commissioning actor")
 	}
 	for _, ref := range candidate.ReproductionEvidenceRefs {
 		reproduction, found, err := eventByID(ctx, tx, ref)
 		if err != nil || !found || reproduction.OrganizationID != item.draft.Event.OrganizationID || reproduction.CorrelationID == item.draft.Event.CorrelationID || reproduction.EventType != "WORK_COMPLETED" {
-			return fmt.Errorf("Lab promotion candidate lacks independent same-organization reproduction evidence")
+			return fmt.Errorf("lab promotion candidate lacks independent same-organization reproduction evidence")
 		}
 		payload, admitted, err := events.AdmittedProjection(reproduction)
 		if err != nil || !admitted || payload.Projection.ProjectionKind != "work" || payload.Projection.RecordID == string(experiment.WorkID) {
-			return fmt.Errorf("Lab promotion reproduction is not a distinct admitted Work completion")
+			return fmt.Errorf("lab promotion reproduction is not a distinct admitted Work completion")
 		}
 	}
 	return nil
