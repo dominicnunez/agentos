@@ -111,6 +111,9 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	if err := verifyProjectionAdmissions(ctx, db); err != nil {
 		return Result{}, err
 	}
+	if err := ledgerstore.ValidateTaskCompletionAdmissions(ctx, db); err != nil {
+		return Result{}, err
+	}
 	if err := ledgerstore.ValidateWorkCompletionAdmissions(ctx, db); err != nil {
 		return Result{}, err
 	}

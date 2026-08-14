@@ -837,6 +837,75 @@ func TestRecoveryRejectsMislabeledTaskLifecycle(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsCompletedTaskWithoutEvidenceChain(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = appendRecoveryProjectionChain(t, ctx, store)
+	task := core.Task{ID: "task-1", WorkID: "work-1", Description: "recovery task", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskRunning}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1"},
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sequence int64
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0)+1 FROM events`).Scan(&sequence); err != nil {
+		t.Fatal(err)
+	}
+	task.Status = core.TaskCompleted
+	value, err := json.Marshal(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := events.ProjectionRecord{ProjectionKind: "task", RecordID: string(task.ID), Version: 3, CorrelationID: "work-1", Value: value}
+	boundary := events.Event{
+		EventID: "forged-task-completion", Sequence: sequence, OrganizationID: "org-1", EventType: "TASK_VERIFIED_COMPLETE", SourceActorID: "runtime",
+		TaskID: string(task.ID), AuthorizationRefs: []string{}, ArtifactRefs: []string{}, CorrelationID: "work-1", CreatedAt: time.Now().UTC(), SchemaVersion: events.SchemaVersion,
+	}
+	decision := events.CompletionDecisionPayload{Contract: core.CompletionContract{TaskID: task.ID, TaskVersion: 2}, Result: events.CompletionDecisionResultPayload{Complete: true}, OutcomeEventRef: "missing-outcome"}
+	detail, err := json.Marshal(decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := events.SealProjectionEvent(boundary, record, detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO events(sequence,event_id,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		boundary.Sequence, boundary.EventID, boundary.OrganizationID, boundary.EventType, boundary.SourceActorID, "", "", "", boundary.TaskID, `[]`, `[]`, payload, boundary.CorrelationID, boundary.CreatedAt.Format(time.RFC3339Nano), boundary.SchemaVersion); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,admission_event_id,admission_fingerprint,created_at) VALUES(?,?,?,?,?,?,?)`, "task", string(task.ID), 3, body, boundary.EventID, sealed.Admission.Fingerprint, boundary.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "completed Task task-1 lacks exact durable evidence") {
+		t.Fatalf("recovery accepted a status-only Task completion: %v", err)
+	}
+}
+
 func TestRecoveryRejectsMislabeledAgentLifecycle(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.db")

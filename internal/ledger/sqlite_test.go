@@ -1253,16 +1253,16 @@ func TestCompletedWorkRequiresExactDurableEvidence(t *testing.T) {
 		Contract: core.CompletionContract{TaskID: task.ID, TaskVersion: 2, Criteria: []core.CompletionCriterion{{ID: "verified", Assurance: core.AssuranceDeterministic, Required: true}}},
 		Result:   events.CompletionDecisionResultPayload{Complete: true}, OutcomeEventRef: outcomeEvent.EventID,
 	}
-	verificationEvent, err := l.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "COMPLETION_VERIFIED", SourceActorID: "runtime", TaskID: string(task.ID), Payload: forged, CorrelationID: "run-1"})
+	_, err = l.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "COMPLETION_VERIFIED", SourceActorID: "runtime", TaskID: string(task.ID), Payload: forged, CorrelationID: "run-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskEvent, err := l.AppendProjection(ctx, events.ProjectionDraft{
+	_, err = l.AppendProjection(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_VERIFIED_COMPLETE", SourceActorID: "runtime", TaskID: string(task.ID), Payload: forged, CorrelationID: "run-1"},
 		ProjectionKind: "task", RecordID: string(task.ID), Version: 3, Value: task,
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("Task admission accepted a forged completion decision")
 	}
 	evidence := events.WorkCompletionEvidencePayload{
 		WorkID: "work-1", WorkVersion: 2, GoalID: "goal-1", IntentID: "intent-1",
@@ -1283,20 +1283,6 @@ func TestCompletedWorkRequiresExactDurableEvidence(t *testing.T) {
 		ArtifactRefs: evidence.ArtifactRefs, Payload: evidence, CorrelationID: "run-1",
 	}); err == nil {
 		t.Fatal("typed admission accepted nonexistent Task evidence references")
-	}
-	forgedEvidence := evidence
-	forgedEvidence.Tasks = append([]events.WorkCompletionTaskEvidencePayload(nil), evidence.Tasks...)
-	forgedEvidence.Tasks[0].VerificationEventRef = verificationEvent.EventID
-	forgedEvidence.Tasks[0].CompletionEventRef = taskEvent.EventID
-	forgedEvidence.Fingerprint, err = forgedEvidence.ExpectedFingerprint()
-	if err != nil || !forgedEvidence.Valid() {
-		t.Fatalf("forged test evidence is invalid: evidence=%+v err=%v", forgedEvidence, err)
-	}
-	if _, err := l.AppendWorkCompletionEvidence(ctx, events.TrustedDraft{
-		OrganizationID: "org-1", EventType: "WORK_COMPLETION_EVALUATED", SourceActorID: "runtime",
-		ArtifactRefs: forgedEvidence.ArtifactRefs, Payload: forgedEvidence, CorrelationID: "run-1",
-	}); err == nil {
-		t.Fatal("typed admission accepted a forged completion decision")
 	}
 	records, err := l.Records(ctx, "work", "work-1")
 	if err != nil || len(records) != 1 {

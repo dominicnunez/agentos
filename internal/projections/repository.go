@@ -266,7 +266,11 @@ func (r *Repository) ValidateCompletionAdmissions(ctx context.Context, snapshot 
 	if err != nil {
 		return err
 	}
-	if err := validateProjectionEventAdmissions(stream); err != nil {
+	inboxObservations, err := r.gateway.InboxObservations(ctx)
+	if err != nil {
+		return err
+	}
+	if err := validateProjectionEventAdmissions(stream, inboxObservations); err != nil {
 		return err
 	}
 	records, err := r.readProjectionRecords(ctx)
@@ -277,10 +281,6 @@ func (r *Repository) ValidateCompletionAdmissions(ctx context.Context, snapshot 
 		return err
 	}
 	if err := validateProjectionEventOrganizationBindings(snapshot, stream); err != nil {
-		return err
-	}
-	inboxObservations, err := r.gateway.InboxObservations(ctx)
-	if err != nil {
 		return err
 	}
 	if err := validateWorkCompletionAdmissions(snapshot, stream, records[KindTeam], inboxObservations); err != nil {
@@ -299,7 +299,11 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if err := validateProjectionEventAdmissions(stream); err != nil {
+	inboxObservations, err := r.gateway.InboxObservations(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if err := validateProjectionEventAdmissions(stream, inboxObservations); err != nil {
 		return Snapshot{}, err
 	}
 	records := make(map[string][][]byte)
@@ -328,10 +332,6 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 	if err := validateProjectionEventOrganizationBindings(snapshot, stream); err != nil {
 		return Snapshot{}, err
 	}
-	inboxObservations, err := r.gateway.InboxObservations(ctx)
-	if err != nil {
-		return Snapshot{}, err
-	}
 	if err := validateWorkCompletionAdmissions(snapshot, stream, records[KindTeam], inboxObservations); err != nil {
 		return Snapshot{}, err
 	}
@@ -341,7 +341,7 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 	return snapshot, nil
 }
 
-func validateProjectionEventAdmissions(stream []events.Event) error {
+func validateProjectionEventAdmissions(stream []events.Event, inboxObservations map[string]events.InboxObservationBinding) error {
 	eventIDs := make(map[string]struct{}, len(stream))
 	sequences := make(map[int64]struct{}, len(stream))
 	ordered := append([]events.Event(nil), stream...)
@@ -359,6 +359,9 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 		Works: map[core.ID]core.DurableState[core.Work]{}, Tasks: map[core.ID]core.DurableState[core.Task]{},
 	}
 	confirmations := make(map[string][]events.Event)
+	teamRecords := make(map[string][][]byte)
+	blueprintRevisions := make(map[core.ID]map[string]core.AgentBlueprint)
+	profileRevisions := make(map[core.ID]map[string]core.ExecutionProfile)
 	for _, event := range ordered {
 		if event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() {
 			return fmt.Errorf("event stream contains an incomplete envelope")
@@ -455,6 +458,12 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 			if err == nil {
 				err = core.AdmitDurableRevision(graph.AgentBlueprints, value.ID, record.Version, record.CorrelationID, value, false, core.ValidAgentBlueprintRevision)
 			}
+			if err == nil {
+				if blueprintRevisions[value.ID] == nil {
+					blueprintRevisions[value.ID] = make(map[string]core.AgentBlueprint)
+				}
+				blueprintRevisions[value.ID][value.Version] = value
+			}
 		case KindExecutionProfile:
 			var value core.ExecutionProfile
 			if decodeExactProjectionJSON(record.Value, &value) != nil || value.ID != core.ID(record.RecordID) || !core.ValidExecutionProfile(value) {
@@ -464,6 +473,12 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 			}
 			if err == nil {
 				err = core.AdmitDurableRevision(graph.ExecutionProfiles, value.ID, record.Version, record.CorrelationID, value, false, core.ValidExecutionProfileRevision)
+			}
+			if err == nil {
+				if profileRevisions[value.ID] == nil {
+					profileRevisions[value.ID] = make(map[string]core.ExecutionProfile)
+				}
+				profileRevisions[value.ID][value.Version] = value
 			}
 		case KindAgent:
 			var value core.Agent
@@ -494,6 +509,14 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 			}
 			if err == nil {
 				err = core.AdmitDurableRevision(graph.Teams, value.ID, record.Version, record.CorrelationID, value, false, core.ValidTeamRevision)
+			}
+			if err == nil {
+				body, marshalErr := json.Marshal(record)
+				if marshalErr != nil {
+					err = marshalErr
+				} else {
+					teamRecords[event.OrganizationID] = append(teamRecords[event.OrganizationID], body)
+				}
 			}
 		case KindIntent:
 			var value core.Intent
@@ -527,6 +550,9 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 			}
 			if err == nil {
 				err = validateProjectionTaskAtAdmission(value, event, record, graph)
+			}
+			if err == nil && event.EventType == "TASK_VERIFIED_COMPLETE" {
+				err = validateTaskCompletionAtAdmission(value, event, record, graph, ordered, teamRecords[event.OrganizationID], inboxObservations, blueprintRevisions, profileRevisions)
 			}
 			if err == nil {
 				err = core.AdmitDurableRevision(graph.Tasks, value.ID, record.Version, record.CorrelationID, value, true, core.ValidTaskRevision)
@@ -600,6 +626,60 @@ func validateProjectionTaskAtAdmission(task core.Task, event events.Event, recor
 		return fmt.Errorf("task requires its exact Intent organization and correlation boundary")
 	}
 	return core.ValidateTaskAssignment(task, intent.Value.OrganizationID, graph)
+}
+
+func validateTaskCompletionAtAdmission(task core.Task, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, stream []events.Event, teamRecords [][]byte, inboxObservations map[string]events.InboxObservationBinding, blueprintRevisions map[core.ID]map[string]core.AgentBlueprint, profileRevisions map[core.ID]map[string]core.ExecutionProfile) error {
+	work, found := graph.Works[task.WorkID]
+	if !found {
+		return fmt.Errorf("completed Task lacks its durable Work")
+	}
+	intent, found := graph.Intents[work.Value.IntentID]
+	if !found {
+		return fmt.Errorf("completed Task lacks its durable Intent")
+	}
+	tasks := make([]events.WorkCompletionTaskBinding, 0)
+	blueprints := make(map[core.ID]core.AgentBlueprint)
+	profiles := make(map[core.ID]core.ExecutionProfile)
+	addTask := func(candidate core.Task, version int, correlationID string) error {
+		if candidate.WorkID != task.WorkID {
+			return nil
+		}
+		tasks = append(tasks, events.WorkCompletionTaskBinding{Task: candidate, Version: version, CorrelationID: correlationID})
+		if candidate.ExecutionKind != core.ExecutionAgent || candidate.AgentConfig == nil {
+			return nil
+		}
+		config := candidate.AgentConfig
+		blueprint, blueprintFound := blueprintRevisions[config.BlueprintID][config.BlueprintVersion]
+		profile, profileFound := profileRevisions[config.ProfileID][config.ProfileVersion]
+		if !blueprintFound || !profileFound {
+			return fmt.Errorf("completed Agent Task lacks its pinned configuration revision")
+		}
+		blueprints[config.BlueprintID] = blueprint
+		profiles[config.ProfileID] = profile
+		return nil
+	}
+	for taskID, state := range graph.Tasks {
+		if taskID == task.ID {
+			continue
+		}
+		if err := addTask(state.Value, state.Version, state.CorrelationID); err != nil {
+			return err
+		}
+	}
+	if err := addTask(task, record.Version, record.CorrelationID); err != nil {
+		return err
+	}
+	teamRevisions, err := events.ResolveTeamRevisionBindings(event.OrganizationID, teamRecords, stream)
+	if err != nil {
+		return fmt.Errorf("resolve completed Task Team history: %w", err)
+	}
+	binding := events.WorkCompletionBinding{
+		OrganizationID: event.OrganizationID, CorrelationID: record.CorrelationID,
+		Work: work.Value, WorkVersion: work.Version, Intent: intent.Value, Tasks: tasks,
+		TeamRevisions: teamRevisions, InboxObservations: inboxObservations, AgentBlueprints: blueprints, ExecutionProfiles: profiles,
+	}
+	_, err = events.ValidateTaskCompletionEvidenceChain(binding, events.WorkCompletionTaskBinding{Task: task, Version: record.Version, CorrelationID: record.CorrelationID}, event, stream)
+	return err
 }
 
 func validateProjectionEventLifecycle[T any](event events.Event, record events.ProjectionRecord, kind string, history map[core.ID]Versioned[T], identity func(T) core.ID, correlationStable bool, validate func(string, int, *T, T) error) error {

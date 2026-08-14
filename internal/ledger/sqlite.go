@@ -572,6 +572,162 @@ FROM events WHERE event_type='WORK_COMPLETED' AND json_extract(payload,'$.projec
 	})
 }
 
+// ValidateTaskCompletionAdmissions certifies every current completed Task
+// projection against its exact verification decision, outcome, execution, and
+// result evidence. Recovery must not infer completion from status alone.
+func ValidateTaskCompletionAdmissions(ctx context.Context, db *sql.DB) error {
+	return validateReadOnlyAdmissions(ctx, db, "Task completion", func(tx *sql.Tx) error {
+		current, err := currentProjectionAdmissions[core.Task](ctx, tx, "task", "Task", func(task core.Task) core.ID { return task.ID })
+		if err != nil {
+			return err
+		}
+		teamBodies, err := admittedProjectionRecordBodies(ctx, tx, `WHERE r.kind='team' ORDER BY r.record_id,r.version`)
+		if err != nil {
+			return fmt.Errorf("read Task completion Team history: %w", err)
+		}
+		inboxObservations, err := inboxObservationBindings(ctx, tx)
+		if err != nil {
+			return fmt.Errorf("read Task completion inbox observations: %w", err)
+		}
+		streams := make(map[string][]events.Event)
+		teamRevisions := make(map[string]map[core.ID][]events.TeamRevisionBinding)
+		for _, candidate := range current {
+			if candidate.value.Status != core.TaskCompleted {
+				continue
+			}
+			matches, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE event_type='TASK_VERIFIED_COMPLETE' AND json_extract(payload,'$.projection.projection_kind')='task' AND json_extract(payload,'$.projection.record_id')=? AND json_extract(payload,'$.projection.version')=? ORDER BY sequence LIMIT 2`, candidate.record.RecordID, candidate.record.Version))
+			if err != nil {
+				return fmt.Errorf("read completed Task %s transition: %w", candidate.value.ID, err)
+			}
+			if len(matches) != 1 {
+				return fmt.Errorf("completed Task %s lacks one exact transition", candidate.value.ID)
+			}
+			transition := matches[0]
+			payload, present, err := events.AdmittedProjection(transition)
+			if err != nil || !present || !reflect.DeepEqual(payload.Projection, candidate.record) {
+				return fmt.Errorf("completed Task %s transition is invalid", candidate.value.ID)
+			}
+			stream, found := streams[transition.OrganizationID]
+			if !found {
+				stream, err = collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? ORDER BY sequence`, transition.OrganizationID))
+				if err != nil {
+					return fmt.Errorf("read completed Task %s event chain: %w", candidate.value.ID, err)
+				}
+				streams[transition.OrganizationID] = stream
+			}
+			revisions, found := teamRevisions[transition.OrganizationID]
+			if !found {
+				revisions, err = events.ResolveTeamRevisionBindings(transition.OrganizationID, teamBodies, stream)
+				if err != nil {
+					return fmt.Errorf("resolve completed Task %s Team history: %w", candidate.value.ID, err)
+				}
+				teamRevisions[transition.OrganizationID] = revisions
+			}
+			binding, err := taskCompletionBinding(ctx, tx, transition.OrganizationID, candidate.record.CorrelationID, candidate.value.WorkID, current, revisions, inboxObservations)
+			if err != nil {
+				return fmt.Errorf("completed Task %s binding: %w", candidate.value.ID, err)
+			}
+			if _, err := events.ValidateTaskCompletionEvidenceChain(binding, events.WorkCompletionTaskBinding{Task: candidate.value, Version: candidate.record.Version, CorrelationID: candidate.record.CorrelationID}, transition, stream); err != nil {
+				return fmt.Errorf("completed Task %s lacks exact durable evidence: %w", candidate.value.ID, err)
+			}
+		}
+		return nil
+	})
+}
+
+func taskCompletionBinding(ctx context.Context, tx *sql.Tx, organizationID, correlationID string, workID core.ID, current []currentProjectionAdmission[core.Task], teamRevisions map[core.ID][]events.TeamRevisionBinding, inboxObservations map[string]events.InboxObservationBinding) (events.WorkCompletionBinding, error) {
+	workBody, found, err := latestRecordBody(ctx, tx, "work", string(workID))
+	if err != nil {
+		return events.WorkCompletionBinding{}, err
+	}
+	var workRecord events.ProjectionRecord
+	var work core.Work
+	if !found || decodeExactJSONBytes(workBody, &workRecord) != nil || decodeExactJSONBytes(workRecord.Value, &work) != nil || work.ID != workID || workRecord.CorrelationID != correlationID {
+		return events.WorkCompletionBinding{}, fmt.Errorf("durable Work is invalid")
+	}
+	intentBody, found, err := latestRecordBody(ctx, tx, "intent", string(work.IntentID))
+	if err != nil {
+		return events.WorkCompletionBinding{}, err
+	}
+	var intentRecord events.ProjectionRecord
+	var intent core.Intent
+	if !found || decodeExactJSONBytes(intentBody, &intentRecord) != nil || decodeExactJSONBytes(intentRecord.Value, &intent) != nil || intent.ID != work.IntentID || intentRecord.CorrelationID != correlationID || string(intent.OrganizationID) != organizationID {
+		return events.WorkCompletionBinding{}, fmt.Errorf("durable Intent is invalid")
+	}
+	tasks := make([]events.WorkCompletionTaskBinding, 0)
+	blueprints := make(map[core.ID]core.AgentBlueprint)
+	profiles := make(map[core.ID]core.ExecutionProfile)
+	for _, candidate := range current {
+		if candidate.value.WorkID != workID {
+			continue
+		}
+		tasks = append(tasks, events.WorkCompletionTaskBinding{Task: candidate.value, Version: candidate.record.Version, CorrelationID: candidate.record.CorrelationID})
+		if candidate.value.ExecutionKind != core.ExecutionAgent || candidate.value.AgentConfig == nil {
+			continue
+		}
+		config := candidate.value.AgentConfig
+		blueprint, err := semanticBlueprintRevision(ctx, tx, config.BlueprintID, config.BlueprintVersion)
+		if err != nil {
+			return events.WorkCompletionBinding{}, err
+		}
+		profile, err := semanticProfileRevision(ctx, tx, config.ProfileID, config.ProfileVersion)
+		if err != nil {
+			return events.WorkCompletionBinding{}, err
+		}
+		blueprints[config.BlueprintID] = blueprint
+		profiles[config.ProfileID] = profile
+	}
+	return events.WorkCompletionBinding{
+		OrganizationID: organizationID, CorrelationID: correlationID, Work: work, WorkVersion: workRecord.Version, Intent: intent, Tasks: tasks,
+		TeamRevisions: teamRevisions, InboxObservations: inboxObservations, AgentBlueprints: blueprints, ExecutionProfiles: profiles,
+	}, nil
+}
+
+func semanticBlueprintRevision(ctx context.Context, tx *sql.Tx, id core.ID, version string) (core.AgentBlueprint, error) {
+	bodies, err := admittedProjectionRecordBodies(ctx, tx, `WHERE r.kind='agent_blueprint' AND r.record_id=? ORDER BY r.version`, string(id))
+	if err != nil {
+		return core.AgentBlueprint{}, err
+	}
+	var selected core.AgentBlueprint
+	for _, body := range bodies {
+		var record events.ProjectionRecord
+		var candidate core.AgentBlueprint
+		if decodeExactJSONBytes(body, &record) != nil || decodeExactJSONBytes(record.Value, &candidate) != nil {
+			return core.AgentBlueprint{}, fmt.Errorf("decode Agent blueprint revision")
+		}
+		if candidate.Version == version {
+			selected = candidate
+		}
+	}
+	if selected.ID != id {
+		return core.AgentBlueprint{}, fmt.Errorf("pinned Agent blueprint revision is unavailable")
+	}
+	return selected, nil
+}
+
+func semanticProfileRevision(ctx context.Context, tx *sql.Tx, id core.ID, version string) (core.ExecutionProfile, error) {
+	bodies, err := admittedProjectionRecordBodies(ctx, tx, `WHERE r.kind='execution_profile' AND r.record_id=? ORDER BY r.version`, string(id))
+	if err != nil {
+		return core.ExecutionProfile{}, err
+	}
+	var selected core.ExecutionProfile
+	for _, body := range bodies {
+		var record events.ProjectionRecord
+		var candidate core.ExecutionProfile
+		if decodeExactJSONBytes(body, &record) != nil || decodeExactJSONBytes(record.Value, &candidate) != nil {
+			return core.ExecutionProfile{}, fmt.Errorf("decode execution profile revision")
+		}
+		if candidate.Version == version {
+			selected = candidate
+		}
+	}
+	if selected.ID != id {
+		return core.ExecutionProfile{}, fmt.Errorf("pinned execution profile revision is unavailable")
+	}
+	return selected, nil
+}
+
 type currentProjectionAdmission[T any] struct {
 	record events.ProjectionRecord
 	// Generic instantiations are read by both evidence validators, but Gallow
@@ -1360,6 +1516,11 @@ func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProj
 	if err != nil {
 		return events.Event{}, err
 	}
+	if item.task != nil && item.draft.Event.EventType == "TASK_VERIFIED_COMPLETE" {
+		if err := validateTaskCompletionTransition(ctx, tx, item, event); err != nil {
+			return events.Event{}, err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,admission_event_id,admission_fingerprint,created_at) VALUES(?,?,?,?,?,?,?)`, item.draft.ProjectionKind, item.draft.RecordID, item.draft.Version, item.body, event.EventID, payload.Admission.Fingerprint, event.CreatedAt.Format(time.RFC3339Nano)); err != nil {
 		return events.Event{}, fmt.Errorf("append projection: %w", err)
 	}
@@ -1390,6 +1551,49 @@ func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProj
 		}
 	}
 	return event, nil
+}
+
+func validateTaskCompletionTransition(ctx context.Context, tx *sql.Tx, item preparedProjection, transition events.Event) error {
+	current, err := currentProjectionAdmissions[core.Task](ctx, tx, "task", "Task", func(task core.Task) core.ID { return task.ID })
+	if err != nil {
+		return err
+	}
+	replaced := false
+	for index := range current {
+		if current[index].value.ID != item.task.ID {
+			continue
+		}
+		current[index] = currentProjectionAdmission[core.Task]{record: item.record, value: *item.task}
+		replaced = true
+		break
+	}
+	if !replaced {
+		return fmt.Errorf("completed Task lacks its prior durable projection")
+	}
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? ORDER BY sequence`, transition.OrganizationID))
+	if err != nil {
+		return fmt.Errorf("read Task completion event chain: %w", err)
+	}
+	teamBodies, err := admittedProjectionRecordBodies(ctx, tx, `WHERE r.kind='team' ORDER BY r.record_id,r.version`)
+	if err != nil {
+		return fmt.Errorf("read Task completion Team history: %w", err)
+	}
+	teamRevisions, err := events.ResolveTeamRevisionBindings(transition.OrganizationID, teamBodies, stream)
+	if err != nil {
+		return fmt.Errorf("resolve Task completion Team history: %w", err)
+	}
+	inboxObservations, err := inboxObservationBindings(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("read Task completion inbox observations: %w", err)
+	}
+	binding, err := taskCompletionBinding(ctx, tx, transition.OrganizationID, item.record.CorrelationID, item.task.WorkID, current, teamRevisions, inboxObservations)
+	if err != nil {
+		return fmt.Errorf("bind Task completion: %w", err)
+	}
+	if _, err := events.ValidateTaskCompletionEvidenceChain(binding, events.WorkCompletionTaskBinding{Task: *item.task, Version: item.record.Version, CorrelationID: item.record.CorrelationID}, transition, stream); err != nil {
+		return fmt.Errorf("validate Task completion evidence: %w", err)
+	}
+	return nil
 }
 
 func validateAgentRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {

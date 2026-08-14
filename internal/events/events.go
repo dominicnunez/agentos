@@ -614,6 +614,62 @@ func ValidateWorkCompletionEvidenceChain(binding WorkCompletionBinding, evidence
 	return evidence, nil
 }
 
+// ValidateTaskCompletionEvidenceChain proves that one terminal Task projection
+// is the result of the exact runtime-owned completion decision and immutable
+// evidence that precede it. A completed status is not evidence by itself.
+func ValidateTaskCompletionEvidenceChain(binding WorkCompletionBinding, task WorkCompletionTaskBinding, completionEvent Event, stream []Event) (CompletionDecisionPayload, error) {
+	if binding.OrganizationID == "" || binding.CorrelationID == "" || binding.Work.ID == "" || binding.Work.Status != core.WorkActive && binding.Work.Status != core.WorkCompleted || binding.Intent.ID == "" ||
+		binding.Intent.ID != binding.Work.IntentID || binding.Intent.NormalizedObjective != binding.Work.Objective || string(binding.Intent.OrganizationID) != binding.OrganizationID ||
+		task.Task.ID == "" || task.Task.WorkID != binding.Work.ID || task.Task.Status != core.TaskCompleted || task.Version < 2 || task.CorrelationID != binding.CorrelationID {
+		return CompletionDecisionPayload{}, fmt.Errorf("task completion binding is invalid")
+	}
+	payload, present, err := AdmittedProjection(completionEvent)
+	if err != nil || !present {
+		return CompletionDecisionPayload{}, fmt.Errorf("task completion transition is not admitted")
+	}
+	var projected core.Task
+	var decision CompletionDecisionPayload
+	if completionEvent.EventType != "TASK_VERIFIED_COMPLETE" || completionEvent.OrganizationID != binding.OrganizationID || completionEvent.SourceActorID != "runtime" || completionEvent.SourceExecutionID != "" || completionEvent.RecipientScope != "" || completionEvent.RecipientID != "" || completionEvent.TaskID != string(task.Task.ID) || len(completionEvent.AuthorizationRefs) != 0 || len(completionEvent.ArtifactRefs) != 0 || completionEvent.CorrelationID != binding.CorrelationID || completionEvent.SchemaVersion != SchemaVersion ||
+		payload.Projection.ProjectionKind != "task" || payload.Projection.RecordID != string(task.Task.ID) || payload.Projection.Version != task.Version || payload.Projection.CorrelationID != binding.CorrelationID ||
+		decodeExactEventJSON(payload.Projection.Value, &projected) != nil || !reflect.DeepEqual(projected, task.Task) || decodeExactEventJSON(payload.Detail, &decision) != nil || decision.Contract.TaskID != task.Task.ID || decision.Contract.TaskVersion < 1 || decision.Contract.TaskVersion >= task.Version || decision.OutcomeEventRef == "" || !decision.Result.Complete || len(decision.Result.Reasons) != 0 {
+		return CompletionDecisionPayload{}, fmt.Errorf("task completion transition is invalid")
+	}
+	var verification Event
+	for _, event := range stream {
+		if event.EventType != "COMPLETION_VERIFIED" || event.TaskID != string(task.Task.ID) || event.CorrelationID != binding.CorrelationID || event.Sequence >= completionEvent.Sequence {
+			continue
+		}
+		var candidate CompletionDecisionPayload
+		if event.OrganizationID != binding.OrganizationID || event.SourceActorID != "runtime" || event.RecipientScope != "" || event.RecipientID != "" || len(event.AuthorizationRefs) != 0 || event.SchemaVersion != SchemaVersion || decodeExactEventJSON(event.Payload, &candidate) != nil || !reflect.DeepEqual(candidate, decision) {
+			continue
+		}
+		if verification.EventID != "" {
+			return CompletionDecisionPayload{}, fmt.Errorf("task completion has multiple matching verification decisions")
+		}
+		verification = event
+	}
+	if verification.EventID == "" {
+		return CompletionDecisionPayload{}, fmt.Errorf("task completion lacks its exact verification decision")
+	}
+	outcomeEvent, found := eventWithID(stream, decision.OutcomeEventRef)
+	var outcome core.ToolOutcome
+	if !found || outcomeEvent.EventType != "TOOL_OUTCOME_RECORDED" || outcomeEvent.OrganizationID != binding.OrganizationID || outcomeEvent.SourceActorID != "runtime" || outcomeEvent.SourceExecutionID == "" || outcomeEvent.RecipientScope != "" || outcomeEvent.RecipientID != "" || outcomeEvent.TaskID != string(task.Task.ID) || len(outcomeEvent.AuthorizationRefs) != 0 || outcomeEvent.CorrelationID != binding.CorrelationID || outcomeEvent.Sequence >= verification.Sequence || outcomeEvent.SchemaVersion != SchemaVersion ||
+		decodeExactEventJSON(outcomeEvent.Payload, &outcome) != nil || outcome.ToolInvocationID == "" || outcome.ToolID == "" || outcome.StartedAt.IsZero() || outcome.FinishedAt.Before(outcome.StartedAt) || !slices.Equal(outcomeEvent.ArtifactRefs, outcome.ArtifactRefs) || !slices.Equal(verification.ArtifactRefs, outcome.ArtifactRefs) || verification.SourceExecutionID != "" && verification.SourceExecutionID != outcomeEvent.SourceExecutionID {
+		return CompletionDecisionPayload{}, fmt.Errorf("task completion outcome evidence is invalid")
+	}
+	expected, err := completionDecisionResult(binding, task, decision, outcome, outcomeEvent, verification, stream)
+	if err != nil {
+		return CompletionDecisionPayload{}, err
+	}
+	if !reflect.DeepEqual(expected, decision.Result) {
+		return CompletionDecisionPayload{}, fmt.Errorf("task completion decision does not match its durable evidence")
+	}
+	if _, _, err := ResolveVerifiedTaskResult(binding.OrganizationID, binding.CorrelationID, task.Task, task.Version, stream, 0); err != nil {
+		return CompletionDecisionPayload{}, err
+	}
+	return decision, nil
+}
+
 func completionEvidencePlan(binding WorkCompletionBinding, evidence WorkCompletionEvidencePayload, evidenceEvent Event, stream []Event) (core.Plan, error) {
 	var planEvent Event
 	var plan core.Plan
