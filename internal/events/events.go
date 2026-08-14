@@ -72,6 +72,33 @@ type OperatorInputReceivedPayload struct {
 	SourceChannel       string `json:"source_channel"`
 }
 
+// DecodeDurableOperatorInput accepts only the canonical operator-input Event
+// Contract and its authority-free durable envelope. Authentication remains an
+// ingress responsibility; the source identity copied into the payload must
+// exactly match the trusted event envelope.
+func DecodeDurableOperatorInput(event Event) (OperatorInputReceivedPayload, error) {
+	var input OperatorInputReceivedPayload
+	if decodeExactEventJSON(event.Payload, &input) != nil ||
+		event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() || event.SchemaVersion != SchemaVersion ||
+		event.OrganizationID == "" || event.SourceActorID == "" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID == "" || event.CorrelationID == "" ||
+		len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || input.MessageID == "" || strings.TrimSpace(input.Text) == "" || !utf8.ValidString(input.Text) || input.SourcePrincipalID != event.SourceActorID {
+		return OperatorInputReceivedPayload{}, fmt.Errorf("operator input event contract is invalid")
+	}
+	switch event.EventType {
+	case "A2A_INPUT_RECEIVED":
+		if input.SourcePrincipalKind != string(core.PrincipalExternalAgent) || input.SourceChannel != "A2A" {
+			return OperatorInputReceivedPayload{}, fmt.Errorf("operator input event contract is invalid")
+		}
+	case "HUMAN_INPUT_RECEIVED":
+		if input.SourcePrincipalKind != string(core.PrincipalHuman) || input.SourceChannel != "HUMAN_DIRECT" {
+			return OperatorInputReceivedPayload{}, fmt.Errorf("operator input event contract is invalid")
+		}
+	default:
+		return OperatorInputReceivedPayload{}, fmt.Errorf("operator input event contract is invalid")
+	}
+	return input, nil
+}
+
 type HumanTaskCompletionSubmittedPayload struct {
 	MessageID         string                  `json:"message_id"`
 	Fields            map[string]string       `json:"fields"`
@@ -1095,12 +1122,12 @@ func ResolveVerifiedTaskResult(organizationID, correlationID string, task core.T
 		if event.EventType != "TASK_VERIFIED_COMPLETE" || event.TaskID != string(task.ID) || event.CorrelationID != correlationID || beforeSequence > 0 && event.Sequence >= beforeSequence {
 			continue
 		}
-		var payload ProjectionEventPayload
+		payload, present, admissionErr := AdmittedProjection(event)
 		var projected core.Task
 		var candidate CompletionDecisionPayload
-		if event.OrganizationID != organizationID || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" ||
-			json.Unmarshal(event.Payload, &payload) != nil || payload.Projection.ProjectionKind != "task" || payload.Projection.RecordID != string(task.ID) || payload.Projection.Version != taskVersion || payload.Projection.CorrelationID != correlationID ||
-			json.Unmarshal(payload.Projection.Value, &projected) != nil || !reflect.DeepEqual(projected, task) || json.Unmarshal(payload.Detail, &candidate) != nil || !candidate.Result.Complete || len(candidate.Result.Reasons) != 0 || candidate.OutcomeEventRef == "" || candidate.Contract.TaskID != task.ID || candidate.Contract.TaskVersion < 1 {
+		if admissionErr != nil || !present || event.OrganizationID != organizationID || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.SchemaVersion != SchemaVersion ||
+			payload.Projection.ProjectionKind != "task" || payload.Projection.RecordID != string(task.ID) || payload.Projection.Version != taskVersion || payload.Projection.CorrelationID != correlationID ||
+			decodeExactEventJSON(payload.Projection.Value, &projected) != nil || !reflect.DeepEqual(projected, task) || decodeExactEventJSON(payload.Detail, &candidate) != nil || !candidate.Result.Complete || len(candidate.Result.Reasons) != 0 || candidate.OutcomeEventRef == "" || candidate.Contract.TaskID != task.ID || candidate.Contract.TaskVersion < 1 || candidate.Contract.TaskVersion >= taskVersion {
 			return Event{}, ResultPublishedPayload{}, fmt.Errorf("verified Task result has an invalid terminal transition")
 		}
 		if completionEvent.EventID != "" {
@@ -1117,8 +1144,8 @@ func ResolveVerifiedTaskResult(organizationID, correlationID string, task core.T
 			continue
 		}
 		var candidate CompletionDecisionPayload
-		if event.OrganizationID != organizationID || event.SourceActorID != "runtime" || event.RecipientScope != "" || event.RecipientID != "" || json.Unmarshal(event.Payload, &candidate) != nil || !reflect.DeepEqual(candidate, decision) {
-			continue
+		if event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() || event.SchemaVersion != SchemaVersion || event.OrganizationID != organizationID || event.SourceActorID != "runtime" || event.RecipientScope != "" || event.RecipientID != "" || len(event.AuthorizationRefs) != 0 || decodeExactEventJSON(event.Payload, &candidate) != nil || !reflect.DeepEqual(candidate, decision) {
+			return Event{}, ResultPublishedPayload{}, fmt.Errorf("verified Task result completion verification is invalid")
 		}
 		if verification.EventID != "" {
 			return Event{}, ResultPublishedPayload{}, fmt.Errorf("verified Task result has multiple completion verifications")
@@ -1130,8 +1157,8 @@ func ResolveVerifiedTaskResult(organizationID, correlationID string, task core.T
 	}
 	outcomeEvent, found := eventWithID(stream, decision.OutcomeEventRef)
 	var outcome core.ToolOutcome
-	if !found || outcomeEvent.EventType != "TOOL_OUTCOME_RECORDED" || outcomeEvent.OrganizationID != organizationID || outcomeEvent.SourceActorID != "runtime" || outcomeEvent.SourceExecutionID == "" || outcomeEvent.RecipientScope != "" || outcomeEvent.RecipientID != "" || outcomeEvent.TaskID != string(task.ID) || outcomeEvent.CorrelationID != correlationID || outcomeEvent.Sequence >= verification.Sequence ||
-		json.Unmarshal(outcomeEvent.Payload, &outcome) != nil || outcome.ToolInvocationID == "" || outcome.ToolID == "" || outcome.StartedAt.IsZero() || outcome.FinishedAt.Before(outcome.StartedAt) || !slices.Equal(outcomeEvent.ArtifactRefs, outcome.ArtifactRefs) || !slices.Equal(verification.ArtifactRefs, outcome.ArtifactRefs) || verification.SourceExecutionID != "" && verification.SourceExecutionID != outcomeEvent.SourceExecutionID {
+	if !found || outcomeEvent.EventID == "" || outcomeEvent.Sequence < 1 || outcomeEvent.CreatedAt.IsZero() || outcomeEvent.SchemaVersion != SchemaVersion || outcomeEvent.EventType != "TOOL_OUTCOME_RECORDED" || outcomeEvent.OrganizationID != organizationID || outcomeEvent.SourceActorID != "runtime" || outcomeEvent.SourceExecutionID == "" || outcomeEvent.RecipientScope != "" || outcomeEvent.RecipientID != "" || outcomeEvent.TaskID != string(task.ID) || len(outcomeEvent.AuthorizationRefs) != 0 || outcomeEvent.CorrelationID != correlationID || outcomeEvent.Sequence >= verification.Sequence ||
+		decodeExactEventJSON(outcomeEvent.Payload, &outcome) != nil || outcome.ToolInvocationID == "" || outcome.ToolID == "" || outcome.StartedAt.IsZero() || outcome.FinishedAt.Before(outcome.StartedAt) || !slices.Equal(outcomeEvent.ArtifactRefs, outcome.ArtifactRefs) || !slices.Equal(verification.ArtifactRefs, outcome.ArtifactRefs) || verification.SourceExecutionID != "" && verification.SourceExecutionID != outcomeEvent.SourceExecutionID {
 		return Event{}, ResultPublishedPayload{}, fmt.Errorf("verified Task result outcome is invalid")
 	}
 	expectedSummary, err := core.ToolOutcomeSummary(outcome)
@@ -1152,8 +1179,8 @@ func ResolveVerifiedTaskResult(organizationID, correlationID string, task core.T
 			continue
 		}
 		var candidate ResultPublishedPayload
-		if event.OrganizationID != organizationID || event.SourceActorID != expectedActorID || event.SourceExecutionID != outcomeEvent.SourceExecutionID || event.RecipientScope != "" || event.RecipientID != "" || json.Unmarshal(event.Payload, &candidate) != nil || !candidate.ValidFor(event.ArtifactRefs) || candidate.Summary != expectedSummary || !slices.Equal(candidate.ArtifactRefs, outcome.ArtifactRefs) {
-			continue
+		if event.EventID == "" || event.CreatedAt.IsZero() || event.SchemaVersion != SchemaVersion || event.OrganizationID != organizationID || event.SourceActorID != expectedActorID || event.SourceExecutionID != outcomeEvent.SourceExecutionID || event.RecipientScope != "" || event.RecipientID != "" || len(event.AuthorizationRefs) != 0 || decodeExactEventJSON(event.Payload, &candidate) != nil || !candidate.ValidFor(event.ArtifactRefs) || candidate.Summary != expectedSummary || !slices.Equal(candidate.ArtifactRefs, outcome.ArtifactRefs) {
+			return Event{}, ResultPublishedPayload{}, fmt.Errorf("verified Task result publication is invalid")
 		}
 		if resultEvent.EventID != "" {
 			return Event{}, ResultPublishedPayload{}, fmt.Errorf("verified Task result has multiple matching publications")
@@ -1169,8 +1196,8 @@ func ResolveVerifiedTaskResult(organizationID, correlationID string, task core.T
 			continue
 		}
 		var candidate CandidateCompletePayload
-		if event.OrganizationID != organizationID || event.SourceActorID != expectedActorID || event.SourceExecutionID != outcomeEvent.SourceExecutionID || event.RecipientScope != "" || event.RecipientID != "" || json.Unmarshal(event.Payload, &candidate) != nil || candidate.ToolInvocationID != string(outcome.ToolInvocationID) || candidate.ResultEventID != resultEvent.EventID || !slices.Equal(candidate.ArtifactRefs, outcome.ArtifactRefs) || !slices.Equal(event.ArtifactRefs, outcome.ArtifactRefs) {
-			continue
+		if event.EventID == "" || event.CreatedAt.IsZero() || event.SchemaVersion != SchemaVersion || event.OrganizationID != organizationID || event.SourceActorID != expectedActorID || event.SourceExecutionID != outcomeEvent.SourceExecutionID || event.RecipientScope != "" || event.RecipientID != "" || len(event.AuthorizationRefs) != 0 || decodeExactEventJSON(event.Payload, &candidate) != nil || candidate.ToolInvocationID != string(outcome.ToolInvocationID) || candidate.ResultEventID != resultEvent.EventID || !slices.Equal(candidate.ArtifactRefs, outcome.ArtifactRefs) || !slices.Equal(event.ArtifactRefs, outcome.ArtifactRefs) {
+			return Event{}, ResultPublishedPayload{}, fmt.Errorf("verified Task result completion candidate is invalid")
 		}
 		if completionCandidate.EventID != "" {
 			return Event{}, ResultPublishedPayload{}, fmt.Errorf("verified Task result has multiple matching candidates")
@@ -1401,21 +1428,11 @@ func executionRevision(binding WorkCompletionBinding, task core.Task, manifestEv
 }
 
 func validCompletionInputEvent(binding WorkCompletionBinding, taskID core.ID, event Event) bool {
-	if event.OrganizationID != binding.OrganizationID || event.TaskID != string(taskID) || event.CorrelationID != binding.CorrelationID || event.SourceActorID == "" || event.SourceExecutionID != "" {
+	if event.OrganizationID != binding.OrganizationID || event.TaskID != string(taskID) || event.CorrelationID != binding.CorrelationID {
 		return false
 	}
-	var input OperatorInputReceivedPayload
-	if json.Unmarshal(event.Payload, &input) != nil || input.MessageID == "" || input.Text == "" || input.SourcePrincipalID != event.SourceActorID {
-		return false
-	}
-	switch event.EventType {
-	case "A2A_INPUT_RECEIVED":
-		return input.SourcePrincipalKind == string(core.PrincipalExternalAgent) && input.SourceChannel == "A2A"
-	case "HUMAN_INPUT_RECEIVED":
-		return input.SourcePrincipalKind == string(core.PrincipalHuman) && input.SourceChannel == "HUMAN_DIRECT"
-	default:
-		return false
-	}
+	_, err := DecodeDurableOperatorInput(event)
+	return err == nil
 }
 
 func validateExecutionStart(binding WorkCompletionBinding, task core.Task, version int, outcomeEvent Event, stream []Event) (Event, bool, error) {
@@ -2219,6 +2236,9 @@ func ValidateTaskProjectionTransition(eventType string, version int, previous *c
 }
 
 func decodeExactEventJSON(data []byte, target any) error {
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {

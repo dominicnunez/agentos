@@ -3133,8 +3133,9 @@ func TestContinuationReplayRequiresExactRuntimeEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	existing := events.Event{
-		EventID: "result-1", OrganizationID: "org-1", EventType: "RESULT_PUBLISHED", SourceActorID: "runtime",
+		EventID: "result-1", Sequence: 1, OrganizationID: "org-1", EventType: "RESULT_PUBLISHED", SourceActorID: "runtime",
 		SourceExecutionID: "execution-1", TaskID: "task-1", ArtifactRefs: payload.ArtifactRefs, CorrelationID: "run-1", Payload: body,
+		CreatedAt: time.Unix(1, 0).UTC(), SchemaVersion: events.SchemaVersion,
 	}
 	replayed, err := service.publishContinuationEventIfMissing(ctx, []events.Event{existing}, "org-1", "task-1", "run-1", "execution-1", "RESULT_PUBLISHED", payload, payload.ArtifactRefs)
 	if err != nil || replayed.EventID != existing.EventID {
@@ -3145,7 +3146,12 @@ func TestContinuationReplayRequiresExactRuntimeEvent(t *testing.T) {
 		"actor":        func(event *events.Event) { event.SourceActorID = "agent-1" },
 		"correlation":  func(event *events.Event) { event.CorrelationID = "run-2" },
 		"recipient":    func(event *events.Event) { event.RecipientScope, event.RecipientID = events.RecipientAgent, "agent-1" },
-		"artifacts":    func(event *events.Event) { event.ArtifactRefs = []string{"artifact-2"} },
+		"authorization": func(event *events.Event) {
+			event.AuthorizationRefs = []string{"approval-1"}
+		},
+		"artifacts": func(event *events.Event) { event.ArtifactRefs = []string{"artifact-2"} },
+		"schema":    func(event *events.Event) { event.SchemaVersion++ },
+		"timestamp": func(event *events.Event) { event.CreatedAt = time.Time{} },
 		"payload": func(event *events.Event) {
 			event.Payload, _ = json.Marshal(events.ResultPublishedPayload{Summary: "substituted", ArtifactRefs: payload.ArtifactRefs})
 		},
@@ -3170,8 +3176,8 @@ func TestDecodeOperatorInputRejectsLegacyA2APayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := events.Event{
-		EventID: "input-1", EventType: "A2A_INPUT_RECEIVED", OrganizationID: "org-1", SourceActorID: "external-agent",
-		TaskID: "task-1", CorrelationID: "run-1", Payload: body,
+		EventID: "input-1", Sequence: 1, EventType: "A2A_INPUT_RECEIVED", OrganizationID: "org-1", SourceActorID: "external-agent",
+		TaskID: "task-1", CorrelationID: "run-1", Payload: body, CreatedAt: time.Unix(1, 0).UTC(), SchemaVersion: events.SchemaVersion,
 	}
 	if _, err := decodeOperatorInput(event); err == nil {
 		t.Fatal("legacy A2A input compatibility payload was accepted")

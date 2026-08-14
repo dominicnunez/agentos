@@ -1127,8 +1127,10 @@ func (s *Service) publishContinuationEventIfMissing(ctx context.Context, stream 
 		if marshalErr != nil {
 			return events.Event{}, fmt.Errorf("encode expected continuation %s for task %s: %w", eventType, taskID, marshalErr)
 		}
-		if event.OrganizationID != string(organizationID) || event.SourceActorID != "runtime" || event.CorrelationID != correlationID ||
-			event.RecipientScope != "" || event.RecipientID != "" || !slices.Equal(event.ArtifactRefs, artifactRefs) || string(event.Payload) != string(expectedPayload) {
+		if event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() || event.SchemaVersion != events.SchemaVersion ||
+			event.OrganizationID != string(organizationID) || event.EventType != eventType || event.SourceActorID != "runtime" || event.SourceExecutionID != string(executionID) ||
+			event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != string(taskID) || len(event.AuthorizationRefs) != 0 ||
+			event.CorrelationID != correlationID || !slices.Equal(event.ArtifactRefs, artifactRefs) || string(event.Payload) != string(expectedPayload) {
 			return events.Event{}, fmt.Errorf("durable continuation %s for task %s does not match the expected runtime event", eventType, taskID)
 		}
 		return event, nil
@@ -1161,25 +1163,11 @@ func externalInputForTask(stream []events.Event, taskID core.ID) (events.Event, 
 }
 
 func decodeOperatorInput(event events.Event) (events.OperatorInputReceivedPayload, error) {
-	var current events.OperatorInputReceivedPayload
-	if err := json.Unmarshal(event.Payload, &current); err != nil || !validOperatorInput(event, current) {
+	input, err := events.DecodeDurableOperatorInput(event)
+	if err != nil {
 		return events.OperatorInputReceivedPayload{}, fmt.Errorf("invalid operator input contract")
 	}
-	return current, nil
-}
-
-func validOperatorInput(event events.Event, input events.OperatorInputReceivedPayload) bool {
-	if input.MessageID == "" || input.Text == "" || input.SourcePrincipalID == "" || input.SourcePrincipalID != event.SourceActorID {
-		return false
-	}
-	switch event.EventType {
-	case "A2A_INPUT_RECEIVED":
-		return input.SourcePrincipalKind == string(core.PrincipalExternalAgent) && input.SourceChannel == "A2A"
-	case "HUMAN_INPUT_RECEIVED":
-		return input.SourcePrincipalKind == string(core.PrincipalHuman) && input.SourceChannel == "HUMAN_DIRECT"
-	default:
-		return false
-	}
+	return input, nil
 }
 
 func operatorInputEventType(channel string) (string, error) {
