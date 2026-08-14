@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dominicnunez/agentos/internal/bootstrap"
 	ledgerrecovery "github.com/dominicnunez/agentos/internal/ledger/recovery"
@@ -244,6 +245,8 @@ func runDoctor(ctx context.Context, args []string, output io.Writer) error {
 	checks = append(checks, doctorCheck{Name: "initialization", Status: status(state.Stage == bootstrap.StageReady), Detail: "stage=" + string(state.Stage)})
 	validationErr := config.ValidateReady()
 	checks = append(checks, doctorCheck{Name: "configuration", Status: status(validationErr == nil), Detail: detail(validationErr, configPath)})
+	policyErr := doctorInferencePolicy(config, nowUTC())
+	checks = append(checks, doctorCheck{Name: "inference authorization", Status: status(policyErr == nil), Detail: detail(policyErr, "current reviewed provider budget")})
 	for _, configuredPath := range []struct {
 		name string
 		path string
@@ -301,6 +304,23 @@ func runDoctor(ctx context.Context, args []string, output io.Writer) error {
 		}
 	}
 	return writeDoctor(output, checks, *jsonOutput, blocked)
+}
+
+func doctorInferencePolicy(config bootstrap.Config, now time.Time) error {
+	if len(config.Providers) != 1 {
+		return fmt.Errorf("exactly one inference policy is required")
+	}
+	policy := config.Providers[0].InferencePolicy
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	if now.Before(policy.AuthorizedAt) || !now.Before(policy.AuthorizationExpiresAt) {
+		return fmt.Errorf("inference authorization is not currently valid")
+	}
+	if policy.Pricing != nil && !now.Before(policy.Pricing.ExpiresAt) {
+		return fmt.Errorf("inference pricing is stale")
+	}
+	return nil
 }
 
 func doctorProviderCredential(config bootstrap.Config) error {

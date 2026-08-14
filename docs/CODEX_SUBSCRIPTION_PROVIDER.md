@@ -18,6 +18,7 @@ The adapter must:
   request rather than mapping it into Agent OS authority;
 - pass only the materialized execution prompt and declared model settings;
 - bound execution time and response size;
+- reject reported usage above the adapter's one-million-token safety ceiling;
 - record the SDK-reported provider, model, and token usage while leaving
   subscription cost explicitly unknown; and
 - close the app-server process during Agent OS shutdown.
@@ -66,6 +67,14 @@ temporary file only while the provider process runs. Rotated credentials are
 sealed back into state before the refresh is accepted. The original
 provider-owned credential path is not retained in Agent OS configuration, and
 credential material is never copied into the repository, workspace, or logs.
+
+Setup also records a reviewed 30-day token allowance, continuity reserve, and
+authorization expiry for the exact subscription model and restricted execution
+profile. Subscription access is quota-consuming even when it has no per-call
+monetary price. The runtime therefore atomically reserves its conservative
+per-request token ceiling before every call and reconciles SDK-reported usage
+afterward. Missing, expired, replayed, concurrent, or exhausted authorization
+fails closed.
 
 The app-server receives a fresh isolated home and a minimal child environment.
 Each inference receives a fresh empty working directory, `never` approval,

@@ -26,6 +26,7 @@ const (
 	codexExecutionProfile     = "v1-codex-subscription-restricted"
 	codexRunTimeout           = 20 * time.Second
 	codexMaximumPromptBytes   = 256 << 10
+	codexMaximumUsageTokens   = 1_000_000
 	codexMaximumResponseBytes = 256 << 10
 	codexMaximumStreamBytes   = 512 << 10
 	codexMaximumModelBytes    = 128
@@ -431,7 +432,7 @@ func validatedCodexResponse(model string, result *sdk.RunResult, summary sdk.Str
 		OutputTokens: output,
 		TotalTokens:  total,
 	}
-	if !usage.Valid() {
+	if !usage.Valid() || usage.TotalTokens > codexMaximumUsageTokens {
 		return ModelResponse{}, fmt.Errorf("codex returned inconsistent token usage")
 	}
 	return ModelResponse{Text: result.Response, Usage: usage}, nil

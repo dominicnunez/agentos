@@ -26,14 +26,16 @@ import (
 )
 
 var requiredColumns = map[string][]string{
-	"consumed_approvals": {"approval_id", "effect_fingerprint", "consumed_at"},
-	"events":             {"sequence", "event_id", "organization_id", "event_type", "source_actor_id", "source_execution_id", "recipient_scope", "recipient_id", "task_id", "authorization_refs", "artifact_refs", "payload", "correlation_id", "created_at", "schema_version"},
-	"external_tasks":     {"organization_id", "task_id", "correlation_id"},
-	"external_work":      {"organization_id", "request_id", "correlation_id", "intent_id"},
-	"inbox":              {"recipient_scope", "recipient_id", "event_id", "organization_id", "task_id", "available_at", "observed_at", "observation_event_id"},
-	"records":            {"kind", "record_id", "version", "body", "admission_event_id", "admission_fingerprint", "created_at"},
+	"consumed_approvals":     {"approval_id", "effect_fingerprint", "consumed_at"},
+	"events":                 {"sequence", "event_id", "organization_id", "event_type", "source_actor_id", "source_execution_id", "recipient_scope", "recipient_id", "task_id", "authorization_refs", "artifact_refs", "payload", "correlation_id", "created_at", "schema_version"},
+	"external_tasks":         {"organization_id", "task_id", "correlation_id"},
+	"external_work":          {"organization_id", "request_id", "correlation_id", "intent_id"},
+	"inbox":                  {"recipient_scope", "recipient_id", "event_id", "organization_id", "task_id", "available_at", "observed_at", "observation_event_id"},
+	"inference_policies":     {"organization_id", "policy_fingerprint", "body", "activation_event_id", "activated_at", "active"},
+	"inference_reservations": {"reservation_id", "request_id", "organization_id", "purpose", "intent_id", "task_id", "execution_id", "correlation_id", "prompt_sha256", "provider", "model", "execution_profile_version", "policy_fingerprint", "state", "reserved_input_tokens", "reserved_output_tokens", "reserved_cost_nano_usd", "charged_input_tokens", "charged_output_tokens", "charged_cost_nano_usd", "window_started_at", "window_expires_at", "created_at", "updated_at"},
+	"records":                {"kind", "record_id", "version", "body", "admission_event_id", "admission_fingerprint", "created_at"},
 }
-var requiredTables = []string{"consumed_approvals", "events", "external_tasks", "external_work", "inbox", "records"}
+var requiredTables = []string{"consumed_approvals", "events", "external_tasks", "external_work", "inbox", "inference_policies", "inference_reservations", "records"}
 
 type Result struct {
 	Path        string `json:"path"`
@@ -118,6 +120,9 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 		return Result{}, err
 	}
 	if err := ledgerstore.ValidateGoalAchievementAdmissions(ctx, db); err != nil {
+		return Result{}, err
+	}
+	if err := ledgerstore.ValidateInferenceAdmissions(ctx, db); err != nil {
 		return Result{}, err
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(sequence), 0) FROM events`).Scan(&result.EventCount, &result.MaxSequence); err != nil {

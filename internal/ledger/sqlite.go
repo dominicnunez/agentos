@@ -25,6 +25,7 @@ import (
 type SQLite struct {
 	db                 *sql.DB
 	newWorkCorrelation func() (string, error)
+	now                func() time.Time
 }
 
 func Open(path string) (*SQLite, error) {
@@ -33,7 +34,7 @@ func Open(path string) (*SQLite, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	l := &SQLite{db: db, newWorkCorrelation: randomWorkCorrelation}
+	l := &SQLite{db: db, newWorkCorrelation: randomWorkCorrelation, now: time.Now}
 	if err := l.migrate(context.Background()); err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
@@ -80,7 +81,36 @@ CREATE INDEX IF NOT EXISTS inbox_available_idx ON inbox(recipient_scope, recipie
 	}
 	_, err = l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS consumed_approvals (
 approval_id TEXT PRIMARY KEY, effect_fingerprint TEXT NOT NULL, consumed_at TEXT NOT NULL);`)
+	if err != nil {
+		return err
+	}
+	_, err = l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS inference_policies (
+organization_id TEXT NOT NULL, policy_fingerprint TEXT NOT NULL, body BLOB NOT NULL,
+activation_event_id TEXT NOT NULL UNIQUE, activated_at TEXT NOT NULL, active INTEGER NOT NULL,
+PRIMARY KEY(organization_id,policy_fingerprint));
+CREATE UNIQUE INDEX IF NOT EXISTS inference_policies_active_idx ON inference_policies(organization_id) WHERE active=1;
+CREATE TABLE IF NOT EXISTS inference_reservations (
+reservation_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, organization_id TEXT NOT NULL,
+purpose TEXT NOT NULL, intent_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '',
+execution_id TEXT NOT NULL, correlation_id TEXT NOT NULL, prompt_sha256 TEXT NOT NULL,
+provider TEXT NOT NULL, model TEXT NOT NULL, execution_profile_version TEXT NOT NULL,
+policy_fingerprint TEXT NOT NULL, state TEXT NOT NULL,
+reserved_input_tokens INTEGER NOT NULL, reserved_output_tokens INTEGER NOT NULL,
+reserved_cost_nano_usd INTEGER NOT NULL, charged_input_tokens INTEGER NOT NULL,
+charged_output_tokens INTEGER NOT NULL, charged_cost_nano_usd INTEGER NOT NULL,
+window_started_at TEXT NOT NULL, window_expires_at TEXT NOT NULL,
+created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+UNIQUE(organization_id,request_id));
+CREATE INDEX IF NOT EXISTS inference_reservations_window_idx
+ON inference_reservations(organization_id,provider,model,window_started_at,state);`)
 	return err
+}
+
+func (l *SQLite) nowUTC() time.Time {
+	if l.now == nil {
+		return time.Now().UTC()
+	}
+	return l.now().UTC()
 }
 
 func (l *SQLite) ensureProjectionAdmissionColumns(ctx context.Context) error {

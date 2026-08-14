@@ -23,6 +23,8 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/bootstrap"
 	"github.com/dominicnunez/agentos/internal/execution"
+	"github.com/dominicnunez/agentos/internal/inference"
+	"github.com/dominicnunez/agentos/internal/modelid"
 	"github.com/dominicnunez/agentos/internal/secrets"
 )
 
@@ -290,6 +292,10 @@ func collectCodexProvider(ctx context.Context, config bootstrap.Config, ui *term
 		Kind: bootstrap.ProviderCodexSubscription, Model: model, SecretRef: secretRef,
 		CodexBinary: binary, CodexCredential: credentialStore,
 	}
+	provider.InferencePolicy, err = collectInferencePolicy(config, provider, ui)
+	if err != nil {
+		return bootstrap.Provider{}, err
+	}
 	if err := provider.Validate(); err != nil {
 		return bootstrap.Provider{}, err
 	}
@@ -353,16 +359,203 @@ func collectOpenAIProvider(ctx context.Context, config bootstrap.Config, ui *ter
 		model = models[selected]
 	}
 	provider := bootstrap.Provider{Kind: bootstrap.ProviderOpenAIAPI, Model: model, SecretRef: "openai-api-key"}
-	if err := provider.Validate(); err != nil {
+	provider.InferencePolicy, err = collectInferencePolicy(config, provider, ui)
+	if err != nil {
 		return bootstrap.Provider{}, err
 	}
-	if err := probeOpenAIModel(ctx, model, string(secret)); err != nil {
-		return bootstrap.Provider{}, fmt.Errorf("OpenAI API connection test failed: %w", err)
+	if err := provider.Validate(); err != nil {
+		return bootstrap.Provider{}, err
 	}
 	if err := storeEncryptedCredential(ctx, config, provider.SecretRef, secret); err != nil {
 		return bootstrap.Provider{}, err
 	}
 	return provider, nil
+}
+
+func collectInferencePolicy(config bootstrap.Config, provider bootstrap.Provider, ui *terminalUI) (inference.Policy, error) {
+	const (
+		windowSeconds = int64((30 * 24 * time.Hour) / time.Second)
+		maximumUsage  = int64(1_000_000)
+	)
+	policy := inference.Policy{
+		Version: inference.PolicyVersion, OrganizationID: config.Organization, Model: provider.Model,
+		WindowDurationSeconds: windowSeconds,
+		MaxConcurrentRequests: 1, MaxAttemptsPerRequest: 1,
+		AuthorizedBy: "local-uid-" + strconv.Itoa(config.Owner.UID), AuthorizedAt: nowUTC(),
+	}
+	switch provider.Kind {
+	case bootstrap.ProviderOpenAIAPI:
+		policy.Provider = "openai-api"
+		policy.ExecutionProfileVersion = "v1-openai-responses-model-only"
+		policy.Mode = inference.MeteredAPI
+		policy.MaxInputTokensPerRequest = maximumUsage
+		policy.MaxOutputTokensPerRequest = 4096
+	case bootstrap.ProviderCodexSubscription:
+		policy.Provider = "codex-subscription"
+		policy.ExecutionProfileVersion = "v1-codex-subscription-restricted"
+		policy.Mode = inference.Subscription
+		policy.MaxInputTokensPerRequest = maximumUsage
+		policy.MaxOutputTokensPerRequest = maximumUsage
+	default:
+		return inference.Policy{}, fmt.Errorf("provider inference classification is unavailable")
+	}
+	minimumWindow := policy.MaxInputTokensPerRequest + policy.MaxOutputTokensPerRequest
+	allowance, err := selectTokenAllowance(ui, minimumWindow)
+	if err != nil {
+		return inference.Policy{}, err
+	}
+	policy.MaxTokensPerWindow = allowance
+	policy.ContinuityReserveTokens = allowance / 10
+	if policy.MaxTokensPerWindow-policy.ContinuityReserveTokens < minimumWindow {
+		return inference.Policy{}, fmt.Errorf("token allowance is too small to preserve the continuity reserve")
+	}
+	expiresAt, err := selectAuthorizationExpiry(ui, policy.AuthorizedAt)
+	if err != nil {
+		return inference.Policy{}, err
+	}
+	policy.AuthorizationExpiresAt = expiresAt
+	if policy.Mode == inference.MeteredAPI {
+		inputPrice, priceErr := readNanoUSD(ui, "Input price per 1M tokens (USD):")
+		if priceErr != nil {
+			return inference.Policy{}, priceErr
+		}
+		outputPrice, priceErr := readNanoUSD(ui, "Output price per 1M tokens (USD):")
+		if priceErr != nil {
+			return inference.Policy{}, priceErr
+		}
+		spendLimit, priceErr := readNanoUSD(ui, "30-day spend limit (USD):")
+		if priceErr != nil {
+			return inference.Policy{}, priceErr
+		}
+		policy.Pricing = &inference.Pricing{
+			InputNanoUSDPerMillionTokens: inputPrice, OutputNanoUSDPerMillionTokens: outputPrice,
+			MaxCostNanoUSDPerRequest: spendLimit, MaxCostNanoUSDPerWindow: spendLimit, ExpiresAt: expiresAt,
+		}
+		requestCost, priceErr := policy.ReservedCostNanoUSD()
+		if priceErr != nil || spendLimit < requestCost {
+			return inference.Policy{}, fmt.Errorf("spend limit must cover one maximally bounded request")
+		}
+		policy.Pricing.MaxCostNanoUSDPerRequest = requestCost
+	}
+	if err := policy.Validate(); err != nil {
+		return inference.Policy{}, err
+	}
+	return policy, nil
+}
+
+func selectTokenAllowance(ui *terminalUI, minimum int64) (int64, error) {
+	options := []struct {
+		label string
+		value int64
+	}{{"2,000,000 tokens per 30 days", 2_000_000}, {"10,000,000 tokens per 30 days", 10_000_000}, {"50,000,000 tokens per 30 days", 50_000_000}}
+	labels := make([]string, 0, len(options)+1)
+	for _, option := range options {
+		if option.value >= minimum+option.value/10 {
+			labels = append(labels, option.label)
+		}
+	}
+	labels = append(labels, "Enter another limit...")
+	selected, err := ui.selectOne("Token allowance:", labels)
+	if err != nil {
+		return 0, err
+	}
+	eligible := make([]int64, 0, len(options))
+	for _, option := range options {
+		if option.value >= minimum+option.value/10 {
+			eligible = append(eligible, option.value)
+		}
+	}
+	if selected < len(eligible) {
+		return eligible[selected], nil
+	}
+	value, err := ui.line("Tokens per 30 days:", true)
+	if err != nil {
+		return 0, err
+	}
+	return parsePositiveInt64(value, "token allowance")
+}
+
+func selectAuthorizationExpiry(ui *terminalUI, authorizedAt time.Time) (time.Time, error) {
+	labels := []string{"30 days", "90 days", "365 days", "Enter another date..."}
+	selected, err := ui.selectOne("Authorization expires:", labels)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if selected < 3 {
+		days := []int{30, 90, 365}[selected]
+		return authorizedAt.Add(time.Duration(days) * 24 * time.Hour), nil
+	}
+	value, err := ui.line("Expiration date (YYYY-MM-DD):", true)
+	if err != nil {
+		return time.Time{}, err
+	}
+	parsed, err := time.Parse("2006-01-02", value)
+	if err != nil || !parsed.After(authorizedAt) {
+		return time.Time{}, fmt.Errorf("authorization expiration must be a future YYYY-MM-DD date")
+	}
+	return parsed.UTC(), nil
+}
+
+func readNanoUSD(ui *terminalUI, label string) (int64, error) {
+	value, err := ui.line(label, true)
+	if err != nil {
+		return 0, err
+	}
+	return parseNanoUSD(value)
+}
+
+func parseNanoUSD(value string) (int64, error) {
+	if value == "" || strings.TrimSpace(value) != value || strings.HasPrefix(value, "-") || strings.Count(value, ".") > 1 {
+		return 0, fmt.Errorf("USD amount must be a positive decimal")
+	}
+	parts := strings.SplitN(value, ".", 2)
+	if parts[0] == "" {
+		return 0, fmt.Errorf("USD amount must be a positive decimal")
+	}
+	wholeUnsigned, err := strconv.ParseUint(parts[0], 10, 63)
+	if err != nil {
+		return 0, fmt.Errorf("USD amount must be a positive decimal")
+	}
+	whole := int64(wholeUnsigned)
+	fraction := ""
+	if len(parts) == 2 {
+		fraction = parts[1]
+		if fraction == "" || len(fraction) > 9 {
+			return 0, fmt.Errorf("USD amount supports at most nine decimal places")
+		}
+		if _, err := strconv.ParseUint(fraction, 10, 32); err != nil {
+			return 0, fmt.Errorf("USD amount must be a positive decimal")
+		}
+	}
+	for len(fraction) < 9 {
+		fraction += "0"
+	}
+	fractionValue := int64(0)
+	if fraction != "" {
+		fractionValue, err = strconv.ParseInt(fraction, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("USD amount is too large")
+		}
+	}
+	if whole > (int64(^uint64(0)>>1)-fractionValue)/1_000_000_000 {
+		return 0, fmt.Errorf("USD amount is too large")
+	}
+	amount := whole*1_000_000_000 + fractionValue
+	if amount < 1 {
+		return 0, fmt.Errorf("USD amount must be positive")
+	}
+	return amount, nil
+}
+
+func parsePositiveInt64(value, label string) (int64, error) {
+	if value == "" || strings.TrimSpace(value) != value {
+		return 0, fmt.Errorf("%s must be a positive integer", label)
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 1 {
+		return 0, fmt.Errorf("%s must be a positive integer", label)
+	}
+	return parsed, nil
 }
 
 func listOpenAIModels(ctx context.Context, key string) ([]string, error) {
@@ -399,8 +592,7 @@ func listOpenAIModels(ctx context.Context, key string) ([]string, error) {
 	seen := make(map[string]struct{})
 	models := make([]string, 0, len(body.Data))
 	for _, model := range body.Data {
-		candidate := bootstrap.Provider{Kind: bootstrap.ProviderOpenAIAPI, Model: model.ID, SecretRef: "model-discovery"}
-		if candidate.Validate() != nil {
+		if !validDiscoveredOpenAIModel(model.ID) {
 			continue
 		}
 		if _, exists := seen[model.ID]; exists {
@@ -414,6 +606,10 @@ func listOpenAIModels(ctx context.Context, key string) ([]string, error) {
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(models)))
 	return models, nil
+}
+
+func validDiscoveredOpenAIModel(model string) bool {
+	return model != "" && len(model) <= 128 && strings.TrimSpace(model) == model && !strings.ContainsAny(model, "\r\n\t ") && modelid.HasDatedSnapshot(model)
 }
 
 func probeOpenAIModel(ctx context.Context, model, key string) error {

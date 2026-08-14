@@ -30,6 +30,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/gateway"
+	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/intake"
 	"github.com/dominicnunez/agentos/internal/ledger"
 	"github.com/dominicnunez/agentos/internal/planning"
@@ -105,13 +106,27 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 	if err := validatePublicURL(publicURL, remote, externalActors != nil, tlsConfig != nil); err != nil {
 		return err
 	}
-	model, closeModel, err := configuredProvider(ctx, config.Providers[0], providerRuntimeDirectory(config), source)
+	rawModel, closeModel, err := configuredProvider(ctx, config.Providers[0], providerRuntimeDirectory(config), source)
 	if err != nil {
 		return err
 	}
 	defer func() {
 		err = errors.Join(err, closeModel())
 	}()
+	recoveredInference, err := l.RecoverInferenceReservations(ctx, config.Organization)
+	if err != nil {
+		return fmt.Errorf("recover incomplete inference reservations: %w", err)
+	}
+	if recoveredInference > 0 {
+		log.Printf("inference reservations require conservative reconciliation: count=%d", recoveredInference)
+	}
+	if err := l.ActivateInferencePolicy(ctx, config.Providers[0].InferencePolicy); err != nil {
+		return fmt.Errorf("activate reviewed inference policy: %w", err)
+	}
+	model, err := inference.NewGuardedAdapter(l, rawModel)
+	if err != nil {
+		return err
+	}
 	planner, err := planning.NewModelPlanner(planningModel{adapter: model})
 	if err != nil {
 		return err

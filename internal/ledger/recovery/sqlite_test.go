@@ -2,7 +2,9 @@ package recovery
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,8 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/execution"
+	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/ledger"
 	_ "modernc.org/sqlite"
 )
@@ -80,6 +84,74 @@ func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	var eventCount int
 	if err := restoredDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events`).Scan(&eventCount); err != nil || eventCount != 1 {
 		t.Fatalf("restored event count=%d err=%v", eventCount, err)
+	}
+}
+
+func TestBackupAndRestorePreserveInferenceAdmissionAuthority(t *testing.T) {
+	ctx := t.Context()
+	directory := t.TempDir()
+	source := filepath.Join(directory, "live-inference.db")
+	live, err := ledger.Open(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	policy := inference.Policy{
+		Version: inference.PolicyVersion, OrganizationID: "organization-1", Provider: "provider-1", Model: "model-1",
+		ExecutionProfileVersion: "profile-v1", Mode: inference.Subscription,
+		MaxInputTokensPerRequest: 100, MaxOutputTokensPerRequest: 20, MaxTokensPerWindow: 500,
+		ContinuityReserveTokens: 100, WindowDurationSeconds: 3600, MaxConcurrentRequests: 1, MaxAttemptsPerRequest: 1,
+		AuthorizedBy: "local-uid-1000", AuthorizedAt: now.Add(-time.Hour), AuthorizationExpiresAt: now.Add(time.Hour),
+	}
+	if err := live.ActivateInferencePolicy(ctx, policy); err != nil {
+		_ = live.Close()
+		t.Fatal(err)
+	}
+	request := restoredInferenceRequest("request-1")
+	reservation, err := live.ReserveInference(ctx, request)
+	if err != nil {
+		_ = live.Close()
+		t.Fatal(err)
+	}
+	usage := events.InferenceUsageRecordedPayload{
+		Source: "provider", Provider: "provider-1", Model: "model-1", InputTokens: 10, OutputTokens: 5, TotalTokens: 15,
+	}
+	if _, err := live.ReconcileInference(ctx, reservation, &usage, inference.ReconciliationCompleted); err != nil {
+		_ = live.Close()
+		t.Fatal(err)
+	}
+
+	backupPath := filepath.Join(directory, "inference-backup.db")
+	if _, err := Backup(ctx, source, backupPath); err != nil {
+		_ = live.Close()
+		t.Fatal(err)
+	}
+	if err := live.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restoredPath := filepath.Join(directory, "inference-restored.db")
+	if _, err := Restore(ctx, backupPath, restoredPath); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := ledger.Open(restoredPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = restored.Close() })
+	if _, err := restored.ReserveInference(ctx, restoredInferenceRequest("request-2")); err != nil {
+		t.Fatalf("restored inference authority could not admit new work: %v", err)
+	}
+}
+
+func restoredInferenceRequest(requestID string) inference.InferenceRequest {
+	digest := sha256.Sum256([]byte("prompt-" + requestID))
+	return inference.InferenceRequest{
+		Scope: inference.Scope{
+			OrganizationID: "organization-1", Purpose: inference.PurposeTaskExecution, RequestID: requestID,
+			TaskID: "task-1", ExecutionID: requestID, CorrelationID: "work-1",
+		},
+		Descriptor:   execution.ModelDescriptor{Provider: "provider-1", Model: "model-1", ExecutionProfileVersion: "profile-v1"},
+		PromptSHA256: hex.EncodeToString(digest[:]),
 	}
 }
 
@@ -2114,7 +2186,9 @@ CREATE TABLE records(kind TEXT NOT NULL, record_id TEXT NOT NULL, version INTEGE
 CREATE TABLE inbox(recipient_scope TEXT NOT NULL, recipient_id TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE, organization_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '', available_at TEXT NOT NULL DEFAULT '', observed_at TEXT NOT NULL DEFAULT '', observation_event_id TEXT NOT NULL DEFAULT '');
 CREATE TABLE consumed_approvals(approval_id TEXT PRIMARY KEY, effect_fingerprint TEXT NOT NULL, consumed_at TEXT NOT NULL);
 CREATE TABLE external_work(organization_id TEXT NOT NULL, request_id TEXT NOT NULL, correlation_id TEXT NOT NULL, intent_id TEXT NOT NULL, PRIMARY KEY(organization_id, request_id));
-CREATE TABLE external_tasks(organization_id TEXT NOT NULL, task_id TEXT NOT NULL, correlation_id TEXT NOT NULL, PRIMARY KEY(organization_id, task_id));`, events.SchemaVersion))
+CREATE TABLE external_tasks(organization_id TEXT NOT NULL, task_id TEXT NOT NULL, correlation_id TEXT NOT NULL, PRIMARY KEY(organization_id, task_id));
+CREATE TABLE inference_policies(organization_id TEXT NOT NULL, policy_fingerprint TEXT NOT NULL, body BLOB NOT NULL, activation_event_id TEXT NOT NULL UNIQUE, activated_at TEXT NOT NULL, active INTEGER NOT NULL, PRIMARY KEY(organization_id,policy_fingerprint));
+CREATE TABLE inference_reservations(reservation_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, organization_id TEXT NOT NULL, purpose TEXT NOT NULL, intent_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '', execution_id TEXT NOT NULL, correlation_id TEXT NOT NULL, prompt_sha256 TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, execution_profile_version TEXT NOT NULL, policy_fingerprint TEXT NOT NULL, state TEXT NOT NULL, reserved_input_tokens INTEGER NOT NULL, reserved_output_tokens INTEGER NOT NULL, reserved_cost_nano_usd INTEGER NOT NULL, charged_input_tokens INTEGER NOT NULL, charged_output_tokens INTEGER NOT NULL, charged_cost_nano_usd INTEGER NOT NULL, window_started_at TEXT NOT NULL, window_expires_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(organization_id,request_id));`, events.SchemaVersion))
 	if err != nil {
 		_ = db.Close()
 		t.Fatal(err)

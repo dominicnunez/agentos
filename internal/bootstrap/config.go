@@ -18,10 +18,11 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/modelid"
 )
 
-const ConfigVersion = 1
+const ConfigVersion = 2
 
 type Mode string
 
@@ -64,11 +65,12 @@ type Owner struct {
 }
 
 type Provider struct {
-	Kind            ProviderKind `json:"kind"`
-	Model           string       `json:"model"`
-	SecretRef       string       `json:"secret_ref,omitempty"`
-	CodexBinary     string       `json:"codex_binary,omitempty"`
-	CodexCredential string       `json:"codex_credential_store,omitempty"`
+	Kind            ProviderKind     `json:"kind"`
+	Model           string           `json:"model"`
+	SecretRef       string           `json:"secret_ref,omitempty"`
+	CodexBinary     string           `json:"codex_binary,omitempty"`
+	CodexCredential string           `json:"codex_credential_store,omitempty"`
+	InferencePolicy inference.Policy `json:"inference_policy"`
 }
 
 type A2A struct {
@@ -168,6 +170,9 @@ func (c Config) ValidateReady() error {
 		if provider.Kind == ProviderCodexSubscription && !pathWithin(c.Paths.StateDir, provider.CodexCredential) {
 			problems = append(problems, fmt.Errorf("provider %d: Codex credential store must remain inside the state directory", index+1))
 		}
+		if provider.InferencePolicy.OrganizationID != c.Organization || provider.InferencePolicy.AuthorizedBy != "local-uid-"+strconv.Itoa(c.Owner.UID) {
+			problems = append(problems, fmt.Errorf("provider %d: inference policy must be approved for this organization by the installation owner", index+1))
+		}
 	}
 	if err := validateA2A(c.A2A); err != nil {
 		problems = append(problems, err)
@@ -197,6 +202,12 @@ func pathWithin(root, target string) bool {
 }
 
 func (p Provider) Validate() error {
+	if err := p.InferencePolicy.Validate(); err != nil {
+		return fmt.Errorf("inference policy: %w", err)
+	}
+	if p.InferencePolicy.Model != p.Model {
+		return fmt.Errorf("inference policy model does not match the provider")
+	}
 	switch p.Kind {
 	case ProviderOpenAIAPI:
 		if strings.TrimSpace(p.Model) == "" || strings.TrimSpace(p.SecretRef) == "" {
@@ -211,9 +222,15 @@ func (p Provider) Validate() error {
 		if p.CodexBinary != "" || p.CodexCredential != "" {
 			return fmt.Errorf("OpenAI API provider cannot contain Codex settings")
 		}
+		if p.InferencePolicy.Provider != "openai-api" || p.InferencePolicy.ExecutionProfileVersion != "v1-openai-responses-model-only" || p.InferencePolicy.Mode != inference.MeteredAPI {
+			return fmt.Errorf("OpenAI API inference policy classification is invalid")
+		}
 	case ProviderCodexSubscription:
 		if !validModelIdentifier(p.Model) || !canonicalAbsolutePath(p.CodexBinary) || !canonicalAbsolutePath(p.CodexCredential) || !validCredentialRef(p.SecretRef) {
 			return fmt.Errorf("codex model, binary, sealed credential store, and key reference are required")
+		}
+		if p.InferencePolicy.Provider != "codex-subscription" || p.InferencePolicy.ExecutionProfileVersion != "v1-codex-subscription-restricted" || p.InferencePolicy.Mode != inference.Subscription {
+			return fmt.Errorf("Codex subscription inference policy classification is invalid")
 		}
 	default:
 		return fmt.Errorf("provider must be codex-subscription or openai-api")

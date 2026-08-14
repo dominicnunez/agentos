@@ -24,8 +24,9 @@ selected, it:
   unexpected model identity, and changed execution-profile fields;
 - bounds prompts to 256 KiB, returned text to 256 KiB, and the full HTTP
   response to 1 MiB;
-- records provider-reported input, output, and total tokens while leaving cost
-  unknown; and
+- records provider-reported input, output, and total tokens and computes cost
+  from the exact operator-reviewed price schedule active at reservation time;
+  and
 - does not automatically retry. A timeout can represent a request that reached
   the billable provider, so retry is an explicit workflow decision.
 
@@ -50,6 +51,11 @@ Select `OpenAI API` during `agentos` setup. The key is entered through a
 no-echo terminal prompt. Agent OS uses it to retrieve the account's available
 dated model snapshots, presents those snapshots in a scrollable picker, and
 verifies the selected model without making an inference request.
+
+Setup then records a reviewed 30-day token allowance, continuity reserve,
+spend limit, current input/output prices, and authorization expiry. Prices are
+entered as exact decimal USD values and stored as integer nano-USD units; they
+are never inferred from model output. Setup performs no billable model probe.
 
 The key is then encrypted with systemd credentials. Configuration stores only
 the fixed credential reference and selected dated model snapshot. The key is
@@ -80,6 +86,10 @@ for the organization before approving a data boundary. Never place secrets,
 credentials, or unapproved sensitive data in an execution prompt.
 
 Pricing is intentionally not embedded in the binary because it changes outside
-the Agent OS release cycle. Provider token usage is durable; monetary controls
-remain with the reviewed OpenAI project until Agent OS has a separately
-approved, current pricing source and budget contract.
+the Agent OS release cycle. Before every request, SQLite atomically reserves
+the maximum bounded input/output tokens and corresponding cost against the
+active organization policy. The response is returned only after actual usage
+and computed cost are durably reconciled. Missing or stale pricing, expired
+authorization, exhausted spend or token allowance, replay, and uncertain prior
+attempts all fail closed. Keep the provider-side project limit and alerts as an
+independent defense.
