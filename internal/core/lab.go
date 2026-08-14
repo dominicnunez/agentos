@@ -124,6 +124,8 @@ func ValidExperimentRevision(previous, next Experiment) bool {
 // the only Work outcome that can justify it.
 func ValidTerminalExperimentWorkStatus(experiment Experiment, work Work) bool {
 	switch experiment.Status {
+	case ExperimentRunning:
+		return false
 	case ExperimentCompleted:
 		return work.Status == WorkCompleted
 	case ExperimentFailed:
