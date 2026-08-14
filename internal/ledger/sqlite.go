@@ -42,68 +42,10 @@ func Open(path string) (*SQLite, error) {
 }
 func (l *SQLite) Close() error { return l.db.Close() }
 func (l *SQLite) migrate(ctx context.Context) error {
-	_, err := l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS events (
-sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, organization_id TEXT NOT NULL,
-event_type TEXT NOT NULL, source_actor_id TEXT NOT NULL DEFAULT '', source_execution_id TEXT NOT NULL DEFAULT '', recipient_scope TEXT NOT NULL DEFAULT '', recipient_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '', authorization_refs BLOB NOT NULL, artifact_refs BLOB NOT NULL, payload BLOB NOT NULL,
-correlation_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, schema_version INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS events_correlation_idx ON events(correlation_id, sequence);`)
-	if err != nil {
+	if err := migrateStorage(ctx, l.db); err != nil {
 		return err
 	}
-	if err := l.ensureEventRoutingColumns(ctx); err != nil {
-		return err
-	}
-	if _, err := l.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS events_intake_actor_idx ON events(organization_id,event_type,source_actor_id,sequence)`); err != nil {
-		return err
-	}
-	_, err = l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS records (
-kind TEXT NOT NULL, record_id TEXT NOT NULL, version INTEGER NOT NULL, body BLOB NOT NULL,
-admission_event_id TEXT NOT NULL DEFAULT '', admission_fingerprint TEXT NOT NULL DEFAULT '',
-created_at TEXT NOT NULL, PRIMARY KEY(kind, record_id, version));
-CREATE INDEX IF NOT EXISTS records_kind_idx ON records(kind, created_at);`)
-	if err != nil {
-		return err
-	}
-	if err := l.ensureProjectionAdmissionColumns(ctx); err != nil {
-		return err
-	}
-	if err := l.migrateExternalWorkIndex(ctx); err != nil {
-		return err
-	}
-	_, err = l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS inbox (
-recipient_scope TEXT NOT NULL, recipient_id TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE,
-organization_id TEXT NOT NULL, task_id TEXT NOT NULL DEFAULT '', available_at TEXT NOT NULL,
-observed_at TEXT NOT NULL DEFAULT '', observation_event_id TEXT NOT NULL DEFAULT '',
-PRIMARY KEY(recipient_scope, recipient_id, event_id));
-CREATE INDEX IF NOT EXISTS inbox_available_idx ON inbox(recipient_scope, recipient_id, observed_at, available_at);`)
-	if err != nil {
-		return err
-	}
-	_, err = l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS consumed_approvals (
-approval_id TEXT PRIMARY KEY, effect_fingerprint TEXT NOT NULL, consumed_at TEXT NOT NULL);`)
-	if err != nil {
-		return err
-	}
-	_, err = l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS inference_policies (
-organization_id TEXT NOT NULL, policy_fingerprint TEXT NOT NULL, body BLOB NOT NULL,
-activation_event_id TEXT NOT NULL UNIQUE, activated_at TEXT NOT NULL, active INTEGER NOT NULL,
-PRIMARY KEY(organization_id,policy_fingerprint));
-CREATE UNIQUE INDEX IF NOT EXISTS inference_policies_active_idx ON inference_policies(organization_id) WHERE active=1;
-CREATE TABLE IF NOT EXISTS inference_reservations (
-reservation_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, organization_id TEXT NOT NULL,
-purpose TEXT NOT NULL, intent_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '',
-execution_id TEXT NOT NULL, correlation_id TEXT NOT NULL, prompt_sha256 TEXT NOT NULL,
-provider TEXT NOT NULL, model TEXT NOT NULL, execution_profile_version TEXT NOT NULL,
-policy_fingerprint TEXT NOT NULL, state TEXT NOT NULL,
-reserved_input_tokens INTEGER NOT NULL, reserved_output_tokens INTEGER NOT NULL,
-reserved_cost_nano_usd INTEGER NOT NULL, charged_input_tokens INTEGER NOT NULL,
-charged_output_tokens INTEGER NOT NULL, charged_cost_nano_usd INTEGER NOT NULL,
-window_started_at TEXT NOT NULL, window_expires_at TEXT NOT NULL,
-created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-UNIQUE(organization_id,request_id));
-CREATE INDEX IF NOT EXISTS inference_reservations_window_idx
-ON inference_reservations(organization_id,provider,model,window_started_at,state);`)
-	return err
+	return l.rebuildExternalWorkIndex(ctx)
 }
 
 func (l *SQLite) nowUTC() time.Time {
@@ -113,50 +55,10 @@ func (l *SQLite) nowUTC() time.Time {
 	return l.now().UTC()
 }
 
-func (l *SQLite) ensureProjectionAdmissionColumns(ctx context.Context) error {
-	columns, err := l.tableColumns(ctx, "records")
-	if err != nil {
-		return err
-	}
-	if columns["admission_event_id"] && columns["admission_fingerprint"] {
-		_, err := l.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS records_admission_event_idx ON records(admission_event_id) WHERE admission_event_id<>''`)
-		return err
-	}
-	var records int
-	if err := l.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM records`).Scan(&records); err != nil {
-		return fmt.Errorf("inspect pre-admission projection records: %w", err)
-	}
-	if records != 0 {
-		return fmt.Errorf("records schema predates event-coupled projection admission; unsupported pre-release state")
-	}
-	for name, ddl := range map[string]string{
-		"admission_event_id":    `ALTER TABLE records ADD COLUMN admission_event_id TEXT NOT NULL DEFAULT ''`,
-		"admission_fingerprint": `ALTER TABLE records ADD COLUMN admission_fingerprint TEXT NOT NULL DEFAULT ''`,
-	} {
-		if columns[name] {
-			continue
-		}
-		if _, err := l.db.ExecContext(ctx, ddl); err != nil {
-			return fmt.Errorf("add projection admission column %s: %w", name, err)
-		}
-	}
-	_, err = l.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS records_admission_event_idx ON records(admission_event_id) WHERE admission_event_id<>''`)
-	return err
-}
-
-func (l *SQLite) migrateExternalWorkIndex(ctx context.Context) error {
-	if _, err := l.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS external_work (
-organization_id TEXT NOT NULL, request_id TEXT NOT NULL, correlation_id TEXT NOT NULL, intent_id TEXT NOT NULL,
-PRIMARY KEY(organization_id, request_id), UNIQUE(organization_id, correlation_id), UNIQUE(intent_id));
-CREATE TABLE IF NOT EXISTS external_tasks (
-organization_id TEXT NOT NULL, task_id TEXT NOT NULL, correlation_id TEXT NOT NULL,
-PRIMARY KEY(organization_id, task_id));
-CREATE INDEX IF NOT EXISTS external_tasks_correlation_idx ON external_tasks(organization_id, correlation_id);`); err != nil {
-		return fmt.Errorf("create external work index: %w", err)
-	}
+func (l *SQLite) rebuildExternalWorkIndex(ctx context.Context) error {
 	intentBodies, err := l.Records(ctx, "intent", "")
 	if err != nil {
-		return fmt.Errorf("scan intents for external work migration: %w", err)
+		return fmt.Errorf("scan intents for external work index: %w", err)
 	}
 	type workBinding struct{ organizationID, requestID, correlationID, intentID string }
 	var bindings []workBinding
@@ -169,32 +71,27 @@ CREATE INDEX IF NOT EXISTS external_tasks_correlation_idx ON external_tasks(orga
 		if err := json.Unmarshal(record.Value, &intent); err != nil {
 			return fmt.Errorf("decode intent value for external work migration: %w", err)
 		}
-		requestID := intent.ExternalRequestID
-		if requestID == "" {
-			if intent.SourceChannel != "A2A" && intent.SourceChannel != "HUMAN_DIRECT" {
-				continue
-			}
-			requestID = record.CorrelationID
+		if intent.SourceChannel != "A2A" && intent.SourceChannel != "HUMAN_DIRECT" {
+			continue
 		}
-		if intent.OrganizationID == "" || requestID == "" || record.CorrelationID == "" || intent.ID == "" {
-			return fmt.Errorf("external intent %q lacks migration identity", intent.ID)
+		if intent.OrganizationID == "" || intent.ExternalRequestID == "" || record.CorrelationID == "" || intent.ID == "" {
+			return fmt.Errorf("external intent %q lacks exact durable index identity", intent.ID)
 		}
-		bindings = append(bindings, workBinding{string(intent.OrganizationID), requestID, record.CorrelationID, string(intent.ID)})
+		bindings = append(bindings, workBinding{string(intent.OrganizationID), intent.ExternalRequestID, record.CorrelationID, string(intent.ID)})
 	}
 	return l.withTx(ctx, func(tx *sql.Tx) error {
-		for _, binding := range bindings {
-			if err := registerExternalWork(ctx, tx, binding.organizationID, binding.requestID, binding.correlationID, binding.intentID); err != nil {
-				return fmt.Errorf("migrate external work %s/%s: %w", binding.organizationID, binding.requestID, err)
-			}
-		}
-		// Rebuild rather than append so rows created by the former all-task
-		// migration are removed. Only runtime-owned roots cross the A2A boundary.
 		if _, err := tx.ExecContext(ctx, `DELETE FROM external_tasks`); err != nil {
 			return fmt.Errorf("clear external task index: %w", err)
 		}
+		for _, binding := range bindings {
+			if err := registerExternalWork(ctx, tx, binding.organizationID, binding.requestID, binding.correlationID, binding.intentID); err != nil {
+				return fmt.Errorf("rebuild external work %s/%s: %w", binding.organizationID, binding.requestID, err)
+			}
+		}
+		// Only runtime-owned roots cross the external lookup boundary.
 		if _, err := tx.ExecContext(ctx, `INSERT INTO external_tasks(organization_id,task_id,correlation_id)
 SELECT organization_id,'task-' || correlation_id,correlation_id FROM external_work`); err != nil {
-			return fmt.Errorf("migrate external root task index: %w", err)
+			return fmt.Errorf("rebuild external root task index: %w", err)
 		}
 		var conflictingTask bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
@@ -202,65 +99,13 @@ SELECT 1 FROM events e
 JOIN external_work w ON w.organization_id=e.organization_id AND w.correlation_id=e.correlation_id
 JOIN external_tasks t ON t.organization_id=e.organization_id AND t.task_id=e.task_id
 WHERE e.task_id<>'' AND t.correlation_id<>e.correlation_id)`).Scan(&conflictingTask); err != nil {
-			return fmt.Errorf("verify external task migration: %w", err)
+			return fmt.Errorf("verify external task index: %w", err)
 		}
 		if conflictingTask {
 			return fmt.Errorf("external task is bound to multiple work streams")
 		}
 		return nil
 	})
-}
-
-func (l *SQLite) ensureEventRoutingColumns(ctx context.Context) error {
-	columns, err := l.tableColumns(ctx, "events")
-	if err != nil {
-		return err
-	}
-	for name, ddl := range map[string]string{
-		"recipient_scope": `ALTER TABLE events ADD COLUMN recipient_scope TEXT NOT NULL DEFAULT ''`,
-		"recipient_id":    `ALTER TABLE events ADD COLUMN recipient_id TEXT NOT NULL DEFAULT ''`,
-	} {
-		if columns[name] {
-			continue
-		}
-		if _, err := l.db.ExecContext(ctx, ddl); err != nil {
-			return fmt.Errorf("add event routing column %s: %w", name, err)
-		}
-	}
-	return nil
-}
-
-func (l *SQLite) tableColumns(ctx context.Context, table string) (map[string]bool, error) {
-	var query string
-	switch table {
-	case "events":
-		query = `PRAGMA table_info(events)`
-	case "records":
-		query = `PRAGMA table_info(records)`
-	default:
-		return nil, fmt.Errorf("unsupported schema table %q", table)
-	}
-	rows, err := l.db.QueryContext(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("inspect %s schema: %w", table, err)
-	}
-	defer func() {
-		_ = rows.Close() // Iteration and close failures are reported by rows.Err.
-	}()
-	columns := map[string]bool{}
-	for rows.Next() {
-		var cid, notNull, primaryKey int
-		var name, columnType string
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			return nil, fmt.Errorf("read %s schema: %w", table, err)
-		}
-		columns[name] = true
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate %s schema: %w", table, err)
-	}
-	return columns, nil
 }
 
 type preparedProjection struct {

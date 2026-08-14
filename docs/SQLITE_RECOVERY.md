@@ -25,7 +25,8 @@ copied, malformed, cross-organization, or otherwise mismatched state is
 rejected. Existing SQLite journal,
 WAL, or shared-memory sidecars at the destination are rejected so stale state
 cannot be applied to a recovered ledger. The utility returns JSON containing
-the resolved path, SHA-256 checksum, size, event count, and maximum sequence.
+the resolved path, SHA-256 checksum, size, event count, maximum sequence,
+storage-schema version, and Event Contract schema version.
 
 Backups contain the full event ledger and may contain sensitive organizational
 data. Moving one to a new storage or trust boundary requires the established
@@ -40,8 +41,10 @@ agentos-recovery verify --database ./agentos-backup.db
 ```
 
 Verification is read-only. It rejects corruption, valid SQLite databases that
-do not contain the required Agent OS ledger tables and columns, unsupported
-pre-admission projection state, projection lifecycle events without typed
+do not carry the Agent OS SQLite application ID, unsupported or ambiguous
+storage versions, layouts that do not match their exact version, schema
+fingerprint drift, Event Contract version mismatch, unsupported pre-admission
+projection state, projection lifecycle events without typed
 admission, and materialized projections that do not match their authorizing
 event or durable Organization/Intent/Work relationship exactly. Task
 dependencies must resolve within one Work boundary and remain acyclic. Agent,
@@ -61,6 +64,28 @@ deactivation does not invalidate an earlier committed start, while interrupted
 adaptive work remains uncertain and cannot reuse that admission for a blind
 retry.
 
+## Storage and Event Contract versions
+
+SQLite storage versions are independent of the Agent OS binary version. The
+current runtime writes storage schema v2 and accepts v1 as the oldest supported
+upgrade source. Schema v1 is frozen in
+`internal/ledger/testdata/storage-v1.sql`. Schema v2 adds metadata that binds
+the storage version, Agent OS application ID, current Event Contract schema,
+and a fingerprint of the reviewed SQLite layout.
+
+Startup inspects the application ID and complete source layout before making a
+change, then applies each ordered migration in one SQLite transaction. A
+missing migration, future version, altered layout, or conflicting metadata
+leaves the source untouched and fails with an actionable error. A nonempty
+unversioned database is unsupported pre-release state: Agent OS does not infer
+authority-bearing identity or silently repair it. Preserve that database and
+use only an explicitly reviewed migration.
+
+Event Contract schema v3 is the only Event schema admitted by storage v1 and
+v2. Future code that changes durable Event Contract meaning must introduce a
+new storage migration and retain an explicit validator for every Event version
+it claims to support; permissive decoding is not a migration mechanism.
+
 ## Restore without overwrite
 
 Restore materializes a validated backup at a new path:
@@ -71,7 +96,10 @@ agentos-recovery restore \
   --output ./agentos-restored.db
 ```
 
-It never modifies the backup and never overwrites an existing destination.
+It never modifies the backup and never overwrites an existing destination. A
+supported older backup remains at its original storage version during the
+copy. The first Agent OS startup against the restored path performs the atomic
+upgrade before serving work.
 The operational switch remains explicit:
 
 1. Stop Agent OS and preserve the current database and any journal files.
@@ -86,7 +114,9 @@ swap paths while Agent OS is running.
 
 ## Evidence
 
-Unit and race tests cover online WAL backup, integrity, schema and projection
-admission rejection, cancellation, destination no-overwrite behavior, restore
-continuity, checksum output, restart recovery, A2A continuation, and structured
-user completion.
+Unit and race tests cover fresh initialization, exact storage headers, atomic
+v1-to-v2 migration, unsupported and corrupt-layout rejection, Event Contract
+binding, online WAL backup, oldest-supported verify/backup/restore/migrate,
+schema and projection admission rejection, cancellation, destination
+no-overwrite behavior, restore continuity, checksum output, restart recovery,
+A2A continuation, and structured user completion.

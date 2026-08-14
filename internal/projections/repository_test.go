@@ -85,7 +85,7 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 	}
 	intent := core.Intent{
 		ID: "intent-request-1", OrganizationID: organization.ID, GoalID: goal.ID, OriginalInstruction: sourceText, NormalizedObjective: "echo hello", HardConstraints: []string{}, ConsequenceBoundaries: []string{},
-		SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: "message-1", AcceptedFingerprint: reviewed.Fingerprint, CreatedAt: now,
+		SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", ExternalRequestID: "request-1", SourceMessageID: "message-1", AcceptedFingerprint: reviewed.Fingerprint, CreatedAt: now,
 	}
 	work := core.Work{ID: "work-1", IntentID: intent.ID, GoalID: goal.ID, Objective: "echo hello", Status: core.WorkActive, CreatedAt: now}
 	task := core.Task{ID: "task-1", WorkID: work.ID, Description: "echo hello", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: rosterAgentConfig(agent), TaskContractVersion: "1", Status: core.TaskPending}
