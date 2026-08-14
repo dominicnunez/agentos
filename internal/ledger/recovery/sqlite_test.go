@@ -1953,4 +1953,3 @@ CREATE TABLE external_tasks(organization_id TEXT NOT NULL, task_id TEXT NOT NULL
 	}
 	return db
 }
-

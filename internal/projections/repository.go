@@ -997,4 +997,3 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		Tasks:             snapshot.Tasks,
 	})
 }
-

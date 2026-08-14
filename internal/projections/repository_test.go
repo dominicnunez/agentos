@@ -1153,4 +1153,3 @@ func rosterAgentConfig(agent core.Agent) *core.AgentConfig {
 		RuntimeAdapter: agent.RuntimeAdapter,
 	}
 }
-
