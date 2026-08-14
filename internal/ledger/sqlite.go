@@ -603,6 +603,9 @@ ORDER BY record_id`, kind)
 		finalErr = errors.Join(finalErr, rows.Close())
 	}()
 	for rows.Next() {
+		// This current-set scan and the single prior-Work check share decoding
+		// mechanics but enforce different completeness and lifecycle invariants.
+		// gallow-ignore-next-line duplicate-code
 		var body []byte
 		var candidate currentProjectionAdmission[T]
 		if err := rows.Scan(&body); err != nil || decodeExactJSONBytes(body, &candidate.record) != nil || decodeExactJSONBytes(candidate.record.Value, &candidate.value) != nil || candidate.record.ProjectionKind != kind || candidate.record.RecordID != string(identity(candidate.value)) {

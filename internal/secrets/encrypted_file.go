@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/dominicnunez/agentos/internal/fileguard"
 )
 
 const (
@@ -54,33 +56,7 @@ func SealFile(path, purpose string, key, plaintext []byte) error {
 			return fmt.Errorf("sealed credential directory must be private and must not traverse a link")
 		}
 	}
-	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refuse to replace sealed credential symlink")
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	temporary, err := os.CreateTemp(directory, ".agentos-seal-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer func() { _ = os.Remove(temporaryPath) }()
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(body); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporaryPath, path)
+	return fileguard.WriteAtomically(path, body, 0o600, 0o700)
 }
 
 func OpenSealedFile(path, purpose string, key []byte) ([]byte, error) {

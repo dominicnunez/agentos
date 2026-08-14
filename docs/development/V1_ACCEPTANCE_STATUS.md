@@ -67,7 +67,7 @@ persisted review decision after restart.
 | Setup caller is owner | `sudo` origin verification, direct-root support, exact UID socket checks, and fail-closed configuration validation |
 | Provider and budget required before ready | Typed Codex subscription and OpenAI API setup with non-billable discovery, exact expiring token/cost policy, and production rejection of the fake adapter |
 | Private user access | Mode-`0600` Unix socket plus kernel `SO_PEERCRED`; no local bearer registry or TCP listener |
-| Runtime and credential confinement | Exact ownership and modes, symlink-safe path validation, systemd private credential imports, and service umask `0077` fail closed before runtime state is opened |
+| Runtime and credential confinement | Exact ownership and modes, stable bounded same-file reads, shared symlink-checked atomic replacement with caller-owned privacy policy, systemd private credential imports, and service umask `0077` fail closed before runtime state is opened |
 | Durable storage upgrades | Agent OS application ID, exact versioned layouts, atomic ordered migrations, Event Contract binding, oldest-supported fixtures, and no inferred pre-release compatibility state |
 | Required user deliverables | Durable structured fields and content-addressed artifact evidence; plain-text self-report cannot complete the Task |
 | Terminal safety | Control and direction-format characters are stripped from untrusted console text |

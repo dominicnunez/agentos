@@ -761,6 +761,9 @@ func validateProjectionEventOrganizationBindings(snapshot Snapshot, stream []eve
 			organizationID = value.OrganizationID
 		case KindAgentBlueprint:
 			var value core.AgentBlueprint
+			// Adjacent switch cases produce a detector token window across
+			// unrelated projection types; each case must retain typed decoding.
+			// gallow-ignore-next-line duplicate-code
 			if decodeExactProjectionJSON(payload.Projection.Value, &value) != nil {
 				return fmt.Errorf("event %s contains an invalid Agent blueprint projection", event.EventID)
 			}

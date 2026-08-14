@@ -484,20 +484,7 @@ func readArtifactUpload(path string) ([]byte, error) {
 	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() || before.Size() <= 0 || before.Size() > artifacts.MaximumArtifactBytes {
 		return nil, fmt.Errorf("artifact must be a bounded regular file, not a link")
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = file.Close() }()
-	opened, err := file.Stat()
-	if err != nil || !os.SameFile(before, opened) {
-		return nil, fmt.Errorf("artifact changed while it was opened")
-	}
-	body, err := io.ReadAll(io.LimitReader(file, artifacts.MaximumArtifactBytes+1))
-	if err != nil || int64(len(body)) != before.Size() {
-		return nil, fmt.Errorf("artifact changed while it was read")
-	}
-	return body, nil
+	return readUnchangedBoundedFile(path, before, artifacts.MaximumArtifactBytes, "artifact")
 }
 
 func randomID(prefix string) (string, error) {

@@ -43,6 +43,10 @@ Target: `1.0.0-rc.1`
   admission.
 - Routine Work reconciliation ignores immutable terminal history; atomic
   completion admission and startup/recovery retain the full evidence audit.
+- Setup credentials and user artifacts share one bounded same-file read
+  primitive, while configuration and sealed-secret writes share a
+  symlink-checked same-directory replacement primitive without merging their
+  distinct ownership, privacy, or content policies.
 - Kernel-provided local peer identity, owner-only exact-effect controls, strict
   Agent registries, role isolation, rate and concurrency limits, remote TLS
   requirements, bounded decoding, and authority-shaped input rejection.

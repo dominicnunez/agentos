@@ -16,6 +16,7 @@ import (
 	"syscall"
 
 	"github.com/dominicnunez/agentos/internal/bootstrap"
+	"github.com/dominicnunez/agentos/internal/fileguard"
 	"github.com/dominicnunez/agentos/internal/gateway"
 	"github.com/dominicnunez/agentos/internal/secrets"
 )
@@ -24,31 +25,17 @@ func ensureInitPrivileges(ctx context.Context, mode bootstrap.Mode, ui *terminal
 	if mode != bootstrap.ModeSystem || effectiveUID() == 0 {
 		return false, nil
 	}
-	selected, err := ui.selectOne("Administrator access required:", []string{"Continue", "Exit"})
-	if err != nil {
-		return false, err
-	}
-	if selected == 1 {
-		return false, errSetupExited
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		return false, err
-	}
-	command := exec.CommandContext(ctx, "/usr/bin/sudo", "--", executable, "init", "--system")
-	command.Stdin = ui.input
-	command.Stdout = ui.output
-	command.Stderr = ui.output
-	if err := command.Run(); err != nil {
-		return false, fmt.Errorf("administrator setup failed: %w", err)
-	}
-	return true, nil
+	return runAdministratorSetup(ctx, ui, "administrator setup failed", "init", "--system")
 }
 
 func ensureProviderSetupPrivileges(ctx context.Context, config bootstrap.Config, ui *terminalUI) (bool, error) {
 	if config.Mode != bootstrap.ModeSystem || effectiveUID() == 0 {
 		return false, nil
 	}
+	return runAdministratorSetup(ctx, ui, "administrator provider setup failed", "setup", "provider")
+}
+
+func runAdministratorSetup(ctx context.Context, ui *terminalUI, failure string, arguments ...string) (bool, error) {
 	selected, err := ui.selectOne("Administrator access required:", []string{"Continue", "Exit"})
 	if err != nil {
 		return false, err
@@ -60,12 +47,13 @@ func ensureProviderSetupPrivileges(ctx context.Context, config bootstrap.Config,
 	if err != nil {
 		return false, err
 	}
-	command := exec.CommandContext(ctx, "/usr/bin/sudo", "--", executable, "setup", "provider")
+	commandArguments := append([]string{"--", executable}, arguments...)
+	command := exec.CommandContext(ctx, "/usr/bin/sudo", commandArguments...)
 	command.Stdin = ui.input
 	command.Stdout = ui.output
 	command.Stderr = ui.output
 	if err := command.Run(); err != nil {
-		return false, fmt.Errorf("administrator provider setup failed: %w", err)
+		return false, fmt.Errorf("%s: %w", failure, err)
 	}
 	return true, nil
 }
@@ -149,21 +137,7 @@ func readSetupCredential(path string, ownerUID int) ([]byte, error) {
 	if !ok || int(stat.Uid) != ownerUID {
 		return nil, fmt.Errorf("credential owner does not match the setup user")
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = file.Close() }()
-	opened, err := file.Stat()
-	if err != nil || !os.SameFile(before, opened) {
-		return nil, fmt.Errorf("credential changed while it was opened")
-	}
-	body, err := io.ReadAll(io.LimitReader(file, secrets.MaximumSealedBytes+1))
-	if err != nil || int64(len(body)) != before.Size() {
-		clearBytes(body)
-		return nil, fmt.Errorf("credential changed while it was read")
-	}
-	return body, nil
+	return readUnchangedBoundedFile(path, before, secrets.MaximumSealedBytes, "credential")
 }
 
 func storeEncryptedCredential(ctx context.Context, config bootstrap.Config, name string, secret []byte) error {
@@ -618,36 +592,7 @@ func installExecutable(destination string) error {
 }
 
 func writeRestrictedFile(path string, body []byte, mode os.FileMode) error {
-	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refuse to replace symlink %s", path)
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".agentos-config-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer func() { _ = os.Remove(temporaryPath) }()
-	if err := temporary.Chmod(mode); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(body); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporaryPath, path)
+	return fileguard.WriteAtomically(path, body, mode, 0o755)
 }
 
 func systemServiceUnit(config bootstrap.Config) (string, error) {
