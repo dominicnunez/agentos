@@ -240,7 +240,7 @@ func validateVersion1Config(config Config) error {
 			problems = append(problems, err)
 		}
 		if provider.Kind == ProviderCodexSubscription && !pathWithin(config.Paths.StateDir, provider.CodexCredential) {
-			problems = append(problems, fmt.Errorf("Codex credential store must remain inside the state directory"))
+			problems = append(problems, fmt.Errorf("codex credential store must remain inside the state directory"))
 		}
 	}
 	if err := validateA2A(config.A2A); err != nil {
