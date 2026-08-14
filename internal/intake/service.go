@@ -198,7 +198,10 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 			return View{}, fmt.Errorf("%w: continuation task does not match durable work", ErrConflict)
 		}
 	}
-	durableInputReplay := matchesDurableInput(stream, principal, message)
+	durableInputReplay, err := matchesDurableInput(stream, principal, message)
+	if err != nil {
+		return View{}, fmt.Errorf("%w: durable operator input is invalid", ErrUnavailable)
+	}
 	if err := ValidateIdentifier("message", message.MessageID); err != nil && !initialReplay && !durableInputReplay {
 		return View{}, err
 	}
@@ -1040,17 +1043,20 @@ func projectIntentView(conversationID string, stream []events.Event, draft core.
 	return View{TaskID: streamTaskID(stream), ConversationID: conversationID, State: state, Prompt: reply, UpdatedAt: stream[len(stream)-1].CreatedAt, Intent: &copy}
 }
 
-func matchesDurableInput(stream []events.Event, principal Principal, message Message) bool {
+func matchesDurableInput(stream []events.Event, principal Principal, message Message) (bool, error) {
 	for _, event := range stream {
 		if event.EventType != "A2A_INPUT_RECEIVED" && event.EventType != "HUMAN_INPUT_RECEIVED" {
 			continue
 		}
-		var input events.OperatorInputReceivedPayload
-		if json.Unmarshal(event.Payload, &input) == nil {
-			return input.MessageID == message.MessageID && input.Text == message.Text && input.SourcePrincipalID == principal.ID && input.SourcePrincipalKind == string(principal.Kind) && input.SourceChannel == principal.Channel
+		input, err := events.DecodeDurableOperatorInput(event)
+		if err != nil {
+			return false, err
+		}
+		if input.MessageID == message.MessageID {
+			return input.Text == message.Text && input.SourcePrincipalID == principal.ID && input.SourcePrincipalKind == string(principal.Kind) && input.SourceChannel == principal.Channel, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func blockedStatusText(stream []events.Event) string {

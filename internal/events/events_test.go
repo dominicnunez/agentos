@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -345,6 +346,136 @@ func TestReviewedCompletionRevalidatesExactEvidencePayloads(t *testing.T) {
 		if _, err := completionDecisionApproval(binding, task, decision, outcome, outcomeEvent, verification, forged); err == nil {
 			t.Fatal("substituted reviewed evidence payload authorized completion")
 		}
+	}
+}
+
+func TestResolveVerifiedTaskResultBindsEverySupportedExecutionKind(t *testing.T) {
+	for _, kind := range []core.ExecutionKind{core.ExecutionDeterministic, core.ExecutionAgent, core.ExecutionHuman} {
+		t.Run(string(kind), func(t *testing.T) {
+			now := time.Unix(10, 0).UTC()
+			task := core.Task{ID: "task-1", WorkID: "work-1", Description: "produce exact dependency evidence", ExecutionKind: kind, Status: core.TaskCompleted}
+			actorID := "runtime"
+			executionID := "execution-task-1-v1"
+			if kind == core.ExecutionAgent {
+				task.AssigneeID = "agent-1"
+				actorID = string(task.AssigneeID)
+			}
+			if kind == core.ExecutionHuman {
+				executionID = "external-input-input-1"
+			}
+			outcome := core.ToolOutcome{
+				ToolInvocationID: "invocation-1", ToolID: "bounded/test", Status: core.OutcomeSucceeded,
+				ObservedEffect: "verified dependency result", PostconditionStatus: core.PostconditionVerified,
+				Retryability: core.NotRetryable, ArtifactRefs: []string{"artifact-1"}, StartedAt: now, FinishedAt: now.Add(time.Second),
+			}
+			summary, err := core.ToolOutcomeSummary(outcome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			contract := core.CompletionContract{TaskID: task.ID, TaskVersion: 1}
+			decision := CompletionDecisionPayload{Contract: contract, Result: core.CompletionResult{Complete: true}, OutcomeEventRef: "outcome-1"}
+			makeEvent := func(id, eventType, sourceActor, sourceExecution string, sequence int64, payload any, artifactRefs []string) Event {
+				t.Helper()
+				body, marshalErr := json.Marshal(payload)
+				if marshalErr != nil {
+					t.Fatal(marshalErr)
+				}
+				return Event{
+					EventID: id, Sequence: sequence, OrganizationID: "org-1", EventType: eventType,
+					SourceActorID: sourceActor, SourceExecutionID: sourceExecution, TaskID: string(task.ID),
+					ArtifactRefs: append([]string(nil), artifactRefs...), Payload: body, CorrelationID: "work-1",
+					CreatedAt: now.Add(time.Duration(sequence) * time.Second), SchemaVersion: SchemaVersion,
+				}
+			}
+			outcomeEvent := makeEvent("outcome-1", "TOOL_OUTCOME_RECORDED", "runtime", executionID, 10, outcome, outcome.ArtifactRefs)
+			resultPayload := ResultPublishedPayload{Summary: summary, ArtifactRefs: outcome.ArtifactRefs}
+			resultEvent := makeEvent("result-1", "RESULT_PUBLISHED", actorID, executionID, 20, resultPayload, outcome.ArtifactRefs)
+			candidateEvent := makeEvent("candidate-1", "CANDIDATE_COMPLETE", actorID, executionID, 30, CandidateCompletePayload{
+				ToolInvocationID: string(outcome.ToolInvocationID), ResultEventID: resultEvent.EventID, ArtifactRefs: outcome.ArtifactRefs,
+			}, outcome.ArtifactRefs)
+			verification := makeEvent("verification-1", "COMPLETION_VERIFIED", "runtime", executionID, 40, decision, outcome.ArtifactRefs)
+			completed := makeEvent("completion-1", "TASK_VERIFIED_COMPLETE", "runtime", "", 50, nil, nil)
+			value, err := json.Marshal(task)
+			if err != nil {
+				t.Fatal(err)
+			}
+			detail, err := json.Marshal(decision)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sealed, err := SealProjectionEvent(completed, ProjectionRecord{
+				ProjectionKind: "task", RecordID: string(task.ID), Version: 2, CorrelationID: "work-1", Value: value,
+			}, detail)
+			if err != nil {
+				t.Fatal(err)
+			}
+			completed.Payload, err = json.Marshal(sealed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stream := []Event{outcomeEvent, resultEvent, candidateEvent, verification, completed}
+			selected, result, err := ResolveVerifiedTaskResult("org-1", "work-1", task, 2, stream, 60)
+			if err != nil || selected.EventID != resultEvent.EventID || !reflect.DeepEqual(result, resultPayload) {
+				t.Fatalf("exact verified result was not resolved: event=%+v result=%+v err=%v", selected, result, err)
+			}
+
+			for name, mutate := range map[string]func(*Event){
+				"cross actor":       func(event *Event) { event.SourceActorID = "other-actor" },
+				"cross execution":   func(event *Event) { event.SourceExecutionID = "other-execution" },
+				"authority bearing": func(event *Event) { event.AuthorizationRefs = []string{"approval-1"} },
+				"substituted payload": func(event *Event) {
+					event.Payload, _ = json.Marshal(ResultPublishedPayload{Summary: "substituted", ArtifactRefs: outcome.ArtifactRefs})
+				},
+			} {
+				t.Run(name, func(t *testing.T) {
+					forged := append([]Event(nil), stream...)
+					mutate(&forged[1])
+					if _, _, err := ResolveVerifiedTaskResult("org-1", "work-1", task, 2, forged, 60); err == nil {
+						t.Fatal("substituted dependency result was accepted")
+					}
+				})
+			}
+			later := makeEvent("result-later", "RESULT_PUBLISHED", actorID, "other-execution", 60, ResultPublishedPayload{Summary: "later unverified result"}, nil)
+			selected, _, err = ResolveVerifiedTaskResult("org-1", "work-1", task, 2, append(stream, later), 70)
+			if err != nil || selected.EventID != resultEvent.EventID {
+				t.Fatalf("later publication replaced the verified dependency result: event=%+v err=%v", selected, err)
+			}
+		})
+	}
+}
+
+func TestDecodeDurableOperatorInputRequiresCanonicalContract(t *testing.T) {
+	now := time.Unix(10, 0).UTC()
+	payload := OperatorInputReceivedPayload{
+		MessageID: "message-1", Text: "bounded user input", SourcePrincipalID: "external-agent",
+		SourcePrincipalKind: string(core.PrincipalExternalAgent), SourceChannel: "A2A",
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := Event{
+		EventID: "input-1", Sequence: 1, OrganizationID: "org-1", EventType: "A2A_INPUT_RECEIVED",
+		SourceActorID: payload.SourcePrincipalID, TaskID: "task-1", CorrelationID: "work-1",
+		Payload: body, CreatedAt: now, SchemaVersion: SchemaVersion,
+	}
+	decoded, err := DecodeDurableOperatorInput(event)
+	if err != nil || !reflect.DeepEqual(decoded, payload) {
+		t.Fatalf("canonical operator input was rejected: payload=%+v err=%v", decoded, err)
+	}
+
+	for name, invalidBody := range map[string][]byte{
+		"legacy only":           []byte(`{"text":"bounded user input","source_external_actor":"external-agent"}`),
+		"legacy extension":      []byte(`{"message_id":"message-1","text":"bounded user input","source_principal_id":"external-agent","source_principal_kind":"EXTERNAL_AGENT","source_channel":"A2A","source_external_actor":"external-agent"}`),
+		"duplicate declaration": []byte(`{"message_id":"message-1","message_id":"message-2","text":"bounded user input","source_principal_id":"external-agent","source_principal_kind":"EXTERNAL_AGENT","source_channel":"A2A"}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := event
+			candidate.Payload = invalidBody
+			if _, err := DecodeDurableOperatorInput(candidate); err == nil {
+				t.Fatal("non-canonical operator input was accepted")
+			}
+		})
 	}
 }
 

@@ -928,6 +928,32 @@ func submitAndConfirm(t *testing.T, ctx context.Context, service *Service, princ
 	return service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: message.ConversationID, MessageID: "confirm-" + message.MessageID, Fingerprint: draft.Intent.Fingerprint})
 }
 
+func TestDurableInputReplayRejectsNonCanonicalContract(t *testing.T) {
+	principal := testPrincipal("external-agent", core.PrincipalExternalAgent, ChannelA2A)
+	message := Message{MessageID: "message-1", Text: "bounded continuation"}
+	payload := events.OperatorInputReceivedPayload{
+		MessageID: message.MessageID, Text: message.Text, SourcePrincipalID: principal.ID,
+		SourcePrincipalKind: string(principal.Kind), SourceChannel: principal.Channel,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := events.Event{
+		EventID: "input-1", Sequence: 1, OrganizationID: principal.OrganizationID, EventType: "A2A_INPUT_RECEIVED",
+		SourceActorID: principal.ID, TaskID: "task-1", CorrelationID: "work-1", Payload: body,
+		CreatedAt: time.Unix(1, 0).UTC(), SchemaVersion: events.SchemaVersion,
+	}
+	matched, err := matchesDurableInput([]events.Event{event}, principal, message)
+	if err != nil || !matched {
+		t.Fatalf("canonical replay was rejected: matched=%t err=%v", matched, err)
+	}
+	event.Payload = []byte(`{"message_id":"message-1","text":"bounded continuation","source_principal_id":"external-agent","source_principal_kind":"EXTERNAL_AGENT","source_channel":"A2A","source_external_actor":"external-agent"}`)
+	if matched, err := matchesDurableInput([]events.Event{event}, principal, message); err == nil || matched {
+		t.Fatalf("non-canonical replay was accepted: matched=%t err=%v", matched, err)
+	}
+}
+
 func projectedWork(t *testing.T, store *ledger.SQLite, correlationID string) (core.Intent, core.Task, []events.Event) {
 	t.Helper()
 	stream := externalStream(t, store, correlationID)
