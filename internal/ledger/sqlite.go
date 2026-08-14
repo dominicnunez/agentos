@@ -1236,7 +1236,10 @@ func validatePriorAgentExecutionTask(ctx context.Context, tx *sql.Tx, draft even
 }
 
 type dispatchRosterRevision[T any] struct {
-	record   events.ProjectionRecord
+	record events.ProjectionRecord
+	// Generic instantiations are read by dispatch admission, but Gallow cannot
+	// currently connect those reads to this generic declaration.
+	// gallow-ignore-next-line unused-field
 	value    T
 	eventRef string
 }
