@@ -1243,7 +1243,7 @@ type dispatchRosterRevision[T any] struct {
 
 func bindAgentDispatch(ctx context.Context, tx *sql.Tx, draft events.ProjectionDraft, task core.Task) (events.AgentDispatchBinding, error) {
 	if task.AgentConfig == nil {
-		return events.AgentDispatchBinding{}, fmt.Errorf("Agent dispatch requires an exact pinned Task configuration")
+		return events.AgentDispatchBinding{}, fmt.Errorf("agent dispatch requires an exact pinned Task configuration")
 	}
 	agent, err := latestDispatchRosterRevision[core.Agent](ctx, tx, "agent", task.AssigneeID)
 	if err != nil {
@@ -1260,7 +1260,7 @@ func bindAgentDispatch(ctx context.Context, tx *sql.Tx, draft events.ProjectionD
 	}
 	if !core.ValidAgent(agent.value) || agent.value.ID != task.AssigneeID || agent.value.OrganizationID != core.ID(draft.Event.OrganizationID) || agent.value.Status != "ACTIVE" || blueprint.value.Status != "ACTIVE" || profile.value.Status != "ACTIVE" ||
 		blueprint.value.ID != config.BlueprintID || blueprint.value.OrganizationID != agent.value.OrganizationID || blueprint.value.Version != config.BlueprintVersion || profile.value.ID != config.ProfileID || profile.value.OrganizationID != agent.value.OrganizationID || profile.value.Version != config.ProfileVersion {
-		return events.AgentDispatchBinding{}, fmt.Errorf("Agent dispatch requires its active exact assigned roster configuration")
+		return events.AgentDispatchBinding{}, fmt.Errorf("agent dispatch requires its active exact assigned roster configuration")
 	}
 	return events.AgentDispatchBinding{
 		DispatchID:                    core.ID(fmt.Sprintf("execution-%s-v%d", task.ID, draft.Version)),

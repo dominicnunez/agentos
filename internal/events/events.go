@@ -1496,10 +1496,10 @@ func executionStartDetail(event Event) (ExecutionStartDetail, error) {
 	var detail ExecutionStartDetail
 	var fields map[string]json.RawMessage
 	if event.EventType != "EXECUTION_STARTED" || json.Unmarshal(event.Payload, &payload) != nil || decodeExactEventJSON(payload.Detail, &detail) != nil || json.Unmarshal(payload.Detail, &fields) != nil || len(fields) < 2 || len(fields) > 3 || fields["inbox_cutoff_sequence"] == nil || fields["dispatch_binding"] == nil || detail.DispatchBinding == nil || detail.InboxCutoffSequence < 0 || detail.InboxCutoffSequence >= event.Sequence || detail.Mode != "" && detail.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
-		return ExecutionStartDetail{}, fmt.Errorf("Agent execution-start detail is invalid")
+		return ExecutionStartDetail{}, fmt.Errorf("agent execution-start detail is invalid")
 	}
 	if len(fields) == 3 && fields["mode"] == nil {
-		return ExecutionStartDetail{}, fmt.Errorf("Agent execution-start detail contains an unknown field")
+		return ExecutionStartDetail{}, fmt.Errorf("agent execution-start detail contains an unknown field")
 	}
 	return detail, nil
 }
@@ -1515,7 +1515,7 @@ func ValidateAgentDispatchStart(start Event, task core.Task, taskVersion int, st
 	}
 	binding := detail.DispatchBinding
 	if start.OrganizationID == "" || start.SourceActorID != "runtime" || start.SourceExecutionID != "" || start.RecipientScope != "" || start.RecipientID != "" || start.TaskID != string(task.ID) || start.CorrelationID == "" || taskVersion < 2 || task.ExecutionKind != core.ExecutionAgent || task.Status != core.TaskRunning || task.AssigneeType != "AGENT" || task.AssigneeID == "" || task.AgentConfig == nil {
-		return fmt.Errorf("Agent dispatch start crosses its runtime-owned Task boundary")
+		return fmt.Errorf("agent dispatch start crosses its runtime-owned Task boundary")
 	}
 	agentRecord, agent, err := dispatchAgentRevision(start, binding.AgentEventRef, binding.AgentID, binding.AgentRecordVersion, stream)
 	if err != nil {
@@ -1532,7 +1532,7 @@ func ValidateAgentDispatchStart(start Event, task core.Task, taskVersion int, st
 	config := task.AgentConfig
 	if !core.ValidAgent(agent) || agent.Status != "ACTIVE" || blueprint.Status != "ACTIVE" || profile.Status != "ACTIVE" || agent.ID != task.AssigneeID || agent.OrganizationID != core.ID(start.OrganizationID) ||
 		blueprint.ID != config.BlueprintID || blueprint.OrganizationID != agent.OrganizationID || blueprint.Version != config.BlueprintVersion || profile.ID != config.ProfileID || profile.OrganizationID != agent.OrganizationID || profile.Version != config.ProfileVersion {
-		return fmt.Errorf("Agent dispatch binding does not match an active exact Task assignment")
+		return fmt.Errorf("agent dispatch binding does not match an active exact Task assignment")
 	}
 	expected := AgentDispatchBinding{
 		DispatchID:                    core.ID(fmt.Sprintf("execution-%s-v%d", task.ID, taskVersion)),
@@ -1553,7 +1553,7 @@ func ValidateAgentDispatchStart(start Event, task core.Task, taskVersion int, st
 		RuntimeAdapter:                config.RuntimeAdapter,
 	}
 	if !reflect.DeepEqual(*binding, expected) {
-		return fmt.Errorf("Agent dispatch binding does not match its admitted roster revisions")
+		return fmt.Errorf("agent dispatch binding does not match its admitted roster revisions")
 	}
 	return nil
 }
@@ -1565,7 +1565,7 @@ func dispatchAgentRevision(start Event, eventRef string, id core.ID, version int
 	}
 	var value core.Agent
 	if decodeExactEventJSON(record.Value, &value) != nil || value.ID != id {
-		return ProjectionRecord{}, core.Agent{}, fmt.Errorf("Agent dispatch references an invalid Agent revision")
+		return ProjectionRecord{}, core.Agent{}, fmt.Errorf("agent dispatch references an invalid Agent revision")
 	}
 	return record, value, nil
 }
@@ -1577,7 +1577,7 @@ func dispatchBlueprintRevision(start Event, eventRef string, id core.ID, version
 	}
 	var value core.AgentBlueprint
 	if decodeExactEventJSON(record.Value, &value) != nil || value.ID != id {
-		return ProjectionRecord{}, core.AgentBlueprint{}, fmt.Errorf("Agent dispatch references an invalid blueprint revision")
+		return ProjectionRecord{}, core.AgentBlueprint{}, fmt.Errorf("agent dispatch references an invalid blueprint revision")
 	}
 	return record, value, nil
 }
@@ -1589,14 +1589,14 @@ func dispatchProfileRevision(start Event, eventRef string, id core.ID, version i
 	}
 	var value core.ExecutionProfile
 	if decodeExactEventJSON(record.Value, &value) != nil || value.ID != id {
-		return ProjectionRecord{}, core.ExecutionProfile{}, fmt.Errorf("Agent dispatch references an invalid execution-profile revision")
+		return ProjectionRecord{}, core.ExecutionProfile{}, fmt.Errorf("agent dispatch references an invalid execution-profile revision")
 	}
 	return record, value, nil
 }
 
 func dispatchProjectionRevision(start Event, eventRef, kind string, id core.ID, version int, stream []Event) (ProjectionRecord, error) {
 	if eventRef == "" || id == "" || version < 1 {
-		return ProjectionRecord{}, fmt.Errorf("Agent dispatch roster reference is incomplete")
+		return ProjectionRecord{}, fmt.Errorf("agent dispatch roster reference is incomplete")
 	}
 	var found Event
 	for _, candidate := range stream {
@@ -1604,16 +1604,16 @@ func dispatchProjectionRevision(start Event, eventRef, kind string, id core.ID, 
 			continue
 		}
 		if found.EventID != "" {
-			return ProjectionRecord{}, fmt.Errorf("Agent dispatch roster reference is duplicated")
+			return ProjectionRecord{}, fmt.Errorf("agent dispatch roster reference is duplicated")
 		}
 		found = candidate
 	}
 	if found.EventID == "" || found.Sequence >= start.Sequence || found.OrganizationID != start.OrganizationID {
-		return ProjectionRecord{}, fmt.Errorf("Agent dispatch roster reference is outside its admission boundary")
+		return ProjectionRecord{}, fmt.Errorf("agent dispatch roster reference is outside its admission boundary")
 	}
 	payload, present, err := AdmittedProjection(found)
 	if err != nil || !present || ValidateProjectionEventBoundary(found, payload) != nil || payload.Projection.ProjectionKind != kind || payload.Projection.RecordID != string(id) || payload.Projection.Version != version {
-		return ProjectionRecord{}, fmt.Errorf("Agent dispatch roster reference lacks exact projection admission")
+		return ProjectionRecord{}, fmt.Errorf("agent dispatch roster reference lacks exact projection admission")
 	}
 	for _, candidate := range stream {
 		if candidate.Sequence <= found.Sequence || candidate.Sequence >= start.Sequence {
@@ -1621,10 +1621,10 @@ func dispatchProjectionRevision(start Event, eventRef, kind string, id core.ID, 
 		}
 		candidatePayload, candidatePresent, candidateErr := AdmittedProjection(candidate)
 		if candidateErr != nil {
-			return ProjectionRecord{}, fmt.Errorf("Agent dispatch roster history is invalid")
+			return ProjectionRecord{}, fmt.Errorf("agent dispatch roster history is invalid")
 		}
 		if candidatePresent && candidatePayload.Projection.ProjectionKind == kind && candidatePayload.Projection.RecordID == string(id) {
-			return ProjectionRecord{}, fmt.Errorf("Agent dispatch references a superseded roster revision")
+			return ProjectionRecord{}, fmt.Errorf("agent dispatch references a superseded roster revision")
 		}
 	}
 	return payload.Projection, nil
