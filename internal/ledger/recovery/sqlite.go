@@ -140,6 +140,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	}
 	defer func() { _ = eventRows.Close() }()
 	admitted := map[string]admittedProjectionEvent{}
+	stream := make([]events.Event, 0)
 	eventIDs := map[string]struct{}{}
 	sequences := map[int64]struct{}{}
 	for eventRows.Next() {
@@ -184,6 +185,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("event %s has an invalid timestamp", event.EventID)
 		}
 		event.CreatedAt = parsed
+		stream = append(stream, event)
 		payload, present, err := events.AdmittedProjection(event)
 		if err != nil {
 			_ = eventRows.Close()
@@ -307,10 +309,10 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("projection admission event %s has no materialized record", eventID)
 		}
 	}
-	return validateProjectionOrganizationBindings(orderedAdmissions)
+	return validateProjectionOrganizationBindings(orderedAdmissions, stream)
 }
 
-func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) error {
+func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, stream []events.Event) error {
 	sort.Slice(admitted, func(left, right int) bool {
 		return admitted[left].event.Sequence < admitted[right].event.Sequence
 	})
@@ -326,8 +328,6 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 		Works:             map[core.ID]core.DurableState[core.Work]{},
 		Tasks:             map[core.ID]core.DurableState[core.Task]{},
 	}
-	directOrganizations := map[string]core.ID{}
-
 	for _, admission := range admitted {
 		event, record := admission.event, admission.payload.Projection
 		var organizationID core.ID
@@ -347,6 +347,9 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 				return fmt.Errorf("event %s contains an invalid Mission projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
+			if err := validateRecoveryOrganizationParent(value.OrganizationID, snapshot); err != nil {
+				return fmt.Errorf("event %s Mission projection: %w", event.EventID, err)
+			}
 			if err := setRecoveryProjection(snapshot.Missions, record, value, false, core.ValidMissionRevision); err != nil {
 				return fmt.Errorf("event %s contains invalid Mission history: %w", event.EventID, err)
 			}
@@ -356,6 +359,9 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 				return fmt.Errorf("event %s contains an invalid Goal projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
+			if err := validateRecoveryOrganizationParent(value.OrganizationID, snapshot); err != nil {
+				return fmt.Errorf("event %s Goal projection: %w", event.EventID, err)
+			}
 			mission, found := snapshot.Missions[value.MissionID]
 			if !found || mission.Value.ID != value.MissionID || mission.Value.OrganizationID != value.OrganizationID {
 				return fmt.Errorf("event %s Goal projection requires its durable same-organization Mission", event.EventID)
@@ -381,6 +387,9 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 				return fmt.Errorf("event %s contains an invalid Agent blueprint projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
+			if err := validateRecoveryOrganizationParent(value.OrganizationID, snapshot); err != nil {
+				return fmt.Errorf("event %s Agent blueprint projection: %w", event.EventID, err)
+			}
 			if err := setRecoveryProjection(snapshot.AgentBlueprints, record, value, false, core.ValidAgentBlueprintRevision); err != nil {
 				return fmt.Errorf("event %s contains invalid Agent blueprint history: %w", event.EventID, err)
 			}
@@ -390,6 +399,9 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 				return fmt.Errorf("event %s contains an invalid execution profile projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
+			if err := validateRecoveryOrganizationParent(value.OrganizationID, snapshot); err != nil {
+				return fmt.Errorf("event %s execution profile projection: %w", event.EventID, err)
+			}
 			if err := setRecoveryProjection(snapshot.ExecutionProfiles, record, value, false, core.ValidExecutionProfileRevision); err != nil {
 				return fmt.Errorf("event %s contains invalid execution profile history: %w", event.EventID, err)
 			}
@@ -399,6 +411,14 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 				return fmt.Errorf("event %s contains an invalid Agent projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
+			if err := validateRecoveryOrganizationParent(value.OrganizationID, snapshot); err != nil {
+				return fmt.Errorf("event %s Agent projection: %w", event.EventID, err)
+			}
+			blueprint, blueprintFound := snapshot.AgentBlueprints[value.BlueprintID]
+			profile, profileFound := snapshot.ExecutionProfiles[value.ExecutionProfileID]
+			if !blueprintFound || !profileFound || !core.ValidAgentConfigurationBinding(value, blueprint.Value, profile.Value) {
+				return fmt.Errorf("event %s Agent projection references invalid pinned configuration at admission", event.EventID)
+			}
 			if err := setRecoveryProjection(snapshot.Agents, record, value, false, core.ValidAgentRevision); err != nil {
 				return fmt.Errorf("event %s contains invalid Agent history: %w", event.EventID, err)
 			}
@@ -408,6 +428,9 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 				return fmt.Errorf("event %s contains an invalid Intent projection", event.EventID)
 			}
 			organizationID = value.OrganizationID
+			if err := validateRecoveryOrganizationParent(value.OrganizationID, snapshot); err != nil {
+				return fmt.Errorf("event %s Intent projection: %w", event.EventID, err)
+			}
 			if err := setRecoveryProjection(snapshot.Intents, record, value, true, nil); err != nil {
 				return fmt.Errorf("event %s contains invalid Intent history: %w", event.EventID, err)
 			}
@@ -416,7 +439,7 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Work projection", event.EventID)
 			}
-			if err := validateRecoveryWorkIntentBinding(event, record, value, snapshot); err != nil {
+			if err := validateRecoveryWorkIntentBinding(event, record, value, snapshot, stream); err != nil {
 				return fmt.Errorf("event %s contains an invalid Work binding: %w", event.EventID, err)
 			}
 			if err := setRecoveryProjection(snapshot.Works, record, value, true, core.ValidWorkRevision); err != nil {
@@ -431,6 +454,11 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 			if err := validateRecoveryTaskWorkBinding(event, record, value, snapshot); err != nil {
 				return fmt.Errorf("event %s contains an invalid Task binding: %w", event.EventID, err)
 			}
+			work := snapshot.Works[value.WorkID].Value
+			intent := snapshot.Intents[work.IntentID].Value
+			if err := core.ValidateTaskAssignment(value, intent.OrganizationID, snapshot); err != nil {
+				return fmt.Errorf("event %s contains an invalid Task assignment: %w", event.EventID, err)
+			}
 			if err := setRecoveryProjection(snapshot.Tasks, record, value, true, core.ValidTaskRevision); err != nil {
 				return fmt.Errorf("event %s contains invalid Task history: %w", event.EventID, err)
 			}
@@ -440,13 +468,6 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent) 
 		}
 		if organizationID == "" || string(organizationID) != event.OrganizationID {
 			return fmt.Errorf("event %s projection crosses its organization boundary", event.EventID)
-		}
-		directOrganizations[event.EventID] = organizationID
-	}
-
-	for eventID, organizationID := range directOrganizations {
-		if _, found := snapshot.Organizations[organizationID]; !found {
-			return fmt.Errorf("event %s projection references a missing Organization", eventID)
 		}
 	}
 	if err := core.ValidateDurableGraph(snapshot); err != nil {
@@ -517,7 +538,15 @@ func validateRecoveryTeamRoster(team core.Team, snapshot core.DurableGraph) erro
 	return nil
 }
 
-func validateRecoveryWorkIntentBinding(event events.Event, record events.ProjectionRecord, work core.Work, snapshot core.DurableGraph) error {
+func validateRecoveryOrganizationParent(organizationID core.ID, snapshot core.DurableGraph) error {
+	organization, found := snapshot.Organizations[organizationID]
+	if !found || organization.Value.ID != organizationID {
+		return fmt.Errorf("requires its durable parent Organization")
+	}
+	return nil
+}
+
+func validateRecoveryWorkIntentBinding(event events.Event, record events.ProjectionRecord, work core.Work, snapshot core.DurableGraph, stream []events.Event) error {
 	intentState, found := snapshot.Intents[work.IntentID]
 	if !found {
 		return fmt.Errorf("work requires its durable Intent")
@@ -525,6 +554,20 @@ func validateRecoveryWorkIntentBinding(event events.Event, record events.Project
 	intent := intentState.Value
 	if intentState.CorrelationID != record.CorrelationID || intent.ID != work.IntentID || intent.GoalID != work.GoalID || intent.NormalizedObjective != work.Objective || string(intent.OrganizationID) != event.OrganizationID {
 		return fmt.Errorf("work does not match its accepted Intent boundary")
+	}
+	if intent.GoalID != "" {
+		var confirmations []events.Event
+		for _, candidate := range stream {
+			if candidate.EventType == "INTENT_CONFIRMED" && candidate.CorrelationID == record.CorrelationID {
+				confirmations = append(confirmations, candidate)
+			}
+		}
+		if len(confirmations) != 1 || confirmations[0].Sequence >= event.Sequence {
+			return fmt.Errorf("goal-bound Work requires one prior intent confirmation")
+		}
+		if err := events.ValidateGoalBoundIntentConfirmation(confirmations[0], intent); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -1791,14 +1791,10 @@ func validateGoalBoundIntentConfirmation(ctx context.Context, tx *sql.Tx, item p
 	if len(stream) != 1 {
 		return fmt.Errorf("goal-bound work requires one atomic intent confirmation")
 	}
-	event := stream[0]
-	var confirmation events.IntentConfirmedPayload
-	if err := decodeExactJSON(event.Payload, &confirmation); err != nil ||
-		event.OrganizationID != item.draft.Event.OrganizationID || event.SourceActorID == "" || event.SourceActorID != confirmation.ConfirmingActorID || event.SourceExecutionID != "" || event.TaskID != "task-"+item.draft.Event.CorrelationID || event.CorrelationID != item.draft.Event.CorrelationID ||
-		confirmation.IntentID != string(intent.ID) || confirmation.GoalID != string(intent.GoalID) || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.Fingerprint != intent.AcceptedFingerprint || confirmation.ConfirmingActorID != string(intent.SourcePrincipalID) || confirmation.ConfirmingActorKind != string(intent.SourcePrincipalKind) || confirmation.SourceChannel != intent.SourceChannel || confirmation.MessageID == "" {
-		return fmt.Errorf("goal-bound work intent confirmation is invalid")
+	if stream[0].CorrelationID != item.draft.Event.CorrelationID {
+		return fmt.Errorf("goal-bound work intent confirmation crosses its correlation boundary")
 	}
-	return nil
+	return events.ValidateGoalBoundIntentConfirmation(stream[0], intent)
 }
 
 func validatePriorActiveWork(ctx context.Context, tx *sql.Tx, item preparedProjection) error {

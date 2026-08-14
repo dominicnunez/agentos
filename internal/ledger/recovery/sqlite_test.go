@@ -317,6 +317,41 @@ func TestRecoveryRejectsMissingProjectionOrganization(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsChildBeforeOrganizationAdmission(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	mission := core.Mission{ID: "mission-1", OrganizationID: organization.ID, Statement: "Mission", Status: core.MissionActive, CreatedAt: now}
+	organizationEvent, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"},
+		ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	missionEvent, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "mission-1"},
+		ProjectionKind: "mission", RecordID: string(mission.ID), Version: 1, Value: mission,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	swapRecoveryProjectionSequences(t, ctx, path, organizationEvent, missionEvent)
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "durable parent Organization") {
+		t.Fatalf("child-before-Organization recovery error=%v", err)
+	}
+}
+
 func TestRecoveryRejectsMissingGoalMission(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.db")
@@ -522,6 +557,94 @@ func TestRecoveryRejectsWorkBeforeIntentAdmission(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsGoalBoundWorkWithoutConfirmation(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	mission := core.Mission{ID: "mission-1", OrganizationID: organization.ID, Statement: "Mission", Status: core.MissionActive, CreatedAt: now}
+	criterion := core.IntentValue{Value: "verified", Origin: "USER"}
+	goal := core.Goal{ID: "goal-1", OrganizationID: organization.ID, MissionID: mission.ID, Objective: "Outcome", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{criterion}, Status: core.GoalActive, CreatedAt: now}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "mission-1"}, ProjectionKind: "mission", RecordID: string(mission.ID), Version: 1, Value: mission},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_CREATED", SourceActorID: "runtime", CorrelationID: "goal-1"}, ProjectionKind: "goal", RecordID: string(goal.ID), Version: 1, Value: goal},
+	} {
+		if _, err := store.AppendProjection(ctx, draft); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	const correlationID = "run-1"
+	const taskID = "task-run-1"
+	const messageID = "message-1"
+	intentDraft := core.IntentDraft{
+		ID: "intent-run-1", OrganizationID: organization.ID, Version: 1, Status: core.IntentStatusReadyForReview,
+		RequestedExecutionKind: core.ExecutionDeterministic,
+		Goal:                   &core.IntentValue{Value: string(goal.ID), Origin: "EXPLICIT", SourceMessageID: messageID},
+		Objective:              "bounded work",
+		Context:                []core.IntentValue{}, Deliverables: []core.IntentValue{{Value: "result", Origin: "USER"}}, CompletionCriteria: []core.IntentValue{criterion},
+		Constraints: []core.IntentValue{}, ResolvedDecisions: []core.IntentDecision{}, ConsequenceCandidates: []string{}, MissingUserInputs: []core.IntentValue{}, CreatedAt: now,
+	}
+	intentDraft.Fingerprint, err = core.FingerprintIntentDraft(intentDraft)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTAKE_MESSAGE_RECORDED", SourceActorID: "user-1", TaskID: taskID, CorrelationID: correlationID,
+		Payload: events.IntakeMessageRecordedPayload{MessageID: messageID, Text: "perform bounded work for goal-1", SourcePrincipalID: "user-1", SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", RequestedExecutionKind: core.ExecutionDeterministic},
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_DRAFTED", SourceActorID: "runtime", TaskID: taskID, CorrelationID: correlationID,
+		Payload: events.IntentDraftedPayload{SourceMessageID: messageID, Draft: intentDraft, Reply: "Review the proposed intent."},
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	confirmation := events.IntentConfirmedPayload{IntentID: string(intentDraft.ID), GoalID: string(goal.ID), Version: 1, Fingerprint: intentDraft.Fingerprint, ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1"}
+	confirmationEvent, err := store.AppendIntentConfirmation(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: taskID, CorrelationID: correlationID, Payload: confirmation}, goal.ID)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	intent := core.Intent{ID: intentDraft.ID, OrganizationID: organization.ID, GoalID: goal.ID, NormalizedObjective: intentDraft.Objective, AcceptedFingerprint: intentDraft.Fingerprint, SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: messageID, CompletionCriteria: intentDraft.CompletionCriteria, CreatedAt: now}
+	work := core.Work{ID: "work-1", IntentID: intent.ID, GoalID: goal.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: correlationID}, ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: correlationID}, ProjectionKind: "work", RecordID: string(work.ID), Version: 1, Value: work},
+	} {
+		if _, err := store.AppendProjection(ctx, draft); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM events WHERE event_id=?`, confirmationEvent.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "one prior intent confirmation") {
+		t.Fatalf("Goal-bound Work without confirmation recovery error=%v", err)
+	}
+}
+
 func TestRecoveryRejectsTaskBeforeWorkAdmission(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.db")
@@ -565,6 +688,53 @@ func TestRecoveryRejectsTaskBeforeWorkAdmission(t *testing.T) {
 	swapRecoveryProjectionSequences(t, ctx, path, workEvent, taskEvent)
 	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "task requires its exact active Work") {
 		t.Fatalf("Task-before-Work recovery error=%v", err)
+	}
+}
+
+func TestRecoveryRejectsTaskBeforeAssigneeAdmission(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	blueprint := core.AgentBlueprint{ID: "blueprint-1", OrganizationID: organization.ID, Version: "v1", Role: "worker", OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE", CreatedAt: now}
+	profile := core.ExecutionProfile{ID: "profile-1", OrganizationID: organization.ID, Version: "v1", ModelProvider: "provider", Model: "model", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE", CreatedAt: now}
+	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "local", Status: "ACTIVE"}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, NormalizedObjective: "objective", CreatedAt: now}
+	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	config := core.AgentConfig{BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ProfileID: profile.ID, ProfileVersion: profile.Version, RuntimeAdapter: agent.RuntimeAdapter}
+	task := core.Task{ID: "task-1", WorkID: work.ID, Description: "task", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: &config, TaskContractVersion: "1", Status: core.TaskPending}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"}, ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"}, ProjectionKind: "work", RecordID: string(work.ID), Version: 1, Value: work},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_BLUEPRINT_CREATED", SourceActorID: "runtime", CorrelationID: "roster"}, ProjectionKind: "agent_blueprint", RecordID: string(blueprint.ID), Version: 1, Value: blueprint},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_PROFILE_CREATED", SourceActorID: "runtime", CorrelationID: "roster"}, ProjectionKind: "execution_profile", RecordID: string(profile.ID), Version: 1, Value: profile},
+	} {
+		if _, err := store.AppendProjection(ctx, draft); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	agentEvent, err := store.AppendProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_CREATED", SourceActorID: "runtime", CorrelationID: "roster"}, ProjectionKind: "agent", RecordID: string(agent.ID), Version: 1, Value: agent})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	taskEvent, err := store.AppendProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1"}, ProjectionKind: "task", RecordID: string(task.ID), Version: 1, Value: task})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	swapRecoveryProjectionSequences(t, ctx, path, agentEvent, taskEvent)
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "invalid Task assignment") {
+		t.Fatalf("Task-before-assignee recovery error=%v", err)
 	}
 }
 
@@ -1279,6 +1449,45 @@ func TestRecoveryRejectsInvalidAgentRosterBinding(t *testing.T) {
 	deleteRecoveryProjection(t, ctx, path, "agent_blueprint", blueprint.ID, 1)
 	if _, err := Verify(ctx, path); err == nil {
 		t.Fatal("recovery verification accepted an Agent with a missing blueprint")
+	}
+}
+
+func TestRecoveryRejectsAgentBeforeConfigurationAdmission(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	blueprint := core.AgentBlueprint{ID: "blueprint-1", OrganizationID: organization.ID, Version: "v1", Role: "worker", OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE", CreatedAt: now}
+	profile := core.ExecutionProfile{ID: "profile-1", OrganizationID: organization.ID, Version: "v1", ModelProvider: "provider", Model: "model", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE", CreatedAt: now}
+	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "local", Status: "ACTIVE"}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	blueprintEvent, err := store.AppendProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_BLUEPRINT_CREATED", SourceActorID: "runtime", CorrelationID: "roster"}, ProjectionKind: "agent_blueprint", RecordID: string(blueprint.ID), Version: 1, Value: blueprint})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_PROFILE_CREATED", SourceActorID: "runtime", CorrelationID: "roster"}, ProjectionKind: "execution_profile", RecordID: string(profile.ID), Version: 1, Value: profile}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	agentEvent, err := store.AppendProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_CREATED", SourceActorID: "runtime", CorrelationID: "roster"}, ProjectionKind: "agent", RecordID: string(agent.ID), Version: 1, Value: agent})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	swapRecoveryProjectionSequences(t, ctx, path, blueprintEvent, agentEvent)
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "invalid pinned configuration at admission") {
+		t.Fatalf("Agent-before-configuration recovery error=%v", err)
 	}
 }
 

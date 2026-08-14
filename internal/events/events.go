@@ -118,6 +118,18 @@ type IntentConfirmedPayload struct {
 	MessageID           string `json:"message_id"`
 }
 
+// ValidateGoalBoundIntentConfirmation proves that one reviewed confirmation
+// exactly authorizes the accepted durable Intent and its Goal binding.
+func ValidateGoalBoundIntentConfirmation(event Event, intent core.Intent) error {
+	var confirmation IntentConfirmedPayload
+	if decodeExactEventJSON(event.Payload, &confirmation) != nil ||
+		event.EventType != "INTENT_CONFIRMED" || event.OrganizationID != string(intent.OrganizationID) || event.SourceActorID == "" || event.SourceActorID != confirmation.ConfirmingActorID || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != "task-"+event.CorrelationID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID == "" || event.SchemaVersion != SchemaVersion ||
+		confirmation.IntentID != string(intent.ID) || confirmation.GoalID != string(intent.GoalID) || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.Fingerprint != intent.AcceptedFingerprint || confirmation.ConfirmingActorID != string(intent.SourcePrincipalID) || confirmation.ConfirmingActorKind != string(intent.SourcePrincipalKind) || confirmation.SourceChannel != intent.SourceChannel || confirmation.MessageID == "" {
+		return fmt.Errorf("goal-bound intent confirmation is invalid")
+	}
+	return nil
+}
+
 type WorkCompletionTransitionPayload struct {
 	EvidenceEventRef string `json:"evidence_event_ref"`
 	Fingerprint      string `json:"fingerprint"`
