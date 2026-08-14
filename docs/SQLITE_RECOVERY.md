@@ -53,7 +53,13 @@ and achieved Goals must retain their exact atomic transition and authoritative
 progress evidence. Agent configuration changes remain distinct from activation
 changes; Team history cannot change tenant ownership or creation identity;
 Task history also preserves its immutable execution contract and correlation
-boundary.
+boundary. Adaptive Agent execution starts must retain a one-shot dispatch
+binding to the exact active Agent, blueprint, and execution-profile projection
+revisions that preceded the start event. Verification rejects missing,
+superseded, cross-organization, or rewritten roster references. A later
+deactivation does not invalidate an earlier committed start, while interrupted
+adaptive work remains uncertain and cannot reuse that admission for a blind
+retry.
 
 ## Restore without overwrite
 

@@ -803,6 +803,353 @@ func appendTaskAssignmentAgent(t *testing.T, ctx context.Context, store *SQLite,
 	return agent, core.AgentConfig{BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ProfileID: profile.ID, ProfileVersion: profile.Version, RuntimeAdapter: agent.RuntimeAdapter}
 }
 
+func appendPendingAgentExecutionTask(t *testing.T, ctx context.Context, store *SQLite, correlationID, taskID string, agent core.Agent, config core.AgentConfig) core.Task {
+	t.Helper()
+	task := core.Task{
+		ID: core.ID(taskID), WorkID: "work-1", Description: "bounded Agent work", ExecutionKind: core.ExecutionAgent,
+		ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: &config,
+		TaskContractVersion: "1", Status: core.TaskPending,
+	}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: taskID, CorrelationID: correlationID},
+		ProjectionKind: "task", RecordID: taskID, Version: 1, Value: task,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return task
+}
+
+func startPendingAgentExecution(ctx context.Context, store *SQLite, correlationID string, task core.Task) (events.Event, error) {
+	task.Status = core.TaskRunning
+	started, _, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: correlationID},
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
+	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: string(task.ID)}, {Scope: events.RecipientAgent, ID: string(task.AssigneeID)}})
+	return started, err
+}
+
+func latestTestProjection[T any](t *testing.T, ctx context.Context, store *SQLite, kind string, id core.ID) (events.ProjectionRecord, T) {
+	t.Helper()
+	var value T
+	records, err := store.Records(ctx, kind, string(id))
+	if err != nil || len(records) == 0 {
+		t.Fatalf("read %s/%s: records=%d err=%v", kind, id, len(records), err)
+	}
+	var record events.ProjectionRecord
+	if err := json.Unmarshal(records[len(records)-1], &record); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(record.Value, &value); err != nil {
+		t.Fatal(err)
+	}
+	return record, value
+}
+
+func TestAgentExecutionStartBindsExactActiveRosterRevision(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	appendTaskProjectionParents(t, ctx, store, "org-1", "dispatch-1", "work-1")
+	agent, config := appendTaskAssignmentAgent(t, ctx, store, "org-1", "dispatch-1", false)
+	task := appendPendingAgentExecutionTask(t, ctx, store, "dispatch-1", "task-dispatch-1", agent, config)
+
+	started, err := startPendingAgentExecution(ctx, store, "dispatch-1", task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, present, err := events.AdmittedProjection(started)
+	if err != nil || !present {
+		t.Fatalf("dispatch start admission: present=%t err=%v", present, err)
+	}
+	var detail events.ExecutionStartDetail
+	if err := json.Unmarshal(payload.Detail, &detail); err != nil || detail.DispatchBinding == nil {
+		t.Fatalf("dispatch detail=%+v err=%v", detail, err)
+	}
+	binding := detail.DispatchBinding
+	if binding.DispatchID != "execution-task-dispatch-1-v2" || binding.OrganizationID != "org-1" || binding.TaskID != task.ID || binding.TaskVersion != 2 || binding.AgentID != agent.ID || binding.AgentRecordVersion != 1 || binding.BlueprintID != config.BlueprintID || binding.BlueprintRecordVersion != 1 || binding.ExecutionProfileID != config.ProfileID || binding.ExecutionProfileRecordVersion != 1 || binding.RuntimeAdapter != config.RuntimeAdapter || binding.AgentEventRef == "" || binding.BlueprintEventRef == "" || binding.ExecutionProfileEventRef == "" {
+		t.Fatalf("execution start did not bind the exact roster revision: %+v", binding)
+	}
+
+	agent.Status = "INACTIVE"
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_DEACTIVATED", SourceActorID: "runtime", CorrelationID: "dispatch-1"},
+		ProjectionKind: "agent", RecordID: string(agent.ID), Version: 2, Value: agent,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stream, err := store.Events(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Status = core.TaskRunning
+	if err := events.ValidateAgentDispatchStart(started, task, 2, stream); err != nil {
+		t.Fatalf("post-start deactivation retroactively invalidated admitted dispatch: %v", err)
+	}
+	if _, err := startPendingAgentExecution(ctx, store, "dispatch-1", task); err == nil {
+		t.Fatal("one-shot dispatch admission was reused")
+	}
+}
+
+func TestAgentExecutionStartRejectsInactiveRosterComponents(t *testing.T) {
+	for _, kind := range []string{"agent", "agent_blueprint", "execution_profile"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			appendTaskProjectionParents(t, ctx, store, "org-1", "inactive-"+kind, "work-1")
+			agent, config := appendTaskAssignmentAgent(t, ctx, store, "org-1", "inactive-"+kind, false)
+			task := appendPendingAgentExecutionTask(t, ctx, store, "inactive-"+kind, "task-inactive-"+kind, agent, config)
+			switch kind {
+			case "agent":
+				agent.Status = "INACTIVE"
+				_, err = store.AppendProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_DEACTIVATED", SourceActorID: "runtime", CorrelationID: "inactive-agent"}, ProjectionKind: kind, RecordID: string(agent.ID), Version: 2, Value: agent})
+			case "agent_blueprint":
+				_, blueprint := latestTestProjection[core.AgentBlueprint](t, ctx, store, kind, config.BlueprintID)
+				blueprint.Status = "INACTIVE"
+				_, err = store.AppendProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_BLUEPRINT_UPDATED", SourceActorID: "runtime", CorrelationID: "inactive-blueprint"}, ProjectionKind: kind, RecordID: string(blueprint.ID), Version: 2, Value: blueprint})
+			case "execution_profile":
+				_, profile := latestTestProjection[core.ExecutionProfile](t, ctx, store, kind, config.ProfileID)
+				profile.Status = "INACTIVE"
+				_, err = store.AppendProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_PROFILE_UPDATED", SourceActorID: "runtime", CorrelationID: "inactive-profile"}, ProjectionKind: kind, RecordID: string(profile.ID), Version: 2, Value: profile})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := startPendingAgentExecution(ctx, store, "inactive-"+kind, task); err == nil {
+				t.Fatalf("inactive %s was dispatched", kind)
+			}
+			stream, err := store.Events(ctx, "inactive-"+kind)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range stream {
+				if event.EventType == "EXECUTION_STARTED" {
+					t.Fatal("rejected dispatch left an execution-start event")
+				}
+			}
+		})
+	}
+}
+
+func TestAgentExecutionStartPreservesPinnedConfigurationAfterPromotion(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	appendTaskProjectionParents(t, ctx, store, "org-1", "promotion", "work-1")
+	agent, config := appendTaskAssignmentAgent(t, ctx, store, "org-1", "original", false)
+	task := appendPendingAgentExecutionTask(t, ctx, store, "promotion", "task-promotion", agent, config)
+	_, promoted := appendTaskAssignmentAgent(t, ctx, store, "org-1", "promoted", false)
+	agent.BlueprintID, agent.BlueprintVersion = promoted.BlueprintID, promoted.BlueprintVersion
+	agent.ExecutionProfileID, agent.ExecutionProfileVersion = promoted.ProfileID, promoted.ProfileVersion
+	agent.RuntimeAdapter = promoted.RuntimeAdapter
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_CONFIGURATION_UPDATED", SourceActorID: "runtime", CorrelationID: "promotion"},
+		ProjectionKind: "agent", RecordID: string(agent.ID), Version: 2, Value: agent,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	started, err := startPendingAgentExecution(ctx, store, "promotion", task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, present, err := events.AdmittedProjection(started)
+	if err != nil || !present {
+		t.Fatalf("promoted dispatch admission: present=%t err=%v", present, err)
+	}
+	var detail events.ExecutionStartDetail
+	if err := json.Unmarshal(payload.Detail, &detail); err != nil || detail.DispatchBinding == nil {
+		t.Fatalf("promoted dispatch detail=%+v err=%v", detail, err)
+	}
+	if detail.DispatchBinding.AgentRecordVersion != 2 || detail.DispatchBinding.BlueprintID != config.BlueprintID || detail.DispatchBinding.ExecutionProfileID != config.ProfileID || detail.DispatchBinding.RuntimeAdapter != config.RuntimeAdapter || detail.DispatchBinding.BlueprintID == promoted.BlueprintID || detail.DispatchBinding.ExecutionProfileID == promoted.ProfileID {
+		t.Fatalf("dispatch substituted promoted configuration for the Task pin: %+v", detail.DispatchBinding)
+	}
+}
+
+func TestAgentDispatchValidationRejectsSupersededRosterBinding(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	appendTaskProjectionParents(t, ctx, store, "org-1", "stale-binding", "work-1")
+	agent, config := appendTaskAssignmentAgent(t, ctx, store, "org-1", "stale-binding", false)
+	task := appendPendingAgentExecutionTask(t, ctx, store, "stale-binding", "task-stale-binding", agent, config)
+	agent.Status = "INACTIVE"
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_DEACTIVATED", SourceActorID: "runtime", CorrelationID: "stale-binding"}, ProjectionKind: "agent", RecordID: string(agent.ID), Version: 2, Value: agent}); err != nil {
+		t.Fatal(err)
+	}
+	agent.Status = "ACTIVE"
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_REACTIVATED", SourceActorID: "runtime", CorrelationID: "stale-binding"}, ProjectionKind: "agent", RecordID: string(agent.ID), Version: 3, Value: agent}); err != nil {
+		t.Fatal(err)
+	}
+	started, err := startPendingAgentExecution(ctx, store, "stale-binding", task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := store.Events(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var createdRef string
+	for _, event := range stream {
+		if event.EventType == "AGENT_CREATED" && event.OrganizationID == "org-1" {
+			createdRef = event.EventID
+		}
+	}
+	payload, present, err := events.AdmittedProjection(started)
+	if err != nil || !present || createdRef == "" {
+		t.Fatalf("load dispatch admission: present=%t created=%q err=%v", present, createdRef, err)
+	}
+	var detail events.ExecutionStartDetail
+	if err := json.Unmarshal(payload.Detail, &detail); err != nil || detail.DispatchBinding == nil {
+		t.Fatal("dispatch detail is missing")
+	}
+	forgedBinding := *detail.DispatchBinding
+	forgedBinding.AgentRecordVersion = 1
+	forgedBinding.AgentEventRef = createdRef
+	detail.DispatchBinding = &forgedBinding
+	detailBody, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := events.SealProjectionEvent(started, payload.Projection, detailBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started.Payload, err = json.Marshal(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Status = core.TaskRunning
+	if err := events.ValidateAgentDispatchStart(started, task, 2, stream); err == nil {
+		t.Fatal("superseded active Agent revision was accepted as dispatch authority")
+	}
+}
+
+func TestAgentDispatchValidationRejectsCrossTenantRosterReference(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	appendTaskProjectionParents(t, ctx, store, "org-1", "tenant-binding", "work-1")
+	agent, config := appendTaskAssignmentAgent(t, ctx, store, "org-1", "tenant-local", false)
+	foreignAgent, _ := appendTaskAssignmentAgent(t, ctx, store, "org-2", "tenant-foreign", true)
+	task := appendPendingAgentExecutionTask(t, ctx, store, "tenant-binding", "task-tenant-binding", agent, config)
+	started, err := startPendingAgentExecution(ctx, store, "tenant-binding", task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := store.Events(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foreignRef string
+	for _, event := range stream {
+		if event.EventType == "AGENT_CREATED" && event.OrganizationID == "org-2" {
+			foreignRef = event.EventID
+		}
+	}
+	payload, present, err := events.AdmittedProjection(started)
+	if err != nil || !present || foreignRef == "" {
+		t.Fatalf("load tenant dispatch admission: present=%t foreign=%q err=%v", present, foreignRef, err)
+	}
+	var detail events.ExecutionStartDetail
+	if err := json.Unmarshal(payload.Detail, &detail); err != nil || detail.DispatchBinding == nil {
+		t.Fatal("dispatch detail is missing")
+	}
+	forgedBinding := *detail.DispatchBinding
+	forgedBinding.AgentID = foreignAgent.ID
+	forgedBinding.AgentRecordVersion = 1
+	forgedBinding.AgentEventRef = foreignRef
+	detail.DispatchBinding = &forgedBinding
+	detailBody, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := events.SealProjectionEvent(started, payload.Projection, detailBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started.Payload, err = json.Marshal(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Status = core.TaskRunning
+	if err := events.ValidateAgentDispatchStart(started, task, 2, stream); err == nil {
+		t.Fatal("cross-tenant Agent revision was accepted as dispatch authority")
+	}
+}
+
+func TestAgentExecutionStartSerializesWithConcurrentDeactivation(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	appendTaskProjectionParents(t, ctx, store, "org-1", "concurrent", "work-1")
+	agent, config := appendTaskAssignmentAgent(t, ctx, store, "org-1", "concurrent", false)
+	task := appendPendingAgentExecutionTask(t, ctx, store, "concurrent", "task-concurrent", agent, config)
+	agent.Status = "INACTIVE"
+
+	ready := make(chan struct{})
+	startResult := make(chan error, 1)
+	deactivateResult := make(chan error, 1)
+	go func() {
+		<-ready
+		_, err := startPendingAgentExecution(ctx, store, "concurrent", task)
+		startResult <- err
+	}()
+	go func() {
+		<-ready
+		_, err := store.AppendProjection(ctx, events.ProjectionDraft{
+			Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_DEACTIVATED", SourceActorID: "runtime", CorrelationID: "concurrent"},
+			ProjectionKind: "agent", RecordID: string(agent.ID), Version: 2, Value: agent,
+		})
+		deactivateResult <- err
+	}()
+	close(ready)
+	startErr, deactivateErr := <-startResult, <-deactivateResult
+	if deactivateErr != nil {
+		t.Fatalf("concurrent deactivation failed: %v", deactivateErr)
+	}
+	stream, err := store.Events(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var startSequence, deactivateSequence int64
+	for _, event := range stream {
+		switch event.EventType {
+		case "EXECUTION_STARTED":
+			startSequence = event.Sequence
+		case "AGENT_DEACTIVATED":
+			deactivateSequence = event.Sequence
+		}
+	}
+	if deactivateSequence == 0 {
+		t.Fatal("concurrent deactivation was not recorded")
+	}
+	if startErr == nil {
+		if startSequence == 0 || startSequence >= deactivateSequence {
+			t.Fatalf("successful dispatch was not serialized before deactivation: start=%d deactivate=%d", startSequence, deactivateSequence)
+		}
+	} else if startSequence != 0 {
+		t.Fatalf("failed dispatch left execution start at sequence %d: %v", startSequence, startErr)
+	}
+}
+
 func TestProjectionBatchAllowsForwardTaskReferences(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(":memory:")

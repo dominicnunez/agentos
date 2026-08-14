@@ -1149,7 +1149,7 @@ FROM events WHERE organization_id=? AND event_type='WORK_COMPLETED' AND json_ext
 
 func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.ProjectionDraft, routes []events.InboxRoute) (events.Event, []events.InboxSelection, error) {
 	var requested events.ExecutionStartDetail
-	if draft.Event.EventType != "EXECUTION_STARTED" || draft.Event.OrganizationID == "" || draft.Event.SourceActorID != "runtime" || draft.Event.SourceExecutionID != "" || draft.Event.TaskID == "" || draft.Event.TaskID != draft.RecordID || draft.Event.CorrelationID == "" || draft.ProjectionKind != "task" || draft.RecordID == "" || draft.Version < 2 || len(routes) < 2 || decodeExactJSON(draft.Event.Payload, &requested) != nil || requested.InboxCutoffSequence != 0 || requested.Mode != "" && requested.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
+	if draft.Event.EventType != "EXECUTION_STARTED" || draft.Event.OrganizationID == "" || draft.Event.SourceActorID != "runtime" || draft.Event.SourceExecutionID != "" || draft.Event.TaskID == "" || draft.Event.TaskID != draft.RecordID || draft.Event.CorrelationID == "" || draft.ProjectionKind != "task" || draft.RecordID == "" || draft.Version < 2 || len(routes) < 2 || decodeExactJSON(draft.Event.Payload, &requested) != nil || requested.InboxCutoffSequence != 0 || requested.DispatchBinding != nil || requested.Mode != "" && requested.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
 		return events.Event{}, nil, fmt.Errorf("complete Agent execution-start boundary is required")
 	}
 	value, err := json.Marshal(draft.Value)
@@ -1166,11 +1166,15 @@ func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.Projecti
 		if err := validatePriorAgentExecutionTask(ctx, tx, draft, task); err != nil {
 			return err
 		}
+		dispatch, err := bindAgentDispatch(ctx, tx, draft, task)
+		if err != nil {
+			return err
+		}
 		var cutoff int64
 		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0) FROM events`).Scan(&cutoff); err != nil {
 			return fmt.Errorf("read Agent execution inbox cutoff: %w", err)
 		}
-		draft.Event.Payload = events.ExecutionStartDetail{Mode: requested.Mode, InboxCutoffSequence: cutoff}
+		draft.Event.Payload = events.ExecutionStartDetail{Mode: requested.Mode, InboxCutoffSequence: cutoff, DispatchBinding: &dispatch}
 		item, err := prepareProjection(draft, false, false)
 		if err != nil {
 			return err
@@ -1182,6 +1186,9 @@ func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.Projecti
 		stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? ORDER BY sequence`, draft.Event.OrganizationID))
 		if err != nil {
 			return fmt.Errorf("read Agent execution route boundary: %w", err)
+		}
+		if err := events.ValidateAgentDispatchStart(started, task, draft.Version, stream); err != nil {
+			return fmt.Errorf("validate Agent dispatch admission: %w", err)
 		}
 		teamBodies, err := admittedProjectionRecordBodies(ctx, tx, `WHERE r.kind='team' ORDER BY r.record_id,r.version`)
 		if err != nil {
@@ -1226,6 +1233,71 @@ func validatePriorAgentExecutionTask(ctx context.Context, tx *sql.Tx, draft even
 		return fmt.Errorf("agent execution start changes the immutable task contract")
 	}
 	return nil
+}
+
+type dispatchRosterRevision[T any] struct {
+	record   events.ProjectionRecord
+	value    T
+	eventRef string
+}
+
+func bindAgentDispatch(ctx context.Context, tx *sql.Tx, draft events.ProjectionDraft, task core.Task) (events.AgentDispatchBinding, error) {
+	if task.AgentConfig == nil {
+		return events.AgentDispatchBinding{}, fmt.Errorf("Agent dispatch requires an exact pinned Task configuration")
+	}
+	agent, err := latestDispatchRosterRevision[core.Agent](ctx, tx, "agent", task.AssigneeID)
+	if err != nil {
+		return events.AgentDispatchBinding{}, fmt.Errorf("bind Agent dispatch assignee: %w", err)
+	}
+	config := task.AgentConfig
+	blueprint, err := latestDispatchRosterRevision[core.AgentBlueprint](ctx, tx, "agent_blueprint", config.BlueprintID)
+	if err != nil {
+		return events.AgentDispatchBinding{}, fmt.Errorf("bind Agent dispatch blueprint: %w", err)
+	}
+	profile, err := latestDispatchRosterRevision[core.ExecutionProfile](ctx, tx, "execution_profile", config.ProfileID)
+	if err != nil {
+		return events.AgentDispatchBinding{}, fmt.Errorf("bind Agent dispatch execution profile: %w", err)
+	}
+	if !core.ValidAgent(agent.value) || agent.value.ID != task.AssigneeID || agent.value.OrganizationID != core.ID(draft.Event.OrganizationID) || agent.value.Status != "ACTIVE" || blueprint.value.Status != "ACTIVE" || profile.value.Status != "ACTIVE" ||
+		blueprint.value.ID != config.BlueprintID || blueprint.value.OrganizationID != agent.value.OrganizationID || blueprint.value.Version != config.BlueprintVersion || profile.value.ID != config.ProfileID || profile.value.OrganizationID != agent.value.OrganizationID || profile.value.Version != config.ProfileVersion {
+		return events.AgentDispatchBinding{}, fmt.Errorf("Agent dispatch requires its active exact assigned roster configuration")
+	}
+	return events.AgentDispatchBinding{
+		DispatchID:                    core.ID(fmt.Sprintf("execution-%s-v%d", task.ID, draft.Version)),
+		OrganizationID:                core.ID(draft.Event.OrganizationID),
+		TaskID:                        task.ID,
+		TaskVersion:                   draft.Version,
+		AgentID:                       agent.value.ID,
+		AgentRecordVersion:            agent.record.Version,
+		AgentEventRef:                 agent.eventRef,
+		BlueprintID:                   blueprint.value.ID,
+		BlueprintRecordVersion:        blueprint.record.Version,
+		BlueprintVersion:              blueprint.value.Version,
+		BlueprintEventRef:             blueprint.eventRef,
+		ExecutionProfileID:            profile.value.ID,
+		ExecutionProfileRecordVersion: profile.record.Version,
+		ExecutionProfileVersion:       profile.value.Version,
+		ExecutionProfileEventRef:      profile.eventRef,
+		RuntimeAdapter:                config.RuntimeAdapter,
+	}, nil
+}
+
+func latestDispatchRosterRevision[T any](ctx context.Context, tx *sql.Tx, kind string, id core.ID) (dispatchRosterRevision[T], error) {
+	var result dispatchRosterRevision[T]
+	body, found, err := latestRecordBody(ctx, tx, kind, string(id))
+	if err != nil {
+		return result, err
+	}
+	if !found || decodeExactJSONBytes(body, &result.record) != nil || decodeExactJSONBytes(result.record.Value, &result.value) != nil || result.record.ProjectionKind != kind || result.record.RecordID != string(id) || result.record.Version < 1 {
+		return dispatchRosterRevision[T]{}, fmt.Errorf("active exact %s revision %s is unavailable", kind, id)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT admission_event_id FROM records WHERE kind=? AND record_id=? AND version=?`, kind, string(id), result.record.Version).Scan(&result.eventRef); err != nil {
+		return dispatchRosterRevision[T]{}, fmt.Errorf("read %s dispatch admission reference: %w", kind, err)
+	}
+	if result.eventRef == "" {
+		return dispatchRosterRevision[T]{}, fmt.Errorf("%s dispatch admission reference is empty", kind)
+	}
+	return result, nil
 }
 
 func prepareProjection(draft events.ProjectionDraft, allowWorkCompletion, allowGoalAchievement bool) (preparedProjection, error) {
@@ -2765,6 +2837,9 @@ func resolveInboxObservationExecution(ctx context.Context, tx *sql.Tx, draft eve
 	}
 	if startEvent.EventID == "" {
 		return events.Event{}, fmt.Errorf("running Agent execution lacks its exact start transition")
+	}
+	if err := events.ValidateAgentDispatchStart(startEvent, task, record.Version, stream); err != nil {
+		return events.Event{}, fmt.Errorf("running Agent execution lacks valid dispatch admission: %w", err)
 	}
 	var teamRevisions map[core.ID][]events.TeamRevisionBinding
 	if recipientScope == events.RecipientTeam {

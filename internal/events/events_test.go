@@ -487,7 +487,7 @@ func TestExecutionInboxUsesPersistedSnapshotCutoff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	detail, err := json.Marshal(ExecutionStartDetail{InboxCutoffSequence: 1})
+	detail, err := json.Marshal(ExecutionStartDetail{InboxCutoffSequence: 1, DispatchBinding: &AgentDispatchBinding{}})
 	if err != nil {
 		t.Fatal(err)
 	}
