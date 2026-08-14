@@ -443,37 +443,9 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 				err = core.AdmitDurableRevision(graph.Goals, value.ID, record.Version, record.CorrelationID, value, false, core.ValidGoalRevision)
 			}
 		case KindAgentBlueprint:
-			var value core.AgentBlueprint
-			if decodeExactProjectionJSON(record.Value, &value) != nil || value.ID != core.ID(record.RecordID) || !core.ValidAgentBlueprint(value) {
-				err = fmt.Errorf("contains an invalid Agent blueprint projection")
-			} else {
-				err = validateProjectionOrganizationAtAdmission(value.OrganizationID, event, graph)
-			}
-			if err == nil {
-				err = core.AdmitDurableRevision(graph.AgentBlueprints, value.ID, record.Version, record.CorrelationID, value, false, core.ValidAgentBlueprintRevision)
-			}
-			if err == nil {
-				if blueprintRevisions[value.ID] == nil {
-					blueprintRevisions[value.ID] = make(map[string]core.AgentBlueprint)
-				}
-				blueprintRevisions[value.ID][value.Version] = value
-			}
+			err = admitVersionedOrganizedProjection(record, event, graph, graph.AgentBlueprints, blueprintRevisions, "Agent blueprint", func(value core.AgentBlueprint) core.ID { return value.ID }, func(value core.AgentBlueprint) core.ID { return value.OrganizationID }, func(value core.AgentBlueprint) string { return value.Version }, core.ValidAgentBlueprint, core.ValidAgentBlueprintRevision)
 		case KindExecutionProfile:
-			var value core.ExecutionProfile
-			if decodeExactProjectionJSON(record.Value, &value) != nil || value.ID != core.ID(record.RecordID) || !core.ValidExecutionProfile(value) {
-				err = fmt.Errorf("contains an invalid execution profile projection")
-			} else {
-				err = validateProjectionOrganizationAtAdmission(value.OrganizationID, event, graph)
-			}
-			if err == nil {
-				err = core.AdmitDurableRevision(graph.ExecutionProfiles, value.ID, record.Version, record.CorrelationID, value, false, core.ValidExecutionProfileRevision)
-			}
-			if err == nil {
-				if profileRevisions[value.ID] == nil {
-					profileRevisions[value.ID] = make(map[string]core.ExecutionProfile)
-				}
-				profileRevisions[value.ID][value.Version] = value
-			}
+			err = admitVersionedOrganizedProjection(record, event, graph, graph.ExecutionProfiles, profileRevisions, "execution profile", func(value core.ExecutionProfile) core.ID { return value.ID }, func(value core.ExecutionProfile) core.ID { return value.OrganizationID }, func(value core.ExecutionProfile) string { return value.Version }, core.ValidExecutionProfile, core.ValidExecutionProfileRevision)
 		case KindAgent:
 			var value core.Agent
 			if decodeExactProjectionJSON(record.Value, &value) != nil {
@@ -627,6 +599,24 @@ func validateOrganizedProjectionLifecycle[T any](value T, event events.Event, re
 		return err
 	}
 	return validateProjectionOrganizationAtAdmission(organization(value), event, graph)
+}
+
+func admitVersionedOrganizedProjection[T any](record events.ProjectionRecord, event events.Event, graph core.DurableGraph, target map[core.ID]Versioned[T], revisions map[core.ID]map[string]T, kind string, identity func(T) core.ID, organization func(T) core.ID, semanticVersion func(T) string, valid func(T) bool, validRevision func(T, T) bool) error {
+	var value T
+	if decodeExactProjectionJSON(record.Value, &value) != nil || identity(value) != core.ID(record.RecordID) || !valid(value) {
+		return fmt.Errorf("contains an invalid %s projection", kind)
+	}
+	if err := validateProjectionOrganizationAtAdmission(organization(value), event, graph); err != nil {
+		return err
+	}
+	if err := core.AdmitDurableRevision(target, identity(value), record.Version, record.CorrelationID, value, false, validRevision); err != nil {
+		return err
+	}
+	if revisions[identity(value)] == nil {
+		revisions[identity(value)] = make(map[string]T)
+	}
+	revisions[identity(value)][semanticVersion(value)] = value
+	return nil
 }
 
 func validateTaskCompletionAtAdmission(task core.Task, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, stream []events.Event, teamRecords [][]byte, inboxObservations map[string]events.InboxObservationBinding, blueprintRevisions map[core.ID]map[string]core.AgentBlueprint, profileRevisions map[core.ID]map[string]core.ExecutionProfile) error {
