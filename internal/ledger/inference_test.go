@@ -324,7 +324,7 @@ func TestInferenceMalformedUsageTerminatesReservationConservatively(t *testing.T
 	if state != inferenceStateViolation || chargedInput != reservation.ReservedInputTokens || chargedOutput != reservation.ReservedOutputTokens || chargedCost != reservation.ReservedCostNanoUSD {
 		t.Fatalf("malformed usage did not terminate with its full conservative charge: state=%s input=%d output=%d cost=%d", state, chargedInput, chargedOutput, chargedCost)
 	}
-	if err := ValidateInferenceAdmissions(t.Context(), store.db); err != nil {
+	if err := store.ValidateInferenceAdmissions(t.Context()); err != nil {
 		t.Fatalf("durable malformed-usage violation failed validation: %v", err)
 	}
 }
@@ -354,7 +354,7 @@ func TestInferenceAdmissionValidationRejectsAccountingTampering(t *testing.T) {
 	if _, err := store.db.ExecContext(t.Context(), `UPDATE inference_reservations SET charged_cost_nano_usd=charged_cost_nano_usd+1 WHERE reservation_id=?`, reservation.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateInferenceAdmissions(t.Context(), store.db); err == nil {
+	if err := store.ValidateInferenceAdmissions(t.Context()); err == nil {
 		t.Fatal("tampered inference accounting passed admission validation")
 	}
 }

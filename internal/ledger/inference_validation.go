@@ -11,6 +11,15 @@ import (
 	"github.com/dominicnunez/agentos/internal/inference"
 )
 
+// ValidateInferenceAdmissions verifies the live ledger before runtime code can
+// trust its mutable budget-accounting columns.
+func (l *SQLite) ValidateInferenceAdmissions(ctx context.Context) error {
+	if l == nil || l.db == nil {
+		return fmt.Errorf("inference admission ledger is required")
+	}
+	return ValidateInferenceAdmissions(ctx, l.db)
+}
+
 // ValidateInferenceAdmissions proves that every durable policy and reservation
 // has its exact Event Contract and that current accounting can be reconstructed
 // without trusting mutable configuration.
