@@ -63,6 +63,34 @@ func ValidTeamRevision(previous, next Team) bool {
 	return previous.ID == next.ID && previous.OrganizationID == next.OrganizationID && previous.CreatedAt.Equal(next.CreatedAt)
 }
 
+// ValidateTeamRoster proves that one Team has a complete definition, a
+// durable parent Organization, and unique same-organization Agent members.
+// Startup replay and recovery certification share this exact boundary.
+func ValidateTeamRoster(team Team, graph DurableGraph) error {
+	if strings.TrimSpace(team.Name) == "" || strings.TrimSpace(team.Status) == "" {
+		return fmt.Errorf("team is incomplete")
+	}
+	organization, found := graph.Organizations[team.OrganizationID]
+	if !found || organization.Value.ID != team.OrganizationID {
+		return fmt.Errorf("team requires its durable parent Organization")
+	}
+	members := make(map[ID]struct{}, len(team.MemberAgentIDs))
+	for _, memberID := range team.MemberAgentIDs {
+		if memberID == "" {
+			return fmt.Errorf("team contains an empty member identity")
+		}
+		if _, duplicate := members[memberID]; duplicate {
+			return fmt.Errorf("team contains a duplicate member identity")
+		}
+		members[memberID] = struct{}{}
+		agent, found := graph.Agents[memberID]
+		if !found || agent.Value.ID != memberID || agent.Value.OrganizationID != team.OrganizationID {
+			return fmt.Errorf("team references invalid member Agent %s", memberID)
+		}
+	}
+	return nil
+}
+
 // ValidAgentRevision preserves durable Agent identity and tenant ownership
 // while allowing reviewed configuration and lifecycle changes.
 func ValidAgentRevision(previous, next Agent) bool {

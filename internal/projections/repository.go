@@ -10,7 +10,6 @@ import (
 	"io"
 	"reflect"
 	"sort"
-	"strings"
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
@@ -542,27 +541,10 @@ func validateProjectionOrganizationAtAdmission(organizationID core.ID, event eve
 }
 
 func validateProjectionTeamAtAdmission(team core.Team, event events.Event, graph core.DurableGraph) error {
-	if strings.TrimSpace(team.Name) == "" || strings.TrimSpace(team.Status) == "" {
-		return fmt.Errorf("team is incomplete")
-	}
 	if err := validateProjectionOrganizationAtAdmission(team.OrganizationID, event, graph); err != nil {
 		return err
 	}
-	members := make(map[core.ID]struct{}, len(team.MemberAgentIDs))
-	for _, memberID := range team.MemberAgentIDs {
-		if memberID == "" {
-			return fmt.Errorf("team contains an empty member identity")
-		}
-		if _, duplicate := members[memberID]; duplicate {
-			return fmt.Errorf("team contains a duplicate member identity")
-		}
-		members[memberID] = struct{}{}
-		agent, found := graph.Agents[memberID]
-		if !found || agent.Value.ID != memberID || agent.Value.OrganizationID != team.OrganizationID {
-			return fmt.Errorf("team references invalid member Agent %s at admission", memberID)
-		}
-	}
-	return nil
+	return core.ValidateTeamRoster(team, graph)
 }
 
 func validateProjectionWorkAtAdmission(work core.Work, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, confirmations map[string][]events.Event) error {
