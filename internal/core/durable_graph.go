@@ -212,11 +212,8 @@ func ValidateDurableGraph(graph DurableGraph) error {
 		}
 	}
 	for id, state := range graph.Teams {
-		for _, memberID := range state.Value.MemberAgentIDs {
-			member, ok := graph.Agents[memberID]
-			if !ok || member.Value.OrganizationID != state.Value.OrganizationID {
-				return fmt.Errorf("team %s references invalid member agent %s", id, memberID)
-			}
+		if err := ValidateTeamRoster(state.Value, graph); err != nil {
+			return fmt.Errorf("team %s: %w", id, err)
 		}
 	}
 	for id, state := range graph.Works {
