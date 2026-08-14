@@ -351,6 +351,9 @@ func validateProjectionEventAdmissions(stream []events.Event) error {
 		if event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() {
 			return fmt.Errorf("event stream contains an incomplete envelope")
 		}
+		if event.SchemaVersion != events.SchemaVersion {
+			return fmt.Errorf("event %s uses unsupported schema version %d", event.EventID, event.SchemaVersion)
+		}
 		if _, duplicate := eventIDs[event.EventID]; duplicate {
 			return fmt.Errorf("event stream contains duplicate event id %s", event.EventID)
 		}
@@ -994,3 +997,4 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		Tasks:             snapshot.Tasks,
 	})
 }
+

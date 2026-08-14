@@ -1075,6 +1075,19 @@ func TestRebuildRejectsProjectionShapedOrdinaryEvents(t *testing.T) {
 	}
 }
 
+func TestRebuildRejectsUnsupportedOrdinaryEventSchema(t *testing.T) {
+	stream := []events.Event{{
+		EventID: "event-1", Sequence: 1, OrganizationID: "org-1", EventType: "INTENT_DRAFTED",
+		SourceActorID: "runtime", TaskID: "task-work-1", CorrelationID: "work-1",
+		CreatedAt: time.Unix(1, 0).UTC(), SchemaVersion: events.SchemaVersion + 1,
+		Payload: json.RawMessage(`{"draft":"unsupported"}`),
+	}}
+	_, err := New(events.NewGateway(replayLedger{stream: stream})).Rebuild(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "unsupported schema version") {
+		t.Fatalf("startup admitted unsupported ordinary event schema: %v", err)
+	}
+}
+
 type replayLedger struct {
 	stream  []events.Event
 	records map[string][][]byte
@@ -1140,3 +1153,4 @@ func rosterAgentConfig(agent core.Agent) *core.AgentConfig {
 		RuntimeAdapter: agent.RuntimeAdapter,
 	}
 }
+

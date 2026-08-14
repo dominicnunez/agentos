@@ -568,8 +568,38 @@ func validateRecoveryWorkIntentBinding(event events.Event, record events.Project
 		if err := events.ValidateGoalBoundIntentConfirmation(confirmations[0], intent); err != nil {
 			return err
 		}
+		goal, err := recoveryActiveGoalAtSequence(stream, intent.GoalID, confirmations[0].Sequence)
+		if err != nil {
+			return err
+		}
+		if err := ledgerstore.ValidateReviewedGoalIntentAdmission(stream, confirmations[0], goal); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func recoveryActiveGoalAtSequence(stream []events.Event, goalID core.ID, confirmationSequence int64) (core.Goal, error) {
+	var goal core.Goal
+	for _, candidate := range stream {
+		if candidate.Sequence >= confirmationSequence {
+			continue
+		}
+		payload, present, err := events.AdmittedProjection(candidate)
+		if err != nil {
+			return core.Goal{}, err
+		}
+		if !present || payload.Projection.ProjectionKind != "goal" || payload.Projection.RecordID != string(goalID) {
+			continue
+		}
+		if decodeExactJSON(payload.Projection.Value, &goal) != nil || goal.ID != goalID {
+			return core.Goal{}, fmt.Errorf("goal-bound intent confirmation references an invalid Goal admission")
+		}
+	}
+	if goal.ID != goalID || goal.Status != core.GoalActive {
+		return core.Goal{}, fmt.Errorf("goal-bound intent confirmation requires its active Goal at admission")
+	}
+	return goal, nil
 }
 
 func validateRecoveryTaskWorkBinding(event events.Event, record events.ProjectionRecord, task core.Task, snapshot core.DurableGraph) error {
@@ -922,3 +952,4 @@ func syncDirectory(path string) error {
 	closeErr := directory.Close()
 	return errors.Join(syncErr, closeErr)
 }
+

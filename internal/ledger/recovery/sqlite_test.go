@@ -569,14 +569,19 @@ func TestRecoveryRejectsGoalBoundWorkWithoutConfirmation(t *testing.T) {
 	mission := core.Mission{ID: "mission-1", OrganizationID: organization.ID, Statement: "Mission", Status: core.MissionActive, CreatedAt: now}
 	criterion := core.IntentValue{Value: "verified", Origin: "USER"}
 	goal := core.Goal{ID: "goal-1", OrganizationID: organization.ID, MissionID: mission.ID, Objective: "Outcome", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{criterion}, Status: core.GoalActive, CreatedAt: now}
+	var goalEvent events.Event
 	for _, draft := range []events.ProjectionDraft{
 		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization},
 		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "mission-1"}, ProjectionKind: "mission", RecordID: string(mission.ID), Version: 1, Value: mission},
 		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_CREATED", SourceActorID: "runtime", CorrelationID: "goal-1"}, ProjectionKind: "goal", RecordID: string(goal.ID), Version: 1, Value: goal},
 	} {
-		if _, err := store.AppendProjection(ctx, draft); err != nil {
+		admitted, err := store.AppendProjection(ctx, draft)
+		if err != nil {
 			_ = store.Close()
 			t.Fatal(err)
+		}
+		if draft.ProjectionKind == "goal" {
+			goalEvent = admitted
 		}
 	}
 	const correlationID = "run-1"
@@ -629,19 +634,57 @@ func TestRecoveryRejectsGoalBoundWorkWithoutConfirmation(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := Verify(ctx, path); err != nil {
+		t.Fatalf("valid reviewed Goal-bound Work failed recovery: %v", err)
+	}
+	pristine, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name   string
+		want   string
+		tamper func(*testing.T, string)
+	}{
+		{name: "missing confirmation", want: "one prior intent confirmation", tamper: func(t *testing.T, path string) {
+			deleteRecoveryEvent(t, ctx, path, `event_id=?`, confirmationEvent.EventID)
+		}},
+		{name: "missing intake evidence", want: "current durable reviewed draft", tamper: func(t *testing.T, path string) {
+			deleteRecoveryEvent(t, ctx, path, `correlation_id=? AND event_type='INTAKE_MESSAGE_RECORDED'`, correlationID)
+		}},
+		{name: "missing reviewed draft", want: "current durable reviewed draft", tamper: func(t *testing.T, path string) {
+			deleteRecoveryEvent(t, ctx, path, `correlation_id=? AND event_type='INTENT_DRAFTED'`, correlationID)
+		}},
+		{name: "goal admitted after confirmation", want: "active Goal at admission", tamper: func(t *testing.T, path string) {
+			swapRecoveryProjectionAndOrdinarySequences(t, ctx, path, goalEvent, confirmationEvent)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tampered := filepath.Join(t.TempDir(), "ledger.db")
+			if err := os.WriteFile(tampered, pristine, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			test.tamper(t, tampered)
+			if _, err := Verify(ctx, tampered); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("invalid Goal-bound confirmation recovery error=%v want=%q", err, test.want)
+			}
+		})
+	}
+}
+
+func deleteRecoveryEvent(t *testing.T, ctx context.Context, path, predicate string, args ...any) {
+	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM events WHERE event_id=?`, confirmationEvent.EventID); err != nil {
-		_ = db.Close()
+	defer func() { _ = db.Close() }()
+	result, err := db.ExecContext(ctx, `DELETE FROM events WHERE `+predicate, args...)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "one prior intent confirmation") {
-		t.Fatalf("Goal-bound Work without confirmation recovery error=%v", err)
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		t.Fatalf("deleted recovery events=%d error=%v", affected, err)
 	}
 }
 
@@ -1208,6 +1251,47 @@ func swapRecoveryProjectionSequences(t *testing.T, ctx context.Context, path str
 			_ = db.Close()
 			t.Fatal(err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func swapRecoveryProjectionAndOrdinarySequences(t *testing.T, ctx context.Context, path string, projection, ordinary events.Event) {
+	t.Helper()
+	projectionBody, projectionFingerprint := resealRecoveryProjectionAtSequence(t, projection, ordinary.Sequence)
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE events SET sequence=-sequence WHERE event_id IN (?,?)`, projection.EventID, ordinary.EventID); err != nil {
+		_ = tx.Rollback()
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE events SET sequence=? WHERE event_id=?`, projection.Sequence, ordinary.EventID); err != nil {
+		_ = tx.Rollback()
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE events SET sequence=?,payload=? WHERE event_id=?`, ordinary.Sequence, projectionBody, projection.EventID); err != nil {
+		_ = tx.Rollback()
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE records SET admission_fingerprint=? WHERE admission_event_id=?`, projectionFingerprint, projection.EventID); err != nil {
+		_ = tx.Rollback()
+		_ = db.Close()
+		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
 		_ = db.Close()
@@ -1869,3 +1953,4 @@ CREATE TABLE external_tasks(organization_id TEXT NOT NULL, task_id TEXT NOT NULL
 	}
 	return db
 }
+

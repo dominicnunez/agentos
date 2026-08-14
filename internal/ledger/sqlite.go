@@ -2446,10 +2446,61 @@ func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.Trus
 		if json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &goal) != nil || goal.ID != goalID || string(goal.OrganizationID) != draft.OrganizationID || goal.Status != core.GoalActive {
 			return fmt.Errorf("confirmed intent requires an active goal in its organization")
 		}
+		confirmationBody, err := json.Marshal(draft.Payload)
+		if err != nil {
+			return fmt.Errorf("encode goal-bound intent confirmation: %w", err)
+		}
+		candidate := events.Event{
+			OrganizationID: draft.OrganizationID, EventType: draft.EventType, SourceActorID: draft.SourceActorID,
+			SourceExecutionID: draft.SourceExecutionID, RecipientScope: draft.RecipientScope, RecipientID: draft.RecipientID,
+			TaskID: draft.TaskID, AuthorizationRefs: draft.AuthorizationRefs, ArtifactRefs: draft.ArtifactRefs,
+			Payload: confirmationBody, CorrelationID: draft.CorrelationID, SchemaVersion: events.SchemaVersion,
+		}
+		if err := ValidateReviewedGoalIntentAdmission(stream, candidate, goal); err != nil {
+			return err
+		}
 		event, err = appendEvent(ctx, tx, draft)
 		return err
 	})
 	return event, err
+}
+
+// ValidateReviewedGoalIntentAdmission replays the bounded intake and review
+// evidence that authorizes one Goal-bound intent confirmation. The supplied
+// Goal must be the exact durable Goal state visible at the confirmation event.
+func ValidateReviewedGoalIntentAdmission(stream []events.Event, confirmationEvent events.Event, goal core.Goal) error {
+	var confirmation events.IntentConfirmedPayload
+	if decodeExactJSONBytes(confirmationEvent.Payload, &confirmation) != nil ||
+		confirmationEvent.EventType != "INTENT_CONFIRMED" || confirmationEvent.OrganizationID == "" || confirmationEvent.OrganizationID != string(goal.OrganizationID) ||
+		confirmationEvent.SourceActorID == "" || confirmationEvent.SourceActorID != confirmation.ConfirmingActorID || !validReviewedOperatorIdentity(confirmation.ConfirmingActorID, confirmation.ConfirmingActorKind, confirmation.SourceChannel) ||
+		confirmationEvent.SourceExecutionID != "" || confirmationEvent.RecipientScope != "" || confirmationEvent.RecipientID != "" || confirmationEvent.TaskID != "task-"+confirmationEvent.CorrelationID ||
+		len(confirmationEvent.AuthorizationRefs) != 0 || len(confirmationEvent.ArtifactRefs) != 0 || confirmationEvent.CorrelationID == "" || confirmationEvent.SchemaVersion != events.SchemaVersion ||
+		confirmation.IntentID != "intent-"+confirmationEvent.CorrelationID || confirmation.GoalID != string(goal.ID) || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.MessageID == "" {
+		return fmt.Errorf("goal-bound intent confirmation does not match its checked goal")
+	}
+	if goal.ID == "" || goal.Status != core.GoalActive {
+		return fmt.Errorf("goal-bound intent confirmation requires its active Goal at admission")
+	}
+	reviewStream := make([]events.Event, 0, len(stream))
+	for _, candidate := range stream {
+		if candidate.CorrelationID != confirmationEvent.CorrelationID || confirmationEvent.Sequence > 0 && candidate.Sequence > confirmationEvent.Sequence {
+			continue
+		}
+		switch candidate.EventType {
+		case "INTAKE_MESSAGE_RECORDED", "INTENT_DRAFTED", "INTENT_CONFIRMED":
+			reviewStream = append(reviewStream, candidate)
+		}
+	}
+	if len(reviewStream) > maximumReviewedIntentEvidenceEvents {
+		return fmt.Errorf("goal-bound intent review evidence exceeds its admission bound")
+	}
+	confirmationDraft := events.TrustedDraft{
+		OrganizationID: confirmationEvent.OrganizationID, EventType: confirmationEvent.EventType, SourceActorID: confirmationEvent.SourceActorID,
+		SourceExecutionID: confirmationEvent.SourceExecutionID, RecipientScope: confirmationEvent.RecipientScope, RecipientID: confirmationEvent.RecipientID,
+		TaskID: confirmationEvent.TaskID, AuthorizationRefs: confirmationEvent.AuthorizationRefs, ArtifactRefs: confirmationEvent.ArtifactRefs,
+		Payload: confirmation, CorrelationID: confirmationEvent.CorrelationID,
+	}
+	return validateReviewedGoalIntent(reviewStream, confirmationDraft, confirmation, goal.ID)
 }
 
 func validateReviewedGoalIntent(stream []events.Event, confirmationDraft events.TrustedDraft, confirmation events.IntentConfirmedPayload, goalID core.ID) error {
@@ -2891,3 +2942,4 @@ func scanEvent(row rowScanner) (events.Event, error) {
 	event.CreatedAt = parsed
 	return event, nil
 }
+
