@@ -382,10 +382,24 @@ func inferenceWindow(now time.Time, duration time.Duration) (time.Time, time.Tim
 
 func inferenceReservationID(request inference.InferenceRequest) (string, error) {
 	body, err := json.Marshal(struct {
-		Scope        inference.Scope `json:"scope"`
-		Descriptor   any             `json:"descriptor"`
-		PromptSHA256 string          `json:"prompt_sha256"`
-	}{Scope: request.Scope, Descriptor: request.Descriptor, PromptSHA256: request.PromptSHA256})
+		OrganizationID          string `json:"organization_id"`
+		Purpose                 string `json:"purpose"`
+		RequestID               string `json:"request_id"`
+		IntentID                string `json:"intent_id"`
+		TaskID                  string `json:"task_id"`
+		ExecutionID             string `json:"execution_id"`
+		CorrelationID           string `json:"correlation_id"`
+		Provider                string `json:"provider"`
+		Model                   string `json:"model"`
+		ExecutionProfileVersion string `json:"execution_profile_version"`
+		PromptSHA256            string `json:"prompt_sha256"`
+	}{
+		OrganizationID: request.Scope.OrganizationID, Purpose: string(request.Scope.Purpose),
+		RequestID: request.Scope.RequestID, IntentID: request.Scope.IntentID, TaskID: request.Scope.TaskID,
+		ExecutionID: request.Scope.ExecutionID, CorrelationID: request.Scope.CorrelationID,
+		Provider: request.Descriptor.Provider, Model: request.Descriptor.Model,
+		ExecutionProfileVersion: request.Descriptor.ExecutionProfileVersion, PromptSHA256: request.PromptSHA256,
+	})
 	if err != nil {
 		return "", fmt.Errorf("encode inference reservation identity: %w", err)
 	}
