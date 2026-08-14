@@ -6,7 +6,7 @@ checklist does not authorize deployment or publication.
 
 | Gate | Status | Evidence or next action |
 |---|---|---|
-| Architecture acceptance | PASS | All 23 current V1 requirements have linked automated evidence. |
+| Architecture acceptance | PASS | All 24 current V1 requirements have linked automated evidence. |
 | Required CI | PASS | Build, vet, lint, race tests, vulnerability scanning, architecture checks, interoperability, and advisory dead-code analysis run on pushes and pull requests. |
 | Resumable initialization | PARTIAL | System-default and current-account user modes, stable paths, setup checkpoints, provider discovery, and service installation are implemented. Complete a clean Linux VM installation test before a release candidate. |
 | Controlled startup | PASS | The runtime refuses incomplete configuration and requires exactly one validated real provider. A2A remains disabled without a reviewed Agent registry. |

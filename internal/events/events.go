@@ -2038,6 +2038,7 @@ func RequiresProjectionAdmission(eventType, sourceActorID string) bool {
 		"AGENT_CREATED", "AGENT_CONFIGURATION_UPDATED", "AGENT_DEACTIVATED", "AGENT_REACTIVATED",
 		"INTENT_CREATED",
 		"WORK_CREATED", "WORK_COMPLETED", "WORK_FAILED", "WORK_PLANNING_FAILED",
+		"LAB_EXPERIMENT_STARTED", "LAB_EXPERIMENT_COMPLETED", "LAB_EXPERIMENT_FAILED", "LAB_PROMOTION_CANDIDATE_CREATED",
 		"TASK_CREATED", "TASK_ASSIGNMENT_REVALIDATED", "TASK_RECOVERED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED":
 		return true
 	case "TASK_BLOCKED":
@@ -2051,7 +2052,7 @@ func RequiresProjectionAdmission(eventType, sourceActorID string) bool {
 // projections carried by the current Event Contract schema.
 func ProjectionKindRequiresAdmission(kind string) bool {
 	switch kind {
-	case "organization", "mission", "goal", "team", "agent_blueprint", "execution_profile", "agent", "intent", "work", "task":
+	case "organization", "mission", "goal", "team", "agent_blueprint", "execution_profile", "agent", "intent", "work", "task", "lab_experiment", "lab_promotion_candidate":
 		return true
 	default:
 		return false
@@ -2114,6 +2115,24 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 		var intent core.Intent
 		if decodeExactEventJSON(record.Value, &intent) != nil || intent.ID == "" || intent.ID != core.ID(record.RecordID) || intent.OrganizationID == "" || string(intent.OrganizationID) != event.OrganizationID || record.CorrelationID == "" || record.CorrelationID != event.CorrelationID {
 			return fmt.Errorf("intent projection value is invalid or lacks its correlation boundary")
+		}
+	}
+	if record.ProjectionKind == "lab_experiment" {
+		var experiment core.Experiment
+		if decodeExactEventJSON(record.Value, &experiment) != nil || experiment.ID != core.ID(record.RecordID) || string(experiment.OrganizationID) != event.OrganizationID || record.CorrelationID == "" || record.CorrelationID != event.CorrelationID {
+			return fmt.Errorf("lab experiment projection value is invalid or lacks its correlation boundary")
+		}
+		if err := ValidateExperimentProjectionTarget(event.EventType, record.Version, experiment); err != nil {
+			return err
+		}
+	}
+	if record.ProjectionKind == "lab_promotion_candidate" {
+		var candidate core.PromotionCandidate
+		if decodeExactEventJSON(record.Value, &candidate) != nil || candidate.ID != core.ID(record.RecordID) || string(candidate.OrganizationID) != event.OrganizationID || record.CorrelationID == "" || record.CorrelationID != event.CorrelationID {
+			return fmt.Errorf("lab promotion-candidate projection value is invalid or lacks its correlation boundary")
+		}
+		if err := ValidatePromotionCandidateProjectionTarget(event.EventType, record.Version, candidate); err != nil {
+			return err
 		}
 	}
 	if record.ProjectionKind == "task" {
@@ -2227,6 +2246,44 @@ func ValidateWorkProjectionTransition(eventType string, version int, previous *c
 		previous.Status == core.WorkActive && next.Status == core.WorkFailed && (eventType == "WORK_FAILED" || eventType == "WORK_PLANNING_FAILED")
 	if !valid {
 		return fmt.Errorf("work lifecycle event %s does not match the exact state transition", eventType)
+	}
+	return nil
+}
+
+// ValidateExperimentProjectionTarget keeps experimental completion separate
+// from trust. No event label in this contract can materialize an active result.
+func ValidateExperimentProjectionTarget(eventType string, version int, experiment core.Experiment) error {
+	if version < 1 || !core.ValidExperiment(experiment) {
+		return fmt.Errorf("lab experiment projection is incomplete or unsafe")
+	}
+	valid := version == 1 && eventType == "LAB_EXPERIMENT_STARTED" && experiment.Status == core.ExperimentRunning ||
+		version > 1 && eventType == "LAB_EXPERIMENT_COMPLETED" && experiment.Status == core.ExperimentCompleted ||
+		version > 1 && eventType == "LAB_EXPERIMENT_FAILED" && experiment.Status == core.ExperimentFailed
+	if !valid {
+		return fmt.Errorf("lab experiment event %s cannot materialize status %s at version %d", eventType, experiment.Status, version)
+	}
+	return nil
+}
+
+func ValidateExperimentProjectionTransition(eventType string, version int, previous *core.Experiment, next core.Experiment) error {
+	if err := ValidateExperimentProjectionTarget(eventType, version, next); err != nil {
+		return err
+	}
+	if previous == nil {
+		if version != 1 || eventType != "LAB_EXPERIMENT_STARTED" {
+			return fmt.Errorf("lab experiment history must begin with runtime start at version one")
+		}
+		return nil
+	}
+	if version < 2 || !core.ValidExperimentRevision(*previous, next) {
+		return fmt.Errorf("lab experiment revision changes its containment, budget, trust, or terminal lifecycle")
+	}
+	return nil
+}
+
+func ValidatePromotionCandidateProjectionTarget(eventType string, version int, candidate core.PromotionCandidate) error {
+	if version != 1 || eventType != "LAB_PROMOTION_CANDIDATE_CREATED" || !core.ValidPromotionCandidate(candidate) {
+		return fmt.Errorf("lab promotion candidate is not a valid version-one nomination")
 	}
 	return nil
 }
@@ -2464,6 +2521,10 @@ func validProjectionEventType(kind string, version int, eventType string) bool {
 		return version == 1 && eventType == "INTENT_CREATED"
 	case "work":
 		return version == 1 && eventType == "WORK_CREATED" || version > 1 && (eventType == "WORK_COMPLETED" || eventType == "WORK_FAILED" || eventType == "WORK_PLANNING_FAILED")
+	case "lab_experiment":
+		return version == 1 && eventType == "LAB_EXPERIMENT_STARTED" || version > 1 && (eventType == "LAB_EXPERIMENT_COMPLETED" || eventType == "LAB_EXPERIMENT_FAILED")
+	case "lab_promotion_candidate":
+		return version == 1 && eventType == "LAB_PROMOTION_CANDIDATE_CREATED"
 	case "task":
 		if version == 1 {
 			return eventType == "TASK_CREATED" || eventType == "TASK_BLOCKED"

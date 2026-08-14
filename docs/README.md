@@ -7,6 +7,7 @@
 - [Approval control](APPROVAL_CONTROL.md) - the owner-only exact-effect decision boundary.
 - [Completion review](COMPLETION_REVIEW.md) - user review of model-backed completion candidates.
 - [Planning and Task DAGs](PLANNING_AND_TASK_DAGS.md) - bounded planning, atomic graph admission, dependency evidence, and external root isolation.
+- [Governed Lab](LAB.md) - contained experiments, unverified results, and nomination-only promotion candidates.
 - [SQLite recovery](SQLITE_RECOVERY.md) - backup, verification, restore, and rollback.
 - [Effect reconciliation](EFFECT_RECONCILIATION.md) - evidence-based recovery of uncertain external effects.
 

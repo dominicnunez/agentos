@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 )
 
@@ -146,16 +147,18 @@ func DistinctNonemptyStrings(values []string) bool {
 // DurableGraph is the current organizational state whose cross-record
 // relationships must remain valid regardless of how it was materialized.
 type DurableGraph struct {
-	Organizations     map[ID]DurableState[Organization]
-	Missions          map[ID]DurableState[Mission]
-	Goals             map[ID]DurableState[Goal]
-	Teams             map[ID]DurableState[Team]
-	AgentBlueprints   map[ID]DurableState[AgentBlueprint]
-	ExecutionProfiles map[ID]DurableState[ExecutionProfile]
-	Agents            map[ID]DurableState[Agent]
-	Intents           map[ID]DurableState[Intent]
-	Works             map[ID]DurableState[Work]
-	Tasks             map[ID]DurableState[Task]
+	Organizations       map[ID]DurableState[Organization]
+	Missions            map[ID]DurableState[Mission]
+	Goals               map[ID]DurableState[Goal]
+	Teams               map[ID]DurableState[Team]
+	AgentBlueprints     map[ID]DurableState[AgentBlueprint]
+	ExecutionProfiles   map[ID]DurableState[ExecutionProfile]
+	Agents              map[ID]DurableState[Agent]
+	Intents             map[ID]DurableState[Intent]
+	Works               map[ID]DurableState[Work]
+	Tasks               map[ID]DurableState[Task]
+	Experiments         map[ID]DurableState[Experiment]
+	PromotionCandidates map[ID]DurableState[PromotionCandidate]
 }
 
 // ValidateDurableGraph applies the complete fail-closed organizational graph
@@ -166,7 +169,7 @@ func ValidateDurableGraph(graph DurableGraph) error {
 			return err
 		}
 	}
-	organized := make([]durableOrganizedIdentity, 0, len(graph.Missions)+len(graph.Goals)+len(graph.AgentBlueprints)+len(graph.ExecutionProfiles)+len(graph.Agents)+len(graph.Teams)+len(graph.Intents))
+	organized := make([]durableOrganizedIdentity, 0, len(graph.Missions)+len(graph.Goals)+len(graph.AgentBlueprints)+len(graph.ExecutionProfiles)+len(graph.Agents)+len(graph.Teams)+len(graph.Intents)+len(graph.Experiments)+len(graph.PromotionCandidates))
 	for id, state := range graph.Missions {
 		organized = append(organized, durableOrganizedIdentity{"mission", id, state.Value.ID, state.Value.OrganizationID})
 	}
@@ -187,6 +190,12 @@ func ValidateDurableGraph(graph DurableGraph) error {
 	}
 	for id, state := range graph.Intents {
 		organized = append(organized, durableOrganizedIdentity{"intent", id, state.Value.ID, state.Value.OrganizationID})
+	}
+	for id, state := range graph.Experiments {
+		organized = append(organized, durableOrganizedIdentity{"experiment", id, state.Value.ID, state.Value.OrganizationID})
+	}
+	for id, state := range graph.PromotionCandidates {
+		organized = append(organized, durableOrganizedIdentity{"promotion candidate", id, state.Value.ID, state.Value.OrganizationID})
 	}
 	for _, record := range organized {
 		if err := validateDurableOrganizedIdentity(record, graph.Organizations); err != nil {
@@ -279,6 +288,42 @@ func ValidateDurableGraph(graph DurableGraph) error {
 	}
 	if err := ValidateTaskDAG(tasks); err != nil {
 		return err
+	}
+	for id, state := range graph.Experiments {
+		experiment := state.Value
+		if !ValidExperiment(experiment) {
+			return fmt.Errorf("experiment %s is incomplete or unsafe", id)
+		}
+		work, found := graph.Works[experiment.WorkID]
+		if !found || state.CorrelationID == "" || work.CorrelationID != state.CorrelationID {
+			return fmt.Errorf("experiment %s crosses its Work correlation boundary", id)
+		}
+		intent := graph.Intents[work.Value.IntentID]
+		if experiment.OrganizationID != intent.Value.OrganizationID || experiment.Objective != work.Value.Objective {
+			return fmt.Errorf("experiment %s crosses its Work organization or objective boundary", id)
+		}
+		// A terminal Work may briefly coexist with a RUNNING experiment after a
+		// crash; startup reconciliation closes it from the durable Work event.
+		if experiment.Status != ExperimentRunning && !ValidTerminalExperimentWorkStatus(experiment, work.Value) {
+			return fmt.Errorf("experiment %s conflicts with its Work lifecycle", id)
+		}
+	}
+	for id, state := range graph.PromotionCandidates {
+		candidate := state.Value
+		if !ValidPromotionCandidate(candidate) {
+			return fmt.Errorf("promotion candidate %s is incomplete or unsafe", id)
+		}
+		experiment, found := graph.Experiments[candidate.ExperimentID]
+		if !found || experiment.Value.Status != ExperimentCompleted || candidate.OrganizationID != experiment.Value.OrganizationID ||
+			candidate.ExperimentVersion != experiment.Version || state.CorrelationID == "" || state.CorrelationID != experiment.CorrelationID ||
+			!slices.Equal(candidate.ExperimentResultEventRefs, experiment.Value.ResultEventRefs) {
+			return fmt.Errorf("promotion candidate %s lacks its exact completed experiment", id)
+		}
+		work := graph.Works[experiment.Value.WorkID]
+		intent := graph.Intents[work.Value.IntentID]
+		if candidate.NominatedBy != intent.Value.SourcePrincipalID {
+			return fmt.Errorf("promotion candidate %s does not preserve its commissioning actor", id)
+		}
 	}
 	return nil
 }

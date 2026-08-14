@@ -11,6 +11,7 @@
 7. `ExecutionContextManifest` records what an execution was actually given.
 8. A2A v1.0 is an external Agent/operator boundary. It does not become the internal communication model.
 9. Approval decisions fail closed. An approval authorizes a fingerprinted effect, never a general privilege expansion.
+10. Lab completion remains `EXPERIMENTAL_UNVERIFIED`; commissioning actors may nominate a result but cannot certify or activate it.
 
 The organizational hierarchy is `Mission > Goal > Work > Task`. Mission and
 Goal are durable organization-scoped projections whose append-only revisions
@@ -37,6 +38,12 @@ runtime-selected dependency result events as untrusted evidence.
 
 The fake adapter is test-only and deliberately non-intelligent: it makes the
 execution seam testable without becoming a production provider.
+
+The first governed Lab slice composes deterministic, no-inference Work with a
+fixed no-effects profile and explicit resource ceilings. It seals Experiment
+and promotion-candidate projections through the same event-coupled admission
+path as other organizational state. Adaptive experiments remain rejected until
+their budgets and containment can be enforced rather than merely recorded.
 
 ## Implemented V1 seams
 

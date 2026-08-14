@@ -30,6 +30,9 @@ Target: `1.0.0-rc.1`
   reconciliation tooling.
 - Explicit SQLite application identity, versioned atomic storage migrations,
   frozen oldest-supported fixtures, and storage/Event Contract diagnostics.
+- Governed deterministic Lab experiments with explicit no-effects containment,
+  resource ceilings, durable unverified results, restart reconciliation, and
+  nomination-only promotion candidates requiring independent evidence.
 
 ### Security
 

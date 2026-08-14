@@ -1452,7 +1452,7 @@ func TestAppendRecordRejectsEveryOrganizationalProjectionNamespace(t *testing.T)
 	}
 	t.Cleanup(func() { _ = l.Close() })
 
-	for _, kind := range []string{"organization", "mission", "goal", "team", "agent_blueprint", "execution_profile", "agent", "intent", "work", "task", "future_projection"} {
+	for _, kind := range []string{"organization", "mission", "goal", "team", "agent_blueprint", "execution_profile", "agent", "intent", "work", "task", "lab_experiment", "lab_promotion_candidate", "future_projection"} {
 		t.Run(kind, func(t *testing.T) {
 			if err := l.AppendRecord(ctx, "org-1", "FORGED_PROJECTION", "runtime", "", nil, nil, kind, "forged-1", 1, map[string]string{"id": "forged-1"}); err == nil {
 				t.Fatalf("generic record writer accepted reserved %s projection", kind)
