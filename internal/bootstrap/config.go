@@ -18,10 +18,14 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/modelid"
 )
 
-const ConfigVersion = 1
+const (
+	legacyConfigVersion = 1
+	ConfigVersion       = 2
+)
 
 type Mode string
 
@@ -64,11 +68,12 @@ type Owner struct {
 }
 
 type Provider struct {
-	Kind            ProviderKind `json:"kind"`
-	Model           string       `json:"model"`
-	SecretRef       string       `json:"secret_ref,omitempty"`
-	CodexBinary     string       `json:"codex_binary,omitempty"`
-	CodexCredential string       `json:"codex_credential_store,omitempty"`
+	Kind            ProviderKind     `json:"kind"`
+	Model           string           `json:"model"`
+	SecretRef       string           `json:"secret_ref,omitempty"`
+	CodexBinary     string           `json:"codex_binary,omitempty"`
+	CodexCredential string           `json:"codex_credential_store,omitempty"`
+	InferencePolicy inference.Policy `json:"inference_policy"`
 }
 
 type A2A struct {
@@ -168,6 +173,9 @@ func (c Config) ValidateReady() error {
 		if provider.Kind == ProviderCodexSubscription && !pathWithin(c.Paths.StateDir, provider.CodexCredential) {
 			problems = append(problems, fmt.Errorf("provider %d: Codex credential store must remain inside the state directory", index+1))
 		}
+		if provider.InferencePolicy.OrganizationID != c.Organization || provider.InferencePolicy.AuthorizedBy != "local-uid-"+strconv.Itoa(c.Owner.UID) {
+			problems = append(problems, fmt.Errorf("provider %d: inference policy must be approved for this organization by the installation owner", index+1))
+		}
 	}
 	if err := validateA2A(c.A2A); err != nil {
 		problems = append(problems, err)
@@ -188,6 +196,83 @@ func (c Config) ValidateReady() error {
 	return errors.Join(problems...)
 }
 
+// UpgradeVersion1Checkpoint validates the one prior setup format and converts
+// it into an incomplete current checkpoint. Provider configuration is cleared
+// deliberately because version 1 contains no reviewed inference policy; setup
+// must collect and verify that policy before the installation can run again.
+func UpgradeVersion1Checkpoint(config Config, state State) (Config, State, error) {
+	if config.Version != legacyConfigVersion || state.Version != legacyConfigVersion || config.Mode != state.Mode {
+		return Config{}, State{}, fmt.Errorf("only a matching version-1 checkpoint can be upgraded")
+	}
+	if err := validateVersion1Config(config); err != nil {
+		return Config{}, State{}, fmt.Errorf("validate version-1 configuration: %w", err)
+	}
+	if !validStage(state.Stage) || state.UpdatedAt.IsZero() || state.UpdatedAt.Location() != time.UTC {
+		return Config{}, State{}, fmt.Errorf("version-1 initialization state is invalid")
+	}
+	upgradedConfig := Config{
+		Version: ConfigVersion, Mode: config.Mode, Owner: config.Owner, Organization: config.Organization,
+		Paths: config.Paths, A2A: config.A2A, CreatedAt: config.CreatedAt, UpdatedAt: config.UpdatedAt,
+	}
+	upgradedState := State{Version: ConfigVersion, Mode: state.Mode, Stage: StageProvider, UpdatedAt: state.UpdatedAt}
+	return upgradedConfig, upgradedState, nil
+}
+
+func validateVersion1Config(config Config) error {
+	var problems []error
+	if config.Mode != ModeSystem && config.Mode != ModeUser {
+		problems = append(problems, fmt.Errorf("mode must be system or user"))
+	}
+	if !validLinuxAccountName(config.Owner.Username) || config.Owner.Username == "agentos" || config.Owner.UID < 0 || config.Owner.GID < 0 {
+		problems = append(problems, fmt.Errorf("owner must be a verified Linux user"))
+	}
+	if !validIdentifier(config.Organization) {
+		problems = append(problems, fmt.Errorf("organization is required"))
+	}
+	if err := validatePaths(config.Paths); err != nil {
+		problems = append(problems, err)
+	}
+	if len(config.Providers) > 1 {
+		problems = append(problems, fmt.Errorf("version-1 configuration has multiple providers"))
+	}
+	for _, provider := range config.Providers {
+		if err := validateVersion1Provider(provider); err != nil {
+			problems = append(problems, err)
+		}
+		if provider.Kind == ProviderCodexSubscription && !pathWithin(config.Paths.StateDir, provider.CodexCredential) {
+			problems = append(problems, fmt.Errorf("codex credential store must remain inside the state directory"))
+		}
+	}
+	if err := validateA2A(config.A2A); err != nil {
+		problems = append(problems, err)
+	}
+	for _, path := range []string{config.A2A.ActorsFile, config.A2A.TLSCertFile, config.A2A.TLSKeyFile} {
+		if path != "" && !pathWithin(config.Paths.ConfigDir, path) {
+			problems = append(problems, fmt.Errorf("A2A source must remain inside the configuration directory"))
+		}
+	}
+	if config.CreatedAt.IsZero() || config.UpdatedAt.IsZero() || config.CreatedAt.Location() != time.UTC || config.UpdatedAt.Location() != time.UTC || config.UpdatedAt.Before(config.CreatedAt) {
+		problems = append(problems, fmt.Errorf("configuration timestamps are invalid"))
+	}
+	return errors.Join(problems...)
+}
+
+func validateVersion1Provider(provider Provider) error {
+	switch provider.Kind {
+	case ProviderOpenAIAPI:
+		if !validModelIdentifier(provider.Model) || !modelid.HasDatedSnapshot(provider.Model) || !validCredentialRef(provider.SecretRef) || provider.CodexBinary != "" || provider.CodexCredential != "" {
+			return fmt.Errorf("version-1 OpenAI API provider is invalid")
+		}
+	case ProviderCodexSubscription:
+		if !validModelIdentifier(provider.Model) || !canonicalAbsolutePath(provider.CodexBinary) || !canonicalAbsolutePath(provider.CodexCredential) || !validCredentialRef(provider.SecretRef) {
+			return fmt.Errorf("version-1 Codex subscription provider is invalid")
+		}
+	default:
+		return fmt.Errorf("version-1 provider kind is invalid")
+	}
+	return nil
+}
+
 func pathWithin(root, target string) bool {
 	if !canonicalAbsolutePath(root) || !canonicalAbsolutePath(target) {
 		return false
@@ -197,6 +282,12 @@ func pathWithin(root, target string) bool {
 }
 
 func (p Provider) Validate() error {
+	if err := p.InferencePolicy.Validate(); err != nil {
+		return fmt.Errorf("inference policy: %w", err)
+	}
+	if p.InferencePolicy.Model != p.Model {
+		return fmt.Errorf("inference policy model does not match the provider")
+	}
 	switch p.Kind {
 	case ProviderOpenAIAPI:
 		if strings.TrimSpace(p.Model) == "" || strings.TrimSpace(p.SecretRef) == "" {
@@ -211,9 +302,15 @@ func (p Provider) Validate() error {
 		if p.CodexBinary != "" || p.CodexCredential != "" {
 			return fmt.Errorf("OpenAI API provider cannot contain Codex settings")
 		}
+		if p.InferencePolicy.Provider != "openai-api" || p.InferencePolicy.ExecutionProfileVersion != "v1-openai-responses-model-only" || p.InferencePolicy.Mode != inference.MeteredAPI {
+			return fmt.Errorf("OpenAI API inference policy classification is invalid")
+		}
 	case ProviderCodexSubscription:
 		if !validModelIdentifier(p.Model) || !canonicalAbsolutePath(p.CodexBinary) || !canonicalAbsolutePath(p.CodexCredential) || !validCredentialRef(p.SecretRef) {
 			return fmt.Errorf("codex model, binary, sealed credential store, and key reference are required")
+		}
+		if p.InferencePolicy.Provider != "codex-subscription" || p.InferencePolicy.ExecutionProfileVersion != "v1-codex-subscription-restricted" || p.InferencePolicy.Mode != inference.Subscription {
+			return fmt.Errorf("codex subscription inference policy classification is invalid")
 		}
 	default:
 		return fmt.Errorf("provider must be codex-subscription or openai-api")
@@ -348,10 +445,14 @@ func LoadState(path string) (State, error) {
 	if err := decodeFile(path, "initialization state", &state); err != nil {
 		return State{}, err
 	}
-	if state.Version != ConfigVersion || (state.Mode != ModeSystem && state.Mode != ModeUser) {
+	if (state.Version != legacyConfigVersion && state.Version != ConfigVersion) || (state.Mode != ModeSystem && state.Mode != ModeUser) || !validStage(state.Stage) {
 		return State{}, fmt.Errorf("initialization state is invalid")
 	}
 	return state, nil
+}
+
+func validStage(stage Stage) bool {
+	return stage == StageWorkspace || stage == StageProvider || stage == StageService || stage == StageReady
 }
 
 func SaveConfig(path string, config Config) error { return writeJSON(path, config, 0o600) }

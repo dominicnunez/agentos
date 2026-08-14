@@ -72,7 +72,7 @@ policy:
       from:
         module: app
       to:
-        modules: [assignment, completion, core, events, execution, planning, projections, telemetry, workflow]
+        modules: [assignment, completion, core, events, execution, inference, planning, projections, telemetry, workflow]
 
     - name: assignment-domain
       from:
@@ -120,7 +120,7 @@ policy:
       from:
         module: bootstrap
       to:
-        module: modelid
+        modules: [inference, modelid]
 
     - name: telemetry-projection
       from:
@@ -150,7 +150,7 @@ policy:
       from:
         module: intake
       to:
-        modules: [app, core, events, modeloutput]
+        modules: [app, core, events, inference, modeloutput]
 
     - name: knowledge-domain
       from:
@@ -162,7 +162,13 @@ policy:
       from:
         module: ledger
       to:
-        modules: [approvals, authority, core, events]
+        modules: [approvals, authority, core, events, inference]
+
+    - name: inference-provider-boundary
+      from:
+        module: inference
+      to:
+        modules: [events, execution]
 
     - name: event-contract-domain
       from:
@@ -221,7 +227,7 @@ policy:
         module: intake
         tests: true
       to:
-        module: ledger
+        modules: [execution, ledger]
 
     - name: knowledge-test-adapter
       from:
@@ -235,7 +241,7 @@ policy:
         module: ledger
         tests: true
       to:
-        module: app
+        modules: [app, execution]
 
     - name: projections-test-adapter
       from:
@@ -250,4 +256,4 @@ analysis:
     - modular-monolith
   table_owners:
     - module: ledger
-      tables: [consumed_approvals, events, inbox, records]
+      tables: [consumed_approvals, events, inbox, inference_policies, inference_reservations, records]

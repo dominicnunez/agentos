@@ -1644,6 +1644,45 @@ type InferenceUsageRecordedPayload struct {
 	CostUSD      *float64 `json:"cost_usd,omitempty"`
 }
 
+// InferencePolicyActivatedPayload records the exact reviewed organization
+// budget admitted by the runtime. Limits are non-secret and the fingerprint
+// binds subsequent reservations to this immutable policy revision.
+type InferencePolicyActivatedPayload struct {
+	PolicyFingerprint       string    `json:"policy_fingerprint"`
+	Provider                string    `json:"provider"`
+	Model                   string    `json:"model"`
+	ExecutionProfileVersion string    `json:"execution_profile_version"`
+	AccessMode              string    `json:"access_mode"`
+	AuthorizedBy            string    `json:"authorized_by"`
+	AuthorizedAt            time.Time `json:"authorized_at"`
+	AuthorizationExpiresAt  time.Time `json:"authorization_expires_at"`
+}
+
+type InferenceReservedPayload struct {
+	ReservationID           string    `json:"reservation_id"`
+	RequestID               string    `json:"request_id"`
+	Purpose                 string    `json:"purpose"`
+	IntentID                string    `json:"intent_id,omitempty"`
+	PolicyFingerprint       string    `json:"policy_fingerprint"`
+	PromptSHA256            string    `json:"prompt_sha256"`
+	Provider                string    `json:"provider"`
+	Model                   string    `json:"model"`
+	ExecutionProfileVersion string    `json:"execution_profile_version"`
+	ReservedInputTokens     int64     `json:"reserved_input_tokens"`
+	ReservedOutputTokens    int64     `json:"reserved_output_tokens"`
+	ReservedCostNanoUSD     int64     `json:"reserved_cost_nano_usd"`
+	WindowStartedAt         time.Time `json:"window_started_at"`
+	WindowExpiresAt         time.Time `json:"window_expires_at"`
+}
+
+type InferenceReconciledPayload struct {
+	ReservationID       string `json:"reservation_id"`
+	State               string `json:"state"`
+	ChargedInputTokens  int64  `json:"charged_input_tokens"`
+	ChargedOutputTokens int64  `json:"charged_output_tokens"`
+	ChargedCostNanoUSD  int64  `json:"charged_cost_nano_usd"`
+}
+
 func (p InferenceUsageRecordedPayload) Valid() bool {
 	return p.Source != "" && p.Provider != "" && p.Model != "" &&
 		p.InputTokens >= 0 && p.OutputTokens >= 0 &&

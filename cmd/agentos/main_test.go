@@ -67,7 +67,8 @@ func TestPrintVersionDoesNotStartRuntime(t *testing.T) {
 }
 
 func TestConfiguredProviderRequiresTypedRealProviderAndServerOwnedSecret(t *testing.T) {
-	provider := bootstrap.Provider{Kind: bootstrap.ProviderOpenAIAPI, Model: "gpt-test-2026-01-01", SecretRef: "OPENAI_PROJECT_KEY"}
+	config := bootstrap.NewConfig(bootstrap.ModeUser, bootstrap.Owner{Username: "test", UID: 1000, GID: 1000}, bootstrap.Paths{}, time.Now())
+	provider := testOpenAIProvider(config, "gpt-test-2026-01-01", "OPENAI_PROJECT_KEY")
 	model, closeModel, err := configuredProvider(context.Background(), provider, t.TempDir(), testSecrets{"OPENAI_PROJECT_KEY": "test-secret"})
 	if err != nil {
 		t.Fatal(err)

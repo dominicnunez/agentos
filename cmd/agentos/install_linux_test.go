@@ -15,7 +15,7 @@ import (
 func TestSystemdUnitsQuoteConfiguredPathsAndPercentSpecifiers(t *testing.T) {
 	config := bootstrap.NewConfig(bootstrap.ModeSystem, bootstrap.Owner{Username: "root", UID: 0, GID: 0}, bootstrap.SystemPaths(), time.Now())
 	config.Paths.Workspace = "/var/lib/agentos/work spaces/%n"
-	config.Providers = []bootstrap.Provider{{Kind: bootstrap.ProviderOpenAIAPI, Model: "gpt-test-2026-01-01", SecretRef: "openai-api-key"}}
+	config.Providers = []bootstrap.Provider{testOpenAIProvider(config, "gpt-test-2026-01-01", "openai-api-key")}
 	unit, err := systemServiceUnit(config)
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +44,7 @@ func TestUserServiceLoadsReviewedA2ACredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := bootstrap.NewConfig(bootstrap.ModeUser, bootstrap.Owner{Username: "alice", UID: effectiveUID(), GID: effectiveUID()}, paths, time.Now())
-	config.Providers = []bootstrap.Provider{{Kind: bootstrap.ProviderOpenAIAPI, Model: "gpt-test-2026-01-01", SecretRef: "openai-api-key"}}
+	config.Providers = []bootstrap.Provider{testOpenAIProvider(config, "gpt-test-2026-01-01", "openai-api-key")}
 	config.A2A.ActorsFile = filepath.Join(paths.ConfigDir, "a2a-actors.json")
 	if err := os.MkdirAll(filepath.Join(paths.ConfigDir, "credentials"), 0o700); err != nil {
 		t.Fatal(err)

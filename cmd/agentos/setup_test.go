@@ -2,8 +2,13 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"slices"
 	"testing"
+	"time"
+
+	"github.com/dominicnunez/agentos/internal/bootstrap"
+	"github.com/dominicnunez/agentos/internal/inference"
 )
 
 type pathSetupUITestDouble struct {
@@ -64,4 +69,39 @@ func TestSelectDetectedPath(t *testing.T) {
 			t.Fatal("invalid selection was accepted")
 		}
 	})
+}
+
+func TestLoadOrBeginInitPersistsOneWayVersion1Upgrade(t *testing.T) {
+	now := time.Now().UTC()
+	paths, err := bootstrap.UserPaths(filepath.Join(t.TempDir(), "home"), filepath.Join(t.TempDir(), "run"), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := bootstrap.Owner{Username: "alice", UID: 1000, GID: 1000}
+	config := bootstrap.NewConfig(bootstrap.ModeUser, owner, paths, now)
+	config.Version = 1
+	provider := testOpenAIProvider(config, "gpt-test-2026-01-01", "openai-api-key")
+	provider.InferencePolicy = inference.Policy{}
+	config.Providers = []bootstrap.Provider{provider}
+	state := bootstrap.State{Version: 1, Mode: bootstrap.ModeUser, Stage: bootstrap.StageReady, UpdatedAt: now}
+	configPath := bootstrap.ConfigPath(paths)
+	statePath := bootstrap.StatePath(paths)
+	if err := bootstrap.SaveConfig(configPath, config); err != nil {
+		t.Fatal(err)
+	}
+	if err := bootstrap.SaveState(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+
+	upgraded, upgradedState, err := loadOrBeginInit(bootstrap.ModeUser, owner, paths, configPath, statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upgraded.Version != bootstrap.ConfigVersion || upgradedState.Version != bootstrap.ConfigVersion || upgradedState.Stage != bootstrap.StageProvider || len(upgraded.Providers) != 0 {
+		t.Fatalf("version-1 checkpoint was not safely upgraded: config=%+v state=%+v", upgraded, upgradedState)
+	}
+	reloaded, err := bootstrap.LoadConfig(configPath)
+	if err != nil || reloaded.Version != bootstrap.ConfigVersion || len(reloaded.Providers) != 0 {
+		t.Fatalf("upgraded checkpoint was not persisted: config=%+v err=%v", reloaded, err)
+	}
 }

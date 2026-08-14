@@ -26,6 +26,7 @@ const (
 	codexExecutionProfile     = "v1-codex-subscription-restricted"
 	codexRunTimeout           = 20 * time.Second
 	codexMaximumPromptBytes   = 256 << 10
+	codexMaximumUsageTokens   = 1_000_000
 	codexMaximumResponseBytes = 256 << 10
 	codexMaximumStreamBytes   = 512 << 10
 	codexMaximumModelBytes    = 128
@@ -336,30 +337,30 @@ func (a *CodexSubscription) Descriptor() ModelDescriptor {
 
 func (a *CodexSubscription) Complete(ctx context.Context, prompt string) (response ModelResponse, err error) {
 	if ctx == nil {
-		return ModelResponse{}, fmt.Errorf("execution context is required")
+		return ModelResponse{}, RequestNotSent(fmt.Errorf("execution context is required"))
 	}
 	if len(prompt) == 0 || len(prompt) > codexMaximumPromptBytes {
-		return ModelResponse{}, fmt.Errorf("codex prompt must contain 1 to %d bytes", codexMaximumPromptBytes)
+		return ModelResponse{}, RequestNotSent(fmt.Errorf("codex prompt must contain 1 to %d bytes", codexMaximumPromptBytes))
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, codexRunTimeout)
 	defer cancel()
 	if a.runPermit == nil {
-		return ModelResponse{}, fmt.Errorf("codex subscription adapter is closed")
+		return ModelResponse{}, RequestNotSent(fmt.Errorf("codex subscription adapter is closed"))
 	}
 	select {
 	case a.runPermit <- struct{}{}:
 		defer func() { <-a.runPermit }()
 	case <-runCtx.Done():
-		return ModelResponse{}, fmt.Errorf("wait for confined Codex turn: %w", runCtx.Err())
+		return ModelResponse{}, RequestNotSent(fmt.Errorf("wait for confined Codex turn: %w", runCtx.Err()))
 	}
 	if a.run == nil || a.isolatedDir == "" {
-		return ModelResponse{}, fmt.Errorf("codex subscription adapter is closed")
+		return ModelResponse{}, RequestNotSent(fmt.Errorf("codex subscription adapter is closed"))
 	}
 
 	runDir, err := os.MkdirTemp(a.isolatedDir, "run-")
 	if err != nil {
-		return ModelResponse{}, fmt.Errorf("create isolated Codex turn directory: %w", err)
+		return ModelResponse{}, RequestNotSent(fmt.Errorf("create isolated Codex turn directory: %w", err))
 	}
 	defer func() {
 		err = errors.Join(err, removeOwnedCodexDirectory(a.isolatedDir, runDir, "run-"))
@@ -431,7 +432,7 @@ func validatedCodexResponse(model string, result *sdk.RunResult, summary sdk.Str
 		OutputTokens: output,
 		TotalTokens:  total,
 	}
-	if !usage.Valid() {
+	if !usage.Valid() || usage.TotalTokens > codexMaximumUsageTokens {
 		return ModelResponse{}, fmt.Errorf("codex returned inconsistent token usage")
 	}
 	return ModelResponse{Text: result.Response, Usage: usage}, nil

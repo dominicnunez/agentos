@@ -2,11 +2,24 @@ package execution
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 )
+
+func TestRequestNotSentMarkerSurvivesWrapping(t *testing.T) {
+	sentinel := errors.New("local rejection")
+	marked := RequestNotSent(sentinel)
+	if !WasRequestNotSent(fmt.Errorf("adapter: %w", marked)) || !errors.Is(marked, sentinel) {
+		t.Fatal("definite pre-send failure lost its marker or cause")
+	}
+	if WasRequestNotSent(sentinel) || RequestNotSent(nil) != nil {
+		t.Fatal("ordinary or nil error was classified as a definite pre-send failure")
+	}
+}
 
 func TestAgentExecutionReturnsSeparateUsageContract(t *testing.T) {
 	executor := NewAgentExecution(FakeModel{})

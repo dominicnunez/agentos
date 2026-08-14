@@ -11,7 +11,6 @@ import (
 	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/effects"
-	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/knowledge"
 	"github.com/dominicnunez/agentos/internal/ledger"
 	"github.com/dominicnunez/agentos/internal/secrets"
@@ -63,21 +62,6 @@ func TestV1SafetyServicesEnforceAndRecordContracts(t *testing.T) {
 	}
 	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "human-1", "task-1", []string{"approval-capability-1"}, nil, "capability_lease", "lease-1", 1, lease); err != nil {
 		t.Fatalf("persist capability lease: %v", err)
-	}
-
-	manager := inference.Manager{Pools: []inference.Pool{
-		{ID: "subscription", Mode: inference.Subscription, Available: false},
-		{ID: "metered", Mode: inference.MeteredAPI, Available: false},
-		{
-			ID: "local", Provider: "fake", Mode: inference.Local,
-			AllowedModels: []string{"fake-model/v1"}, Available: true, ConcurrencyLimit: 1,
-			Snapshot:          inference.UsageSnapshot{Source: "local", ObservedAt: now, Confidence: 1, Remaining: 10, Unit: "requests"},
-			ContinuityReserve: 1,
-		},
-	}}
-	selection, err := manager.Select(inference.Request{RequiredModel: "fake-model/v1", EstimatedUsage: 1})
-	if err != nil || selection.PoolID != "local" || selection.Provider != "fake" || selection.Model != "fake-model/v1" || selection.Snapshot.Source != "local" {
-		t.Fatalf("select reserve-safe inference pool: selection=%+v err=%v", selection, err)
 	}
 
 	record := core.KnowledgeRecord{

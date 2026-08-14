@@ -30,6 +30,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/gateway"
+	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/intake"
 	"github.com/dominicnunez/agentos/internal/ledger"
 	"github.com/dominicnunez/agentos/internal/planning"
@@ -105,13 +106,24 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 	if err := validatePublicURL(publicURL, remote, externalActors != nil, tlsConfig != nil); err != nil {
 		return err
 	}
-	model, closeModel, err := configuredProvider(ctx, config.Providers[0], providerRuntimeDirectory(config), source)
+	recoveredInference, err := prepareInferenceAdmissions(ctx, l, config.Providers[0].InferencePolicy)
+	if err != nil {
+		return err
+	}
+	if recoveredInference > 0 {
+		log.Printf("inference reservations require conservative reconciliation: count=%d", recoveredInference)
+	}
+	rawModel, closeModel, err := configuredProvider(ctx, config.Providers[0], providerRuntimeDirectory(config), source)
 	if err != nil {
 		return err
 	}
 	defer func() {
 		err = errors.Join(err, closeModel())
 	}()
+	model, err := inference.NewGuardedAdapter(l, rawModel)
+	if err != nil {
+		return err
+	}
 	planner, err := planning.NewModelPlanner(planningModel{adapter: model})
 	if err != nil {
 		return err
@@ -170,6 +182,32 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 		bindings = append(bindings, serverBinding{server: a2aServer, listener: a2aListener, certFile: tlsCertFile, keyFile: tlsKeyFile})
 	}
 	return serveAll(ctx, bindings)
+}
+
+type inferenceAdmissionStore interface {
+	ValidateInferenceAdmissions(context.Context) error
+	RecoverInferenceReservations(context.Context, string) (int, error)
+	ActivateInferencePolicy(context.Context, inference.Policy) error
+}
+
+func prepareInferenceAdmissions(ctx context.Context, store inferenceAdmissionStore, policy inference.Policy) (int, error) {
+	if store == nil {
+		return 0, fmt.Errorf("inference admission store is required")
+	}
+	if err := store.ValidateInferenceAdmissions(ctx); err != nil {
+		return 0, fmt.Errorf("validate durable inference accounting before startup: %w", err)
+	}
+	recovered, err := store.RecoverInferenceReservations(ctx, policy.OrganizationID)
+	if err != nil {
+		return 0, fmt.Errorf("recover incomplete inference reservations: %w", err)
+	}
+	if err := store.ActivateInferencePolicy(ctx, policy); err != nil {
+		return 0, fmt.Errorf("activate reviewed inference policy: %w", err)
+	}
+	if err := store.ValidateInferenceAdmissions(ctx); err != nil {
+		return 0, fmt.Errorf("validate durable inference accounting after startup recovery: %w", err)
+	}
+	return recovered, nil
 }
 
 type intakeModel struct{ adapter execution.ModelAdapter }

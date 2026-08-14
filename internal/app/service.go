@@ -17,6 +17,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
+	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/planning"
 	"github.com/dominicnunez/agentos/internal/projections"
 	"github.com/dominicnunez/agentos/internal/telemetry"
@@ -1728,6 +1729,17 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	}
 
 	turnCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.modelTurnTimeout)
+	if usesModel {
+		turnCtx, err = inference.WithScope(turnCtx, inference.Scope{
+			OrganizationID: string(organizationID), Purpose: inference.PurposePlanning,
+			RequestID: string(executionID), IntentID: string(intent.ID), TaskID: "task-" + correlationID,
+			ExecutionID: string(executionID), CorrelationID: correlationID,
+		})
+		if err != nil {
+			cancel()
+			return core.Plan{}, attemptFailure(fmt.Errorf("bind planning inference scope: %w", err))
+		}
+	}
 	result, buildErr := s.planner.Build(turnCtx, draft, requestedKind)
 	cancel()
 	if result.Usage != nil {
@@ -2444,6 +2456,15 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	cancel := func() {}
 	if task.ExecutionKind == core.ExecutionAgent {
 		executionCtx, cancel = context.WithTimeout(ctx, s.modelTurnTimeout)
+		executionCtx, err = inference.WithScope(executionCtx, inference.Scope{
+			OrganizationID: string(organizationID), Purpose: inference.PurposeTaskExecution,
+			RequestID: string(executionID), TaskID: string(task.ID), ExecutionID: string(executionID),
+			CorrelationID: state.CorrelationID,
+		})
+		if err != nil {
+			cancel()
+			return taskRun{}, fmt.Errorf("bind inference scope for task %s: %w", task.ID, err)
+		}
 	}
 	executionResult, executionErr := handler.Execute(executionCtx, executionTask, manifest)
 	cancel()

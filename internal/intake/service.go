@@ -15,6 +15,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/app"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/inference"
 )
 
 const (
@@ -386,7 +387,19 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 			return View{}, fmt.Errorf("%w: manifest intent normalization context", ErrUnavailable)
 		}
 	}
-	normalized, err := s.normalizer.Normalize(ctx, turns)
+	normalizationCtx := ctx
+	if usesModel {
+		normalizationCtx, err = inference.WithScope(ctx, inference.Scope{
+			OrganizationID: principal.OrganizationID, Purpose: inference.PurposeIntentNormalization,
+			RequestID: executionID, IntentID: "intent-" + stream[0].CorrelationID,
+			TaskID: "task-" + stream[0].CorrelationID, ExecutionID: executionID,
+			CorrelationID: stream[0].CorrelationID,
+		})
+		if err != nil {
+			return View{}, fmt.Errorf("%w: bind intent normalization inference scope", ErrUnavailable)
+		}
+	}
+	normalized, err := s.normalizer.Normalize(normalizationCtx, turns)
 	if normalized.Usage != nil {
 		_, usageErr := s.app.RecordIntentNormalizationUsage(ctx, principal.OrganizationID, message.ConversationID, executionID, *normalized.Usage)
 		if usageErr != nil {

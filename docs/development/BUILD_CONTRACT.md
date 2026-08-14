@@ -42,7 +42,8 @@ execution seam testable without becoming a production provider.
 
 The repository includes exact fail-closed capability checks, append-only
 versioned records, provenance-gated institutional knowledge, deterministic audit
-rules, reserve-aware inference selection and normalized usage snapshots, an
+rules, durable organization-scoped inference authorization with atomic
+reservation/reconciliation and normalized usage snapshots, an
 environment-backed `SecretSource`, a confined Codex subscription adapter, a
 fixed-endpoint official OpenAI Responses adapter with bounded responses and no
 redirects, and
@@ -70,6 +71,16 @@ deterministic role profile, own/organization work scope, status, expiry, and
 request ceilings.
 Credentials and A2A wire types remain outside core domain objects. Production
 deployments must explicitly configure a provider adapter.
+That adapter is wrapped once at the composition root. Intent normalization,
+adaptive planning, and Agent execution each attach an exact organization,
+Intent/Task, execution, request, and correlation scope before the shared gate
+can call it. There is no production model-call path outside this wrapper.
+
+The admission gate uses one deterministic, reserve-aware resource selector for
+subscription, metered API, and local policies. Current setup installs Codex
+subscription or OpenAI API adapters; local policy support is retained at the
+resource and durable-admission boundaries without claiming a bundled local
+runtime adapter.
 
 The A2A adapter and first-party user gateway translate into one principal-aware
 Intake Service. The Intent records the authenticated principal ID/kind and source

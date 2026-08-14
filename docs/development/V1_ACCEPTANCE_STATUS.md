@@ -64,7 +64,7 @@ persisted review decision after restart.
 |---|---|
 | Stable Linux paths and resumable setup | Unit-tested configuration and strict checkpoint loading; live Linux installation remains a release-readiness test |
 | Setup caller is owner | `sudo` origin verification, direct-root support, exact UID socket checks, and fail-closed configuration validation |
-| Provider required before ready | Typed Codex subscription and OpenAI API setup with discovery, connection tests, and production rejection of the fake adapter |
+| Provider and budget required before ready | Typed Codex subscription and OpenAI API setup with non-billable discovery, exact expiring token/cost policy, and production rejection of the fake adapter |
 | Private user access | Mode-`0600` Unix socket plus kernel `SO_PEERCRED`; no local bearer registry or TCP listener |
 | Runtime and credential confinement | Exact ownership and modes, symlink-safe path validation, systemd private credential imports, and service umask `0077` fail closed before runtime state is opened |
 | Required user deliverables | Durable structured fields and content-addressed artifact evidence; plain-text self-report cannot complete the Task |
