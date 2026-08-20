@@ -305,19 +305,8 @@ func validReviewedIntakeMessage(event Event, payload IntakeMessageRecordedPayloa
 }
 
 func validReviewedOperatorIdentity(id, kind, channel string) bool {
-	if id == "" {
-		return false
-	}
-	switch core.PrincipalKind(kind) {
-	case core.PrincipalHuman:
-		return channel == "HUMAN_DIRECT"
-	case core.PrincipalExternalAgent:
-		return channel == "A2A"
-	case core.PrincipalRuntime:
-		return false
-	default:
-		return false
-	}
+	principalKind := core.PrincipalKind(kind)
+	return principalKind != core.PrincipalRuntime && core.ValidIntentSourceIdentity(core.ID(id), principalKind, channel)
 }
 
 type WorkCompletionTransitionPayload struct {
