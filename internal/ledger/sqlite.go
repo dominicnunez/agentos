@@ -911,7 +911,7 @@ FROM events WHERE organization_id=? AND event_type='WORK_COMPLETED' AND json_ext
 			var record events.ProjectionRecord
 			var experiment core.Experiment
 			if decodeExactJSONBytes(body, &record) != nil || decodeExactJSONBytes(record.Value, &experiment) != nil || experiment.ID != core.ID(record.RecordID) || experiment.WorkID != work.ID || string(experiment.OrganizationID) != organizationID {
-				return nil, fmt.Errorf("Goal Work experiment binding is invalid")
+				return nil, fmt.Errorf("goal Work experiment binding is invalid")
 			}
 			return nil, fmt.Errorf("experimental Work cannot provide authoritative Goal progress evidence")
 		}
