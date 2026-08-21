@@ -201,6 +201,7 @@ type IntentNormalizationContextPayload struct {
 type IntentConfirmedPayload struct {
 	IntentID            string `json:"intent_id"`
 	GoalID              string `json:"goal_id,omitempty"`
+	ReplacesWorkID      string `json:"replaces_work_id,omitempty"`
 	Version             int    `json:"version"`
 	Fingerprint         string `json:"fingerprint"`
 	ConfirmingActorID   string `json:"confirming_actor_id"`
@@ -215,7 +216,7 @@ func ValidateIntentConfirmation(stream []Event, event Event, intent core.Intent)
 	var confirmation IntentConfirmedPayload
 	if decodeExactEventJSON(event.Payload, &confirmation) != nil ||
 		event.EventType != "INTENT_CONFIRMED" || event.OrganizationID != string(intent.OrganizationID) || event.SourceActorID == "" || event.SourceActorID != confirmation.ConfirmingActorID || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != "task-"+event.CorrelationID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID == "" || event.SchemaVersion != SchemaVersion ||
-		confirmation.IntentID != string(intent.ID) || confirmation.GoalID != string(intent.GoalID) || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.Fingerprint != intent.AcceptedFingerprint || !core.ValidIntentSourceIdentity(intent.SourcePrincipalID, intent.SourcePrincipalKind, intent.SourceChannel) || !validReviewedOperatorIdentity(confirmation.ConfirmingActorID, confirmation.ConfirmingActorKind, confirmation.SourceChannel) || confirmation.MessageID == "" {
+		confirmation.IntentID != string(intent.ID) || confirmation.GoalID != string(intent.GoalID) || confirmation.ReplacesWorkID != string(intent.ReplacesWorkID) || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.Fingerprint != intent.AcceptedFingerprint || !core.ValidIntentSourceIdentity(intent.SourcePrincipalID, intent.SourcePrincipalKind, intent.SourceChannel) || !validReviewedOperatorIdentity(confirmation.ConfirmingActorID, confirmation.ConfirmingActorKind, confirmation.SourceChannel) || confirmation.MessageID == "" {
 		return fmt.Errorf("intent confirmation is invalid")
 	}
 	original, found := initialReviewedIntake(stream, event)
@@ -289,7 +290,7 @@ func validReviewedIntentConfirmation(event Event, confirmation IntentConfirmedPa
 		event.SourceActorID != "" && event.SourceActorID == confirmation.ConfirmingActorID && validReviewedOperatorIdentity(confirmation.ConfirmingActorID, confirmation.ConfirmingActorKind, confirmation.SourceChannel) &&
 		event.SourceExecutionID == "" && event.RecipientScope == "" && event.RecipientID == "" && event.TaskID == "task-"+event.CorrelationID &&
 		len(event.AuthorizationRefs) == 0 && len(event.ArtifactRefs) == 0 && event.CorrelationID != "" && event.SchemaVersion == SchemaVersion &&
-		confirmation.IntentID == "intent-"+event.CorrelationID && confirmation.GoalID == string(goalID) && confirmation.Version >= 1 && confirmation.Fingerprint != "" && confirmation.MessageID != ""
+		confirmation.IntentID == "intent-"+event.CorrelationID && confirmation.GoalID == string(goalID) && (confirmation.ReplacesWorkID == "" || core.ValidWorkReferenceID(confirmation.ReplacesWorkID)) && confirmation.Version >= 1 && confirmation.Fingerprint != "" && confirmation.MessageID != ""
 }
 
 func validateReviewedIntent(stream []Event, confirmationEvent Event, confirmation IntentConfirmedPayload, goalID core.ID) error {
@@ -348,17 +349,36 @@ func validateReviewedIntent(stream []Event, confirmationEvent Event, confirmatio
 	if err != nil || reviewedGoalID != goalID {
 		return fmt.Errorf("intent reviewed Goal provenance is invalid")
 	}
+	replacesWorkID, err := core.AcceptedIntentReplacesWorkID(reviewed)
+	if err != nil || string(replacesWorkID) != confirmation.ReplacesWorkID {
+		return fmt.Errorf("intent reviewed replacement Work provenance is invalid")
+	}
 	if goalID == "" {
 		if reviewed.Goal != nil {
 			return fmt.Errorf("unbound intent contains a Goal")
 		}
 	} else {
-		if reviewed.Goal == nil || reviewed.Goal.Origin != "EXPLICIT" && reviewed.Goal.Origin != "CONFIRMED" {
+		if reviewed.Goal == nil {
 			return fmt.Errorf("goal-bound intent reviewed Goal provenance is invalid")
 		}
-		goalMessage, found := intakeMessages[reviewed.Goal.SourceMessageID]
-		if !found || intakeSequences[reviewed.Goal.SourceMessageID] >= latestDraftEvent.Sequence || !core.ContainsExactGoalReference(goalMessage.Text, string(goalID)) {
-			return fmt.Errorf("goal-bound intent Goal is not present in its attributed source message")
+		switch reviewed.Goal.Origin {
+		case "EXPLICIT", "CONFIRMED":
+			goalMessage, found := intakeMessages[reviewed.Goal.SourceMessageID]
+			if !found || intakeSequences[reviewed.Goal.SourceMessageID] >= latestDraftEvent.Sequence || !core.ContainsExactGoalReference(goalMessage.Text, string(goalID)) {
+				return fmt.Errorf("goal-bound intent Goal is not present in its attributed source message")
+			}
+		case "POLICY":
+			if replacesWorkID == "" || reviewed.Goal.SourceMessageID != "" {
+				return fmt.Errorf("replacement-derived Goal provenance is invalid")
+			}
+		default:
+			return fmt.Errorf("goal-bound intent reviewed Goal provenance is invalid")
+		}
+	}
+	if replacesWorkID != "" {
+		replacementMessage, found := intakeMessages[reviewed.ReplacesWork.SourceMessageID]
+		if !found || intakeSequences[reviewed.ReplacesWork.SourceMessageID] >= latestDraftEvent.Sequence || !core.ContainsExactWorkReference(replacementMessage.Text, string(replacesWorkID)) {
+			return fmt.Errorf("intent replacement Work is not present in its attributed source message")
 		}
 	}
 	for _, event := range stream {
@@ -3177,7 +3197,7 @@ type ProjectionReader interface {
 	Records(context.Context, string, string) ([][]byte, error)
 }
 type IntentConfirmer interface {
-	AppendIntentConfirmation(context.Context, TrustedDraft, core.ID) (Event, error)
+	AppendIntentConfirmation(context.Context, TrustedDraft, core.ID, core.ID) (Event, error)
 }
 type ExternalWorkResolver interface {
 	ResolveExternalWork(context.Context, string, string) (string, bool, error)
@@ -3336,15 +3356,16 @@ func (g *Gateway) PublishWorkCompletionEvidence(ctx context.Context, draft Trust
 }
 
 // PublishIntentConfirmation atomically validates the exact reviewed intake and,
-// when present, proves that its Goal is active in the same organization.
+// when present, proves that its Goal is active and its predecessor Work is a
+// terminal same-organization failure with no existing replacement.
 // Later Goal lifecycle changes do not invalidate the admitted Work binding.
-func (g *Gateway) PublishIntentConfirmation(ctx context.Context, draft TrustedDraft, goalID core.ID) (Event, error) {
+func (g *Gateway) PublishIntentConfirmation(ctx context.Context, draft TrustedDraft, goalID, replacesWorkID core.ID) (Event, error) {
 	if draft.EventType != "INTENT_CONFIRMED" {
 		return Event{}, fmt.Errorf("intent confirmation is incomplete")
 	}
 	var confirmation IntentConfirmedPayload
-	if decodePayload(draft.Payload, &confirmation) != nil || confirmation.GoalID != string(goalID) {
-		return Event{}, fmt.Errorf("intent confirmation does not match its reviewed Goal selection")
+	if decodePayload(draft.Payload, &confirmation) != nil || confirmation.GoalID != string(goalID) || confirmation.ReplacesWorkID != string(replacesWorkID) {
+		return Event{}, fmt.Errorf("intent confirmation does not match its reviewed Goal and replacement selection")
 	}
 	if err := g.validateAddressed(ctx, draft, false); err != nil {
 		return Event{}, err
@@ -3353,7 +3374,7 @@ func (g *Gateway) PublishIntentConfirmation(ctx context.Context, draft TrustedDr
 	if !ok {
 		return Event{}, fmt.Errorf("ledger does not support typed intent confirmation")
 	}
-	return confirmer.AppendIntentConfirmation(ctx, draft, goalID)
+	return confirmer.AppendIntentConfirmation(ctx, draft, goalID, replacesWorkID)
 }
 func (g *Gateway) PublishProjection(ctx context.Context, draft ProjectionDraft) (Event, error) {
 	if draft.Event.EventType == "" || draft.ProjectionKind == "" || draft.RecordID == "" || draft.Version < 1 {

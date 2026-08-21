@@ -43,6 +43,46 @@ type IntentNormalizationContext struct {
 	ExecutionProfileVersion string
 }
 
+// ResolveReplacementGoal deterministically binds reviewed replacement Work to
+// its failed predecessor. It does not infer or grant a Goal; it returns only the
+// predecessor's already-durable binding after rechecking the replacement
+// boundary against the current projection state.
+func (s *Service) ResolveReplacementGoal(ctx context.Context, organizationID string, workID core.ID) (core.ID, error) {
+	if ctx == nil || organizationID == "" || workID == "" {
+		return "", fmt.Errorf("organization and replacement Work are required")
+	}
+	snapshot, err := s.state.Load(ctx)
+	if err != nil {
+		return "", fmt.Errorf("load durable replacement state: %w", err)
+	}
+	predecessor, found := snapshot.Works[workID]
+	if !found || predecessor.Value.ID != workID || predecessor.Value.Status != core.WorkFailed {
+		return "", fmt.Errorf("replacement requires an existing failed Work")
+	}
+	predecessorIntent, found := snapshot.Intents[predecessor.Value.IntentID]
+	if !found || predecessorIntent.Value.ID != predecessor.Value.IntentID || predecessorIntent.Value.OrganizationID != core.ID(organizationID) {
+		return "", fmt.Errorf("replacement Work crosses its organization boundary")
+	}
+	for existingID, existing := range snapshot.Works {
+		if existingID != workID && existing.Value.ReplacesWorkID == workID {
+			return "", fmt.Errorf("failed Work already has a durable replacement")
+		}
+	}
+	goalID := predecessor.Value.GoalID
+	if goalID == "" {
+		return "", nil
+	}
+	goal, found := snapshot.Goals[goalID]
+	if !found || goal.Value.ID != goalID || goal.Value.OrganizationID != core.ID(organizationID) || goal.Value.Status != core.GoalActive {
+		return "", fmt.Errorf("replacement requires its predecessor's active Goal")
+	}
+	mission, found := snapshot.Missions[goal.Value.MissionID]
+	if !found || mission.Value.ID != goal.Value.MissionID || mission.Value.OrganizationID != core.ID(organizationID) || mission.Value.Status != core.MissionActive {
+		return "", fmt.Errorf("replacement requires its predecessor Goal's active Mission")
+	}
+	return goalID, nil
+}
+
 func (s *Service) ActiveIntake(ctx context.Context, organizationID string, principalID core.ID, principalKind core.PrincipalKind, sourceChannel string) (string, []events.Event, bool, error) {
 	if ctx == nil || organizationID == "" || principalID == "" || principalKind == "" || sourceChannel == "" {
 		return "", nil, false, fmt.Errorf("organization and complete principal identity are required")
@@ -268,6 +308,10 @@ func (s *Service) ConfirmIntent(ctx context.Context, in IntentConfirmation) (Res
 	if err != nil {
 		return Result{}, fmt.Errorf("accepted Intent Goal is invalid: %w", err)
 	}
+	replacesWorkID, err := core.AcceptedIntentReplacesWorkID(draft)
+	if err != nil {
+		return Result{}, fmt.Errorf("accepted Intent replacement Work is invalid: %w", err)
+	}
 	original, found, err := initialIntakeMessage(stream)
 	if err != nil || !found {
 		return Result{}, fmt.Errorf("durable initial intake message is required")
@@ -277,15 +321,15 @@ func (s *Service) ConfirmIntent(ctx context.Context, in IntentConfirmation) (Res
 			continue
 		}
 		var recorded events.IntentConfirmedPayload
-		if json.Unmarshal(event.Payload, &recorded) != nil || recorded.IntentID != string(draft.ID) || recorded.GoalID != string(goalID) || recorded.Version != draft.Version || recorded.Fingerprint != in.Fingerprint || recorded.MessageID != in.MessageID ||
+		if json.Unmarshal(event.Payload, &recorded) != nil || recorded.IntentID != string(draft.ID) || recorded.GoalID != string(goalID) || recorded.ReplacesWorkID != string(replacesWorkID) || recorded.Version != draft.Version || recorded.Fingerprint != in.Fingerprint || recorded.MessageID != in.MessageID ||
 			recorded.ConfirmingActorID != string(in.SourcePrincipalID) || recorded.ConfirmingActorKind != string(in.SourcePrincipalKind) || recorded.SourceChannel != in.SourceChannel {
 			return Result{}, fmt.Errorf("intent confirmation conflicts with durable state")
 		}
 		return s.submitConfirmedIntent(ctx, submitFromIntent(in, draft, original, correlationID), draft.Mode)
 	}
-	payload := events.IntentConfirmedPayload{IntentID: string(draft.ID), GoalID: string(goalID), Version: draft.Version, Fingerprint: draft.Fingerprint, ConfirmingActorID: string(in.SourcePrincipalID), ConfirmingActorKind: string(in.SourcePrincipalKind), SourceChannel: in.SourceChannel, MessageID: in.MessageID}
+	payload := events.IntentConfirmedPayload{IntentID: string(draft.ID), GoalID: string(goalID), ReplacesWorkID: string(replacesWorkID), Version: draft.Version, Fingerprint: draft.Fingerprint, ConfirmingActorID: string(in.SourcePrincipalID), ConfirmingActorKind: string(in.SourcePrincipalKind), SourceChannel: in.SourceChannel, MessageID: in.MessageID}
 	confirmation := events.TrustedDraft{OrganizationID: in.OrganizationID, EventType: "INTENT_CONFIRMED", SourceActorID: string(in.SourcePrincipalID), TaskID: "task-" + correlationID, CorrelationID: correlationID, Payload: payload}
-	_, err = s.gateway.PublishIntentConfirmation(ctx, confirmation, goalID)
+	_, err = s.gateway.PublishIntentConfirmation(ctx, confirmation, goalID, replacesWorkID)
 	if err != nil {
 		return Result{}, fmt.Errorf("persist intent confirmation: %w", err)
 	}
@@ -299,6 +343,9 @@ func ValidateReviewedIntentExecution(draft core.IntentDraft, organizationID core
 		return err
 	}
 	if draft.Mode == core.IntentModeExperiment {
+		if draft.ReplacesWork != nil {
+			return fmt.Errorf("V1 experimental intent cannot replace production Work")
+		}
 		if kind != core.ExecutionDeterministic || draft.RequestedExecutionKind != core.ExecutionDeterministic {
 			return fmt.Errorf("V1 experimental intent requires deterministic execution")
 		}

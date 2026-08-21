@@ -9,7 +9,8 @@ import (
 // required for durable admission.
 func ValidWork(work Work) bool {
 	validStatus := work.Status == WorkActive || work.Status == WorkCompleted || work.Status == WorkFailed
-	return work.ID != "" && work.IntentID != "" && strings.TrimSpace(work.Objective) != "" && validStatus
+	validReplacement := work.ReplacesWorkID == "" || work.ReplacesWorkID != work.ID && ValidWorkReferenceID(string(work.ReplacesWorkID))
+	return work.ID != "" && work.IntentID != "" && strings.TrimSpace(work.Objective) != "" && validStatus && validReplacement
 }
 
 // ValidWorkRevision preserves the accepted Intent, optional Goal binding, and

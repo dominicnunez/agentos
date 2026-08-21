@@ -697,6 +697,162 @@ func TestGoalBoundIntentPreservesSubmissionAndConfirmationMessageIdentities(t *t
 	}
 }
 
+type replacementIntentNormalizer struct{ predecessorID core.ID }
+
+func (replacementIntentNormalizer) Descriptor() (NormalizerDescriptor, bool) {
+	return NormalizerDescriptor{}, false
+}
+
+func (n replacementIntentNormalizer) Normalize(_ context.Context, turns []ConversationTurn) (Normalization, error) {
+	last := turns[len(turns)-1]
+	return Normalization{
+		State: normalizationReady, Reply: "Review the replacement Work.",
+		Candidate: IntentCandidate{
+			Mode: core.IntentModeStandard, Objective: "echo replacement result",
+			ReplacesWork: &core.IntentValue{Value: string(n.predecessorID), Origin: "EXPLICIT", SourceMessageID: last.MessageID},
+			Context:      []core.IntentValue{}, Deliverables: []core.IntentValue{{Value: "Replacement result", Origin: "EXPLICIT", SourceMessageID: last.MessageID}},
+			CompletionCriteria: []core.IntentValue{{Value: "Replacement result is verified", Origin: "EXPLICIT", SourceMessageID: last.MessageID}},
+			Constraints:        []core.IntentValue{}, ResolvedDecisions: []core.IntentDecision{}, ConsequenceCandidates: []string{}, MissingUserInputs: []core.IntentValue{},
+		},
+	}, nil
+}
+
+func TestReviewedReplacementCreatesFreshWorkPlanAndTask(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(filepath.Join(t.TempDir(), "replacement-intake.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close replacement intake store: %v", err)
+		}
+	})
+	gateway := events.NewGateway(store)
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "org-1"},
+		ProjectionKind: "organization", RecordID: "org-1", Version: 1, Value: organization,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mission := core.Mission{ID: "mission-1", OrganizationID: organization.ID, Statement: "Sustain verified work", Status: core.MissionActive, CreatedAt: now}
+	goal := core.Goal{ID: "goal-1", OrganizationID: organization.ID, MissionID: mission.ID, Objective: "Deliver verified work", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "verified", Origin: "USER"}}, Status: core.GoalActive, CreatedAt: now}
+	for _, projection := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "mission-1"}, ProjectionKind: "mission", RecordID: string(mission.ID), Version: 1, Value: mission},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_CREATED", SourceActorID: "runtime", CorrelationID: "goal-1"}, ProjectionKind: "goal", RecordID: string(goal.ID), Version: 1, Value: goal},
+	} {
+		if _, err := store.AppendProjection(ctx, projection); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const predecessorMessageID = "message-old"
+	const predecessorInstruction = "Run old work for goal-1"
+	predecessorDraft := core.IntentDraft{
+		ID: "intent-old", OrganizationID: organization.ID, Version: 1, Status: core.IntentStatusReadyForReview, Mode: core.IntentModeStandard,
+		RequestedExecutionKind: core.ExecutionDeterministic,
+		Goal:                   &core.IntentValue{Value: string(goal.ID), Origin: "EXPLICIT", SourceMessageID: predecessorMessageID},
+		Objective:              "old work",
+		Context:                []core.IntentValue{}, Deliverables: []core.IntentValue{{Value: "old result", Origin: "USER"}}, CompletionCriteria: []core.IntentValue{{Value: "old result verified", Origin: "USER"}},
+		Constraints: []core.IntentValue{}, ResolvedDecisions: []core.IntentDecision{}, ConsequenceCandidates: []string{}, MissingUserInputs: []core.IntentValue{}, CreatedAt: now,
+	}
+	predecessorDraft.Fingerprint, err = core.FingerprintIntentDraft(predecessorDraft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTAKE_MESSAGE_RECORDED", SourceActorID: "user-1", TaskID: "task-old", CorrelationID: "old",
+		Payload: events.IntakeMessageRecordedPayload{MessageID: predecessorMessageID, Text: predecessorInstruction, SourcePrincipalID: "user-1", SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: ChannelHumanDirect, RequestedExecutionKind: core.ExecutionDeterministic},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_DRAFTED", SourceActorID: "runtime", TaskID: "task-old", CorrelationID: "old",
+		Payload: events.IntentDraftedPayload{SourceMessageID: predecessorMessageID, Draft: predecessorDraft, Reply: "Review old work."},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	predecessorConfirmation := events.IntentConfirmedPayload{
+		IntentID: string(predecessorDraft.ID), GoalID: string(goal.ID), Version: 1, Fingerprint: predecessorDraft.Fingerprint,
+		ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: ChannelHumanDirect, MessageID: "confirmation-old",
+	}
+	if _, err := store.AppendIntentConfirmation(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-old", CorrelationID: "old", Payload: predecessorConfirmation,
+	}, goal.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	predecessorIntent := core.Intent{
+		ID: "intent-old", OrganizationID: "org-1", GoalID: goal.ID, OriginalInstruction: predecessorInstruction, NormalizedObjective: predecessorDraft.Objective,
+		SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: ChannelHumanDirect, SourceMessageID: predecessorMessageID,
+		AcceptedFingerprint: predecessorDraft.Fingerprint, CompletionCriteria: predecessorDraft.CompletionCriteria, CreatedAt: now,
+	}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "old"},
+		ProjectionKind: "intent", RecordID: string(predecessorIntent.ID), Version: 1, Value: predecessorIntent,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	predecessor := core.Work{ID: "work-old", IntentID: predecessorIntent.ID, GoalID: goal.ID, Objective: predecessorIntent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "old"},
+		ProjectionKind: "work", RecordID: string(predecessor.ID), Version: 1, Value: predecessor,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	predecessor.Status = core.WorkFailed
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_FAILED", SourceActorID: "runtime", CorrelationID: "old", Payload: map[string]string{"reason": "bounded failure"}},
+		ProjectionKind: "work", RecordID: string(predecessor.ID), Version: 2, Value: predecessor,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service := NewWithNormalizer(app.New(gateway), replacementIntentNormalizer{predecessorID: predecessor.ID})
+	principal := testPrincipal("user-1", core.PrincipalHuman, ChannelHumanDirect)
+	message := Message{ConversationID: "replacement", MessageID: "message-replacement", Text: "Replace work-old with a bounded verified result.", RequestedKind: core.ExecutionDeterministic}
+	draft, err := service.Handle(ctx, principal, message)
+	if err != nil || draft.State != StateAwaitingConfirmation || draft.Intent == nil || draft.Intent.ReplacesWork == nil || draft.Intent.ReplacesWork.Value != string(predecessor.ID) || draft.Intent.Goal == nil || draft.Intent.Goal.Value != string(goal.ID) || draft.Intent.Goal.Origin != "POLICY" {
+		t.Fatalf("replacement review=%+v err=%v", draft, err)
+	}
+	view, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: message.ConversationID, MessageID: "confirmation-replacement", Fingerprint: draft.Intent.Fingerprint})
+	if err != nil || view.State != StateCompleted || view.Result == "" {
+		t.Fatalf("replacement completion=%+v err=%v", view, err)
+	}
+	correlationID, found, err := gateway.ResolveExternalWork(ctx, principal.OrganizationID, message.ConversationID)
+	if err != nil || !found {
+		t.Fatalf("resolve replacement correlation: found=%t err=%v", found, err)
+	}
+	stream, err := gateway.Events(ctx, correlationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replacementIntent core.Intent
+	var replacementWork core.Work
+	createdPlan, createdTask := false, false
+	for _, event := range stream {
+		payload, present, err := events.AdmittedProjection(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if present && payload.Projection.ProjectionKind == "intent" {
+			if err := json.Unmarshal(payload.Projection.Value, &replacementIntent); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if present && payload.Projection.ProjectionKind == "work" && payload.Projection.Version == 1 {
+			if err := json.Unmarshal(payload.Projection.Value, &replacementWork); err != nil {
+				t.Fatal(err)
+			}
+		}
+		createdPlan = createdPlan || event.EventType == "PLAN_CREATED"
+		createdTask = createdTask || event.EventType == "TASK_CREATED"
+	}
+	if replacementIntent.ReplacesWorkID != predecessor.ID || replacementIntent.GoalID != goal.ID || replacementWork.ReplacesWorkID != predecessor.ID || replacementWork.GoalID != goal.ID || replacementWork.ID == predecessor.ID || view.WorkID != string(replacementWork.ID) || !createdPlan || !createdTask {
+		t.Fatalf("replacement lineage or fresh execution graph missing: intent=%+v work=%+v plan=%t task=%t", replacementIntent, replacementWork, createdPlan, createdTask)
+	}
+}
+
 func TestGoalBoundIntentConcurrentConfirmationIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	store, err := ledger.Open(":memory:")

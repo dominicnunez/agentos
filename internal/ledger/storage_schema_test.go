@@ -180,7 +180,7 @@ func TestStorageV2MigrationPreservesReviewedIntentEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	confirmation := events.IntentConfirmedPayload{IntentID: string(draft.ID), Version: 1, Fingerprint: draft.Fingerprint, ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1"}
-	if _, err := store.AppendIntentConfirmation(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-run-1", CorrelationID: "run-1", Payload: confirmation}, ""); err != nil {
+	if _, err := store.AppendIntentConfirmation(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-run-1", CorrelationID: "run-1", Payload: confirmation}, "", ""); err != nil {
 		_ = store.Close()
 		t.Fatal(err)
 	}

@@ -964,7 +964,7 @@ func TestAgentExecutionStartAtomicallyRejectsStrategicRevisionDrift(t *testing.T
 	}
 	if _, err := store.AppendIntentConfirmation(ctx, events.TrustedDraft{
 		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-" + correlationID, CorrelationID: correlationID, Payload: confirmation,
-	}, goal.ID); err != nil {
+	}, goal.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	intent := core.Intent{
@@ -1713,7 +1713,7 @@ func TestCompletedWorkRequiresExactDurableEvidence(t *testing.T) {
 	}
 	if _, err := l.AppendIntentConfirmation(ctx, events.TrustedDraft{
 		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-run-1", Payload: confirmation, CorrelationID: "run-1",
-	}, "goal-1"); err != nil {
+	}, "goal-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	intent := core.Intent{
@@ -2022,7 +2022,7 @@ func TestIntentConfirmationGoalArgumentMatchesPayload(t *testing.T) {
 		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", CorrelationID: "run-1",
 		Payload: events.IntentConfirmedPayload{IntentID: "intent-1", GoalID: "goal-2", Version: 1, Fingerprint: "fingerprint", MessageID: "message-1"},
 	}
-	if _, err := l.AppendIntentConfirmation(ctx, draft, "goal-1"); err == nil {
+	if _, err := l.AppendIntentConfirmation(ctx, draft, "goal-1", ""); err == nil {
 		t.Fatal("ledger checked one Goal while persisting a different payload Goal")
 	}
 	stream, err := l.Events(ctx, "run-1")
@@ -2065,18 +2065,18 @@ func TestUnboundIntentConfirmationReplayIsIdempotent(t *testing.T) {
 		ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1",
 	}
 	draft := events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-run-1", Payload: payload, CorrelationID: "run-1"}
-	first, err := l.AppendIntentConfirmation(ctx, draft, "")
+	first, err := l.AppendIntentConfirmation(ctx, draft, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	replayed, err := l.AppendIntentConfirmation(ctx, draft, "")
+	replayed, err := l.AppendIntentConfirmation(ctx, draft, "", "")
 	if err != nil || replayed.EventID != first.EventID {
 		t.Fatalf("exact confirmation retry was not idempotent: first=%+v replayed=%+v err=%v", first, replayed, err)
 	}
 	conflict := payload
 	conflict.MessageID = "confirmation-2"
 	draft.Payload = conflict
-	if _, err := l.AppendIntentConfirmation(ctx, draft, ""); err == nil {
+	if _, err := l.AppendIntentConfirmation(ctx, draft, "", ""); err == nil {
 		t.Fatal("conflicting confirmation retry was accepted")
 	}
 	stream, err := l.Events(ctx, "run-1")
@@ -2130,7 +2130,7 @@ func TestUnboundIntentConfirmationRequiresExactReviewedEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := l.AppendIntentConfirmation(ctx, draft, ""); err == nil {
+			if _, err := l.AppendIntentConfirmation(ctx, draft, "", ""); err == nil {
 				t.Fatal("unreviewed or changed Intent confirmation was admitted")
 			}
 			after, err := l.Events(ctx, "run-1")
@@ -2171,7 +2171,7 @@ func TestGoalBoundIntentConfirmationConcurrentReplayIsIdempotent(t *testing.T) {
 		go func() {
 			defer callers.Done()
 			<-start
-			event, err := l.AppendIntentConfirmation(ctx, draft, "goal-1")
+			event, err := l.AppendIntentConfirmation(ctx, draft, "goal-1", "")
 			eventsOut <- event
 			errorsOut <- err
 		}()
@@ -2201,7 +2201,7 @@ func TestGoalBoundIntentConfirmationConcurrentReplayIsIdempotent(t *testing.T) {
 	conflict := confirmation
 	conflict.MessageID = "confirmation-2"
 	draft.Payload = conflict
-	if _, err := l.AppendIntentConfirmation(ctx, draft, "goal-1"); err == nil {
+	if _, err := l.AppendIntentConfirmation(ctx, draft, "goal-1", ""); err == nil {
 		t.Fatal("conflicting confirmation reused or replaced durable state")
 	}
 	if err := l.Close(); err != nil {
@@ -2213,7 +2213,7 @@ func TestGoalBoundIntentConfirmationConcurrentReplayIsIdempotent(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
 	draft.Payload = confirmation
-	replayed, err := reopened.AppendIntentConfirmation(ctx, draft, "goal-1")
+	replayed, err := reopened.AppendIntentConfirmation(ctx, draft, "goal-1", "")
 	if err != nil || replayed.EventID != eventID {
 		t.Fatalf("restart did not preserve idempotent confirmation: event=%+v err=%v", replayed, err)
 	}
@@ -2271,7 +2271,7 @@ func TestGoalBoundIntentConfirmationRequiresExactReviewedEvidence(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := l.AppendIntentConfirmation(ctx, draft, "goal-1"); err == nil {
+			if _, err := l.AppendIntentConfirmation(ctx, draft, "goal-1", ""); err == nil {
 				t.Fatal("unreviewed or forged Goal-bound confirmation was admitted")
 			}
 			after, err := l.Events(ctx, "run-1")
@@ -2358,7 +2358,7 @@ func TestWorkProjectionMatchesAcceptedIntentGoal(t *testing.T) {
 	reviewed := appendReviewedGoalIntent(t, ctx, l, "org-1", "run-1", "intent-run-1", "goal-a", "bounded work", core.ExecutionDeterministic, now)
 	fingerprint := reviewed.Fingerprint
 	confirmation := events.IntentConfirmedPayload{IntentID: "intent-run-1", GoalID: "goal-a", Version: 1, Fingerprint: fingerprint, ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "message-1"}
-	if _, err := l.AppendIntentConfirmation(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-run-1", Payload: confirmation, CorrelationID: "run-1"}, "goal-a"); err != nil {
+	if _, err := l.AppendIntentConfirmation(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-run-1", Payload: confirmation, CorrelationID: "run-1"}, "goal-a", ""); err != nil {
 		t.Fatal(err)
 	}
 	intent := core.Intent{ID: "intent-run-1", OrganizationID: "org-1", GoalID: "goal-a", OriginalInstruction: "bounded work under goal-a", NormalizedObjective: "bounded work", AcceptedFingerprint: fingerprint, SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: "source-run-1", CreatedAt: now}
@@ -2506,7 +2506,7 @@ func TestGoalBoundWorkRequiresAtomicIntentConfirmation(t *testing.T) {
 	if _, err := l.AppendProjection(ctx, workDraft); err == nil {
 		t.Fatal("Goal-bound Work was admitted without atomic Intent confirmation")
 	}
-	if _, err := l.AppendIntentConfirmation(ctx, confirmationDraft, "goal-1"); err != nil {
+	if _, err := l.AppendIntentConfirmation(ctx, confirmationDraft, "goal-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := l.AppendProjection(ctx, workDraft); err != nil {
@@ -2544,7 +2544,7 @@ func TestGoalBoundIntentConfirmationRequiresActiveMission(t *testing.T) {
 	}
 	if _, err := l.AppendIntentConfirmation(ctx, events.TrustedDraft{
 		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-run-1", Payload: confirmation, CorrelationID: "run-1",
-	}, "goal-1"); err == nil {
+	}, "goal-1", ""); err == nil {
 		t.Fatal("Goal-bound Intent was confirmed after its Mission retired")
 	}
 	stream, err := l.Events(ctx, "run-1")
@@ -2555,6 +2555,108 @@ func TestGoalBoundIntentConfirmationRequiresActiveMission(t *testing.T) {
 		if event.EventType == "INTENT_CONFIRMED" {
 			t.Fatal("rejected Mission-inactive confirmation reached the ledger")
 		}
+	}
+}
+
+func TestReviewedReplacementRequiresOnePriorFailedWork(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "replacement.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close replacement store: %v", err)
+		}
+	})
+	now := time.Now().UTC()
+	appendTestMission(t, ctx, store, "org-1", "mission-1", now)
+	predecessorIntent := core.Intent{
+		ID: "intent-old", OrganizationID: "org-1", OriginalInstruction: "old work", NormalizedObjective: "old work",
+		SourcePrincipalID: "runtime", SourcePrincipalKind: core.PrincipalRuntime, SourceChannel: "INTERNAL", AcceptedFingerprint: "internal-old", CreatedAt: now,
+	}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "old"},
+		ProjectionKind: "intent", RecordID: string(predecessorIntent.ID), Version: 1, Value: predecessorIntent,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	predecessor := core.Work{ID: "work-old", IntentID: predecessorIntent.ID, Objective: predecessorIntent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "old"},
+		ProjectionKind: "work", RecordID: string(predecessor.ID), Version: 1, Value: predecessor,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	activeDraft := appendReviewedReplacementIntent(t, ctx, store, "org-1", "active-replacement", "intent-active-replacement", predecessor.ID, "echo replacement", now)
+	activeConfirmation := replacementConfirmation(activeDraft, "confirmation-active", predecessor.ID)
+	if _, err := store.AppendIntentConfirmation(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-active-replacement", CorrelationID: "active-replacement", Payload: activeConfirmation,
+	}, "", predecessor.ID); err == nil {
+		t.Fatal("active Work was accepted as a replacement predecessor")
+	}
+
+	predecessor.Status = core.WorkFailed
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_FAILED", SourceActorID: "runtime", CorrelationID: "old", Payload: map[string]string{"reason": "bounded failure"}},
+		ProjectionKind: "work", RecordID: string(predecessor.ID), Version: 2, Value: predecessor,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	internalIntent := core.Intent{
+		ID: "intent-internal-replacement", OrganizationID: "org-1", ReplacesWorkID: predecessor.ID,
+		OriginalInstruction: "replace internally", NormalizedObjective: "replace internally",
+		SourcePrincipalID: "runtime", SourcePrincipalKind: core.PrincipalRuntime, SourceChannel: "INTERNAL", AcceptedFingerprint: "internal-replacement", CreatedAt: now,
+	}
+	internalWork := core.Work{ID: "work-internal-replacement", IntentID: internalIntent.ID, ReplacesWorkID: predecessor.ID, Objective: internalIntent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	if _, err := store.AppendProjections(ctx, []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "internal-replacement"}, ProjectionKind: "intent", RecordID: string(internalIntent.ID), Version: 1, Value: internalIntent},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "internal-replacement"}, ProjectionKind: "work", RecordID: string(internalWork.ID), Version: 1, Value: internalWork},
+	}); err == nil {
+		t.Fatal("internal replacement bypassed reviewed Intent confirmation")
+	}
+	appendTestMission(t, ctx, store, "org-2", "mission-2", now)
+	crossTenantDraft := appendReviewedReplacementIntent(t, ctx, store, "org-2", "cross-tenant-replacement", "intent-cross-tenant-replacement", predecessor.ID, "echo cross tenant", now)
+	if _, err := store.AppendIntentConfirmation(ctx, events.TrustedDraft{
+		OrganizationID: "org-2", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-cross-tenant-replacement", CorrelationID: "cross-tenant-replacement", Payload: replacementConfirmation(crossTenantDraft, "confirmation-cross-tenant", predecessor.ID),
+	}, "", predecessor.ID); err == nil {
+		t.Fatal("cross-organization Work was accepted as a replacement predecessor")
+	}
+
+	draft := appendReviewedReplacementIntent(t, ctx, store, "org-1", "replacement", "intent-replacement", predecessor.ID, "echo replacement", now)
+	confirmation := replacementConfirmation(draft, "confirmation-replacement", predecessor.ID)
+	if _, err := store.AppendIntentConfirmation(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-replacement", CorrelationID: "replacement", Payload: confirmation,
+	}, "", predecessor.ID); err != nil {
+		t.Fatalf("reviewed replacement confirmation failed: %v", err)
+	}
+	replacementIntent := core.Intent{
+		ID: draft.ID, OrganizationID: "org-1", ReplacesWorkID: predecessor.ID,
+		OriginalInstruction: "Replace work-old with echo replacement", NormalizedObjective: draft.Objective,
+		SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT",
+		SourceMessageID: "source-replacement", AcceptedFingerprint: draft.Fingerprint, CreatedAt: now,
+	}
+	replacement := core.Work{ID: "work-replacement", IntentID: replacementIntent.ID, ReplacesWorkID: predecessor.ID, Objective: draft.Objective, Status: core.WorkActive, CreatedAt: now}
+	if _, err := store.AppendProjections(ctx, []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "replacement"}, ProjectionKind: "intent", RecordID: string(replacementIntent.ID), Version: 1, Value: replacementIntent},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "replacement"}, ProjectionKind: "work", RecordID: string(replacement.ID), Version: 1, Value: replacement},
+	}); err != nil {
+		t.Fatalf("atomic replacement projections failed: %v", err)
+	}
+
+	duplicateDraft := appendReviewedReplacementIntent(t, ctx, store, "org-1", "replacement-2", "intent-replacement-2", predecessor.ID, "echo second replacement", now)
+	if _, err := store.AppendIntentConfirmation(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-replacement-2", CorrelationID: "replacement-2", Payload: replacementConfirmation(duplicateDraft, "confirmation-replacement-2", predecessor.ID),
+	}, "", predecessor.ID); err == nil {
+		t.Fatal("failed Work received a second reviewed replacement")
+	}
+}
+
+func replacementConfirmation(draft core.IntentDraft, messageID string, predecessorID core.ID) events.IntentConfirmedPayload {
+	return events.IntentConfirmedPayload{
+		IntentID: string(draft.ID), ReplacesWorkID: string(predecessorID), Version: draft.Version, Fingerprint: draft.Fingerprint,
+		ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: messageID,
 	}
 }
 
@@ -2574,6 +2676,15 @@ func appendReviewedGoalIntentWithSource(t *testing.T, ctx context.Context, l *SQ
 }
 
 func appendReviewedIntentWithSource(t *testing.T, ctx context.Context, l *SQLite, organizationID, correlationID, intentID, goalID, objective, sourceText string, mode core.IntentMode, kind core.ExecutionKind, createdAt time.Time) core.IntentDraft {
+	return appendReviewedIntentWithLineage(t, ctx, l, organizationID, correlationID, intentID, goalID, "", objective, sourceText, mode, kind, createdAt)
+}
+
+func appendReviewedReplacementIntent(t *testing.T, ctx context.Context, l *SQLite, organizationID, correlationID, intentID string, predecessorID core.ID, objective string, createdAt time.Time) core.IntentDraft {
+	t.Helper()
+	return appendReviewedIntentWithLineage(t, ctx, l, organizationID, correlationID, intentID, "", predecessorID, objective, "Replace "+string(predecessorID)+" with "+objective, core.IntentModeStandard, core.ExecutionDeterministic, createdAt)
+}
+
+func appendReviewedIntentWithLineage(t *testing.T, ctx context.Context, l *SQLite, organizationID, correlationID, intentID, goalID string, predecessorID core.ID, objective, sourceText string, mode core.IntentMode, kind core.ExecutionKind, createdAt time.Time) core.IntentDraft {
 	t.Helper()
 	sourceMessageID := "source-" + correlationID
 	taskID := "task-" + correlationID
@@ -2595,6 +2706,9 @@ func appendReviewedIntentWithSource(t *testing.T, ctx context.Context, l *SQLite
 	}
 	if goalID != "" {
 		draft.Goal = &core.IntentValue{Value: goalID, Origin: "EXPLICIT", SourceMessageID: sourceMessageID}
+	}
+	if predecessorID != "" {
+		draft.ReplacesWork = &core.IntentValue{Value: string(predecessorID), Origin: "EXPLICIT", SourceMessageID: sourceMessageID}
 	}
 	fingerprint, err := core.FingerprintIntentDraft(draft)
 	if err != nil {

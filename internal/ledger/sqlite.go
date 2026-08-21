@@ -2216,7 +2216,7 @@ func validateWorkIntentBinding(ctx context.Context, tx *sql.Tx, item preparedPro
 	}
 	var record events.ProjectionRecord
 	var intent core.Intent
-	if json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &intent) != nil || record.RecordID != string(item.work.IntentID) || record.CorrelationID != item.draft.Event.CorrelationID || intent.ID != item.work.IntentID || intent.GoalID != item.work.GoalID || intent.NormalizedObjective != item.work.Objective || string(intent.OrganizationID) != item.draft.Event.OrganizationID {
+	if json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &intent) != nil || record.RecordID != string(item.work.IntentID) || record.CorrelationID != item.draft.Event.CorrelationID || intent.ID != item.work.IntentID || intent.GoalID != item.work.GoalID || intent.ReplacesWorkID != item.work.ReplacesWorkID || intent.NormalizedObjective != item.work.Objective || string(intent.OrganizationID) != item.draft.Event.OrganizationID {
 		return fmt.Errorf("work does not match its accepted intent boundary")
 	}
 	if intentRequiresConfirmation(intent) {
@@ -2224,11 +2224,47 @@ func validateWorkIntentBinding(ctx context.Context, tx *sql.Tx, item preparedPro
 			return err
 		}
 	}
+	if err := validateWorkReplacementBinding(ctx, tx, item, intent); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateWorkReplacementBinding(ctx context.Context, tx *sql.Tx, item preparedProjection, intent core.Intent) error {
+	predecessorID := item.work.ReplacesWorkID
+	if predecessorID == "" {
+		return nil
+	}
+	body, found, err := latestRecordBody(ctx, tx, "work", string(predecessorID))
+	if err != nil || !found {
+		return fmt.Errorf("replacement Work predecessor is unavailable")
+	}
+	var predecessorRecord events.ProjectionRecord
+	var predecessor core.Work
+	if decodeExactJSONBytes(body, &predecessorRecord) != nil || decodeExactJSONBytes(predecessorRecord.Value, &predecessor) != nil || predecessor.ID != predecessorID || predecessor.Status != core.WorkFailed || predecessor.GoalID != item.work.GoalID {
+		return fmt.Errorf("replacement Work requires a failed predecessor with the same Goal binding")
+	}
+	intentBody, intentFound, err := latestRecordBody(ctx, tx, "intent", string(predecessor.IntentID))
+	if err != nil || !intentFound {
+		return fmt.Errorf("replacement Work predecessor lacks its durable Intent")
+	}
+	var predecessorIntentRecord events.ProjectionRecord
+	var predecessorIntent core.Intent
+	if decodeExactJSONBytes(intentBody, &predecessorIntentRecord) != nil || decodeExactJSONBytes(predecessorIntentRecord.Value, &predecessorIntent) != nil || predecessorIntent.ID != predecessor.IntentID || predecessorIntent.OrganizationID != intent.OrganizationID || predecessorIntentRecord.CorrelationID != predecessorRecord.CorrelationID {
+		return fmt.Errorf("replacement Work predecessor crosses its organization or Intent boundary")
+	}
+	var existing int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT record_id) FROM records WHERE kind='work' AND record_id<>? AND json_extract(body,'$.value.replaces_work_id')=?`, item.draft.RecordID, string(predecessorID)).Scan(&existing); err != nil {
+		return fmt.Errorf("read replacement Work uniqueness: %w", err)
+	}
+	if existing != 0 {
+		return fmt.Errorf("failed Work already has a durable replacement")
+	}
 	return nil
 }
 
 func intentRequiresConfirmation(intent core.Intent) bool {
-	return intent.GoalID != "" || intent.SourceChannel == "HUMAN_DIRECT" || intent.SourceChannel == "A2A" || intent.SourcePrincipalKind == core.PrincipalHuman || intent.SourcePrincipalKind == core.PrincipalExternalAgent
+	return intent.GoalID != "" || intent.ReplacesWorkID != "" || intent.SourceChannel == "HUMAN_DIRECT" || intent.SourceChannel == "A2A" || intent.SourcePrincipalKind == core.PrincipalHuman || intent.SourcePrincipalKind == core.PrincipalExternalAgent
 }
 
 func validateExternalIntentConfirmation(ctx context.Context, tx *sql.Tx, item preparedProjection, intent core.Intent) error {
@@ -2846,12 +2882,12 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 	return appendEvent(ctx, l.db, d)
 }
 
-func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.TrustedDraft, goalID core.ID) (events.Event, error) {
+func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.TrustedDraft, goalID, replacesWorkID core.ID) (events.Event, error) {
 	if draft.EventType != "INTENT_CONFIRMED" || draft.OrganizationID == "" {
 		return events.Event{}, fmt.Errorf("complete intent confirmation is required")
 	}
 	var confirmation events.IntentConfirmedPayload
-	if err := decodeExactJSON(draft.Payload, &confirmation); err != nil || confirmation.GoalID != string(goalID) || confirmation.IntentID != "intent-"+draft.CorrelationID || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.ConfirmingActorID == "" || confirmation.ConfirmingActorKind == "" || confirmation.SourceChannel == "" || confirmation.MessageID == "" ||
+	if err := decodeExactJSON(draft.Payload, &confirmation); err != nil || confirmation.GoalID != string(goalID) || confirmation.ReplacesWorkID != string(replacesWorkID) || confirmation.IntentID != "intent-"+draft.CorrelationID || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.ConfirmingActorID == "" || confirmation.ConfirmingActorKind == "" || confirmation.SourceChannel == "" || confirmation.MessageID == "" ||
 		draft.SourceActorID != confirmation.ConfirmingActorID || draft.SourceExecutionID != "" || draft.RecipientScope != "" || draft.RecipientID != "" || draft.TaskID != "task-"+draft.CorrelationID || draft.CorrelationID == "" || len(draft.AuthorizationRefs) != 0 || len(draft.ArtifactRefs) != 0 {
 		return events.Event{}, fmt.Errorf("intent confirmation does not match its reviewed Goal selection")
 	}
@@ -2894,6 +2930,9 @@ func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.Trus
 				if err := events.ValidateReviewedGoalIntentAdmission(stream, candidate, goal); err != nil {
 					return err
 				}
+			}
+			if err := validateReplacementWorkAtIntentConfirmation(ctx, tx, draft.OrganizationID, goalID, replacesWorkID, candidate); err != nil {
+				return err
 			}
 			event = candidate
 			return nil
@@ -2939,10 +2978,50 @@ func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.Trus
 		} else if err := events.ValidateReviewedGoalIntentAdmission(stream, candidate, goal); err != nil {
 			return err
 		}
+		if err := validateReplacementWorkAtIntentConfirmation(ctx, tx, draft.OrganizationID, goalID, replacesWorkID, candidate); err != nil {
+			return err
+		}
 		event, err = appendEvent(ctx, tx, draft)
 		return err
 	})
 	return event, err
+}
+
+func validateReplacementWorkAtIntentConfirmation(ctx context.Context, tx *sql.Tx, organizationID string, goalID, replacesWorkID core.ID, confirmation events.Event) error {
+	if replacesWorkID == "" {
+		return nil
+	}
+	if organizationID == "" || !core.ValidWorkReferenceID(string(replacesWorkID)) {
+		return fmt.Errorf("intent replacement Work boundary is invalid")
+	}
+	var body []byte
+	var predecessorSequence int64
+	err := tx.QueryRowContext(ctx, `SELECT r.body,e.sequence FROM records r JOIN events e ON e.event_id=r.admission_event_id WHERE r.kind='work' AND r.record_id=? ORDER BY r.version DESC LIMIT 1`, string(replacesWorkID)).Scan(&body, &predecessorSequence)
+	if err != nil {
+		return fmt.Errorf("confirmed replacement Work is unavailable")
+	}
+	var record events.ProjectionRecord
+	var predecessor core.Work
+	if decodeExactJSONBytes(body, &record) != nil || decodeExactJSONBytes(record.Value, &predecessor) != nil || predecessor.ID != replacesWorkID || predecessor.Status != core.WorkFailed || predecessor.GoalID != goalID || record.CorrelationID == "" || confirmation.Sequence > 0 && predecessorSequence >= confirmation.Sequence {
+		return fmt.Errorf("confirmed replacement requires a prior failed Work with the same Goal binding")
+	}
+	intentBody, found, err := latestRecordBody(ctx, tx, "intent", string(predecessor.IntentID))
+	if err != nil || !found {
+		return fmt.Errorf("confirmed replacement Work lacks its durable Intent")
+	}
+	var intentRecord events.ProjectionRecord
+	var intent core.Intent
+	if decodeExactJSONBytes(intentBody, &intentRecord) != nil || decodeExactJSONBytes(intentRecord.Value, &intent) != nil || intent.ID != predecessor.IntentID || intent.OrganizationID != core.ID(organizationID) || intentRecord.CorrelationID != record.CorrelationID {
+		return fmt.Errorf("confirmed replacement Work crosses its organization or Intent boundary")
+	}
+	var existing int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE organization_id=? AND event_type='INTENT_CONFIRMED' AND correlation_id<>? AND json_extract(payload,'$.replaces_work_id')=?`, organizationID, confirmation.CorrelationID, string(replacesWorkID)).Scan(&existing); err != nil {
+		return fmt.Errorf("read replacement Work lineage: %w", err)
+	}
+	if existing != 0 {
+		return fmt.Errorf("failed Work already has a reviewed replacement")
+	}
+	return nil
 }
 
 func activeGoalAtIntentConfirmation(ctx context.Context, tx *sql.Tx, organizationID string, goalID core.ID, confirmationSequence int64) (core.Goal, error) {

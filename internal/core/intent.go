@@ -44,6 +44,12 @@ func ValidGoalReferenceID(value string) bool {
 	return true
 }
 
+// ValidWorkReferenceID keeps replacement lineage references unambiguous and
+// distinct from arbitrary user text.
+func ValidWorkReferenceID(value string) bool {
+	return strings.HasPrefix(value, "work-") && ValidGoalReferenceID(value)
+}
+
 // FingerprintIntentDraft binds confirmation to the complete canonical draft,
 // including its version and creation time, while excluding the fingerprint
 // field itself.
@@ -80,6 +86,12 @@ func ValidateAcceptedIntentDraft(draft IntentDraft, organizationID ID, kind Exec
 			return err
 		}
 		groups = append(groups, []IntentValue{*draft.Goal})
+	}
+	if draft.ReplacesWork != nil {
+		if _, err := AcceptedIntentReplacesWorkID(draft); err != nil {
+			return err
+		}
+		groups = append(groups, []IntentValue{*draft.ReplacesWork})
 	}
 	for _, group := range groups {
 		for _, value := range group {
@@ -123,13 +135,44 @@ func AcceptedIntentGoalID(draft IntentDraft) (ID, error) {
 	return ID(value), nil
 }
 
+// AcceptedIntentReplacesWorkID validates the predecessor Work identity and
+// explicit source-message provenance selected in a reviewed replacement.
+func AcceptedIntentReplacesWorkID(draft IntentDraft) (ID, error) {
+	if draft.ReplacesWork == nil {
+		return "", nil
+	}
+	value := draft.ReplacesWork.Value
+	if !ValidWorkReferenceID(value) {
+		return "", fmt.Errorf("accepted Intent replacement Work identity is invalid")
+	}
+	switch draft.ReplacesWork.Origin {
+	case "EXPLICIT", "CONFIRMED":
+		if draft.ReplacesWork.SourceMessageID == "" {
+			return "", fmt.Errorf("accepted Intent replacement Work requires source-message provenance")
+		}
+	default:
+		return "", fmt.Errorf("accepted Intent replacement Work provenance is invalid")
+	}
+	return ID(value), nil
+}
+
 // ContainsExactGoalReference recognizes a Goal ID only as a complete token.
 // This prevents one Goal from being selected by a prefix or substring match.
 func ContainsExactGoalReference(text, goalID string) bool {
+	return containsExactReference(text, goalID)
+}
+
+// ContainsExactWorkReference recognizes a predecessor Work ID only as a
+// complete token in its attributed operator message.
+func ContainsExactWorkReference(text, workID string) bool {
+	return containsExactReference(text, workID)
+}
+
+func containsExactReference(text, referenceID string) bool {
 	for _, field := range strings.Fields(text) {
 		token := field
 		for {
-			if goalTokenMatches(token, goalID) {
+			if goalTokenMatches(token, referenceID) {
 				return true
 			}
 			leading, size := utf8.DecodeRuneInString(token)

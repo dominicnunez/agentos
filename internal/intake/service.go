@@ -80,6 +80,7 @@ type Message struct {
 
 type View struct {
 	TaskID             string
+	WorkID             string
 	ConversationID     string
 	State              string
 	Prompt             string
@@ -423,6 +424,17 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 	if usesModel != (normalized.Usage != nil) {
 		return View{}, fmt.Errorf("%w: intent normalizer model usage contract is inconsistent", ErrUnavailable)
 	}
+	if normalized.Candidate.ReplacesWork != nil {
+		goalID, resolveErr := s.app.ResolveReplacementGoal(ctx, principal.OrganizationID, core.ID(normalized.Candidate.ReplacesWork.Value))
+		if resolveErr != nil {
+			return View{}, fmt.Errorf("%w: resolve replacement Work binding", ErrConflict)
+		}
+		if normalized.Candidate.Goal == nil && goalID != "" {
+			normalized.Candidate.Goal = &core.IntentValue{Value: string(goalID), Origin: "POLICY"}
+		} else if normalized.Candidate.Goal != nil && core.ID(normalized.Candidate.Goal.Value) != goalID {
+			return View{}, fmt.Errorf("%w: replacement Work Goal conflicts with its durable predecessor", ErrConflict)
+		}
+	}
 	requestedKind, err := explicitRequestedKind(stream)
 	if err != nil {
 		return View{}, fmt.Errorf("%w: load explicit execution route", ErrUnavailable)
@@ -440,8 +452,9 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 	draft := core.IntentDraft{
 		ID: core.ID("intent-" + stream[0].CorrelationID), OrganizationID: core.ID(principal.OrganizationID),
 		Version: version, Status: status, Mode: normalized.Candidate.Mode, RequestedExecutionKind: requestedKind,
-		Goal:      cloneIntentValue(normalized.Candidate.Goal),
-		Objective: normalized.Candidate.Objective, Context: normalized.Candidate.Context,
+		Goal:         cloneIntentValue(normalized.Candidate.Goal),
+		ReplacesWork: cloneIntentValue(normalized.Candidate.ReplacesWork),
+		Objective:    normalized.Candidate.Objective, Context: normalized.Candidate.Context,
 		Deliverables: normalized.Candidate.Deliverables, CompletionCriteria: normalized.Candidate.CompletionCriteria,
 		Constraints: normalized.Candidate.Constraints, ResolvedDecisions: normalized.Candidate.ResolvedDecisions,
 		ConsequenceCandidates: normalized.Candidate.ConsequenceCandidates, MissingUserInputs: normalized.Candidate.MissingUserInputs,
@@ -695,7 +708,7 @@ func ValidateIdentifier(name, value string) error {
 }
 
 func projectView(conversationID string, stream []events.Event, includeResult bool) View {
-	view := View{TaskID: streamTaskID(stream), ConversationID: conversationID, State: externalState(stream)}
+	view := View{TaskID: streamTaskID(stream), WorkID: streamWorkID(stream), ConversationID: conversationID, State: externalState(stream)}
 	if payload, found, err := latestIntentPayload(stream); err == nil && found {
 		view.Mode = payload.Draft.Mode
 	}
@@ -752,8 +765,22 @@ func streamTask(stream []events.Event) (core.Task, bool) {
 	return core.Task{}, false
 }
 
+func streamWorkID(stream []events.Event) string {
+	for index := len(stream) - 1; index >= 0; index-- {
+		projection, present, err := events.AdmittedProjection(stream[index])
+		if err != nil || !present || projection.Projection.ProjectionKind != "work" {
+			continue
+		}
+		var work core.Work
+		if json.Unmarshal(projection.Projection.Value, &work) == nil && work.ID != "" && string(work.ID) == projection.Projection.RecordID {
+			return string(work.ID)
+		}
+	}
+	return ""
+}
+
 func projectSubmissionReceipt(conversationID string, stream []events.Event) View {
-	view := View{TaskID: streamTaskID(stream), ConversationID: conversationID, State: StateWorking}
+	view := View{TaskID: streamTaskID(stream), WorkID: streamWorkID(stream), ConversationID: conversationID, State: StateWorking}
 	for _, event := range stream {
 		if event.EventType == "INTENT_CREATED" {
 			view.UpdatedAt = event.CreatedAt
@@ -1068,7 +1095,7 @@ func projectIntentView(conversationID string, stream []events.Event, draft core.
 		state = StateAwaitingConfirmation
 	}
 	copy := draft
-	return View{TaskID: streamTaskID(stream), ConversationID: conversationID, State: state, Prompt: reply, UpdatedAt: stream[len(stream)-1].CreatedAt, Intent: &copy}
+	return View{TaskID: streamTaskID(stream), WorkID: streamWorkID(stream), ConversationID: conversationID, State: state, Prompt: reply, UpdatedAt: stream[len(stream)-1].CreatedAt, Intent: &copy}
 }
 
 func matchesDurableInput(stream []events.Event, principal Principal, message Message) (bool, error) {

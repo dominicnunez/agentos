@@ -11,11 +11,31 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dominicnunez/agentos/internal/core"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
+
+func TestIntentReviewDisplaysExactReplacementWork(t *testing.T) {
+	var output bytes.Buffer
+	printIntentReview(&output, core.IntentDraft{
+		Objective: "retry bounded work", Mode: core.IntentModeStandard, ReplacesWork: &core.IntentValue{Value: "work-failed-1"},
+	})
+	if !strings.Contains(output.String(), "Replaces failed Work\nwork-failed-1") {
+		t.Fatalf("replacement review omitted predecessor identity: %q", output.String())
+	}
+}
+
+func TestTaskStatusDisplaysDurableWorkIdentity(t *testing.T) {
+	var output bytes.Buffer
+	printTaskStatus(&output, tuiTask{TaskID: "task-1", WorkID: "work-1", State: "FAILED"})
+	if !strings.Contains(output.String(), "Task task-1 - FAILED") || !strings.Contains(output.String(), "Work work-1") {
+		t.Fatalf("task status omitted Work identity: %q", output.String())
+	}
+}
 
 func TestReadArtifactUploadRejectsLinksAndReadsBoundedRegularFiles(t *testing.T) {
 	directory := t.TempDir()

@@ -90,7 +90,7 @@ func TestRecoveryRejectsCausallyReorderedGoalEvidence(t *testing.T) {
 	}
 	if _, err := gateway.PublishIntentConfirmation(ctx, events.TrustedDraft{
 		OrganizationID: string(organization.ID), EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: taskID, CorrelationID: correlationID, Payload: confirmation,
-	}, goal.ID); err != nil {
+	}, goal.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	submission := app.Submit{

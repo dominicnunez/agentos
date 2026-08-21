@@ -790,7 +790,7 @@ func TestIntentCannotBypassTypedReviewAdmission(t *testing.T) {
 		if _, err := gateway.PublishTrusted(context.Background(), draft); err == nil {
 			t.Fatalf("Intent with Goal %q bypassed typed review admission", goalID)
 		}
-		if _, err := gateway.PublishIntentConfirmation(context.Background(), draft, goalID); err == nil {
+		if _, err := gateway.PublishIntentConfirmation(context.Background(), draft, goalID, ""); err == nil {
 			t.Fatalf("ledger without typed review admission accepted Intent with Goal %q", goalID)
 		}
 		if len(ledger.events) != 0 {
@@ -803,7 +803,7 @@ func TestIntentCannotBypassTypedReviewAdmission(t *testing.T) {
 		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-work-1", CorrelationID: "work-1",
 		Payload: IntentConfirmedPayload{IntentID: "intent-work-1", GoalID: "goal-1", Version: 1, Fingerprint: "fingerprint", ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "message-1"},
 	}
-	if _, err := gateway.PublishIntentConfirmation(context.Background(), mismatched, "goal-2"); err == nil {
+	if _, err := gateway.PublishIntentConfirmation(context.Background(), mismatched, "goal-2", ""); err == nil {
 		t.Fatal("Intent payload Goal did not match the Goal selected for typed admission")
 	}
 }

@@ -91,7 +91,7 @@ func runTUI(ctx context.Context, _ string, config bootstrap.Config, input *os.Fi
 				_, _ = fmt.Fprintf(output, "Confirmation unavailable: %s\n", safeTerminalLine(confirmErr.Error()))
 				continue
 			}
-			_, _ = fmt.Fprintf(output, "Task %s - %s\n", confirmed.TaskID, confirmed.State)
+			printTaskStatus(output, confirmed)
 			conversationID, currentIntent = "", nil
 		default:
 			if line == "/complete" || line == "/user-task" {
@@ -124,7 +124,7 @@ func runTUI(ctx context.Context, _ string, config bootstrap.Config, input *os.Fi
 				_, _ = fmt.Fprintf(output, "Work unavailable: %s\n", safeTerminalLine(err.Error()))
 				continue
 			}
-			_, _ = fmt.Fprintf(output, "Task %s - %s\n", response.TaskID, response.State)
+			printTaskStatus(output, response)
 			if response.Prompt != "" {
 				_, _ = fmt.Fprintln(output, safeTerminalText(response.Prompt))
 			}
@@ -143,7 +143,7 @@ func runTUI(ctx context.Context, _ string, config bootstrap.Config, input *os.Fi
 						_, _ = fmt.Fprintf(output, "Confirmation unavailable: %s\n", safeTerminalLine(confirmErr.Error()))
 						continue
 					}
-					_, _ = fmt.Fprintf(output, "Task %s - %s\n", response.TaskID, response.State)
+					printTaskStatus(output, response)
 					conversationID = ""
 					currentIntent = nil
 				}
@@ -163,6 +163,7 @@ func runTUI(ctx context.Context, _ string, config bootstrap.Config, input *os.Fi
 
 type tuiTask struct {
 	TaskID             string                   `json:"task_id"`
+	WorkID             string                   `json:"work_id"`
 	ConversationID     string                   `json:"conversation_id"`
 	State              string                   `json:"state"`
 	Prompt             string                   `json:"prompt"`
@@ -178,6 +179,9 @@ func printIntentReview(output io.Writer, draft core.IntentDraft) {
 	_, _ = fmt.Fprintf(output, "\nMode\n%s\n", safeTerminalLine(string(draft.Mode)))
 	if draft.Goal != nil {
 		_, _ = fmt.Fprintf(output, "\nGoal\n%s\n", safeTerminalLine(draft.Goal.Value))
+	}
+	if draft.ReplacesWork != nil {
+		_, _ = fmt.Fprintf(output, "\nReplaces failed Work\n%s\n", safeTerminalLine(draft.ReplacesWork.Value))
 	}
 	printIntentValues(output, "Context", draft.Context)
 	printIntentValues(output, "Deliverables", draft.Deliverables)
@@ -199,6 +203,13 @@ func printIntentReview(output io.Writer, draft core.IntentDraft) {
 		_, _ = fmt.Fprintf(output, "\nRequested execution: %s\n", safeTerminalLine(string(draft.RequestedExecutionKind)))
 	}
 	_, _ = fmt.Fprintf(output, "\nIntent version %d  Fingerprint %s\n", draft.Version, draft.Fingerprint)
+}
+
+func printTaskStatus(output io.Writer, task tuiTask) {
+	_, _ = fmt.Fprintf(output, "Task %s - %s\n", task.TaskID, task.State)
+	if task.WorkID != "" {
+		_, _ = fmt.Fprintf(output, "Work %s\n", safeTerminalLine(task.WorkID))
+	}
 }
 
 func printIntentValues(output io.Writer, heading string, values []core.IntentValue) {
@@ -262,10 +273,9 @@ func (c *tuiClient) completeHumanTask(ctx context.Context, taskID string, reader
 	if err := c.request(ctx, http.MethodPost, "/v1/user/tasks/"+taskID+"/completion", request, &task); err != nil {
 		return err
 	}
+	printTaskStatus(output, task)
 	if task.TrustLabel != "" {
-		_, _ = fmt.Fprintf(output, "Task %s - %s\nTrust: %s\n", task.TaskID, task.State, safeTerminalLine(task.TrustLabel))
-	} else {
-		_, _ = fmt.Fprintf(output, "Task %s - %s\n", task.TaskID, task.State)
+		_, _ = fmt.Fprintf(output, "Trust: %s\n", safeTerminalLine(task.TrustLabel))
 	}
 	_, err = fmt.Fprintln(output, safeTerminalText(task.Result))
 	return err

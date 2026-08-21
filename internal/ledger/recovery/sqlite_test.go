@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dominicnunez/agentos/internal/app"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
@@ -815,7 +816,7 @@ func TestRecoveryRejectsGoalBoundWorkWithoutConfirmation(t *testing.T) {
 		t.Fatal(err)
 	}
 	confirmation := events.IntentConfirmedPayload{IntentID: string(intentDraft.ID), GoalID: string(goal.ID), Version: 1, Fingerprint: intentDraft.Fingerprint, ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1"}
-	confirmationEvent, err := store.AppendIntentConfirmation(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: taskID, CorrelationID: correlationID, Payload: confirmation}, goal.ID)
+	confirmationEvent, err := store.AppendIntentConfirmation(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: taskID, CorrelationID: correlationID, Payload: confirmation}, goal.ID, "")
 	if err != nil {
 		_ = store.Close()
 		t.Fatal(err)
@@ -869,6 +870,108 @@ func TestRecoveryRejectsGoalBoundWorkWithoutConfirmation(t *testing.T) {
 				t.Fatalf("invalid Goal-bound confirmation recovery error=%v want=%q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestRecoveryRechecksReplacementFailureAtConfirmationSequence(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "replacement.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := events.NewGateway(store)
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	predecessorIntent := core.Intent{
+		ID: "intent-old", OrganizationID: organization.ID, OriginalInstruction: "old work", NormalizedObjective: "old work",
+		SourcePrincipalID: "runtime", SourcePrincipalKind: core.PrincipalRuntime, SourceChannel: "INTERNAL", AcceptedFingerprint: "internal-old", CreatedAt: now,
+	}
+	predecessor := core.Work{ID: "work-old", IntentID: predecessorIntent.ID, Objective: predecessorIntent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	for _, projection := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "old"}, ProjectionKind: "intent", RecordID: string(predecessorIntent.ID), Version: 1, Value: predecessorIntent},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "old"}, ProjectionKind: "work", RecordID: string(predecessor.ID), Version: 1, Value: predecessor},
+	} {
+		if _, err := store.AppendProjection(ctx, projection); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	application := app.New(gateway)
+	const requestID = "replacement"
+	const messageID = "message-replacement"
+	if _, err := application.RecordIntakeMessage(ctx, app.IntakeMessage{
+		RequestID: requestID, OrganizationID: "org-1", MessageID: messageID, Text: "Replace work-old with a verified result",
+		SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", RequestedKind: core.ExecutionDeterministic,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	correlationID, found, err := gateway.ResolveExternalWork(ctx, "org-1", requestID)
+	if err != nil || !found {
+		_ = store.Close()
+		t.Fatalf("resolve replacement correlation: found=%t err=%v", found, err)
+	}
+	draft := core.IntentDraft{
+		ID: core.ID("intent-" + correlationID), OrganizationID: organization.ID, Version: 1, Status: core.IntentStatusReadyForReview, Mode: core.IntentModeStandard,
+		RequestedExecutionKind: core.ExecutionDeterministic,
+		ReplacesWork:           &core.IntentValue{Value: string(predecessor.ID), Origin: "EXPLICIT", SourceMessageID: messageID},
+		Objective:              "echo replacement result",
+		Context:                []core.IntentValue{}, Deliverables: []core.IntentValue{{Value: "replacement result", Origin: "EXPLICIT", SourceMessageID: messageID}}, CompletionCriteria: []core.IntentValue{{Value: "replacement result verified", Origin: "EXPLICIT", SourceMessageID: messageID}},
+		Constraints: []core.IntentValue{}, ResolvedDecisions: []core.IntentDecision{}, ConsequenceCandidates: []string{}, MissingUserInputs: []core.IntentValue{}, CreatedAt: now,
+	}
+	draft.Fingerprint, err = core.FingerprintIntentDraft(draft)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, err := application.RecordIntentDraft(ctx, "org-1", requestID, messageID, draft, "Review replacement Work."); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	predecessor.Status = core.WorkFailed
+	failureEvent, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_FAILED", SourceActorID: "runtime", CorrelationID: "old", Payload: map[string]string{"reason": "bounded failure"}},
+		ProjectionKind: "work", RecordID: string(predecessor.ID), Version: 2, Value: predecessor,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	result, err := application.ConfirmIntent(ctx, app.IntentConfirmation{
+		RequestID: requestID, OrganizationID: "org-1", MessageID: "confirmation-replacement", Fingerprint: draft.Fingerprint,
+		SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", Kind: core.ExecutionDeterministic,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	var confirmationEvent events.Event
+	for _, event := range result.Events {
+		if event.EventType == "INTENT_CONFIRMED" {
+			confirmationEvent = event
+		}
+	}
+	if confirmationEvent.EventID == "" {
+		_ = store.Close()
+		t.Fatal("replacement confirmation was not persisted")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err != nil {
+		t.Fatalf("valid replacement failed recovery verification: %v", err)
+	}
+	swapRecoveryProjectionAndOrdinarySequences(t, ctx, path, failureEvent, confirmationEvent)
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "prior failed Work with the same Goal binding at admission") {
+		t.Fatalf("recovery accepted replacement before predecessor failure: %v", err)
+	}
+}
+
+func TestRecoveryRequiresConfirmationForRuntimeReplacement(t *testing.T) {
+	if !intentRequiresConfirmation(core.Intent{ReplacesWorkID: "work-old", SourcePrincipalID: "runtime", SourcePrincipalKind: core.PrincipalRuntime, SourceChannel: "INTERNAL"}) {
+		t.Fatal("recovery treated runtime replacement lineage as unreviewed internal Work")
 	}
 }
 

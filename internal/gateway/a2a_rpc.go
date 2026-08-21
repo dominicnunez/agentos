@@ -296,10 +296,18 @@ func projectA2ATask(view intake.View) *a2a.Task {
 			ID: a2a.ArtifactID("result-" + view.TaskID), Name: "Agent OS result", Parts: a2a.ContentParts{part},
 		}}
 	}
-	if view.Mode != "" || view.TrustLabel != "" {
-		task.Metadata = map[string]any{agentOSTaskMetadataURI: map[string]any{
-			"mode": view.Mode, "trust_label": view.TrustLabel,
-		}}
+	if view.Mode != "" || view.TrustLabel != "" || view.WorkID != "" {
+		metadata := map[string]any{}
+		if view.Mode != "" {
+			metadata["mode"] = view.Mode
+		}
+		if view.TrustLabel != "" {
+			metadata["trust_label"] = view.TrustLabel
+		}
+		if view.WorkID != "" {
+			metadata["work_id"] = view.WorkID
+		}
+		task.Metadata = map[string]any{agentOSTaskMetadataURI: metadata}
 	}
 	if view.Intent != nil {
 		review := map[string]any{
@@ -311,6 +319,9 @@ func projectA2ATask(view intake.View) *a2a.Task {
 		}
 		if view.Intent.Goal != nil {
 			review["goal"] = *view.Intent.Goal
+		}
+		if view.Intent.ReplacesWork != nil {
+			review["replaces_work"] = *view.Intent.ReplacesWork
 		}
 		if task.Metadata == nil {
 			task.Metadata = make(map[string]any)

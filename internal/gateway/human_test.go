@@ -19,9 +19,9 @@ import (
 
 const testOwnerMarker = "local-owner-uid-marker"
 
-func TestHumanResponseRetainsExperimentalTrustLabel(t *testing.T) {
-	response := humanResponse(intake.View{TaskID: "task-1", ConversationID: "context-1", State: intake.StateCompleted, Result: "lab result", Mode: core.IntentModeExperiment, TrustLabel: core.ExperimentTrustUnverified})
-	if response.Mode != core.IntentModeExperiment || response.TrustLabel != core.ExperimentTrustUnverified {
+func TestHumanResponseRetainsWorkIdentityAndExperimentalTrustLabel(t *testing.T) {
+	response := humanResponse(intake.View{TaskID: "task-1", WorkID: "work-1", ConversationID: "context-1", State: intake.StateCompleted, Result: "lab result", Mode: core.IntentModeExperiment, TrustLabel: core.ExperimentTrustUnverified})
+	if response.WorkID != "work-1" || response.Mode != core.IntentModeExperiment || response.TrustLabel != core.ExperimentTrustUnverified {
 		t.Fatalf("experimental response=%+v", response)
 	}
 }

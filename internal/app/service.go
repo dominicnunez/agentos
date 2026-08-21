@@ -1503,15 +1503,43 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 	if err != nil || goalID != in.GoalID {
 		return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("submitted Goal does not match the accepted Intent")
 	}
+	replacesWorkID, err := core.AcceptedIntentReplacesWorkID(acceptedDraft)
+	if err != nil {
+		return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("submitted replacement Work does not match the accepted Intent")
+	}
+	if replacesWorkID != "" && (in.NormalizedIntent == nil || in.SourceChannel != "HUMAN_DIRECT" && in.SourceChannel != "A2A") {
+		return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("replacement Work requires a reviewed user or A2A Intent")
+	}
+	if replacesWorkID != "" && in.experimentSpec != nil {
+		return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("V1 Lab Work cannot replace production Work")
+	}
 	intentID := core.ID("intent-" + correlationID)
-	if goalID != "" {
+	if goalID != "" || replacesWorkID != "" {
 		goal, found := snapshot.Goals[goalID]
-		goalConfirmed, confirmErr := s.goalBindingWasConfirmed(ctx, correlationID, acceptedDraft)
+		bindingConfirmed, confirmErr := s.intentBindingWasConfirmed(ctx, correlationID, acceptedDraft)
 		if confirmErr != nil {
 			return core.Intent{}, core.Work{}, core.Task{}, confirmErr
 		}
-		if !found || goal.Value.OrganizationID != organizationID || !goalConfirmed {
+		if goalID != "" && (!found || goal.Value.OrganizationID != organizationID) {
 			return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("accepted Intent requires a valid Goal admission in its organization")
+		}
+		if !bindingConfirmed {
+			return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("accepted Intent requires its exact durable review confirmation")
+		}
+	}
+	if replacesWorkID != "" {
+		predecessor, found := snapshot.Works[replacesWorkID]
+		if !found || predecessor.Value.Status != core.WorkFailed || predecessor.Value.GoalID != goalID {
+			return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("accepted replacement requires a failed Work with the same Goal binding")
+		}
+		predecessorIntent, found := snapshot.Intents[predecessor.Value.IntentID]
+		if !found || predecessorIntent.Value.OrganizationID != organizationID {
+			return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("accepted replacement Work crosses its organization boundary")
+		}
+		for existingID, existing := range snapshot.Works {
+			if existingID != core.ID("work-"+correlationID) && existing.Value.ReplacesWorkID == replacesWorkID {
+				return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("failed Work already has a durable replacement")
+			}
 		}
 	}
 	hardConstraints := make([]string, 0, len(acceptedDraft.Constraints))
@@ -1519,7 +1547,7 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 		hardConstraints = append(hardConstraints, constraint.Value)
 	}
 	intent := core.Intent{
-		ID: intentID, OrganizationID: organizationID, GoalID: goalID,
+		ID: intentID, OrganizationID: organizationID, GoalID: goalID, ReplacesWorkID: replacesWorkID,
 		OriginalInstruction: in.Statement, NormalizedObjective: acceptedDraft.Objective,
 		HardConstraints: hardConstraints, ConsequenceBoundaries: append([]string(nil), acceptedDraft.ConsequenceCandidates...),
 		SourcePrincipalID: in.SourcePrincipalID, SourcePrincipalKind: in.SourcePrincipalKind,
@@ -1533,7 +1561,7 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 	}
 	intentExists := false
 	if existing, ok := snapshot.Intents[intent.ID]; ok {
-		if existing.Value.OrganizationID != organizationID || existing.Value.GoalID != goalID || existing.Value.OriginalInstruction != in.Statement || existing.Value.NormalizedObjective != acceptedDraft.Objective ||
+		if existing.Value.OrganizationID != organizationID || existing.Value.GoalID != goalID || existing.Value.ReplacesWorkID != replacesWorkID || existing.Value.OriginalInstruction != in.Statement || existing.Value.NormalizedObjective != acceptedDraft.Objective ||
 			!slices.Equal(existing.Value.HardConstraints, hardConstraints) || !slices.Equal(existing.Value.ConsequenceBoundaries, acceptedDraft.ConsequenceCandidates) ||
 			!slices.Equal(existing.Value.Context, acceptedDraft.Context) || !slices.Equal(existing.Value.Deliverables, acceptedDraft.Deliverables) ||
 			!slices.Equal(existing.Value.CompletionCriteria, acceptedDraft.CompletionCriteria) || !slices.Equal(existing.Value.ResolvedDecisions, acceptedDraft.ResolvedDecisions) ||
@@ -1543,26 +1571,38 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 		}
 		intent = existing.Value
 		intentExists = true
-	} else if in.experimentSpec == nil {
+	} else if in.experimentSpec == nil && replacesWorkID == "" {
 		if err := s.state.SaveIntent(ctx, "INTENT_CREATED", "runtime", correlationID, 1, intent, nil); err != nil {
 			return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("persist intent: %w", err)
 		}
 		snapshot.Intents[intent.ID] = projections.Versioned[core.Intent]{Version: 1, CorrelationID: correlationID, Value: intent}
 	}
 
-	work := core.Work{ID: core.ID("work-" + correlationID), IntentID: intent.ID, GoalID: goalID, Objective: acceptedDraft.Objective, Status: core.WorkActive, CreatedAt: now}
+	work := core.Work{ID: core.ID("work-" + correlationID), IntentID: intent.ID, GoalID: goalID, ReplacesWorkID: replacesWorkID, Objective: acceptedDraft.Objective, Status: core.WorkActive, CreatedAt: now}
 	workExists := false
 	if existing, ok := snapshot.Works[work.ID]; ok {
-		if existing.Value.IntentID != intent.ID || existing.Value.GoalID != goalID || existing.Value.Objective != acceptedDraft.Objective {
+		if existing.Value.IntentID != intent.ID || existing.Value.GoalID != goalID || existing.Value.ReplacesWorkID != replacesWorkID || existing.Value.Objective != acceptedDraft.Objective {
 			return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("request work projection does not match submitted work")
 		}
 		work = existing.Value
 		workExists = true
-	} else if in.experimentSpec == nil {
+	} else if in.experimentSpec == nil && replacesWorkID == "" {
 		if err := s.state.SaveWork(ctx, organizationID, "WORK_CREATED", "runtime", correlationID, 1, work, nil); err != nil {
 			return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("persist work: %w", err)
 		}
 		snapshot.Works[work.ID] = projections.Versioned[core.Work]{Version: 1, CorrelationID: correlationID, Value: work}
+	}
+	if replacesWorkID != "" {
+		if intentExists != workExists {
+			return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("replacement submission is only partially materialized")
+		}
+		if !intentExists {
+			if err := s.state.SaveReplacementSubmission(ctx, correlationID, intent, work); err != nil {
+				return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("persist reviewed replacement Work: %w", err)
+			}
+			snapshot.Intents[intent.ID] = projections.Versioned[core.Intent]{Version: 1, CorrelationID: correlationID, Value: intent}
+			snapshot.Works[work.ID] = projections.Versioned[core.Work]{Version: 1, CorrelationID: correlationID, Value: work}
+		}
 	}
 	experimentID := core.ID("experiment-" + string(work.ID))
 	_, hasExperiment := snapshot.Experiments[experimentID]
@@ -1652,10 +1692,10 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 	return intent, work, task, nil
 }
 
-func (s *Service) goalBindingWasConfirmed(ctx context.Context, correlationID string, draft core.IntentDraft) (bool, error) {
+func (s *Service) intentBindingWasConfirmed(ctx context.Context, correlationID string, draft core.IntentDraft) (bool, error) {
 	stream, err := s.gateway.Events(ctx, correlationID)
 	if err != nil {
-		return false, fmt.Errorf("load Goal admission evidence: %w", err)
+		return false, fmt.Errorf("load Intent admission evidence: %w", err)
 	}
 	for _, event := range stream {
 		if event.EventType != "INTENT_CONFIRMED" {
@@ -1666,7 +1706,8 @@ func (s *Service) goalBindingWasConfirmed(ctx context.Context, correlationID str
 			return false, fmt.Errorf("durable Intent confirmation is invalid")
 		}
 		goalID, _ := acceptedGoalID(draft)
-		if event.OrganizationID == string(draft.OrganizationID) && payload.IntentID == string(draft.ID) && payload.GoalID == string(goalID) && payload.Version == draft.Version && payload.Fingerprint == draft.Fingerprint {
+		replacesWorkID, _ := core.AcceptedIntentReplacesWorkID(draft)
+		if event.OrganizationID == string(draft.OrganizationID) && payload.IntentID == string(draft.ID) && payload.GoalID == string(goalID) && payload.ReplacesWorkID == string(replacesWorkID) && payload.Version == draft.Version && payload.Fingerprint == draft.Fingerprint {
 			return true, nil
 		}
 	}

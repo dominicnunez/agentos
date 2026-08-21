@@ -71,9 +71,10 @@ func TestAgentCardAdvertisesOnlyA2AV1JSONRPC(t *testing.T) {
 
 func TestA2AIntentReviewSerializesSelectedGoalProvenance(t *testing.T) {
 	goal := core.IntentValue{Value: "goal-123", Origin: "EXPLICIT", SourceMessageID: "message-1"}
+	replacesWork := core.IntentValue{Value: "work-failed-123", Origin: "EXPLICIT", SourceMessageID: "message-1"}
 	task := projectA2ATask(intake.View{
 		TaskID: "task-1", ConversationID: "context-1", State: intake.StateAwaitingConfirmation,
-		Intent: &core.IntentDraft{Version: 1, Mode: core.IntentModeStandard, Fingerprint: strings.Repeat("a", 64), Objective: "Advance the Goal", Goal: &goal},
+		Intent: &core.IntentDraft{Version: 1, Mode: core.IntentModeStandard, Fingerprint: strings.Repeat("a", 64), Objective: "Advance the Goal", Goal: &goal, ReplacesWork: &replacesWork},
 	})
 	body, err := json.Marshal(task)
 	if err != nil {
@@ -89,6 +90,10 @@ func TestA2AIntentReviewSerializesSelectedGoalProvenance(t *testing.T) {
 	if err := json.Unmarshal(wire.Metadata[intentConfirmationURI]["goal"], &reviewed); err != nil || reviewed != goal {
 		t.Fatalf("A2A review omitted the selected Goal provenance: body=%s goal=%+v err=%v", body, reviewed, err)
 	}
+	var reviewedReplacement core.IntentValue
+	if err := json.Unmarshal(wire.Metadata[intentConfirmationURI]["replaces_work"], &reviewedReplacement); err != nil || reviewedReplacement != replacesWork {
+		t.Fatalf("A2A review omitted the replacement Work provenance: body=%s replacement=%+v err=%v", body, reviewedReplacement, err)
+	}
 	var mode core.IntentMode
 	if err := json.Unmarshal(wire.Metadata[intentConfirmationURI]["mode"], &mode); err != nil || mode != core.IntentModeStandard {
 		t.Fatalf("A2A review omitted the fingerprinted Intent mode: body=%s mode=%s err=%v", body, mode, err)
@@ -103,6 +108,14 @@ func TestA2ACompletedExperimentRetainsUnverifiedTrustLabel(t *testing.T) {
 	metadata, ok := task.Metadata[agentOSTaskMetadataURI].(map[string]any)
 	if !ok || metadata["mode"] != core.IntentModeExperiment || metadata["trust_label"] != core.ExperimentTrustUnverified {
 		t.Fatalf("completed experiment metadata=%+v", task.Metadata)
+	}
+}
+
+func TestA2ATaskExposesDurableWorkIdentity(t *testing.T) {
+	task := projectA2ATask(intake.View{TaskID: "task-1", WorkID: "work-1", ConversationID: "context-1", State: intake.StateFailed})
+	metadata, ok := task.Metadata[agentOSTaskMetadataURI].(map[string]any)
+	if !ok || metadata["work_id"] != "work-1" {
+		t.Fatalf("failed A2A task omitted durable Work identity: %+v", task.Metadata)
 	}
 }
 
