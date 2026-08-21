@@ -84,6 +84,8 @@ type View struct {
 	State              string
 	Prompt             string
 	Result             string
+	Mode               core.IntentMode
+	TrustLabel         string
 	UpdatedAt          time.Time
 	CompletionContract *core.CompletionContract
 	Intent             *core.IntentDraft
@@ -296,7 +298,7 @@ func (s *Service) ConfirmIntent(ctx context.Context, principal Principal, confir
 	if err != nil {
 		return View{}, err
 	}
-	if err := core.ValidateAcceptedIntentDraft(draft, core.ID(principal.OrganizationID), kind); err != nil {
+	if err := app.ValidateReviewedIntentExecution(draft, core.ID(principal.OrganizationID), kind); err != nil {
 		return View{}, fmt.Errorf("%w: reviewed intent is not executable: %w", ErrInvalid, err)
 	}
 	_, err = s.app.ConfirmIntent(ctx, app.IntentConfirmation{
@@ -694,9 +696,19 @@ func ValidateIdentifier(name, value string) error {
 
 func projectView(conversationID string, stream []events.Event, includeResult bool) View {
 	view := View{TaskID: streamTaskID(stream), ConversationID: conversationID, State: externalState(stream)}
+	if payload, found, err := latestIntentPayload(stream); err == nil && found {
+		view.Mode = payload.Draft.Mode
+	}
 	for _, event := range stream {
 		if event.TaskID == view.TaskID || event.EventType == "WORK_PLANNING_FAILED" {
 			view.UpdatedAt = event.CreatedAt
+		}
+		if projection, present, err := events.AdmittedProjection(event); err == nil && present && projection.Projection.ProjectionKind == "lab_experiment" {
+			var experiment core.Experiment
+			if json.Unmarshal(projection.Projection.Value, &experiment) == nil && experiment.OrganizationID == core.ID(event.OrganizationID) && experiment.TrustLabel != "" {
+				view.Mode = core.IntentModeExperiment
+				view.TrustLabel = experiment.TrustLabel
+			}
 		}
 	}
 	if view.State == StateInputRequired {

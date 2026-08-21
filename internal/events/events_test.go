@@ -978,3 +978,61 @@ func TestTaskBlockedRequiresUpwardRouteAndContract(t *testing.T) {
 		t.Fatal("incomplete blocked-work contract was accepted")
 	}
 }
+
+func TestIntentConfirmationBindsOriginalAuthenticatedSource(t *testing.T) {
+	intakePayload := IntakeMessageRecordedPayload{
+		MessageID: "message-1", Text: "echo hello", SourcePrincipalID: "user-1",
+		SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", RequestedExecutionKind: core.ExecutionDeterministic,
+	}
+	intakeBody, err := json.Marshal(intakePayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmationPayload := IntentConfirmedPayload{
+		IntentID: "intent-run-1", Version: 1, Fingerprint: "fingerprint", ConfirmingActorID: "user-1",
+		ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1",
+	}
+	confirmationBody, err := json.Marshal(confirmationPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intakeEvent := Event{EventID: "evt-1", Sequence: 1, OrganizationID: "org-1", EventType: "INTAKE_MESSAGE_RECORDED", SourceActorID: "user-1", TaskID: "task-run-1", Payload: intakeBody, CorrelationID: "run-1", CreatedAt: time.Now().UTC(), SchemaVersion: SchemaVersion}
+	confirmationEvent := Event{EventID: "evt-2", Sequence: 2, OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-run-1", Payload: confirmationBody, CorrelationID: "run-1", CreatedAt: time.Now().UTC(), SchemaVersion: SchemaVersion}
+	intent := core.Intent{
+		ID: "intent-run-1", OrganizationID: "org-1", OriginalInstruction: "echo hello", AcceptedFingerprint: "fingerprint",
+		SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: "message-1",
+	}
+	evidence := []Event{intakeEvent, confirmationEvent}
+	if err := ValidateIntentConfirmation(evidence, confirmationEvent, intent); err != nil {
+		t.Fatalf("valid source binding: %v", err)
+	}
+	for name, mutate := range map[string]func(*core.Intent){
+		"principal": func(value *core.Intent) { value.SourcePrincipalID = "user-2" },
+		"kind":      func(value *core.Intent) { value.SourcePrincipalKind = core.PrincipalExternalAgent },
+		"channel":   func(value *core.Intent) { value.SourceChannel = "A2A" },
+		"message":   func(value *core.Intent) { value.SourceMessageID = "message-2" },
+		"text":      func(value *core.Intent) { value.OriginalInstruction = "different" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := intent
+			mutate(&changed)
+			if err := ValidateIntentConfirmation(evidence, confirmationEvent, changed); err == nil {
+				t.Fatal("changed durable source identity was accepted")
+			}
+		})
+	}
+}
+
+func TestReviewedIntentEvidenceIndexUsesConfirmationBoundary(t *testing.T) {
+	stream := []Event{
+		{Sequence: 4, CorrelationID: "run-1", EventType: "INTAKE_MESSAGE_RECORDED"},
+		{Sequence: 1, CorrelationID: "run-1", EventType: "INTAKE_MESSAGE_RECORDED"},
+		{Sequence: 2, CorrelationID: "run-2", EventType: "INTENT_DRAFTED"},
+		{Sequence: 3, CorrelationID: "run-1", EventType: "INTENT_CONFIRMED"},
+		{Sequence: 5, CorrelationID: "run-1", EventType: "OTHER"},
+	}
+	evidence := IndexReviewedIntentEvidence(stream).At(stream[3])
+	if len(evidence) != 2 || evidence[0].Sequence != 1 || evidence[1].Sequence != 3 {
+		t.Fatalf("bounded evidence=%+v", evidence)
+	}
+}

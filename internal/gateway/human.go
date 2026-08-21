@@ -74,6 +74,8 @@ type humanTaskResponse struct {
 	State              string                   `json:"state"`
 	Prompt             string                   `json:"prompt,omitempty"`
 	Result             string                   `json:"result,omitempty"`
+	Mode               core.IntentMode          `json:"mode,omitempty"`
+	TrustLabel         string                   `json:"trust_label,omitempty"`
 	UpdatedAt          string                   `json:"updated_at,omitempty"`
 	CompletionContract *core.CompletionContract `json:"completion_contract,omitempty"`
 	Intent             *core.IntentDraft        `json:"intent,omitempty"`
@@ -335,7 +337,7 @@ func (h *Human) writeIntakeError(w http.ResponseWriter, err error) {
 func humanResponse(view intake.View) humanTaskResponse {
 	response := humanTaskResponse{
 		TaskID: view.TaskID, ConversationID: view.ConversationID,
-		State: view.State, Prompt: view.Prompt, Result: view.Result,
+		State: view.State, Prompt: view.Prompt, Result: view.Result, Mode: view.Mode, TrustLabel: view.TrustLabel,
 	}
 	response.CompletionContract = view.CompletionContract
 	response.Intent = view.Intent

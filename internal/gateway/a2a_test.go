@@ -95,6 +95,17 @@ func TestA2AIntentReviewSerializesSelectedGoalProvenance(t *testing.T) {
 	}
 }
 
+func TestA2ACompletedExperimentRetainsUnverifiedTrustLabel(t *testing.T) {
+	task := projectA2ATask(intake.View{
+		TaskID: "task-1", ConversationID: "context-1", State: intake.StateCompleted, Result: "lab result",
+		Mode: core.IntentModeExperiment, TrustLabel: core.ExperimentTrustUnverified,
+	})
+	metadata, ok := task.Metadata[agentOSTaskMetadataURI].(map[string]any)
+	if !ok || metadata["mode"] != core.IntentModeExperiment || metadata["trust_label"] != core.ExperimentTrustUnverified {
+		t.Fatalf("completed experiment metadata=%+v", task.Metadata)
+	}
+}
+
 func TestUnconfiguredAgentCardRejectsNonLoopbackHost(t *testing.T) {
 	handler := NewA2A(intake.New(app.New(events.NewGateway(noopLedger{}))), nil, "", "test-version")
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/.well-known/agent-card.json", nil)

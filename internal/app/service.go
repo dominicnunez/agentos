@@ -558,6 +558,17 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 			MessageID: intent.SourceMessageID, SourcePrincipalID: intent.SourcePrincipalID, SourcePrincipalKind: intent.SourcePrincipalKind,
 			SourceChannel: intent.SourceChannel, correlationID: workState.CorrelationID,
 		}
+		experimentID := core.ID("experiment-" + string(workID))
+		if experimentState, experimental := snapshot.Experiments[experimentID]; experimental {
+			if experimentState.CorrelationID != workState.CorrelationID || experimentState.Value.WorkID != workID || experimentState.Value.OrganizationID != intent.OrganizationID || experimentState.Value.Status != core.ExperimentRunning {
+				return 0, fmt.Errorf("work %s has invalid durable Lab containment", workID)
+			}
+			spec, specErr := lab.SpecFromExperiment(experimentState.Value)
+			if specErr != nil {
+				return 0, fmt.Errorf("recover Lab containment for work %s: %w", workID, specErr)
+			}
+			in.experimentSpec = &spec
+		}
 		if intent.SourceChannel == "INTERNAL" {
 			if !hasDurablePlan {
 				if err := s.failPlanningWork(ctx, intent.OrganizationID, workState, "PLANNING_RECOVERY_IDENTITY_INCOMPLETE", "planning could not be resumed because the requested execution kind was not durably recoverable", planningAttemptRef); err != nil {
@@ -2785,9 +2796,14 @@ func (s *Service) reconcileGoals(ctx context.Context) error {
 		if !found || mission.Value.Status != core.MissionActive {
 			continue
 		}
+		experimentalWorks := make(map[core.ID]struct{}, len(snapshot.Experiments))
+		for _, experimentState := range snapshot.Experiments {
+			experimentalWorks[experimentState.Value.WorkID] = struct{}{}
+		}
 		hasCompletedWork := false
 		for _, workState := range snapshot.Works {
-			if workState.Value.GoalID == goalID && workState.Value.Status == core.WorkCompleted {
+			_, experimental := experimentalWorks[workState.Value.ID]
+			if !experimental && workState.Value.GoalID == goalID && workState.Value.Status == core.WorkCompleted {
 				hasCompletedWork = true
 				break
 			}

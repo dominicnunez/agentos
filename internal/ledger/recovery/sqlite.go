@@ -304,6 +304,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 }
 
 func validateRecoveryIntentConfirmations(stream []events.Event) error {
+	reviewEvidence := events.IndexReviewedIntentEvidence(stream)
 	for _, event := range stream {
 		if event.EventType != "INTENT_CONFIRMED" {
 			continue
@@ -313,7 +314,7 @@ func validateRecoveryIntentConfirmations(stream []events.Event) error {
 			return fmt.Errorf("event %s contains an invalid intent confirmation", event.EventID)
 		}
 		if confirmation.GoalID == "" {
-			if err := events.ValidateReviewedIntentAdmission(stream, event); err != nil {
+			if err := events.ValidateIndexedReviewedIntentAdmission(reviewEvidence.At(event), event); err != nil {
 				return fmt.Errorf("event %s: %w", event.EventID, err)
 			}
 			continue
@@ -322,7 +323,7 @@ func validateRecoveryIntentConfirmations(stream []events.Event) error {
 		if err != nil {
 			return fmt.Errorf("event %s: %w", event.EventID, err)
 		}
-		if err := events.ValidateReviewedGoalIntentAdmission(stream, event, goal); err != nil {
+		if err := events.ValidateIndexedReviewedGoalIntentAdmission(reviewEvidence.At(event), event, goal); err != nil {
 			return fmt.Errorf("event %s: %w", event.EventID, err)
 		}
 	}
@@ -345,6 +346,7 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, 
 		Works:             map[core.ID]core.DurableState[core.Work]{},
 		Tasks:             map[core.ID]core.DurableState[core.Task]{},
 	}
+	reviewEvidence := events.IndexReviewedIntentEvidence(stream)
 	for _, admission := range admitted {
 		event, record := admission.event, admission.payload.Projection
 		var organizationID core.ID
@@ -456,7 +458,7 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, 
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Work projection", event.EventID)
 			}
-			if err := validateRecoveryWorkIntentBinding(event, record, value, snapshot, stream); err != nil {
+			if err := validateRecoveryWorkIntentBinding(event, record, value, snapshot, stream, reviewEvidence); err != nil {
 				return fmt.Errorf("event %s contains an invalid Work binding: %w", event.EventID, err)
 			}
 			if err := setRecoveryProjection(snapshot.Works, record, value, true, core.ValidWorkRevision); err != nil {
@@ -547,7 +549,7 @@ func validateRecoveryOrganizationParent(organizationID core.ID, snapshot core.Du
 	return nil
 }
 
-func validateRecoveryWorkIntentBinding(event events.Event, record events.ProjectionRecord, work core.Work, snapshot core.DurableGraph, stream []events.Event) error {
+func validateRecoveryWorkIntentBinding(event events.Event, record events.ProjectionRecord, work core.Work, snapshot core.DurableGraph, stream []events.Event, reviewEvidence events.ReviewedIntentEvidenceIndex) error {
 	intentState, found := snapshot.Intents[work.IntentID]
 	if !found {
 		return fmt.Errorf("work requires its durable Intent")
@@ -566,7 +568,7 @@ func validateRecoveryWorkIntentBinding(event events.Event, record events.Project
 		if len(confirmations) != 1 || confirmations[0].Sequence >= event.Sequence {
 			return fmt.Errorf("external Work requires one prior intent confirmation")
 		}
-		if err := events.ValidateIntentConfirmation(confirmations[0], intent); err != nil {
+		if err := events.ValidateIntentConfirmation(reviewEvidence.At(confirmations[0]), confirmations[0], intent); err != nil {
 			return err
 		}
 		if intent.GoalID != "" {
@@ -574,10 +576,10 @@ func validateRecoveryWorkIntentBinding(event events.Event, record events.Project
 			if err != nil {
 				return err
 			}
-			if err := events.ValidateReviewedGoalIntentAdmission(stream, confirmations[0], goal); err != nil {
+			if err := events.ValidateIndexedReviewedGoalIntentAdmission(reviewEvidence.At(confirmations[0]), confirmations[0], goal); err != nil {
 				return err
 			}
-		} else if err := events.ValidateReviewedIntentAdmission(stream, confirmations[0]); err != nil {
+		} else if err := events.ValidateIndexedReviewedIntentAdmission(reviewEvidence.At(confirmations[0]), confirmations[0]); err != nil {
 			return err
 		}
 	}

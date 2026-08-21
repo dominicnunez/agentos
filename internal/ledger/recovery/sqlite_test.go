@@ -751,7 +751,7 @@ func TestRecoveryRejectsGoalBoundWorkWithoutConfirmation(t *testing.T) {
 		_ = store.Close()
 		t.Fatal(err)
 	}
-	intent := core.Intent{ID: intentDraft.ID, OrganizationID: organization.ID, GoalID: goal.ID, NormalizedObjective: intentDraft.Objective, AcceptedFingerprint: intentDraft.Fingerprint, SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: messageID, CompletionCriteria: intentDraft.CompletionCriteria, CreatedAt: now}
+	intent := core.Intent{ID: intentDraft.ID, OrganizationID: organization.ID, GoalID: goal.ID, OriginalInstruction: "perform bounded work for goal-1", NormalizedObjective: intentDraft.Objective, AcceptedFingerprint: intentDraft.Fingerprint, SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: messageID, CompletionCriteria: intentDraft.CompletionCriteria, CreatedAt: now}
 	work := core.Work{ID: "work-1", IntentID: intent.ID, GoalID: goal.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
 	for _, draft := range []events.ProjectionDraft{
 		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: correlationID}, ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent},
