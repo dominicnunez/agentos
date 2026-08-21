@@ -174,7 +174,10 @@ func ValidateModelInput(input Input) error {
 	if err := validateInput(input); err != nil {
 		return err
 	}
-	body, err := json.Marshal(input)
+	body, err := json.Marshal(struct {
+		Intent   core.IntentDraft       `json:"intent"`
+		Strategy *core.StrategicContext `json:"strategy"`
+	}{Intent: input.Intent, Strategy: input.Strategy})
 	if err != nil {
 		return fmt.Errorf("encode complete planning input: %w", err)
 	}
