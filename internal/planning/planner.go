@@ -21,6 +21,8 @@ const (
 	PromptVersion        = "task-planner-v1"
 	MaximumPlanTasks     = 16
 	maximumTaskTextBytes = 16 << 10
+	maximumPromptBytes   = 128 << 10
+	modelPromptOverhead  = 4 << 10
 	maximumResponseBytes = 128 << 10
 )
 
@@ -116,6 +118,9 @@ func (p *ModelPlanner) Build(ctx context.Context, input Input, kind core.Executi
 	if err := validateInput(input); err != nil {
 		return Result{}, err
 	}
+	if err := ValidateModelInput(input); err != nil {
+		return Result{}, err
+	}
 	intent := input.Intent
 	if kind != core.ExecutionAgent {
 		tasks, err := directTasks(intent, kind)
@@ -136,6 +141,9 @@ func (p *ModelPlanner) Build(ctx context.Context, input Input, kind core.Executi
 ` + string(accepted) + `
 Organizational direction JSON follows:
 ` + string(strategic)
+	if len(prompt) > maximumPromptBytes {
+		return Result{}, fmt.Errorf("complete planning input exceeds the model-prompt limit")
+	}
 	response, err := p.model.CompleteText(ctx, prompt)
 	if err != nil {
 		return Result{}, fmt.Errorf("plan accepted intent: %w", err)
@@ -157,6 +165,23 @@ Organizational direction JSON follows:
 		return failure, err
 	}
 	return Result{Tasks: tasks, Usage: &usage}, nil
+}
+
+// ValidateModelInput bounds the complete serialized planning data before a
+// durable planning attempt is recorded. ModelPlanner also checks the exact
+// final prompt, while this reserved overhead keeps the preflight conservative.
+func ValidateModelInput(input Input) error {
+	if err := validateInput(input); err != nil {
+		return err
+	}
+	body, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("encode complete planning input: %w", err)
+	}
+	if len(body) > maximumPromptBytes-modelPromptOverhead {
+		return fmt.Errorf("complete planning input exceeds the model-prompt limit")
+	}
+	return nil
 }
 
 func validateInput(input Input) error {

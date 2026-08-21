@@ -142,3 +142,21 @@ func TestModelPlannerCapsTotalTaskCount(t *testing.T) {
 		t.Fatal("oversized Task DAG was accepted")
 	}
 }
+
+func TestModelPlannerRejectsOversizedCompleteInputBeforeProviderCall(t *testing.T) {
+	model := &plannerModel{text: `{"tasks":[]}`}
+	planner, err := NewModelPlanner(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := Input{Intent: core.IntentDraft{Objective: strings.Repeat("x", maximumPromptBytes)}}
+	if err := ValidateModelInput(input); err == nil {
+		t.Fatal("oversized complete planning input passed preflight")
+	}
+	if _, err := planner.Build(context.Background(), input, core.ExecutionAgent); err == nil {
+		t.Fatal("oversized complete planning input was accepted")
+	}
+	if model.calls != 0 {
+		t.Fatalf("provider was called %d times for oversized planning input", model.calls)
+	}
+}
