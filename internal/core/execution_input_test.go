@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -62,6 +63,16 @@ func TestValidateStrategicExecutionContextRejectsOversizedDirectionBeforeStart(t
 	}
 	if err := ValidateStrategicExecutionContext(context); err == nil {
 		t.Fatal("oversized strategic direction crossed the pre-start execution-context bound")
+	}
+}
+
+func TestMaterializeAgentExecutionInputRejectsOversizedAggregate(t *testing.T) {
+	_, _, err := MaterializeAgentExecutionInput(AgentExecutionInputContext{
+		Blueprint: AgentBlueprint{ID: "blueprint-1", Version: "v1", Role: "worker", OperatingInstructions: strings.Repeat("x", maximumExecutionContextBytes)},
+		Task:      Task{Description: "bounded work"},
+	})
+	if !errors.Is(err, ErrExecutionContextLimitExceeded) {
+		t.Fatalf("oversized aggregate execution input was not rejected: %v", err)
 	}
 }
 

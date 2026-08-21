@@ -795,8 +795,47 @@ func startPendingAgentExecution(ctx context.Context, store *SQLite, correlationI
 	started, _, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: correlationID},
 		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
-	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: string(task.ID)}, {Scope: events.RecipientAgent, ID: string(task.AssigneeID)}})
+	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: string(task.ID)}, {Scope: events.RecipientAgent, ID: string(task.AssigneeID)}}, func([]events.InboxSelection) error { return nil })
 	return started, err
+}
+
+func TestAgentExecutionStartRollsBackRejectedAggregateInput(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	appendTaskProjectionParents(t, ctx, store, "org-1", "bounded-input", "work-1")
+	agent, config := appendTaskAssignmentAgent(t, ctx, store, "org-1", "bounded-input", false)
+	task := appendPendingAgentExecutionTask(t, ctx, store, "bounded-input", "task-bounded-input", agent, config)
+	task.Status = core.TaskRunning
+	validatorCalled := false
+	if _, _, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "bounded-input"},
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
+	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: string(task.ID)}, {Scope: events.RecipientAgent, ID: string(task.AssigneeID)}}, func([]events.InboxSelection) error {
+		validatorCalled = true
+		return core.ErrExecutionContextLimitExceeded
+	}); !errors.Is(err, core.ErrExecutionContextLimitExceeded) {
+		t.Fatalf("execution start did not preserve aggregate-input rejection: %v", err)
+	}
+	if !validatorCalled {
+		t.Fatal("execution input validator was not called inside start admission")
+	}
+	_, persisted := latestTestProjection[core.Task](t, ctx, store, "task", task.ID)
+	if persisted.Status != core.TaskPending {
+		t.Fatalf("rejected aggregate input changed Task state: %+v", persisted)
+	}
+	stream, err := store.Events(ctx, "bounded-input")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range stream {
+		if event.EventType == "EXECUTION_STARTED" {
+			t.Fatal("rejected aggregate input persisted execution start")
+		}
+	}
 }
 
 func latestTestProjection[T any](t *testing.T, ctx context.Context, store *SQLite, kind string, id core.ID) (events.ProjectionRecord, T) {
@@ -1007,7 +1046,7 @@ func TestAgentExecutionStartAtomicallyRejectsStrategicRevisionDrift(t *testing.T
 			Payload: events.ExecutionStartDetail{StrategicEventRefs: eventRefs, StrategicContextRefs: contextRefs},
 		},
 		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
-	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: string(task.ID)}, {Scope: events.RecipientAgent, ID: string(task.AssigneeID)}}); err == nil {
+	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: string(task.ID)}, {Scope: events.RecipientAgent, ID: string(task.AssigneeID)}}, func([]events.InboxSelection) error { return nil }); err == nil {
 		t.Fatal("strategically stale Agent dispatch was committed")
 	}
 	_, persisted := latestTestProjection[core.Task](t, ctx, store, "task", task.ID)
@@ -1021,7 +1060,7 @@ func TestAgentExecutionStartAtomicallyRejectsStrategicRevisionDrift(t *testing.T
 			Payload: events.ExecutionStartDetail{StrategicEventRefs: eventRefs, StrategicContextRefs: contextRefs},
 		},
 		ProjectionKind: "task", RecordID: string(deterministicTask.ID), Version: 2, Value: deterministicTask,
-	}, nil); err == nil || len(selections) != 0 {
+	}, nil, nil); err == nil || len(selections) != 0 {
 		t.Fatal("strategically stale deterministic execution was committed or selected inbox input")
 	}
 	_, persistedDeterministic := latestTestProjection[core.Task](t, ctx, store, "task", deterministicTask.ID)
@@ -1035,7 +1074,7 @@ func TestAgentExecutionStartAtomicallyRejectsStrategicRevisionDrift(t *testing.T
 			Payload: events.ExecutionStartDetail{Mode: "OPERATOR_HUMAN_INPUT", InputEventRef: humanInput.EventID, StrategicEventRefs: eventRefs, StrategicContextRefs: contextRefs},
 		},
 		ProjectionKind: "task", RecordID: string(humanTask.ID), Version: 2, Value: humanTask,
-	}, nil); err == nil || len(selections) != 0 {
+	}, nil, nil); err == nil || len(selections) != 0 {
 		t.Fatal("strategically stale user execution was committed or selected inbox input")
 	}
 	_, persistedHuman := latestTestProjection[core.Task](t, ctx, store, "task", humanTask.ID)
@@ -1409,7 +1448,7 @@ func TestMessageInboxSurvivesReopenAndObservation(t *testing.T) {
 	startEvent, selections, err := l.AppendExecutionStart(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1"},
 		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
-	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: "task-2"}, {Scope: events.RecipientAgent, ID: "agent-2"}})
+	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: "task-2"}, {Scope: events.RecipientAgent, ID: "agent-2"}}, func([]events.InboxSelection) error { return nil })
 	if err != nil {
 		_ = l.Close()
 		t.Fatal(err)

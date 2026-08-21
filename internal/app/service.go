@@ -2602,8 +2602,29 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		if remediation {
 			mode = "BLOCKED_DEPENDENCY_REMEDIATION"
 		}
-		selections := []events.InboxSelection(nil)
-		_, selections, err = s.state.StartAgentExecution(ctx, organizationID, state.CorrelationID, state.Version+1, task, mode, strategyEventRefs, strategyContextRefs, actionBoundaryRoutes(snapshot, task))
+		var executionInput string
+		validateInput := func(selections []events.InboxSelection) error {
+			inboxBatches = inboxBatchesFromSelections(selections)
+			inputContext := core.AgentExecutionInputContext{
+				Blueprint: selected.Blueprint, Task: task, Strategy: strategy,
+				DependencyResults: dependencyResults, BlockedDependencies: blockedDependencies,
+			}
+			for _, event := range sortedInboxEvents(inboxBatches) {
+				inputContext.InboxEvents = append(inputContext.InboxEvents, core.AgentExecutionInboxEvent{
+					Sequence: event.Sequence, EventID: event.EventID, EventType: event.EventType,
+					SourceActorID: event.SourceActorID, RecipientScope: event.RecipientScope, RecipientID: event.RecipientID,
+					TaskID: event.TaskID, CreatedAt: event.CreatedAt, Payload: append(json.RawMessage(nil), event.Payload...),
+				})
+			}
+			if hasRevision {
+				inputContext.Revision = &core.AgentExecutionRevision{
+					EventRef: revisionEvent.EventID, ReviewerID: revision.ReviewerID, UntrustedText: revision.Feedback,
+				}
+			}
+			executionTask, executionInput, err = core.MaterializeAgentExecutionInput(inputContext)
+			return err
+		}
+		_, _, err = s.state.StartAgentExecution(ctx, organizationID, state.CorrelationID, state.Version+1, task, mode, strategyEventRefs, strategyContextRefs, actionBoundaryRoutes(snapshot, task), validateInput)
 		if err != nil {
 			if errors.Is(err, events.ErrStrategicContextChanged) {
 				if failErr := s.failStrategicTask(ctx, organizationID, state); failErr != nil {
@@ -2611,35 +2632,22 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 				}
 				return taskRun{}, nil
 			}
+			if errors.Is(err, core.ErrExecutionContextLimitExceeded) {
+				task.Status = core.TaskFailed
+				detail := strategicTaskFailureDetail{Code: "EXECUTION_CONTEXT_LIMIT_EXCEEDED", Reason: err.Error(), Replacement: "submit narrower replacement Work whose reviewed context fits the execution boundary"}
+				if saveErr := s.state.SaveTask(ctx, organizationID, "TASK_WORK_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); saveErr != nil {
+					return taskRun{}, fmt.Errorf("terminalize oversized execution input for task %s: %w", task.ID, saveErr)
+				}
+				return taskRun{}, nil
+			}
 			return taskRun{}, fmt.Errorf("persist Agent execution start and inbox boundary for task %s: %w", task.ID, err)
 		}
-		inboxBatches = inboxBatchesFromSelections(selections)
 		inboxRefs := inboxEventRefs(inboxBatches)
 		eventRefs := append([]string(nil), strategyEventRefs...)
 		eventRefs = append(eventRefs, inboxRefs...)
 		eventRefs = append(eventRefs, dependencyRefs...)
 		if hasRevision {
 			eventRefs = append(eventRefs, revisionEvent.EventID)
-		}
-		inputContext := core.AgentExecutionInputContext{
-			Blueprint: selected.Blueprint, Task: task, Strategy: strategy,
-			DependencyResults: dependencyResults, BlockedDependencies: blockedDependencies,
-		}
-		for _, event := range sortedInboxEvents(inboxBatches) {
-			inputContext.InboxEvents = append(inputContext.InboxEvents, core.AgentExecutionInboxEvent{
-				Sequence: event.Sequence, EventID: event.EventID, EventType: event.EventType,
-				SourceActorID: event.SourceActorID, RecipientScope: event.RecipientScope, RecipientID: event.RecipientID,
-				TaskID: event.TaskID, CreatedAt: event.CreatedAt, Payload: append(json.RawMessage(nil), event.Payload...),
-			})
-		}
-		if hasRevision {
-			inputContext.Revision = &core.AgentExecutionRevision{
-				EventRef: revisionEvent.EventID, ReviewerID: revision.ReviewerID, UntrustedText: revision.Feedback,
-			}
-		}
-		executionTask, _, err = core.MaterializeAgentExecutionInput(inputContext)
-		if err != nil {
-			return taskRun{}, fmt.Errorf("materialize durable Agent execution input for task %s: %w", task.ID, err)
 		}
 		manifest = core.ExecutionContextManifest{
 			ExecutionID:             executionID,
@@ -2660,10 +2668,6 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			ArtifactRefs:            []core.VersionedRef{},
 			AdditionalContextRefs:   strategyContextRefs,
 			ContextBuilderVersion:   "v1",
-		}
-		executionInput := executionTask.ExecutionBrief
-		if executionInput == "" {
-			executionInput = executionTask.Description
 		}
 		manifest.ExecutionInputSHA256 = core.FingerprintExecutionInput(executionInput)
 		manifest.CreatedAt = time.Now().UTC()

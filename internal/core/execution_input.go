@@ -2,12 +2,15 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
 )
 
 const maximumExecutionContextBytes = 256 << 10
+
+var ErrExecutionContextLimitExceeded = errors.New("execution context exceeds the aggregate input limit")
 
 type AgentExecutionDependencyResult struct {
 	TaskID       ID       `json:"task_id"`
@@ -161,6 +164,9 @@ func MaterializeAgentExecutionInput(context AgentExecutionInputContext) (Task, s
 	materialized.ExecutionBrief += dependencyContext
 	if materialized.Description != context.Task.Description {
 		materialized.ExecutionBrief += "\n\nAdditional durable execution context:\n" + materialized.Description
+	}
+	if len(materialized.ExecutionBrief) > maximumExecutionContextBytes {
+		return Task{}, "", ErrExecutionContextLimitExceeded
 	}
 	return materialized, materialized.ExecutionBrief, nil
 }

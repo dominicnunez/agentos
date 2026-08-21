@@ -2078,7 +2078,7 @@ func TestRecoveryRejectsSupersededAgentDispatchBinding(t *testing.T) {
 	started, _, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1"},
 		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
-	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: string(task.ID)}, {Scope: events.RecipientAgent, ID: string(agent.ID)}})
+	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: string(task.ID)}, {Scope: events.RecipientAgent, ID: string(agent.ID)}}, func([]events.InboxSelection) error { return nil })
 	if err != nil {
 		_ = store.Close()
 		t.Fatal(err)

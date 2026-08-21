@@ -248,7 +248,7 @@ func saveTestVerifiedTask(ctx context.Context, gateway *events.Gateway, reposito
 	task.Status = core.TaskRunning
 	startVersion := state.Version + 1
 	if task.ExecutionKind == core.ExecutionAgent {
-		_, selections, err := repository.StartAgentExecution(ctx, organizationID, correlationID, startVersion, task, "", nil, nil, actionBoundaryRoutes(snapshot, task))
+		_, selections, err := repository.StartAgentExecution(ctx, organizationID, correlationID, startVersion, task, "", nil, nil, actionBoundaryRoutes(snapshot, task), func([]events.InboxSelection) error { return nil })
 		if err != nil {
 			return err
 		}
@@ -3349,7 +3349,7 @@ func TestRecoveryIsDeterministicFirst(t *testing.T) {
 					if err != nil {
 						return err
 					}
-					_, _, err = repository.StartAgentExecution(ctx, organization.ID, requestID, 2, task, "", nil, nil, actionBoundaryRoutes(snapshot, task))
+					_, _, err = repository.StartAgentExecution(ctx, organization.ID, requestID, 2, task, "", nil, nil, actionBoundaryRoutes(snapshot, task), func([]events.InboxSelection) error { return nil })
 					return err
 				}
 				_, err := repository.StartTaskExecution(ctx, organization.ID, requestID, 2, task, "", "", nil, nil)

@@ -207,6 +207,12 @@ func TestValidateTaskExecutionStartRejectsMissingNonAgentStrategy(t *testing.T) 
 	if err := ValidateTaskExecutionStart(missing, task, 2, work, intent, append(stream, missing)); err == nil {
 		t.Fatal("deterministic replay accepted a start without its Goal-bound strategic references")
 	}
+	goal.Objective = "changed before execution"
+	drifted := append(append([]Event(nil), stream...), strategicProjectionEvent(t, 4, "GOAL_REFINED", "goal", goal.ID, 2, goal))
+	stale := nonAgentStrategicExecutionStartEvent(t, 5, task, refs, versions)
+	if err := ValidateTaskExecutionStart(stale, task, 2, work, intent, append(drifted, stale)); err == nil {
+		t.Fatal("deterministic replay accepted a Plan that was stale before execution start")
+	}
 }
 
 func strategicExecutionStartEvent(t *testing.T, sequence int64, eventRefs []string, contextRefs []core.VersionedRef) Event {

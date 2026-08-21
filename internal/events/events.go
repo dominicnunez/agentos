@@ -528,6 +528,8 @@ type InboxSelection struct {
 	Events []Event
 }
 
+type ExecutionStartValidator func([]InboxSelection) error
+
 type WorkCompletionBinding struct {
 	OrganizationID    string
 	CorrelationID     string
@@ -1858,6 +1860,10 @@ func ValidateTaskExecutionStart(start Event, task core.Task, taskVersion int, wo
 	if !slices.Equal(plan.StrategicEventRefs, detail.StrategicEventRefs) || !slices.Equal(plan.StrategicContextRefs, detail.StrategicContextRefs) {
 		return fmt.Errorf("execution start does not bind its durable Plan context")
 	}
+	_, currentEventRefs, currentContextRefs, err := ResolveStrategicContext(start.OrganizationID, work, stream, start.Sequence)
+	if err != nil || !slices.Equal(currentEventRefs, detail.StrategicEventRefs) || !slices.Equal(currentContextRefs, detail.StrategicContextRefs) {
+		return fmt.Errorf("execution start crossed a strategic-context revision")
+	}
 	if task.ExecutionKind == core.ExecutionHuman {
 		inputEvent, found := eventWithID(stream, detail.InputEventRef)
 		if !found || inputEvent.Sequence >= start.Sequence || inputEvent.OrganizationID != start.OrganizationID || inputEvent.TaskID != start.TaskID || inputEvent.CorrelationID != start.CorrelationID {
@@ -3156,7 +3162,7 @@ type GoalAchievementValidator interface {
 	ValidateGoalAchievement(context.Context, string, core.ID) error
 }
 type ExecutionStartAppender interface {
-	AppendExecutionStart(context.Context, ProjectionDraft, []InboxRoute) (Event, []InboxSelection, error)
+	AppendExecutionStart(context.Context, ProjectionDraft, []InboxRoute, ExecutionStartValidator) (Event, []InboxSelection, error)
 }
 type ProjectionReader interface {
 	Records(context.Context, string, string) ([][]byte, error)
@@ -3360,7 +3366,7 @@ func (g *Gateway) PublishProjection(ctx context.Context, draft ProjectionDraft) 
 	return store.AppendProjection(ctx, draft)
 }
 
-func (g *Gateway) PublishExecutionStart(ctx context.Context, draft ProjectionDraft, routes []InboxRoute) (Event, []InboxSelection, error) {
+func (g *Gateway) PublishExecutionStart(ctx context.Context, draft ProjectionDraft, routes []InboxRoute, validate ExecutionStartValidator) (Event, []InboxSelection, error) {
 	if draft.Event.EventType != "EXECUTION_STARTED" || draft.Event.OrganizationID == "" || draft.Event.SourceActorID != "runtime" || draft.Event.SourceExecutionID != "" || draft.Event.RecipientScope != "" || draft.Event.RecipientID != "" || draft.Event.TaskID == "" || draft.Event.TaskID != draft.RecordID || draft.Event.CorrelationID == "" || draft.ProjectionKind != "task" || draft.RecordID == "" || draft.Version < 2 {
 		return Event{}, nil, fmt.Errorf("complete execution-start identity is required")
 	}
@@ -3371,15 +3377,15 @@ func (g *Gateway) PublishExecutionStart(ctx context.Context, draft ProjectionDra
 	}
 	switch task.ExecutionKind {
 	case core.ExecutionAgent:
-		if task.AssigneeType != "AGENT" || task.AssigneeID == "" || len(routes) < 2 || detail.InputEventRef != "" || detail.Mode != "" && detail.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
+		if task.AssigneeType != "AGENT" || task.AssigneeID == "" || len(routes) < 2 || validate == nil || detail.InputEventRef != "" || detail.Mode != "" && detail.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
 			return Event{}, nil, fmt.Errorf("agent execution-start task or inbox boundary is invalid")
 		}
 	case core.ExecutionDeterministic:
-		if len(routes) != 0 || detail.Mode != "" || detail.InputEventRef != "" {
+		if len(routes) != 0 || validate != nil || detail.Mode != "" || detail.InputEventRef != "" {
 			return Event{}, nil, fmt.Errorf("deterministic execution-start boundary is invalid")
 		}
 	case core.ExecutionHuman:
-		if len(routes) != 0 || detail.Mode != "OPERATOR_HUMAN_INPUT" && detail.Mode != "STRUCTURED_HUMAN_COMPLETION" || detail.InputEventRef == "" {
+		if len(routes) != 0 || validate != nil || detail.Mode != "OPERATOR_HUMAN_INPUT" && detail.Mode != "STRUCTURED_HUMAN_COMPLETION" || detail.InputEventRef == "" {
 			return Event{}, nil, fmt.Errorf("user execution-start boundary is invalid")
 		}
 	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
@@ -3391,7 +3397,7 @@ func (g *Gateway) PublishExecutionStart(ctx context.Context, draft ProjectionDra
 	if !ok {
 		return Event{}, nil, fmt.Errorf("event ledger does not support atomic execution start")
 	}
-	return appender.AppendExecutionStart(ctx, draft, routes)
+	return appender.AppendExecutionStart(ctx, draft, routes, validate)
 }
 
 func (g *Gateway) PublishWorkCompletion(ctx context.Context, draft ProjectionDraft) (Event, error) {

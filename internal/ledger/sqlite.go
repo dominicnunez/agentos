@@ -1022,7 +1022,7 @@ ORDER BY transition.sequence,transition.event_id LIMIT 1`, organizationID, strin
 	return transitions, nil
 }
 
-func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.ProjectionDraft, routes []events.InboxRoute) (events.Event, []events.InboxSelection, error) {
+func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.ProjectionDraft, routes []events.InboxRoute, validate events.ExecutionStartValidator) (events.Event, []events.InboxSelection, error) {
 	var requested events.ExecutionStartDetail
 	if draft.Event.EventType != "EXECUTION_STARTED" || draft.Event.OrganizationID == "" || draft.Event.SourceActorID != "runtime" || draft.Event.SourceExecutionID != "" || draft.Event.TaskID == "" || draft.Event.TaskID != draft.RecordID || draft.Event.CorrelationID == "" || draft.ProjectionKind != "task" || draft.RecordID == "" || draft.Version < 2 || decodeExactJSON(draft.Event.Payload, &requested) != nil || requested.InboxCutoffSequence != 0 || requested.DispatchBinding != nil {
 		return events.Event{}, nil, fmt.Errorf("complete execution-start boundary is required")
@@ -1037,15 +1037,15 @@ func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.Projecti
 	}
 	switch task.ExecutionKind {
 	case core.ExecutionAgent:
-		if task.AssigneeType != "AGENT" || task.AssigneeID == "" || len(routes) < 2 || requested.InputEventRef != "" || requested.Mode != "" && requested.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
+		if task.AssigneeType != "AGENT" || task.AssigneeID == "" || len(routes) < 2 || validate == nil || requested.InputEventRef != "" || requested.Mode != "" && requested.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
 			return events.Event{}, nil, fmt.Errorf("agent execution-start boundary is invalid")
 		}
 	case core.ExecutionDeterministic:
-		if len(routes) != 0 || requested.Mode != "" || requested.InputEventRef != "" {
+		if len(routes) != 0 || validate != nil || requested.Mode != "" || requested.InputEventRef != "" {
 			return events.Event{}, nil, fmt.Errorf("deterministic execution-start boundary is invalid")
 		}
 	case core.ExecutionHuman:
-		if len(routes) != 0 || requested.Mode != "OPERATOR_HUMAN_INPUT" && requested.Mode != "STRUCTURED_HUMAN_COMPLETION" || requested.InputEventRef == "" {
+		if len(routes) != 0 || validate != nil || requested.Mode != "OPERATOR_HUMAN_INPUT" && requested.Mode != "STRUCTURED_HUMAN_COMPLETION" || requested.InputEventRef == "" {
 			return events.Event{}, nil, fmt.Errorf("user execution-start boundary is invalid")
 		}
 	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
@@ -1141,6 +1141,9 @@ ORDER BY e.sequence`, draft.Event.OrganizationID, route.Scope, route.ID, cutoff)
 				return fmt.Errorf("select Agent execution inbox %s/%s: %w", route.Scope, route.ID, err)
 			}
 			selections = append(selections, events.InboxSelection{Route: route, Events: selected})
+		}
+		if err := validate(selections); err != nil {
+			return fmt.Errorf("validate bounded Agent execution input: %w", err)
 		}
 		return nil
 	})

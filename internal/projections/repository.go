@@ -237,7 +237,7 @@ func (r *Repository) SaveExperimentalSubmission(ctx context.Context, correlation
 	return err
 }
 
-func (r *Repository) StartAgentExecution(ctx context.Context, organizationID core.ID, correlationID string, version int, value core.Task, mode string, strategicEventRefs []string, strategicContextRefs []core.VersionedRef, routes []events.InboxRoute) (events.Event, []events.InboxSelection, error) {
+func (r *Repository) StartAgentExecution(ctx context.Context, organizationID core.ID, correlationID string, version int, value core.Task, mode string, strategicEventRefs []string, strategicContextRefs []core.VersionedRef, routes []events.InboxRoute, validate events.ExecutionStartValidator) (events.Event, []events.InboxSelection, error) {
 	if r == nil || r.gateway == nil || organizationID == "" || correlationID == "" || value.ID == "" || value.ExecutionKind != core.ExecutionAgent || value.Status != core.TaskRunning || version < 2 {
 		return events.Event{}, nil, fmt.Errorf("complete Agent execution-start projection is required")
 	}
@@ -247,7 +247,7 @@ func (r *Repository) StartAgentExecution(ctx context.Context, organizationID cor
 			TaskID: string(value.ID), CorrelationID: correlationID, Payload: events.ExecutionStartDetail{Mode: mode, StrategicEventRefs: strategicEventRefs, StrategicContextRefs: strategicContextRefs},
 		},
 		ProjectionKind: KindTask, RecordID: string(value.ID), Version: version, Value: value,
-	}, routes)
+	}, routes, validate)
 }
 
 // StartTaskExecution admits deterministic and user-operated execution starts
@@ -264,7 +264,7 @@ func (r *Repository) StartTaskExecution(ctx context.Context, organizationID core
 			TaskID: string(value.ID), CorrelationID: correlationID, Payload: events.ExecutionStartDetail{Mode: mode, InputEventRef: inputEventRef, StrategicEventRefs: strategicEventRefs, StrategicContextRefs: strategicContextRefs},
 		},
 		ProjectionKind: KindTask, RecordID: string(value.ID), Version: version, Value: value,
-	}, nil)
+	}, nil, nil)
 	if err == nil && len(selections) != 0 {
 		return events.Event{}, fmt.Errorf("non-Agent execution start selected an inbox")
 	}
