@@ -1516,7 +1516,7 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 		snapshot.Experiments[experiment.ID] = projections.Versioned[core.Experiment]{Version: 1, CorrelationID: correlationID, Value: experiment}
 	}
 
-	plan, err := s.ensurePlan(ctx, organizationID, correlationID, intent, acceptedDraft, in.Kind)
+	plan, err := s.ensurePlan(ctx, organizationID, correlationID, intent, work, acceptedDraft, in.Kind)
 	if err == nil && in.experimentSpec != nil {
 		err = lab.ValidatePlan(in.experimentSpec.Budget, plan.Tasks)
 	}
@@ -1737,7 +1737,7 @@ func acceptedGoalID(draft core.IntentDraft) (core.ID, error) {
 	return core.AcceptedIntentGoalID(draft)
 }
 
-func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correlationID string, intent core.Intent, draft core.IntentDraft, requestedKind core.ExecutionKind) (core.Plan, error) {
+func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correlationID string, intent core.Intent, work core.Work, draft core.IntentDraft, requestedKind core.ExecutionKind) (core.Plan, error) {
 	stream, err := s.gateway.Events(ctx, correlationID)
 	if err != nil {
 		return core.Plan{}, fmt.Errorf("load durable planning state: %w", err)
@@ -1763,20 +1763,38 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 		recorded = &copy
 	}
 	planID := core.ID("plan-" + correlationID)
+	allEvents := stream
+	if work.GoalID != "" {
+		allEvents, err = s.gateway.Events(ctx, "")
+		if err != nil {
+			return core.Plan{}, fmt.Errorf("load strategic planning context: %w", err)
+		}
+	}
 	if recorded != nil {
-		if err := validateDurablePlan(*recorded, planID, intent, draft, requestedKind); err != nil {
+		if _, err := events.ResolveStrategicContextByRefs(string(organizationID), work, allEvents, recorded.StrategicEventRefs, recorded.StrategicContextRefs); err != nil {
+			return core.Plan{}, fmt.Errorf("validate durable Plan strategic context: %w", err)
+		}
+		if err := validateDurablePlan(*recorded, planID, intent, draft, requestedKind, recorded.StrategicEventRefs, recorded.StrategicContextRefs); err != nil {
 			return core.Plan{}, err
 		}
 		return *recorded, nil
 	}
+	strategy, strategicEventRefs, strategicContextRefs, err := events.ResolveStrategicContext(string(organizationID), work, allEvents, 0)
+	if err != nil {
+		return core.Plan{}, fmt.Errorf("resolve strategic planning context: %w", err)
+	}
+	if strategy != nil && (strategy.Mission.Status != core.MissionActive || strategy.Goal.Status != core.GoalActive) {
+		return core.Plan{}, fmt.Errorf("strategic planning context is not active")
+	}
 
 	descriptor, modelCapable := s.planner.Descriptor()
 	usesModel := modelCapable && requestedKind == core.ExecutionAgent
-	inputRefs, err := planningInputRefs(stream, intent, draft)
+	intentInputRefs, err := planningInputRefs(stream, intent, draft)
 	if err != nil {
 		return core.Plan{}, err
 	}
-	attemptRef, attempted, attemptStateErr := recordedPlanningAttempt(stream, planID, intent, draft, inputRefs)
+	inputRefs := append(append([]string(nil), intentInputRefs...), strategicEventRefs...)
+	attemptRef, attempted, attemptStateErr := recordedPlanningAttempt(stream, planID, intent, draft, inputRefs, strategicContextRefs)
 	if attempted {
 		if attemptStateErr == nil {
 			attemptStateErr = fmt.Errorf("adaptive planning attempt has no validated durable plan")
@@ -1791,6 +1809,7 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 			PlanID: string(planID), IntentID: string(intent.ID), IntentFingerprint: draft.Fingerprint,
 			PromptVersion: descriptor.PromptVersion, Provider: descriptor.Provider, Model: descriptor.Model,
 			ExecutionProfileVersion: descriptor.ExecutionProfileVersion, InputEventRefs: inputRefs,
+			StrategicContextRefs: strategicContextRefs,
 		}
 		contextEvent, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
 			OrganizationID: string(organizationID), EventType: "PLANNING_CONTEXT_MANIFESTED", SourceActorID: "runtime",
@@ -1820,7 +1839,7 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 			return core.Plan{}, attemptFailure(fmt.Errorf("bind planning inference scope: %w", err))
 		}
 	}
-	result, buildErr := s.planner.Build(turnCtx, draft, requestedKind)
+	result, buildErr := s.planner.Build(turnCtx, planning.Input{Intent: draft, Strategy: strategy}, requestedKind)
 	cancel()
 	if result.Usage != nil {
 		if !usesModel || !result.Usage.Valid() || result.Usage.Provider != descriptor.Provider || result.Usage.Model != descriptor.Model {
@@ -1841,13 +1860,14 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	}
 	plan := core.Plan{
 		ID: planID, IntentID: intent.ID, IntentFingerprint: draft.Fingerprint, Version: 1,
+		StrategicEventRefs: append([]string(nil), strategicEventRefs...), StrategicContextRefs: append([]core.VersionedRef(nil), strategicContextRefs...),
 		Tasks: append([]core.PlanTask(nil), result.Tasks...), CreatedAt: time.Now().UTC(),
 	}
 	plan.Fingerprint, err = core.FingerprintPlan(plan)
 	if err != nil {
 		return core.Plan{}, attemptFailure(fmt.Errorf("fingerprint durable plan: %w", err))
 	}
-	if err := validateDurablePlan(plan, planID, intent, draft, requestedKind); err != nil {
+	if err := validateDurablePlan(plan, planID, intent, draft, requestedKind, strategicEventRefs, strategicContextRefs); err != nil {
 		return core.Plan{}, attemptFailure(err)
 	}
 	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
@@ -1859,7 +1879,7 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	return plan, nil
 }
 
-func recordedPlanningAttempt(stream []events.Event, planID core.ID, intent core.Intent, draft core.IntentDraft, inputRefs []string) (string, bool, error) {
+func recordedPlanningAttempt(stream []events.Event, planID core.ID, intent core.Intent, draft core.IntentDraft, inputRefs []string, strategicContextRefs []core.VersionedRef) (string, bool, error) {
 	attemptRef := ""
 	for _, event := range stream {
 		if event.EventType != "PLANNING_CONTEXT_MANIFESTED" {
@@ -1873,7 +1893,7 @@ func recordedPlanningAttempt(stream []events.Event, planID core.ID, intent core.
 		if event.EventID == "" || event.SourceExecutionID == "" || event.TaskID != "task-"+event.CorrelationID ||
 			json.Unmarshal(event.Payload, &manifest) != nil || manifest.PlanID != string(planID) || manifest.IntentID != string(intent.ID) ||
 			manifest.IntentFingerprint != draft.Fingerprint || manifest.PromptVersion == "" || manifest.Provider == "" || manifest.Model == "" ||
-			manifest.ExecutionProfileVersion == "" || !slices.Equal(manifest.InputEventRefs, inputRefs) {
+			manifest.ExecutionProfileVersion == "" || !slices.Equal(manifest.InputEventRefs, inputRefs) || !slices.Equal(manifest.StrategicContextRefs, strategicContextRefs) {
 			return attemptRef, true, fmt.Errorf("durable planning context does not match the accepted Intent")
 		}
 	}
@@ -1913,9 +1933,14 @@ func planningInputRefs(stream []events.Event, intent core.Intent, draft core.Int
 	return refs, nil
 }
 
-func validateDurablePlan(plan core.Plan, planID core.ID, intent core.Intent, draft core.IntentDraft, requestedKind core.ExecutionKind) error {
+func validateDurablePlan(plan core.Plan, planID core.ID, intent core.Intent, draft core.IntentDraft, requestedKind core.ExecutionKind, strategicEventRefs []string, strategicContextRefs []core.VersionedRef) error {
 	if plan.ID != planID || plan.IntentID != intent.ID || plan.IntentFingerprint != intent.AcceptedFingerprint || plan.IntentFingerprint != draft.Fingerprint || plan.Version != 1 || plan.CreatedAt.IsZero() {
 		return fmt.Errorf("durable plan does not bind the exact accepted intent")
+	}
+	if !slices.Equal(plan.StrategicEventRefs, strategicEventRefs) || !slices.Equal(plan.StrategicContextRefs, strategicContextRefs) ||
+		(intent.GoalID == "" && (len(plan.StrategicEventRefs) != 0 || len(plan.StrategicContextRefs) != 0)) ||
+		(intent.GoalID != "" && (len(plan.StrategicEventRefs) != 2 || len(plan.StrategicContextRefs) != 2)) {
+		return fmt.Errorf("durable plan does not bind the exact strategic context")
 	}
 	if err := planning.ValidateTasks(plan.Tasks, requestedKind); err != nil {
 		return fmt.Errorf("durable plan is invalid: %w", err)
@@ -2437,9 +2462,53 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	var dependencyRefs []string
 	var dependencyResults []core.AgentExecutionDependencyResult
 	var blockedDependencies []core.AgentExecutionBlockedDependency
+	var strategy *core.StrategicContext
+	var strategyEventRefs []string
+	var strategyContextRefs []core.VersionedRef
+	var correlationEvents []events.Event
 	var revision completion.HumanReview
 	var revisionEvent events.Event
 	var hasRevision bool
+	workState, found := snapshot.Works[task.WorkID]
+	if !found || workState.Value.ID != task.WorkID || workState.Value.IntentID == "" {
+		return taskRun{}, fmt.Errorf("load durable Work context for task %s", task.ID)
+	}
+	if workState.Value.GoalID != "" {
+		intentState, intentFound := snapshot.Intents[workState.Value.IntentID]
+		if !intentFound || intentState.Value.OrganizationID != organizationID {
+			return taskRun{}, fmt.Errorf("load durable Intent context for task %s", task.ID)
+		}
+		correlationEvents, err = s.gateway.Events(ctx, state.CorrelationID)
+		if err != nil {
+			return taskRun{}, fmt.Errorf("load durable Plan context for task %s: %w", task.ID, err)
+		}
+		plan, planErr := workCompletionPlan(correlationEvents, intentState.Value, state.CorrelationID)
+		allEvents, streamErr := s.gateway.Events(ctx, "")
+		if streamErr != nil {
+			return taskRun{}, fmt.Errorf("load strategic execution context for task %s: %w", task.ID, streamErr)
+		}
+		if planErr == nil {
+			strategy, planErr = events.ResolveStrategicContextByRefs(string(organizationID), workState.Value, allEvents, plan.StrategicEventRefs, plan.StrategicContextRefs)
+		}
+		var latestEventRefs []string
+		var latestContextRefs []core.VersionedRef
+		var latest *core.StrategicContext
+		if planErr == nil {
+			latest, latestEventRefs, latestContextRefs, planErr = events.ResolveStrategicContext(string(organizationID), workState.Value, allEvents, 0)
+		}
+		if planErr != nil || strategy == nil || latest == nil || strategy.Mission.Status != core.MissionActive || strategy.Goal.Status != core.GoalActive ||
+			!slices.Equal(plan.StrategicEventRefs, latestEventRefs) || !slices.Equal(plan.StrategicContextRefs, latestContextRefs) {
+			task.Status = core.TaskBlocked
+			detail := blockedDetail("the Mission or Goal changed after this Work was planned", "a new reviewed Plan bound to the current active Mission and Goal revisions", "the runtime cannot silently reinterpret planned Work under changed organizational direction")
+			detail.Code = "STRATEGIC_CONTEXT_CHANGED"
+			if saveErr := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); saveErr != nil {
+				return taskRun{}, fmt.Errorf("persist strategic-context block for task %s: %w", task.ID, saveErr)
+			}
+			return taskRun{}, nil
+		}
+		strategyEventRefs = append([]string(nil), plan.StrategicEventRefs...)
+		strategyContextRefs = append([]core.VersionedRef(nil), plan.StrategicContextRefs...)
+	}
 	if task.ExecutionKind == core.ExecutionAgent {
 		if remediation {
 			dependencyRefs, blockedDependencies, err = s.blockedDependencyContext(ctx, snapshot, state.CorrelationID, task)
@@ -2452,11 +2521,13 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 				return taskRun{}, fmt.Errorf("load dependency evidence for task %s: %w", task.ID, err)
 			}
 		}
-		stream, err := s.gateway.Events(ctx, state.CorrelationID)
+		if correlationEvents == nil {
+			correlationEvents, err = s.gateway.Events(ctx, state.CorrelationID)
+		}
 		if err != nil {
 			return taskRun{}, fmt.Errorf("load completion revision context for task %s: %w", task.ID, err)
 		}
-		revision, revisionEvent, hasRevision, err = latestRevision(stream, task.ID)
+		revision, revisionEvent, hasRevision, err = latestRevision(correlationEvents, task.ID)
 		if err != nil {
 			return taskRun{}, fmt.Errorf("validate completion revision context for task %s: %w", task.ID, err)
 		}
@@ -2475,12 +2546,14 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		}
 		inboxBatches = inboxBatchesFromSelections(selections)
 		inboxRefs := inboxEventRefs(inboxBatches)
-		eventRefs := append(append([]string(nil), inboxRefs...), dependencyRefs...)
+		eventRefs := append([]string(nil), strategyEventRefs...)
+		eventRefs = append(eventRefs, inboxRefs...)
+		eventRefs = append(eventRefs, dependencyRefs...)
 		if hasRevision {
 			eventRefs = append(eventRefs, revisionEvent.EventID)
 		}
 		inputContext := core.AgentExecutionInputContext{
-			Blueprint: selected.Blueprint, Task: task,
+			Blueprint: selected.Blueprint, Task: task, Strategy: strategy,
 			DependencyResults: dependencyResults, BlockedDependencies: blockedDependencies,
 		}
 		for _, event := range sortedInboxEvents(inboxBatches) {
@@ -2516,7 +2589,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			SkillRefs:               []core.VersionedRef{},
 			ToolDefinitions:         []core.VersionedRef{},
 			ArtifactRefs:            []core.VersionedRef{},
-			AdditionalContextRefs:   []core.VersionedRef{},
+			AdditionalContextRefs:   strategyContextRefs,
 			ContextBuilderVersion:   "v1",
 		}
 		executionInput := executionTask.ExecutionBrief

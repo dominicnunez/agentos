@@ -406,6 +406,22 @@ func confirmedGoalSubmit(t *testing.T, ctx context.Context, gateway *events.Gate
 	return in
 }
 
+type strategicDriftPlanner struct{ revise func() }
+
+func (strategicDriftPlanner) Descriptor() (planning.Descriptor, bool) {
+	return planning.Descriptor{}, false
+}
+
+func (p strategicDriftPlanner) Build(_ context.Context, input planning.Input, kind core.ExecutionKind) (planning.Result, error) {
+	if p.revise != nil {
+		p.revise()
+	}
+	return planning.Result{Tasks: []core.PlanTask{{
+		Key: "root", Description: input.Intent.Objective, ExecutionKind: kind,
+		ModelInferencePolicy: core.InferenceAllowed, DependsOn: []string{},
+	}}}, nil
+}
+
 func TestVerticalSlice(t *testing.T) {
 	l, err := ledger.Open(":memory:")
 	if err != nil {
@@ -924,13 +940,22 @@ func TestSubmitBindsOnlyActiveGoalFromAcceptedIntent(t *testing.T) {
 	if result.Intent.GoalID != "goal-1" || result.Work.GoalID != "goal-1" {
 		t.Fatalf("accepted Goal was not durably bound: intent=%+v work=%+v", result.Intent, result.Work)
 	}
+	var plan core.Plan
 	var evidence completion.WorkEvidence
 	for _, event := range result.Events {
-		if event.EventType == "WORK_COMPLETION_EVALUATED" {
+		switch event.EventType {
+		case "PLAN_CREATED":
+			if err := json.Unmarshal(event.Payload, &plan); err != nil {
+				t.Fatal(err)
+			}
+		case "WORK_COMPLETION_EVALUATED":
 			if err := json.Unmarshal(event.Payload, &evidence); err != nil {
 				t.Fatal(err)
 			}
 		}
+	}
+	if len(plan.StrategicEventRefs) != 2 || len(plan.StrategicContextRefs) != 2 || plan.StrategicContextRefs[0].ID != "mission/mission-1" || plan.StrategicContextRefs[1].ID != "goal/goal-1" {
+		t.Fatalf("durable Plan omitted exact Mission/Goal context: %+v", plan)
 	}
 	if evidence.GoalID != "goal-1" || !evidence.Valid() {
 		t.Fatalf("Work evidence does not bind the accepted Goal: %+v", evidence)
@@ -959,6 +984,54 @@ func TestSubmitBindsOnlyActiveGoalFromAcceptedIntent(t *testing.T) {
 	}
 	if _, err := service.Submit(ctx, Submit{RequestID: "missing-goal", OrganizationID: "org-1", GoalID: "goal-missing", Statement: "echo missing", Kind: core.ExecutionDeterministic}); err == nil {
 		t.Fatal("submission bound Work to a missing Goal")
+	}
+}
+
+func TestGoalRevisionAfterPlanningBlocksExecution(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	seedTestGoal(t, ctx, repository, "org-1", "mission-1", "goal-1", core.GoalActive)
+	planner := strategicDriftPlanner{revise: func() {
+		snapshot, loadErr := repository.Load(ctx)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		state := snapshot.Goals["goal-1"]
+		goal := state.Value
+		goal.Objective = "revised after planning started"
+		if saveErr := repository.SaveGoal(ctx, "GOAL_REFINED", "runtime", state.CorrelationID, state.Version+1, goal, nil); saveErr != nil {
+			t.Fatal(saveErr)
+		}
+	}}
+	service := NewWithModelAndPlanner(gateway, execution.FakeModel{}, planner)
+	in := confirmedGoalSubmit(t, ctx, gateway, "strategic-drift", "org-1", "goal-1", "prepare a governed result", core.ExecutionAgent)
+	result, err := service.Submit(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Task.Status != core.TaskBlocked || result.Work.Status != core.WorkActive {
+		t.Fatalf("strategic drift did not block active Work: task=%+v work=%+v", result.Task, result.Work)
+	}
+	found := false
+	for _, event := range result.Events {
+		if event.EventType != "TASK_BLOCKED" {
+			continue
+		}
+		var payload events.ProjectionEventPayload
+		var detail core.AgentExecutionBlockedDetail
+		if json.Unmarshal(event.Payload, &payload) != nil || json.Unmarshal(payload.Detail, &detail) != nil {
+			t.Fatal("decode strategic-context block")
+		}
+		found = detail.Code == "STRATEGIC_CONTEXT_CHANGED"
+	}
+	if !found {
+		t.Fatal("strategic-context drift lacked a durable fail-closed block")
 	}
 }
 
@@ -1317,6 +1390,43 @@ func newOrganizationPlanner(t *testing.T, model *organizationLoopModel) planning
 		t.Fatal(err)
 	}
 	return planner
+}
+
+func TestGoalBoundPlanningAndExecutionUseExactStrategicContext(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	seedTestGoal(t, ctx, repository, "org-1", "mission-1", "goal-1", core.GoalActive)
+	model := &organizationLoopModel{plan: `{"tasks":[]}`}
+	service := NewWithModelAndPlanner(gateway, model, newOrganizationPlanner(t, model))
+	in := confirmedGoalSubmit(t, ctx, gateway, "strategic-agent", "org-1", "goal-1", "prepare a governed result", core.ExecutionAgent)
+	result, err := service.Submit(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, ok := result.Outcome.ObservedEffect.(string)
+	if !ok || !strings.Contains(observed, "mission-1") || !strings.Contains(observed, "durable test direction") || !strings.Contains(observed, "goal-1") || !strings.Contains(observed, "measurable test outcome") {
+		t.Fatalf("Agent execution omitted strategic context: %q", result.Outcome.ObservedEffect)
+	}
+	manifestFound := false
+	for _, event := range result.Events {
+		if event.EventType != "EXECUTION_CONTEXT_MANIFESTED" {
+			continue
+		}
+		var manifest core.ExecutionContextManifest
+		if json.Unmarshal(event.Payload, &manifest) != nil || len(manifest.AdditionalContextRefs) != 2 || len(manifest.EventRefs) < 2 {
+			t.Fatalf("execution manifest omitted strategic provenance: %+v", manifest)
+		}
+		manifestFound = true
+	}
+	if !manifestFound {
+		t.Fatal("Goal-bound Agent execution lacked a context manifest")
+	}
 }
 
 type delayedOrganizationModel struct{}
@@ -2764,11 +2874,11 @@ func (*recoveryPlanner) Descriptor() (planning.Descriptor, bool) {
 	return planning.Descriptor{PromptVersion: "recovery-test-v1", Provider: "fake", Model: "fake-model/v1", ExecutionProfileVersion: "v1-fake"}, true
 }
 
-func (p *recoveryPlanner) Build(_ context.Context, draft core.IntentDraft, kind core.ExecutionKind) (planning.Result, error) {
+func (p *recoveryPlanner) Build(_ context.Context, input planning.Input, kind core.ExecutionKind) (planning.Result, error) {
 	p.calls++
 	usage := events.InferenceUsageRecordedPayload{Source: "test", Provider: "fake", Model: "fake-model/v1"}
 	return planning.Result{Tasks: []core.PlanTask{{
-		Key: "root", Description: draft.Objective, ExecutionKind: kind,
+		Key: "root", Description: input.Intent.Objective, ExecutionKind: kind,
 		ModelInferencePolicy: core.InferenceAllowed, DependsOn: []string{},
 	}}, Usage: &usage}, nil
 }
@@ -2779,7 +2889,7 @@ func (*failingPlanningPlanner) Descriptor() (planning.Descriptor, bool) {
 	return planning.Descriptor{PromptVersion: "failure-test-v1", Provider: "fake", Model: "fake-model/v1", ExecutionProfileVersion: "v1-fake"}, true
 }
 
-func (p *failingPlanningPlanner) Build(context.Context, core.IntentDraft, core.ExecutionKind) (planning.Result, error) {
+func (p *failingPlanningPlanner) Build(context.Context, planning.Input, core.ExecutionKind) (planning.Result, error) {
 	p.calls++
 	cost := 0.01
 	usage := events.InferenceUsageRecordedPayload{

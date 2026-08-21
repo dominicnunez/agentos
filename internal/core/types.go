@@ -235,13 +235,15 @@ type PlanTask struct {
 // Intent. It is coordination data, not authority: tasks still pass through
 // assignment, capability, consequence, effect, and completion boundaries.
 type Plan struct {
-	ID                ID         `json:"id"`
-	IntentID          ID         `json:"intent_id"`
-	IntentFingerprint string     `json:"intent_fingerprint"`
-	Version           int        `json:"version"`
-	Tasks             []PlanTask `json:"tasks"`
-	Fingerprint       string     `json:"fingerprint"`
-	CreatedAt         time.Time  `json:"created_at"`
+	ID                   ID             `json:"id"`
+	IntentID             ID             `json:"intent_id"`
+	IntentFingerprint    string         `json:"intent_fingerprint"`
+	Version              int            `json:"version"`
+	StrategicEventRefs   []string       `json:"strategic_event_refs,omitempty"`
+	StrategicContextRefs []VersionedRef `json:"strategic_context_refs,omitempty"`
+	Tasks                []PlanTask     `json:"tasks"`
+	Fingerprint          string         `json:"fingerprint"`
+	CreatedAt            time.Time      `json:"created_at"`
 }
 
 // AgentConfig pins the exact reviewed configuration selected for a Task.

@@ -25,4 +25,14 @@ func TestFingerprintPlanBindsValidatedStructure(t *testing.T) {
 	if err != nil || changed == first {
 		t.Fatalf("changed=%q original=%q err=%v", changed, first, err)
 	}
+	plan.Tasks[0].Description = "work"
+	plan.StrategicEventRefs = []string{"mission-event", "goal-event"}
+	plan.StrategicContextRefs = []VersionedRef{
+		{ID: "mission/mission-1", Version: "1", MaterializationState: MaterializedFull},
+		{ID: "goal/goal-1", Version: "2", MaterializationState: MaterializedFull},
+	}
+	strategic, err := FingerprintPlan(plan)
+	if err != nil || strategic == first {
+		t.Fatalf("strategic=%q original=%q err=%v", strategic, first, err)
+	}
 }

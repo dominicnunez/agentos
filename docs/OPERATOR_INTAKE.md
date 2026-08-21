@@ -22,11 +22,13 @@ the natural-language intake conversation. The normalizer may carry only an
 exact Goal ID present in the cited message, and the Goal is shown in the
 fingerprinted Intent review before confirmation. It may not invent or select a
 Goal. Goal activity and tenant ownership are checked in the same SQLite
-transaction that records confirmation. A later pause or retirement prevents
-new bindings but does not invalidate retry or recovery of already admitted
-Work. Work completion contributes bounded evidence only; Goal progress and
-achievement require a separate trusted evaluation, and bare achievement
-projection updates are rejected.
+transaction that records confirmation. Planning fingerprints the exact Mission
+and Goal revisions it uses. Retry and recovery retain that context; if either
+revision changes before execution, Agent OS blocks the affected Task for an
+explicit replan instead of silently changing its meaning. Work completion
+contributes bounded evidence only; Goal progress and achievement require a
+separate trusted evaluation, and bare achievement projection updates are
+rejected.
 
 ## Setup and local user access
 

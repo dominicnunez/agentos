@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -508,6 +509,138 @@ type WorkCompletionBinding struct {
 	InboxObservations map[string]InboxObservationBinding
 	AgentBlueprints   map[core.ID]core.AgentBlueprint
 	ExecutionProfiles map[core.ID]core.ExecutionProfile
+}
+
+// ResolveStrategicContext selects the latest exact Mission and Goal
+// projections visible at one boundary. The returned records are explanatory
+// work context only. Event and version references make the selection
+// independently replayable without trusting mutable current projections.
+func ResolveStrategicContext(organizationID string, work core.Work, stream []Event, beforeSequence int64) (*core.StrategicContext, []string, []core.VersionedRef, error) {
+	if organizationID == "" || work.ID == "" {
+		return nil, nil, nil, fmt.Errorf("strategic context organization and Work are required")
+	}
+	if work.GoalID == "" {
+		return nil, nil, nil, nil
+	}
+	goalEvent, goalRecord, goal, err := latestGoalProjection(organizationID, work.GoalID, stream, beforeSequence)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	missionEvent, missionRecord, mission, err := latestMissionProjection(organizationID, goal.MissionID, stream, beforeSequence)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	context := &core.StrategicContext{
+		Mission: mission, MissionVersion: missionRecord.Version,
+		Goal: goal, GoalVersion: goalRecord.Version,
+	}
+	if !core.ValidStrategicContext(*context) {
+		return nil, nil, nil, fmt.Errorf("durable Mission and Goal do not form valid strategic context")
+	}
+	return context,
+		[]string{missionEvent.EventID, goalEvent.EventID},
+		[]core.VersionedRef{
+			{ID: "mission/" + string(mission.ID), Version: strconv.Itoa(missionRecord.Version), MaterializationState: core.MaterializedFull},
+			{ID: "goal/" + string(goal.ID), Version: strconv.Itoa(goalRecord.Version), MaterializationState: core.MaterializedFull},
+		}, nil
+}
+
+// ResolveStrategicContextByRefs reconstructs the exact strategic revisions
+// fingerprinted into a durable Plan. It never substitutes newer projections.
+func ResolveStrategicContextByRefs(organizationID string, work core.Work, stream []Event, eventRefs []string, versionRefs []core.VersionedRef) (*core.StrategicContext, error) {
+	if organizationID == "" || work.ID == "" {
+		return nil, fmt.Errorf("strategic context organization and Work are required")
+	}
+	if work.GoalID == "" {
+		if len(eventRefs) != 0 || len(versionRefs) != 0 {
+			return nil, fmt.Errorf("ad hoc Work cannot bind strategic context")
+		}
+		return nil, nil
+	}
+	if len(eventRefs) != 2 || len(versionRefs) != 2 || eventRefs[0] == eventRefs[1] ||
+		versionRefs[0].MaterializationState != core.MaterializedFull || versionRefs[1].MaterializationState != core.MaterializedFull {
+		return nil, fmt.Errorf("strategic context references are invalid")
+	}
+	missionEvent, found := eventWithID(stream, eventRefs[0])
+	if !found {
+		return nil, fmt.Errorf("strategic Mission event is unavailable")
+	}
+	goalEvent, found := eventWithID(stream, eventRefs[1])
+	if !found {
+		return nil, fmt.Errorf("strategic Goal event is unavailable")
+	}
+	missionRecord, mission, err := exactMissionProjection(organizationID, missionEvent)
+	if err != nil {
+		return nil, err
+	}
+	goalRecord, goal, err := exactGoalProjection(organizationID, goalEvent)
+	if err != nil {
+		return nil, err
+	}
+	if goal.ID != work.GoalID || versionRefs[0].ID != "mission/"+string(mission.ID) || versionRefs[0].Version != strconv.Itoa(missionRecord.Version) ||
+		versionRefs[1].ID != "goal/"+string(goal.ID) || versionRefs[1].Version != strconv.Itoa(goalRecord.Version) {
+		return nil, fmt.Errorf("strategic context references do not match durable projections")
+	}
+	context := &core.StrategicContext{Mission: mission, MissionVersion: missionRecord.Version, Goal: goal, GoalVersion: goalRecord.Version}
+	if !core.ValidStrategicContext(*context) {
+		return nil, fmt.Errorf("durable Mission and Goal do not form valid strategic context")
+	}
+	return context, nil
+}
+
+func exactGoalProjection(organizationID string, event Event) (ProjectionRecord, core.Goal, error) {
+	return exactStrategicProjection(organizationID, event, "goal", "Goal", func(value core.Goal) core.ID { return value.ID }, func(value core.Goal) core.ID { return value.OrganizationID }, core.ValidGoal)
+}
+
+func exactMissionProjection(organizationID string, event Event) (ProjectionRecord, core.Mission, error) {
+	return exactStrategicProjection(organizationID, event, "mission", "Mission", func(value core.Mission) core.ID { return value.ID }, func(value core.Mission) core.ID { return value.OrganizationID }, core.ValidMission)
+}
+
+func exactStrategicProjection[T any](organizationID string, event Event, kind, label string, identity func(T) core.ID, tenant func(T) core.ID, valid func(T) bool) (ProjectionRecord, T, error) {
+	var value T
+	payload, present, err := AdmittedProjection(event)
+	if err != nil || !present || payload.Projection.ProjectionKind != kind || event.OrganizationID != organizationID ||
+		decodeExactEventJSON(payload.Projection.Value, &value) != nil || payload.Projection.RecordID != string(identity(value)) || tenant(value) != core.ID(organizationID) || !valid(value) {
+		return ProjectionRecord{}, value, fmt.Errorf("strategic %s projection is invalid", label)
+	}
+	return payload.Projection, value, nil
+}
+
+func latestGoalProjection(organizationID string, goalID core.ID, stream []Event, beforeSequence int64) (Event, ProjectionRecord, core.Goal, error) {
+	return latestStrategicProjection(organizationID, goalID, stream, beforeSequence, "goal", "Goal", func(value core.Goal) core.ID { return value.ID }, func(value core.Goal) core.ID { return value.OrganizationID }, core.ValidGoal)
+}
+
+func latestMissionProjection(organizationID string, missionID core.ID, stream []Event, beforeSequence int64) (Event, ProjectionRecord, core.Mission, error) {
+	return latestStrategicProjection(organizationID, missionID, stream, beforeSequence, "mission", "Mission", func(value core.Mission) core.ID { return value.ID }, func(value core.Mission) core.ID { return value.OrganizationID }, core.ValidMission)
+}
+
+func latestStrategicProjection[T any](organizationID string, recordID core.ID, stream []Event, beforeSequence int64, kind, label string, identity func(T) core.ID, tenant func(T) core.ID, valid func(T) bool) (Event, ProjectionRecord, T, error) {
+	var selected Event
+	var selectedRecord ProjectionRecord
+	var selectedValue T
+	for _, event := range stream {
+		if beforeSequence > 0 && event.Sequence >= beforeSequence {
+			continue
+		}
+		payload, present, err := AdmittedProjection(event)
+		if err != nil {
+			return Event{}, ProjectionRecord{}, selectedValue, err
+		}
+		if !present || payload.Projection.ProjectionKind != kind || payload.Projection.RecordID != string(recordID) {
+			continue
+		}
+		record, value, err := exactStrategicProjection(organizationID, event, kind, label, identity, tenant, valid)
+		if err != nil || identity(value) != recordID {
+			return Event{}, ProjectionRecord{}, selectedValue, fmt.Errorf("strategic %s projection is invalid", label)
+		}
+		if event.Sequence > selected.Sequence {
+			selected, selectedRecord, selectedValue = event, record, value
+		}
+	}
+	if selected.EventID == "" {
+		return Event{}, ProjectionRecord{}, selectedValue, fmt.Errorf("strategic %s projection is unavailable", label)
+	}
+	return selected, selectedRecord, selectedValue, nil
 }
 
 type CompletionDecisionResultPayload = core.CompletionResult
@@ -1129,7 +1262,7 @@ func completionExecutionModel(binding WorkCompletionBinding, task core.Task, exe
 	_, createdOffset := manifest.CreatedAt.Zone()
 	if found.EventID == "" || !profileFound || profile.ID != config.ProfileID || profile.OrganizationID != core.ID(binding.OrganizationID) || profile.Version != config.ProfileVersion ||
 		manifest.ExecutionID != core.ID(executionID) || manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID || manifest.AgentBlueprintVersion != config.BlueprintVersion || manifest.ExecutionProfileVersion != profile.Version || manifest.RuntimeAdapter != config.RuntimeAdapter || manifest.Provider != profile.ModelProvider || manifest.Model != profile.Model || manifest.TaskContractVersion != task.TaskContractVersion || manifest.PromptVersion != profile.PromptVersion || manifest.PolicyVersion != "v1" || manifest.ContextBuilderVersion != "v1" || manifest.CreatedAt.IsZero() || createdOffset != 0 ||
-		len(manifest.KnowledgeRefs) != 0 || len(manifest.SkillRefs) != 0 || len(manifest.ToolDefinitions) != 0 || len(manifest.ArtifactRefs) != 0 || len(manifest.AdditionalContextRefs) != 0 || !validSHA256(manifest.ExecutionInputSHA256) {
+		len(manifest.KnowledgeRefs) != 0 || len(manifest.SkillRefs) != 0 || len(manifest.ToolDefinitions) != 0 || len(manifest.ArtifactRefs) != 0 || !validSHA256(manifest.ExecutionInputSHA256) {
 		return executionModel{}, fmt.Errorf("work completion Agent manifest does not match its immutable Task")
 	}
 	expectedInput, err := expectedAgentExecutionInput(binding, task, startEvent, found, manifest, stream)
@@ -1144,6 +1277,13 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 	if err != nil {
 		return "", err
 	}
+	strategy, strategyEventRefs, strategyContextRefs, err := ResolveStrategicContext(binding.OrganizationID, binding.Work, stream, manifestEvent.Sequence)
+	if err != nil {
+		return "", err
+	}
+	if !slices.Equal(manifest.AdditionalContextRefs, strategyContextRefs) {
+		return "", fmt.Errorf("execution strategic context references do not match durable revisions")
+	}
 	dependencyRefs, dependencies, err := executionDependencies(binding, task, manifestEvent, stream)
 	if err != nil {
 		return "", err
@@ -1156,7 +1296,9 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 	if err != nil {
 		return "", err
 	}
-	expectedRefs := append(append([]string(nil), inboxRefs...), dependencyRefs...)
+	expectedRefs := append([]string(nil), strategyEventRefs...)
+	expectedRefs = append(expectedRefs, inboxRefs...)
+	expectedRefs = append(expectedRefs, dependencyRefs...)
 	if revisionRef != "" {
 		expectedRefs = append(expectedRefs, revisionRef)
 	}
@@ -1164,7 +1306,7 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 		return "", fmt.Errorf("execution context references do not match durable runtime selection")
 	}
 	_, input, err := core.MaterializeAgentExecutionInput(core.AgentExecutionInputContext{
-		Blueprint: blueprint, Task: task, DependencyResults: dependencies, InboxEvents: inbox, Revision: revision,
+		Blueprint: blueprint, Task: task, Strategy: strategy, DependencyResults: dependencies, InboxEvents: inbox, Revision: revision,
 	})
 	return input, err
 }
@@ -1844,14 +1986,15 @@ func validSHA256(value string) bool {
 // Intent event/fingerprint supplied to one planning attempt. Planning output is
 // still untrusted until the runtime validates and records a Plan.
 type PlanningContextPayload struct {
-	PlanID                  string   `json:"plan_id"`
-	IntentID                string   `json:"intent_id"`
-	IntentFingerprint       string   `json:"intent_fingerprint"`
-	PromptVersion           string   `json:"prompt_version"`
-	Provider                string   `json:"provider"`
-	Model                   string   `json:"model"`
-	ExecutionProfileVersion string   `json:"execution_profile_version"`
-	InputEventRefs          []string `json:"input_event_refs"`
+	PlanID                  string              `json:"plan_id"`
+	IntentID                string              `json:"intent_id"`
+	IntentFingerprint       string              `json:"intent_fingerprint"`
+	PromptVersion           string              `json:"prompt_version"`
+	Provider                string              `json:"provider"`
+	Model                   string              `json:"model"`
+	ExecutionProfileVersion string              `json:"execution_profile_version"`
+	InputEventRefs          []string            `json:"input_event_refs"`
+	StrategicContextRefs    []core.VersionedRef `json:"strategic_context_refs,omitempty"`
 }
 
 func (p ResultPublishedPayload) ValidFor(artifactRefs []string) bool {
