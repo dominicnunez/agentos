@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "lockfile_sha256": "fdeaffad10e420306e9ff2a716c5abd6151f01664a012b08f55c1adc3df9cd32",
+  "packages": [
+    {
+      "name": "@sveltejs/kit",
+      "version": "2.70.3",
+      "declared_license": "MIT",
+      "evidence": [
+        {
+          "file": "LICENSE",
+          "sha256": "ac6ecdc526c9e6aec1db76f0e8dfe344d792380e974686476e7c512152ae2636"
+        }
+      ]
+    },
+    {
+      "name": "svelte",
+      "version": "5.56.10",
+      "declared_license": "MIT",
+      "evidence": [
+        {
+          "file": "LICENSE.md",
+          "sha256": "06257f4847b13a49a039efb17b944c141e71b12fd8d231b362d86919067d77a3"
+        }
+      ]
+    }
+  ],
+  "license_texts": [
+    {
+      "sha256": "06257f4847b13a49a039efb17b944c141e71b12fd8d231b362d86919067d77a3",
+      "text": "Copyright (c) 2016-2025 [Svelte Contributors](https://github.com/sveltejs/svelte/graphs/contributors)\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.\n"
+    },
+    {
+      "sha256": "ac6ecdc526c9e6aec1db76f0e8dfe344d792380e974686476e7c512152ae2636",
+      "text": "Copyright (c) 2020 [these people](https://github.com/sveltejs/kit/graphs/contributors)\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE."
+    }
+  ]
+}

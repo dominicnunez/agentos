@@ -28,5 +28,5 @@ obligation as `CONFIRMED` or `FAILED`. Missing reconciliation support, lookup
 failure, unknown status, missing evidence, or a changed attempt remains
 `ATTEMPTED` for operator resolution.
 
-No natural-language work channel can decide an approval. The local console uses
+No natural-language work channel can decide an approval. The local dashboard uses
 the separate exact-effect control described in [Approval control](APPROVAL_CONTROL.md).

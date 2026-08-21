@@ -24,6 +24,8 @@ modules:
     path: internal/completion
   - name: core
     path: internal/core
+  - name: dashboard
+    path: internal/dashboard
   - name: effects
     path: internal/effects
   - name: effectstatus

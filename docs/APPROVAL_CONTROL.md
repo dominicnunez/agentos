@@ -1,18 +1,20 @@
 # Exact-effect approval control
 
-Agent OS exposes approval work through the private user gateway. It is carried
-over the owner-only Unix socket, not a separate network listener, bearer token,
-or actor file. Linux proves the connecting account's UID before the request
-reaches the approval service.
+Agent OS exposes approval work through the private user gateway. Its
+authoritative boundary is the owner-only Unix socket, not a bearer registry or
+actor file. Linux proves the connecting dashboard process's UID before the
+request reaches the approval service. The owner-launched web dashboard uses
+only its ephemeral, session-authenticated loopback bridge and cannot bypass
+that Unix boundary.
 
 For V1, the verified installation owner may decide approval requests belonging
 to the configured organization. That local identity grant does not weaken any
 other check: every transition reloads the durable approval and prepared effect,
 checks its state and expiry, and compares the exact effect fingerprint.
 
-## Console flow
+## Dashboard flow
 
-The terminal console lists pending work through:
+The local dashboard lists pending work through:
 
 ```text
 GET /v1/control/approvals
@@ -24,7 +26,7 @@ expiry, and single-use status. These values come from the ledger and cannot be
 supplied or replaced by the interface.
 
 Approval requires typing `APPROVE <fingerprint-prefix>` after viewing the exact
-effect. Denial requires `DENY`. The console performs the durable lifecycle:
+effect. Denial requires `DENY`. The dashboard performs the durable lifecycle:
 
 ```text
 PENDING -> NOTIFIED -> ACKNOWLEDGED -> PENDING_DECISION -> APPROVED | DENIED

@@ -86,17 +86,31 @@ elevation, but reports service-private ledger and credential inspection as
 informational. Run `sudo agentos doctor` for full at-rest verification and
 `sudo agentos doctor --online` for the external provider check in system mode.
 
-## Organization console
+## Organization dashboard
 
-After setup, `agentos` opens the terminal organization console. It uses the
-private user gateway; it never reads or edits the SQLite ledger directly.
+After setup, `agentos` opens the embedded organization dashboard in the
+owner's browser. SvelteKit is compiled to static assets inside the Go binary;
+there is no production Node server. The dashboard uses the private user
+gateway and never reads or edits the SQLite ledger directly.
+
+The launcher binds an ephemeral IPv4 loopback port. Loopback is not treated as
+identity. The verified installation owner receives a one-time 256-bit
+bootstrap credential through a mode-`0600` temporary page, so the credential
+does not appear in terminal output or the browser-launch command line. The
+bridge exchanges it once for an in-memory, eight-hour bearer session, deletes
+the bootstrap file, requires an exact Host and browser origin, sends no CORS
+permission, and applies a strict hash-bound Content Security Policy. Browser
+credentials never cross into the Unix gateway; the bridge connects separately
+and Linux `SO_PEERCRED` re-establishes the configured owner.
 
 The initial views are:
 
+- Overview: current intake and governance queues.
 - Work: submit natural-language work and inspect its narrow Task view.
 - Approvals: inspect the exact prepared effect and approve or deny it.
-- Agents: view the authorized Agent roster as that capability is added.
-- System: direct the user to the read-only `agentos doctor` report.
+- Reviews: judge exact candidate results and completion evidence.
+- System: inspect the dashboard session and use the read-only `agentos doctor`
+  report.
 
 Natural-language input first enters a durable, resumable intake conversation.
 The configured model may propose a structured Intent, but its output is
@@ -123,7 +137,7 @@ not repeat inference. Intake is capped at 32 messages and 128 KiB of text per
 conversation; a request that would exceed either limit is rejected before its
 message is appended.
 
-The console presents the complete Intent for review. `/confirm` binds the
+The dashboard presents the complete Intent for review. **Confirm exact Intent** binds the
 current Linux user to the exact Intent version and SHA-256 fingerprint. Only
 then may Agent OS create the Work and executable Task state. The confirmed
 Intent is fingerprint-bound to a runtime-validated Plan. Exact deterministic
@@ -131,7 +145,7 @@ work skips planning inference; adaptive work may use the configured provider
 to propose the smallest useful Task DAG. The complete graph is committed
 atomically before scheduling, and model output cannot introduce authority or
 new execution mechanisms. An unfinished
-conversation is recovered from SQLite when the console restarts. Confirmation
+conversation is recovered from SQLite when the dashboard restarts. Confirmation
 means Agent OS understood the requested work; it is never approval for a
 financial, public, destructive, privileged, legal, deployment, or other
 consequential effect.
@@ -142,13 +156,13 @@ OS reruns deterministic-first routing after every clarification against the
 latest normalized objective; an inferred route from an earlier incomplete
 draft is never treated as an operator choice.
 
-`/user-task <instruction>` creates work that must wait for structured user
-completion. `/complete <task-id>` collects every required field and file from
-the Task's durable CompletionContract. A self-reported "done" message cannot
+Selecting **User task** before intake creates work that must wait for structured
+user completion. The Task view collects every required field and file from the
+Task's durable CompletionContract. A self-reported "done" message cannot
 complete that Task.
 
-`/reviews` lists pending completion judgments, including internal planned
-Tasks that are intentionally absent from A2A lookup. The console binds a
+The Reviews view lists pending completion judgments, including internal planned
+Tasks that are intentionally absent from A2A lookup. The dashboard binds a
 decision to the exact evidence fingerprint and states explicitly that judging
 candidate completion does not approve a consequential effect.
 

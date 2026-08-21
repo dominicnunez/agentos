@@ -105,7 +105,7 @@ func runInit(ctx context.Context, mode bootstrap.Mode, resume bool, input *os.Fi
 	if err := config.ValidateReady(); err != nil {
 		return fmt.Errorf("setup did not produce a ready installation: %w", err)
 	}
-	_, err = fmt.Fprintln(output, "\nAgent OS is ready. Run agentos to open the organization console.")
+	_, err = fmt.Fprintln(output, "\nAgent OS is ready. Run agentos to open the organization dashboard.")
 	return err
 }
 
