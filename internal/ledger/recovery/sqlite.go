@@ -133,13 +133,6 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 			return Result{}, err
 		}
 	} else {
-		var incompatible int
-		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE event_type IN ('INTENT_DRAFTED','INTENT_CONFIRMED')`).Scan(&incompatible); err != nil {
-			return Result{}, fmt.Errorf("inspect legacy migration eligibility: %w", err)
-		}
-		if incompatible != 0 {
-			return Result{}, fmt.Errorf("legacy storage contains Intent review evidence that cannot be safely migrated")
-		}
 		if err := verifyLegacyAdmissionsAfterMigration(ctx, db); err != nil {
 			return Result{}, err
 		}

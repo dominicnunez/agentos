@@ -1006,8 +1006,15 @@ func validateGoalAchievementAdmissionsFromEvents(snapshot Snapshot, stream []eve
 		CompletionSequence int64
 	}
 	workEvidence := make(map[string]workEvidenceBinding)
+	experimentalWorks := make(map[core.ID]struct{}, len(snapshot.Experiments))
+	for _, experiment := range snapshot.Experiments {
+		experimentalWorks[experiment.Value.WorkID] = struct{}{}
+	}
 	for workID, state := range snapshot.Works {
 		if state.Value.Status != core.WorkCompleted || state.Value.GoalID == "" {
+			continue
+		}
+		if _, experimental := experimentalWorks[workID]; experimental {
 			continue
 		}
 		intent, ok := snapshot.Intents[state.Value.IntentID]

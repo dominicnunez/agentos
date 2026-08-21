@@ -152,37 +152,71 @@ func TestOpenMigratesStorageV2WithoutIntentReviewEvidence(t *testing.T) {
 	}
 }
 
-func TestStorageV2MigrationRejectsPreModeIntentEvidenceAtomically(t *testing.T) {
+func TestStorageV2MigrationPreservesReviewedIntentEvidence(t *testing.T) {
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "storage-v2-intent.db")
-	legacy := createStorageV2Fixture(t, path)
-	if _, err := legacy.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version) VALUES('draft-1','org-1','INTENT_DRAFTED','runtime','task-1','[]','[]','{}','run-1','2026-08-13T12:00:00Z',?)`, LegacyEventSchemaVersion); err != nil {
-		_ = legacy.Close()
+	store, err := Open(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := legacy.Close(); err != nil {
+	now := time.Now().UTC()
+	value := core.IntentValue{Value: "hello", Origin: "EXPLICIT", SourceMessageID: "message-1"}
+	draft := core.IntentDraft{
+		ID: "intent-run-1", OrganizationID: "org-1", Version: 1, Status: core.IntentStatusReadyForReview, Mode: core.IntentModeStandard,
+		RequestedExecutionKind: core.ExecutionDeterministic, Objective: "echo hello", Context: []core.IntentValue{}, Deliverables: []core.IntentValue{value},
+		CompletionCriteria: []core.IntentValue{value}, Constraints: []core.IntentValue{}, ResolvedDecisions: []core.IntentDecision{}, ConsequenceCandidates: []string{}, MissingUserInputs: []core.IntentValue{}, CreatedAt: now,
+	}
+	draft.Fingerprint, err = core.FingerprintIntentDraft(draft)
+	if err != nil {
+		_ = store.Close()
 		t.Fatal(err)
 	}
-	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "cannot be migrated without changing authoritative fingerprints") {
-		t.Fatalf("pre-mode Intent storage migration error=%v", err)
+	if _, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "INTAKE_MESSAGE_RECORDED", SourceActorID: "user-1", TaskID: "task-run-1", CorrelationID: "run-1", Payload: events.IntakeMessageRecordedPayload{MessageID: "message-1", Text: "echo hello", SourcePrincipalID: "user-1", SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", RequestedExecutionKind: core.ExecutionDeterministic}}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_DRAFTED", SourceActorID: "runtime", TaskID: "task-run-1", CorrelationID: "run-1", Payload: events.IntentDraftedPayload{SourceMessageID: "message-1", Draft: draft, Reply: "Review."}}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	confirmation := events.IntentConfirmedPayload{IntentID: string(draft.ID), Version: 1, Fingerprint: draft.Fingerprint, ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1"}
+	if _, err := store.AppendIntentConfirmation(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-run-1", CorrelationID: "run-1", Payload: confirmation}, ""); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
 	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = db.Close() }()
-	var version, eventVersion, metadataVersion, metadataEventVersion int
-	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE events SET schema_version=?`, LegacyEventSchemaVersion); err != nil {
+		_ = db.Close()
 		t.Fatal(err)
 	}
-	if err := db.QueryRowContext(ctx, `SELECT schema_version FROM events WHERE event_id='draft-1'`).Scan(&eventVersion); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=2,event_schema_version=?`, LegacyEventSchemaVersion); err != nil {
+		_ = db.Close()
 		t.Fatal(err)
 	}
-	if err := db.QueryRowContext(ctx, `SELECT storage_version,event_schema_version FROM agentos_storage WHERE singleton=1`).Scan(&metadataVersion, &metadataEventVersion); err != nil {
+	if _, err := db.ExecContext(ctx, `PRAGMA user_version=2`); err != nil {
+		_ = db.Close()
 		t.Fatal(err)
 	}
-	if version != 2 || eventVersion != LegacyEventSchemaVersion || metadataVersion != 2 || metadataEventVersion != LegacyEventSchemaVersion {
-		t.Fatalf("failed migration mutated storage: version=%d event=%d metadata=%d/%d", version, eventVersion, metadataVersion, metadataEventVersion)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = migrated.Close() }()
+	stream, err := migrated.Events(ctx, "run-1")
+	if err != nil || len(stream) != 3 {
+		t.Fatalf("migrated review stream=%+v err=%v", stream, err)
+	}
+	if err := events.ValidateReviewedIntentAdmission(stream, stream[2]); err != nil {
+		t.Fatalf("migrated reviewed Intent evidence: %v", err)
 	}
 }
 

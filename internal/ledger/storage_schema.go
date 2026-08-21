@@ -26,9 +26,9 @@ const (
 	OldestSupportedStorageVersion = 1
 	// CurrentStorageVersion is the only layout accepted after runtime startup.
 	CurrentStorageVersion = 3
-	// LegacyEventSchemaVersion identifies the pre-Intent-mode Event Contract.
-	// Migration may advance only ledgers without review evidence whose
-	// fingerprint semantics changed.
+	// LegacyEventSchemaVersion identifies the immediately preceding Event
+	// Contract. Its payload semantics already included Intent mode; migration
+	// validates review evidence and reseals schema-bound projection admissions.
 	LegacyEventSchemaVersion = 3
 
 	storageSchemaV1Fingerprint = "ce7fe300685bcbc66821ca3692d962eda27cdd1ca9e1642972cccc8e2b4736cb"
@@ -197,13 +197,6 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 		_, err = tx.ExecContext(ctx, `INSERT INTO agentos_storage(singleton,storage_version,event_schema_version,application_id,schema_fingerprint) VALUES(1,?,?,?,?)`, to, LegacyEventSchemaVersion, StorageApplicationID, fingerprint)
 		return err
 	case from == 2 && to == 3:
-		var incompatible int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE event_type IN ('INTENT_DRAFTED','INTENT_CONFIRMED')`).Scan(&incompatible); err != nil {
-			return fmt.Errorf("inspect pre-mode Intent review evidence: %w", err)
-		}
-		if incompatible != 0 {
-			return fmt.Errorf("storage contains pre-mode Intent review evidence that cannot be migrated without changing authoritative fingerprints")
-		}
 		if err := resealLegacyProjectionAdmissions(ctx, tx); err != nil {
 			return err
 		}
