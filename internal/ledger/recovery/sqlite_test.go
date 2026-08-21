@@ -103,7 +103,7 @@ func TestOldestSupportedStorageFixtureVerifiesBacksUpRestoresAndMigrates(t *test
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version) VALUES('event-v1','org-1','AUDIT_NOTE','runtime','task-1',?,?,?,'work-v1','2026-08-13T12:00:00Z',?)`, []byte("[]"), []byte("[]"), []byte("{}"), events.SchemaVersion); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version) VALUES('event-v1','org-1','AUDIT_NOTE','runtime','task-1',?,?,?,'work-v1','2026-08-13T12:00:00Z',?)`, []byte("[]"), []byte("[]"), []byte("{}"), ledger.LegacyEventSchemaVersion); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestOldestSupportedStorageFixtureVerifiesBacksUpRestoresAndMigrates(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if verified.StorageVersion != ledger.OldestSupportedStorageVersion || verified.EventSchemaVersion != events.SchemaVersion {
+	if verified.StorageVersion != ledger.OldestSupportedStorageVersion || verified.EventSchemaVersion != ledger.LegacyEventSchemaVersion {
 		t.Fatalf("v1 verification=%+v", verified)
 	}
 	backupPath := filepath.Join(directory, "storage-v1-backup.db")
@@ -143,6 +143,75 @@ func TestOldestSupportedStorageFixtureVerifiesBacksUpRestoresAndMigrates(t *test
 	migrated, err := Verify(ctx, restoredPath)
 	if err != nil || migrated.StorageVersion != ledger.CurrentStorageVersion || migrated.EventSchemaVersion != events.SchemaVersion {
 		t.Fatalf("migrated restore=%+v err=%v", migrated, err)
+	}
+}
+
+func TestLegacyVerificationRejectsTamperedAdmissionsAfterMigration(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "legacy-tampered.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	mission := core.Mission{ID: "mission-1", OrganizationID: organization.ID, Statement: "Mission", Status: core.MissionActive, CreatedAt: now}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "mission-1"}, ProjectionKind: "mission", RecordID: string(mission.ID), Version: 1, Value: mission},
+	} {
+		if _, err := store.AppendProjection(ctx, draft); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	missionStream, err := store.Events(ctx, "mission-1")
+	if err != nil || len(missionStream) != 1 {
+		_ = store.Close()
+		t.Fatalf("mission stream=%+v err=%v", missionStream, err)
+	}
+	legacyAdmission, present, err := events.ResealProjectionEventForMigration(missionStream[0], events.SchemaVersion, ledger.LegacyEventSchemaVersion)
+	if err != nil || !present {
+		_ = store.Close()
+		t.Fatalf("legacy mission admission: present=%t err=%v", present, err)
+	}
+	legacyPayload, err := json.Marshal(legacyAdmission)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM events WHERE event_type='ORGANIZATION_CREATED'; DELETE FROM records WHERE kind='organization'`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE events SET payload=?,schema_version=? WHERE event_id=?`, legacyPayload, ledger.LegacyEventSchemaVersion, missionStream[0].EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE records SET admission_fingerprint=? WHERE admission_event_id=?`, legacyAdmission.Admission.Fingerprint, missionStream[0].EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=2,event_schema_version=?`, ledger.LegacyEventSchemaVersion); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA user_version=2`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "durable parent Organization") {
+		t.Fatalf("legacy tampered-admission verification error=%v", err)
 	}
 }
 
@@ -751,7 +820,7 @@ func TestRecoveryRejectsGoalBoundWorkWithoutConfirmation(t *testing.T) {
 		_ = store.Close()
 		t.Fatal(err)
 	}
-	intent := core.Intent{ID: intentDraft.ID, OrganizationID: organization.ID, GoalID: goal.ID, NormalizedObjective: intentDraft.Objective, AcceptedFingerprint: intentDraft.Fingerprint, SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: messageID, CompletionCriteria: intentDraft.CompletionCriteria, CreatedAt: now}
+	intent := core.Intent{ID: intentDraft.ID, OrganizationID: organization.ID, GoalID: goal.ID, OriginalInstruction: "perform bounded work for goal-1", NormalizedObjective: intentDraft.Objective, AcceptedFingerprint: intentDraft.Fingerprint, SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: messageID, CompletionCriteria: intentDraft.CompletionCriteria, CreatedAt: now}
 	work := core.Work{ID: "work-1", IntentID: intent.ID, GoalID: goal.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
 	for _, draft := range []events.ProjectionDraft{
 		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: correlationID}, ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent},

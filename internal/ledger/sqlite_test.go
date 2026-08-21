@@ -1498,8 +1498,8 @@ func TestCompletedWorkRequiresExactDurableEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	intent := core.Intent{
-		ID: "intent-run-1", OrganizationID: "org-1", GoalID: "goal-1", NormalizedObjective: "verify work", CompletionCriteria: criteria, AcceptedFingerprint: intentFingerprint,
-		SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: "message-1", CreatedAt: now,
+		ID: "intent-run-1", OrganizationID: "org-1", GoalID: "goal-1", OriginalInstruction: "verify work under goal-1", NormalizedObjective: "verify work", CompletionCriteria: criteria, AcceptedFingerprint: intentFingerprint,
+		SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: "source-run-1", CreatedAt: now,
 	}
 	if _, err := l.AppendProjection(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "run-1"},
@@ -2142,7 +2142,7 @@ func TestWorkProjectionMatchesAcceptedIntentGoal(t *testing.T) {
 	if _, err := l.AppendIntentConfirmation(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-run-1", Payload: confirmation, CorrelationID: "run-1"}, "goal-a"); err != nil {
 		t.Fatal(err)
 	}
-	intent := core.Intent{ID: "intent-run-1", OrganizationID: "org-1", GoalID: "goal-a", NormalizedObjective: "bounded work", AcceptedFingerprint: fingerprint, SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: "message-1", CreatedAt: now}
+	intent := core.Intent{ID: "intent-run-1", OrganizationID: "org-1", GoalID: "goal-a", OriginalInstruction: "bounded work under goal-a", NormalizedObjective: "bounded work", AcceptedFingerprint: fingerprint, SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: "source-run-1", CreatedAt: now}
 	if _, err := l.AppendProjection(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "run-1"},
 		ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent,
@@ -2272,7 +2272,7 @@ func TestGoalBoundWorkRequiresAtomicIntentConfirmation(t *testing.T) {
 	if _, err := l.Append(ctx, confirmationDraft); err == nil {
 		t.Fatal("generic ledger append bypassed atomic Goal admission")
 	}
-	intent := core.Intent{ID: "intent-run-1", OrganizationID: "org-1", GoalID: "goal-1", NormalizedObjective: "bounded work", AcceptedFingerprint: fingerprint, SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: "message-1", CreatedAt: now}
+	intent := core.Intent{ID: "intent-run-1", OrganizationID: "org-1", GoalID: "goal-1", OriginalInstruction: "bounded work under goal-1", NormalizedObjective: "bounded work", AcceptedFingerprint: fingerprint, SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: "source-run-1", CreatedAt: now}
 	if _, err := l.AppendProjection(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "run-1"},
 		ProjectionKind: "intent", RecordID: "intent-run-1", Version: 1, Value: intent,

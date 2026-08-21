@@ -19,6 +19,13 @@ import (
 
 const testOwnerMarker = "local-owner-uid-marker"
 
+func TestHumanResponseRetainsExperimentalTrustLabel(t *testing.T) {
+	response := humanResponse(intake.View{TaskID: "task-1", ConversationID: "context-1", State: intake.StateCompleted, Result: "lab result", Mode: core.IntentModeExperiment, TrustLabel: core.ExperimentTrustUnverified})
+	if response.Mode != core.IntentModeExperiment || response.TrustLabel != core.ExperimentTrustUnverified {
+		t.Fatalf("experimental response=%+v", response)
+	}
+}
+
 type reviewerModel struct{}
 
 func (reviewerModel) Name() string { return "review-provider/test-model" }

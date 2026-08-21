@@ -39,6 +39,34 @@ type backuper interface {
 	NewBackup(string) (*sqlite.Backup, error)
 }
 
+func backupSQLiteSnapshot(ctx context.Context, source *sql.DB, destination string) error {
+	connection, err := source.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire SQLite backup connection: %w", err)
+	}
+	backupErr := connection.Raw(func(driverConnection any) error {
+		provider, ok := driverConnection.(backuper)
+		if !ok {
+			return fmt.Errorf("SQLite driver does not support online backup")
+		}
+		backup, err := provider.NewBackup(sqliteFileURI(destination, false))
+		if err != nil {
+			return err
+		}
+		for more := true; more; {
+			if err := ctx.Err(); err != nil {
+				return errors.Join(err, backup.Finish())
+			}
+			more, err = backup.Step(128)
+			if err != nil {
+				return errors.Join(err, backup.Finish())
+			}
+		}
+		return backup.Finish()
+	})
+	return errors.Join(backupErr, connection.Close())
+}
+
 // Backup creates and verifies an online SQLite snapshot. Destination must not
 // exist; publication uses a same-directory hard link so a concurrent creator
 // cannot be overwritten between validation and publication.
@@ -88,20 +116,26 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	}
 	result.StorageVersion = contract.StorageVersion
 	result.EventSchemaVersion = contract.EventSchemaVersion
-	if err := verifyProjectionAdmissions(ctx, db); err != nil {
-		return Result{}, err
-	}
-	if err := ledgerstore.ValidateTaskCompletionAdmissions(ctx, db); err != nil {
-		return Result{}, err
-	}
-	if err := ledgerstore.ValidateWorkCompletionAdmissions(ctx, db); err != nil {
-		return Result{}, err
-	}
-	if err := ledgerstore.ValidateGoalAchievementAdmissions(ctx, db); err != nil {
-		return Result{}, err
-	}
-	if err := ledgerstore.ValidateInferenceAdmissions(ctx, db); err != nil {
-		return Result{}, err
+	if contract.EventSchemaVersion == events.SchemaVersion {
+		if err := verifyProjectionAdmissions(ctx, db); err != nil {
+			return Result{}, err
+		}
+		if err := ledgerstore.ValidateTaskCompletionAdmissions(ctx, db); err != nil {
+			return Result{}, err
+		}
+		if err := ledgerstore.ValidateWorkCompletionAdmissions(ctx, db); err != nil {
+			return Result{}, err
+		}
+		if err := ledgerstore.ValidateGoalAchievementAdmissions(ctx, db); err != nil {
+			return Result{}, err
+		}
+		if err := ledgerstore.ValidateInferenceAdmissions(ctx, db); err != nil {
+			return Result{}, err
+		}
+	} else {
+		if err := verifyLegacyAdmissionsAfterMigration(ctx, db); err != nil {
+			return Result{}, err
+		}
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(sequence), 0) FROM events`).Scan(&result.EventCount, &result.MaxSequence); err != nil {
 		return Result{}, fmt.Errorf("inspect Agent OS event ledger: %w", err)
@@ -114,6 +148,45 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	verified.StorageVersion = result.StorageVersion
 	verified.EventSchemaVersion = result.EventSchemaVersion
 	return verified, err
+}
+
+// verifyLegacyAdmissionsAfterMigration audits the exact migration result in an
+// isolated snapshot. The source remains read-only and byte-for-byte unchanged;
+// the migrated copy must satisfy every current admission check before the
+// legacy backup can be reported as verified.
+func verifyLegacyAdmissionsAfterMigration(ctx context.Context, source *sql.DB) (finalErr error) {
+	temporary, err := os.CreateTemp("", "agentos-legacy-verification-*.db")
+	if err != nil {
+		return fmt.Errorf("create legacy verification snapshot: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	if err := temporary.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return fmt.Errorf("close legacy verification snapshot: %w", err)
+	}
+	defer func() {
+		for _, path := range []string{temporaryPath, temporaryPath + "-journal", temporaryPath + "-shm", temporaryPath + "-wal"} {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				finalErr = errors.Join(finalErr, fmt.Errorf("remove legacy verification snapshot: %w", err))
+			}
+		}
+	}()
+
+	if err := backupSQLiteSnapshot(ctx, source, temporaryPath); err != nil {
+		return fmt.Errorf("snapshot legacy storage for admission verification: %w", err)
+	}
+
+	migrated, err := ledgerstore.Open(temporaryPath)
+	if err != nil {
+		return fmt.Errorf("migrate legacy verification snapshot: %w", err)
+	}
+	if err := migrated.Close(); err != nil {
+		return fmt.Errorf("close migrated legacy verification snapshot: %w", err)
+	}
+	if _, err := Verify(ctx, temporaryPath); err != nil {
+		return fmt.Errorf("verify migrated legacy admissions: %w", err)
+	}
+	return nil
 }
 
 type admittedProjectionEvent struct {
@@ -304,6 +377,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 }
 
 func validateRecoveryIntentConfirmations(stream []events.Event) error {
+	reviewEvidence := events.IndexReviewedIntentEvidence(stream)
 	for _, event := range stream {
 		if event.EventType != "INTENT_CONFIRMED" {
 			continue
@@ -313,7 +387,7 @@ func validateRecoveryIntentConfirmations(stream []events.Event) error {
 			return fmt.Errorf("event %s contains an invalid intent confirmation", event.EventID)
 		}
 		if confirmation.GoalID == "" {
-			if err := events.ValidateReviewedIntentAdmission(stream, event); err != nil {
+			if err := events.ValidateIndexedReviewedIntentAdmission(reviewEvidence.At(event), event); err != nil {
 				return fmt.Errorf("event %s: %w", event.EventID, err)
 			}
 			continue
@@ -322,7 +396,7 @@ func validateRecoveryIntentConfirmations(stream []events.Event) error {
 		if err != nil {
 			return fmt.Errorf("event %s: %w", event.EventID, err)
 		}
-		if err := events.ValidateReviewedGoalIntentAdmission(stream, event, goal); err != nil {
+		if err := events.ValidateIndexedReviewedGoalIntentAdmission(reviewEvidence.At(event), event, goal); err != nil {
 			return fmt.Errorf("event %s: %w", event.EventID, err)
 		}
 	}
@@ -345,6 +419,7 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, 
 		Works:             map[core.ID]core.DurableState[core.Work]{},
 		Tasks:             map[core.ID]core.DurableState[core.Task]{},
 	}
+	reviewEvidence := events.IndexReviewedIntentEvidence(stream)
 	for _, admission := range admitted {
 		event, record := admission.event, admission.payload.Projection
 		var organizationID core.ID
@@ -456,7 +531,7 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, 
 			if decodeExactJSON(record.Value, &value) != nil || string(value.ID) != record.RecordID {
 				return fmt.Errorf("event %s contains an invalid Work projection", event.EventID)
 			}
-			if err := validateRecoveryWorkIntentBinding(event, record, value, snapshot, stream); err != nil {
+			if err := validateRecoveryWorkIntentBinding(event, record, value, snapshot, stream, reviewEvidence); err != nil {
 				return fmt.Errorf("event %s contains an invalid Work binding: %w", event.EventID, err)
 			}
 			if err := setRecoveryProjection(snapshot.Works, record, value, true, core.ValidWorkRevision); err != nil {
@@ -547,7 +622,7 @@ func validateRecoveryOrganizationParent(organizationID core.ID, snapshot core.Du
 	return nil
 }
 
-func validateRecoveryWorkIntentBinding(event events.Event, record events.ProjectionRecord, work core.Work, snapshot core.DurableGraph, stream []events.Event) error {
+func validateRecoveryWorkIntentBinding(event events.Event, record events.ProjectionRecord, work core.Work, snapshot core.DurableGraph, stream []events.Event, reviewEvidence events.ReviewedIntentEvidenceIndex) error {
 	intentState, found := snapshot.Intents[work.IntentID]
 	if !found {
 		return fmt.Errorf("work requires its durable Intent")
@@ -566,7 +641,7 @@ func validateRecoveryWorkIntentBinding(event events.Event, record events.Project
 		if len(confirmations) != 1 || confirmations[0].Sequence >= event.Sequence {
 			return fmt.Errorf("external Work requires one prior intent confirmation")
 		}
-		if err := events.ValidateIntentConfirmation(confirmations[0], intent); err != nil {
+		if err := events.ValidateIntentConfirmation(reviewEvidence.At(confirmations[0]), confirmations[0], intent); err != nil {
 			return err
 		}
 		if intent.GoalID != "" {
@@ -574,10 +649,10 @@ func validateRecoveryWorkIntentBinding(event events.Event, record events.Project
 			if err != nil {
 				return err
 			}
-			if err := events.ValidateReviewedGoalIntentAdmission(stream, confirmations[0], goal); err != nil {
+			if err := events.ValidateIndexedReviewedGoalIntentAdmission(reviewEvidence.At(confirmations[0]), confirmations[0], goal); err != nil {
 				return err
 			}
-		} else if err := events.ValidateReviewedIntentAdmission(stream, confirmations[0]); err != nil {
+		} else if err := events.ValidateIndexedReviewedIntentAdmission(reviewEvidence.At(confirmations[0]), confirmations[0]); err != nil {
 			return err
 		}
 	}
@@ -738,35 +813,8 @@ func clone(ctx context.Context, source, destination string) (result Result, fina
 			finalErr = errors.Join(finalErr, db.Close())
 		}
 	}()
-	connection, err := db.Conn(ctx)
-	if err != nil {
-		return Result{}, fmt.Errorf("acquire backup source connection: %w", err)
-	}
-	if err := connection.Raw(func(driverConnection any) error {
-		provider, ok := driverConnection.(backuper)
-		if !ok {
-			return fmt.Errorf("SQLite driver does not support online backup")
-		}
-		backup, err := provider.NewBackup(sqliteFileURI(temporaryPath, false))
-		if err != nil {
-			return err
-		}
-		for more := true; more; {
-			if err := ctx.Err(); err != nil {
-				return errors.Join(err, backup.Finish())
-			}
-			more, err = backup.Step(128)
-			if err != nil {
-				return errors.Join(err, backup.Finish())
-			}
-		}
-		return backup.Finish()
-	}); err != nil {
-		_ = connection.Close()
+	if err := backupSQLiteSnapshot(ctx, db, temporaryPath); err != nil {
 		return Result{}, fmt.Errorf("create online SQLite backup: %w", err)
-	}
-	if err := connection.Close(); err != nil {
-		return Result{}, fmt.Errorf("close backup source connection: %w", err)
 	}
 	if err := db.Close(); err != nil {
 		return Result{}, fmt.Errorf("close backup source: %w", err)

@@ -152,6 +152,9 @@ func runTUI(ctx context.Context, _ string, config bootstrap.Config, input *os.Fi
 				_, _ = fmt.Fprintf(output, "Use /complete %s when every required item is ready.\n", response.TaskID)
 			}
 			if response.Result != "" {
+				if response.TrustLabel != "" {
+					_, _ = fmt.Fprintf(output, "Trust: %s\n", safeTerminalLine(response.TrustLabel))
+				}
 				_, _ = fmt.Fprintln(output, safeTerminalText(response.Result))
 			}
 		}
@@ -164,6 +167,8 @@ type tuiTask struct {
 	State              string                   `json:"state"`
 	Prompt             string                   `json:"prompt"`
 	Result             string                   `json:"result"`
+	Mode               core.IntentMode          `json:"mode"`
+	TrustLabel         string                   `json:"trust_label"`
 	CompletionContract *core.CompletionContract `json:"completion_contract"`
 	Intent             *core.IntentDraft        `json:"intent"`
 }
@@ -257,7 +262,12 @@ func (c *tuiClient) completeHumanTask(ctx context.Context, taskID string, reader
 	if err := c.request(ctx, http.MethodPost, "/v1/user/tasks/"+taskID+"/completion", request, &task); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(output, "Task %s - %s\n%s\n", task.TaskID, task.State, safeTerminalText(task.Result))
+	if task.TrustLabel != "" {
+		_, _ = fmt.Fprintf(output, "Task %s - %s\nTrust: %s\n", task.TaskID, task.State, safeTerminalLine(task.TrustLabel))
+	} else {
+		_, _ = fmt.Fprintf(output, "Task %s - %s\n", task.TaskID, task.State)
+	}
+	_, err = fmt.Fprintln(output, safeTerminalText(task.Result))
 	return err
 }
 

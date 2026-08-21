@@ -16,6 +16,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
+	"github.com/dominicnunez/agentos/internal/lab"
 	"github.com/dominicnunez/agentos/internal/ledger"
 	"github.com/dominicnunez/agentos/internal/planning"
 	"github.com/dominicnunez/agentos/internal/projections"
@@ -65,6 +66,80 @@ func acceptedTestIntent(id, organizationID core.ID, objective string) core.Inten
 		ID: id, OrganizationID: organizationID, OriginalInstruction: objective, NormalizedObjective: objective,
 		AcceptedFingerprint: strings.Repeat("a", 64),
 		CompletionCriteria:  []core.IntentValue{{Value: "the requested outcome is independently verified", Origin: "RUNTIME_TEST"}},
+	}
+}
+
+func TestRecoveryRestoresDurableExperimentContainment(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	repository := projections.New(gateway)
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	if err := repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "org-1", 1, organization, nil); err != nil {
+		t.Fatal(err)
+	}
+	const correlationID = "experiment-crash"
+	const taskID = "task-" + correlationID
+	const sourceMessageID = "message-1"
+	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTAKE_MESSAGE_RECORDED", SourceActorID: "user-1", TaskID: taskID, CorrelationID: correlationID,
+		Payload: events.IntakeMessageRecordedPayload{MessageID: sourceMessageID, Text: "echo recovered", SourcePrincipalID: "user-1", SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", RequestedExecutionKind: core.ExecutionDeterministic},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	value := core.IntentValue{Value: "recovered", Origin: "EXPLICIT", SourceMessageID: sourceMessageID}
+	draft := core.IntentDraft{
+		ID: "intent-" + correlationID, OrganizationID: organization.ID, Version: 1, Status: core.IntentStatusReadyForReview, Mode: core.IntentModeExperiment,
+		RequestedExecutionKind: core.ExecutionDeterministic, Objective: "echo recovered", Context: []core.IntentValue{}, Deliverables: []core.IntentValue{value}, CompletionCriteria: []core.IntentValue{value}, Constraints: []core.IntentValue{}, ResolvedDecisions: []core.IntentDecision{}, ConsequenceCandidates: []string{}, MissingUserInputs: []core.IntentValue{}, CreatedAt: now,
+	}
+	draft.Fingerprint, err = core.FingerprintIntentDraft(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_DRAFTED", SourceActorID: "runtime", TaskID: taskID, CorrelationID: correlationID, Payload: events.IntentDraftedPayload{SourceMessageID: sourceMessageID, Draft: draft, Reply: "Review this experiment."}}); err != nil {
+		t.Fatal(err)
+	}
+	confirmation := events.IntentConfirmedPayload{IntentID: string(draft.ID), Version: 1, Fingerprint: draft.Fingerprint, ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1"}
+	if _, err := gateway.PublishIntentConfirmation(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: taskID, CorrelationID: correlationID, Payload: confirmation}, ""); err != nil {
+		t.Fatal(err)
+	}
+	intent := core.Intent{
+		ID: draft.ID, OrganizationID: organization.ID, OriginalInstruction: "echo recovered", NormalizedObjective: draft.Objective,
+		SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", ExternalRequestID: correlationID, SourceMessageID: sourceMessageID,
+		Deliverables: draft.Deliverables, CompletionCriteria: draft.CompletionCriteria, AcceptedFingerprint: draft.Fingerprint, CreatedAt: now,
+	}
+	work := core.Work{ID: "work-" + correlationID, IntentID: intent.ID, Objective: draft.Objective, Status: core.WorkActive, CreatedAt: now}
+	if _, err := lab.New(gateway).StartSubmission(ctx, correlationID, intent, work, lab.DefaultSpec()); err != nil {
+		t.Fatal(err)
+	}
+	result, err := New(gateway).Recover(ctx)
+	if err != nil {
+		t.Fatalf("recover durable experiment: %v", err)
+	}
+	if result.PlansMaterialized != 1 || result.TasksExecuted != 1 {
+		t.Fatalf("recovery=%+v", result)
+	}
+	snapshot, err := repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	experiment := snapshot.Experiments[core.ID("experiment-"+string(work.ID))]
+	if experiment.Value.Status != core.ExperimentCompleted || experiment.Value.TrustLabel != core.ExperimentTrustUnverified {
+		t.Fatalf("recovered experiment=%+v", experiment.Value)
+	}
+	stream, err := gateway.Events(ctx, correlationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range stream {
+		if event.EventType == "WORK_PLANNING_FAILED" {
+			t.Fatal("recovery discarded durable experimental containment")
+		}
 	}
 }
 

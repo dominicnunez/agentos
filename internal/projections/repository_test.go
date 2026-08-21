@@ -1191,7 +1191,57 @@ func TestRebuildRejectsInvalidHistoricalTeamRoster(t *testing.T) {
 	}
 }
 
+func TestGoalAchievementEventReplayRejectsExperimentalWorkEvidence(t *testing.T) {
+	now := time.Unix(1, 0).UTC()
+	mission := core.Mission{ID: "mission-1", OrganizationID: "org-1", Statement: "Mission", Status: core.MissionActive, CreatedAt: now}
+	criterion := core.IntentValue{Value: "verified", Origin: "USER", SourceMessageID: "message-1"}
+	activeGoal := core.Goal{ID: "goal-1", OrganizationID: "org-1", MissionID: mission.ID, Objective: "Outcome", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{criterion}, Status: core.GoalActive, CreatedAt: now}
+	achievedGoal := activeGoal
+	achievedGoal.Status = core.GoalAchieved
+	intent := core.Intent{ID: "intent-1", OrganizationID: "org-1", GoalID: activeGoal.ID, NormalizedObjective: "echo result", AcceptedFingerprint: strings.Repeat("a", 64), CreatedAt: now}
+	work := core.Work{ID: "work-1", IntentID: intent.ID, GoalID: activeGoal.ID, Objective: intent.NormalizedObjective, Status: core.WorkCompleted, CreatedAt: now}
+	evidence := events.WorkCompletionEvidencePayload{
+		WorkID: work.ID, WorkVersion: 2, GoalID: activeGoal.ID, IntentID: intent.ID, IntentFingerprint: intent.AcceptedFingerprint,
+		PlanID: "plan-1", PlanVersion: 1, Criteria: []core.IntentValue{criterion},
+		Tasks:        []events.WorkCompletionTaskEvidencePayload{{TaskID: "task-1", TaskVersion: 2, VerificationEventRef: "verification-1", CompletionEventRef: "completion-1", ArtifactRefs: []string{}}},
+		ArtifactRefs: []string{}, CreatedAt: time.Unix(3, 0).UTC(),
+	}
+	var err error
+	evidence.Fingerprint, err = evidence.ExpectedFingerprint()
+	if err != nil || !evidence.Valid() {
+		t.Fatalf("work evidence is invalid: %+v err=%v", evidence, err)
+	}
+	workEvidence := events.GoalWorkEvidence{EventRef: "event-work-evidence", EventAt: evidence.CreatedAt, Evidence: evidence}
+	evaluation, err := events.NewGoalProgressEvaluation(activeGoal, 1, []events.GoalWorkEvidence{workEvidence})
+	if err != nil || evaluation.Result != events.GoalProgressTargetAchieved {
+		t.Fatalf("Goal evaluation=%+v err=%v", evaluation, err)
+	}
+	stream := []events.Event{
+		sealedReplayProjection(t, 1, "MISSION_CREATED", KindMission, string(mission.ID), 1, "mission-1", mission.OrganizationID, mission),
+		sealedReplayProjection(t, 2, "GOAL_CREATED", KindGoal, string(activeGoal.ID), 1, "goal-1", activeGoal.OrganizationID, activeGoal),
+		{EventID: workEvidence.EventRef, Sequence: 3, OrganizationID: "org-1", EventType: "WORK_COMPLETION_EVALUATED", SourceActorID: "runtime", CorrelationID: "work-1", CreatedAt: evidence.CreatedAt, SchemaVersion: events.SchemaVersion, Payload: mustJSON(t, evidence)},
+		sealedReplayProjectionWithDetail(t, 4, "WORK_COMPLETED", KindWork, string(work.ID), 2, "work-1", "org-1", work, events.WorkCompletionTransitionPayload{EvidenceEventRef: workEvidence.EventRef, Fingerprint: evidence.Fingerprint}),
+		{EventID: "event-goal-evaluation", Sequence: 5, OrganizationID: "org-1", EventType: "GOAL_PROGRESS_EVALUATED", SourceActorID: "runtime", CorrelationID: "goal-1", CreatedAt: time.Unix(5, 0).UTC(), SchemaVersion: events.SchemaVersion, Payload: mustJSON(t, evaluation)},
+		sealedReplayProjectionWithDetail(t, 6, "GOAL_ACHIEVED", KindGoal, string(achievedGoal.ID), 2, "goal-1", "org-1", achievedGoal, events.GoalAchievementTransitionPayload{EvidenceEventRef: "event-goal-evaluation", Fingerprint: evaluation.Fingerprint}),
+	}
+	finished := time.Unix(4, 0).UTC()
+	snapshot := Snapshot{
+		Missions:    map[core.ID]Versioned[core.Mission]{mission.ID: {Version: 1, CorrelationID: "mission-1", Value: mission}},
+		Goals:       map[core.ID]Versioned[core.Goal]{activeGoal.ID: {Version: 2, CorrelationID: "goal-1", Value: achievedGoal}},
+		Intents:     map[core.ID]Versioned[core.Intent]{intent.ID: {Version: 1, CorrelationID: "work-1", Value: intent}},
+		Works:       map[core.ID]Versioned[core.Work]{work.ID: {Version: 2, CorrelationID: "work-1", Value: work}},
+		Experiments: map[core.ID]Versioned[core.Experiment]{"experiment-1": {Version: 2, CorrelationID: "work-1", Value: core.Experiment{ID: "experiment-1", OrganizationID: "org-1", WorkID: work.ID, Objective: work.Objective, SandboxRef: "sandbox", CapabilityProfileRef: "no-effects", Budget: core.ExperimentBudget{MaxExecutions: 1, MaxUsageUnits: 1, MaxWallTimeSeconds: 1, AllowedInferencePools: []string{"deterministic"}}, Status: core.ExperimentCompleted, TrustLabel: core.ExperimentTrustUnverified, ResultEventRefs: []string{"result-1"}, StartedAt: now, FinishedAt: &finished}}},
+	}
+	if err := validateGoalAchievementAdmissionsFromEvents(snapshot, stream); err == nil || !strings.Contains(err.Error(), "missing or cross-Goal Work evidence") {
+		t.Fatalf("event replay accepted experimental Goal evidence: %v", err)
+	}
+}
+
 func sealedReplayProjection(t *testing.T, sequence int64, eventType, kind, recordID string, version int, correlationID string, organizationID core.ID, value any) events.Event {
+	return sealedReplayProjectionWithDetail(t, sequence, eventType, kind, recordID, version, correlationID, organizationID, value, nil)
+}
+
+func sealedReplayProjectionWithDetail(t *testing.T, sequence int64, eventType, kind, recordID string, version int, correlationID string, organizationID core.ID, value, detail any) events.Event {
 	t.Helper()
 	encoded, err := json.Marshal(value)
 	if err != nil {
@@ -1202,7 +1252,11 @@ func sealedReplayProjection(t *testing.T, sequence int64, eventType, kind, recor
 		EventID: fmt.Sprintf("event-%d", sequence), Sequence: sequence, OrganizationID: string(organizationID), EventType: eventType,
 		SourceActorID: "runtime", CorrelationID: correlationID, CreatedAt: time.Unix(sequence, 0).UTC(), SchemaVersion: events.SchemaVersion,
 	}
-	sealed, err := events.SealProjectionEvent(event, record, nil)
+	var detailBody json.RawMessage
+	if detail != nil {
+		detailBody = mustJSON(t, detail)
+	}
+	sealed, err := events.SealProjectionEvent(event, record, detailBody)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1211,6 +1265,15 @@ func sealedReplayProjection(t *testing.T, sequence int64, eventType, kind, recor
 		t.Fatal(err)
 	}
 	return event
+}
+
+func mustJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	body, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
 }
 
 func swapReplayProjectionSequences(t *testing.T, stream []events.Event, firstType, secondType string) []events.Event {

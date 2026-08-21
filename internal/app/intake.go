@@ -9,6 +9,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/lab"
+	"github.com/dominicnunez/agentos/internal/planning"
 )
 
 type IntakeMessage struct {
@@ -260,7 +261,7 @@ func (s *Service) ConfirmIntent(ctx context.Context, in IntentConfirmation) (Res
 	if err != nil || recomputed != draft.Fingerprint {
 		return Result{}, fmt.Errorf("durable intent fingerprint is invalid")
 	}
-	if err := core.ValidateAcceptedIntentDraft(draft, core.ID(in.OrganizationID), in.Kind); err != nil {
+	if err := ValidateReviewedIntentExecution(draft, core.ID(in.OrganizationID), in.Kind); err != nil {
 		return Result{}, fmt.Errorf("reviewed intent is not executable: %w", err)
 	}
 	goalID, err := acceptedGoalID(draft)
@@ -289,6 +290,23 @@ func (s *Service) ConfirmIntent(ctx context.Context, in IntentConfirmation) (Res
 		return Result{}, fmt.Errorf("persist intent confirmation: %w", err)
 	}
 	return s.submitConfirmedIntent(ctx, submitFromIntent(in, draft, original, correlationID), draft.Mode)
+}
+
+// ValidateReviewedIntentExecution applies runtime routability checks before a
+// reviewed Intent can cross its durable confirmation boundary.
+func ValidateReviewedIntentExecution(draft core.IntentDraft, organizationID core.ID, kind core.ExecutionKind) error {
+	if err := core.ValidateAcceptedIntentDraft(draft, organizationID, kind); err != nil {
+		return err
+	}
+	if draft.Mode == core.IntentModeExperiment {
+		if kind != core.ExecutionDeterministic || draft.RequestedExecutionKind != core.ExecutionDeterministic {
+			return fmt.Errorf("V1 experimental intent requires deterministic execution")
+		}
+		if err := planning.ValidateDeterministicObjective(draft.Objective); err != nil {
+			return fmt.Errorf("reviewed experiment is not executable: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Service) submitConfirmedIntent(ctx context.Context, submit Submit, mode core.IntentMode) (Result, error) {

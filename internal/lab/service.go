@@ -44,6 +44,22 @@ func DefaultSpec() Spec {
 	}
 }
 
+// SpecFromExperiment restores only the immutable containment already admitted
+// with durable experimental Work. It never derives or widens authority.
+func SpecFromExperiment(experiment core.Experiment) (Spec, error) {
+	spec := Spec{
+		SandboxRef: experiment.SandboxRef, CapabilityProfileRef: experiment.CapabilityProfileRef,
+		Budget: experiment.Budget,
+	}
+	if experiment.ID == "" || experiment.WorkID == "" || experiment.OrganizationID == "" || !core.ValidExperiment(experiment) {
+		return Spec{}, fmt.Errorf("durable Lab experiment is invalid")
+	}
+	if err := ValidateDeterministicSpec(spec); err != nil {
+		return Spec{}, err
+	}
+	return spec, nil
+}
+
 func ValidateDeterministicSpec(spec Spec) error {
 	if spec.SandboxRef != DeterministicSandbox || spec.CapabilityProfileRef != NoEffectsCapabilityProfile || !core.ValidExperimentBudget(spec.Budget) ||
 		spec.Budget.MaxMeteredCostMicrounits != 0 || !slices.Equal(spec.Budget.AllowedInferencePools, []string{DeterministicInferencePool}) {

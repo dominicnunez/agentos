@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -24,7 +25,11 @@ const (
 	// not identify or publish an Agent OS release.
 	OldestSupportedStorageVersion = 1
 	// CurrentStorageVersion is the only layout accepted after runtime startup.
-	CurrentStorageVersion = 2
+	CurrentStorageVersion = 3
+	// LegacyEventSchemaVersion identifies the immediately preceding Event
+	// Contract. Its payload semantics already included Intent mode; migration
+	// validates review evidence and reseals schema-bound projection admissions.
+	LegacyEventSchemaVersion = 3
 
 	storageSchemaV1Fingerprint = "ce7fe300685bcbc66821ca3692d962eda27cdd1ca9e1642972cccc8e2b4736cb"
 )
@@ -189,11 +194,94 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 		if err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO agentos_storage(singleton,storage_version,event_schema_version,application_id,schema_fingerprint) VALUES(1,?,?,?,?)`, to, events.SchemaVersion, StorageApplicationID, fingerprint)
+		_, err = tx.ExecContext(ctx, `INSERT INTO agentos_storage(singleton,storage_version,event_schema_version,application_id,schema_fingerprint) VALUES(1,?,?,?,?)`, to, LegacyEventSchemaVersion, StorageApplicationID, fingerprint)
 		return err
+	case from == 2 && to == 3:
+		if err := resealLegacyProjectionAdmissions(ctx, tx); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE events SET schema_version=? WHERE schema_version=?`, events.SchemaVersion, LegacyEventSchemaVersion); err != nil {
+			return fmt.Errorf("advance durable Event Contract version: %w", err)
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=?,event_schema_version=? WHERE singleton=1 AND storage_version=? AND event_schema_version=?`, to, events.SchemaVersion, from, LegacyEventSchemaVersion)
+		if err != nil {
+			return fmt.Errorf("advance storage contract metadata: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil || rows != 1 {
+			return fmt.Errorf("storage contract metadata did not match the reviewed migration boundary")
+		}
+		return nil
 	default:
 		return fmt.Errorf("no reviewed storage migration exists")
 	}
+}
+
+type projectionReseal struct {
+	eventID        string
+	oldPayload     []byte
+	newPayload     []byte
+	oldFingerprint string
+	newFingerprint string
+}
+
+func resealLegacyProjectionAdmissions(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,CAST(payload AS BLOB),correlation_id,created_at,schema_version FROM events ORDER BY sequence`)
+	if err != nil {
+		return fmt.Errorf("read legacy projection admissions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var reseals []projectionReseal
+	for rows.Next() {
+		event, err := scanEvent(rows)
+		if err != nil {
+			return fmt.Errorf("decode legacy projection admission: %w", err)
+		}
+		payload, present, err := events.ResealProjectionEventForMigration(event, LegacyEventSchemaVersion, events.SchemaVersion)
+		if err != nil {
+			return fmt.Errorf("reseal legacy event %s: %w", event.EventID, err)
+		}
+		if !present {
+			continue
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("encode resealed legacy event %s: %w", event.EventID, err)
+		}
+		var original events.ProjectionEventPayload
+		if decodeExactJSONBytes(event.Payload, &original) != nil {
+			return fmt.Errorf("decode original legacy event %s", event.EventID)
+		}
+		reseals = append(reseals, projectionReseal{
+			eventID: event.EventID, oldPayload: event.Payload, newPayload: body,
+			oldFingerprint: original.Admission.Fingerprint, newFingerprint: payload.Admission.Fingerprint,
+		})
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close legacy projection admissions: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("scan legacy projection admissions: %w", err)
+	}
+	for _, reseal := range reseals {
+		result, err := tx.ExecContext(ctx, `UPDATE events SET payload=?,schema_version=? WHERE event_id=? AND payload=? AND schema_version=?`, reseal.newPayload, events.SchemaVersion, reseal.eventID, reseal.oldPayload, LegacyEventSchemaVersion)
+		if err != nil {
+			return fmt.Errorf("persist resealed legacy event %s: %w", reseal.eventID, err)
+		}
+		changed, err := result.RowsAffected()
+		if err != nil || changed != 1 {
+			return fmt.Errorf("legacy event %s changed across its migration boundary", reseal.eventID)
+		}
+		result, err = tx.ExecContext(ctx, `UPDATE records SET admission_fingerprint=? WHERE admission_event_id=? AND admission_fingerprint=?`, reseal.newFingerprint, reseal.eventID, reseal.oldFingerprint)
+		if err != nil {
+			return fmt.Errorf("persist resealed legacy record %s: %w", reseal.eventID, err)
+		}
+		changed, err = result.RowsAffected()
+		if err != nil || changed != 1 {
+			return fmt.Errorf("legacy record %s does not match its sealed admission", reseal.eventID)
+		}
+	}
+	return nil
 }
 
 // ValidateStorageContract verifies a supported offline database without
@@ -232,6 +320,10 @@ func sqliteStorageHeader(ctx context.Context, query storageQueryer) (application
 }
 
 func validateStorageLayout(ctx context.Context, query storageQueryer, version int) (StorageContract, error) {
+	expectedEventVersion := events.SchemaVersion
+	if version < CurrentStorageVersion {
+		expectedEventVersion = LegacyEventSchemaVersion
+	}
 	expected := make(map[string][]string, len(storageColumnsV1)+1)
 	for table, columns := range storageColumnsV1 {
 		expected[table] = columns
@@ -270,13 +362,13 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 		}
 	}
 	var unsupportedEvents int
-	if err := query.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE schema_version<>?`, events.SchemaVersion).Scan(&unsupportedEvents); err != nil {
+	if err := query.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE schema_version<>?`, expectedEventVersion).Scan(&unsupportedEvents); err != nil {
 		return StorageContract{}, fmt.Errorf("inspect durable Event Contract versions: %w", err)
 	}
 	if unsupportedEvents != 0 {
-		return StorageContract{}, fmt.Errorf("storage schema version %d contains %d events outside supported Event Contract schema v%d", version, unsupportedEvents, events.SchemaVersion)
+		return StorageContract{}, fmt.Errorf("storage schema version %d contains %d events outside supported Event Contract schema v%d", version, unsupportedEvents, expectedEventVersion)
 	}
-	contract := StorageContract{StorageVersion: version, EventSchemaVersion: events.SchemaVersion}
+	contract := StorageContract{StorageVersion: version, EventSchemaVersion: expectedEventVersion}
 	if version < 2 {
 		fingerprint, err := storageSchemaFingerprint(ctx, query)
 		if err != nil {
@@ -292,7 +384,7 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 	if err := query.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(MAX(storage_version),0),COALESCE(MAX(event_schema_version),0),COALESCE(MAX(application_id),0),COALESCE(MAX(schema_fingerprint),'') FROM agentos_storage`).Scan(&rows, &storageVersion, &eventVersion, &applicationID, &storedFingerprint); err != nil {
 		return StorageContract{}, fmt.Errorf("read Agent OS storage metadata: %w", err)
 	}
-	if rows != 1 || storageVersion != version || eventVersion != events.SchemaVersion || applicationID != StorageApplicationID || storedFingerprint == "" {
+	if rows != 1 || storageVersion != version || eventVersion != expectedEventVersion || applicationID != StorageApplicationID || storedFingerprint == "" {
 		return StorageContract{}, fmt.Errorf("agent OS storage metadata does not match runtime contract")
 	}
 	fingerprint, err := storageSchemaFingerprint(ctx, query)

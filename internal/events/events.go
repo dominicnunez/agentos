@@ -17,11 +17,43 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 )
 
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 // ReviewedIntentEvidenceLimit bounds the durable intake/review evidence
 // replayed for one Intent confirmation.
 const ReviewedIntentEvidenceLimit = 1024
+
+// ReviewedIntentEvidenceIndex is a replay-time index of bounded review events
+// keyed by correlation. It prevents repeated full-ledger scans while retaining
+// the exact time-of-use boundary for each confirmation.
+type ReviewedIntentEvidenceIndex map[string][]Event
+
+func IndexReviewedIntentEvidence(stream []Event) ReviewedIntentEvidenceIndex {
+	index := make(ReviewedIntentEvidenceIndex)
+	for _, event := range stream {
+		switch event.EventType {
+		case "INTAKE_MESSAGE_RECORDED", "INTENT_DRAFTED", "INTENT_CONFIRMED":
+			index[event.CorrelationID] = append(index[event.CorrelationID], event)
+		}
+	}
+	for correlationID := range index {
+		sort.SliceStable(index[correlationID], func(left, right int) bool {
+			return index[correlationID][left].Sequence < index[correlationID][right].Sequence
+		})
+	}
+	return index
+}
+
+func (index ReviewedIntentEvidenceIndex) At(confirmation Event) []Event {
+	evidence := index[confirmation.CorrelationID]
+	if confirmation.Sequence <= 0 {
+		return evidence
+	}
+	end := sort.Search(len(evidence), func(position int) bool {
+		return evidence[position].Sequence > confirmation.Sequence
+	})
+	return evidence[:end]
+}
 
 const (
 	RecipientAgent = "AGENT"
@@ -151,31 +183,68 @@ type IntentConfirmedPayload struct {
 
 // ValidateIntentConfirmation proves that one reviewed confirmation exactly
 // authorizes the accepted durable Intent, including an optional Goal binding.
-func ValidateIntentConfirmation(event Event, intent core.Intent) error {
+func ValidateIntentConfirmation(stream []Event, event Event, intent core.Intent) error {
 	var confirmation IntentConfirmedPayload
 	if decodeExactEventJSON(event.Payload, &confirmation) != nil ||
 		event.EventType != "INTENT_CONFIRMED" || event.OrganizationID != string(intent.OrganizationID) || event.SourceActorID == "" || event.SourceActorID != confirmation.ConfirmingActorID || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != "task-"+event.CorrelationID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID == "" || event.SchemaVersion != SchemaVersion ||
 		confirmation.IntentID != string(intent.ID) || confirmation.GoalID != string(intent.GoalID) || confirmation.Version < 1 || confirmation.Fingerprint == "" || confirmation.Fingerprint != intent.AcceptedFingerprint || !core.ValidIntentSourceIdentity(intent.SourcePrincipalID, intent.SourcePrincipalKind, intent.SourceChannel) || !validReviewedOperatorIdentity(confirmation.ConfirmingActorID, confirmation.ConfirmingActorKind, confirmation.SourceChannel) || confirmation.MessageID == "" {
 		return fmt.Errorf("intent confirmation is invalid")
 	}
+	original, found := initialReviewedIntake(stream, event)
+	if !found || intent.SourcePrincipalID != core.ID(original.SourcePrincipalID) || intent.SourcePrincipalKind != core.PrincipalKind(original.SourcePrincipalKind) || intent.SourceChannel != original.SourceChannel || intent.SourceMessageID != original.MessageID || intent.OriginalInstruction != original.Text {
+		return fmt.Errorf("intent confirmation is not bound to its original intake source")
+	}
 	return nil
+}
+
+func initialReviewedIntake(stream []Event, confirmation Event) (IntakeMessageRecordedPayload, bool) {
+	var original IntakeMessageRecordedPayload
+	var originalSequence int64
+	found := false
+	for _, event := range stream {
+		if event.EventType != "INTAKE_MESSAGE_RECORDED" || event.CorrelationID != confirmation.CorrelationID || confirmation.Sequence > 0 && event.Sequence > confirmation.Sequence {
+			continue
+		}
+		var payload IntakeMessageRecordedPayload
+		if decodeExactEventJSON(event.Payload, &payload) != nil || !validReviewedIntakeMessage(event, payload, confirmation) {
+			return IntakeMessageRecordedPayload{}, false
+		}
+		if !found || event.Sequence < originalSequence {
+			original = payload
+			originalSequence = event.Sequence
+			found = true
+		}
+	}
+	return original, found
 }
 
 // ValidateReviewedIntentAdmission replays the bounded intake and review
 // evidence that authorizes one Intent confirmation without a Goal binding.
 func ValidateReviewedIntentAdmission(stream []Event, confirmationEvent Event) error {
+	return ValidateIndexedReviewedIntentAdmission(IndexReviewedIntentEvidence(stream).At(confirmationEvent), confirmationEvent)
+}
+
+// ValidateIndexedReviewedIntentAdmission validates a pre-indexed, time-bounded
+// review slice without rescanning the full ledger.
+func ValidateIndexedReviewedIntentAdmission(stream []Event, confirmationEvent Event) error {
 	var confirmation IntentConfirmedPayload
 	if decodeExactEventJSON(confirmationEvent.Payload, &confirmation) != nil ||
 		!validReviewedIntentConfirmation(confirmationEvent, confirmation, "") {
 		return fmt.Errorf("intent confirmation does not match its reviewed intake")
 	}
-	return validateReviewedIntent(reviewedIntentEvidence(stream, confirmationEvent), confirmationEvent, confirmation, "")
+	return validateReviewedIntent(stream, confirmationEvent, confirmation, "")
 }
 
 // ValidateReviewedGoalIntentAdmission replays the bounded intake and review
 // evidence that authorizes one Goal-bound intent confirmation. The supplied
 // Goal must be the exact durable Goal state visible at the confirmation event.
 func ValidateReviewedGoalIntentAdmission(stream []Event, confirmationEvent Event, goal core.Goal) error {
+	return ValidateIndexedReviewedGoalIntentAdmission(IndexReviewedIntentEvidence(stream).At(confirmationEvent), confirmationEvent, goal)
+}
+
+// ValidateIndexedReviewedGoalIntentAdmission validates a pre-indexed,
+// time-bounded review slice for one Goal-bound confirmation.
+func ValidateIndexedReviewedGoalIntentAdmission(stream []Event, confirmationEvent Event, goal core.Goal) error {
 	var confirmation IntentConfirmedPayload
 	if decodeExactEventJSON(confirmationEvent.Payload, &confirmation) != nil ||
 		confirmationEvent.OrganizationID != string(goal.OrganizationID) || !validReviewedIntentConfirmation(confirmationEvent, confirmation, goal.ID) {
@@ -184,7 +253,7 @@ func ValidateReviewedGoalIntentAdmission(stream []Event, confirmationEvent Event
 	if goal.ID == "" || goal.Status != core.GoalActive {
 		return fmt.Errorf("goal-bound intent confirmation requires its active Goal at admission")
 	}
-	return validateReviewedIntent(reviewedIntentEvidence(stream, confirmationEvent), confirmationEvent, confirmation, goal.ID)
+	return validateReviewedIntent(stream, confirmationEvent, confirmation, goal.ID)
 }
 
 func validReviewedIntentConfirmation(event Event, confirmation IntentConfirmedPayload, goalID core.ID) bool {
@@ -193,20 +262,6 @@ func validReviewedIntentConfirmation(event Event, confirmation IntentConfirmedPa
 		event.SourceExecutionID == "" && event.RecipientScope == "" && event.RecipientID == "" && event.TaskID == "task-"+event.CorrelationID &&
 		len(event.AuthorizationRefs) == 0 && len(event.ArtifactRefs) == 0 && event.CorrelationID != "" && event.SchemaVersion == SchemaVersion &&
 		confirmation.IntentID == "intent-"+event.CorrelationID && confirmation.GoalID == string(goalID) && confirmation.Version >= 1 && confirmation.Fingerprint != "" && confirmation.MessageID != ""
-}
-
-func reviewedIntentEvidence(stream []Event, confirmationEvent Event) []Event {
-	reviewStream := make([]Event, 0, len(stream))
-	for _, candidate := range stream {
-		if candidate.CorrelationID != confirmationEvent.CorrelationID || confirmationEvent.Sequence > 0 && candidate.Sequence > confirmationEvent.Sequence {
-			continue
-		}
-		switch candidate.EventType {
-		case "INTAKE_MESSAGE_RECORDED", "INTENT_DRAFTED", "INTENT_CONFIRMED":
-			reviewStream = append(reviewStream, candidate)
-		}
-	}
-	return reviewStream
 }
 
 func validateReviewedIntent(stream []Event, confirmationEvent Event, confirmation IntentConfirmedPayload, goalID core.ID) error {
@@ -1954,6 +2009,31 @@ func SealProjectionEvent(event Event, record ProjectionRecord, detail json.RawMe
 // event that contains a reserved projection/admission key must carry one exact
 // valid sealed contract or fail closed.
 func AdmittedProjection(event Event) (ProjectionEventPayload, bool, error) {
+	return admittedProjectionAtSchema(event, SchemaVersion)
+}
+
+// ResealProjectionEventForMigration validates one existing projection
+// admission at its exact source Event Contract boundary and deterministically
+// reseals it for a different schema. Storage migrations and their fixtures are
+// its only intended callers.
+func ResealProjectionEventForMigration(event Event, sourceSchemaVersion, targetSchemaVersion int) (ProjectionEventPayload, bool, error) {
+	if sourceSchemaVersion < 1 || targetSchemaVersion < 1 || sourceSchemaVersion == targetSchemaVersion || event.SchemaVersion != sourceSchemaVersion || sourceSchemaVersion != SchemaVersion && targetSchemaVersion != SchemaVersion {
+		return ProjectionEventPayload{}, false, fmt.Errorf("projection migration boundary is invalid")
+	}
+	payload, present, err := admittedProjectionAtSchema(event, sourceSchemaVersion)
+	if err != nil || !present {
+		return payload, present, err
+	}
+	event.SchemaVersion = targetSchemaVersion
+	fingerprint, err := projectionAdmissionFingerprint(payload.Admission, event, payload.Projection, payload.Detail)
+	if err != nil {
+		return ProjectionEventPayload{}, true, err
+	}
+	payload.Admission.Fingerprint = fingerprint
+	return payload, true, nil
+}
+
+func admittedProjectionAtSchema(event Event, expectedSchemaVersion int) (ProjectionEventPayload, bool, error) {
 	if rejectDuplicateJSONKeys(event.Payload) != nil {
 		return ProjectionEventPayload{}, false, fmt.Errorf("event payload is malformed")
 	}
@@ -1973,7 +2053,7 @@ func AdmittedProjection(event Event) (ProjectionEventPayload, bool, error) {
 		return ProjectionEventPayload{}, true, fmt.Errorf("projection event admission is malformed")
 	}
 	want, fingerprintErr := projectionAdmissionFingerprint(payload.Admission, event, payload.Projection, payload.Detail)
-	if fingerprintErr != nil || want != payload.Admission.Fingerprint || event.SchemaVersion != SchemaVersion {
+	if fingerprintErr != nil || want != payload.Admission.Fingerprint || event.SchemaVersion != expectedSchemaVersion {
 		return ProjectionEventPayload{}, true, fmt.Errorf("projection event admission does not match its event boundary")
 	}
 	return payload, true, nil

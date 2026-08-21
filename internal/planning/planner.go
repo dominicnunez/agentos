@@ -26,6 +26,15 @@ const (
 
 var planKeyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
 
+// ValidateDeterministicObjective proves that the accepted objective can be
+// routed to a registered deterministic handler before durable confirmation.
+func ValidateDeterministicObjective(objective string) error {
+	if !strings.HasPrefix(objective, "echo ") {
+		return fmt.Errorf("deterministic intent has no registered handler")
+	}
+	return nil
+}
+
 type Descriptor struct {
 	PromptVersion           string
 	Provider                string
@@ -133,8 +142,8 @@ func directTasks(intent core.IntentDraft, kind core.ExecutionKind) ([]core.PlanT
 	policy := core.InferenceForbidden
 	switch kind {
 	case core.ExecutionDeterministic:
-		if !strings.HasPrefix(intent.Objective, "echo ") {
-			return nil, fmt.Errorf("deterministic intent has no registered handler")
+		if err := ValidateDeterministicObjective(intent.Objective); err != nil {
+			return nil, err
 		}
 	case core.ExecutionHuman:
 	case core.ExecutionAgent:
@@ -242,7 +251,7 @@ func ValidateTasks(tasks []core.PlanTask, requestedKind core.ExecutionKind) erro
 		}
 		switch requestedKind {
 		case core.ExecutionDeterministic:
-			if root.ModelInferencePolicy != core.InferenceForbidden || !strings.HasPrefix(root.Description, "echo ") {
+			if root.ModelInferencePolicy != core.InferenceForbidden || ValidateDeterministicObjective(root.Description) != nil {
 				return fmt.Errorf("direct deterministic plan has no registered handler")
 			}
 		case core.ExecutionHuman:

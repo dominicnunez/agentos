@@ -21,10 +21,11 @@ import (
 )
 
 const (
-	a2aRoleUser           = string(a2a.MessageRoleUser)
-	a2aStateInputRequired = string(a2a.TaskStateInputRequired)
-	a2aStateCompleted     = string(a2a.TaskStateCompleted)
-	intentConfirmationURI = intentconfirmation.URI
+	a2aRoleUser            = string(a2a.MessageRoleUser)
+	a2aStateInputRequired  = string(a2a.TaskStateInputRequired)
+	a2aStateCompleted      = string(a2a.TaskStateCompleted)
+	intentConfirmationURI  = intentconfirmation.URI
+	agentOSTaskMetadataURI = "https://github.com/dominicnunez/agentos/blob/main/docs/A2A_INTEROP.md#agent-os-task-metadata"
 )
 
 type strictJSONRPCRequest struct {
@@ -295,6 +296,11 @@ func projectA2ATask(view intake.View) *a2a.Task {
 			ID: a2a.ArtifactID("result-" + view.TaskID), Name: "Agent OS result", Parts: a2a.ContentParts{part},
 		}}
 	}
+	if view.Mode != "" || view.TrustLabel != "" {
+		task.Metadata = map[string]any{agentOSTaskMetadataURI: map[string]any{
+			"mode": view.Mode, "trust_label": view.TrustLabel,
+		}}
+	}
 	if view.Intent != nil {
 		review := map[string]any{
 			"state": view.State, "fingerprint": view.Intent.Fingerprint, "version": view.Intent.Version,
@@ -306,7 +312,10 @@ func projectA2ATask(view intake.View) *a2a.Task {
 		if view.Intent.Goal != nil {
 			review["goal"] = *view.Intent.Goal
 		}
-		task.Metadata = map[string]any{intentConfirmationURI: review}
+		if task.Metadata == nil {
+			task.Metadata = make(map[string]any)
+		}
+		task.Metadata[intentConfirmationURI] = review
 	}
 	return task
 }

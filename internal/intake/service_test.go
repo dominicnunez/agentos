@@ -824,7 +824,7 @@ func TestReviewedExperimentUsesOnlyRuntimeOwnedContainment(t *testing.T) {
 		t.Fatalf("experimental review=%+v err=%v", draft, err)
 	}
 	confirmed, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: draft.ConversationID, MessageID: "confirmation-1", Fingerprint: draft.Intent.Fingerprint})
-	if err != nil || confirmed.State != StateCompleted || confirmed.Result != "lab result" {
+	if err != nil || confirmed.State != StateCompleted || confirmed.Result != "lab result" || confirmed.Mode != core.IntentModeExperiment || confirmed.TrustLabel != core.ExperimentTrustUnverified {
 		t.Fatalf("experimental confirmation=%+v err=%v", confirmed, err)
 	}
 	stream := externalStream(t, store, draft.ConversationID)
@@ -864,8 +864,8 @@ func TestNonDeterministicExperimentFailsBeforeConfirmation(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	service := NewWithNormalizer(app.New(events.NewGateway(store)), experimentNormalizer{objective: "draft an experimental report"})
 	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
-	draft, err := service.Handle(ctx, principal, Message{ConversationID: "unsupported-experiment", MessageID: "message-1", Text: "Experiment with a report"})
-	if err != nil || draft.Intent == nil || draft.Intent.RequestedExecutionKind != core.ExecutionAgent {
+	draft, err := service.Handle(ctx, principal, Message{ConversationID: "unsupported-experiment", MessageID: "message-1", Text: "Experiment with a report", RequestedKind: core.ExecutionDeterministic})
+	if err != nil || draft.Intent == nil || draft.Intent.RequestedExecutionKind != core.ExecutionDeterministic {
 		t.Fatalf("unsupported experimental review=%+v err=%v", draft, err)
 	}
 	if _, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: draft.ConversationID, MessageID: "confirmation-1", Fingerprint: draft.Intent.Fingerprint}); !errors.Is(err, ErrInvalid) {
@@ -873,6 +873,92 @@ func TestNonDeterministicExperimentFailsBeforeConfirmation(t *testing.T) {
 	}
 	if containsEvent(externalStream(t, store, draft.ConversationID), "INTENT_CONFIRMED") {
 		t.Fatal("invalid experimental route persisted confirmation")
+	}
+}
+
+func TestAgentKindExperimentFailsBeforeConfirmationEvenWithDeterministicObjective(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := NewWithNormalizer(app.New(events.NewGateway(store)), experimentNormalizer{objective: "echo lab result"})
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	draft, err := service.Handle(ctx, principal, Message{ConversationID: "agent-experiment", MessageID: "message-1", Text: "Run this experiment with an Agent", RequestedKind: core.ExecutionAgent})
+	if err != nil || draft.Intent == nil || draft.Intent.RequestedExecutionKind != core.ExecutionAgent {
+		t.Fatalf("Agent-kind experimental review=%+v err=%v", draft, err)
+	}
+	if _, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: draft.ConversationID, MessageID: "confirmation-1", Fingerprint: draft.Intent.Fingerprint}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Agent-kind experiment confirmation err=%v", err)
+	}
+	if containsEvent(externalStream(t, store, draft.ConversationID), "INTENT_CONFIRMED") {
+		t.Fatal("Agent-kind experiment persisted confirmation")
+	}
+}
+
+type goalExperimentNormalizer struct{ goalID core.ID }
+
+func (goalExperimentNormalizer) Descriptor() (NormalizerDescriptor, bool) {
+	return NormalizerDescriptor{}, false
+}
+
+func (n goalExperimentNormalizer) Normalize(_ context.Context, turns []ConversationTurn) (Normalization, error) {
+	latest := turns[len(turns)-1]
+	value := core.IntentValue{Value: "lab result", Origin: "EXPLICIT", SourceMessageID: latest.MessageID}
+	return Normalization{State: normalizationReady, Reply: "Review this experiment.", Candidate: IntentCandidate{
+		Mode: core.IntentModeExperiment, Goal: &core.IntentValue{Value: string(n.goalID), Origin: "EXPLICIT", SourceMessageID: latest.MessageID},
+		Objective: "echo lab result", Deliverables: []core.IntentValue{value}, CompletionCriteria: []core.IntentValue{value},
+	}}, nil
+}
+
+func TestExperimentalWorkCannotAdvanceGoal(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	mission := core.Mission{ID: "mission-1", OrganizationID: organization.ID, Statement: "durable direction", Status: core.MissionActive, CreatedAt: now}
+	goal := core.Goal{ID: "goal-1", OrganizationID: organization.ID, MissionID: mission.ID, Objective: "produce lab result", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "lab result", Origin: "EXPLICIT", SourceMessageID: "message-1"}}, Status: core.GoalActive, CreatedAt: now}
+	for _, projection := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "org-1"}, ProjectionKind: "organization", RecordID: "org-1", Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "mission-1"}, ProjectionKind: "mission", RecordID: "mission-1", Version: 1, Value: mission},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_CREATED", SourceActorID: "runtime", CorrelationID: "goal-1"}, ProjectionKind: "goal", RecordID: "goal-1", Version: 1, Value: goal},
+	} {
+		if _, err := store.AppendProjection(ctx, projection); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service := NewWithNormalizer(app.New(gateway), goalExperimentNormalizer{goalID: goal.ID})
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	draft, err := service.Handle(ctx, principal, Message{ConversationID: "goal-experiment", MessageID: "message-1", Text: "Run echo lab result for goal-1", RequestedKind: core.ExecutionDeterministic})
+	if err != nil || draft.Intent == nil {
+		t.Fatalf("experimental Goal review=%+v err=%v", draft, err)
+	}
+	confirmed, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: draft.ConversationID, MessageID: "confirmation-1", Fingerprint: draft.Intent.Fingerprint})
+	if err != nil || confirmed.State != StateCompleted || confirmed.TrustLabel != core.ExperimentTrustUnverified {
+		t.Fatalf("experimental Goal result=%+v err=%v", confirmed, err)
+	}
+	records, err := store.Records(ctx, "goal", string(goal.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record events.ProjectionRecord
+	var durableGoal core.Goal
+	if len(records) != 1 || json.Unmarshal(records[0], &record) != nil || json.Unmarshal(record.Value, &durableGoal) != nil || durableGoal.Status != core.GoalActive {
+		t.Fatal("unverified experimental Work advanced authoritative Goal state")
+	}
+	if _, err := gateway.EvaluateGoalProgress(ctx, string(organization.ID), goal.ID); err == nil {
+		t.Fatal("explicit Goal evaluation accepted unverified experimental Work")
+	}
+	for _, event := range externalStream(t, store, draft.ConversationID) {
+		if event.EventType == "GOAL_PROGRESS_EVALUATED" || event.EventType == "GOAL_ACHIEVED" {
+			t.Fatalf("unverified experimental Work produced Goal authority: %s", event.EventType)
+		}
 	}
 }
 

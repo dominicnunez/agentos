@@ -408,6 +408,7 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 	sequences := make(map[int64]struct{}, len(stream))
 	ordered := append([]events.Event(nil), stream...)
 	sort.Slice(ordered, func(left, right int) bool { return ordered[left].Sequence < ordered[right].Sequence })
+	reviewEvidence := events.IndexReviewedIntentEvidence(ordered)
 	tasks := make(map[core.ID]Versioned[core.Task])
 	agents := make(map[core.ID]Versioned[core.Agent])
 	missions := make(map[core.ID]Versioned[core.Mission])
@@ -453,7 +454,7 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 				}
 				confirmations[event.CorrelationID] = append(confirmations[event.CorrelationID], event)
 				if confirmation.GoalID == "" {
-					if err := events.ValidateReviewedIntentAdmission(ordered, event); err != nil {
+					if err := events.ValidateIndexedReviewedIntentAdmission(reviewEvidence.At(event), event); err != nil {
 						return fmt.Errorf("event %s: %w", event.EventID, err)
 					}
 					continue
@@ -462,7 +463,7 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 				if !found || goal.Value.ID != core.ID(confirmation.GoalID) || goal.Value.Status != core.GoalActive {
 					return fmt.Errorf("event %s Goal-bound intent confirmation lacks its active Goal", event.EventID)
 				}
-				if err := events.ValidateReviewedGoalIntentAdmission(ordered, event, goal.Value); err != nil {
+				if err := events.ValidateIndexedReviewedGoalIntentAdmission(reviewEvidence.At(event), event, goal.Value); err != nil {
 					return fmt.Errorf("event %s: %w", event.EventID, err)
 				}
 			}
@@ -563,7 +564,7 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 			}
 		case KindWork:
 			err = admitLifecycleProjection(event, record, "Work", works, graph.Works, func(value core.Work) core.ID { return value.ID }, events.ValidateWorkProjectionTransition, func(value core.Work) error {
-				return validateProjectionWorkAtAdmission(value, event, record, graph, confirmations)
+				return validateProjectionWorkAtAdmission(value, event, record, graph, confirmations, reviewEvidence)
 			}, core.ValidWorkRevision)
 		case KindTask:
 			var value core.Task
@@ -620,7 +621,7 @@ func validateProjectionTeamAtAdmission(team core.Team, event events.Event, graph
 	return core.ValidateTeamRoster(team, graph)
 }
 
-func validateProjectionWorkAtAdmission(work core.Work, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, confirmations map[string][]events.Event) error {
+func validateProjectionWorkAtAdmission(work core.Work, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, confirmations map[string][]events.Event, reviewEvidence events.ReviewedIntentEvidenceIndex) error {
 	intent, found := graph.Intents[work.IntentID]
 	if !found || intent.CorrelationID != record.CorrelationID || intent.Value.ID != work.IntentID || intent.Value.GoalID != work.GoalID || intent.Value.NormalizedObjective != work.Objective || string(intent.Value.OrganizationID) != event.OrganizationID {
 		return fmt.Errorf("work requires its exact prior Intent on the same organization and correlation boundary")
@@ -630,7 +631,7 @@ func validateProjectionWorkAtAdmission(work core.Work, event events.Event, recor
 		if len(matching) != 1 || matching[0].Sequence >= event.Sequence {
 			return fmt.Errorf("external Work requires one prior reviewed intent confirmation")
 		}
-		if err := events.ValidateIntentConfirmation(matching[0], intent.Value); err != nil {
+		if err := events.ValidateIntentConfirmation(reviewEvidence.At(matching[0]), matching[0], intent.Value); err != nil {
 			return err
 		}
 	}
@@ -1005,8 +1006,15 @@ func validateGoalAchievementAdmissionsFromEvents(snapshot Snapshot, stream []eve
 		CompletionSequence int64
 	}
 	workEvidence := make(map[string]workEvidenceBinding)
+	experimentalWorks := make(map[core.ID]struct{}, len(snapshot.Experiments))
+	for _, experiment := range snapshot.Experiments {
+		experimentalWorks[experiment.Value.WorkID] = struct{}{}
+	}
 	for workID, state := range snapshot.Works {
 		if state.Value.Status != core.WorkCompleted || state.Value.GoalID == "" {
+			continue
+		}
+		if _, experimental := experimentalWorks[workID]; experimental {
 			continue
 		}
 		intent, ok := snapshot.Intents[state.Value.IntentID]

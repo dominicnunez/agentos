@@ -905,6 +905,16 @@ FROM events WHERE organization_id=? AND event_type='WORK_COMPLETED' AND json_ext
 			return nil, fmt.Errorf("goal Work has multiple completion transitions")
 		}
 		seenWorks[work.ID] = struct{}{}
+		if body, found, err := latestRecordBody(ctx, tx, "lab_experiment", "experiment-"+string(work.ID)); err != nil {
+			return nil, fmt.Errorf("read Goal Work experiment binding: %w", err)
+		} else if found {
+			var record events.ProjectionRecord
+			var experiment core.Experiment
+			if decodeExactJSONBytes(body, &record) != nil || decodeExactJSONBytes(record.Value, &experiment) != nil || experiment.ID != core.ID(record.RecordID) || experiment.WorkID != work.ID || string(experiment.OrganizationID) != organizationID {
+				return nil, fmt.Errorf("goal Work experiment binding is invalid")
+			}
+			return nil, fmt.Errorf("experimental Work cannot provide authoritative Goal progress evidence")
+		}
 		currentBody, found, err := latestRecordBody(ctx, tx, "work", string(work.ID))
 		if err != nil || !found {
 			return nil, fmt.Errorf("read current Goal Work projection")
@@ -961,11 +971,17 @@ JOIN events AS evidence ON evidence.event_id=json_extract(transition.payload,'$.
 JOIN json_each(evidence.payload,'$.criteria') AS criterion
 WHERE transition.organization_id=? AND transition.event_type='WORK_COMPLETED'
   AND json_extract(transition.payload,'$.projection.value.goal_id')=?
+	AND NOT EXISTS (
+		SELECT 1 FROM records AS experiment
+		WHERE experiment.kind='lab_experiment'
+		  AND experiment.record_id='experiment-' || json_extract(transition.payload,'$.projection.value.id')
+		  AND json_extract(experiment.body,'$.value.organization_id')=?
+	)
   AND evidence.organization_id=? AND evidence.event_type='WORK_COMPLETION_EVALUATED'
   AND json_extract(criterion.value,'$.value')=?
   AND json_extract(criterion.value,'$.origin')=?
   AND COALESCE(json_extract(criterion.value,'$.source_message_id'),'')=?
-ORDER BY transition.sequence,transition.event_id LIMIT 1`, organizationID, string(goal.ID), organizationID, criterion.Value, criterion.Origin, criterion.SourceMessageID))
+ORDER BY transition.sequence,transition.event_id LIMIT 1`, organizationID, string(goal.ID), organizationID, organizationID, criterion.Value, criterion.Origin, criterion.SourceMessageID))
 		if err != nil {
 			return nil, fmt.Errorf("read Goal criterion witness: %w", err)
 		}
@@ -974,8 +990,17 @@ ORDER BY transition.sequence,transition.event_id LIMIT 1`, organizationID, strin
 		}
 	}
 	if len(byID) == 0 {
-		matches, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
-FROM events WHERE organization_id=? AND event_type='WORK_COMPLETED' AND json_extract(payload,'$.projection.value.goal_id')=? ORDER BY sequence,event_id LIMIT 1`, organizationID, string(goal.ID)))
+		matches, err := collectEvents(tx.QueryContext(ctx, `SELECT transition.event_id,transition.sequence,transition.organization_id,transition.event_type,transition.source_actor_id,transition.source_execution_id,transition.recipient_scope,transition.recipient_id,transition.task_id,transition.authorization_refs,transition.artifact_refs,transition.payload,transition.correlation_id,transition.created_at,transition.schema_version
+FROM events AS transition
+WHERE transition.organization_id=? AND transition.event_type='WORK_COMPLETED'
+  AND json_extract(transition.payload,'$.projection.value.goal_id')=?
+	AND NOT EXISTS (
+		SELECT 1 FROM records AS experiment
+		WHERE experiment.kind='lab_experiment'
+		  AND experiment.record_id='experiment-' || json_extract(transition.payload,'$.projection.value.id')
+		  AND json_extract(experiment.body,'$.value.organization_id')=?
+	)
+ORDER BY transition.sequence,transition.event_id LIMIT 1`, organizationID, string(goal.ID), organizationID))
 		if err != nil {
 			return nil, fmt.Errorf("read initial Goal Work witness: %w", err)
 		}
@@ -2044,17 +2069,26 @@ func intentRequiresConfirmation(intent core.Intent) bool {
 }
 
 func validateExternalIntentConfirmation(ctx context.Context, tx *sql.Tx, item preparedProjection, intent core.Intent) error {
-	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type='INTENT_CONFIRMED' ORDER BY sequence`, item.draft.Event.CorrelationID))
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_DRAFTED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, item.draft.Event.CorrelationID, events.ReviewedIntentEvidenceLimit+1))
 	if err != nil {
 		return fmt.Errorf("read reviewed intent confirmation: %w", err)
 	}
-	if len(stream) != 1 {
+	if len(stream) > events.ReviewedIntentEvidenceLimit {
+		return fmt.Errorf("external Work intent review evidence exceeds its admission bound")
+	}
+	var confirmations []events.Event
+	for _, event := range stream {
+		if event.EventType == "INTENT_CONFIRMED" {
+			confirmations = append(confirmations, event)
+		}
+	}
+	if len(confirmations) != 1 {
 		return fmt.Errorf("external Work requires one atomic intent confirmation")
 	}
-	if stream[0].CorrelationID != item.draft.Event.CorrelationID {
+	if confirmations[0].CorrelationID != item.draft.Event.CorrelationID {
 		return fmt.Errorf("work intent confirmation crosses its correlation boundary")
 	}
-	return events.ValidateIntentConfirmation(stream[0], intent)
+	return events.ValidateIntentConfirmation(stream, confirmations[0], intent)
 }
 
 func validatePriorActiveWork(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
