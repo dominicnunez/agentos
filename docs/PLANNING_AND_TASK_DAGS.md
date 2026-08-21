@@ -124,4 +124,3 @@ advertising an input request that no authorized V1 transition can consume.
 Intent, Work, and Task projection histories keep one immutable correlation
 boundary across every version. Rebuild fails closed if any historical record
 crosses that boundary, even if a later version changes it back.
-

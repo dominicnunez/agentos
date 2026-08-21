@@ -377,4 +377,3 @@ func validateAcyclic(tasks []core.PlanTask) error {
 func validTaskText(value string) bool {
 	return utf8.ValidString(value) && strings.TrimSpace(value) != "" && len(value) <= maximumTaskTextBytes
 }
-

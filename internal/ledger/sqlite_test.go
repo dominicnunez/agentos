@@ -2485,4 +2485,3 @@ func appendTestMission(t *testing.T, ctx context.Context, l *SQLite, organizatio
 		t.Fatal(err)
 	}
 }
-
