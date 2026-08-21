@@ -3312,11 +3312,11 @@ func (s *Service) taskUsesCurrentStrategy(ctx context.Context, snapshot projecti
 	}
 	plan, err := events.ResolvePlan(string(organizationID), state.CorrelationID, workState.Value, intentState.Value, stream)
 	if err != nil {
-		return false, fmt.Errorf("%w: %v", errTaskStrategicContextChanged, err)
+		return false, errors.Join(errTaskStrategicContextChanged, fmt.Errorf("resolve durable Plan: %w", err))
 	}
 	strategy, err := snapshotStrategicContext(snapshot, organizationID, workState.Value, plan)
 	if err != nil {
-		return false, fmt.Errorf("%w: %v", errTaskStrategicContextChanged, err)
+		return false, errors.Join(errTaskStrategicContextChanged, fmt.Errorf("resolve durable strategy: %w", err))
 	}
 	return strategy != nil && strategy.Mission.Status == core.MissionActive && strategy.Goal.Status == core.GoalActive, nil
 }
