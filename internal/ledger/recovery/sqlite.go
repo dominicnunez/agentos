@@ -39,6 +39,34 @@ type backuper interface {
 	NewBackup(string) (*sqlite.Backup, error)
 }
 
+func backupSQLiteSnapshot(ctx context.Context, source *sql.DB, destination string) error {
+	connection, err := source.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire SQLite backup connection: %w", err)
+	}
+	backupErr := connection.Raw(func(driverConnection any) error {
+		provider, ok := driverConnection.(backuper)
+		if !ok {
+			return fmt.Errorf("SQLite driver does not support online backup")
+		}
+		backup, err := provider.NewBackup(sqliteFileURI(destination, false))
+		if err != nil {
+			return err
+		}
+		for more := true; more; {
+			if err := ctx.Err(); err != nil {
+				return errors.Join(err, backup.Finish())
+			}
+			more, err = backup.Step(128)
+			if err != nil {
+				return errors.Join(err, backup.Finish())
+			}
+		}
+		return backup.Finish()
+	})
+	return errors.Join(backupErr, connection.Close())
+}
+
 // Backup creates and verifies an online SQLite snapshot. Destination must not
 // exist; publication uses a same-directory hard link so a concurrent creator
 // cannot be overwritten between validation and publication.
@@ -151,35 +179,8 @@ func verifyLegacyAdmissionsAfterMigration(ctx context.Context, source *sql.DB) (
 		}
 	}()
 
-	connection, err := source.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("acquire legacy verification connection: %w", err)
-	}
-	if err := connection.Raw(func(driverConnection any) error {
-		provider, ok := driverConnection.(backuper)
-		if !ok {
-			return fmt.Errorf("SQLite driver does not support online backup")
-		}
-		backup, err := provider.NewBackup(sqliteFileURI(temporaryPath, false))
-		if err != nil {
-			return err
-		}
-		for more := true; more; {
-			if err := ctx.Err(); err != nil {
-				return errors.Join(err, backup.Finish())
-			}
-			more, err = backup.Step(128)
-			if err != nil {
-				return errors.Join(err, backup.Finish())
-			}
-		}
-		return backup.Finish()
-	}); err != nil {
-		_ = connection.Close()
+	if err := backupSQLiteSnapshot(ctx, source, temporaryPath); err != nil {
 		return fmt.Errorf("snapshot legacy storage for admission verification: %w", err)
-	}
-	if err := connection.Close(); err != nil {
-		return fmt.Errorf("close legacy verification connection: %w", err)
 	}
 
 	migrated, err := ledgerstore.Open(temporaryPath)
@@ -819,35 +820,8 @@ func clone(ctx context.Context, source, destination string) (result Result, fina
 			finalErr = errors.Join(finalErr, db.Close())
 		}
 	}()
-	connection, err := db.Conn(ctx)
-	if err != nil {
-		return Result{}, fmt.Errorf("acquire backup source connection: %w", err)
-	}
-	if err := connection.Raw(func(driverConnection any) error {
-		provider, ok := driverConnection.(backuper)
-		if !ok {
-			return fmt.Errorf("SQLite driver does not support online backup")
-		}
-		backup, err := provider.NewBackup(sqliteFileURI(temporaryPath, false))
-		if err != nil {
-			return err
-		}
-		for more := true; more; {
-			if err := ctx.Err(); err != nil {
-				return errors.Join(err, backup.Finish())
-			}
-			more, err = backup.Step(128)
-			if err != nil {
-				return errors.Join(err, backup.Finish())
-			}
-		}
-		return backup.Finish()
-	}); err != nil {
-		_ = connection.Close()
+	if err := backupSQLiteSnapshot(ctx, db, temporaryPath); err != nil {
 		return Result{}, fmt.Errorf("create online SQLite backup: %w", err)
-	}
-	if err := connection.Close(); err != nil {
-		return Result{}, fmt.Errorf("close backup source connection: %w", err)
 	}
 	if err := db.Close(); err != nil {
 		return Result{}, fmt.Errorf("close backup source: %w", err)
