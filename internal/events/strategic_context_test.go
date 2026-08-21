@@ -67,6 +67,37 @@ func TestResolveStrategicContextRejectsMissingOrCrossTenantAncestry(t *testing.T
 	}
 }
 
+func TestResolvePlanBindsAcceptedIntentFingerprint(t *testing.T) {
+	now := time.Unix(10, 0).UTC()
+	intent := core.Intent{ID: "intent-run-1", OrganizationID: "org-1", AcceptedFingerprint: "accepted", CreatedAt: now}
+	work := core.Work{ID: "work-1", IntentID: intent.ID, GoalID: "goal-1", Objective: "bounded work", Status: core.WorkActive, CreatedAt: now}
+	plan := core.Plan{
+		ID: "plan-run-1", IntentID: intent.ID, IntentFingerprint: intent.AcceptedFingerprint, Version: 1,
+		StrategicEventRefs: []string{"mission-event", "goal-event"},
+		StrategicContextRefs: []core.VersionedRef{
+			{ID: "mission/mission-1", Version: "1", MaterializationState: core.MaterializedFull},
+			{ID: "goal/goal-1", Version: "1", MaterializationState: core.MaterializedFull},
+		},
+		Tasks: []core.PlanTask{{Key: "root", Description: "bounded work", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed}}, CreatedAt: now,
+	}
+	plan.Fingerprint, _ = core.FingerprintPlan(plan)
+	planEvent := func(value core.Plan) Event {
+		body, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Event{EventID: "plan-event", Sequence: 3, OrganizationID: "org-1", EventType: "PLAN_CREATED", SourceActorID: "runtime", TaskID: "task-run-1", Payload: body, CorrelationID: "run-1", CreatedAt: now, SchemaVersion: SchemaVersion}
+	}
+	if resolved, err := ResolvePlan("org-1", "run-1", work, intent, []Event{planEvent(plan)}); err != nil || resolved.Fingerprint != plan.Fingerprint {
+		t.Fatalf("valid accepted Plan was rejected: plan=%+v err=%v", resolved, err)
+	}
+	plan.IntentFingerprint = "different-reviewed-intent"
+	plan.Fingerprint, _ = core.FingerprintPlan(plan)
+	if _, err := ResolvePlan("org-1", "run-1", work, intent, []Event{planEvent(plan)}); err == nil {
+		t.Fatal("self-consistent Plan for a different accepted Intent fingerprint was admitted")
+	}
+}
+
 func strategicProjectionEvent(t *testing.T, sequence int64, eventType, kind string, id core.ID, version int, value any) Event {
 	t.Helper()
 	body, err := json.Marshal(value)

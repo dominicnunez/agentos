@@ -250,6 +250,27 @@ func (r *Repository) StartAgentExecution(ctx context.Context, organizationID cor
 	}, routes)
 }
 
+// StartTaskExecution admits deterministic and user-operated execution starts
+// through the same transactional strategic-context boundary as Agent work.
+// It does not grant capabilities, approval authority, or effect permission.
+func (r *Repository) StartTaskExecution(ctx context.Context, organizationID core.ID, correlationID string, version int, value core.Task, mode, inputEventRef string, strategicEventRefs []string, strategicContextRefs []core.VersionedRef) (events.Event, error) {
+	if r == nil || r.gateway == nil || organizationID == "" || correlationID == "" || value.ID == "" || value.Status != core.TaskRunning || version < 2 ||
+		value.ExecutionKind != core.ExecutionDeterministic && value.ExecutionKind != core.ExecutionHuman {
+		return events.Event{}, fmt.Errorf("complete deterministic or user execution-start projection is required")
+	}
+	started, selections, err := r.gateway.PublishExecutionStart(ctx, events.ProjectionDraft{
+		Event: events.TrustedDraft{
+			OrganizationID: string(organizationID), EventType: "EXECUTION_STARTED", SourceActorID: "runtime",
+			TaskID: string(value.ID), CorrelationID: correlationID, Payload: events.ExecutionStartDetail{Mode: mode, InputEventRef: inputEventRef, StrategicEventRefs: strategicEventRefs, StrategicContextRefs: strategicContextRefs},
+		},
+		ProjectionKind: KindTask, RecordID: string(value.ID), Version: version, Value: value,
+	}, nil)
+	if err == nil && len(selections) != 0 {
+		return events.Event{}, fmt.Errorf("non-Agent execution start selected an inbox")
+	}
+	return started, err
+}
+
 // SaveNewTasks atomically creates a complete Task DAG. Every Task starts at
 // version one; later transitions continue through SaveTask.
 func (r *Repository) SaveNewTasks(ctx context.Context, organizationID core.ID, actorID, correlationID string, values []core.Task) error {

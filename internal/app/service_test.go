@@ -257,7 +257,7 @@ func saveTestVerifiedTask(ctx context.Context, gateway *events.Gateway, reposito
 				return fmt.Errorf("test verified Agent unexpectedly selected inbox input")
 			}
 		}
-	} else if err := repository.SaveTask(ctx, organizationID, "EXECUTION_STARTED", "runtime", correlationID, startVersion, task, nil); err != nil {
+	} else if _, err := repository.StartTaskExecution(ctx, organizationID, correlationID, startVersion, task, "", "", nil, nil); err != nil {
 		return err
 	}
 	now := time.Now().UTC()
@@ -987,7 +987,7 @@ func TestSubmitBindsOnlyActiveGoalFromAcceptedIntent(t *testing.T) {
 	}
 }
 
-func TestGoalRevisionAfterPlanningBlocksExecution(t *testing.T) {
+func TestGoalRevisionAfterPlanningTerminalizesStaleWork(t *testing.T) {
 	ctx := context.Background()
 	l, err := ledger.Open(":memory:")
 	if err != nil {
@@ -1015,23 +1015,59 @@ func TestGoalRevisionAfterPlanningBlocksExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Task.Status != core.TaskBlocked || result.Work.Status != core.WorkActive {
-		t.Fatalf("strategic drift did not block active Work: task=%+v work=%+v", result.Task, result.Work)
+	if result.Task.Status != core.TaskFailed || result.Work.Status != core.WorkFailed {
+		t.Fatalf("strategic drift did not terminalize stale Work: task=%+v work=%+v", result.Task, result.Work)
 	}
 	found := false
 	for _, event := range result.Events {
-		if event.EventType != "TASK_BLOCKED" {
+		if event.EventType != "TASK_WORK_FAILED" {
 			continue
 		}
 		var payload events.ProjectionEventPayload
-		var detail core.AgentExecutionBlockedDetail
+		var detail strategicTaskFailureDetail
 		if json.Unmarshal(event.Payload, &payload) != nil || json.Unmarshal(payload.Detail, &detail) != nil {
 			t.Fatal("decode strategic-context block")
 		}
 		found = detail.Code == "STRATEGIC_CONTEXT_CHANGED"
 	}
 	if !found {
-		t.Fatal("strategic-context drift lacked a durable fail-closed block")
+		t.Fatal("strategic-context drift lacked a durable fail-closed terminal transition")
+	}
+}
+
+func TestOversizedStrategicContextFailsBeforeExecutionStart(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	seedTestGoal(t, ctx, repository, "org-1", "mission-1", "goal-1", core.GoalActive)
+	snapshot, err := repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missionState := snapshot.Missions["mission-1"]
+	mission := missionState.Value
+	mission.Statement = strings.Repeat("x", 256<<10)
+	if err := repository.SaveMission(ctx, "MISSION_REVISED", "runtime", missionState.CorrelationID, missionState.Version+1, mission, nil); err != nil {
+		t.Fatal(err)
+	}
+	service := New(gateway)
+	in := confirmedGoalSubmit(t, ctx, gateway, "oversized-strategy", "org-1", "goal-1", "prepare a governed result", core.ExecutionAgent)
+	result, err := service.Submit(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Task.Status != core.TaskFailed || result.Work.Status != core.WorkFailed {
+		t.Fatalf("oversized strategic context did not fail before execution: task=%+v work=%+v", result.Task, result.Work)
+	}
+	for _, event := range result.Events {
+		if event.EventType == "EXECUTION_STARTED" {
+			t.Fatal("oversized strategic context durably started execution")
+		}
 	}
 }
 
@@ -3233,7 +3269,8 @@ func TestRecoveryIsDeterministicFirst(t *testing.T) {
 					_, _, err = repository.StartAgentExecution(ctx, organization.ID, requestID, 2, task, "", nil, nil, actionBoundaryRoutes(snapshot, task))
 					return err
 				}
-				return repository.SaveTask(ctx, organization.ID, "EXECUTION_STARTED", "runtime", requestID, 2, task, nil)
+				_, err := repository.StartTaskExecution(ctx, organization.ID, requestID, 2, task, "", "", nil, nil)
+				return err
 			},
 		} {
 			if err := save(); err != nil {
@@ -3338,7 +3375,7 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 			if test.stage == "completion_verified" {
 				task := state.Value
 				task.Status = core.TaskRunning
-				if err := service.state.SaveTask(ctx, "org-1", "EXECUTION_STARTED", "runtime", correlationID, state.Version+1, task, map[string]string{"input_event_ref": inputEvent.EventID}); err != nil {
+				if _, err := service.state.StartTaskExecution(ctx, "org-1", correlationID, state.Version+1, task, "OPERATOR_HUMAN_INPUT", inputEvent.EventID, nil, nil); err != nil {
 					t.Fatal(err)
 				}
 				state = projections.Versioned[core.Task]{Version: state.Version + 1, CorrelationID: correlationID, Value: task}

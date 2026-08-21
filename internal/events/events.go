@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -19,6 +20,10 @@ import (
 )
 
 const SchemaVersion = 4
+
+// ErrStrategicContextChanged identifies a fail-closed execution admission
+// rejected because the Mission or Goal no longer matches the reviewed Plan.
+var ErrStrategicContextChanged = errors.New("strategic context changed")
 
 // ReviewedIntentEvidenceLimit bounds the durable intake/review evidence
 // replayed for one Intent confirmation.
@@ -138,6 +143,28 @@ type HumanTaskCompletionSubmittedPayload struct {
 	Artifacts         []core.ArtifactEvidence `json:"artifacts,omitempty"`
 	SourcePrincipalID string                  `json:"source_principal_id"`
 	SourceChannel     string                  `json:"source_channel"`
+}
+
+// DecodeHumanTaskCompletion accepts only the canonical structured user
+// completion Event Contract and its authority-free durable envelope.
+func DecodeHumanTaskCompletion(event Event) (HumanTaskCompletionSubmittedPayload, error) {
+	var submission HumanTaskCompletionSubmittedPayload
+	if decodeExactEventJSON(event.Payload, &submission) != nil || event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() || event.SchemaVersion != SchemaVersion ||
+		event.EventType != "HUMAN_TASK_COMPLETION_SUBMITTED" || event.OrganizationID == "" || event.SourceActorID == "" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID == "" || event.CorrelationID == "" ||
+		len(event.AuthorizationRefs) != 0 || submission.MessageID == "" || submission.SourcePrincipalID != event.SourceActorID || submission.SourceChannel != "HUMAN_DIRECT" {
+		return HumanTaskCompletionSubmittedPayload{}, fmt.Errorf("structured user completion event contract is invalid")
+	}
+	refs := make([]string, len(submission.Artifacts))
+	for index, artifact := range submission.Artifacts {
+		if artifact.Ref == "" || artifact.Origin != submission.SourcePrincipalID {
+			return HumanTaskCompletionSubmittedPayload{}, fmt.Errorf("structured user completion artifact evidence is invalid")
+		}
+		refs[index] = artifact.Ref
+	}
+	if !slices.Equal(event.ArtifactRefs, refs) {
+		return HumanTaskCompletionSubmittedPayload{}, fmt.Errorf("structured user completion artifact references do not match")
+	}
+	return submission, nil
 }
 
 type OperatorWorkAcceptedPayload struct {
@@ -462,6 +489,7 @@ type InboxObservationBinding struct {
 
 type ExecutionStartDetail struct {
 	Mode                 string                `json:"mode,omitempty"`
+	InputEventRef        string                `json:"input_event_ref,omitempty"`
 	InboxCutoffSequence  int64                 `json:"inbox_cutoff_sequence"`
 	DispatchBinding      *AgentDispatchBinding `json:"dispatch_binding,omitempty"`
 	StrategicEventRefs   []string              `json:"strategic_event_refs,omitempty"`
@@ -592,9 +620,27 @@ func ResolveStrategicContextByRefs(organizationID string, work core.Work, stream
 
 // ResolvePlanStrategicContext validates the one runtime-owned Plan for a Work
 // and reconstructs the exact Mission and Goal revisions fingerprinted into it.
-func ResolvePlanStrategicContext(organizationID, correlationID string, work core.Work, stream []Event) (core.Plan, *core.StrategicContext, error) {
-	if organizationID == "" || correlationID == "" || work.ID == "" || work.IntentID == "" {
-		return core.Plan{}, nil, fmt.Errorf("strategic Plan identity is incomplete")
+func ResolvePlanStrategicContext(organizationID, correlationID string, work core.Work, intent core.Intent, stream []Event) (core.Plan, *core.StrategicContext, error) {
+	plan, err := ResolvePlan(organizationID, correlationID, work, intent, stream)
+	if err != nil {
+		return core.Plan{}, nil, err
+	}
+	context, err := ResolveStrategicContextByRefs(organizationID, work, stream, plan.StrategicEventRefs, plan.StrategicContextRefs)
+	if err != nil {
+		return core.Plan{}, nil, err
+	}
+	return plan, context, nil
+}
+
+// ResolvePlan validates the one runtime-owned Plan and binds it to the exact
+// accepted Intent fingerprint. Strategic projection events may be resolved
+// separately through their immutable references.
+func ResolvePlan(organizationID, correlationID string, work core.Work, intent core.Intent, stream []Event) (core.Plan, error) {
+	if organizationID == "" || correlationID == "" || work.ID == "" || work.IntentID == "" || intent.ID == "" || intent.AcceptedFingerprint == "" {
+		return core.Plan{}, fmt.Errorf("strategic Plan identity is incomplete")
+	}
+	if intent.ID != work.IntentID || intent.OrganizationID != core.ID(organizationID) {
+		return core.Plan{}, fmt.Errorf("strategic Plan Intent does not match durable Work")
 	}
 	var selected Event
 	var plan core.Plan
@@ -605,29 +651,25 @@ func ResolvePlanStrategicContext(organizationID, correlationID string, work core
 		var candidate core.Plan
 		if selected.EventID != "" || event.OrganizationID != organizationID || event.SourceActorID != "runtime" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != "task-"+correlationID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 ||
 			event.SourceExecutionID != "" && event.SourceExecutionID != "planning-plan-"+correlationID+"-attempt-1" || decodeExactEventJSON(event.Payload, &candidate) != nil {
-			return core.Plan{}, nil, fmt.Errorf("strategic Plan event is invalid")
+			return core.Plan{}, fmt.Errorf("strategic Plan event is invalid")
 		}
 		selected, plan = event, candidate
 	}
 	_, offset := plan.CreatedAt.Zone()
 	expectedFingerprint, err := core.FingerprintPlan(plan)
 	if err != nil {
-		return core.Plan{}, nil, fmt.Errorf("fingerprint strategic Plan: %w", err)
+		return core.Plan{}, fmt.Errorf("fingerprint strategic Plan: %w", err)
 	}
 	if selected.EventID == "" {
-		return core.Plan{}, nil, fmt.Errorf("strategic Plan is unavailable")
+		return core.Plan{}, fmt.Errorf("strategic Plan is unavailable")
 	}
-	if plan.ID != core.ID("plan-"+correlationID) || plan.IntentID != work.IntentID || plan.Version != 1 || len(plan.Tasks) == 0 || plan.CreatedAt.IsZero() || offset != 0 {
-		return core.Plan{}, nil, fmt.Errorf("strategic Plan identity or lifecycle is invalid")
+	if plan.ID != core.ID("plan-"+correlationID) || plan.IntentID != work.IntentID || plan.IntentFingerprint != intent.AcceptedFingerprint || plan.Version != 1 || len(plan.Tasks) == 0 || plan.CreatedAt.IsZero() || offset != 0 {
+		return core.Plan{}, fmt.Errorf("strategic Plan identity or lifecycle is invalid")
 	}
 	if plan.Fingerprint == "" || plan.Fingerprint != expectedFingerprint {
-		return core.Plan{}, nil, fmt.Errorf("strategic Plan fingerprint is invalid")
+		return core.Plan{}, fmt.Errorf("strategic Plan fingerprint is invalid")
 	}
-	context, err := ResolveStrategicContextByRefs(organizationID, work, stream, plan.StrategicEventRefs, plan.StrategicContextRefs)
-	if err != nil {
-		return core.Plan{}, nil, err
-	}
-	return plan, context, nil
+	return plan, nil
 }
 
 func exactGoalProjection(organizationID string, event Event) (ProjectionRecord, core.Goal, error) {
@@ -1329,7 +1371,7 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 	if err != nil {
 		return "", err
 	}
-	plan, plannedStrategy, err := ResolvePlanStrategicContext(binding.OrganizationID, binding.CorrelationID, binding.Work, stream)
+	plan, plannedStrategy, err := ResolvePlanStrategicContext(binding.OrganizationID, binding.CorrelationID, binding.Work, binding.Intent, stream)
 	startDetail, startErr := executionStartDetail(startEvent)
 	if err != nil {
 		return "", fmt.Errorf("resolve execution Plan strategic context: %w", err)
@@ -3211,10 +3253,7 @@ func (g *Gateway) PublishProjection(ctx context.Context, draft ProjectionDraft) 
 		return Event{}, err
 	}
 	if draft.Event.EventType == "EXECUTION_STARTED" && draft.ProjectionKind == "task" {
-		var task core.Task
-		if decodePayload(draft.Value, &task) == nil && task.ExecutionKind == core.ExecutionAgent {
-			return Event{}, fmt.Errorf("agent execution start requires atomic inbox selection")
-		}
+		return Event{}, fmt.Errorf("execution start requires typed atomic admission")
 	}
 	store, ok := g.ledger.(ProjectionAppender)
 	if !ok {
@@ -3224,17 +3263,33 @@ func (g *Gateway) PublishProjection(ctx context.Context, draft ProjectionDraft) 
 }
 
 func (g *Gateway) PublishExecutionStart(ctx context.Context, draft ProjectionDraft, routes []InboxRoute) (Event, []InboxSelection, error) {
-	if draft.Event.EventType != "EXECUTION_STARTED" || draft.Event.OrganizationID == "" || draft.Event.SourceActorID != "runtime" || draft.Event.SourceExecutionID != "" || draft.Event.RecipientScope != "" || draft.Event.RecipientID != "" || draft.Event.TaskID == "" || draft.Event.TaskID != draft.RecordID || draft.Event.CorrelationID == "" || draft.ProjectionKind != "task" || draft.RecordID == "" || draft.Version < 2 || len(routes) < 2 {
-		return Event{}, nil, fmt.Errorf("complete Agent execution-start identity and inbox routes are required")
+	if draft.Event.EventType != "EXECUTION_STARTED" || draft.Event.OrganizationID == "" || draft.Event.SourceActorID != "runtime" || draft.Event.SourceExecutionID != "" || draft.Event.RecipientScope != "" || draft.Event.RecipientID != "" || draft.Event.TaskID == "" || draft.Event.TaskID != draft.RecordID || draft.Event.CorrelationID == "" || draft.ProjectionKind != "task" || draft.RecordID == "" || draft.Version < 2 {
+		return Event{}, nil, fmt.Errorf("complete execution-start identity is required")
 	}
 	var task core.Task
 	var detail ExecutionStartDetail
-	if decodePayload(draft.Value, &task) != nil || task.ID != core.ID(draft.RecordID) || task.ExecutionKind != core.ExecutionAgent || task.Status != core.TaskRunning || task.AssigneeType != "AGENT" || task.AssigneeID == "" || decodePayload(draft.Event.Payload, &detail) != nil || detail.InboxCutoffSequence != 0 || detail.DispatchBinding != nil || detail.Mode != "" && detail.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" || !validStrategicStartRefs(detail.StrategicEventRefs, detail.StrategicContextRefs) {
-		return Event{}, nil, fmt.Errorf("agent execution-start task or detail is invalid")
+	if decodePayload(draft.Value, &task) != nil || task.ID != core.ID(draft.RecordID) || task.Status != core.TaskRunning || decodePayload(draft.Event.Payload, &detail) != nil || detail.InboxCutoffSequence != 0 || detail.DispatchBinding != nil || !validStrategicStartRefs(detail.StrategicEventRefs, detail.StrategicContextRefs) {
+		return Event{}, nil, fmt.Errorf("execution-start task or detail is invalid")
+	}
+	switch task.ExecutionKind {
+	case core.ExecutionAgent:
+		if task.AssigneeType != "AGENT" || task.AssigneeID == "" || len(routes) < 2 || detail.InputEventRef != "" || detail.Mode != "" && detail.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
+			return Event{}, nil, fmt.Errorf("agent execution-start task or inbox boundary is invalid")
+		}
+	case core.ExecutionDeterministic:
+		if len(routes) != 0 || detail.Mode != "" || detail.InputEventRef != "" {
+			return Event{}, nil, fmt.Errorf("deterministic execution-start boundary is invalid")
+		}
+	case core.ExecutionHuman:
+		if len(routes) != 0 || detail.Mode != "OPERATOR_HUMAN_INPUT" && detail.Mode != "STRUCTURED_HUMAN_COMPLETION" || detail.InputEventRef == "" {
+			return Event{}, nil, fmt.Errorf("user execution-start boundary is invalid")
+		}
+	default:
+		return Event{}, nil, fmt.Errorf("execution-start kind is unavailable")
 	}
 	appender, ok := g.ledger.(ExecutionStartAppender)
 	if !ok {
-		return Event{}, nil, fmt.Errorf("event ledger does not support atomic Agent execution start")
+		return Event{}, nil, fmt.Errorf("event ledger does not support atomic execution start")
 	}
 	return appender.AppendExecutionStart(ctx, draft, routes)
 }

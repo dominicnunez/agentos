@@ -141,8 +141,37 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	strategicEvents, err := l.Events(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var missionEventRef, goalEventRef string
+	for _, event := range strategicEvents {
+		switch event.EventType {
+		case "MISSION_CREATED":
+			missionEventRef = event.EventID
+		case "GOAL_CREATED":
+			goalEventRef = event.EventID
+		}
+	}
+	plan := core.Plan{
+		ID: "plan-request-1", IntentID: intent.ID, IntentFingerprint: intent.AcceptedFingerprint, Version: 1,
+		StrategicEventRefs: []string{missionEventRef, goalEventRef},
+		StrategicContextRefs: []core.VersionedRef{
+			{ID: "mission/" + string(mission.ID), Version: "1", MaterializationState: core.MaterializedFull},
+			{ID: "goal/" + string(goal.ID), Version: "1", MaterializationState: core.MaterializedFull},
+		},
+		Tasks: []core.PlanTask{{Key: "root", Description: task.Description, ExecutionKind: task.ExecutionKind, ModelInferencePolicy: task.ModelInferencePolicy}}, CreatedAt: now,
+	}
+	plan.Fingerprint, err = core.FingerprintPlan(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "PLAN_CREATED", SourceActorID: "runtime", TaskID: "task-request-1", CorrelationID: "request-1", Payload: plan}); err != nil {
+		t.Fatal(err)
+	}
 	task.Status = core.TaskRunning
-	if err := repository.SaveTask(ctx, organization.ID, "EXECUTION_STARTED", "runtime", "request-1", 2, task, nil); err != nil {
+	if _, err := repository.StartTaskExecution(ctx, organization.ID, "request-1", 2, task, "", "", plan.StrategicEventRefs, plan.StrategicContextRefs); err != nil {
 		_ = l.Close()
 		t.Fatal(err)
 	}

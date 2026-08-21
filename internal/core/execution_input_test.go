@@ -54,6 +54,17 @@ func TestMaterializeAgentExecutionInputRejectsInvalidStrategicContext(t *testing
 	}
 }
 
+func TestValidateStrategicExecutionContextRejectsOversizedDirectionBeforeStart(t *testing.T) {
+	created := time.Unix(2, 0).UTC()
+	context := &StrategicContext{
+		Mission: Mission{ID: "mission-1", OrganizationID: "org-1", Statement: strings.Repeat("x", maximumExecutionContextBytes), Status: MissionActive, CreatedAt: created}, MissionVersion: 1,
+		Goal: Goal{ID: "goal-1", OrganizationID: "org-1", MissionID: "mission-1", Objective: "bounded outcome", Mode: GoalTarget, SuccessCriteria: []IntentValue{{Value: "evidence", Origin: "USER"}}, Status: GoalActive, CreatedAt: created}, GoalVersion: 1,
+	}
+	if err := ValidateStrategicExecutionContext(context); err == nil {
+		t.Fatal("oversized strategic direction crossed the pre-start execution-context bound")
+	}
+}
+
 func TestMaterializeAgentExecutionInputRejectsMixedDependencyModes(t *testing.T) {
 	_, _, err := MaterializeAgentExecutionInput(AgentExecutionInputContext{
 		Blueprint:           AgentBlueprint{ID: "blueprint-1", Version: "v1"},

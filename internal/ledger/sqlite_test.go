@@ -943,6 +943,33 @@ func TestAgentExecutionStartAtomicallyRejectsStrategicRevisionDrift(t *testing.T
 		}
 	}
 	task := appendPendingAgentExecutionTask(t, ctx, store, correlationID, "task-"+correlationID, agent, config)
+	deterministicTask := task
+	deterministicTask.ID = "task-" + correlationID + "-deterministic"
+	deterministicTask.ExecutionKind = core.ExecutionDeterministic
+	deterministicTask.ModelInferencePolicy = core.InferenceForbidden
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(deterministicTask.ID), CorrelationID: correlationID},
+		ProjectionKind: "task", RecordID: string(deterministicTask.ID), Version: 1, Value: deterministicTask,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	humanTask := task
+	humanTask.ID = "task-" + correlationID + "-human"
+	humanTask.ExecutionKind = core.ExecutionHuman
+	humanTask.ModelInferencePolicy = core.InferenceForbidden
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(humanTask.ID), CorrelationID: correlationID},
+		ProjectionKind: "task", RecordID: string(humanTask.ID), Version: 1, Value: humanTask,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	humanInput, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "HUMAN_INPUT_RECEIVED", SourceActorID: "user-1", TaskID: string(humanTask.ID), CorrelationID: correlationID,
+		Payload: events.OperatorInputReceivedPayload{MessageID: "human-input-1", Text: "required evidence", SourcePrincipalID: "user-1", SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	contextRefs := []core.VersionedRef{
 		{ID: "mission/mission-1", Version: "1", MaterializationState: core.MaterializedFull},
 		{ID: "goal/goal-1", Version: "1", MaterializationState: core.MaterializedFull},
@@ -951,7 +978,11 @@ func TestAgentExecutionStartAtomicallyRejectsStrategicRevisionDrift(t *testing.T
 	plan := core.Plan{
 		ID: "plan-" + correlationID, IntentID: intent.ID, IntentFingerprint: intent.AcceptedFingerprint, Version: 1,
 		StrategicEventRefs: eventRefs, StrategicContextRefs: contextRefs,
-		Tasks: []core.PlanTask{{Key: "root", Description: task.Description, ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []string{}}}, CreatedAt: now,
+		Tasks: []core.PlanTask{
+			{Key: "agent-work", Description: task.Description, ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []string{}},
+			{Key: "deterministic-work", Description: deterministicTask.Description, ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, DependsOn: []string{}},
+			{Key: "human-work", Description: humanTask.Description, ExecutionKind: core.ExecutionHuman, ModelInferencePolicy: core.InferenceForbidden, DependsOn: []string{}},
+		}, CreatedAt: now,
 	}
 	plan.Fingerprint, err = core.FingerprintPlan(plan)
 	if err != nil {
@@ -982,6 +1013,34 @@ func TestAgentExecutionStartAtomicallyRejectsStrategicRevisionDrift(t *testing.T
 	_, persisted := latestTestProjection[core.Task](t, ctx, store, "task", task.ID)
 	if persisted.Status != core.TaskPending {
 		t.Fatalf("rejected dispatch changed Task state: %+v", persisted)
+	}
+	deterministicTask.Status = core.TaskRunning
+	if _, selections, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
+		Event: events.TrustedDraft{
+			OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(deterministicTask.ID), CorrelationID: correlationID,
+			Payload: events.ExecutionStartDetail{StrategicEventRefs: eventRefs, StrategicContextRefs: contextRefs},
+		},
+		ProjectionKind: "task", RecordID: string(deterministicTask.ID), Version: 2, Value: deterministicTask,
+	}, nil); err == nil || len(selections) != 0 {
+		t.Fatal("strategically stale deterministic execution was committed or selected inbox input")
+	}
+	_, persistedDeterministic := latestTestProjection[core.Task](t, ctx, store, "task", deterministicTask.ID)
+	if persistedDeterministic.Status != core.TaskPending {
+		t.Fatalf("rejected deterministic start changed Task state: %+v", persistedDeterministic)
+	}
+	humanTask.Status = core.TaskRunning
+	if _, selections, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
+		Event: events.TrustedDraft{
+			OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(humanTask.ID), CorrelationID: correlationID,
+			Payload: events.ExecutionStartDetail{Mode: "OPERATOR_HUMAN_INPUT", InputEventRef: humanInput.EventID, StrategicEventRefs: eventRefs, StrategicContextRefs: contextRefs},
+		},
+		ProjectionKind: "task", RecordID: string(humanTask.ID), Version: 2, Value: humanTask,
+	}, nil); err == nil || len(selections) != 0 {
+		t.Fatal("strategically stale user execution was committed or selected inbox input")
+	}
+	_, persistedHuman := latestTestProjection[core.Task](t, ctx, store, "task", humanTask.ID)
+	if persistedHuman.Status != core.TaskPending {
+		t.Fatalf("rejected user start changed Task state: %+v", persistedHuman)
 	}
 }
 
@@ -2413,6 +2472,50 @@ func TestGoalBoundWorkRequiresAtomicIntentConfirmation(t *testing.T) {
 	}
 	if _, err := l.AppendProjection(ctx, workDraft); err != nil {
 		t.Fatalf("atomically confirmed Goal-bound Work was rejected: %v", err)
+	}
+}
+
+func TestGoalBoundIntentConfirmationRequiresActiveMission(t *testing.T) {
+	ctx := context.Background()
+	l, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	now := time.Now().UTC()
+	appendTestMission(t, ctx, l, "org-1", "mission-1", now)
+	goal := core.Goal{ID: "goal-1", OrganizationID: "org-1", MissionID: "mission-1", Objective: "bounded direction", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "done", Origin: "USER"}}, Status: core.GoalActive, CreatedAt: now}
+	if _, err := l.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_CREATED", SourceActorID: "runtime", CorrelationID: "goal-1"},
+		ProjectionKind: "goal", RecordID: "goal-1", Version: 1, Value: goal,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reviewed := appendReviewedGoalIntent(t, ctx, l, "org-1", "run-1", "intent-run-1", "goal-1", "bounded work", core.ExecutionDeterministic, now)
+	retired := core.Mission{ID: "mission-1", OrganizationID: "org-1", Statement: "durable direction", Status: core.MissionRetired, CreatedAt: now}
+	if _, err := l.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "MISSION_RETIRED", SourceActorID: "runtime", CorrelationID: "mission-1"},
+		ProjectionKind: "mission", RecordID: "mission-1", Version: 2, Value: retired,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	confirmation := events.IntentConfirmedPayload{
+		IntentID: string(reviewed.ID), GoalID: "goal-1", Version: reviewed.Version, Fingerprint: reviewed.Fingerprint,
+		ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1",
+	}
+	if _, err := l.AppendIntentConfirmation(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-run-1", Payload: confirmation, CorrelationID: "run-1",
+	}, "goal-1"); err == nil {
+		t.Fatal("Goal-bound Intent was confirmed after its Mission retired")
+	}
+	stream, err := l.Events(ctx, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range stream {
+		if event.EventType == "INTENT_CONFIRMED" {
+			t.Fatal("rejected Mission-inactive confirmation reached the ledger")
+		}
 	}
 }
 

@@ -41,11 +41,15 @@ Adaptive planning receives those exact Mission and Goal revisions as
 organizational direction, clearly separated from authority. The Plan
 fingerprint covers their immutable references. Agent execution materializes
 the same revisions into its input and records them in the execution manifest.
-If either projection changes before dispatch, Agent OS blocks the Task with
-`STRATEGIC_CONTEXT_CHANGED`. For Agent work, the SQLite execution-start
-transaction rechecks the exact references so a concurrent revision cannot
-cross the time-of-use boundary. Agent OS does not silently reinterpret the Plan under new
-organizational direction. Ad hoc Work carries no strategic references.
+If either projection changes before execution, Agent OS fails the stale Task
+with `STRATEGIC_CONTEXT_CHANGED`; the Work then becomes terminal so replacement
+Work can receive a new reviewed Intent and Plan. The SQLite execution-start
+transaction rechecks the exact references for Agent, deterministic, and
+user-operated work so a concurrent revision cannot cross the time-of-use
+boundary. Agent execution also rejects strategic context that cannot fit its
+bounded input before execution start is persisted. Agent OS does not silently
+reinterpret the Plan under new organizational direction. Ad hoc Work carries
+no strategic references.
 
 The complete Task graph is committed to SQLite in one transaction. A failed
 write leaves no Task executable, and recovery rejects a partial or conflicting
