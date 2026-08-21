@@ -776,24 +776,35 @@ func TestAgentCannotMintTrustedStateEvents(t *testing.T) {
 	}
 }
 
-func TestGoalBoundIntentCannotBypassAtomicAdmission(t *testing.T) {
+func TestIntentCannotBypassTypedReviewAdmission(t *testing.T) {
+	for _, goalID := range []core.ID{"", "goal-1"} {
+		ledger := &memoryLedger{}
+		gateway := NewGateway(ledger)
+		draft := TrustedDraft{
+			OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-work-1", CorrelationID: "work-1",
+			Payload: IntentConfirmedPayload{
+				IntentID: "intent-work-1", GoalID: string(goalID), Version: 1, Fingerprint: "fingerprint",
+				ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "message-1",
+			},
+		}
+		if _, err := gateway.PublishTrusted(context.Background(), draft); err == nil {
+			t.Fatalf("Intent with Goal %q bypassed typed review admission", goalID)
+		}
+		if _, err := gateway.PublishIntentConfirmation(context.Background(), draft, goalID); err == nil {
+			t.Fatalf("ledger without typed review admission accepted Intent with Goal %q", goalID)
+		}
+		if len(ledger.events) != 0 {
+			t.Fatalf("rejected Intent confirmation reached ledger: %+v", ledger.events)
+		}
+	}
 	ledger := &memoryLedger{}
 	gateway := NewGateway(ledger)
-	draft := TrustedDraft{
-		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", CorrelationID: "work-1",
-		Payload: IntentConfirmedPayload{IntentID: "intent-1", GoalID: "goal-1", Version: 1, Fingerprint: "fingerprint", MessageID: "message-1"},
+	mismatched := TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-work-1", CorrelationID: "work-1",
+		Payload: IntentConfirmedPayload{IntentID: "intent-work-1", GoalID: "goal-1", Version: 1, Fingerprint: "fingerprint", ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "message-1"},
 	}
-	if _, err := gateway.PublishTrusted(context.Background(), draft); err == nil {
-		t.Fatal("Goal-bound Intent bypassed atomic Goal admission")
-	}
-	if _, err := gateway.PublishIntentConfirmation(context.Background(), draft, "goal-2"); err == nil {
-		t.Fatal("Intent payload Goal did not match the Goal selected for atomic admission")
-	}
-	if _, err := gateway.PublishIntentConfirmation(context.Background(), draft, "goal-1"); err == nil {
-		t.Fatal("ledger without atomic Goal admission support accepted confirmation")
-	}
-	if len(ledger.events) != 0 {
-		t.Fatalf("rejected Goal confirmation reached ledger: %+v", ledger.events)
+	if _, err := gateway.PublishIntentConfirmation(context.Background(), mismatched, "goal-2"); err == nil {
+		t.Fatal("Intent payload Goal did not match the Goal selected for typed admission")
 	}
 }
 

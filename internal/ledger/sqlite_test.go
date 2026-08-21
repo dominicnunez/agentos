@@ -1812,6 +1812,116 @@ func TestIntentConfirmationGoalArgumentMatchesPayload(t *testing.T) {
 	}
 }
 
+func TestIntentConfirmationCannotUseGenericAppend(t *testing.T) {
+	ctx := context.Background()
+	l, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	draft := events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-run-1", CorrelationID: "run-1",
+		Payload: events.IntentConfirmedPayload{IntentID: "intent-run-1", Version: 1, Fingerprint: "fingerprint", ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1"},
+	}
+	if _, err := l.Append(ctx, draft); err == nil {
+		t.Fatal("generic ledger append accepted an Intent confirmation")
+	}
+	stream, err := l.Events(ctx, "run-1")
+	if err != nil || len(stream) != 0 {
+		t.Fatalf("rejected generic confirmation reached ledger: events=%+v err=%v", stream, err)
+	}
+}
+
+func TestUnboundIntentConfirmationReplayIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	l, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	now := time.Now().UTC()
+	reviewed := appendReviewedIntent(t, ctx, l, "org-1", "run-1", "intent-run-1", "bounded work", core.IntentModeStandard, core.ExecutionDeterministic, now)
+	payload := events.IntentConfirmedPayload{
+		IntentID: "intent-run-1", Version: 1, Fingerprint: reviewed.Fingerprint,
+		ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1",
+	}
+	draft := events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-run-1", Payload: payload, CorrelationID: "run-1"}
+	first, err := l.AppendIntentConfirmation(ctx, draft, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := l.AppendIntentConfirmation(ctx, draft, "")
+	if err != nil || replayed.EventID != first.EventID {
+		t.Fatalf("exact confirmation retry was not idempotent: first=%+v replayed=%+v err=%v", first, replayed, err)
+	}
+	conflict := payload
+	conflict.MessageID = "confirmation-2"
+	draft.Payload = conflict
+	if _, err := l.AppendIntentConfirmation(ctx, draft, ""); err == nil {
+		t.Fatal("conflicting confirmation retry was accepted")
+	}
+	stream, err := l.Events(ctx, "run-1")
+	if err != nil || len(stream) != 3 || stream[2].EventID != first.EventID {
+		t.Fatalf("confirmation retry changed durable evidence: events=%+v err=%v", stream, err)
+	}
+}
+
+func TestUnboundIntentConfirmationRequiresExactReviewedEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		seedReview bool
+		mutate     func(*events.IntentConfirmedPayload, core.IntentDraft)
+	}{
+		{name: "missing durable review"},
+		{name: "changed reviewed mode", seedReview: true, mutate: func(payload *events.IntentConfirmedPayload, reviewed core.IntentDraft) {
+			reviewed.Mode = core.IntentModeExperiment
+			fingerprint, err := core.FingerprintIntentDraft(reviewed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload.Fingerprint = fingerprint
+		}},
+		{name: "mismatched confirmer kind and channel", seedReview: true, mutate: func(payload *events.IntentConfirmedPayload, _ core.IntentDraft) {
+			payload.ConfirmingActorKind = string(core.PrincipalExternalAgent)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			l, err := Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = l.Close() })
+			now := time.Now().UTC()
+			reviewed := core.IntentDraft{}
+			fingerprint := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+			if test.seedReview {
+				reviewed = appendReviewedIntent(t, ctx, l, "org-1", "run-1", "intent-run-1", "bounded work", core.IntentModeStandard, core.ExecutionDeterministic, now)
+				fingerprint = reviewed.Fingerprint
+			}
+			payload := events.IntentConfirmedPayload{
+				IntentID: "intent-run-1", Version: 1, Fingerprint: fingerprint,
+				ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1",
+			}
+			if test.mutate != nil {
+				test.mutate(&payload, reviewed)
+			}
+			draft := events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: payload.ConfirmingActorID, TaskID: "task-run-1", Payload: payload, CorrelationID: "run-1"}
+			before, err := l.Events(ctx, "run-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := l.AppendIntentConfirmation(ctx, draft, ""); err == nil {
+				t.Fatal("unreviewed or changed Intent confirmation was admitted")
+			}
+			after, err := l.Events(ctx, "run-1")
+			if err != nil || len(after) != len(before) {
+				t.Fatalf("rejected confirmation changed the ledger: before=%d after=%d err=%v", len(before), len(after), err)
+			}
+		})
+	}
+}
+
 func TestGoalBoundIntentConfirmationConcurrentReplayIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "agentos.db")
@@ -2190,7 +2300,17 @@ func appendReviewedGoalIntent(t *testing.T, ctx context.Context, l *SQLite, orga
 	return appendReviewedGoalIntentWithSource(t, ctx, l, organizationID, correlationID, intentID, goalID, objective, objective+" under "+goalID, kind, createdAt)
 }
 
+func appendReviewedIntent(t *testing.T, ctx context.Context, l *SQLite, organizationID, correlationID, intentID, objective string, mode core.IntentMode, kind core.ExecutionKind, createdAt time.Time) core.IntentDraft {
+	t.Helper()
+	return appendReviewedIntentWithSource(t, ctx, l, organizationID, correlationID, intentID, "", objective, objective, mode, kind, createdAt)
+}
+
 func appendReviewedGoalIntentWithSource(t *testing.T, ctx context.Context, l *SQLite, organizationID, correlationID, intentID, goalID, objective, sourceText string, kind core.ExecutionKind, createdAt time.Time) core.IntentDraft {
+	t.Helper()
+	return appendReviewedIntentWithSource(t, ctx, l, organizationID, correlationID, intentID, goalID, objective, sourceText, core.IntentModeStandard, kind, createdAt)
+}
+
+func appendReviewedIntentWithSource(t *testing.T, ctx context.Context, l *SQLite, organizationID, correlationID, intentID, goalID, objective, sourceText string, mode core.IntentMode, kind core.ExecutionKind, createdAt time.Time) core.IntentDraft {
 	t.Helper()
 	sourceMessageID := "source-" + correlationID
 	taskID := "task-" + correlationID
@@ -2204,11 +2324,14 @@ func appendReviewedGoalIntentWithSource(t *testing.T, ctx context.Context, l *SQ
 		t.Fatal(err)
 	}
 	draft := core.IntentDraft{
-		ID: core.ID(intentID), OrganizationID: core.ID(organizationID), Version: 1, Status: core.IntentStatusReadyForReview, RequestedExecutionKind: kind,
-		Goal: &core.IntentValue{Value: goalID, Origin: "EXPLICIT", SourceMessageID: sourceMessageID}, Objective: objective,
-		Context: []core.IntentValue{}, Deliverables: []core.IntentValue{{Value: "Produce the requested result.", Origin: "DEFAULT"}},
+		ID: core.ID(intentID), OrganizationID: core.ID(organizationID), Version: 1, Status: core.IntentStatusReadyForReview, Mode: mode, RequestedExecutionKind: kind,
+		Objective: objective,
+		Context:   []core.IntentValue{}, Deliverables: []core.IntentValue{{Value: "Produce the requested result.", Origin: "DEFAULT"}},
 		CompletionCriteria: []core.IntentValue{{Value: "The result is independently verified.", Origin: "DEFAULT"}}, Constraints: []core.IntentValue{},
 		ResolvedDecisions: []core.IntentDecision{}, ConsequenceCandidates: []string{}, MissingUserInputs: []core.IntentValue{}, CreatedAt: createdAt,
+	}
+	if goalID != "" {
+		draft.Goal = &core.IntentValue{Value: goalID, Origin: "EXPLICIT", SourceMessageID: sourceMessageID}
 	}
 	fingerprint, err := core.FingerprintIntentDraft(draft)
 	if err != nil {

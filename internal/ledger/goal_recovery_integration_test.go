@@ -59,7 +59,7 @@ func TestRecoveryRejectsCausallyReorderedGoalEvidence(t *testing.T) {
 	messageID := "message-" + requestID
 	draft := core.IntentDraft{
 		ID: core.ID("intent-" + correlationID), OrganizationID: organization.ID, Version: 1,
-		Status: core.IntentStatusReadyForReview, RequestedExecutionKind: core.ExecutionDeterministic,
+		Status: core.IntentStatusReadyForReview, Mode: core.IntentModeStandard, RequestedExecutionKind: core.ExecutionDeterministic,
 		Goal: &core.IntentValue{Value: string(goal.ID), Origin: "EXPLICIT", SourceMessageID: messageID}, Objective: statement,
 		Context:            []core.IntentValue{},
 		Deliverables:       []core.IntentValue{{Value: "The submitted work is performed.", Origin: "RUNTIME_DEFAULT"}},

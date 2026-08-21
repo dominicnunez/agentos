@@ -13,6 +13,12 @@ activate a result.
 
 The first V1 slice is deliberately narrow:
 
+- a user or authenticated A2A Agent may explicitly ask for an experiment during
+  the ordinary natural-language intake conversation;
+- the complete Intent review shows `mode: EXPERIMENT`, and that mode is bound
+  into the reviewed fingerprint before any Work is admitted;
+- operator content cannot choose a sandbox, capability profile, budget, cost
+  ceiling, or inference pool; the runtime supplies the fixed V1 profile;
 - one experiment is bound to one same-organization Work and its immutable
   objective;
 - the experiment records a disposable sandbox reference, the fixed
@@ -33,6 +39,11 @@ Adaptive Agent execution remains fail closed until its token, cost, wall-time,
 sandbox, and capability usage can be enforced at the same transactional
 boundary. Recording a budget without enforcing it is not accepted as Lab
 support.
+
+If an experimental Intent would require adaptive Agent execution, confirmation
+is rejected before `INTENT_CONFIRMED` is written. The conversation remains
+reviewable, but the unsupported request cannot be admitted or silently
+downgraded to ordinary Work.
 
 ## Promotion candidates
 

@@ -719,7 +719,7 @@ func TestRecoveryRejectsGoalBoundWorkWithoutConfirmation(t *testing.T) {
 	const taskID = "task-run-1"
 	const messageID = "message-1"
 	intentDraft := core.IntentDraft{
-		ID: "intent-run-1", OrganizationID: organization.ID, Version: 1, Status: core.IntentStatusReadyForReview,
+		ID: "intent-run-1", OrganizationID: organization.ID, Version: 1, Status: core.IntentStatusReadyForReview, Mode: core.IntentModeStandard,
 		RequestedExecutionKind: core.ExecutionDeterministic,
 		Goal:                   &core.IntentValue{Value: string(goal.ID), Origin: "EXPLICIT", SourceMessageID: messageID},
 		Objective:              "bounded work",

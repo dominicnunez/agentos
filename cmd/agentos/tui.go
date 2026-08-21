@@ -170,6 +170,7 @@ type tuiTask struct {
 
 func printIntentReview(output io.Writer, draft core.IntentDraft) {
 	_, _ = fmt.Fprintf(output, "\nProposed work\n\nOutcome\n%s\n", safeTerminalText(draft.Objective))
+	_, _ = fmt.Fprintf(output, "\nMode\n%s\n", safeTerminalLine(string(draft.Mode)))
 	if draft.Goal != nil {
 		_, _ = fmt.Fprintf(output, "\nGoal\n%s\n", safeTerminalLine(draft.Goal.Value))
 	}

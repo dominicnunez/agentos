@@ -73,7 +73,7 @@ func TestA2AIntentReviewSerializesSelectedGoalProvenance(t *testing.T) {
 	goal := core.IntentValue{Value: "goal-123", Origin: "EXPLICIT", SourceMessageID: "message-1"}
 	task := projectA2ATask(intake.View{
 		TaskID: "task-1", ConversationID: "context-1", State: intake.StateAwaitingConfirmation,
-		Intent: &core.IntentDraft{Version: 1, Fingerprint: strings.Repeat("a", 64), Objective: "Advance the Goal", Goal: &goal},
+		Intent: &core.IntentDraft{Version: 1, Mode: core.IntentModeStandard, Fingerprint: strings.Repeat("a", 64), Objective: "Advance the Goal", Goal: &goal},
 	})
 	body, err := json.Marshal(task)
 	if err != nil {
@@ -88,6 +88,10 @@ func TestA2AIntentReviewSerializesSelectedGoalProvenance(t *testing.T) {
 	var reviewed core.IntentValue
 	if err := json.Unmarshal(wire.Metadata[intentConfirmationURI]["goal"], &reviewed); err != nil || reviewed != goal {
 		t.Fatalf("A2A review omitted the selected Goal provenance: body=%s goal=%+v err=%v", body, reviewed, err)
+	}
+	var mode core.IntentMode
+	if err := json.Unmarshal(wire.Metadata[intentConfirmationURI]["mode"], &mode); err != nil || mode != core.IntentModeStandard {
+		t.Fatalf("A2A review omitted the fingerprinted Intent mode: body=%s mode=%s err=%v", body, mode, err)
 	}
 }
 

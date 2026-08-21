@@ -1247,6 +1247,9 @@ func (s *Service) Submit(ctx context.Context, in Submit) (Result, error) {
 	if in.SourceChannel != "INTERNAL" && !operatorSubmission {
 		return Result{}, fmt.Errorf("operator work channel is not supported")
 	}
+	if !core.ValidIntentSourceIdentity(in.SourcePrincipalID, in.SourcePrincipalKind, in.SourceChannel) {
+		return Result{}, fmt.Errorf("submission principal kind does not match its source channel")
+	}
 	if operatorSubmission && in.MessageID == "" {
 		return Result{}, fmt.Errorf("operator submission message id is required")
 	}
@@ -1690,7 +1693,7 @@ func acceptedDraftForSubmission(in Submit, correlationID string) (core.IntentDra
 	}
 	draft := core.IntentDraft{
 		ID: core.ID("intent-draft-" + correlationID), OrganizationID: core.ID(in.OrganizationID), Version: 1,
-		Status: core.IntentStatusReadyForReview, RequestedExecutionKind: in.Kind, Goal: goal, Objective: in.Statement,
+		Status: core.IntentStatusReadyForReview, Mode: core.IntentModeStandard, RequestedExecutionKind: in.Kind, Goal: goal, Objective: in.Statement,
 		Context: []core.IntentValue{},
 		Deliverables: []core.IntentValue{{
 			Value: "The submitted work is performed.", Origin: "RUNTIME_DEFAULT",

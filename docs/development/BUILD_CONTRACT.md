@@ -40,10 +40,13 @@ The fake adapter is test-only and deliberately non-intelligent: it makes the
 execution seam testable without becoming a production provider.
 
 The first governed Lab slice composes deterministic, no-inference Work with a
-fixed no-effects profile and explicit resource ceilings. It seals Experiment
-and promotion-candidate projections through the same event-coupled admission
-path as other organizational state. Adaptive experiments remain rejected until
-their budgets and containment can be enforced rather than merely recorded.
+fixed no-effects profile and explicit resource ceilings. A reviewed Intent
+must bind `STANDARD` or `EXPERIMENT` into its fingerprint; only the runtime may
+materialize the fixed Lab containment and an unsupported adaptive experiment
+fails before confirmation is persisted. Experiment and promotion-candidate
+projections use the same event-coupled admission path as other organizational
+state. Adaptive experiments remain rejected until their budgets and
+containment can be enforced rather than merely recorded.
 
 ## Implemented V1 seams
 

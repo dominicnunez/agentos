@@ -27,14 +27,27 @@ type Spec struct {
 }
 
 const (
+	DeterministicSandbox       = "lab-deterministic-no-effects-v1"
 	NoEffectsCapabilityProfile = "lab-no-effects-v1"
 	DeterministicInferencePool = "deterministic"
 )
 
+// DefaultSpec is the runtime-owned containment used by reviewed natural-
+// language Lab requests. External callers cannot supply or widen these values.
+func DefaultSpec() Spec {
+	return Spec{
+		SandboxRef: DeterministicSandbox, CapabilityProfileRef: NoEffectsCapabilityProfile,
+		Budget: core.ExperimentBudget{
+			MaxExecutions: 1, MaxUsageUnits: 1, MaxWallTimeSeconds: 60,
+			MaxChildren: 0, AllowedInferencePools: []string{DeterministicInferencePool},
+		},
+	}
+}
+
 func ValidateDeterministicSpec(spec Spec) error {
-	if spec.CapabilityProfileRef != NoEffectsCapabilityProfile || !core.ValidExperimentBudget(spec.Budget) ||
+	if spec.SandboxRef != DeterministicSandbox || spec.CapabilityProfileRef != NoEffectsCapabilityProfile || !core.ValidExperimentBudget(spec.Budget) ||
 		spec.Budget.MaxMeteredCostMicrounits != 0 || !slices.Equal(spec.Budget.AllowedInferencePools, []string{DeterministicInferencePool}) {
-		return fmt.Errorf("V1 Lab requires the no-effects profile, zero metered cost, and deterministic-only pool")
+		return fmt.Errorf("V1 Lab requires its deterministic sandbox, no-effects profile, zero metered cost, and deterministic-only pool")
 	}
 	return nil
 }

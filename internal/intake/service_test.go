@@ -164,6 +164,45 @@ func TestIntakeKeepsSourceProvenance(t *testing.T) {
 	}
 }
 
+func TestOrganizationScopedActorCanConfirmAnotherActorsIntent(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := New(app.New(events.NewGateway(store)))
+	submitter := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	confirmer := testPrincipal("human-2", core.PrincipalHuman, ChannelHumanDirect)
+	message := Message{ConversationID: "shared-confirmation", MessageID: "message-1", Text: "echo reviewed work"}
+	review, err := service.Handle(ctx, submitter, message)
+	if err != nil || review.State != StateAwaitingConfirmation || review.Intent == nil {
+		t.Fatalf("review=%+v err=%v", review, err)
+	}
+	completed, err := service.ConfirmIntent(ctx, confirmer, IntentConfirmation{ConversationID: message.ConversationID, MessageID: "confirmation-1", Fingerprint: review.Intent.Fingerprint})
+	if err != nil || completed.State != StateCompleted {
+		t.Fatalf("organization-scoped confirmation=%+v err=%v", completed, err)
+	}
+	intent, _, stream := projectedWork(t, store, message.ConversationID)
+	if intent.SourcePrincipalID != core.ID(submitter.ID) || intent.SourcePrincipalKind != submitter.Kind || intent.SourceChannel != submitter.Channel {
+		t.Fatalf("confirmation changed submitter provenance: %+v", intent)
+	}
+	found := false
+	for _, event := range stream {
+		if event.EventType != "INTENT_CONFIRMED" {
+			continue
+		}
+		var payload events.IntentConfirmedPayload
+		if json.Unmarshal(event.Payload, &payload) != nil || event.SourceActorID != confirmer.ID || payload.ConfirmingActorID != confirmer.ID || payload.ConfirmingActorKind != string(confirmer.Kind) || payload.SourceChannel != confirmer.Channel {
+			t.Fatalf("confirmation actor provenance=%+v payload=%+v", event, payload)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("durable confirmation evidence was not recorded")
+	}
+}
+
 func TestChannelsShareWorkButAgentCannotCompleteUserTask(t *testing.T) {
 	ctx := context.Background()
 	store, err := ledger.Open(":memory:")
@@ -411,7 +450,7 @@ func TestIntentNormalizationManifestsModelUseAndReplaysWithoutInference(t *testi
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	ready := `{"state":"READY_FOR_REVIEW","reply":"Review this intent.","intent":{"objective":"Prepare a Linux release","context":[],"deliverables":[{"value":"Linux binary","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Binary passes verification","origin":"EXPLICIT","source_message_id":"message-1"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
+	ready := `{"state":"READY_FOR_REVIEW","reply":"Review this intent.","intent":{"mode":"STANDARD","objective":"Prepare a Linux release","context":[],"deliverables":[{"value":"Linux binary","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Binary passes verification","origin":"EXPLICIT","source_message_id":"message-1"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
 	normalizer, err := NewModelNormalizer(normalizationModel{response: ready})
 	if err != nil {
 		t.Fatal(err)
@@ -486,7 +525,7 @@ func TestIntentNormalizationRetryCompletesAnInterruptedDraftOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	ready := `{"state":"READY_FOR_REVIEW","reply":"Review this intent.","intent":{"objective":"Prepare a Linux release","context":[],"deliverables":[{"value":"Linux binary","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Binary passes verification","origin":"EXPLICIT","source_message_id":"message-1"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
+	ready := `{"state":"READY_FOR_REVIEW","reply":"Review this intent.","intent":{"mode":"STANDARD","objective":"Prepare a Linux release","context":[],"deliverables":[{"value":"Linux binary","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Binary passes verification","origin":"EXPLICIT","source_message_id":"message-1"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
 	model := &retryNormalizationModel{response: ready}
 	normalizer, err := NewModelNormalizer(model)
 	if err != nil {
@@ -577,7 +616,7 @@ func (n goalNormalizer) Normalize(_ context.Context, turns []ConversationTurn) (
 	goal := core.IntentValue{Value: n.goalID, Origin: "EXPLICIT", SourceMessageID: latest.MessageID}
 	return Normalization{
 		State: normalizationReady, Reply: "Review this Goal-bound intent.",
-		Candidate: IntentCandidate{Goal: &goal, Objective: "Advance " + n.goalID, Deliverables: []core.IntentValue{value}, CompletionCriteria: []core.IntentValue{value}},
+		Candidate: IntentCandidate{Mode: core.IntentModeStandard, Goal: &goal, Objective: "Advance " + n.goalID, Deliverables: []core.IntentValue{value}, CompletionCriteria: []core.IntentValue{value}},
 	}, nil
 }
 
@@ -750,8 +789,91 @@ func (fixedNormalizer) Normalize(_ context.Context, turns []ConversationTurn) (N
 	value := core.IntentValue{Value: "Bounded result", Origin: "DEFAULT", SourceMessageID: latest.MessageID}
 	return Normalization{
 		State: normalizationReady, Reply: "Review this intent.",
-		Candidate: IntentCandidate{Objective: "Retain the supplied context", Deliverables: []core.IntentValue{value}, CompletionCriteria: []core.IntentValue{value}},
+		Candidate: IntentCandidate{Mode: core.IntentModeStandard, Objective: "Retain the supplied context", Deliverables: []core.IntentValue{value}, CompletionCriteria: []core.IntentValue{value}},
 	}, nil
+}
+
+type experimentNormalizer struct{ objective string }
+
+func (experimentNormalizer) Descriptor() (NormalizerDescriptor, bool) {
+	return NormalizerDescriptor{}, false
+}
+
+func (n experimentNormalizer) Normalize(_ context.Context, turns []ConversationTurn) (Normalization, error) {
+	latest := turns[len(turns)-1]
+	value := core.IntentValue{Value: "Bounded experimental result", Origin: "EXPLICIT", SourceMessageID: latest.MessageID}
+	return Normalization{
+		State: normalizationReady, Reply: "Review this experimental intent.",
+		Candidate: IntentCandidate{Mode: core.IntentModeExperiment, Objective: n.objective, Deliverables: []core.IntentValue{value}, CompletionCriteria: []core.IntentValue{value}},
+	}, nil
+}
+
+func TestReviewedExperimentUsesOnlyRuntimeOwnedContainment(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	service := NewWithNormalizer(app.New(gateway), experimentNormalizer{objective: "echo lab result"})
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+
+	draft, err := service.Handle(ctx, principal, Message{ConversationID: "reviewed-experiment", MessageID: "message-1", Text: "Run this as a bounded experiment"})
+	if err != nil || draft.Intent == nil || draft.Intent.Mode != core.IntentModeExperiment || draft.Intent.RequestedExecutionKind != core.ExecutionDeterministic {
+		t.Fatalf("experimental review=%+v err=%v", draft, err)
+	}
+	confirmed, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: draft.ConversationID, MessageID: "confirmation-1", Fingerprint: draft.Intent.Fingerprint})
+	if err != nil || confirmed.State != StateCompleted || confirmed.Result != "lab result" {
+		t.Fatalf("experimental confirmation=%+v err=%v", confirmed, err)
+	}
+	stream := externalStream(t, store, draft.ConversationID)
+	var experiment core.Experiment
+	for _, event := range stream {
+		if event.EventType != "LAB_EXPERIMENT_COMPLETED" {
+			continue
+		}
+		var payload events.ProjectionEventPayload
+		if json.Unmarshal(event.Payload, &payload) != nil || json.Unmarshal(payload.Projection.Value, &experiment) != nil {
+			t.Fatalf("terminal experiment projection is malformed: %s", event.Payload)
+		}
+	}
+	if experiment.Status != core.ExperimentCompleted || experiment.TrustLabel != core.ExperimentTrustUnverified ||
+		experiment.SandboxRef != "lab-deterministic-no-effects-v1" || experiment.CapabilityProfileRef != "lab-no-effects-v1" ||
+		experiment.Budget.MaxExecutions != 1 || experiment.Budget.MaxUsageUnits != 1 || experiment.Budget.MaxMeteredCostMicrounits != 0 ||
+		experiment.Budget.MaxWallTimeSeconds != 60 || experiment.Budget.MaxChildren != 0 || len(experiment.Budget.AllowedInferencePools) != 1 || experiment.Budget.AllowedInferencePools[0] != "deterministic" {
+		t.Fatalf("experimental containment=%+v", experiment)
+	}
+	if containsEvent(stream, "INFERENCE_USAGE_RECORDED") || countEvents(stream, "INTENT_CONFIRMED") != 1 {
+		t.Fatalf("experimental stream crossed containment or duplicated confirmation: %+v", stream)
+	}
+	if _, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: draft.ConversationID, MessageID: "confirmation-1", Fingerprint: draft.Intent.Fingerprint}); err != nil {
+		t.Fatalf("exact experimental retry failed: %v", err)
+	}
+	if countEvents(externalStream(t, store, draft.ConversationID), "INTENT_CONFIRMED") != 1 {
+		t.Fatal("experimental retry duplicated confirmation")
+	}
+}
+
+func TestNonDeterministicExperimentFailsBeforeConfirmation(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := NewWithNormalizer(app.New(events.NewGateway(store)), experimentNormalizer{objective: "draft an experimental report"})
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	draft, err := service.Handle(ctx, principal, Message{ConversationID: "unsupported-experiment", MessageID: "message-1", Text: "Experiment with a report"})
+	if err != nil || draft.Intent == nil || draft.Intent.RequestedExecutionKind != core.ExecutionAgent {
+		t.Fatalf("unsupported experimental review=%+v err=%v", draft, err)
+	}
+	if _, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: draft.ConversationID, MessageID: "confirmation-1", Fingerprint: draft.Intent.Fingerprint}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("non-deterministic experiment confirmation err=%v", err)
+	}
+	if containsEvent(externalStream(t, store, draft.ConversationID), "INTENT_CONFIRMED") {
+		t.Fatal("invalid experimental route persisted confirmation")
+	}
 }
 
 func TestIntentConversationByteLimitRejectsBeforeAppending(t *testing.T) {
@@ -792,12 +914,12 @@ func (clarificationRoutingNormalizer) Normalize(_ context.Context, turns []Conve
 	if len(turns) == 1 {
 		return Normalization{
 			State: normalizationNeedsInput, Reply: "Provide the final objective.",
-			Candidate: IntentCandidate{Objective: "echo provisional", MissingUserInputs: []core.IntentValue{{Value: "final objective", Origin: "DEFAULT"}}},
+			Candidate: IntentCandidate{Mode: core.IntentModeStandard, Objective: "echo provisional", MissingUserInputs: []core.IntentValue{{Value: "final objective", Origin: "DEFAULT"}}},
 		}, nil
 	}
 	return Normalization{
 		State: normalizationReady, Reply: "Review this intent.",
-		Candidate: IntentCandidate{Objective: latest.Text, Deliverables: []core.IntentValue{value}, CompletionCriteria: []core.IntentValue{value}},
+		Candidate: IntentCandidate{Mode: core.IntentModeStandard, Objective: latest.Text, Deliverables: []core.IntentValue{value}, CompletionCriteria: []core.IntentValue{value}},
 	}, nil
 }
 
@@ -853,7 +975,7 @@ func (n *stagedNormalizer) Normalize(_ context.Context, turns []ConversationTurn
 	value := core.IntentValue{Value: "Deliver " + latest.MessageID, Origin: "EXPLICIT", SourceMessageID: latest.MessageID}
 	return Normalization{
 		State: normalizationReady, Reply: "Review this intent.",
-		Candidate: IntentCandidate{Objective: "Objective " + latest.MessageID, Deliverables: []core.IntentValue{value}, CompletionCriteria: []core.IntentValue{value}},
+		Candidate: IntentCandidate{Mode: core.IntentModeStandard, Objective: "Objective " + latest.MessageID, Deliverables: []core.IntentValue{value}, CompletionCriteria: []core.IntentValue{value}},
 	}, nil
 }
 

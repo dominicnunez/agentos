@@ -313,6 +313,9 @@ func validateRecoveryIntentConfirmations(stream []events.Event) error {
 			return fmt.Errorf("event %s contains an invalid intent confirmation", event.EventID)
 		}
 		if confirmation.GoalID == "" {
+			if err := events.ValidateReviewedIntentAdmission(stream, event); err != nil {
+				return fmt.Errorf("event %s: %w", event.EventID, err)
+			}
 			continue
 		}
 		goal, err := recoveryActiveGoalAtSequence(stream, core.ID(confirmation.GoalID), event.Sequence)
@@ -553,7 +556,7 @@ func validateRecoveryWorkIntentBinding(event events.Event, record events.Project
 	if intentState.CorrelationID != record.CorrelationID || intent.ID != work.IntentID || intent.GoalID != work.GoalID || intent.NormalizedObjective != work.Objective || string(intent.OrganizationID) != event.OrganizationID {
 		return fmt.Errorf("work does not match its accepted Intent boundary")
 	}
-	if intent.GoalID != "" {
+	if intentRequiresConfirmation(intent) {
 		var confirmations []events.Event
 		for _, candidate := range stream {
 			if candidate.EventType == "INTENT_CONFIRMED" && candidate.CorrelationID == record.CorrelationID {
@@ -561,20 +564,28 @@ func validateRecoveryWorkIntentBinding(event events.Event, record events.Project
 			}
 		}
 		if len(confirmations) != 1 || confirmations[0].Sequence >= event.Sequence {
-			return fmt.Errorf("goal-bound Work requires one prior intent confirmation")
+			return fmt.Errorf("external Work requires one prior intent confirmation")
 		}
-		if err := events.ValidateGoalBoundIntentConfirmation(confirmations[0], intent); err != nil {
+		if err := events.ValidateIntentConfirmation(confirmations[0], intent); err != nil {
 			return err
 		}
-		goal, err := recoveryActiveGoalAtSequence(stream, intent.GoalID, confirmations[0].Sequence)
-		if err != nil {
-			return err
-		}
-		if err := events.ValidateReviewedGoalIntentAdmission(stream, confirmations[0], goal); err != nil {
+		if intent.GoalID != "" {
+			goal, err := recoveryActiveGoalAtSequence(stream, intent.GoalID, confirmations[0].Sequence)
+			if err != nil {
+				return err
+			}
+			if err := events.ValidateReviewedGoalIntentAdmission(stream, confirmations[0], goal); err != nil {
+				return err
+			}
+		} else if err := events.ValidateReviewedIntentAdmission(stream, confirmations[0]); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func intentRequiresConfirmation(intent core.Intent) bool {
+	return intent.GoalID != "" || intent.SourceChannel == "HUMAN_DIRECT" || intent.SourceChannel == "A2A" || intent.SourcePrincipalKind == core.PrincipalHuman || intent.SourcePrincipalKind == core.PrincipalExternalAgent
 }
 
 func recoveryActiveGoalAtSequence(stream []events.Event, goalID core.ID, confirmationSequence int64) (core.Goal, error) {

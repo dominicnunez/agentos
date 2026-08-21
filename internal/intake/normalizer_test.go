@@ -19,7 +19,7 @@ func (m normalizationModel) CompleteText(context.Context, string) (TextCompletio
 }
 
 func TestModelNormalizerRequiresCompleteStrictIntent(t *testing.T) {
-	ready := `{"state":"READY_FOR_REVIEW","reply":"Please review this interpretation.","intent":{"objective":"Release version 1","context":[],"deliverables":[{"value":"Linux binary","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"The verified binary is public","origin":"EXPLICIT","source_message_id":"message-1"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":["PUBLIC_EXTERNAL"],"missing_user_inputs":[]}}`
+	ready := `{"state":"READY_FOR_REVIEW","reply":"Please review this interpretation.","intent":{"mode":"STANDARD","objective":"Release version 1","context":[],"deliverables":[{"value":"Linux binary","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"The verified binary is public","origin":"EXPLICIT","source_message_id":"message-1"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":["PUBLIC_EXTERNAL"],"missing_user_inputs":[]}}`
 	normalizer, err := NewModelNormalizer(normalizationModel{response: ready})
 	if err != nil {
 		t.Fatal(err)
@@ -31,6 +31,8 @@ func TestModelNormalizerRequiresCompleteStrictIntent(t *testing.T) {
 
 	for _, malformed := range []string{
 		ready + `{}`,
+		strings.Replace(ready, `"mode":"STANDARD"`, `"mode":""`, 1),
+		strings.Replace(ready, `"mode":"STANDARD"`, `"mode":"ADMIN"`, 1),
 		strings.Replace(ready, `"missing_user_inputs":[]`, `"missing_user_inputs":[{"value":"version","origin":"INFERRED"}]`, 1),
 		strings.Replace(ready, `"deliverables":[{"value":"Linux binary","origin":"EXPLICIT","source_message_id":"message-1"}]`, `"deliverables":[]`, 1),
 		strings.Replace(ready, `"consequence_candidates":["PUBLIC_EXTERNAL"]`, `"consequence_candidates":["NO_APPROVAL_NEEDED"]`, 1),
@@ -48,7 +50,7 @@ func TestModelNormalizerRequiresCompleteStrictIntent(t *testing.T) {
 }
 
 func TestModelNormalizerAllowsOnlyExplicitMissingUserInputState(t *testing.T) {
-	response := `{"state":"NEEDS_USER_INPUT","reply":"Which release version should be used?","intent":{"objective":"Publish a release","context":[],"deliverables":[],"completion_criteria":[],"constraints":[],"resolved_decisions":[],"consequence_candidates":["PUBLIC_EXTERNAL"],"missing_user_inputs":[{"value":"Release version","origin":"INFERRED"}]}}`
+	response := `{"state":"NEEDS_USER_INPUT","reply":"Which release version should be used?","intent":{"mode":"STANDARD","objective":"Publish a release","context":[],"deliverables":[],"completion_criteria":[],"constraints":[],"resolved_decisions":[],"consequence_candidates":["PUBLIC_EXTERNAL"],"missing_user_inputs":[{"value":"Release version","origin":"INFERRED"}]}}`
 	normalizer, err := NewModelNormalizer(normalizationModel{response: response})
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +62,7 @@ func TestModelNormalizerAllowsOnlyExplicitMissingUserInputState(t *testing.T) {
 }
 
 func TestModelNormalizerBindsOnlyExplicitGoalReference(t *testing.T) {
-	response := `{"state":"READY_FOR_REVIEW","reply":"Review the Goal-bound work.","intent":{"objective":"Advance the Goal","goal":{"value":"goal-123","origin":"EXPLICIT","source_message_id":"message-1"},"context":[],"deliverables":[{"value":"Result","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Verified","origin":"DEFAULT"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
+	response := `{"state":"READY_FOR_REVIEW","reply":"Review the Goal-bound work.","intent":{"mode":"STANDARD","objective":"Advance the Goal","goal":{"value":"goal-123","origin":"EXPLICIT","source_message_id":"message-1"},"context":[],"deliverables":[{"value":"Result","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Verified","origin":"DEFAULT"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
 	normalizer, err := NewModelNormalizer(normalizationModel{response: response})
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +88,7 @@ func TestModelNormalizerBindsOnlyExplicitGoalReference(t *testing.T) {
 }
 
 func TestModelNormalizerTreatsOnlyUnambiguousPunctuationAsGoalBoundary(t *testing.T) {
-	response := `{"state":"READY_FOR_REVIEW","reply":"Review the Goal-bound work.","intent":{"objective":"Advance the Goal","goal":{"value":"goal-123","origin":"EXPLICIT","source_message_id":"message-1"},"context":[],"deliverables":[{"value":"Result","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Verified","origin":"DEFAULT"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
+	response := `{"state":"READY_FOR_REVIEW","reply":"Review the Goal-bound work.","intent":{"mode":"STANDARD","objective":"Advance the Goal","goal":{"value":"goal-123","origin":"EXPLICIT","source_message_id":"message-1"},"context":[],"deliverables":[{"value":"Result","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Verified","origin":"DEFAULT"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
 	for _, text := range []string{"Use goal-123, then continue", "Use goal-123!", "Use (goal-123)."} {
 		normalizer, err := NewModelNormalizer(normalizationModel{response: response})
 		if err != nil {

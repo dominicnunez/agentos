@@ -395,6 +395,46 @@ func TestVerticalSlice(t *testing.T) {
 	}
 }
 
+func TestSubmitRejectsMismatchedOperatorIdentity(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	service := New(gateway)
+
+	tests := []struct {
+		name          string
+		channel       string
+		principalKind core.PrincipalKind
+	}{
+		{name: "A2A caller labeled as user", channel: "A2A", principalKind: core.PrincipalHuman},
+		{name: "direct caller labeled as external Agent", channel: "HUMAN_DIRECT", principalKind: core.PrincipalExternalAgent},
+		{name: "A2A caller labeled as runtime", channel: "A2A", principalKind: core.PrincipalRuntime},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requestID := fmt.Sprintf("mismatched-operator-%d", index)
+			_, err := service.Submit(ctx, Submit{
+				RequestID: requestID, OrganizationID: "org-1", Statement: "echo rejected",
+				Kind: core.ExecutionDeterministic, MessageID: "message-" + requestID,
+				SourcePrincipalID: "operator-1", SourcePrincipalKind: test.principalKind,
+				SourceChannel: test.channel,
+			})
+			if err == nil {
+				t.Fatal("mismatched operator identity was accepted")
+			}
+			if _, found, err := gateway.ResolveExternalWork(ctx, "org-1", requestID); err != nil {
+				t.Fatal(err)
+			} else if found {
+				t.Fatal("rejected operator identity reserved durable external work")
+			}
+		})
+	}
+}
+
 type eventReadCountingLedger struct {
 	*ledger.SQLite
 	eventReads int
@@ -2901,8 +2941,8 @@ func seedAcceptedWorkWithoutPlan(t *testing.T, gateway *events.Gateway, correlat
 	t.Helper()
 	ctx := context.Background()
 	draft := core.IntentDraft{
-		ID: core.ID("intent-draft-" + correlationID), OrganizationID: "org-1", Version: 1,
-		Status: core.IntentStatusReadyForReview, RequestedExecutionKind: core.ExecutionAgent,
+		ID: core.ID("intent-" + correlationID), OrganizationID: "org-1", Version: 1,
+		Status: core.IntentStatusReadyForReview, Mode: core.IntentModeStandard, RequestedExecutionKind: core.ExecutionAgent,
 		Objective: "complete accepted work", Context: []core.IntentValue{},
 		Deliverables:       []core.IntentValue{{Value: "completed work", Origin: "USER"}},
 		CompletionCriteria: []core.IntentValue{{Value: "the work is complete", Origin: "USER"}},
@@ -2928,6 +2968,30 @@ func seedAcceptedWorkWithoutPlan(t *testing.T, gateway *events.Gateway, correlat
 		func() error {
 			return repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", correlationID, 1, organization, nil)
 		},
+	} {
+		if err := save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTAKE_MESSAGE_RECORDED", SourceActorID: "user-1", TaskID: "task-" + correlationID, CorrelationID: correlationID,
+		Payload: events.IntakeMessageRecordedPayload{MessageID: "message-1", Text: intent.OriginalInstruction, SourcePrincipalID: "user-1", SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", RequestedExecutionKind: core.ExecutionAgent},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_DRAFTED", SourceActorID: "runtime", TaskID: "task-" + correlationID, CorrelationID: correlationID,
+		Payload: events.IntentDraftedPayload{SourceMessageID: "message-1", Draft: draft, Reply: "Review intent."},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gateway.PublishIntentConfirmation(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-" + correlationID, CorrelationID: correlationID,
+		Payload: events.IntentConfirmedPayload{IntentID: string(draft.ID), Version: draft.Version, Fingerprint: draft.Fingerprint, ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1"},
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, save := range []func() error{
 		func() error {
 			return repository.SaveIntent(ctx, "INTENT_CREATED", "runtime", correlationID, 1, intent, nil)
 		},
@@ -2938,18 +3002,6 @@ func seedAcceptedWorkWithoutPlan(t *testing.T, gateway *events.Gateway, correlat
 		if err := save(); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
-		OrganizationID: "org-1", EventType: "INTENT_DRAFTED", SourceActorID: "runtime", TaskID: "task-" + correlationID, CorrelationID: correlationID,
-		Payload: events.IntentDraftedPayload{SourceMessageID: "message-1", Draft: draft, Reply: "Review intent."},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
-		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-" + correlationID, CorrelationID: correlationID,
-		Payload: events.IntentConfirmedPayload{IntentID: string(draft.ID), Version: draft.Version, Fingerprint: draft.Fingerprint, ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1"},
-	}); err != nil {
-		t.Fatal(err)
 	}
 	return work, draft
 }

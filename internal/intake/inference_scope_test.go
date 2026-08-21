@@ -51,7 +51,7 @@ func TestIntentNormalizationUsesDurableInferenceScope(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	ready := `{"state":"READY_FOR_REVIEW","reply":"Review this intent.","intent":{"objective":"Prepare a Linux release","context":[],"deliverables":[{"value":"Linux binary","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Binary passes verification","origin":"EXPLICIT","source_message_id":"message-1"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
+	ready := `{"state":"READY_FOR_REVIEW","reply":"Review this intent.","intent":{"mode":"STANDARD","objective":"Prepare a Linux release","context":[],"deliverables":[{"value":"Linux binary","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Binary passes verification","origin":"EXPLICIT","source_message_id":"message-1"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
 	guarded, err := inference.NewGuardedAdapter(store, &intakeExecutionModel{response: ready})
 	if err != nil {
 		t.Fatal(err)

@@ -73,7 +73,7 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 	team := core.Team{ID: "team-1", OrganizationID: organization.ID, Name: "Delivery", MemberAgentIDs: []core.ID{agent.ID}, Status: "ACTIVE", CreatedAt: now}
 	sourceText := "Use goal-1 to echo hello"
 	reviewed := core.IntentDraft{
-		ID: "intent-request-1", OrganizationID: organization.ID, Version: 1, Status: core.IntentStatusReadyForReview, RequestedExecutionKind: core.ExecutionDeterministic,
+		ID: "intent-request-1", OrganizationID: organization.ID, Version: 1, Status: core.IntentStatusReadyForReview, Mode: core.IntentModeStandard, RequestedExecutionKind: core.ExecutionDeterministic,
 		Goal: &core.IntentValue{Value: string(goal.ID), Origin: "EXPLICIT", SourceMessageID: "message-1"}, Objective: "echo hello",
 		Context: []core.IntentValue{}, Deliverables: []core.IntentValue{{Value: "hello", Origin: "EXPLICIT", SourceMessageID: "message-1"}},
 		CompletionCriteria: []core.IntentValue{{Value: "verified outcome", Origin: "DEFAULT"}}, Constraints: []core.IntentValue{}, ResolvedDecisions: []core.IntentDecision{},
@@ -178,7 +178,7 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 		t.Fatalf("startup admitted Goal-bound Work without review evidence: %v", err)
 	}
 	withUnboundConfirmation := insertUnboundReplayConfirmation(t, stream, "request-1", intent)
-	if _, err := New(events.NewGateway(replayLedger{stream: withUnboundConfirmation})).Rebuild(ctx); err == nil || !strings.Contains(err.Error(), "one prior reviewed intent confirmation") {
+	if _, err := New(events.NewGateway(replayLedger{stream: withUnboundConfirmation})).Rebuild(ctx); err == nil || !strings.Contains(err.Error(), "reviewed Goal provenance") {
 		t.Fatalf("startup admitted Goal-bound Work after conflicting unbound confirmation: %v", err)
 	}
 	workBeforeIntent := swapReplayProjectionSequences(t, stream, "INTENT_CREATED", "WORK_CREATED")

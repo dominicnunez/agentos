@@ -453,6 +453,9 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 				}
 				confirmations[event.CorrelationID] = append(confirmations[event.CorrelationID], event)
 				if confirmation.GoalID == "" {
+					if err := events.ValidateReviewedIntentAdmission(ordered, event); err != nil {
+						return fmt.Errorf("event %s: %w", event.EventID, err)
+					}
 					continue
 				}
 				goal, found := graph.Goals[core.ID(confirmation.GoalID)]
@@ -622,16 +625,20 @@ func validateProjectionWorkAtAdmission(work core.Work, event events.Event, recor
 	if !found || intent.CorrelationID != record.CorrelationID || intent.Value.ID != work.IntentID || intent.Value.GoalID != work.GoalID || intent.Value.NormalizedObjective != work.Objective || string(intent.Value.OrganizationID) != event.OrganizationID {
 		return fmt.Errorf("work requires its exact prior Intent on the same organization and correlation boundary")
 	}
-	if intent.Value.GoalID != "" {
+	if intentRequiresConfirmation(intent.Value) {
 		matching := confirmations[record.CorrelationID]
 		if len(matching) != 1 || matching[0].Sequence >= event.Sequence {
-			return fmt.Errorf("goal-bound Work requires one prior reviewed intent confirmation")
+			return fmt.Errorf("external Work requires one prior reviewed intent confirmation")
 		}
-		if err := events.ValidateGoalBoundIntentConfirmation(matching[0], intent.Value); err != nil {
+		if err := events.ValidateIntentConfirmation(matching[0], intent.Value); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func intentRequiresConfirmation(intent core.Intent) bool {
+	return intent.GoalID != "" || intent.SourceChannel == "HUMAN_DIRECT" || intent.SourceChannel == "A2A" || intent.SourcePrincipalKind == core.PrincipalHuman || intent.SourcePrincipalKind == core.PrincipalExternalAgent
 }
 
 func validateProjectionTaskAtAdmission(task core.Task, event events.Event, record events.ProjectionRecord, graph core.DurableGraph) error {

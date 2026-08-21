@@ -98,6 +98,11 @@ func TestExperimentalSubmissionRejectsUnenforcedInferenceAndEffectProfiles(t *te
 	if _, err := service.SubmitExperiment(context.Background(), base, spec); err == nil {
 		t.Fatal("metered inference entered the Lab before cost enforcement exists")
 	}
+	spec = experimentSpec()
+	spec.SandboxRef = "caller-selected-sandbox"
+	if _, err := service.SubmitExperiment(context.Background(), base, spec); err == nil {
+		t.Fatal("caller-selected Lab sandbox was accepted")
+	}
 }
 
 func TestOrdinaryWorkCannotBeRetrofittedWithLabContainment(t *testing.T) {
@@ -247,10 +252,11 @@ func TestPromotionNominationRequiresIndependentSameOrganizationWork(t *testing.T
 }
 
 func experimentSpec() lab.Spec {
-	return lab.Spec{
-		SandboxRef: "sandbox-disposable-1", CapabilityProfileRef: lab.NoEffectsCapabilityProfile,
-		Budget: core.ExperimentBudget{MaxExecutions: 2, MaxUsageUnits: 1000, MaxWallTimeSeconds: 60, MaxChildren: 1, AllowedInferencePools: []string{lab.DeterministicInferencePool}},
-	}
+	spec := lab.DefaultSpec()
+	spec.Budget.MaxExecutions = 2
+	spec.Budget.MaxUsageUnits = 1000
+	spec.Budget.MaxChildren = 1
+	return spec
 }
 
 func eventOfType(t *testing.T, stream []events.Event, eventType string) events.Event {

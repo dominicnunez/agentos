@@ -296,6 +296,9 @@ func (s *Service) ConfirmIntent(ctx context.Context, principal Principal, confir
 	if err != nil {
 		return View{}, err
 	}
+	if err := core.ValidateAcceptedIntentDraft(draft, core.ID(principal.OrganizationID), kind); err != nil {
+		return View{}, fmt.Errorf("%w: reviewed intent is not executable: %w", ErrInvalid, err)
+	}
 	_, err = s.app.ConfirmIntent(ctx, app.IntentConfirmation{
 		RequestID: confirmation.ConversationID, OrganizationID: principal.OrganizationID,
 		MessageID: confirmation.MessageID, Fingerprint: confirmation.Fingerprint,
@@ -434,7 +437,7 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 	}
 	draft := core.IntentDraft{
 		ID: core.ID("intent-" + stream[0].CorrelationID), OrganizationID: core.ID(principal.OrganizationID),
-		Version: version, Status: status, RequestedExecutionKind: requestedKind,
+		Version: version, Status: status, Mode: normalized.Candidate.Mode, RequestedExecutionKind: requestedKind,
 		Goal:      cloneIntentValue(normalized.Candidate.Goal),
 		Objective: normalized.Candidate.Objective, Context: normalized.Candidate.Context,
 		Deliverables: normalized.Candidate.Deliverables, CompletionCriteria: normalized.Candidate.CompletionCriteria,

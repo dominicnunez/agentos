@@ -9,6 +9,26 @@ import (
 	"unicode/utf8"
 )
 
+// ValidIntentSourceIdentity binds each durable source channel to the only
+// principal kind that may use it. Authentication and capability checks remain
+// boundary responsibilities; this prevents mislabeled provenance from
+// bypassing reviewed external-work admission.
+func ValidIntentSourceIdentity(id ID, kind PrincipalKind, channel string) bool {
+	if id == "" {
+		return false
+	}
+	switch channel {
+	case "INTERNAL":
+		return kind == PrincipalRuntime
+	case "HUMAN_DIRECT":
+		return kind == PrincipalHuman
+	case "A2A":
+		return kind == PrincipalExternalAgent
+	default:
+		return false
+	}
+}
+
 // ValidGoalReferenceID keeps Goal identifiers admitted through untrusted
 // natural-language intake unambiguous and safe to match as exact tokens.
 func ValidGoalReferenceID(value string) bool {
@@ -44,6 +64,12 @@ func FingerprintIntentDraft(draft IntentDraft) (string, error) {
 func ValidateAcceptedIntentDraft(draft IntentDraft, organizationID ID, kind ExecutionKind) error {
 	if draft.ID == "" || draft.OrganizationID != organizationID || draft.Version < 1 || draft.Status != IntentStatusReadyForReview || draft.RequestedExecutionKind != kind {
 		return fmt.Errorf("identity, version, review state, and requested execution kind must match")
+	}
+	if draft.Mode != IntentModeStandard && draft.Mode != IntentModeExperiment {
+		return fmt.Errorf("intent mode must be standard or experiment")
+	}
+	if draft.Mode == IntentModeExperiment && kind != ExecutionDeterministic {
+		return fmt.Errorf("V1 experimental intent requires deterministic execution")
 	}
 	if strings.TrimSpace(draft.Objective) == "" || len(draft.Deliverables) == 0 || len(draft.CompletionCriteria) == 0 || len(draft.MissingUserInputs) != 0 {
 		return fmt.Errorf("objective, deliverables, and completion criteria are required and missing user inputs are forbidden")
