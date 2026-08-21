@@ -165,6 +165,21 @@ func TestLegacyVerificationRejectsTamperedAdmissionsAfterMigration(t *testing.T)
 			t.Fatal(err)
 		}
 	}
+	missionStream, err := store.Events(ctx, "mission-1")
+	if err != nil || len(missionStream) != 1 {
+		_ = store.Close()
+		t.Fatalf("mission stream=%+v err=%v", missionStream, err)
+	}
+	legacyAdmission, present, err := events.ResealProjectionEventForMigration(missionStream[0], events.SchemaVersion, ledger.LegacyEventSchemaVersion)
+	if err != nil || !present {
+		_ = store.Close()
+		t.Fatalf("legacy mission admission: present=%t err=%v", present, err)
+	}
+	legacyPayload, err := json.Marshal(legacyAdmission)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +187,23 @@ func TestLegacyVerificationRejectsTamperedAdmissionsAfterMigration(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM events WHERE event_type='ORGANIZATION_CREATED'; DELETE FROM records WHERE kind='organization'; UPDATE events SET schema_version=?; UPDATE agentos_storage SET storage_version=2,event_schema_version=?; PRAGMA user_version=2`, ledger.LegacyEventSchemaVersion, ledger.LegacyEventSchemaVersion); err != nil {
+	if _, err := db.ExecContext(ctx, `DELETE FROM events WHERE event_type='ORGANIZATION_CREATED'; DELETE FROM records WHERE kind='organization'`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE events SET payload=?,schema_version=? WHERE event_id=?`, legacyPayload, ledger.LegacyEventSchemaVersion, missionStream[0].EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE records SET admission_fingerprint=? WHERE admission_event_id=?`, legacyAdmission.Admission.Fingerprint, missionStream[0].EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=2,event_schema_version=?`, ledger.LegacyEventSchemaVersion); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA user_version=2`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}

@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,7 +40,7 @@ func TestStorageV1FixtureMatchesFrozenFingerprint(t *testing.T) {
 	}
 }
 
-func TestOpenMigratesStorageV1FixtureWithoutRewritingLedger(t *testing.T) {
+func TestOpenMigratesStorageV1FixtureAndResealsProjectionAdmissions(t *testing.T) {
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "storage-v1.db")
 	legacy := createStorageV1Fixture(t, path)
@@ -48,7 +49,27 @@ func TestOpenMigratesStorageV1FixtureWithoutRewritingLedger(t *testing.T) {
 		_ = legacy.Close()
 		t.Fatal(err)
 	}
-	if _, err := legacy.ExecContext(ctx, `UPDATE events SET schema_version=?`, LegacyEventSchemaVersion); err != nil {
+	row := legacy.QueryRowContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE sequence=1`)
+	event, err := scanEvent(row)
+	if err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
+	legacyAdmission, present, err := events.ResealProjectionEventForMigration(event, events.SchemaVersion, LegacyEventSchemaVersion)
+	if err != nil || !present {
+		_ = legacy.Close()
+		t.Fatalf("create legacy projection admission: present=%t err=%v", present, err)
+	}
+	legacyPayload, err := json.Marshal(legacyAdmission)
+	if err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
+	if _, err := legacy.ExecContext(ctx, `UPDATE events SET payload=?,schema_version=? WHERE event_id=?`, legacyPayload, LegacyEventSchemaVersion, event.EventID); err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
+	if _, err := legacy.ExecContext(ctx, `UPDATE records SET admission_fingerprint=? WHERE admission_event_id=?`, legacyAdmission.Admission.Fingerprint, event.EventID); err != nil {
 		_ = legacy.Close()
 		t.Fatal(err)
 	}
@@ -79,9 +100,9 @@ func TestOpenMigratesStorageV1FixtureWithoutRewritingLedger(t *testing.T) {
 		_ = store.Close()
 		t.Fatal(err)
 	}
-	if string(afterPayload) != string(beforePayload) {
+	if string(afterPayload) == string(beforePayload) {
 		_ = store.Close()
-		t.Fatal("storage migration rewrote the authoritative Event payload")
+		t.Fatal("storage migration did not reseal the projection admission")
 	}
 	records, err := store.Records(ctx, "organization", string(organization.ID))
 	if err != nil || len(records) != 1 {
@@ -99,6 +120,9 @@ func TestOpenMigratesStorageV1FixtureWithoutRewritingLedger(t *testing.T) {
 	stream, err := restarted.Events(ctx, "legacy-request")
 	if err != nil || len(stream) != 1 || stream[0].OrganizationID != "org-1" {
 		t.Fatalf("restarted migrated stream=%+v err=%v", stream, err)
+	}
+	if _, present, err := events.AdmittedProjection(stream[0]); err != nil || !present {
+		t.Fatalf("migrated projection admission: present=%t err=%v", present, err)
 	}
 }
 

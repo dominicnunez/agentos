@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -203,6 +204,9 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 		if incompatible != 0 {
 			return fmt.Errorf("storage contains pre-mode Intent review evidence that cannot be migrated without changing authoritative fingerprints")
 		}
+		if err := resealLegacyProjectionAdmissions(ctx, tx); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE events SET schema_version=? WHERE schema_version=?`, events.SchemaVersion, LegacyEventSchemaVersion); err != nil {
 			return fmt.Errorf("advance durable Event Contract version: %w", err)
 		}
@@ -218,6 +222,76 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 	default:
 		return fmt.Errorf("no reviewed storage migration exists")
 	}
+}
+
+type projectionReseal struct {
+	eventID        string
+	oldPayload     []byte
+	newPayload     []byte
+	oldFingerprint string
+	newFingerprint string
+}
+
+func resealLegacyProjectionAdmissions(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,CAST(payload AS BLOB),correlation_id,created_at,schema_version FROM events ORDER BY sequence`)
+	if err != nil {
+		return fmt.Errorf("read legacy projection admissions: %w", err)
+	}
+	var reseals []projectionReseal
+	for rows.Next() {
+		event, err := scanEvent(rows)
+		if err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("decode legacy projection admission: %w", err)
+		}
+		payload, present, err := events.ResealProjectionEventForMigration(event, LegacyEventSchemaVersion, events.SchemaVersion)
+		if err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("reseal legacy event %s: %w", event.EventID, err)
+		}
+		if !present {
+			continue
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("encode resealed legacy event %s: %w", event.EventID, err)
+		}
+		var original events.ProjectionEventPayload
+		if decodeExactJSONBytes(event.Payload, &original) != nil {
+			_ = rows.Close()
+			return fmt.Errorf("decode original legacy event %s", event.EventID)
+		}
+		reseals = append(reseals, projectionReseal{
+			eventID: event.EventID, oldPayload: event.Payload, newPayload: body,
+			oldFingerprint: original.Admission.Fingerprint, newFingerprint: payload.Admission.Fingerprint,
+		})
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close legacy projection admissions: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("scan legacy projection admissions: %w", err)
+	}
+	for _, reseal := range reseals {
+		result, err := tx.ExecContext(ctx, `UPDATE events SET payload=?,schema_version=? WHERE event_id=? AND payload=? AND schema_version=?`, reseal.newPayload, events.SchemaVersion, reseal.eventID, reseal.oldPayload, LegacyEventSchemaVersion)
+		if err != nil {
+			return fmt.Errorf("persist resealed legacy event %s: %w", reseal.eventID, err)
+		}
+		changed, err := result.RowsAffected()
+		if err != nil || changed != 1 {
+			return fmt.Errorf("legacy event %s changed across its migration boundary", reseal.eventID)
+		}
+		result, err = tx.ExecContext(ctx, `UPDATE records SET admission_fingerprint=? WHERE admission_event_id=? AND admission_fingerprint=?`, reseal.newFingerprint, reseal.eventID, reseal.oldFingerprint)
+		if err != nil {
+			return fmt.Errorf("persist resealed legacy record %s: %w", reseal.eventID, err)
+		}
+		changed, err = result.RowsAffected()
+		if err != nil || changed != 1 {
+			return fmt.Errorf("legacy record %s does not match its sealed admission", reseal.eventID)
+		}
+	}
+	return nil
 }
 
 // ValidateStorageContract verifies a supported offline database without

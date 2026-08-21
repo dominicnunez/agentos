@@ -2009,6 +2009,31 @@ func SealProjectionEvent(event Event, record ProjectionRecord, detail json.RawMe
 // event that contains a reserved projection/admission key must carry one exact
 // valid sealed contract or fail closed.
 func AdmittedProjection(event Event) (ProjectionEventPayload, bool, error) {
+	return admittedProjectionAtSchema(event, SchemaVersion)
+}
+
+// ResealProjectionEventForMigration validates one existing projection
+// admission at its exact source Event Contract boundary and deterministically
+// reseals it for a different schema. Storage migrations and their fixtures are
+// its only intended callers.
+func ResealProjectionEventForMigration(event Event, sourceSchemaVersion, targetSchemaVersion int) (ProjectionEventPayload, bool, error) {
+	if sourceSchemaVersion < 1 || targetSchemaVersion < 1 || sourceSchemaVersion == targetSchemaVersion || event.SchemaVersion != sourceSchemaVersion || sourceSchemaVersion != SchemaVersion && targetSchemaVersion != SchemaVersion {
+		return ProjectionEventPayload{}, false, fmt.Errorf("projection migration boundary is invalid")
+	}
+	payload, present, err := admittedProjectionAtSchema(event, sourceSchemaVersion)
+	if err != nil || !present {
+		return payload, present, err
+	}
+	event.SchemaVersion = targetSchemaVersion
+	fingerprint, err := projectionAdmissionFingerprint(payload.Admission, event, payload.Projection, payload.Detail)
+	if err != nil {
+		return ProjectionEventPayload{}, true, err
+	}
+	payload.Admission.Fingerprint = fingerprint
+	return payload, true, nil
+}
+
+func admittedProjectionAtSchema(event Event, expectedSchemaVersion int) (ProjectionEventPayload, bool, error) {
 	if rejectDuplicateJSONKeys(event.Payload) != nil {
 		return ProjectionEventPayload{}, false, fmt.Errorf("event payload is malformed")
 	}
@@ -2028,7 +2053,7 @@ func AdmittedProjection(event Event) (ProjectionEventPayload, bool, error) {
 		return ProjectionEventPayload{}, true, fmt.Errorf("projection event admission is malformed")
 	}
 	want, fingerprintErr := projectionAdmissionFingerprint(payload.Admission, event, payload.Projection, payload.Detail)
-	if fingerprintErr != nil || want != payload.Admission.Fingerprint || event.SchemaVersion != SchemaVersion {
+	if fingerprintErr != nil || want != payload.Admission.Fingerprint || event.SchemaVersion != expectedSchemaVersion {
 		return ProjectionEventPayload{}, true, fmt.Errorf("projection event admission does not match its event boundary")
 	}
 	return payload, true, nil
