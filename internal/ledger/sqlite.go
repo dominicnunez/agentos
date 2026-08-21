@@ -1048,6 +1048,8 @@ func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.Projecti
 		if len(routes) != 0 || requested.Mode != "OPERATOR_HUMAN_INPUT" && requested.Mode != "STRUCTURED_HUMAN_COMPLETION" || requested.InputEventRef == "" {
 			return events.Event{}, nil, fmt.Errorf("user execution-start boundary is invalid")
 		}
+	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
+		return events.Event{}, nil, fmt.Errorf("execution-start kind is unavailable")
 	default:
 		return events.Event{}, nil, fmt.Errorf("execution-start kind is unavailable")
 	}

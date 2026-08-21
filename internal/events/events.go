@@ -3284,6 +3284,8 @@ func (g *Gateway) PublishExecutionStart(ctx context.Context, draft ProjectionDra
 		if len(routes) != 0 || detail.Mode != "OPERATOR_HUMAN_INPUT" && detail.Mode != "STRUCTURED_HUMAN_COMPLETION" || detail.InputEventRef == "" {
 			return Event{}, nil, fmt.Errorf("user execution-start boundary is invalid")
 		}
+	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
+		return Event{}, nil, fmt.Errorf("execution-start kind is unavailable")
 	default:
 		return Event{}, nil, fmt.Errorf("execution-start kind is unavailable")
 	}
