@@ -115,7 +115,7 @@ func TestDurableObjectsSurviveRestartAndRebuildFromEvents(t *testing.T) {
 			_, err := gateway.PublishIntentConfirmation(ctx, events.TrustedDraft{
 				OrganizationID: string(organization.ID), EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-request-1", CorrelationID: "request-1",
 				Payload: events.IntentConfirmedPayload{IntentID: string(intent.ID), GoalID: string(goal.ID), Version: 1, Fingerprint: intent.AcceptedFingerprint, ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1"},
-			}, goal.ID)
+			}, goal.ID, "")
 			return err
 		},
 		func() error {

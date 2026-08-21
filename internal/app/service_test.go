@@ -105,7 +105,7 @@ func TestRecoveryRestoresDurableExperimentContainment(t *testing.T) {
 		t.Fatal(err)
 	}
 	confirmation := events.IntentConfirmedPayload{IntentID: string(draft.ID), Version: 1, Fingerprint: draft.Fingerprint, ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1"}
-	if _, err := gateway.PublishIntentConfirmation(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: taskID, CorrelationID: correlationID, Payload: confirmation}, ""); err != nil {
+	if _, err := gateway.PublishIntentConfirmation(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: taskID, CorrelationID: correlationID, Payload: confirmation}, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	intent := core.Intent{
@@ -400,7 +400,7 @@ func confirmedGoalSubmit(t *testing.T, ctx context.Context, gateway *events.Gate
 	}
 	if _, err := gateway.PublishIntentConfirmation(ctx, events.TrustedDraft{
 		OrganizationID: organizationID, EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-" + correlationID, CorrelationID: correlationID, Payload: payload,
-	}, goalID); err != nil {
+	}, goalID, ""); err != nil {
 		t.Fatal(err)
 	}
 	return in
@@ -3345,7 +3345,7 @@ func seedAcceptedWorkWithoutPlan(t *testing.T, gateway *events.Gateway, correlat
 	if _, err := gateway.PublishIntentConfirmation(ctx, events.TrustedDraft{
 		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-" + correlationID, CorrelationID: correlationID,
 		Payload: events.IntentConfirmedPayload{IntentID: string(draft.ID), Version: draft.Version, Fingerprint: draft.Fingerprint, ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1"},
-	}, ""); err != nil {
+	}, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, save := range []func() error{

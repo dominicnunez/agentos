@@ -815,7 +815,7 @@ func TestRecoveryRejectsGoalBoundWorkWithoutConfirmation(t *testing.T) {
 		t.Fatal(err)
 	}
 	confirmation := events.IntentConfirmedPayload{IntentID: string(intentDraft.ID), GoalID: string(goal.ID), Version: 1, Fingerprint: intentDraft.Fingerprint, ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1"}
-	confirmationEvent, err := store.AppendIntentConfirmation(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: taskID, CorrelationID: correlationID, Payload: confirmation}, goal.ID)
+	confirmationEvent, err := store.AppendIntentConfirmation(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: taskID, CorrelationID: correlationID, Payload: confirmation}, goal.ID, "")
 	if err != nil {
 		_ = store.Close()
 		t.Fatal(err)
