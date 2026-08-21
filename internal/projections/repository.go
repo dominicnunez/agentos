@@ -785,7 +785,7 @@ func validateLabExperimentAtAdmission(experiment core.Experiment, event events.E
 		return fmt.Errorf("lab experiment crosses its Work organization or objective")
 	}
 	if intent.Value.ReplacesWorkID != "" || work.Value.ReplacesWorkID != "" {
-		return fmt.Errorf("Lab Work cannot carry production replacement lineage")
+		return fmt.Errorf("lab Work cannot carry production replacement lineage")
 	}
 	switch experiment.Status {
 	case core.ExperimentRunning:
