@@ -1843,6 +1843,8 @@ func ValidateTaskExecutionStart(start Event, task core.Task, taskVersion int, wo
 		}
 	case core.ExecutionDeterministic, core.ExecutionHuman:
 		detail, err = nonAgentExecutionStartDetail(start, task.ExecutionKind)
+	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
+		err = fmt.Errorf("execution start uses an unavailable execution kind")
 	default:
 		err = fmt.Errorf("execution start uses an unavailable execution kind")
 	}
@@ -1911,6 +1913,8 @@ func nonAgentExecutionStartDetail(event Event, kind core.ExecutionKind) (Executi
 			return ExecutionStartDetail{}, fmt.Errorf("user execution-start detail is invalid")
 		}
 		expectedFields += 2
+	case core.ExecutionTool, core.ExecutionAgent, core.ExecutionTeam, core.ExecutionMixed:
+		return ExecutionStartDetail{}, fmt.Errorf("non-Agent execution-start kind is invalid")
 	default:
 		return ExecutionStartDetail{}, fmt.Errorf("non-Agent execution-start kind is invalid")
 	}
