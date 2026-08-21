@@ -1367,23 +1367,9 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 	if err != nil {
 		return "", err
 	}
-	strategy, strategyEventRefs, strategyContextRefs, err := ResolveStrategicContext(binding.OrganizationID, binding.Work, stream, manifestEvent.Sequence)
+	strategy, strategyEventRefs, strategyContextRefs, err := executionStrategicContext(binding, startEvent, stream)
 	if err != nil {
 		return "", err
-	}
-	plan, plannedStrategy, err := ResolvePlanStrategicContext(binding.OrganizationID, binding.CorrelationID, binding.Work, binding.Intent, stream)
-	startDetail, startErr := executionStartDetail(startEvent)
-	if err != nil {
-		return "", fmt.Errorf("resolve execution Plan strategic context: %w", err)
-	}
-	if startErr != nil {
-		return "", startErr
-	}
-	if !reflect.DeepEqual(strategy, plannedStrategy) || !slices.Equal(plan.StrategicEventRefs, strategyEventRefs) || !slices.Equal(plan.StrategicContextRefs, strategyContextRefs) {
-		return "", fmt.Errorf("execution strategic context does not match its durable Plan")
-	}
-	if !slices.Equal(startDetail.StrategicEventRefs, strategyEventRefs) || !slices.Equal(startDetail.StrategicContextRefs, strategyContextRefs) {
-		return "", fmt.Errorf("execution start does not bind the planned strategic context")
 	}
 	if !slices.Equal(manifest.AdditionalContextRefs, strategyContextRefs) {
 		return "", fmt.Errorf("execution manifest does not bind the planned strategic context")
@@ -1413,6 +1399,28 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 		Blueprint: blueprint, Task: task, Strategy: strategy, DependencyResults: dependencies, InboxEvents: inbox, Revision: revision,
 	})
 	return input, err
+}
+
+func executionStrategicContext(binding WorkCompletionBinding, startEvent Event, stream []Event) (*core.StrategicContext, []string, []core.VersionedRef, error) {
+	startDetail, err := executionStartDetail(startEvent)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	plan, plannedStrategy, err := ResolvePlanStrategicContext(binding.OrganizationID, binding.CorrelationID, binding.Work, binding.Intent, stream)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("resolve execution Plan strategic context: %w", err)
+	}
+	if !slices.Equal(plan.StrategicEventRefs, startDetail.StrategicEventRefs) || !slices.Equal(plan.StrategicContextRefs, startDetail.StrategicContextRefs) {
+		return nil, nil, nil, fmt.Errorf("execution start does not bind the planned strategic context")
+	}
+	strategy, err := ResolveStrategicContextByRefs(binding.OrganizationID, binding.Work, stream, startDetail.StrategicEventRefs, startDetail.StrategicContextRefs)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("resolve execution-start strategic context: %w", err)
+	}
+	if !reflect.DeepEqual(strategy, plannedStrategy) {
+		return nil, nil, nil, fmt.Errorf("execution strategic context does not match its durable Plan")
+	}
+	return strategy, append([]string(nil), startDetail.StrategicEventRefs...), append([]core.VersionedRef(nil), startDetail.StrategicContextRefs...), nil
 }
 
 func executionBlueprint(binding WorkCompletionBinding, task core.Task) (core.AgentBlueprint, error) {

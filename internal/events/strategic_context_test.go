@@ -98,6 +98,90 @@ func TestResolvePlanBindsAcceptedIntentFingerprint(t *testing.T) {
 	}
 }
 
+func TestExecutionStrategicContextUsesAtomicStartReferences(t *testing.T) {
+	now := time.Unix(10, 0).UTC()
+	mission := core.Mission{ID: "mission-1", OrganizationID: "org-1", Statement: "durable direction", Status: core.MissionActive, CreatedAt: now}
+	goal := core.Goal{ID: "goal-1", OrganizationID: "org-1", MissionID: mission.ID, Objective: "admitted outcome", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "verified evidence", Origin: "USER"}}, Status: core.GoalActive, CreatedAt: now}
+	intent := core.Intent{ID: "intent-run-1", OrganizationID: "org-1", AcceptedFingerprint: "accepted", CreatedAt: now}
+	work := core.Work{ID: "work-1", IntentID: intent.ID, GoalID: goal.ID, Objective: "bounded work", Status: core.WorkActive, CreatedAt: now}
+	strategicEventRefs := []string{"event-1", "event-2"}
+	strategicContextRefs := []core.VersionedRef{
+		{ID: "mission/mission-1", Version: "1", MaterializationState: core.MaterializedFull},
+		{ID: "goal/goal-1", Version: "1", MaterializationState: core.MaterializedFull},
+	}
+	plan := core.Plan{
+		ID: "plan-run-1", IntentID: intent.ID, IntentFingerprint: intent.AcceptedFingerprint, Version: 1,
+		StrategicEventRefs: strategicEventRefs, StrategicContextRefs: strategicContextRefs,
+		Tasks: []core.PlanTask{{Key: "root", Description: "bounded work", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed}}, CreatedAt: now,
+	}
+	plan.Fingerprint, _ = core.FingerprintPlan(plan)
+	planBody, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := []Event{
+		strategicProjectionEvent(t, 1, "MISSION_CREATED", "mission", mission.ID, 1, mission),
+		strategicProjectionEvent(t, 2, "GOAL_CREATED", "goal", goal.ID, 1, goal),
+		{EventID: "plan-event", Sequence: 3, OrganizationID: "org-1", EventType: "PLAN_CREATED", SourceActorID: "runtime", TaskID: "task-run-1", Payload: planBody, CorrelationID: "run-1", CreatedAt: now, SchemaVersion: SchemaVersion},
+	}
+	start := strategicExecutionStartEvent(t, 4, strategicEventRefs, strategicContextRefs)
+	stream = append(stream, start)
+	goal.Objective = "newer outcome"
+	stream = append(stream, strategicProjectionEvent(t, 5, "GOAL_REFINED", "goal", goal.ID, 2, goal))
+
+	strategy, eventRefs, contextRefs, err := executionStrategicContext(WorkCompletionBinding{
+		OrganizationID: "org-1", CorrelationID: "run-1", Work: work, Intent: intent,
+	}, start, stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strategy.Goal.Objective != "admitted outcome" || strategy.GoalVersion != 1 {
+		t.Fatalf("execution did not retain its atomically admitted strategy: %+v", strategy)
+	}
+	if !sameStrings(eventRefs, strategicEventRefs) || !sameVersionedRefs(contextRefs, strategicContextRefs) {
+		t.Fatalf("execution strategy provenance changed: events=%v refs=%+v", eventRefs, contextRefs)
+	}
+}
+
+func strategicExecutionStartEvent(t *testing.T, sequence int64, eventRefs []string, contextRefs []core.VersionedRef) Event {
+	t.Helper()
+	task := core.Task{ID: "task-run-1", WorkID: "work-1", Description: "bounded work", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, Status: core.TaskRunning, AssigneeType: "AGENT", AssigneeID: "agent-1"}
+	taskBody, err := json.Marshal(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := ProjectionRecord{ProjectionKind: "task", RecordID: string(task.ID), Version: 2, CorrelationID: "run-1", Value: taskBody}
+	event := Event{EventID: "start-event", Sequence: sequence, OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "run-1", CreatedAt: time.Unix(sequence, 0).UTC(), SchemaVersion: SchemaVersion}
+	detail, err := json.Marshal(ExecutionStartDetail{
+		InboxCutoffSequence: sequence - 1, DispatchBinding: &AgentDispatchBinding{},
+		StrategicEventRefs: append([]string(nil), eventRefs...), StrategicContextRefs: append([]core.VersionedRef(nil), contextRefs...),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := SealProjectionEvent(event, record, detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.Payload, err = json.Marshal(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return event
+}
+
+func sameVersionedRefs(left, right []core.VersionedRef) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func strategicProjectionEvent(t *testing.T, sequence int64, eventType, kind string, id core.ID, version int, value any) Event {
 	t.Helper()
 	body, err := json.Marshal(value)
