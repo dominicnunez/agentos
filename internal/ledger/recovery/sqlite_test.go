@@ -146,6 +146,44 @@ func TestOldestSupportedStorageFixtureVerifiesBacksUpRestoresAndMigrates(t *test
 	}
 }
 
+func TestLegacyVerificationRejectsTamperedAdmissionsAfterMigration(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "legacy-tampered.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	mission := core.Mission{ID: "mission-1", OrganizationID: organization.ID, Statement: "Mission", Status: core.MissionActive, CreatedAt: now}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: string(organization.ID), EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "mission-1"}, ProjectionKind: "mission", RecordID: string(mission.ID), Version: 1, Value: mission},
+	} {
+		if _, err := store.AppendProjection(ctx, draft); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM events WHERE event_type='ORGANIZATION_CREATED'; DELETE FROM records WHERE kind='organization'; UPDATE events SET schema_version=?; UPDATE agentos_storage SET storage_version=2,event_schema_version=?; PRAGMA user_version=2`, ledger.LegacyEventSchemaVersion, ledger.LegacyEventSchemaVersion); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "durable parent Organization") {
+		t.Fatalf("legacy tampered-admission verification error=%v", err)
+	}
+}
+
 func TestBackupAndRestorePreserveInferenceAdmissionAuthority(t *testing.T) {
 	ctx := t.Context()
 	directory := t.TempDir()

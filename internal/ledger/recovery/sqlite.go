@@ -112,6 +112,9 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 		if incompatible != 0 {
 			return Result{}, fmt.Errorf("legacy storage contains Intent review evidence that cannot be safely migrated")
 		}
+		if err := verifyLegacyAdmissionsAfterMigration(ctx, db); err != nil {
+			return Result{}, err
+		}
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(sequence), 0) FROM events`).Scan(&result.EventCount, &result.MaxSequence); err != nil {
 		return Result{}, fmt.Errorf("inspect Agent OS event ledger: %w", err)
@@ -124,6 +127,72 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	verified.StorageVersion = result.StorageVersion
 	verified.EventSchemaVersion = result.EventSchemaVersion
 	return verified, err
+}
+
+// verifyLegacyAdmissionsAfterMigration audits the exact migration result in an
+// isolated snapshot. The source remains read-only and byte-for-byte unchanged;
+// the migrated copy must satisfy every current admission check before the
+// legacy backup can be reported as verified.
+func verifyLegacyAdmissionsAfterMigration(ctx context.Context, source *sql.DB) (finalErr error) {
+	temporary, err := os.CreateTemp("", "agentos-legacy-verification-*.db")
+	if err != nil {
+		return fmt.Errorf("create legacy verification snapshot: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	if err := temporary.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return fmt.Errorf("close legacy verification snapshot: %w", err)
+	}
+	defer func() {
+		for _, path := range []string{temporaryPath, temporaryPath + "-journal", temporaryPath + "-shm", temporaryPath + "-wal"} {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				finalErr = errors.Join(finalErr, fmt.Errorf("remove legacy verification snapshot: %w", err))
+			}
+		}
+	}()
+
+	connection, err := source.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire legacy verification connection: %w", err)
+	}
+	if err := connection.Raw(func(driverConnection any) error {
+		provider, ok := driverConnection.(backuper)
+		if !ok {
+			return fmt.Errorf("SQLite driver does not support online backup")
+		}
+		backup, err := provider.NewBackup(sqliteFileURI(temporaryPath, false))
+		if err != nil {
+			return err
+		}
+		for more := true; more; {
+			if err := ctx.Err(); err != nil {
+				return errors.Join(err, backup.Finish())
+			}
+			more, err = backup.Step(128)
+			if err != nil {
+				return errors.Join(err, backup.Finish())
+			}
+		}
+		return backup.Finish()
+	}); err != nil {
+		_ = connection.Close()
+		return fmt.Errorf("snapshot legacy storage for admission verification: %w", err)
+	}
+	if err := connection.Close(); err != nil {
+		return fmt.Errorf("close legacy verification connection: %w", err)
+	}
+
+	migrated, err := ledgerstore.Open(temporaryPath)
+	if err != nil {
+		return fmt.Errorf("migrate legacy verification snapshot: %w", err)
+	}
+	if err := migrated.Close(); err != nil {
+		return fmt.Errorf("close migrated legacy verification snapshot: %w", err)
+	}
+	if _, err := Verify(ctx, temporaryPath); err != nil {
+		return fmt.Errorf("verify migrated legacy admissions: %w", err)
+	}
+	return nil
 }
 
 type admittedProjectionEvent struct {
