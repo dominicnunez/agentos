@@ -237,16 +237,15 @@ func resealLegacyProjectionAdmissions(ctx context.Context, tx *sql.Tx) error {
 	if err != nil {
 		return fmt.Errorf("read legacy projection admissions: %w", err)
 	}
+	defer func() { _ = rows.Close() }()
 	var reseals []projectionReseal
 	for rows.Next() {
 		event, err := scanEvent(rows)
 		if err != nil {
-			_ = rows.Close()
 			return fmt.Errorf("decode legacy projection admission: %w", err)
 		}
 		payload, present, err := events.ResealProjectionEventForMigration(event, LegacyEventSchemaVersion, events.SchemaVersion)
 		if err != nil {
-			_ = rows.Close()
 			return fmt.Errorf("reseal legacy event %s: %w", event.EventID, err)
 		}
 		if !present {
@@ -254,12 +253,10 @@ func resealLegacyProjectionAdmissions(ctx context.Context, tx *sql.Tx) error {
 		}
 		body, err := json.Marshal(payload)
 		if err != nil {
-			_ = rows.Close()
 			return fmt.Errorf("encode resealed legacy event %s: %w", event.EventID, err)
 		}
 		var original events.ProjectionEventPayload
 		if decodeExactJSONBytes(event.Payload, &original) != nil {
-			_ = rows.Close()
 			return fmt.Errorf("decode original legacy event %s", event.EventID)
 		}
 		reseals = append(reseals, projectionReseal{
