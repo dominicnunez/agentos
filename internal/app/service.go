@@ -35,6 +35,8 @@ const (
 	assignmentBlockedCode   = "ASSIGNMENT_INELIGIBLE"
 )
 
+var errTaskStrategicContextChanged = errors.New("task strategic context changed")
+
 type Submit struct {
 	RequestID           string
 	OrganizationID      string
@@ -444,10 +446,10 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 			}
 			if assignmentBlocked {
 				current, currentErr := s.taskUsesCurrentStrategy(ctx, snapshot, organizationID, state)
-				if currentErr != nil {
+				if currentErr != nil && !errors.Is(currentErr, errTaskStrategicContextChanged) {
 					return RecoveryResult{}, fmt.Errorf("validate strategic context for assignment-blocked task %s: %w", state.Value.ID, currentErr)
 				}
-				if !current {
+				if !current || currentErr != nil {
 					if failErr := s.failStrategicTask(ctx, organizationID, state); failErr != nil {
 						return RecoveryResult{}, fmt.Errorf("terminalize stale assignment-blocked task %s: %w", state.Value.ID, failErr)
 					}
@@ -3310,10 +3312,13 @@ func (s *Service) taskUsesCurrentStrategy(ctx context.Context, snapshot projecti
 	}
 	plan, err := events.ResolvePlan(string(organizationID), state.CorrelationID, workState.Value, intentState.Value, stream)
 	if err != nil {
-		return false, nil
+		return false, fmt.Errorf("%w: %v", errTaskStrategicContextChanged, err)
 	}
 	strategy, err := snapshotStrategicContext(snapshot, organizationID, workState.Value, plan)
-	return err == nil && strategy != nil && strategy.Mission.Status == core.MissionActive && strategy.Goal.Status == core.GoalActive, nil
+	if err != nil {
+		return false, fmt.Errorf("%w: %v", errTaskStrategicContextChanged, err)
+	}
+	return strategy != nil && strategy.Mission.Status == core.MissionActive && strategy.Goal.Status == core.GoalActive, nil
 }
 
 func (s *Service) failStrategicTask(ctx context.Context, organizationID core.ID, state projections.Versioned[core.Task]) error {
