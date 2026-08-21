@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dominicnunez/agentos/internal/app"
 	"github.com/dominicnunez/agentos/internal/core"
@@ -102,6 +103,35 @@ func TestExperimentalSubmissionRejectsUnenforcedInferenceAndEffectProfiles(t *te
 	spec.SandboxRef = "caller-selected-sandbox"
 	if _, err := service.SubmitExperiment(context.Background(), base, spec); err == nil {
 		t.Fatal("caller-selected Lab sandbox was accepted")
+	}
+}
+
+func TestLabBoundaryRejectsProductionReplacementLineage(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	repository := projections.New(gateway)
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	if err := repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "setup", 1, organization, nil); err != nil {
+		t.Fatal(err)
+	}
+	intent := core.Intent{ID: "intent-lab", OrganizationID: organization.ID, ReplacesWorkID: "work-production", NormalizedObjective: "bounded experiment", CreatedAt: now}
+	work := core.Work{ID: "work-lab", IntentID: intent.ID, ReplacesWorkID: "work-production", Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	if _, err := lab.New(gateway).StartSubmission(ctx, "lab-replacement", intent, work, experimentSpec()); err == nil || !strings.Contains(err.Error(), "cannot replace production Work") {
+		t.Fatalf("Lab service accepted production replacement lineage: %v", err)
+	}
+	experiment := core.Experiment{ID: "experiment-lab", OrganizationID: organization.ID, WorkID: work.ID, Objective: work.Objective, Status: core.ExperimentRunning}
+	if err := repository.SaveExperimentalSubmission(ctx, "lab-replacement", intent, work, experiment); err == nil {
+		t.Fatal("durable Lab admission accepted production replacement lineage")
+	}
+	stream, err := gateway.Events(ctx, "lab-replacement")
+	if err != nil || len(stream) != 0 {
+		t.Fatalf("rejected Lab replacement reached the ledger: events=%+v err=%v", stream, err)
 	}
 }
 

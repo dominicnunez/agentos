@@ -737,9 +737,55 @@ func TestReviewedReplacementCreatesFreshWorkPlanAndTask(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	mission := core.Mission{ID: "mission-1", OrganizationID: organization.ID, Statement: "Sustain verified work", Status: core.MissionActive, CreatedAt: now}
+	goal := core.Goal{ID: "goal-1", OrganizationID: organization.ID, MissionID: mission.ID, Objective: "Deliver verified work", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "verified", Origin: "USER"}}, Status: core.GoalActive, CreatedAt: now}
+	for _, projection := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "mission-1"}, ProjectionKind: "mission", RecordID: string(mission.ID), Version: 1, Value: mission},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_CREATED", SourceActorID: "runtime", CorrelationID: "goal-1"}, ProjectionKind: "goal", RecordID: string(goal.ID), Version: 1, Value: goal},
+	} {
+		if _, err := store.AppendProjection(ctx, projection); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const predecessorMessageID = "message-old"
+	const predecessorInstruction = "Run old work for goal-1"
+	predecessorDraft := core.IntentDraft{
+		ID: "intent-old", OrganizationID: organization.ID, Version: 1, Status: core.IntentStatusReadyForReview, Mode: core.IntentModeStandard,
+		RequestedExecutionKind: core.ExecutionDeterministic,
+		Goal:                   &core.IntentValue{Value: string(goal.ID), Origin: "EXPLICIT", SourceMessageID: predecessorMessageID},
+		Objective:              "old work",
+		Context:                []core.IntentValue{}, Deliverables: []core.IntentValue{{Value: "old result", Origin: "USER"}}, CompletionCriteria: []core.IntentValue{{Value: "old result verified", Origin: "USER"}},
+		Constraints: []core.IntentValue{}, ResolvedDecisions: []core.IntentDecision{}, ConsequenceCandidates: []string{}, MissingUserInputs: []core.IntentValue{}, CreatedAt: now,
+	}
+	predecessorDraft.Fingerprint, err = core.FingerprintIntentDraft(predecessorDraft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTAKE_MESSAGE_RECORDED", SourceActorID: "user-1", TaskID: "task-old", CorrelationID: "old",
+		Payload: events.IntakeMessageRecordedPayload{MessageID: predecessorMessageID, Text: predecessorInstruction, SourcePrincipalID: "user-1", SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: ChannelHumanDirect, RequestedExecutionKind: core.ExecutionDeterministic},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_DRAFTED", SourceActorID: "runtime", TaskID: "task-old", CorrelationID: "old",
+		Payload: events.IntentDraftedPayload{SourceMessageID: predecessorMessageID, Draft: predecessorDraft, Reply: "Review old work."},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	predecessorConfirmation := events.IntentConfirmedPayload{
+		IntentID: string(predecessorDraft.ID), GoalID: string(goal.ID), Version: 1, Fingerprint: predecessorDraft.Fingerprint,
+		ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: ChannelHumanDirect, MessageID: "confirmation-old",
+	}
+	if _, err := store.AppendIntentConfirmation(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-old", CorrelationID: "old", Payload: predecessorConfirmation,
+	}, goal.ID, ""); err != nil {
+		t.Fatal(err)
+	}
 	predecessorIntent := core.Intent{
-		ID: "intent-old", OrganizationID: "org-1", OriginalInstruction: "old work", NormalizedObjective: "old work",
-		SourcePrincipalID: "runtime", SourcePrincipalKind: core.PrincipalRuntime, SourceChannel: "INTERNAL", AcceptedFingerprint: "internal-old", CreatedAt: now,
+		ID: "intent-old", OrganizationID: "org-1", GoalID: goal.ID, OriginalInstruction: predecessorInstruction, NormalizedObjective: predecessorDraft.Objective,
+		SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: ChannelHumanDirect, SourceMessageID: predecessorMessageID,
+		AcceptedFingerprint: predecessorDraft.Fingerprint, CompletionCriteria: predecessorDraft.CompletionCriteria, CreatedAt: now,
 	}
 	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "old"},
@@ -747,7 +793,7 @@ func TestReviewedReplacementCreatesFreshWorkPlanAndTask(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	predecessor := core.Work{ID: "work-old", IntentID: predecessorIntent.ID, Objective: predecessorIntent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	predecessor := core.Work{ID: "work-old", IntentID: predecessorIntent.ID, GoalID: goal.ID, Objective: predecessorIntent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
 	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "old"},
 		ProjectionKind: "work", RecordID: string(predecessor.ID), Version: 1, Value: predecessor,
@@ -766,7 +812,7 @@ func TestReviewedReplacementCreatesFreshWorkPlanAndTask(t *testing.T) {
 	principal := testPrincipal("user-1", core.PrincipalHuman, ChannelHumanDirect)
 	message := Message{ConversationID: "replacement", MessageID: "message-replacement", Text: "Replace work-old with a bounded verified result.", RequestedKind: core.ExecutionDeterministic}
 	draft, err := service.Handle(ctx, principal, message)
-	if err != nil || draft.State != StateAwaitingConfirmation || draft.Intent == nil || draft.Intent.ReplacesWork == nil || draft.Intent.ReplacesWork.Value != string(predecessor.ID) {
+	if err != nil || draft.State != StateAwaitingConfirmation || draft.Intent == nil || draft.Intent.ReplacesWork == nil || draft.Intent.ReplacesWork.Value != string(predecessor.ID) || draft.Intent.Goal == nil || draft.Intent.Goal.Value != string(goal.ID) || draft.Intent.Goal.Origin != "POLICY" {
 		t.Fatalf("replacement review=%+v err=%v", draft, err)
 	}
 	view, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: message.ConversationID, MessageID: "confirmation-replacement", Fingerprint: draft.Intent.Fingerprint})
@@ -802,7 +848,7 @@ func TestReviewedReplacementCreatesFreshWorkPlanAndTask(t *testing.T) {
 		createdPlan = createdPlan || event.EventType == "PLAN_CREATED"
 		createdTask = createdTask || event.EventType == "TASK_CREATED"
 	}
-	if replacementIntent.ReplacesWorkID != predecessor.ID || replacementWork.ReplacesWorkID != predecessor.ID || replacementWork.ID == predecessor.ID || !createdPlan || !createdTask {
+	if replacementIntent.ReplacesWorkID != predecessor.ID || replacementIntent.GoalID != goal.ID || replacementWork.ReplacesWorkID != predecessor.ID || replacementWork.GoalID != goal.ID || replacementWork.ID == predecessor.ID || view.WorkID != string(replacementWork.ID) || !createdPlan || !createdTask {
 		t.Fatalf("replacement lineage or fresh execution graph missing: intent=%+v work=%+v plan=%t task=%t", replacementIntent, replacementWork, createdPlan, createdTask)
 	}
 }

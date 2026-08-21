@@ -111,6 +111,14 @@ func TestA2ACompletedExperimentRetainsUnverifiedTrustLabel(t *testing.T) {
 	}
 }
 
+func TestA2ATaskExposesDurableWorkIdentity(t *testing.T) {
+	task := projectA2ATask(intake.View{TaskID: "task-1", WorkID: "work-1", ConversationID: "context-1", State: intake.StateFailed})
+	metadata, ok := task.Metadata[agentOSTaskMetadataURI].(map[string]any)
+	if !ok || metadata["work_id"] != "work-1" {
+		t.Fatalf("failed A2A task omitted durable Work identity: %+v", task.Metadata)
+	}
+}
+
 func TestUnconfiguredAgentCardRejectsNonLoopbackHost(t *testing.T) {
 	handler := NewA2A(intake.New(app.New(events.NewGateway(noopLedger{}))), nil, "", "test-version")
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/.well-known/agent-card.json", nil)

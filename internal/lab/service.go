@@ -125,6 +125,9 @@ func (s *Service) StartSubmission(ctx context.Context, correlationID string, int
 	if _, found := snapshot.Organizations[intent.OrganizationID]; !found || intent.OrganizationID == "" || work.IntentID != intent.ID || work.Status != core.WorkActive {
 		return core.Experiment{}, fmt.Errorf("new Lab submission requires its organization, Intent, and active bounded Work")
 	}
+	if intent.ReplacesWorkID != "" || work.ReplacesWorkID != "" {
+		return core.Experiment{}, fmt.Errorf("V1 Lab Work cannot replace production Work")
+	}
 	experiment := newExperiment(intent.OrganizationID, work, spec, s.now())
 	if !core.ValidExperiment(experiment) {
 		return core.Experiment{}, fmt.Errorf("lab experiment containment or resource budget is invalid")

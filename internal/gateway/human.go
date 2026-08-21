@@ -70,6 +70,7 @@ type humanMessageRequest struct {
 
 type humanTaskResponse struct {
 	TaskID             string                   `json:"task_id"`
+	WorkID             string                   `json:"work_id,omitempty"`
 	ConversationID     string                   `json:"conversation_id"`
 	State              string                   `json:"state"`
 	Prompt             string                   `json:"prompt,omitempty"`
@@ -336,7 +337,7 @@ func (h *Human) writeIntakeError(w http.ResponseWriter, err error) {
 
 func humanResponse(view intake.View) humanTaskResponse {
 	response := humanTaskResponse{
-		TaskID: view.TaskID, ConversationID: view.ConversationID,
+		TaskID: view.TaskID, WorkID: view.WorkID, ConversationID: view.ConversationID,
 		State: view.State, Prompt: view.Prompt, Result: view.Result, Mode: view.Mode, TrustLabel: view.TrustLabel,
 	}
 	response.CompletionContract = view.CompletionContract

@@ -349,22 +349,31 @@ func validateReviewedIntent(stream []Event, confirmationEvent Event, confirmatio
 	if err != nil || reviewedGoalID != goalID {
 		return fmt.Errorf("intent reviewed Goal provenance is invalid")
 	}
+	replacesWorkID, err := core.AcceptedIntentReplacesWorkID(reviewed)
+	if err != nil || string(replacesWorkID) != confirmation.ReplacesWorkID {
+		return fmt.Errorf("intent reviewed replacement Work provenance is invalid")
+	}
 	if goalID == "" {
 		if reviewed.Goal != nil {
 			return fmt.Errorf("unbound intent contains a Goal")
 		}
 	} else {
-		if reviewed.Goal == nil || reviewed.Goal.Origin != "EXPLICIT" && reviewed.Goal.Origin != "CONFIRMED" {
+		if reviewed.Goal == nil {
 			return fmt.Errorf("goal-bound intent reviewed Goal provenance is invalid")
 		}
-		goalMessage, found := intakeMessages[reviewed.Goal.SourceMessageID]
-		if !found || intakeSequences[reviewed.Goal.SourceMessageID] >= latestDraftEvent.Sequence || !core.ContainsExactGoalReference(goalMessage.Text, string(goalID)) {
-			return fmt.Errorf("goal-bound intent Goal is not present in its attributed source message")
+		switch reviewed.Goal.Origin {
+		case "EXPLICIT", "CONFIRMED":
+			goalMessage, found := intakeMessages[reviewed.Goal.SourceMessageID]
+			if !found || intakeSequences[reviewed.Goal.SourceMessageID] >= latestDraftEvent.Sequence || !core.ContainsExactGoalReference(goalMessage.Text, string(goalID)) {
+				return fmt.Errorf("goal-bound intent Goal is not present in its attributed source message")
+			}
+		case "POLICY":
+			if replacesWorkID == "" || reviewed.Goal.SourceMessageID != "" {
+				return fmt.Errorf("replacement-derived Goal provenance is invalid")
+			}
+		default:
+			return fmt.Errorf("goal-bound intent reviewed Goal provenance is invalid")
 		}
-	}
-	replacesWorkID, err := core.AcceptedIntentReplacesWorkID(reviewed)
-	if err != nil || string(replacesWorkID) != confirmation.ReplacesWorkID {
-		return fmt.Errorf("intent reviewed replacement Work provenance is invalid")
 	}
 	if replacesWorkID != "" {
 		replacementMessage, found := intakeMessages[reviewed.ReplacesWork.SourceMessageID]

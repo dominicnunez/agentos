@@ -35,9 +35,13 @@ Failed Work is replaced through the same conversational review boundary, not
 by editing or reopening its Plan or Tasks. The user or authorized A2A Agent
 must explicitly cite the exact failed Work ID in a source message. The
 normalizer may carry only that exact reference into the fingerprinted Intent;
-it cannot infer a predecessor. Confirmation atomically rechecks that the Work
-is failed, belongs to the same organization and Goal, and has no prior
-replacement. Agent OS then creates a fresh Intent, Work, Plan, and Task DAG.
+it cannot infer a predecessor. Authenticated task views expose the durable Work
+ID. When the predecessor is Goal-bound, Agent OS deterministically copies that
+durable Goal binding into the reviewed Intent instead of asking the operator to
+repeat it. The review surface displays both identifiers. Confirmation atomically
+rechecks that the Work is failed, belongs to the same organization and Goal, and
+has no prior replacement. Agent OS then creates a fresh Intent, Work, Plan, and
+Task DAG.
 Approvals, capabilities, effect permission, artifacts, completion claims, and
 execution state never flow across the replacement link. A replacement may
 itself be replaced only after it fails. Forks, cycles, active or completed

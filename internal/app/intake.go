@@ -43,6 +43,46 @@ type IntentNormalizationContext struct {
 	ExecutionProfileVersion string
 }
 
+// ResolveReplacementGoal deterministically binds reviewed replacement Work to
+// its failed predecessor. It does not infer or grant a Goal; it returns only the
+// predecessor's already-durable binding after rechecking the replacement
+// boundary against the current projection state.
+func (s *Service) ResolveReplacementGoal(ctx context.Context, organizationID string, workID core.ID) (core.ID, error) {
+	if ctx == nil || organizationID == "" || workID == "" {
+		return "", fmt.Errorf("organization and replacement Work are required")
+	}
+	snapshot, err := s.state.Load(ctx)
+	if err != nil {
+		return "", fmt.Errorf("load durable replacement state: %w", err)
+	}
+	predecessor, found := snapshot.Works[workID]
+	if !found || predecessor.Value.ID != workID || predecessor.Value.Status != core.WorkFailed {
+		return "", fmt.Errorf("replacement requires an existing failed Work")
+	}
+	predecessorIntent, found := snapshot.Intents[predecessor.Value.IntentID]
+	if !found || predecessorIntent.Value.ID != predecessor.Value.IntentID || predecessorIntent.Value.OrganizationID != core.ID(organizationID) {
+		return "", fmt.Errorf("replacement Work crosses its organization boundary")
+	}
+	for existingID, existing := range snapshot.Works {
+		if existingID != workID && existing.Value.ReplacesWorkID == workID {
+			return "", fmt.Errorf("failed Work already has a durable replacement")
+		}
+	}
+	goalID := predecessor.Value.GoalID
+	if goalID == "" {
+		return "", nil
+	}
+	goal, found := snapshot.Goals[goalID]
+	if !found || goal.Value.ID != goalID || goal.Value.OrganizationID != core.ID(organizationID) || goal.Value.Status != core.GoalActive {
+		return "", fmt.Errorf("replacement requires its predecessor's active Goal")
+	}
+	mission, found := snapshot.Missions[goal.Value.MissionID]
+	if !found || mission.Value.ID != goal.Value.MissionID || mission.Value.OrganizationID != core.ID(organizationID) || mission.Value.Status != core.MissionActive {
+		return "", fmt.Errorf("replacement requires its predecessor Goal's active Mission")
+	}
+	return goalID, nil
+}
+
 func (s *Service) ActiveIntake(ctx context.Context, organizationID string, principalID core.ID, principalKind core.PrincipalKind, sourceChannel string) (string, []events.Event, bool, error) {
 	if ctx == nil || organizationID == "" || principalID == "" || principalKind == "" || sourceChannel == "" {
 		return "", nil, false, fmt.Errorf("organization and complete principal identity are required")

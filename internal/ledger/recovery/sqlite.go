@@ -378,6 +378,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 
 func validateRecoveryIntentConfirmations(stream []events.Event) error {
 	reviewEvidence := events.IndexReviewedIntentEvidence(stream)
+	replacements := make(map[core.ID]string)
 	for _, event := range stream {
 		if event.EventType != "INTENT_CONFIRMED" {
 			continue
@@ -385,6 +386,15 @@ func validateRecoveryIntentConfirmations(stream []events.Event) error {
 		var confirmation events.IntentConfirmedPayload
 		if decodeExactJSON(event.Payload, &confirmation) != nil {
 			return fmt.Errorf("event %s contains an invalid intent confirmation", event.EventID)
+		}
+		if err := validateRecoveryReplacementConfirmation(stream, event, confirmation); err != nil {
+			return fmt.Errorf("event %s: %w", event.EventID, err)
+		}
+		if predecessorID := core.ID(confirmation.ReplacesWorkID); predecessorID != "" {
+			if correlationID, duplicate := replacements[predecessorID]; duplicate && correlationID != event.CorrelationID {
+				return fmt.Errorf("event %s: failed Work has multiple reviewed replacements", event.EventID)
+			}
+			replacements[predecessorID] = event.CorrelationID
 		}
 		if confirmation.GoalID == "" {
 			if err := events.ValidateIndexedReviewedIntentAdmission(reviewEvidence.At(event), event); err != nil {
@@ -628,7 +638,7 @@ func validateRecoveryWorkIntentBinding(event events.Event, record events.Project
 		return fmt.Errorf("work requires its durable Intent")
 	}
 	intent := intentState.Value
-	if intentState.CorrelationID != record.CorrelationID || intent.ID != work.IntentID || intent.GoalID != work.GoalID || intent.NormalizedObjective != work.Objective || string(intent.OrganizationID) != event.OrganizationID {
+	if intentState.CorrelationID != record.CorrelationID || intent.ID != work.IntentID || intent.GoalID != work.GoalID || intent.ReplacesWorkID != work.ReplacesWorkID || intent.NormalizedObjective != work.Objective || string(intent.OrganizationID) != event.OrganizationID {
 		return fmt.Errorf("work does not match its accepted Intent boundary")
 	}
 	if intentRequiresConfirmation(intent) {
@@ -642,6 +652,13 @@ func validateRecoveryWorkIntentBinding(event events.Event, record events.Project
 			return fmt.Errorf("external Work requires one prior intent confirmation")
 		}
 		if err := events.ValidateIntentConfirmation(reviewEvidence.At(confirmations[0]), confirmations[0], intent); err != nil {
+			return err
+		}
+		var confirmation events.IntentConfirmedPayload
+		if decodeExactJSON(confirmations[0].Payload, &confirmation) != nil {
+			return fmt.Errorf("replacement Work confirmation is invalid")
+		}
+		if err := validateRecoveryReplacementConfirmation(stream, confirmations[0], confirmation); err != nil {
 			return err
 		}
 		if intent.GoalID != "" {
@@ -660,7 +677,58 @@ func validateRecoveryWorkIntentBinding(event events.Event, record events.Project
 }
 
 func intentRequiresConfirmation(intent core.Intent) bool {
-	return intent.GoalID != "" || intent.SourceChannel == "HUMAN_DIRECT" || intent.SourceChannel == "A2A" || intent.SourcePrincipalKind == core.PrincipalHuman || intent.SourcePrincipalKind == core.PrincipalExternalAgent
+	return intent.GoalID != "" || intent.ReplacesWorkID != "" || intent.SourceChannel == "HUMAN_DIRECT" || intent.SourceChannel == "A2A" || intent.SourcePrincipalKind == core.PrincipalHuman || intent.SourcePrincipalKind == core.PrincipalExternalAgent
+}
+
+func validateRecoveryReplacementConfirmation(stream []events.Event, confirmationEvent events.Event, confirmation events.IntentConfirmedPayload) error {
+	predecessorID := core.ID(confirmation.ReplacesWorkID)
+	if predecessorID == "" {
+		return nil
+	}
+	var predecessor core.Work
+	var predecessorCorrelation string
+	for _, candidate := range stream {
+		if candidate.Sequence >= confirmationEvent.Sequence {
+			continue
+		}
+		payload, present, err := events.AdmittedProjection(candidate)
+		if err != nil {
+			return err
+		}
+		if !present || payload.Projection.ProjectionKind != "work" || payload.Projection.RecordID != string(predecessorID) {
+			continue
+		}
+		if decodeExactJSON(payload.Projection.Value, &predecessor) != nil || predecessor.ID != predecessorID {
+			return fmt.Errorf("reviewed replacement references an invalid predecessor Work admission")
+		}
+		predecessorCorrelation = payload.Projection.CorrelationID
+	}
+	if predecessor.ID != predecessorID || predecessor.Status != core.WorkFailed || predecessor.GoalID != core.ID(confirmation.GoalID) {
+		return fmt.Errorf("reviewed replacement requires its prior failed Work with the same Goal binding at admission")
+	}
+	var predecessorIntent core.Intent
+	for _, candidate := range stream {
+		if candidate.Sequence >= confirmationEvent.Sequence {
+			continue
+		}
+		payload, present, err := events.AdmittedProjection(candidate)
+		if err != nil {
+			return err
+		}
+		if !present || payload.Projection.ProjectionKind != "intent" || payload.Projection.RecordID != string(predecessor.IntentID) {
+			continue
+		}
+		if decodeExactJSON(payload.Projection.Value, &predecessorIntent) != nil || predecessorIntent.ID != predecessor.IntentID {
+			return fmt.Errorf("reviewed replacement references an invalid predecessor Intent admission")
+		}
+		if payload.Projection.CorrelationID != predecessorCorrelation {
+			return fmt.Errorf("reviewed replacement predecessor crosses its correlation boundary")
+		}
+	}
+	if predecessorIntent.ID != predecessor.IntentID || string(predecessorIntent.OrganizationID) != confirmationEvent.OrganizationID {
+		return fmt.Errorf("reviewed replacement Work crosses its organization boundary")
+	}
+	return nil
 }
 
 func recoveryActiveGoalAtSequence(stream []events.Event, goalID core.ID, confirmationSequence int64) (core.Goal, error) {

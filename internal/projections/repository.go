@@ -207,7 +207,7 @@ func (r *Repository) SavePromotionCandidate(ctx context.Context, correlationID s
 func (r *Repository) SaveExperimentalSubmission(ctx context.Context, correlationID string, intent core.Intent, work core.Work, experiment core.Experiment) error {
 	if r == nil || r.gateway == nil || correlationID == "" || intent.ID == "" || work.ID == "" || experiment.ID == "" ||
 		intent.OrganizationID == "" || work.IntentID != intent.ID || experiment.OrganizationID != intent.OrganizationID || experiment.WorkID != work.ID ||
-		work.Status != core.WorkActive {
+		work.Status != core.WorkActive || intent.ReplacesWorkID != "" || work.ReplacesWorkID != "" {
 		return fmt.Errorf("complete experimental Intent, Work, and containment are required")
 	}
 	if err := events.ValidateExperimentProjectionTarget("LAB_EXPERIMENT_STARTED", 1, experiment); err != nil {
@@ -783,6 +783,9 @@ func validateLabExperimentAtAdmission(experiment core.Experiment, event events.E
 	intent, found := graph.Intents[work.Value.IntentID]
 	if !found || intent.Value.OrganizationID != experiment.OrganizationID || experiment.Objective != work.Value.Objective {
 		return fmt.Errorf("lab experiment crosses its Work organization or objective")
+	}
+	if intent.Value.ReplacesWorkID != "" || work.Value.ReplacesWorkID != "" {
+		return fmt.Errorf("Lab Work cannot carry production replacement lineage")
 	}
 	switch experiment.Status {
 	case core.ExperimentRunning:
