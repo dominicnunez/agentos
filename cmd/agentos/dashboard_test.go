@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -174,7 +175,7 @@ func dashboardSession(t *testing.T, bridge *dashboardBridge) string {
 }
 
 func dashboardAuthorizedRequest(bridge *dashboardBridge, method, target, token, body string) *httptest.ResponseRecorder {
-	request := httptest.NewRequest(method, target, bytes.NewBufferString(body))
+	request := httptest.NewRequestWithContext(context.Background(), method, target, bytes.NewBufferString(body))
 	request.Host = "127.0.0.1:41000"
 	request.Header.Set("Origin", "http://127.0.0.1:41000")
 	request.Header.Set("Authorization", "Bearer "+token)
@@ -187,7 +188,7 @@ func dashboardAuthorizedRequest(bridge *dashboardBridge, method, target, token, 
 }
 
 func dashboardRequest(bridge *dashboardBridge, method, target, origin, contentType, body string) *httptest.ResponseRecorder {
-	request := httptest.NewRequest(method, target, bytes.NewBufferString(body))
+	request := httptest.NewRequestWithContext(context.Background(), method, target, bytes.NewBufferString(body))
 	request.Host = "127.0.0.1:41000"
 	if origin != "" {
 		request.Header.Set("Origin", origin)

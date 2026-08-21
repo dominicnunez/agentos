@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +16,7 @@ func TestEmbeddedDashboardServesOnlyGeneratedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	handler.ServeHTTP(response, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "<!doctype html>") {
 		t.Fatalf("dashboard root=%d %q", response.Code, response.Body.String())
 	}
@@ -33,12 +34,12 @@ func TestEmbeddedDashboardServesOnlyGeneratedFiles(t *testing.T) {
 		t.Fatal("dashboard index lacks a generated immutable asset")
 	}
 	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, asset[1], nil))
+	handler.ServeHTTP(response, httptest.NewRequestWithContext(context.Background(), http.MethodGet, asset[1], nil))
 	if response.Code != http.StatusOK || response.Body.Len() == 0 || response.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" {
 		t.Fatalf("embedded asset=%d bytes=%d cache=%q", response.Code, response.Body.Len(), response.Header().Get("Cache-Control"))
 	}
 	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/not-generated", nil))
+	handler.ServeHTTP(response, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/not-generated", nil))
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("unknown dashboard resource=%d", response.Code)
 	}
