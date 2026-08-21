@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,8 @@ const (
 	localRuntimeAdapter     = "local"
 	assignmentBlockedCode   = "ASSIGNMENT_INELIGIBLE"
 )
+
+var errTaskStrategicContextChanged = errors.New("task strategic context changed")
 
 type Submit struct {
 	RequestID           string
@@ -442,6 +445,16 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 				return RecoveryResult{}, fmt.Errorf("validate assignment block for task %s: %w", state.Value.ID, err)
 			}
 			if assignmentBlocked {
+				current, currentErr := s.taskUsesCurrentStrategy(ctx, snapshot, organizationID, state)
+				if currentErr != nil && !errors.Is(currentErr, errTaskStrategicContextChanged) {
+					return RecoveryResult{}, fmt.Errorf("validate strategic context for assignment-blocked task %s: %w", state.Value.ID, currentErr)
+				}
+				if !current || currentErr != nil {
+					if failErr := s.failStrategicTask(ctx, organizationID, state); failErr != nil {
+						return RecoveryResult{}, fmt.Errorf("terminalize stale assignment-blocked task %s: %w", state.Value.ID, failErr)
+					}
+					continue
+				}
 				if _, resolveErr := assignment.ResolveAssigned(assignmentRoster(snapshot), state.Value, s.assignmentRequirement(organizationID, state.Value.ExecutionKind)); resolveErr == nil {
 					task := state.Value
 					task.Status = core.TaskPending
@@ -821,13 +834,21 @@ func (s *Service) continueHumanCompletionTask(ctx context.Context, organizationI
 			return fmt.Errorf("user completion cannot advance failed task %s", task.ID)
 		case core.TaskBlocked:
 			detail := map[string]string{"reason": "structured user completion received", "completion_event_ref": completionEvent.EventID}
-			if err := s.advanceInputContinuation(ctx, organizationID, correlationID, state, detail); err != nil {
+			terminalized, err := s.advanceInputContinuation(ctx, organizationID, correlationID, state, detail)
+			if err != nil {
 				return err
+			}
+			if terminalized {
+				return nil
 			}
 		case core.TaskPending:
 			detail := map[string]string{"mode": "STRUCTURED_HUMAN_COMPLETION", "completion_event_ref": completionEvent.EventID}
-			if err := s.advanceInputContinuation(ctx, organizationID, correlationID, state, detail); err != nil {
+			terminalized, err := s.advanceInputContinuation(ctx, organizationID, correlationID, state, detail)
+			if err != nil {
 				return err
+			}
+			if terminalized {
+				return nil
 			}
 		case core.TaskRunning:
 			return s.finishHumanCompletionTask(ctx, organizationID, state, completionEvent, payload)
@@ -1017,14 +1038,22 @@ func (s *Service) continueExternalInputTask(ctx context.Context, organizationID,
 			return fmt.Errorf("external input continuation cannot advance failed task %s", task.ID)
 		case core.TaskBlocked:
 			detail := map[string]string{"reason": "authorized external input received", "input_event_ref": inputEvent.EventID}
-			if err := s.advanceInputContinuation(ctx, organizationID, correlationID, state, detail); err != nil {
+			terminalized, err := s.advanceInputContinuation(ctx, organizationID, correlationID, state, detail)
+			if err != nil {
 				return err
+			}
+			if terminalized {
+				return nil
 			}
 			continue
 		case core.TaskPending:
 			detail := map[string]string{"mode": "OPERATOR_HUMAN_INPUT", "input_event_ref": inputEvent.EventID}
-			if err := s.advanceInputContinuation(ctx, organizationID, correlationID, state, detail); err != nil {
+			terminalized, err := s.advanceInputContinuation(ctx, organizationID, correlationID, state, detail)
+			if err != nil {
 				return fmt.Errorf("persist external input execution start for task %s: %w", task.ID, err)
+			}
+			if terminalized {
+				return nil
 			}
 			continue
 		case core.TaskRunning:
@@ -1039,9 +1068,9 @@ func (s *Service) continueExternalInputTask(ctx context.Context, organizationID,
 // PENDING -> RUNNING edges shared by structured user completion and authorized
 // external input. Each caller retains its own event validation, terminal-state
 // handling, details, outcomes, and completion rules.
-func (s *Service) advanceInputContinuation(ctx context.Context, organizationID core.ID, correlationID string, state projections.Versioned[core.Task], detail map[string]string) error {
+func (s *Service) advanceInputContinuation(ctx context.Context, organizationID core.ID, correlationID string, state projections.Versioned[core.Task], detail map[string]string) (bool, error) {
 	if organizationID == "" || correlationID == "" || state.CorrelationID != correlationID || state.Value.ExecutionKind != core.ExecutionHuman {
-		return fmt.Errorf("valid user-operated input continuation state is required")
+		return false, fmt.Errorf("valid user-operated input continuation state is required")
 	}
 	task := state.Value
 	eventType := ""
@@ -1050,14 +1079,59 @@ func (s *Service) advanceInputContinuation(ctx context.Context, organizationID c
 		task.Status = core.TaskPending
 		eventType = "TASK_RESUMED"
 	case core.TaskPending:
+		mode := detail["mode"]
+		inputEventRef := detail["input_event_ref"]
+		if mode == "STRUCTURED_HUMAN_COMPLETION" {
+			inputEventRef = detail["completion_event_ref"]
+		}
+		if inputEventRef == "" || mode != "OPERATOR_HUMAN_INPUT" && mode != "STRUCTURED_HUMAN_COMPLETION" {
+			return false, fmt.Errorf("input continuation event reference is required")
+		}
+		snapshot, err := s.state.Load(ctx)
+		if err != nil {
+			return false, err
+		}
+		current, found := snapshot.Tasks[task.ID]
+		if !found || current.Version != state.Version || !reflect.DeepEqual(current.Value, state.Value) || current.CorrelationID != correlationID {
+			return false, fmt.Errorf("input continuation task changed before execution start")
+		}
+		var strategicEventRefs []string
+		var strategicContextRefs []core.VersionedRef
+		workState, found := snapshot.Works[task.WorkID]
+		if !found || workState.Value.ID != task.WorkID || workState.Value.IntentID == "" {
+			return false, fmt.Errorf("input continuation Work is unavailable")
+		}
+		if workState.Value.GoalID != "" {
+			intentState, found := snapshot.Intents[workState.Value.IntentID]
+			if !found || intentState.Value.OrganizationID != organizationID {
+				return false, fmt.Errorf("input continuation Intent is unavailable")
+			}
+			stream, err := s.gateway.Events(ctx, correlationID)
+			if err != nil {
+				return false, err
+			}
+			plan, err := events.ResolvePlan(string(organizationID), correlationID, workState.Value, intentState.Value, stream)
+			if err == nil {
+				_, err = snapshotStrategicContext(snapshot, organizationID, workState.Value, plan)
+			}
+			if err != nil {
+				return true, s.failStrategicTask(ctx, organizationID, state)
+			}
+			strategicEventRefs = append([]string(nil), plan.StrategicEventRefs...)
+			strategicContextRefs = append([]core.VersionedRef(nil), plan.StrategicContextRefs...)
+		}
 		task.Status = core.TaskRunning
-		eventType = "EXECUTION_STARTED"
+		_, err = s.state.StartTaskExecution(ctx, organizationID, correlationID, state.Version+1, task, mode, inputEventRef, strategicEventRefs, strategicContextRefs)
+		if errors.Is(err, events.ErrStrategicContextChanged) {
+			return true, s.failStrategicTask(ctx, organizationID, state)
+		}
+		return false, err
 	case core.TaskRunning, core.TaskCompleted, core.TaskFailed:
-		return fmt.Errorf("input continuation cannot advance task in status %s", task.Status)
+		return false, fmt.Errorf("input continuation cannot advance task in status %s", task.Status)
 	default:
-		return fmt.Errorf("input continuation cannot advance task in status %s", task.Status)
+		return false, fmt.Errorf("input continuation cannot advance task in status %s", task.Status)
 	}
-	return s.state.SaveTask(ctx, organizationID, eventType, "runtime", correlationID, state.Version+1, task, detail)
+	return false, s.state.SaveTask(ctx, organizationID, eventType, "runtime", correlationID, state.Version+1, task, detail)
 }
 
 func (s *Service) finishExternalInputTask(ctx context.Context, organizationID core.ID, state projections.Versioned[core.Task], inputEvent events.Event) error {
@@ -1516,7 +1590,7 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 		snapshot.Experiments[experiment.ID] = projections.Versioned[core.Experiment]{Version: 1, CorrelationID: correlationID, Value: experiment}
 	}
 
-	plan, err := s.ensurePlan(ctx, organizationID, correlationID, intent, acceptedDraft, in.Kind)
+	plan, err := s.ensurePlan(ctx, organizationID, correlationID, intent, work, acceptedDraft, in.Kind)
 	if err == nil && in.experimentSpec != nil {
 		err = lab.ValidatePlan(in.experimentSpec.Budget, plan.Tasks)
 	}
@@ -1737,7 +1811,7 @@ func acceptedGoalID(draft core.IntentDraft) (core.ID, error) {
 	return core.AcceptedIntentGoalID(draft)
 }
 
-func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correlationID string, intent core.Intent, draft core.IntentDraft, requestedKind core.ExecutionKind) (core.Plan, error) {
+func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correlationID string, intent core.Intent, work core.Work, draft core.IntentDraft, requestedKind core.ExecutionKind) (core.Plan, error) {
 	stream, err := s.gateway.Events(ctx, correlationID)
 	if err != nil {
 		return core.Plan{}, fmt.Errorf("load durable planning state: %w", err)
@@ -1763,20 +1837,38 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 		recorded = &copy
 	}
 	planID := core.ID("plan-" + correlationID)
+	allEvents := stream
+	if work.GoalID != "" {
+		allEvents, err = s.gateway.Events(ctx, "")
+		if err != nil {
+			return core.Plan{}, fmt.Errorf("load strategic planning context: %w", err)
+		}
+	}
 	if recorded != nil {
-		if err := validateDurablePlan(*recorded, planID, intent, draft, requestedKind); err != nil {
+		if _, err := events.ResolveStrategicContextByRefs(string(organizationID), work, allEvents, recorded.StrategicEventRefs, recorded.StrategicContextRefs); err != nil {
+			return core.Plan{}, fmt.Errorf("validate durable Plan strategic context: %w", err)
+		}
+		if err := validateDurablePlan(*recorded, planID, intent, draft, requestedKind, recorded.StrategicEventRefs, recorded.StrategicContextRefs); err != nil {
 			return core.Plan{}, err
 		}
 		return *recorded, nil
 	}
+	strategy, strategicEventRefs, strategicContextRefs, err := events.ResolveStrategicContext(string(organizationID), work, allEvents, 0)
+	if err != nil {
+		return core.Plan{}, fmt.Errorf("resolve strategic planning context: %w", err)
+	}
+	if strategy != nil && (strategy.Mission.Status != core.MissionActive || strategy.Goal.Status != core.GoalActive) {
+		return core.Plan{}, fmt.Errorf("strategic planning context is not active")
+	}
 
 	descriptor, modelCapable := s.planner.Descriptor()
 	usesModel := modelCapable && requestedKind == core.ExecutionAgent
-	inputRefs, err := planningInputRefs(stream, intent, draft)
+	intentInputRefs, err := planningInputRefs(stream, intent, draft)
 	if err != nil {
 		return core.Plan{}, err
 	}
-	attemptRef, attempted, attemptStateErr := recordedPlanningAttempt(stream, planID, intent, draft, inputRefs)
+	inputRefs := append(append([]string(nil), intentInputRefs...), strategicEventRefs...)
+	attemptRef, attempted, attemptStateErr := recordedPlanningAttempt(stream, planID, intent, draft, inputRefs, strategicContextRefs)
 	if attempted {
 		if attemptStateErr == nil {
 			attemptStateErr = fmt.Errorf("adaptive planning attempt has no validated durable plan")
@@ -1786,11 +1878,15 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	executionID := core.ID("")
 	planningContextRef := ""
 	if usesModel {
+		if err := planning.ValidateModelInput(planning.Input{Intent: draft, Strategy: strategy}); err != nil {
+			return core.Plan{}, fmt.Errorf("validate bounded planning input: %w", err)
+		}
 		executionID = core.ID(fmt.Sprintf("planning-%s-attempt-1", planID))
 		contextPayload := events.PlanningContextPayload{
 			PlanID: string(planID), IntentID: string(intent.ID), IntentFingerprint: draft.Fingerprint,
 			PromptVersion: descriptor.PromptVersion, Provider: descriptor.Provider, Model: descriptor.Model,
 			ExecutionProfileVersion: descriptor.ExecutionProfileVersion, InputEventRefs: inputRefs,
+			StrategicContextRefs: strategicContextRefs,
 		}
 		contextEvent, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
 			OrganizationID: string(organizationID), EventType: "PLANNING_CONTEXT_MANIFESTED", SourceActorID: "runtime",
@@ -1820,7 +1916,7 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 			return core.Plan{}, attemptFailure(fmt.Errorf("bind planning inference scope: %w", err))
 		}
 	}
-	result, buildErr := s.planner.Build(turnCtx, draft, requestedKind)
+	result, buildErr := s.planner.Build(turnCtx, planning.Input{Intent: draft, Strategy: strategy}, requestedKind)
 	cancel()
 	if result.Usage != nil {
 		if !usesModel || !result.Usage.Valid() || result.Usage.Provider != descriptor.Provider || result.Usage.Model != descriptor.Model {
@@ -1841,13 +1937,14 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	}
 	plan := core.Plan{
 		ID: planID, IntentID: intent.ID, IntentFingerprint: draft.Fingerprint, Version: 1,
+		StrategicEventRefs: append([]string(nil), strategicEventRefs...), StrategicContextRefs: append([]core.VersionedRef(nil), strategicContextRefs...),
 		Tasks: append([]core.PlanTask(nil), result.Tasks...), CreatedAt: time.Now().UTC(),
 	}
 	plan.Fingerprint, err = core.FingerprintPlan(plan)
 	if err != nil {
 		return core.Plan{}, attemptFailure(fmt.Errorf("fingerprint durable plan: %w", err))
 	}
-	if err := validateDurablePlan(plan, planID, intent, draft, requestedKind); err != nil {
+	if err := validateDurablePlan(plan, planID, intent, draft, requestedKind, strategicEventRefs, strategicContextRefs); err != nil {
 		return core.Plan{}, attemptFailure(err)
 	}
 	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
@@ -1859,7 +1956,7 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	return plan, nil
 }
 
-func recordedPlanningAttempt(stream []events.Event, planID core.ID, intent core.Intent, draft core.IntentDraft, inputRefs []string) (string, bool, error) {
+func recordedPlanningAttempt(stream []events.Event, planID core.ID, intent core.Intent, draft core.IntentDraft, inputRefs []string, strategicContextRefs []core.VersionedRef) (string, bool, error) {
 	attemptRef := ""
 	for _, event := range stream {
 		if event.EventType != "PLANNING_CONTEXT_MANIFESTED" {
@@ -1873,7 +1970,7 @@ func recordedPlanningAttempt(stream []events.Event, planID core.ID, intent core.
 		if event.EventID == "" || event.SourceExecutionID == "" || event.TaskID != "task-"+event.CorrelationID ||
 			json.Unmarshal(event.Payload, &manifest) != nil || manifest.PlanID != string(planID) || manifest.IntentID != string(intent.ID) ||
 			manifest.IntentFingerprint != draft.Fingerprint || manifest.PromptVersion == "" || manifest.Provider == "" || manifest.Model == "" ||
-			manifest.ExecutionProfileVersion == "" || !slices.Equal(manifest.InputEventRefs, inputRefs) {
+			manifest.ExecutionProfileVersion == "" || !slices.Equal(manifest.InputEventRefs, inputRefs) || !slices.Equal(manifest.StrategicContextRefs, strategicContextRefs) {
 			return attemptRef, true, fmt.Errorf("durable planning context does not match the accepted Intent")
 		}
 	}
@@ -1913,9 +2010,14 @@ func planningInputRefs(stream []events.Event, intent core.Intent, draft core.Int
 	return refs, nil
 }
 
-func validateDurablePlan(plan core.Plan, planID core.ID, intent core.Intent, draft core.IntentDraft, requestedKind core.ExecutionKind) error {
+func validateDurablePlan(plan core.Plan, planID core.ID, intent core.Intent, draft core.IntentDraft, requestedKind core.ExecutionKind, strategicEventRefs []string, strategicContextRefs []core.VersionedRef) error {
 	if plan.ID != planID || plan.IntentID != intent.ID || plan.IntentFingerprint != intent.AcceptedFingerprint || plan.IntentFingerprint != draft.Fingerprint || plan.Version != 1 || plan.CreatedAt.IsZero() {
 		return fmt.Errorf("durable plan does not bind the exact accepted intent")
+	}
+	if !slices.Equal(plan.StrategicEventRefs, strategicEventRefs) || !slices.Equal(plan.StrategicContextRefs, strategicContextRefs) ||
+		(intent.GoalID == "" && (len(plan.StrategicEventRefs) != 0 || len(plan.StrategicContextRefs) != 0)) ||
+		(intent.GoalID != "" && (len(plan.StrategicEventRefs) != 2 || len(plan.StrategicContextRefs) != 2)) {
+		return fmt.Errorf("durable plan does not bind the exact strategic context")
 	}
 	if err := planning.ValidateTasks(plan.Tasks, requestedKind); err != nil {
 		return fmt.Errorf("durable plan is invalid: %w", err)
@@ -2389,18 +2491,6 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		return taskRun{}, err
 	}
 	var selected assignment.Selection
-	if task.ExecutionKind == core.ExecutionDeterministic || task.ExecutionKind == core.ExecutionAgent {
-		selected, err = assignment.ResolveAssigned(assignmentRoster(snapshot), task, s.assignmentRequirement(organizationID, task.ExecutionKind))
-		if err != nil {
-			task.Status = core.TaskBlocked
-			detail := blockedDetail("the durable Agent assignment is unavailable or no longer eligible", "an active same-organization Agent with the exact reviewed blueprint, execution profile, runtime adapter, and capability prerequisites", "the runtime cannot substitute another Agent, infer capabilities, or change provider identity at dispatch")
-			detail.Code = assignmentBlockedCode
-			if saveErr := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); saveErr != nil {
-				return taskRun{}, fmt.Errorf("persist assignment block for task %s: %w", task.ID, saveErr)
-			}
-			return taskRun{}, nil
-		}
-	}
 	var handler execution.Handler
 	switch task.ExecutionKind {
 	case core.ExecutionDeterministic:
@@ -2408,12 +2498,8 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	case core.ExecutionAgent:
 		handler = s.agent
 	case core.ExecutionHuman:
-		task.Status = core.TaskBlocked
-		detail := blockedDetail("user task is awaiting structured completion", "every field and artifact required by its CompletionContract", "the runtime cannot invent, infer, or waive required user evidence")
-		if err := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); err != nil {
-			return taskRun{}, fmt.Errorf("persist input-required user task %s: %w", task.ID, err)
-		}
-		return taskRun{}, nil
+		// The strategic Plan is checked before the Task is allowed to wait for
+		// user input. Continuation rechecks it transactionally at execution start.
 	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
 		task.Status = core.TaskBlocked
 		detail := blockedDetail("execution kind is declared but unavailable in this V1 slice", "authorized runtime handler", "the worker cannot expand its own execution authority")
@@ -2437,9 +2523,59 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	var dependencyRefs []string
 	var dependencyResults []core.AgentExecutionDependencyResult
 	var blockedDependencies []core.AgentExecutionBlockedDependency
+	var strategy *core.StrategicContext
+	var strategyEventRefs []string
+	var strategyContextRefs []core.VersionedRef
+	var correlationEvents []events.Event
 	var revision completion.HumanReview
 	var revisionEvent events.Event
 	var hasRevision bool
+	workState, found := snapshot.Works[task.WorkID]
+	if !found || workState.Value.ID != task.WorkID || workState.Value.IntentID == "" {
+		return taskRun{}, fmt.Errorf("load durable Work context for task %s", task.ID)
+	}
+	if workState.Value.GoalID != "" {
+		intentState, intentFound := snapshot.Intents[workState.Value.IntentID]
+		if !intentFound || intentState.Value.OrganizationID != organizationID {
+			return taskRun{}, fmt.Errorf("load durable Intent context for task %s", task.ID)
+		}
+		correlationEvents, err = s.gateway.Events(ctx, state.CorrelationID)
+		if err != nil {
+			return taskRun{}, fmt.Errorf("load strategic execution context for task %s: %w", task.ID, err)
+		}
+		plan, planErr := events.ResolvePlan(string(organizationID), state.CorrelationID, workState.Value, intentState.Value, correlationEvents)
+		if planErr == nil {
+			strategy, planErr = snapshotStrategicContext(snapshot, organizationID, workState.Value, plan)
+		}
+		if planErr != nil || strategy == nil || strategy.Mission.Status != core.MissionActive || strategy.Goal.Status != core.GoalActive {
+			if failErr := s.failStrategicTask(ctx, organizationID, state); failErr != nil {
+				return taskRun{}, fmt.Errorf("terminalize stale strategic task %s: %w", task.ID, failErr)
+			}
+			return taskRun{}, nil
+		}
+		strategyEventRefs = append([]string(nil), plan.StrategicEventRefs...)
+		strategyContextRefs = append([]core.VersionedRef(nil), plan.StrategicContextRefs...)
+	}
+	if task.ExecutionKind == core.ExecutionDeterministic || task.ExecutionKind == core.ExecutionAgent {
+		selected, err = assignment.ResolveAssigned(assignmentRoster(snapshot), task, s.assignmentRequirement(organizationID, task.ExecutionKind))
+		if err != nil {
+			task.Status = core.TaskBlocked
+			detail := blockedDetail("the durable Agent assignment is unavailable or no longer eligible", "an active same-organization Agent with the exact reviewed blueprint, execution profile, runtime adapter, and capability prerequisites", "the runtime cannot substitute another Agent, infer capabilities, or change provider identity at dispatch")
+			detail.Code = assignmentBlockedCode
+			if saveErr := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); saveErr != nil {
+				return taskRun{}, fmt.Errorf("persist assignment block for task %s: %w", task.ID, saveErr)
+			}
+			return taskRun{}, nil
+		}
+	}
+	if task.ExecutionKind == core.ExecutionHuman {
+		task.Status = core.TaskBlocked
+		detail := blockedDetail("user task is awaiting structured completion", "every field and artifact required by its CompletionContract", "the runtime cannot invent, infer, or waive required user evidence")
+		if err := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); err != nil {
+			return taskRun{}, fmt.Errorf("persist input-required user task %s: %w", task.ID, err)
+		}
+		return taskRun{}, nil
+	}
 	if task.ExecutionKind == core.ExecutionAgent {
 		if remediation {
 			dependencyRefs, blockedDependencies, err = s.blockedDependencyContext(ctx, snapshot, state.CorrelationID, task)
@@ -2452,13 +2588,23 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 				return taskRun{}, fmt.Errorf("load dependency evidence for task %s: %w", task.ID, err)
 			}
 		}
-		stream, err := s.gateway.Events(ctx, state.CorrelationID)
+		if correlationEvents == nil {
+			correlationEvents, err = s.gateway.Events(ctx, state.CorrelationID)
+		}
 		if err != nil {
 			return taskRun{}, fmt.Errorf("load completion revision context for task %s: %w", task.ID, err)
 		}
-		revision, revisionEvent, hasRevision, err = latestRevision(stream, task.ID)
+		revision, revisionEvent, hasRevision, err = latestRevision(correlationEvents, task.ID)
 		if err != nil {
 			return taskRun{}, fmt.Errorf("validate completion revision context for task %s: %w", task.ID, err)
+		}
+		if err := core.ValidateStrategicExecutionContext(strategy); err != nil {
+			task.Status = core.TaskFailed
+			detail := strategicTaskFailureDetail{Code: "EXECUTION_CONTEXT_LIMIT_EXCEEDED", Reason: err.Error(), Replacement: "submit narrower replacement Work whose reviewed context fits the execution boundary"}
+			if saveErr := s.state.SaveTask(ctx, organizationID, "TASK_WORK_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); saveErr != nil {
+				return taskRun{}, fmt.Errorf("terminalize oversized execution context for task %s: %w", task.ID, saveErr)
+			}
+			return taskRun{}, nil
 		}
 	}
 
@@ -2468,36 +2614,52 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		if remediation {
 			mode = "BLOCKED_DEPENDENCY_REMEDIATION"
 		}
-		selections := []events.InboxSelection(nil)
-		_, selections, err = s.state.StartAgentExecution(ctx, organizationID, state.CorrelationID, state.Version+1, task, mode, actionBoundaryRoutes(snapshot, task))
+		var executionInput string
+		validateInput := func(selections []events.InboxSelection) error {
+			inboxBatches = inboxBatchesFromSelections(selections)
+			inputContext := core.AgentExecutionInputContext{
+				Blueprint: selected.Blueprint, Task: task, Strategy: strategy,
+				DependencyResults: dependencyResults, BlockedDependencies: blockedDependencies,
+			}
+			for _, event := range sortedInboxEvents(inboxBatches) {
+				inputContext.InboxEvents = append(inputContext.InboxEvents, core.AgentExecutionInboxEvent{
+					Sequence: event.Sequence, EventID: event.EventID, EventType: event.EventType,
+					SourceActorID: event.SourceActorID, RecipientScope: event.RecipientScope, RecipientID: event.RecipientID,
+					TaskID: event.TaskID, CreatedAt: event.CreatedAt, Payload: append(json.RawMessage(nil), event.Payload...),
+				})
+			}
+			if hasRevision {
+				inputContext.Revision = &core.AgentExecutionRevision{
+					EventRef: revisionEvent.EventID, ReviewerID: revision.ReviewerID, UntrustedText: revision.Feedback,
+				}
+			}
+			executionTask, executionInput, err = core.MaterializeAgentExecutionInput(inputContext)
+			return err
+		}
+		_, _, err = s.state.StartAgentExecution(ctx, organizationID, state.CorrelationID, state.Version+1, task, mode, strategyEventRefs, strategyContextRefs, actionBoundaryRoutes(snapshot, task), validateInput)
 		if err != nil {
+			if errors.Is(err, events.ErrStrategicContextChanged) {
+				if failErr := s.failStrategicTask(ctx, organizationID, state); failErr != nil {
+					return taskRun{}, fmt.Errorf("terminalize concurrently stale strategic task %s: %w", task.ID, failErr)
+				}
+				return taskRun{}, nil
+			}
+			if errors.Is(err, core.ErrExecutionContextLimitExceeded) {
+				task.Status = core.TaskFailed
+				detail := strategicTaskFailureDetail{Code: "EXECUTION_CONTEXT_LIMIT_EXCEEDED", Reason: err.Error(), Replacement: "submit narrower replacement Work whose reviewed context fits the execution boundary"}
+				if saveErr := s.state.SaveTask(ctx, organizationID, "TASK_WORK_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); saveErr != nil {
+					return taskRun{}, fmt.Errorf("terminalize oversized execution input for task %s: %w", task.ID, saveErr)
+				}
+				return taskRun{}, nil
+			}
 			return taskRun{}, fmt.Errorf("persist Agent execution start and inbox boundary for task %s: %w", task.ID, err)
 		}
-		inboxBatches = inboxBatchesFromSelections(selections)
 		inboxRefs := inboxEventRefs(inboxBatches)
-		eventRefs := append(append([]string(nil), inboxRefs...), dependencyRefs...)
+		eventRefs := append([]string(nil), strategyEventRefs...)
+		eventRefs = append(eventRefs, inboxRefs...)
+		eventRefs = append(eventRefs, dependencyRefs...)
 		if hasRevision {
 			eventRefs = append(eventRefs, revisionEvent.EventID)
-		}
-		inputContext := core.AgentExecutionInputContext{
-			Blueprint: selected.Blueprint, Task: task,
-			DependencyResults: dependencyResults, BlockedDependencies: blockedDependencies,
-		}
-		for _, event := range sortedInboxEvents(inboxBatches) {
-			inputContext.InboxEvents = append(inputContext.InboxEvents, core.AgentExecutionInboxEvent{
-				Sequence: event.Sequence, EventID: event.EventID, EventType: event.EventType,
-				SourceActorID: event.SourceActorID, RecipientScope: event.RecipientScope, RecipientID: event.RecipientID,
-				TaskID: event.TaskID, CreatedAt: event.CreatedAt, Payload: append(json.RawMessage(nil), event.Payload...),
-			})
-		}
-		if hasRevision {
-			inputContext.Revision = &core.AgentExecutionRevision{
-				EventRef: revisionEvent.EventID, ReviewerID: revision.ReviewerID, UntrustedText: revision.Feedback,
-			}
-		}
-		executionTask, _, err = core.MaterializeAgentExecutionInput(inputContext)
-		if err != nil {
-			return taskRun{}, fmt.Errorf("materialize durable Agent execution input for task %s: %w", task.ID, err)
 		}
 		manifest = core.ExecutionContextManifest{
 			ExecutionID:             executionID,
@@ -2516,19 +2678,21 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			SkillRefs:               []core.VersionedRef{},
 			ToolDefinitions:         []core.VersionedRef{},
 			ArtifactRefs:            []core.VersionedRef{},
-			AdditionalContextRefs:   []core.VersionedRef{},
+			AdditionalContextRefs:   strategyContextRefs,
 			ContextBuilderVersion:   "v1",
-		}
-		executionInput := executionTask.ExecutionBrief
-		if executionInput == "" {
-			executionInput = executionTask.Description
 		}
 		manifest.ExecutionInputSHA256 = core.FingerprintExecutionInput(executionInput)
 		manifest.CreatedAt = time.Now().UTC()
 		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "EXECUTION_CONTEXT_MANIFESTED", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: manifest, CorrelationID: state.CorrelationID}); err != nil {
 			return taskRun{}, fmt.Errorf("persist execution context for task %s: %w", task.ID, err)
 		}
-	} else if err := s.state.SaveTask(ctx, organizationID, "EXECUTION_STARTED", "runtime", state.CorrelationID, state.Version+1, task, nil); err != nil {
+	} else if _, err := s.state.StartTaskExecution(ctx, organizationID, state.CorrelationID, state.Version+1, task, "", "", strategyEventRefs, strategyContextRefs); err != nil {
+		if errors.Is(err, events.ErrStrategicContextChanged) {
+			if failErr := s.failStrategicTask(ctx, organizationID, state); failErr != nil {
+				return taskRun{}, fmt.Errorf("terminalize concurrently stale strategic task %s: %w", task.ID, failErr)
+			}
+			return taskRun{}, nil
+		}
 		return taskRun{}, fmt.Errorf("persist execution start for task %s: %w", task.ID, err)
 	}
 
@@ -3099,6 +3263,76 @@ func sortedTaskStates(tasks map[core.ID]projections.Versioned[core.Task]) []proj
 	}
 	sort.Slice(states, func(i, j int) bool { return states[i].Value.ID < states[j].Value.ID })
 	return states
+}
+
+func snapshotStrategicContext(snapshot projections.Snapshot, organizationID core.ID, work core.Work, plan core.Plan) (*core.StrategicContext, error) {
+	goalState, found := snapshot.Goals[work.GoalID]
+	if !found || goalState.Value.ID != work.GoalID || goalState.Value.OrganizationID != organizationID {
+		return nil, fmt.Errorf("current Goal is unavailable")
+	}
+	missionState, found := snapshot.Missions[goalState.Value.MissionID]
+	if !found || missionState.Value.ID != goalState.Value.MissionID || missionState.Value.OrganizationID != organizationID {
+		return nil, fmt.Errorf("current Mission is unavailable")
+	}
+	context := &core.StrategicContext{
+		Mission: missionState.Value, MissionVersion: missionState.Version,
+		Goal: goalState.Value, GoalVersion: goalState.Version,
+	}
+	expectedRefs := []core.VersionedRef{
+		{ID: "mission/" + string(context.Mission.ID), Version: strconv.Itoa(context.MissionVersion), MaterializationState: core.MaterializedFull},
+		{ID: "goal/" + string(context.Goal.ID), Version: strconv.Itoa(context.GoalVersion), MaterializationState: core.MaterializedFull},
+	}
+	if !core.ValidStrategicContext(*context) || len(plan.StrategicEventRefs) != 2 || plan.StrategicEventRefs[0] == "" || plan.StrategicEventRefs[1] == "" || plan.StrategicEventRefs[0] == plan.StrategicEventRefs[1] || !slices.Equal(plan.StrategicContextRefs, expectedRefs) {
+		return nil, fmt.Errorf("plan does not match current strategic context")
+	}
+	return context, nil
+}
+
+type strategicTaskFailureDetail struct {
+	Code        string `json:"code"`
+	Reason      string `json:"reason"`
+	Replacement string `json:"replacement"`
+}
+
+func (s *Service) taskUsesCurrentStrategy(ctx context.Context, snapshot projections.Snapshot, organizationID core.ID, state projections.Versioned[core.Task]) (bool, error) {
+	workState, found := snapshot.Works[state.Value.WorkID]
+	if !found || workState.Value.ID != state.Value.WorkID || workState.Value.IntentID == "" {
+		return false, fmt.Errorf("durable Work context is unavailable")
+	}
+	if workState.Value.GoalID == "" {
+		return true, nil
+	}
+	intentState, found := snapshot.Intents[workState.Value.IntentID]
+	if !found || intentState.Value.OrganizationID != organizationID {
+		return false, fmt.Errorf("durable Intent context is unavailable")
+	}
+	stream, err := s.gateway.Events(ctx, state.CorrelationID)
+	if err != nil {
+		return false, err
+	}
+	plan, err := events.ResolvePlan(string(organizationID), state.CorrelationID, workState.Value, intentState.Value, stream)
+	if err != nil {
+		return false, errors.Join(errTaskStrategicContextChanged, fmt.Errorf("resolve durable Plan: %w", err))
+	}
+	strategy, err := snapshotStrategicContext(snapshot, organizationID, workState.Value, plan)
+	if err != nil {
+		return false, errors.Join(errTaskStrategicContextChanged, fmt.Errorf("resolve durable strategy: %w", err))
+	}
+	return strategy != nil && strategy.Mission.Status == core.MissionActive && strategy.Goal.Status == core.GoalActive, nil
+}
+
+func (s *Service) failStrategicTask(ctx context.Context, organizationID core.ID, state projections.Versioned[core.Task]) error {
+	if organizationID == "" || state.CorrelationID == "" || state.Value.ID == "" || state.Value.Status != core.TaskPending && state.Value.Status != core.TaskBlocked {
+		return fmt.Errorf("eligible pending or blocked strategic Task is required")
+	}
+	task := state.Value
+	task.Status = core.TaskFailed
+	detail := strategicTaskFailureDetail{
+		Code:        "STRATEGIC_CONTEXT_CHANGED",
+		Reason:      "the Mission or Goal changed after this Work was planned",
+		Replacement: "submit replacement Work reviewed against the current active Mission and Goal",
+	}
+	return s.state.SaveTask(ctx, organizationID, "TASK_WORK_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail)
 }
 
 func (s *Service) saveBlockedTask(ctx context.Context, snapshot projections.Snapshot, previous projections.Versioned[core.Task], organizationID core.ID, blocked core.Task, detail events.TaskBlockedPayload) error {

@@ -1022,34 +1022,83 @@ ORDER BY transition.sequence,transition.event_id LIMIT 1`, organizationID, strin
 	return transitions, nil
 }
 
-func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.ProjectionDraft, routes []events.InboxRoute) (events.Event, []events.InboxSelection, error) {
+func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.ProjectionDraft, routes []events.InboxRoute, validate events.ExecutionStartValidator) (events.Event, []events.InboxSelection, error) {
 	var requested events.ExecutionStartDetail
-	if draft.Event.EventType != "EXECUTION_STARTED" || draft.Event.OrganizationID == "" || draft.Event.SourceActorID != "runtime" || draft.Event.SourceExecutionID != "" || draft.Event.TaskID == "" || draft.Event.TaskID != draft.RecordID || draft.Event.CorrelationID == "" || draft.ProjectionKind != "task" || draft.RecordID == "" || draft.Version < 2 || len(routes) < 2 || decodeExactJSON(draft.Event.Payload, &requested) != nil || requested.InboxCutoffSequence != 0 || requested.DispatchBinding != nil || requested.Mode != "" && requested.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
-		return events.Event{}, nil, fmt.Errorf("complete Agent execution-start boundary is required")
+	if draft.Event.EventType != "EXECUTION_STARTED" || draft.Event.OrganizationID == "" || draft.Event.SourceActorID != "runtime" || draft.Event.SourceExecutionID != "" || draft.Event.TaskID == "" || draft.Event.TaskID != draft.RecordID || draft.Event.CorrelationID == "" || draft.ProjectionKind != "task" || draft.RecordID == "" || draft.Version < 2 || decodeExactJSON(draft.Event.Payload, &requested) != nil || requested.InboxCutoffSequence != 0 || requested.DispatchBinding != nil {
+		return events.Event{}, nil, fmt.Errorf("complete execution-start boundary is required")
 	}
 	value, err := json.Marshal(draft.Value)
 	if err != nil {
-		return events.Event{}, nil, fmt.Errorf("encode Agent execution-start Task: %w", err)
+		return events.Event{}, nil, fmt.Errorf("encode execution-start Task: %w", err)
 	}
 	var task core.Task
-	if json.Unmarshal(value, &task) != nil || task.ID != core.ID(draft.RecordID) || task.ExecutionKind != core.ExecutionAgent || task.Status != core.TaskRunning || task.AssigneeType != "AGENT" || task.AssigneeID == "" {
-		return events.Event{}, nil, fmt.Errorf("agent execution-start task is invalid")
+	if json.Unmarshal(value, &task) != nil || task.ID != core.ID(draft.RecordID) || task.Status != core.TaskRunning {
+		return events.Event{}, nil, fmt.Errorf("execution-start task is invalid")
+	}
+	switch task.ExecutionKind {
+	case core.ExecutionAgent:
+		if task.AssigneeType != "AGENT" || task.AssigneeID == "" || len(routes) < 2 || validate == nil || requested.InputEventRef != "" || requested.Mode != "" && requested.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
+			return events.Event{}, nil, fmt.Errorf("agent execution-start boundary is invalid")
+		}
+	case core.ExecutionDeterministic:
+		if len(routes) != 0 || validate != nil || requested.Mode != "" || requested.InputEventRef != "" {
+			return events.Event{}, nil, fmt.Errorf("deterministic execution-start boundary is invalid")
+		}
+	case core.ExecutionHuman:
+		if len(routes) != 0 || validate != nil || requested.Mode != "OPERATOR_HUMAN_INPUT" && requested.Mode != "STRUCTURED_HUMAN_COMPLETION" || requested.InputEventRef == "" {
+			return events.Event{}, nil, fmt.Errorf("user execution-start boundary is invalid")
+		}
+	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
+		return events.Event{}, nil, fmt.Errorf("execution-start kind is unavailable")
+	default:
+		return events.Event{}, nil, fmt.Errorf("execution-start kind is unavailable")
 	}
 	var started events.Event
 	var selections []events.InboxSelection
 	err = l.withTx(ctx, func(tx *sql.Tx) error {
-		if err := validatePriorAgentExecutionTask(ctx, tx, draft, task); err != nil {
+		if err := validatePriorExecutionTask(ctx, tx, draft, task); err != nil {
 			return err
 		}
-		dispatch, err := bindAgentDispatch(ctx, tx, draft, task)
+		if task.ExecutionKind == core.ExecutionHuman {
+			inputEvents, err := exactEventsByID(ctx, tx, draft.Event.OrganizationID, requested.InputEventRef)
+			if err != nil || len(inputEvents) != 1 || inputEvents[0].CorrelationID != draft.Event.CorrelationID || inputEvents[0].TaskID != string(task.ID) {
+				return fmt.Errorf("user execution start lacks its exact durable input event")
+			}
+			if requested.Mode == "OPERATOR_HUMAN_INPUT" {
+				if _, err := events.DecodeDurableOperatorInput(inputEvents[0]); err != nil {
+					return fmt.Errorf("user execution start input event is invalid: %w", err)
+				}
+			} else if _, err := events.DecodeHumanTaskCompletion(inputEvents[0]); err != nil {
+				return fmt.Errorf("structured user completion start event is invalid: %w", err)
+			}
+		}
+		var dispatch *events.AgentDispatchBinding
+		var cutoff int64
+		if task.ExecutionKind == core.ExecutionAgent {
+			bound, err := bindAgentDispatch(ctx, tx, draft, task)
+			if err != nil {
+				return err
+			}
+			dispatch = &bound
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0) FROM events`).Scan(&cutoff); err != nil {
+				return fmt.Errorf("read Agent execution inbox cutoff: %w", err)
+			}
+		}
+		stream, err := validateStrategicExecutionStart(ctx, tx, draft, task, requested)
 		if err != nil {
 			return err
 		}
-		var cutoff int64
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0) FROM events`).Scan(&cutoff); err != nil {
-			return fmt.Errorf("read Agent execution inbox cutoff: %w", err)
+		if dispatch != nil {
+			roster, err := exactEventsByID(ctx, tx, draft.Event.OrganizationID, dispatch.AgentEventRef, dispatch.BlueprintEventRef, dispatch.ExecutionProfileEventRef)
+			if err != nil {
+				return fmt.Errorf("read Agent execution roster boundary: %w", err)
+			}
+			stream = append(stream, roster...)
 		}
-		draft.Event.Payload = events.ExecutionStartDetail{Mode: requested.Mode, InboxCutoffSequence: cutoff, DispatchBinding: &dispatch}
+		draft.Event.Payload = events.ExecutionStartDetail{
+			Mode: requested.Mode, InputEventRef: requested.InputEventRef, InboxCutoffSequence: cutoff, DispatchBinding: dispatch,
+			StrategicEventRefs: append([]string(nil), requested.StrategicEventRefs...), StrategicContextRefs: append([]core.VersionedRef(nil), requested.StrategicContextRefs...),
+		}
 		item, err := prepareProjection(draft, false, false)
 		if err != nil {
 			return err
@@ -1058,9 +1107,9 @@ func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.Projecti
 		if err != nil {
 			return err
 		}
-		stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? ORDER BY sequence`, draft.Event.OrganizationID))
-		if err != nil {
-			return fmt.Errorf("read Agent execution route boundary: %w", err)
+		stream = append(stream, started)
+		if task.ExecutionKind != core.ExecutionAgent {
+			return nil
 		}
 		if err := events.ValidateAgentDispatchStart(started, task, draft.Version, stream); err != nil {
 			return fmt.Errorf("validate Agent dispatch admission: %w", err)
@@ -1069,7 +1118,12 @@ func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.Projecti
 		if err != nil {
 			return fmt.Errorf("read Agent execution Team history: %w", err)
 		}
-		teamRevisions, err := events.ResolveTeamRevisionBindings(draft.Event.OrganizationID, teamBodies, stream)
+		teamEvents, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? AND json_extract(payload,'$.projection.projection_kind')='team' ORDER BY sequence`, draft.Event.OrganizationID))
+		if err != nil {
+			return fmt.Errorf("read Agent execution Team event history: %w", err)
+		}
+		teamRevisions, err := events.ResolveTeamRevisionBindings(draft.Event.OrganizationID, teamBodies, teamEvents)
 		if err != nil {
 			return fmt.Errorf("resolve Agent execution Team history: %w", err)
 		}
@@ -1088,24 +1142,133 @@ ORDER BY e.sequence`, draft.Event.OrganizationID, route.Scope, route.ID, cutoff)
 			}
 			selections = append(selections, events.InboxSelection{Route: route, Events: selected})
 		}
+		if err := validate(selections); err != nil {
+			return fmt.Errorf("validate bounded Agent execution input: %w", err)
+		}
 		return nil
 	})
 	return started, selections, err
 }
 
-func validatePriorAgentExecutionTask(ctx context.Context, tx *sql.Tx, draft events.ProjectionDraft, task core.Task) error {
+func validateStrategicExecutionStart(ctx context.Context, tx *sql.Tx, draft events.ProjectionDraft, task core.Task, requested events.ExecutionStartDetail) ([]events.Event, error) {
+	body, found, err := latestRecordBody(ctx, tx, "work", string(task.WorkID))
+	if err != nil {
+		return nil, fmt.Errorf("read execution Work: %w", err)
+	}
+	var record events.ProjectionRecord
+	var work core.Work
+	if !found || decodeExactJSONBytes(body, &record) != nil || decodeExactJSONBytes(record.Value, &work) != nil || work.ID != task.WorkID || work.IntentID == "" || work.Status != core.WorkActive || record.CorrelationID != draft.Event.CorrelationID {
+		return nil, fmt.Errorf("execution strategic Work is invalid")
+	}
+	if work.GoalID == "" {
+		if len(requested.StrategicEventRefs) != 0 || len(requested.StrategicContextRefs) != 0 {
+			return nil, fmt.Errorf("ad hoc execution cannot bind strategic context")
+		}
+		return nil, nil
+	}
+	stream, err := boundedStrategicExecutionEvents(ctx, tx, draft.Event.OrganizationID, draft.Event.CorrelationID, work, requested)
+	if err != nil {
+		return nil, err
+	}
+	intentBody, intentFound, err := latestRecordBody(ctx, tx, "intent", string(work.IntentID))
+	if err != nil {
+		return nil, fmt.Errorf("read execution strategic Intent: %w", err)
+	}
+	var intentRecord events.ProjectionRecord
+	var intent core.Intent
+	if !intentFound || decodeExactJSONBytes(intentBody, &intentRecord) != nil || decodeExactJSONBytes(intentRecord.Value, &intent) != nil ||
+		intent.ID != work.IntentID || intent.OrganizationID != core.ID(draft.Event.OrganizationID) || intent.AcceptedFingerprint == "" || intentRecord.CorrelationID != draft.Event.CorrelationID {
+		return nil, fmt.Errorf("execution strategic Intent is invalid")
+	}
+	plan, strategy, err := events.ResolvePlanStrategicContext(draft.Event.OrganizationID, draft.Event.CorrelationID, work, intent, stream)
+	if err != nil || strategy == nil || strategy.Mission.Status != core.MissionActive || strategy.Goal.Status != core.GoalActive {
+		return nil, fmt.Errorf("execution strategic Plan is stale or invalid")
+	}
+	_, currentEventRefs, currentContextRefs, err := events.ResolveStrategicContext(draft.Event.OrganizationID, work, stream, 0)
+	if err != nil || !slices.Equal(plan.StrategicEventRefs, requested.StrategicEventRefs) || !slices.Equal(plan.StrategicContextRefs, requested.StrategicContextRefs) ||
+		!slices.Equal(currentEventRefs, requested.StrategicEventRefs) || !slices.Equal(currentContextRefs, requested.StrategicContextRefs) {
+		return nil, fmt.Errorf("%w before transactional execution start", events.ErrStrategicContextChanged)
+	}
+	return stream, nil
+}
+
+func boundedStrategicExecutionEvents(ctx context.Context, tx *sql.Tx, organizationID, correlationID string, work core.Work, requested events.ExecutionStartDetail) ([]events.Event, error) {
+	if organizationID == "" || correlationID == "" || work.GoalID == "" || len(requested.StrategicEventRefs) != 2 || len(requested.StrategicContextRefs) != 2 {
+		return nil, fmt.Errorf("execution strategic references are incomplete")
+	}
+	plans, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? AND correlation_id=? AND event_type='PLAN_CREATED' ORDER BY sequence LIMIT 2`, organizationID, correlationID))
+	if err != nil || len(plans) != 1 {
+		return nil, fmt.Errorf("read exact execution strategic Plan")
+	}
+	goalBody, found, err := latestRecordBody(ctx, tx, "goal", string(work.GoalID))
+	if err != nil || !found {
+		return nil, fmt.Errorf("read current execution Goal")
+	}
+	var goalRecord events.ProjectionRecord
+	var goal core.Goal
+	if decodeExactJSONBytes(goalBody, &goalRecord) != nil || decodeExactJSONBytes(goalRecord.Value, &goal) != nil || goal.ID != work.GoalID || goal.MissionID == "" || string(goal.OrganizationID) != organizationID {
+		return nil, fmt.Errorf("current execution Goal is invalid")
+	}
+	goalEventRef, err := latestAdmissionEventRef(ctx, tx, "goal", string(goal.ID))
+	if err != nil {
+		return nil, err
+	}
+	missionEventRef, err := latestAdmissionEventRef(ctx, tx, "mission", string(goal.MissionID))
+	if err != nil {
+		return nil, err
+	}
+	selected, err := exactEventsByID(ctx, tx, organizationID,
+		requested.StrategicEventRefs[0], requested.StrategicEventRefs[1], missionEventRef, goalEventRef)
+	if err != nil {
+		return nil, fmt.Errorf("read bounded execution strategic events: %w", err)
+	}
+	return append(plans, selected...), nil
+}
+
+func latestAdmissionEventRef(ctx context.Context, tx *sql.Tx, kind, recordID string) (string, error) {
+	var eventRef string
+	if err := tx.QueryRowContext(ctx, `SELECT admission_event_id FROM records WHERE kind=? AND record_id=? ORDER BY version DESC LIMIT 1`, kind, recordID).Scan(&eventRef); err != nil || eventRef == "" {
+		return "", fmt.Errorf("read current %s admission reference", kind)
+	}
+	return eventRef, nil
+}
+
+func exactEventsByID(ctx context.Context, tx *sql.Tx, organizationID string, eventRefs ...string) ([]events.Event, error) {
+	seen := make(map[string]struct{}, len(eventRefs))
+	selected := make([]events.Event, 0, len(eventRefs))
+	for _, eventRef := range eventRefs {
+		if eventRef == "" {
+			return nil, fmt.Errorf("event reference is empty")
+		}
+		if _, duplicate := seen[eventRef]; duplicate {
+			continue
+		}
+		seen[eventRef] = struct{}{}
+		row := tx.QueryRowContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_id=?`, eventRef)
+		event, err := scanEvent(row)
+		if err != nil || event.OrganizationID != organizationID {
+			return nil, fmt.Errorf("event reference %s is missing or crosses its organization", eventRef)
+		}
+		selected = append(selected, event)
+	}
+	sort.Slice(selected, func(i, j int) bool { return selected[i].Sequence < selected[j].Sequence })
+	return selected, nil
+}
+
+func validatePriorExecutionTask(ctx context.Context, tx *sql.Tx, draft events.ProjectionDraft, task core.Task) error {
 	body, found, err := latestRecordBody(ctx, tx, "task", draft.RecordID)
 	if err != nil {
-		return fmt.Errorf("read prior Agent execution Task: %w", err)
+		return fmt.Errorf("read prior execution Task: %w", err)
 	}
 	var record events.ProjectionRecord
 	var prior core.Task
 	if !found || json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &prior) != nil || record.ProjectionKind != "task" || record.RecordID != draft.RecordID || record.Version < 1 || record.CorrelationID != draft.Event.CorrelationID || draft.Version != record.Version+1 || prior.ID != task.ID || prior.Status != core.TaskPending {
-		return fmt.Errorf("agent execution start does not follow an eligible exact task revision")
+		return fmt.Errorf("execution start does not follow an eligible exact task revision")
 	}
 	prior.Status = task.Status
 	if !reflect.DeepEqual(prior, task) {
-		return fmt.Errorf("agent execution start changes the immutable task contract")
+		return fmt.Errorf("execution start changes the immutable task contract")
 	}
 	return nil
 }
@@ -2725,6 +2888,9 @@ func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.Trus
 				if err != nil {
 					return err
 				}
+				if err := validateActiveMissionAt(ctx, tx, draft.OrganizationID, goal.MissionID, candidate.Sequence); err != nil {
+					return fmt.Errorf("intent confirmation lacks its historical active Mission: %w", err)
+				}
 				if err := events.ValidateReviewedGoalIntentAdmission(stream, candidate, goal); err != nil {
 					return err
 				}
@@ -2744,6 +2910,16 @@ func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.Trus
 			var record events.ProjectionRecord
 			if json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &goal) != nil || goal.ID != goalID || string(goal.OrganizationID) != draft.OrganizationID || goal.Status != core.GoalActive {
 				return fmt.Errorf("confirmed intent requires an active goal in its organization")
+			}
+			missionBody, missionFound, readErr := latestRecordBody(ctx, tx, "mission", string(goal.MissionID))
+			if readErr != nil {
+				return fmt.Errorf("read confirmed intent Mission: %w", readErr)
+			}
+			var missionRecord events.ProjectionRecord
+			var mission core.Mission
+			if !missionFound || decodeExactJSONBytes(missionBody, &missionRecord) != nil || decodeExactJSONBytes(missionRecord.Value, &mission) != nil ||
+				mission.ID != goal.MissionID || string(mission.OrganizationID) != draft.OrganizationID || mission.Status != core.MissionActive || !core.ValidMission(mission) {
+				return fmt.Errorf("confirmed intent requires an active Mission in its organization")
 			}
 		}
 		confirmationBody, err := json.Marshal(draft.Payload)

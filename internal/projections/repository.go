@@ -237,17 +237,38 @@ func (r *Repository) SaveExperimentalSubmission(ctx context.Context, correlation
 	return err
 }
 
-func (r *Repository) StartAgentExecution(ctx context.Context, organizationID core.ID, correlationID string, version int, value core.Task, mode string, routes []events.InboxRoute) (events.Event, []events.InboxSelection, error) {
+func (r *Repository) StartAgentExecution(ctx context.Context, organizationID core.ID, correlationID string, version int, value core.Task, mode string, strategicEventRefs []string, strategicContextRefs []core.VersionedRef, routes []events.InboxRoute, validate events.ExecutionStartValidator) (events.Event, []events.InboxSelection, error) {
 	if r == nil || r.gateway == nil || organizationID == "" || correlationID == "" || value.ID == "" || value.ExecutionKind != core.ExecutionAgent || value.Status != core.TaskRunning || version < 2 {
 		return events.Event{}, nil, fmt.Errorf("complete Agent execution-start projection is required")
 	}
 	return r.gateway.PublishExecutionStart(ctx, events.ProjectionDraft{
 		Event: events.TrustedDraft{
 			OrganizationID: string(organizationID), EventType: "EXECUTION_STARTED", SourceActorID: "runtime",
-			TaskID: string(value.ID), CorrelationID: correlationID, Payload: events.ExecutionStartDetail{Mode: mode},
+			TaskID: string(value.ID), CorrelationID: correlationID, Payload: events.ExecutionStartDetail{Mode: mode, StrategicEventRefs: strategicEventRefs, StrategicContextRefs: strategicContextRefs},
 		},
 		ProjectionKind: KindTask, RecordID: string(value.ID), Version: version, Value: value,
-	}, routes)
+	}, routes, validate)
+}
+
+// StartTaskExecution admits deterministic and user-operated execution starts
+// through the same transactional strategic-context boundary as Agent work.
+// It does not grant capabilities, approval authority, or effect permission.
+func (r *Repository) StartTaskExecution(ctx context.Context, organizationID core.ID, correlationID string, version int, value core.Task, mode, inputEventRef string, strategicEventRefs []string, strategicContextRefs []core.VersionedRef) (events.Event, error) {
+	if r == nil || r.gateway == nil || organizationID == "" || correlationID == "" || value.ID == "" || value.Status != core.TaskRunning || version < 2 ||
+		value.ExecutionKind != core.ExecutionDeterministic && value.ExecutionKind != core.ExecutionHuman {
+		return events.Event{}, fmt.Errorf("complete deterministic or user execution-start projection is required")
+	}
+	started, selections, err := r.gateway.PublishExecutionStart(ctx, events.ProjectionDraft{
+		Event: events.TrustedDraft{
+			OrganizationID: string(organizationID), EventType: "EXECUTION_STARTED", SourceActorID: "runtime",
+			TaskID: string(value.ID), CorrelationID: correlationID, Payload: events.ExecutionStartDetail{Mode: mode, InputEventRef: inputEventRef, StrategicEventRefs: strategicEventRefs, StrategicContextRefs: strategicContextRefs},
+		},
+		ProjectionKind: KindTask, RecordID: string(value.ID), Version: version, Value: value,
+	}, nil, nil)
+	if err == nil && len(selections) != 0 {
+		return events.Event{}, fmt.Errorf("non-Agent execution start selected an inbox")
+	}
+	return started, err
 }
 
 // SaveNewTasks atomically creates a complete Task DAG. Every Task starts at
@@ -574,7 +595,7 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 				err = validateProjectionEventLifecycle(event, record, "Task", tasks, func(value core.Task) core.ID { return value.ID }, true, events.ValidateTaskProjectionTransition)
 			}
 			if err == nil {
-				err = validateProjectionTaskAtAdmission(value, event, record, graph)
+				err = validateProjectionTaskAtAdmission(value, event, record, graph, ordered)
 			}
 			if err == nil && event.EventType == "TASK_VERIFIED_COMPLETE" {
 				err = validateTaskCompletionAtAdmission(value, event, record, graph, ordered, teamRecords[event.OrganizationID], inboxObservations, blueprintRevisions, profileRevisions)
@@ -642,7 +663,7 @@ func intentRequiresConfirmation(intent core.Intent) bool {
 	return intent.GoalID != "" || intent.SourceChannel == "HUMAN_DIRECT" || intent.SourceChannel == "A2A" || intent.SourcePrincipalKind == core.PrincipalHuman || intent.SourcePrincipalKind == core.PrincipalExternalAgent
 }
 
-func validateProjectionTaskAtAdmission(task core.Task, event events.Event, record events.ProjectionRecord, graph core.DurableGraph) error {
+func validateProjectionTaskAtAdmission(task core.Task, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, stream []events.Event) error {
 	work, found := graph.Works[task.WorkID]
 	if !found || work.CorrelationID != record.CorrelationID || work.Value.ID != task.WorkID || work.Value.Status != core.WorkActive {
 		return fmt.Errorf("task requires its exact active Work on the same correlation boundary")
@@ -651,7 +672,13 @@ func validateProjectionTaskAtAdmission(task core.Task, event events.Event, recor
 	if !found || intent.CorrelationID != record.CorrelationID || intent.Value.ID != work.Value.IntentID || string(intent.Value.OrganizationID) != event.OrganizationID {
 		return fmt.Errorf("task requires its exact Intent organization and correlation boundary")
 	}
-	return core.ValidateTaskAssignment(task, intent.Value.OrganizationID, graph)
+	if err := core.ValidateTaskAssignment(task, intent.Value.OrganizationID, graph); err != nil {
+		return err
+	}
+	if event.EventType == "EXECUTION_STARTED" {
+		return events.ValidateTaskExecutionStart(event, task, record.Version, work.Value, intent.Value, stream)
+	}
+	return nil
 }
 
 func validateOrganizedProjectionLifecycle[T any](value T, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, history map[core.ID]Versioned[T], kind string, identity func(T) core.ID, organization func(T) core.ID, validate func(string, int, *T, T) error) error {

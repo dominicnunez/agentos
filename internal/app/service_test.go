@@ -248,7 +248,7 @@ func saveTestVerifiedTask(ctx context.Context, gateway *events.Gateway, reposito
 	task.Status = core.TaskRunning
 	startVersion := state.Version + 1
 	if task.ExecutionKind == core.ExecutionAgent {
-		_, selections, err := repository.StartAgentExecution(ctx, organizationID, correlationID, startVersion, task, "", actionBoundaryRoutes(snapshot, task))
+		_, selections, err := repository.StartAgentExecution(ctx, organizationID, correlationID, startVersion, task, "", nil, nil, actionBoundaryRoutes(snapshot, task), func([]events.InboxSelection) error { return nil })
 		if err != nil {
 			return err
 		}
@@ -257,7 +257,7 @@ func saveTestVerifiedTask(ctx context.Context, gateway *events.Gateway, reposito
 				return fmt.Errorf("test verified Agent unexpectedly selected inbox input")
 			}
 		}
-	} else if err := repository.SaveTask(ctx, organizationID, "EXECUTION_STARTED", "runtime", correlationID, startVersion, task, nil); err != nil {
+	} else if _, err := repository.StartTaskExecution(ctx, organizationID, correlationID, startVersion, task, "", "", nil, nil); err != nil {
 		return err
 	}
 	now := time.Now().UTC()
@@ -404,6 +404,22 @@ func confirmedGoalSubmit(t *testing.T, ctx context.Context, gateway *events.Gate
 		t.Fatal(err)
 	}
 	return in
+}
+
+type strategicDriftPlanner struct{ revise func() }
+
+func (strategicDriftPlanner) Descriptor() (planning.Descriptor, bool) {
+	return planning.Descriptor{}, false
+}
+
+func (p strategicDriftPlanner) Build(_ context.Context, input planning.Input, kind core.ExecutionKind) (planning.Result, error) {
+	if p.revise != nil {
+		p.revise()
+	}
+	return planning.Result{Tasks: []core.PlanTask{{
+		Key: "root", Description: input.Intent.Objective, ExecutionKind: kind,
+		ModelInferencePolicy: core.InferenceAllowed, DependsOn: []string{},
+	}}}, nil
 }
 
 func TestVerticalSlice(t *testing.T) {
@@ -924,13 +940,22 @@ func TestSubmitBindsOnlyActiveGoalFromAcceptedIntent(t *testing.T) {
 	if result.Intent.GoalID != "goal-1" || result.Work.GoalID != "goal-1" {
 		t.Fatalf("accepted Goal was not durably bound: intent=%+v work=%+v", result.Intent, result.Work)
 	}
+	var plan core.Plan
 	var evidence completion.WorkEvidence
 	for _, event := range result.Events {
-		if event.EventType == "WORK_COMPLETION_EVALUATED" {
+		switch event.EventType {
+		case "PLAN_CREATED":
+			if err := json.Unmarshal(event.Payload, &plan); err != nil {
+				t.Fatal(err)
+			}
+		case "WORK_COMPLETION_EVALUATED":
 			if err := json.Unmarshal(event.Payload, &evidence); err != nil {
 				t.Fatal(err)
 			}
 		}
+	}
+	if len(plan.StrategicEventRefs) != 2 || len(plan.StrategicContextRefs) != 2 || plan.StrategicContextRefs[0].ID != "mission/mission-1" || plan.StrategicContextRefs[1].ID != "goal/goal-1" {
+		t.Fatalf("durable Plan omitted exact Mission/Goal context: %+v", plan)
 	}
 	if evidence.GoalID != "goal-1" || !evidence.Valid() {
 		t.Fatalf("Work evidence does not bind the accepted Goal: %+v", evidence)
@@ -959,6 +984,173 @@ func TestSubmitBindsOnlyActiveGoalFromAcceptedIntent(t *testing.T) {
 	}
 	if _, err := service.Submit(ctx, Submit{RequestID: "missing-goal", OrganizationID: "org-1", GoalID: "goal-missing", Statement: "echo missing", Kind: core.ExecutionDeterministic}); err == nil {
 		t.Fatal("submission bound Work to a missing Goal")
+	}
+}
+
+func TestGoalRevisionAfterPlanningTerminalizesStaleWork(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	seedTestGoal(t, ctx, repository, "org-1", "mission-1", "goal-1", core.GoalActive)
+	planner := strategicDriftPlanner{revise: func() {
+		snapshot, loadErr := repository.Load(ctx)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		state := snapshot.Goals["goal-1"]
+		goal := state.Value
+		goal.Objective = "revised after planning started"
+		if saveErr := repository.SaveGoal(ctx, "GOAL_REFINED", "runtime", state.CorrelationID, state.Version+1, goal, nil); saveErr != nil {
+			t.Fatal(saveErr)
+		}
+	}}
+	service := NewWithModelAndPlanner(gateway, execution.FakeModel{}, planner)
+	in := confirmedGoalSubmit(t, ctx, gateway, "strategic-drift", "org-1", "goal-1", "prepare a governed result", core.ExecutionAgent)
+	result, err := service.Submit(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Task.Status != core.TaskFailed || result.Work.Status != core.WorkFailed {
+		t.Fatalf("strategic drift did not terminalize stale Work: task=%+v work=%+v", result.Task, result.Work)
+	}
+	found := false
+	for _, event := range result.Events {
+		if event.EventType != "TASK_WORK_FAILED" {
+			continue
+		}
+		var payload events.ProjectionEventPayload
+		var detail strategicTaskFailureDetail
+		if json.Unmarshal(event.Payload, &payload) != nil || json.Unmarshal(payload.Detail, &detail) != nil {
+			t.Fatal("decode strategic-context block")
+		}
+		found = detail.Code == "STRATEGIC_CONTEXT_CHANGED"
+	}
+	if !found {
+		t.Fatal("strategic-context drift lacked a durable fail-closed terminal transition")
+	}
+}
+
+func TestOversizedStrategicContextFailsBeforeExecutionStart(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	seedTestGoal(t, ctx, repository, "org-1", "mission-1", "goal-1", core.GoalActive)
+	snapshot, err := repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missionState := snapshot.Missions["mission-1"]
+	mission := missionState.Value
+	mission.Statement = strings.Repeat("x", 256<<10)
+	if err := repository.SaveMission(ctx, "MISSION_REVISED", "runtime", missionState.CorrelationID, missionState.Version+1, mission, nil); err != nil {
+		t.Fatal(err)
+	}
+	model := &organizationLoopModel{}
+	service := NewWithModelAndPlanner(gateway, model, newOrganizationPlanner(t, model))
+	in := confirmedGoalSubmit(t, ctx, gateway, "oversized-strategy", "org-1", "goal-1", "prepare a governed result", core.ExecutionAgent)
+	if _, err := service.Submit(ctx, in); err == nil || !strings.Contains(err.Error(), "validate bounded planning input") {
+		t.Fatalf("oversized strategic context was not rejected by planning preflight: %v", err)
+	}
+	snapshot, err = repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Works) != 1 {
+		t.Fatalf("preflight rejection produced %d Work records", len(snapshot.Works))
+	}
+	for _, workState := range snapshot.Works {
+		if workState.Value.Status != core.WorkFailed {
+			t.Fatalf("preflight rejection did not fail closed: %+v", workState)
+		}
+	}
+	stream, err := service.ExternalEvents(ctx, "org-1", "oversized-strategy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range stream {
+		if event.EventType == "PLANNING_CONTEXT_MANIFESTED" || event.EventType == "EXECUTION_STARTED" {
+			t.Fatalf("oversized strategic context crossed the planning preflight: %s", event.EventType)
+		}
+	}
+	if len(model.prompts) != 0 {
+		t.Fatalf("oversized strategic context reached a provider: prompts=%d", len(model.prompts))
+	}
+}
+
+func TestStrategicDriftDuringUserTaskContinuationReconcilesWork(t *testing.T) {
+	tests := []struct {
+		name         string
+		continueTask func(context.Context, *Service, Result) error
+	}{
+		{
+			name: "structured completion",
+			continueTask: func(ctx context.Context, service *Service, result Result) error {
+				return service.ProvideHumanCompletion(ctx, HumanCompletionInput{
+					OrganizationID: "org-1", PrincipalID: "user-1", SourceChannel: "HUMAN_DIRECT",
+					RequestID: "strategic-user-continuation", TaskID: string(result.Task.ID),
+					Submission: core.HumanTaskSubmission{MessageID: "completion-1", Fields: map[string]string{"response": "completed input"}},
+				})
+			},
+		},
+		{
+			name: "external input",
+			continueTask: func(ctx context.Context, service *Service, result Result) error {
+				return service.ProvideOperatorInput(ctx, OperatorInput{
+					OrganizationID: "org-1", PrincipalID: "agent-1", PrincipalKind: core.PrincipalExternalAgent,
+					SourceChannel: "A2A", RequestID: "strategic-user-continuation", TaskID: string(result.Task.ID),
+					MessageID: "input-1", Text: "completed input",
+				})
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			l, err := ledger.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = l.Close() })
+			gateway := events.NewGateway(l)
+			repository := projections.New(gateway)
+			seedTestGoal(t, ctx, repository, "org-1", "mission-1", "goal-1", core.GoalActive)
+			service := New(gateway)
+			in := confirmedGoalSubmit(t, ctx, gateway, "strategic-user-continuation", "org-1", "goal-1", "provide a governed decision", core.ExecutionHuman)
+			result, err := service.Submit(ctx, in)
+			if err != nil || result.Task.Status != core.TaskBlocked {
+				t.Fatalf("blocked user task=%+v err=%v", result.Task, err)
+			}
+			snapshot, err := repository.Load(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			goalState := snapshot.Goals["goal-1"]
+			goal := goalState.Value
+			goal.Objective = "revised before user continuation"
+			if err := repository.SaveGoal(ctx, "GOAL_REFINED", "runtime", goalState.CorrelationID, goalState.Version+1, goal, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := test.continueTask(ctx, service, result); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err = repository.Load(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Tasks[result.Task.ID].Value.Status != core.TaskFailed || snapshot.Works[result.Work.ID].Value.Status != core.WorkFailed {
+				t.Fatalf("strategic drift was not fully reconciled: task=%+v work=%+v", snapshot.Tasks[result.Task.ID], snapshot.Works[result.Work.ID])
+			}
+		})
 	}
 }
 
@@ -1317,6 +1509,43 @@ func newOrganizationPlanner(t *testing.T, model *organizationLoopModel) planning
 		t.Fatal(err)
 	}
 	return planner
+}
+
+func TestGoalBoundPlanningAndExecutionUseExactStrategicContext(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	seedTestGoal(t, ctx, repository, "org-1", "mission-1", "goal-1", core.GoalActive)
+	model := &organizationLoopModel{plan: `{"tasks":[]}`}
+	service := NewWithModelAndPlanner(gateway, model, newOrganizationPlanner(t, model))
+	in := confirmedGoalSubmit(t, ctx, gateway, "strategic-agent", "org-1", "goal-1", "prepare a governed result", core.ExecutionAgent)
+	result, err := service.Submit(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, ok := result.Outcome.ObservedEffect.(string)
+	if !ok || !strings.Contains(observed, "mission-1") || !strings.Contains(observed, "durable test direction") || !strings.Contains(observed, "goal-1") || !strings.Contains(observed, "measurable test outcome") {
+		t.Fatalf("Agent execution omitted strategic context: %q", result.Outcome.ObservedEffect)
+	}
+	manifestFound := false
+	for _, event := range result.Events {
+		if event.EventType != "EXECUTION_CONTEXT_MANIFESTED" {
+			continue
+		}
+		var manifest core.ExecutionContextManifest
+		if json.Unmarshal(event.Payload, &manifest) != nil || len(manifest.AdditionalContextRefs) != 2 || len(manifest.EventRefs) < 2 {
+			t.Fatalf("execution manifest omitted strategic provenance: %+v", manifest)
+		}
+		manifestFound = true
+	}
+	if !manifestFound {
+		t.Fatal("Goal-bound Agent execution lacked a context manifest")
+	}
 }
 
 type delayedOrganizationModel struct{}
@@ -2392,11 +2621,11 @@ func TestRecoverExecutesPersistedPendingWorkAndPreservesIdentity(t *testing.T) {
 		_ = l.Close()
 		t.Fatal(err)
 	}
-	if err := saveTestVerifiedTask(ctx, g, repository, organization.ID, "request-1", projections.Versioned[core.Task]{Version: 1, CorrelationID: "request-1", Value: first}); err != nil {
+	if err := saveTestPlan(ctx, g, "request-1", intent, first, second); err != nil {
 		_ = l.Close()
 		t.Fatal(err)
 	}
-	if err := saveTestPlan(ctx, g, "request-1", intent, first, second); err != nil {
+	if err := saveTestVerifiedTask(ctx, g, repository, organization.ID, "request-1", projections.Versioned[core.Task]{Version: 1, CorrelationID: "request-1", Value: first}); err != nil {
 		_ = l.Close()
 		t.Fatal(err)
 	}
@@ -2602,6 +2831,59 @@ func TestRecoverResumesOnlyRevalidatedAssignmentBlock(t *testing.T) {
 	assertEventOrder(t, stream, "TASK_BLOCKED", "TASK_ASSIGNMENT_REVALIDATED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE")
 }
 
+func TestRecoverTerminalizesAssignmentBlockAfterStrategicDrift(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	seedTestGoal(t, ctx, repository, "org-1", "mission-1", "goal-1", core.GoalActive)
+	agent := seedTestAgents(t, ctx, repository, "assignment-strategic-drift", "org-1", execution.FakeModel{}.Descriptor(), "agent-1")[0]
+	service := New(gateway)
+	in := confirmedGoalSubmit(t, ctx, gateway, "assignment-strategic-drift", "org-1", "goal-1", "echo governed", core.ExecutionDeterministic)
+	in.correlationID, err = gateway.ReserveExternalWork(ctx, "org-1", "assignment-strategic-drift")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, work, task, err := service.ensureSubmission(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent.Status = "INACTIVE"
+	if err := repository.SaveAgent(ctx, "AGENT_DEACTIVATED", "runtime", "assignment-strategic-drift", 2, agent, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tasks[task.ID].Value.Status != core.TaskBlocked {
+		t.Fatalf("ineligible strategic Task was not assignment-blocked: %+v", snapshot.Tasks[task.ID].Value)
+	}
+	goalState := snapshot.Goals["goal-1"]
+	goal := goalState.Value
+	goal.Status = core.GoalPaused
+	if err := repository.SaveGoal(ctx, "GOAL_PAUSED", "runtime", goalState.CorrelationID, goalState.Version+1, goal, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tasks[task.ID].Value.Status != core.TaskFailed || snapshot.Works[work.ID].Value.Status != core.WorkFailed {
+		t.Fatalf("strategic drift left assignment-blocked Work active: task=%+v work=%+v", snapshot.Tasks[task.ID].Value, snapshot.Works[work.ID].Value)
+	}
+}
+
 func TestAssignmentBlockedDependencyWaitsForRevalidation(t *testing.T) {
 	ctx := context.Background()
 	l, err := ledger.Open(":memory:")
@@ -2764,11 +3046,11 @@ func (*recoveryPlanner) Descriptor() (planning.Descriptor, bool) {
 	return planning.Descriptor{PromptVersion: "recovery-test-v1", Provider: "fake", Model: "fake-model/v1", ExecutionProfileVersion: "v1-fake"}, true
 }
 
-func (p *recoveryPlanner) Build(_ context.Context, draft core.IntentDraft, kind core.ExecutionKind) (planning.Result, error) {
+func (p *recoveryPlanner) Build(_ context.Context, input planning.Input, kind core.ExecutionKind) (planning.Result, error) {
 	p.calls++
 	usage := events.InferenceUsageRecordedPayload{Source: "test", Provider: "fake", Model: "fake-model/v1"}
 	return planning.Result{Tasks: []core.PlanTask{{
-		Key: "root", Description: draft.Objective, ExecutionKind: kind,
+		Key: "root", Description: input.Intent.Objective, ExecutionKind: kind,
 		ModelInferencePolicy: core.InferenceAllowed, DependsOn: []string{},
 	}}, Usage: &usage}, nil
 }
@@ -2779,7 +3061,7 @@ func (*failingPlanningPlanner) Descriptor() (planning.Descriptor, bool) {
 	return planning.Descriptor{PromptVersion: "failure-test-v1", Provider: "fake", Model: "fake-model/v1", ExecutionProfileVersion: "v1-fake"}, true
 }
 
-func (p *failingPlanningPlanner) Build(context.Context, core.IntentDraft, core.ExecutionKind) (planning.Result, error) {
+func (p *failingPlanningPlanner) Build(context.Context, planning.Input, core.ExecutionKind) (planning.Result, error) {
 	p.calls++
 	cost := 0.01
 	usage := events.InferenceUsageRecordedPayload{
@@ -3114,24 +3396,25 @@ func TestRecoveryIsDeterministicFirst(t *testing.T) {
 				return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", requestID, 1, task, nil)
 			},
 			func() error {
+				return saveTestPlan(ctx, events.NewGateway(l), requestID, intent, task)
+			},
+			func() error {
 				task.Status = core.TaskRunning
 				if kind == core.ExecutionAgent {
 					snapshot, err := repository.Load(ctx)
 					if err != nil {
 						return err
 					}
-					_, _, err = repository.StartAgentExecution(ctx, organization.ID, requestID, 2, task, "", actionBoundaryRoutes(snapshot, task))
+					_, _, err = repository.StartAgentExecution(ctx, organization.ID, requestID, 2, task, "", nil, nil, actionBoundaryRoutes(snapshot, task), func([]events.InboxSelection) error { return nil })
 					return err
 				}
-				return repository.SaveTask(ctx, organization.ID, "EXECUTION_STARTED", "runtime", requestID, 2, task, nil)
+				_, err := repository.StartTaskExecution(ctx, organization.ID, requestID, 2, task, "", "", nil, nil)
+				return err
 			},
 		} {
 			if err := save(); err != nil {
 				t.Fatal(err)
 			}
-		}
-		if err := saveTestPlan(ctx, events.NewGateway(l), requestID, intent, task); err != nil {
-			t.Fatal(err)
 		}
 		return task
 	}
@@ -3228,7 +3511,7 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 			if test.stage == "completion_verified" {
 				task := state.Value
 				task.Status = core.TaskRunning
-				if err := service.state.SaveTask(ctx, "org-1", "EXECUTION_STARTED", "runtime", correlationID, state.Version+1, task, map[string]string{"input_event_ref": inputEvent.EventID}); err != nil {
+				if _, err := service.state.StartTaskExecution(ctx, "org-1", correlationID, state.Version+1, task, "OPERATOR_HUMAN_INPUT", inputEvent.EventID, nil, nil); err != nil {
 					t.Fatal(err)
 				}
 				state = projections.Versioned[core.Task]{Version: state.Version + 1, CorrelationID: correlationID, Value: task}
@@ -3408,7 +3691,7 @@ func TestAdvanceInputContinuationRejectsInvalidStateWithoutEvents(t *testing.T) 
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if err := service.advanceInputContinuation(ctx, test.organization, test.correlationID, test.state, map[string]string{"input_event_ref": "event-1"}); err == nil {
+			if _, err := service.advanceInputContinuation(ctx, test.organization, test.correlationID, test.state, map[string]string{"input_event_ref": "event-1"}); err == nil {
 				t.Fatal("invalid input continuation state was accepted")
 			}
 		})
@@ -3608,10 +3891,10 @@ func TestLateralMessagesAtActionBoundary(t *testing.T) {
 		_ = l.Close()
 		t.Fatal(err)
 	}
-	if err := saveTestVerifiedTask(ctx, gateway, repository, organization.ID, "request-1", projections.Versioned[core.Task]{Version: 1, CorrelationID: "request-1", Value: sourceTask}); err != nil {
+	if err := saveTestPlan(ctx, gateway, "request-1", intent, sourceTask, recipientTask); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveTestPlan(ctx, gateway, "request-1", intent, sourceTask, recipientTask); err != nil {
+	if err := saveTestVerifiedTask(ctx, gateway, repository, organization.ID, "request-1", projections.Versioned[core.Task]{Version: 1, CorrelationID: "request-1", Value: sourceTask}); err != nil {
 		t.Fatal(err)
 	}
 	completedStream, err := gateway.Events(ctx, "request-1")
