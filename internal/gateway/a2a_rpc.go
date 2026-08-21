@@ -25,7 +25,7 @@ const (
 	a2aStateInputRequired  = string(a2a.TaskStateInputRequired)
 	a2aStateCompleted      = string(a2a.TaskStateCompleted)
 	intentConfirmationURI  = intentconfirmation.URI
-	agentOSTaskMetadataURI = "https://github.com/dominicnunez/agentos/blob/main/docs/A2A.md"
+	agentOSTaskMetadataURI = "https://github.com/dominicnunez/agentos/blob/main/docs/A2A_INTEROP.md#agent-os-task-metadata"
 )
 
 type strictJSONRPCRequest struct {

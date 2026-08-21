@@ -876,6 +876,27 @@ func TestNonDeterministicExperimentFailsBeforeConfirmation(t *testing.T) {
 	}
 }
 
+func TestAgentKindExperimentFailsBeforeConfirmationEvenWithDeterministicObjective(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := NewWithNormalizer(app.New(events.NewGateway(store)), experimentNormalizer{objective: "echo lab result"})
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	draft, err := service.Handle(ctx, principal, Message{ConversationID: "agent-experiment", MessageID: "message-1", Text: "Run this experiment with an Agent", RequestedKind: core.ExecutionAgent})
+	if err != nil || draft.Intent == nil || draft.Intent.RequestedExecutionKind != core.ExecutionAgent {
+		t.Fatalf("Agent-kind experimental review=%+v err=%v", draft, err)
+	}
+	if _, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: draft.ConversationID, MessageID: "confirmation-1", Fingerprint: draft.Intent.Fingerprint}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Agent-kind experiment confirmation err=%v", err)
+	}
+	if containsEvent(externalStream(t, store, draft.ConversationID), "INTENT_CONFIRMED") {
+		t.Fatal("Agent-kind experiment persisted confirmation")
+	}
+}
+
 type goalExperimentNormalizer struct{ goalID core.ID }
 
 func (goalExperimentNormalizer) Descriptor() (NormalizerDescriptor, bool) {

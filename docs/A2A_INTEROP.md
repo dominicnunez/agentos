@@ -89,6 +89,26 @@ Intent confirmation is a separate work-plane capability held by authenticated
 interpretation of requested work. It cannot be combined with an execution-kind
 hint and never satisfies an exact-effect approval boundary.
 
+## Agent OS task metadata
+
+Completed experimental tasks carry runtime-authored metadata under this
+document's canonical URI:
+
+```json
+{
+  "https://github.com/dominicnunez/agentos/blob/main/docs/A2A_INTEROP.md#agent-os-task-metadata": {
+    "mode": "EXPERIMENT",
+    "trust_label": "EXPERIMENTAL_UNVERIFIED"
+  }
+}
+```
+
+`mode` identifies the reviewed Intent mode. `trust_label` remains
+`EXPERIMENTAL_UNVERIFIED` after successful task completion: completion does not
+promote an experimental result into trusted Goal evidence, policy, knowledge,
+capability, or effect authority. Standard task results do not carry an
+experimental trust label.
+
 The conversation is bounded to 32 messages and 128 KiB of text. Model-backed
 normalization records its provider identity, prompt-contract version, input
 event references, and token usage in the Agent OS ledger before a draft can be
