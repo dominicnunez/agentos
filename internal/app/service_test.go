@@ -4067,4 +4067,3 @@ func assertEventOrder(t *testing.T, stream []events.Event, expected ...string) {
 		t.Fatalf("event order missing %q after index %d: %+v", expected[next], next, stream)
 	}
 }
-

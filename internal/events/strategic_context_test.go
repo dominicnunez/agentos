@@ -341,4 +341,3 @@ func strategicProjectionEvent(t *testing.T, sequence int64, eventType, kind stri
 	}
 	return event
 }
-

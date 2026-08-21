@@ -3457,4 +3457,3 @@ func agentParticipates(snapshot projections.Snapshot, agentID core.ID, task core
 	}
 	return false
 }
-
