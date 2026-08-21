@@ -162,15 +162,15 @@ Organizational direction JSON follows:
 func validateInput(input Input) error {
 	if input.Intent.Goal == nil {
 		if input.Strategy != nil {
-			return fmt.Errorf("ad hoc Intent cannot receive strategic context")
+			return fmt.Errorf("ad hoc intent cannot receive strategic context")
 		}
 		return nil
 	}
 	if input.Strategy == nil || !core.ValidStrategicContext(*input.Strategy) {
-		return fmt.Errorf("Goal-bound Intent requires valid strategic context")
+		return fmt.Errorf("goal-bound intent requires valid strategic context")
 	}
 	if input.Intent.OrganizationID != input.Strategy.Goal.OrganizationID || input.Intent.Goal.Value != string(input.Strategy.Goal.ID) {
-		return fmt.Errorf("strategic context does not match the accepted Intent")
+		return fmt.Errorf("strategic context does not match the accepted intent")
 	}
 	return nil
 }
@@ -377,3 +377,4 @@ func validateAcyclic(tasks []core.PlanTask) error {
 func validTaskText(value string) bool {
 	return utf8.ValidString(value) && strings.TrimSpace(value) != "" && len(value) <= maximumTaskTextBytes
 }
+

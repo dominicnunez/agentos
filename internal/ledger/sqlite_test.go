@@ -885,9 +885,10 @@ func TestAgentExecutionStartAtomicallyRejectsStrategicRevisionDrift(t *testing.T
 		if appendErr != nil {
 			t.Fatal(appendErr)
 		}
-		if index == 0 {
+		switch index {
+		case 0:
 			missionEvent = appended
-		} else if index == 1 {
+		case 1:
 			goalEvent = appended
 		}
 	}
@@ -2484,3 +2485,4 @@ func appendTestMission(t *testing.T, ctx context.Context, l *SQLite, organizatio
 		t.Fatal(err)
 	}
 }
+

@@ -42,9 +42,9 @@ organizational direction, clearly separated from authority. The Plan
 fingerprint covers their immutable references. Agent execution materializes
 the same revisions into its input and records them in the execution manifest.
 If either projection changes before dispatch, Agent OS blocks the Task with
-`STRATEGIC_CONTEXT_CHANGED`; the SQLite execution-start transaction rechecks
-the exact references so a concurrent revision cannot cross the time-of-use
-boundary. Agent OS does not silently reinterpret the Plan under new
+`STRATEGIC_CONTEXT_CHANGED`. For Agent work, the SQLite execution-start
+transaction rechecks the exact references so a concurrent revision cannot
+cross the time-of-use boundary. Agent OS does not silently reinterpret the Plan under new
 organizational direction. Ad hoc Work carries no strategic references.
 
 The complete Task graph is committed to SQLite in one transaction. A failed
@@ -124,3 +124,4 @@ advertising an input request that no authorized V1 transition can consume.
 Intent, Work, and Task projection histories keep one immutable correlation
 boundary across every version. Rebuild fails closed if any historical record
 crosses that boundary, even if a later version changes it back.
+
