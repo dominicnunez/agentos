@@ -118,13 +118,13 @@ func (p *ModelPlanner) Build(ctx context.Context, input Input, kind core.Executi
 	if err := validateInput(input); err != nil {
 		return Result{}, err
 	}
-	if err := ValidateModelInput(input); err != nil {
-		return Result{}, err
-	}
 	intent := input.Intent
 	if kind != core.ExecutionAgent {
 		tasks, err := directTasks(intent, kind)
 		return Result{Tasks: tasks}, err
+	}
+	if err := ValidateModelInput(input); err != nil {
+		return Result{}, err
 	}
 	accepted, err := json.Marshal(intent)
 	if err != nil {

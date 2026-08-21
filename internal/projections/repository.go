@@ -595,7 +595,7 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 				err = validateProjectionEventLifecycle(event, record, "Task", tasks, func(value core.Task) core.ID { return value.ID }, true, events.ValidateTaskProjectionTransition)
 			}
 			if err == nil {
-				err = validateProjectionTaskAtAdmission(value, event, record, graph)
+				err = validateProjectionTaskAtAdmission(value, event, record, graph, ordered)
 			}
 			if err == nil && event.EventType == "TASK_VERIFIED_COMPLETE" {
 				err = validateTaskCompletionAtAdmission(value, event, record, graph, ordered, teamRecords[event.OrganizationID], inboxObservations, blueprintRevisions, profileRevisions)
@@ -663,7 +663,7 @@ func intentRequiresConfirmation(intent core.Intent) bool {
 	return intent.GoalID != "" || intent.SourceChannel == "HUMAN_DIRECT" || intent.SourceChannel == "A2A" || intent.SourcePrincipalKind == core.PrincipalHuman || intent.SourcePrincipalKind == core.PrincipalExternalAgent
 }
 
-func validateProjectionTaskAtAdmission(task core.Task, event events.Event, record events.ProjectionRecord, graph core.DurableGraph) error {
+func validateProjectionTaskAtAdmission(task core.Task, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, stream []events.Event) error {
 	work, found := graph.Works[task.WorkID]
 	if !found || work.CorrelationID != record.CorrelationID || work.Value.ID != task.WorkID || work.Value.Status != core.WorkActive {
 		return fmt.Errorf("task requires its exact active Work on the same correlation boundary")
@@ -672,7 +672,13 @@ func validateProjectionTaskAtAdmission(task core.Task, event events.Event, recor
 	if !found || intent.CorrelationID != record.CorrelationID || intent.Value.ID != work.Value.IntentID || string(intent.Value.OrganizationID) != event.OrganizationID {
 		return fmt.Errorf("task requires its exact Intent organization and correlation boundary")
 	}
-	return core.ValidateTaskAssignment(task, intent.Value.OrganizationID, graph)
+	if err := core.ValidateTaskAssignment(task, intent.Value.OrganizationID, graph); err != nil {
+		return err
+	}
+	if event.EventType == "EXECUTION_STARTED" {
+		return events.ValidateTaskExecutionStart(event, task, record.Version, work.Value, intent.Value, stream)
+	}
+	return nil
 }
 
 func validateOrganizedProjectionLifecycle[T any](value T, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, history map[core.ID]Versioned[T], kind string, identity func(T) core.ID, organization func(T) core.ID, validate func(string, int, *T, T) error) error {

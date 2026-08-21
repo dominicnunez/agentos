@@ -160,3 +160,22 @@ func TestModelPlannerRejectsOversizedCompleteInputBeforeProviderCall(t *testing.
 		t.Fatalf("provider was called %d times for oversized planning input", model.calls)
 	}
 }
+
+func TestModelPlannerDoesNotApplyPromptLimitToDirectPlanning(t *testing.T) {
+	model := &plannerModel{err: errors.New("must not be called")}
+	planner, err := NewModelPlanner(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := Input{
+		Intent: core.IntentDraft{OrganizationID: "org-1", Goal: &core.IntentValue{Value: "goal-1", Origin: "USER"}, Objective: "echo hello"},
+		Strategy: &core.StrategicContext{
+			Mission: core.Mission{ID: "mission-1", OrganizationID: "org-1", Statement: strings.Repeat("x", maximumPromptBytes), Status: core.MissionActive, CreatedAt: time.Unix(1, 0).UTC()}, MissionVersion: 1,
+			Goal: core.Goal{ID: "goal-1", OrganizationID: "org-1", MissionID: "mission-1", Objective: "outcome", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "evidence", Origin: "USER"}}, Status: core.GoalActive, CreatedAt: time.Unix(1, 0).UTC()}, GoalVersion: 1,
+		},
+	}
+	result, err := planner.Build(context.Background(), input, core.ExecutionDeterministic)
+	if err != nil || model.calls != 0 || len(result.Tasks) != 1 || result.Tasks[0].ExecutionKind != core.ExecutionDeterministic {
+		t.Fatalf("direct planning incorrectly used the model prompt boundary: result=%+v calls=%d err=%v", result, model.calls, err)
+	}
+}
