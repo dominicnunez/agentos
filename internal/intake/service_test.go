@@ -723,7 +723,11 @@ func TestReviewedReplacementCreatesFreshWorkPlanAndTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close replacement intake store: %v", err)
+		}
+	})
 	gateway := events.NewGateway(store)
 	now := time.Now().UTC()
 	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}

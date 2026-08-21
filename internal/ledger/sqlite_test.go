@@ -2564,7 +2564,11 @@ func TestReviewedReplacementRequiresOnePriorFailedWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close replacement store: %v", err)
+		}
+	})
 	now := time.Now().UTC()
 	appendTestMission(t, ctx, store, "org-1", "mission-1", now)
 	predecessorIntent := core.Intent{
