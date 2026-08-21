@@ -108,3 +108,31 @@ func TestModelNormalizerTreatsOnlyUnambiguousPunctuationAsGoalBoundary(t *testin
 		}
 	}
 }
+
+func TestModelNormalizerBindsExplicitReplacementWorkProvenance(t *testing.T) {
+	response := `{"state":"READY_FOR_REVIEW","reply":"Review the replacement.","intent":{"mode":"STANDARD","objective":"Retry with a bounded approach","goal":null,"replaces_work":{"value":"work-failed-1","origin":"EXPLICIT","source_message_id":"message-1"},"context":[],"deliverables":[{"value":"Verified replacement result","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Result passes verification","origin":"EXPLICIT","source_message_id":"message-1"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
+	normalizer, err := NewModelNormalizer(normalizationModel{response: response})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turns := []ConversationTurn{{MessageID: "message-1", Text: "Replace work-failed-1 with a bounded approach and verify the result."}}
+	result, err := normalizer.Normalize(context.Background(), turns)
+	if err != nil || result.Candidate.ReplacesWork == nil || result.Candidate.ReplacesWork.Value != "work-failed-1" {
+		t.Fatalf("replacement normalization=%+v err=%v", result, err)
+	}
+
+	for name, changed := range map[string]string{
+		"invented provenance": strings.Replace(response, `"origin":"EXPLICIT","source_message_id":"message-1"`, `"origin":"INFERRED","source_message_id":"message-1"`, 1),
+		"absent reference":    strings.Replace(response, `"value":"work-failed-1"`, `"value":"work-other"`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			normalizer, err := NewModelNormalizer(normalizationModel{response: changed})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := normalizer.Normalize(context.Background(), turns); err == nil {
+				t.Fatal("untrusted replacement provenance was accepted")
+			}
+		})
+	}
+}

@@ -237,6 +237,29 @@ func (r *Repository) SaveExperimentalSubmission(ctx context.Context, correlation
 	return err
 }
 
+// SaveReplacementSubmission atomically admits a freshly reviewed Intent and
+// Work whose immutable lineage points to one failed predecessor. It creates no
+// Plan, Task, approval, capability, effect permission, artifact, or completion
+// inheritance.
+func (r *Repository) SaveReplacementSubmission(ctx context.Context, correlationID string, intent core.Intent, work core.Work) error {
+	if r == nil || r.gateway == nil || correlationID == "" || intent.ID == "" || work.ID == "" || intent.OrganizationID == "" ||
+		work.IntentID != intent.ID || work.ReplacesWorkID == "" || intent.ReplacesWorkID != work.ReplacesWorkID || work.Status != core.WorkActive {
+		return fmt.Errorf("complete reviewed replacement Intent and Work are required")
+	}
+	drafts := []events.ProjectionDraft{
+		{
+			Event:          events.TrustedDraft{OrganizationID: string(intent.OrganizationID), EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: correlationID},
+			ProjectionKind: KindIntent, RecordID: string(intent.ID), Version: 1, Value: intent,
+		},
+		{
+			Event:          events.TrustedDraft{OrganizationID: string(intent.OrganizationID), EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: correlationID},
+			ProjectionKind: KindWork, RecordID: string(work.ID), Version: 1, Value: work,
+		},
+	}
+	_, err := r.gateway.PublishProjections(ctx, drafts)
+	return err
+}
+
 func (r *Repository) StartAgentExecution(ctx context.Context, organizationID core.ID, correlationID string, version int, value core.Task, mode string, strategicEventRefs []string, strategicContextRefs []core.VersionedRef, routes []events.InboxRoute, validate events.ExecutionStartValidator) (events.Event, []events.InboxSelection, error) {
 	if r == nil || r.gateway == nil || organizationID == "" || correlationID == "" || value.ID == "" || value.ExecutionKind != core.ExecutionAgent || value.Status != core.TaskRunning || version < 2 {
 		return events.Event{}, nil, fmt.Errorf("complete Agent execution-start projection is required")
@@ -445,6 +468,7 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 		Experiments: map[core.ID]core.DurableState[core.Experiment]{}, PromotionCandidates: map[core.ID]core.DurableState[core.PromotionCandidate]{},
 	}
 	confirmations := make(map[string][]events.Event)
+	replacementConfirmations := make(map[core.ID]string)
 	teamRecords := make(map[string][][]byte)
 	blueprintRevisions := make(map[core.ID]map[string]core.AgentBlueprint)
 	profileRevisions := make(map[core.ID]map[string]core.ExecutionProfile)
@@ -478,15 +502,19 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 					if err := events.ValidateIndexedReviewedIntentAdmission(reviewEvidence.At(event), event); err != nil {
 						return fmt.Errorf("event %s: %w", event.EventID, err)
 					}
-					continue
+				} else {
+					goal, found := graph.Goals[core.ID(confirmation.GoalID)]
+					if !found || goal.Value.ID != core.ID(confirmation.GoalID) || goal.Value.Status != core.GoalActive {
+						return fmt.Errorf("event %s Goal-bound intent confirmation lacks its active Goal", event.EventID)
+					}
+					if err := events.ValidateIndexedReviewedGoalIntentAdmission(reviewEvidence.At(event), event, goal.Value); err != nil {
+						return fmt.Errorf("event %s: %w", event.EventID, err)
+					}
 				}
-				goal, found := graph.Goals[core.ID(confirmation.GoalID)]
-				if !found || goal.Value.ID != core.ID(confirmation.GoalID) || goal.Value.Status != core.GoalActive {
-					return fmt.Errorf("event %s Goal-bound intent confirmation lacks its active Goal", event.EventID)
-				}
-				if err := events.ValidateIndexedReviewedGoalIntentAdmission(reviewEvidence.At(event), event, goal.Value); err != nil {
+				if err := validateProjectionReplacementConfirmation(event, confirmation, graph, replacementConfirmations); err != nil {
 					return fmt.Errorf("event %s: %w", event.EventID, err)
 				}
+				continue
 			}
 			if events.RequiresProjectionAdmission(event.EventType, event.SourceActorID) {
 				return fmt.Errorf("event %s uses a projection lifecycle event without typed admission", event.EventID)
@@ -647,6 +675,9 @@ func validateProjectionWorkAtAdmission(work core.Work, event events.Event, recor
 	if !found || intent.CorrelationID != record.CorrelationID || intent.Value.ID != work.IntentID || intent.Value.GoalID != work.GoalID || intent.Value.NormalizedObjective != work.Objective || string(intent.Value.OrganizationID) != event.OrganizationID {
 		return fmt.Errorf("work requires its exact prior Intent on the same organization and correlation boundary")
 	}
+	if intent.Value.ReplacesWorkID != work.ReplacesWorkID {
+		return fmt.Errorf("work does not match its accepted Intent replacement lineage")
+	}
 	if intentRequiresConfirmation(intent.Value) {
 		matching := confirmations[record.CorrelationID]
 		if len(matching) != 1 || matching[0].Sequence >= event.Sequence {
@@ -656,11 +687,46 @@ func validateProjectionWorkAtAdmission(work core.Work, event events.Event, recor
 			return err
 		}
 	}
+	if predecessorID := work.ReplacesWorkID; predecessorID != "" {
+		predecessor, found := graph.Works[predecessorID]
+		if !found || predecessor.Value.Status != core.WorkFailed || predecessor.Value.GoalID != work.GoalID {
+			return fmt.Errorf("replacement Work requires its prior failed Work with the same Goal binding")
+		}
+		predecessorIntent, found := graph.Intents[predecessor.Value.IntentID]
+		if !found || predecessorIntent.Value.OrganizationID != intent.Value.OrganizationID {
+			return fmt.Errorf("replacement Work crosses its organization boundary")
+		}
+		for existingID, existing := range graph.Works {
+			if existingID != work.ID && existing.Value.ReplacesWorkID == predecessorID {
+				return fmt.Errorf("failed Work already has a replacement")
+			}
+		}
+	}
+	return nil
+}
+
+func validateProjectionReplacementConfirmation(event events.Event, confirmation events.IntentConfirmedPayload, graph core.DurableGraph, replacements map[core.ID]string) error {
+	predecessorID := core.ID(confirmation.ReplacesWorkID)
+	if predecessorID == "" {
+		return nil
+	}
+	predecessor, found := graph.Works[predecessorID]
+	if !found || predecessor.Value.Status != core.WorkFailed || predecessor.Value.GoalID != core.ID(confirmation.GoalID) {
+		return fmt.Errorf("reviewed replacement requires a prior failed Work with the same Goal binding")
+	}
+	predecessorIntent, found := graph.Intents[predecessor.Value.IntentID]
+	if !found || string(predecessorIntent.Value.OrganizationID) != event.OrganizationID {
+		return fmt.Errorf("reviewed replacement Work crosses its organization boundary")
+	}
+	if correlationID, duplicate := replacements[predecessorID]; duplicate && correlationID != event.CorrelationID {
+		return fmt.Errorf("failed Work has multiple reviewed replacements")
+	}
+	replacements[predecessorID] = event.CorrelationID
 	return nil
 }
 
 func intentRequiresConfirmation(intent core.Intent) bool {
-	return intent.GoalID != "" || intent.SourceChannel == "HUMAN_DIRECT" || intent.SourceChannel == "A2A" || intent.SourcePrincipalKind == core.PrincipalHuman || intent.SourcePrincipalKind == core.PrincipalExternalAgent
+	return intent.GoalID != "" || intent.ReplacesWorkID != "" || intent.SourceChannel == "HUMAN_DIRECT" || intent.SourceChannel == "A2A" || intent.SourcePrincipalKind == core.PrincipalHuman || intent.SourcePrincipalKind == core.PrincipalExternalAgent
 }
 
 func validateProjectionTaskAtAdmission(task core.Task, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, stream []events.Event) error {

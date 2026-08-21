@@ -31,6 +31,19 @@ contributes bounded evidence only; Goal progress and achievement require a
 separate trusted evaluation, and bare achievement projection updates are
 rejected.
 
+Failed Work is replaced through the same conversational review boundary, not
+by editing or reopening its Plan or Tasks. The user or authorized A2A Agent
+must explicitly cite the exact failed Work ID in a source message. The
+normalizer may carry only that exact reference into the fingerprinted Intent;
+it cannot infer a predecessor. Confirmation atomically rechecks that the Work
+is failed, belongs to the same organization and Goal, and has no prior
+replacement. Agent OS then creates a fresh Intent, Work, Plan, and Task DAG.
+Approvals, capabilities, effect permission, artifacts, completion claims, and
+execution state never flow across the replacement link. A replacement may
+itself be replaced only after it fails. Forks, cycles, active or completed
+predecessors, cross-organization references, and Lab-to-production replacement
+all fail closed in V1.
+
 ## Setup and local user access
 
 Run `agentos` with no arguments to start or resume setup. System installation

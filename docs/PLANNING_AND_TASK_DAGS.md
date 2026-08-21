@@ -16,6 +16,17 @@ separate durable progress-evidence path. A Work may bind to one active Goal in
 the same organization; that binding, its Intent, and its objective are
 immutable after creation. Goal linkage is optional for ad hoc Work.
 
+Replanning creates replacement Work; it never mutates a Plan or reopens a
+Task. A fresh reviewed Intent must explicitly reference one failed predecessor
+Work in the same organization and with the same Goal binding. Confirmation
+admits at most one direct replacement, after which planning creates a fresh
+immutable Plan and Task DAG. Replacement chains are allowed only by replacing
+a later failed replacement. Forks and cycles are invalid. The lineage conveys
+history only: no approval, capability, effect permission, artifact, completion
+claim, Task state, or execution state is inherited. Lab Work cannot replace
+production Work in V1. This is controlled replacement lineage, not a generic
+versioned-Plan or PlanGraph engine.
+
 After an Intent is confirmed, Agent OS converts it into the smallest useful
 dependency graph of bounded Tasks. The graph is a runtime coordination
 contract, not a grant of authority.

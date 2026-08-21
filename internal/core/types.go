@@ -144,6 +144,7 @@ type IntentDraft struct {
 	Mode                   IntentMode       `json:"mode"`
 	RequestedExecutionKind ExecutionKind    `json:"requested_execution_kind"`
 	Goal                   *IntentValue     `json:"goal,omitempty"`
+	ReplacesWork           *IntentValue     `json:"replaces_work,omitempty"`
 	Objective              string           `json:"objective"`
 	Context                []IntentValue    `json:"context"`
 	Deliverables           []IntentValue    `json:"deliverables"`
@@ -160,6 +161,7 @@ type Intent struct {
 	ID                    ID               `json:"id"`
 	OrganizationID        ID               `json:"organization_id"`
 	GoalID                ID               `json:"goal_id,omitempty"`
+	ReplacesWorkID        ID               `json:"replaces_work_id,omitempty"`
 	OriginalInstruction   string           `json:"original_instruction"`
 	NormalizedObjective   string           `json:"normalized_objective"`
 	HardConstraints       []string         `json:"hard_constraints"`
@@ -186,12 +188,13 @@ const (
 )
 
 type Work struct {
-	ID        ID         `json:"id"`
-	IntentID  ID         `json:"intent_id"`
-	GoalID    ID         `json:"goal_id,omitempty"`
-	Objective string     `json:"objective"`
-	Status    WorkStatus `json:"status"`
-	CreatedAt time.Time  `json:"created_at"`
+	ID             ID         `json:"id"`
+	IntentID       ID         `json:"intent_id"`
+	GoalID         ID         `json:"goal_id,omitempty"`
+	ReplacesWorkID ID         `json:"replaces_work_id,omitempty"`
+	Objective      string     `json:"objective"`
+	Status         WorkStatus `json:"status"`
+	CreatedAt      time.Time  `json:"created_at"`
 }
 
 type ExecutionKind string

@@ -312,6 +312,9 @@ func projectA2ATask(view intake.View) *a2a.Task {
 		if view.Intent.Goal != nil {
 			review["goal"] = *view.Intent.Goal
 		}
+		if view.Intent.ReplacesWork != nil {
+			review["replaces_work"] = *view.Intent.ReplacesWork
+		}
 		if task.Metadata == nil {
 			task.Metadata = make(map[string]any)
 		}

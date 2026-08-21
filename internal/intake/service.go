@@ -440,8 +440,9 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 	draft := core.IntentDraft{
 		ID: core.ID("intent-" + stream[0].CorrelationID), OrganizationID: core.ID(principal.OrganizationID),
 		Version: version, Status: status, Mode: normalized.Candidate.Mode, RequestedExecutionKind: requestedKind,
-		Goal:      cloneIntentValue(normalized.Candidate.Goal),
-		Objective: normalized.Candidate.Objective, Context: normalized.Candidate.Context,
+		Goal:         cloneIntentValue(normalized.Candidate.Goal),
+		ReplacesWork: cloneIntentValue(normalized.Candidate.ReplacesWork),
+		Objective:    normalized.Candidate.Objective, Context: normalized.Candidate.Context,
 		Deliverables: normalized.Candidate.Deliverables, CompletionCriteria: normalized.Candidate.CompletionCriteria,
 		Constraints: normalized.Candidate.Constraints, ResolvedDecisions: normalized.Candidate.ResolvedDecisions,
 		ConsequenceCandidates: normalized.Candidate.ConsequenceCandidates, MissingUserInputs: normalized.Candidate.MissingUserInputs,

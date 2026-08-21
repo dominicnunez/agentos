@@ -268,6 +268,10 @@ func (s *Service) ConfirmIntent(ctx context.Context, in IntentConfirmation) (Res
 	if err != nil {
 		return Result{}, fmt.Errorf("accepted Intent Goal is invalid: %w", err)
 	}
+	replacesWorkID, err := core.AcceptedIntentReplacesWorkID(draft)
+	if err != nil {
+		return Result{}, fmt.Errorf("accepted Intent replacement Work is invalid: %w", err)
+	}
 	original, found, err := initialIntakeMessage(stream)
 	if err != nil || !found {
 		return Result{}, fmt.Errorf("durable initial intake message is required")
@@ -277,15 +281,15 @@ func (s *Service) ConfirmIntent(ctx context.Context, in IntentConfirmation) (Res
 			continue
 		}
 		var recorded events.IntentConfirmedPayload
-		if json.Unmarshal(event.Payload, &recorded) != nil || recorded.IntentID != string(draft.ID) || recorded.GoalID != string(goalID) || recorded.Version != draft.Version || recorded.Fingerprint != in.Fingerprint || recorded.MessageID != in.MessageID ||
+		if json.Unmarshal(event.Payload, &recorded) != nil || recorded.IntentID != string(draft.ID) || recorded.GoalID != string(goalID) || recorded.ReplacesWorkID != string(replacesWorkID) || recorded.Version != draft.Version || recorded.Fingerprint != in.Fingerprint || recorded.MessageID != in.MessageID ||
 			recorded.ConfirmingActorID != string(in.SourcePrincipalID) || recorded.ConfirmingActorKind != string(in.SourcePrincipalKind) || recorded.SourceChannel != in.SourceChannel {
 			return Result{}, fmt.Errorf("intent confirmation conflicts with durable state")
 		}
 		return s.submitConfirmedIntent(ctx, submitFromIntent(in, draft, original, correlationID), draft.Mode)
 	}
-	payload := events.IntentConfirmedPayload{IntentID: string(draft.ID), GoalID: string(goalID), Version: draft.Version, Fingerprint: draft.Fingerprint, ConfirmingActorID: string(in.SourcePrincipalID), ConfirmingActorKind: string(in.SourcePrincipalKind), SourceChannel: in.SourceChannel, MessageID: in.MessageID}
+	payload := events.IntentConfirmedPayload{IntentID: string(draft.ID), GoalID: string(goalID), ReplacesWorkID: string(replacesWorkID), Version: draft.Version, Fingerprint: draft.Fingerprint, ConfirmingActorID: string(in.SourcePrincipalID), ConfirmingActorKind: string(in.SourcePrincipalKind), SourceChannel: in.SourceChannel, MessageID: in.MessageID}
 	confirmation := events.TrustedDraft{OrganizationID: in.OrganizationID, EventType: "INTENT_CONFIRMED", SourceActorID: string(in.SourcePrincipalID), TaskID: "task-" + correlationID, CorrelationID: correlationID, Payload: payload}
-	_, err = s.gateway.PublishIntentConfirmation(ctx, confirmation, goalID)
+	_, err = s.gateway.PublishIntentConfirmation(ctx, confirmation, goalID, replacesWorkID)
 	if err != nil {
 		return Result{}, fmt.Errorf("persist intent confirmation: %w", err)
 	}
@@ -299,6 +303,9 @@ func ValidateReviewedIntentExecution(draft core.IntentDraft, organizationID core
 		return err
 	}
 	if draft.Mode == core.IntentModeExperiment {
+		if draft.ReplacesWork != nil {
+			return fmt.Errorf("V1 experimental intent cannot replace production Work")
+		}
 		if kind != core.ExecutionDeterministic || draft.RequestedExecutionKind != core.ExecutionDeterministic {
 			return fmt.Errorf("V1 experimental intent requires deterministic execution")
 		}

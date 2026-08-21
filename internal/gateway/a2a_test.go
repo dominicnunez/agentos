@@ -71,9 +71,10 @@ func TestAgentCardAdvertisesOnlyA2AV1JSONRPC(t *testing.T) {
 
 func TestA2AIntentReviewSerializesSelectedGoalProvenance(t *testing.T) {
 	goal := core.IntentValue{Value: "goal-123", Origin: "EXPLICIT", SourceMessageID: "message-1"}
+	replacesWork := core.IntentValue{Value: "work-failed-123", Origin: "EXPLICIT", SourceMessageID: "message-1"}
 	task := projectA2ATask(intake.View{
 		TaskID: "task-1", ConversationID: "context-1", State: intake.StateAwaitingConfirmation,
-		Intent: &core.IntentDraft{Version: 1, Mode: core.IntentModeStandard, Fingerprint: strings.Repeat("a", 64), Objective: "Advance the Goal", Goal: &goal},
+		Intent: &core.IntentDraft{Version: 1, Mode: core.IntentModeStandard, Fingerprint: strings.Repeat("a", 64), Objective: "Advance the Goal", Goal: &goal, ReplacesWork: &replacesWork},
 	})
 	body, err := json.Marshal(task)
 	if err != nil {
@@ -88,6 +89,10 @@ func TestA2AIntentReviewSerializesSelectedGoalProvenance(t *testing.T) {
 	var reviewed core.IntentValue
 	if err := json.Unmarshal(wire.Metadata[intentConfirmationURI]["goal"], &reviewed); err != nil || reviewed != goal {
 		t.Fatalf("A2A review omitted the selected Goal provenance: body=%s goal=%+v err=%v", body, reviewed, err)
+	}
+	var reviewedReplacement core.IntentValue
+	if err := json.Unmarshal(wire.Metadata[intentConfirmationURI]["replaces_work"], &reviewedReplacement); err != nil || reviewedReplacement != replacesWork {
+		t.Fatalf("A2A review omitted the replacement Work provenance: body=%s replacement=%+v err=%v", body, reviewedReplacement, err)
 	}
 	var mode core.IntentMode
 	if err := json.Unmarshal(wire.Metadata[intentConfirmationURI]["mode"], &mode); err != nil || mode != core.IntentModeStandard {

@@ -225,6 +225,13 @@ func ValidateDurableGraph(graph DurableGraph) error {
 			return fmt.Errorf("team %s: %w", id, err)
 		}
 	}
+	for id, state := range graph.Intents {
+		if state.Value.ReplacesWorkID != "" && !ValidWorkReferenceID(string(state.Value.ReplacesWorkID)) {
+			return fmt.Errorf("intent %s references an invalid replacement Work", id)
+		}
+	}
+	replacementByPredecessor := make(map[ID]ID)
+	replacementOf := make(map[ID]ID)
 	for id, state := range graph.Works {
 		if err := validateDurableIdentity("work", id, state.Value.ID); err != nil {
 			return err
@@ -242,6 +249,9 @@ func ValidateDurableGraph(graph DurableGraph) error {
 		if state.Value.Objective != intent.Value.NormalizedObjective {
 			return fmt.Errorf("work %s does not match its accepted intent objective", id)
 		}
+		if state.Value.ReplacesWorkID != intent.Value.ReplacesWorkID {
+			return fmt.Errorf("work %s does not match its accepted intent replacement lineage", id)
+		}
 		if state.CorrelationID == "" || intent.CorrelationID != state.CorrelationID {
 			return fmt.Errorf("work %s crosses its intent correlation boundary", id)
 		}
@@ -250,6 +260,30 @@ func ValidateDurableGraph(graph DurableGraph) error {
 			if !ok || goal.Value.OrganizationID != intent.Value.OrganizationID {
 				return fmt.Errorf("work %s references invalid goal %s", id, state.Value.GoalID)
 			}
+		}
+		if predecessorID := state.Value.ReplacesWorkID; predecessorID != "" {
+			predecessor, ok := graph.Works[predecessorID]
+			if !ok || predecessor.Value.Status != WorkFailed || predecessor.Value.GoalID != state.Value.GoalID {
+				return fmt.Errorf("work %s does not replace a failed Work with the same Goal binding", id)
+			}
+			predecessorIntent, ok := graph.Intents[predecessor.Value.IntentID]
+			if !ok || predecessorIntent.Value.OrganizationID != intent.Value.OrganizationID {
+				return fmt.Errorf("work %s replacement lineage crosses its organization", id)
+			}
+			if existing, duplicate := replacementByPredecessor[predecessorID]; duplicate && existing != id {
+				return fmt.Errorf("failed work %s has multiple replacements", predecessorID)
+			}
+			replacementByPredecessor[predecessorID] = id
+			replacementOf[id] = predecessorID
+		}
+	}
+	for start := range replacementOf {
+		seen := make(map[ID]struct{})
+		for current := start; current != ""; current = replacementOf[current] {
+			if _, cycle := seen[current]; cycle {
+				return fmt.Errorf("work replacement lineage contains a cycle at %s", current)
+			}
+			seen[current] = struct{}{}
 		}
 	}
 	tasks := make(map[ID]Task, len(graph.Tasks))
