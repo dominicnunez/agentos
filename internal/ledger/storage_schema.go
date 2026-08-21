@@ -24,7 +24,11 @@ const (
 	// not identify or publish an Agent OS release.
 	OldestSupportedStorageVersion = 1
 	// CurrentStorageVersion is the only layout accepted after runtime startup.
-	CurrentStorageVersion = 2
+	CurrentStorageVersion = 3
+	// LegacyEventSchemaVersion identifies the pre-Intent-mode Event Contract.
+	// Migration may advance only ledgers without review evidence whose
+	// fingerprint semantics changed.
+	LegacyEventSchemaVersion = 3
 
 	storageSchemaV1Fingerprint = "ce7fe300685bcbc66821ca3692d962eda27cdd1ca9e1642972cccc8e2b4736cb"
 )
@@ -189,8 +193,28 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 		if err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO agentos_storage(singleton,storage_version,event_schema_version,application_id,schema_fingerprint) VALUES(1,?,?,?,?)`, to, events.SchemaVersion, StorageApplicationID, fingerprint)
+		_, err = tx.ExecContext(ctx, `INSERT INTO agentos_storage(singleton,storage_version,event_schema_version,application_id,schema_fingerprint) VALUES(1,?,?,?,?)`, to, LegacyEventSchemaVersion, StorageApplicationID, fingerprint)
 		return err
+	case from == 2 && to == 3:
+		var incompatible int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE event_type IN ('INTENT_DRAFTED','INTENT_CONFIRMED')`).Scan(&incompatible); err != nil {
+			return fmt.Errorf("inspect pre-mode Intent review evidence: %w", err)
+		}
+		if incompatible != 0 {
+			return fmt.Errorf("storage contains pre-mode Intent review evidence that cannot be migrated without changing authoritative fingerprints")
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE events SET schema_version=? WHERE schema_version=?`, events.SchemaVersion, LegacyEventSchemaVersion); err != nil {
+			return fmt.Errorf("advance durable Event Contract version: %w", err)
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=?,event_schema_version=? WHERE singleton=1 AND storage_version=? AND event_schema_version=?`, to, events.SchemaVersion, from, LegacyEventSchemaVersion)
+		if err != nil {
+			return fmt.Errorf("advance storage contract metadata: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil || rows != 1 {
+			return fmt.Errorf("storage contract metadata did not match the reviewed migration boundary")
+		}
+		return nil
 	default:
 		return fmt.Errorf("no reviewed storage migration exists")
 	}
@@ -232,6 +256,10 @@ func sqliteStorageHeader(ctx context.Context, query storageQueryer) (application
 }
 
 func validateStorageLayout(ctx context.Context, query storageQueryer, version int) (StorageContract, error) {
+	expectedEventVersion := events.SchemaVersion
+	if version < CurrentStorageVersion {
+		expectedEventVersion = LegacyEventSchemaVersion
+	}
 	expected := make(map[string][]string, len(storageColumnsV1)+1)
 	for table, columns := range storageColumnsV1 {
 		expected[table] = columns
@@ -270,13 +298,13 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 		}
 	}
 	var unsupportedEvents int
-	if err := query.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE schema_version<>?`, events.SchemaVersion).Scan(&unsupportedEvents); err != nil {
+	if err := query.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE schema_version<>?`, expectedEventVersion).Scan(&unsupportedEvents); err != nil {
 		return StorageContract{}, fmt.Errorf("inspect durable Event Contract versions: %w", err)
 	}
 	if unsupportedEvents != 0 {
-		return StorageContract{}, fmt.Errorf("storage schema version %d contains %d events outside supported Event Contract schema v%d", version, unsupportedEvents, events.SchemaVersion)
+		return StorageContract{}, fmt.Errorf("storage schema version %d contains %d events outside supported Event Contract schema v%d", version, unsupportedEvents, expectedEventVersion)
 	}
-	contract := StorageContract{StorageVersion: version, EventSchemaVersion: events.SchemaVersion}
+	contract := StorageContract{StorageVersion: version, EventSchemaVersion: expectedEventVersion}
 	if version < 2 {
 		fingerprint, err := storageSchemaFingerprint(ctx, query)
 		if err != nil {
@@ -292,7 +320,7 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 	if err := query.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(MAX(storage_version),0),COALESCE(MAX(event_schema_version),0),COALESCE(MAX(application_id),0),COALESCE(MAX(schema_fingerprint),'') FROM agentos_storage`).Scan(&rows, &storageVersion, &eventVersion, &applicationID, &storedFingerprint); err != nil {
 		return StorageContract{}, fmt.Errorf("read Agent OS storage metadata: %w", err)
 	}
-	if rows != 1 || storageVersion != version || eventVersion != events.SchemaVersion || applicationID != StorageApplicationID || storedFingerprint == "" {
+	if rows != 1 || storageVersion != version || eventVersion != expectedEventVersion || applicationID != StorageApplicationID || storedFingerprint == "" {
 		return StorageContract{}, fmt.Errorf("agent OS storage metadata does not match runtime contract")
 	}
 	fingerprint, err := storageSchemaFingerprint(ctx, query)

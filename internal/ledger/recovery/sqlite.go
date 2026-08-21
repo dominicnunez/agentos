@@ -88,20 +88,30 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	}
 	result.StorageVersion = contract.StorageVersion
 	result.EventSchemaVersion = contract.EventSchemaVersion
-	if err := verifyProjectionAdmissions(ctx, db); err != nil {
-		return Result{}, err
-	}
-	if err := ledgerstore.ValidateTaskCompletionAdmissions(ctx, db); err != nil {
-		return Result{}, err
-	}
-	if err := ledgerstore.ValidateWorkCompletionAdmissions(ctx, db); err != nil {
-		return Result{}, err
-	}
-	if err := ledgerstore.ValidateGoalAchievementAdmissions(ctx, db); err != nil {
-		return Result{}, err
-	}
-	if err := ledgerstore.ValidateInferenceAdmissions(ctx, db); err != nil {
-		return Result{}, err
+	if contract.EventSchemaVersion == events.SchemaVersion {
+		if err := verifyProjectionAdmissions(ctx, db); err != nil {
+			return Result{}, err
+		}
+		if err := ledgerstore.ValidateTaskCompletionAdmissions(ctx, db); err != nil {
+			return Result{}, err
+		}
+		if err := ledgerstore.ValidateWorkCompletionAdmissions(ctx, db); err != nil {
+			return Result{}, err
+		}
+		if err := ledgerstore.ValidateGoalAchievementAdmissions(ctx, db); err != nil {
+			return Result{}, err
+		}
+		if err := ledgerstore.ValidateInferenceAdmissions(ctx, db); err != nil {
+			return Result{}, err
+		}
+	} else {
+		var incompatible int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE event_type IN ('INTENT_DRAFTED','INTENT_CONFIRMED')`).Scan(&incompatible); err != nil {
+			return Result{}, fmt.Errorf("inspect legacy migration eligibility: %w", err)
+		}
+		if incompatible != 0 {
+			return Result{}, fmt.Errorf("legacy storage contains Intent review evidence that cannot be safely migrated")
+		}
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(sequence), 0) FROM events`).Scan(&result.EventCount, &result.MaxSequence); err != nil {
 		return Result{}, fmt.Errorf("inspect Agent OS event ledger: %w", err)

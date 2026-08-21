@@ -103,7 +103,7 @@ func TestOldestSupportedStorageFixtureVerifiesBacksUpRestoresAndMigrates(t *test
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version) VALUES('event-v1','org-1','AUDIT_NOTE','runtime','task-1',?,?,?,'work-v1','2026-08-13T12:00:00Z',?)`, []byte("[]"), []byte("[]"), []byte("{}"), events.SchemaVersion); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version) VALUES('event-v1','org-1','AUDIT_NOTE','runtime','task-1',?,?,?,'work-v1','2026-08-13T12:00:00Z',?)`, []byte("[]"), []byte("[]"), []byte("{}"), ledger.LegacyEventSchemaVersion); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestOldestSupportedStorageFixtureVerifiesBacksUpRestoresAndMigrates(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if verified.StorageVersion != ledger.OldestSupportedStorageVersion || verified.EventSchemaVersion != events.SchemaVersion {
+	if verified.StorageVersion != ledger.OldestSupportedStorageVersion || verified.EventSchemaVersion != ledger.LegacyEventSchemaVersion {
 		t.Fatalf("v1 verification=%+v", verified)
 	}
 	backupPath := filepath.Join(directory, "storage-v1-backup.db")

@@ -48,6 +48,10 @@ func TestOpenMigratesStorageV1FixtureWithoutRewritingLedger(t *testing.T) {
 		_ = legacy.Close()
 		t.Fatal(err)
 	}
+	if _, err := legacy.ExecContext(ctx, `UPDATE events SET schema_version=?`, LegacyEventSchemaVersion); err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
 	var beforePayload []byte
 	if err := legacy.QueryRowContext(ctx, `SELECT payload FROM events WHERE sequence=1`).Scan(&beforePayload); err != nil {
 		_ = legacy.Close()
@@ -95,6 +99,66 @@ func TestOpenMigratesStorageV1FixtureWithoutRewritingLedger(t *testing.T) {
 	stream, err := restarted.Events(ctx, "legacy-request")
 	if err != nil || len(stream) != 1 || stream[0].OrganizationID != "org-1" {
 		t.Fatalf("restarted migrated stream=%+v err=%v", stream, err)
+	}
+}
+
+func TestOpenMigratesStorageV2WithoutIntentReviewEvidence(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "storage-v2.db")
+	legacy := createStorageV2Fixture(t, path)
+	if _, err := legacy.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,authorization_refs,artifact_refs,payload,created_at,schema_version) VALUES('audit-1','org-1','AUDIT_NOTE','runtime','[]','[]','{}','2026-08-13T12:00:00Z',?)`, LegacyEventSchemaVersion); err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	contract, err := ValidateStorageContract(ctx, store.db)
+	if err != nil || contract.StorageVersion != CurrentStorageVersion || contract.EventSchemaVersion != events.SchemaVersion {
+		t.Fatalf("migrated v2 contract=%+v err=%v", contract, err)
+	}
+	var eventVersion int
+	if err := store.db.QueryRowContext(ctx, `SELECT schema_version FROM events WHERE event_id='audit-1'`).Scan(&eventVersion); err != nil || eventVersion != events.SchemaVersion {
+		t.Fatalf("migrated event version=%d err=%v", eventVersion, err)
+	}
+}
+
+func TestStorageV2MigrationRejectsPreModeIntentEvidenceAtomically(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "storage-v2-intent.db")
+	legacy := createStorageV2Fixture(t, path)
+	if _, err := legacy.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version) VALUES('draft-1','org-1','INTENT_DRAFTED','runtime','task-1','[]','[]','{}','run-1','2026-08-13T12:00:00Z',?)`, LegacyEventSchemaVersion); err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "cannot be migrated without changing authoritative fingerprints") {
+		t.Fatalf("pre-mode Intent storage migration error=%v", err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var version, eventVersion, metadataVersion, metadataEventVersion int
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT schema_version FROM events WHERE event_id='draft-1'`).Scan(&eventVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT storage_version,event_schema_version FROM agentos_storage WHERE singleton=1`).Scan(&metadataVersion, &metadataEventVersion); err != nil {
+		t.Fatal(err)
+	}
+	if version != 2 || eventVersion != LegacyEventSchemaVersion || metadataVersion != 2 || metadataEventVersion != LegacyEventSchemaVersion {
+		t.Fatalf("failed migration mutated storage: version=%d event=%d metadata=%d/%d", version, eventVersion, metadataVersion, metadataEventVersion)
 	}
 }
 
@@ -215,6 +279,31 @@ func createStorageV1Fixture(t *testing.T, path string) *sql.DB {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(t.Context(), string(script)); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	return db
+}
+
+func createStorageV2Fixture(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	db := createStorageV1Fixture(t, path)
+	tx, err := db.BeginTx(t.Context(), nil)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := applyStorageMigration(t.Context(), tx, 1, 2); err != nil {
+		_ = tx.Rollback()
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(t.Context(), `PRAGMA user_version=2`); err != nil {
+		_ = tx.Rollback()
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
