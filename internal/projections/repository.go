@@ -237,14 +237,14 @@ func (r *Repository) SaveExperimentalSubmission(ctx context.Context, correlation
 	return err
 }
 
-func (r *Repository) StartAgentExecution(ctx context.Context, organizationID core.ID, correlationID string, version int, value core.Task, mode string, routes []events.InboxRoute) (events.Event, []events.InboxSelection, error) {
+func (r *Repository) StartAgentExecution(ctx context.Context, organizationID core.ID, correlationID string, version int, value core.Task, mode string, strategicEventRefs []string, strategicContextRefs []core.VersionedRef, routes []events.InboxRoute) (events.Event, []events.InboxSelection, error) {
 	if r == nil || r.gateway == nil || organizationID == "" || correlationID == "" || value.ID == "" || value.ExecutionKind != core.ExecutionAgent || value.Status != core.TaskRunning || version < 2 {
 		return events.Event{}, nil, fmt.Errorf("complete Agent execution-start projection is required")
 	}
 	return r.gateway.PublishExecutionStart(ctx, events.ProjectionDraft{
 		Event: events.TrustedDraft{
 			OrganizationID: string(organizationID), EventType: "EXECUTION_STARTED", SourceActorID: "runtime",
-			TaskID: string(value.ID), CorrelationID: correlationID, Payload: events.ExecutionStartDetail{Mode: mode},
+			TaskID: string(value.ID), CorrelationID: correlationID, Payload: events.ExecutionStartDetail{Mode: mode, StrategicEventRefs: strategicEventRefs, StrategicContextRefs: strategicContextRefs},
 		},
 		ProjectionKind: KindTask, RecordID: string(value.ID), Version: version, Value: value,
 	}, routes)

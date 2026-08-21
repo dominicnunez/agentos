@@ -1049,7 +1049,17 @@ func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.Projecti
 		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0) FROM events`).Scan(&cutoff); err != nil {
 			return fmt.Errorf("read Agent execution inbox cutoff: %w", err)
 		}
-		draft.Event.Payload = events.ExecutionStartDetail{Mode: requested.Mode, InboxCutoffSequence: cutoff, DispatchBinding: &dispatch}
+		stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? ORDER BY sequence`, draft.Event.OrganizationID))
+		if err != nil {
+			return fmt.Errorf("read Agent execution strategic boundary: %w", err)
+		}
+		if err := validateStrategicExecutionStart(ctx, tx, draft, task, requested, stream); err != nil {
+			return err
+		}
+		draft.Event.Payload = events.ExecutionStartDetail{
+			Mode: requested.Mode, InboxCutoffSequence: cutoff, DispatchBinding: &dispatch,
+			StrategicEventRefs: append([]string(nil), requested.StrategicEventRefs...), StrategicContextRefs: append([]core.VersionedRef(nil), requested.StrategicContextRefs...),
+		}
 		item, err := prepareProjection(draft, false, false)
 		if err != nil {
 			return err
@@ -1058,10 +1068,7 @@ func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.Projecti
 		if err != nil {
 			return err
 		}
-		stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? ORDER BY sequence`, draft.Event.OrganizationID))
-		if err != nil {
-			return fmt.Errorf("read Agent execution route boundary: %w", err)
-		}
+		stream = append(stream, started)
 		if err := events.ValidateAgentDispatchStart(started, task, draft.Version, stream); err != nil {
 			return fmt.Errorf("validate Agent dispatch admission: %w", err)
 		}
@@ -1091,6 +1098,34 @@ ORDER BY e.sequence`, draft.Event.OrganizationID, route.Scope, route.ID, cutoff)
 		return nil
 	})
 	return started, selections, err
+}
+
+func validateStrategicExecutionStart(ctx context.Context, tx *sql.Tx, draft events.ProjectionDraft, task core.Task, requested events.ExecutionStartDetail, stream []events.Event) error {
+	body, found, err := latestRecordBody(ctx, tx, "work", string(task.WorkID))
+	if err != nil {
+		return fmt.Errorf("read Agent execution Work: %w", err)
+	}
+	var record events.ProjectionRecord
+	var work core.Work
+	if !found || decodeExactJSONBytes(body, &record) != nil || decodeExactJSONBytes(record.Value, &work) != nil || work.ID != task.WorkID || work.IntentID == "" || work.Status != core.WorkActive || record.CorrelationID != draft.Event.CorrelationID {
+		return fmt.Errorf("agent execution strategic Work is invalid")
+	}
+	if work.GoalID == "" {
+		if len(requested.StrategicEventRefs) != 0 || len(requested.StrategicContextRefs) != 0 {
+			return fmt.Errorf("ad hoc Agent execution cannot bind strategic context")
+		}
+		return nil
+	}
+	plan, strategy, err := events.ResolvePlanStrategicContext(draft.Event.OrganizationID, draft.Event.CorrelationID, work, stream)
+	if err != nil || strategy == nil || strategy.Mission.Status != core.MissionActive || strategy.Goal.Status != core.GoalActive {
+		return fmt.Errorf("agent execution strategic Plan is stale or invalid")
+	}
+	_, currentEventRefs, currentContextRefs, err := events.ResolveStrategicContext(draft.Event.OrganizationID, work, stream, 0)
+	if err != nil || !slices.Equal(plan.StrategicEventRefs, requested.StrategicEventRefs) || !slices.Equal(plan.StrategicContextRefs, requested.StrategicContextRefs) ||
+		!slices.Equal(currentEventRefs, requested.StrategicEventRefs) || !slices.Equal(currentContextRefs, requested.StrategicContextRefs) {
+		return fmt.Errorf("agent execution strategic context changed before transactional dispatch")
+	}
+	return nil
 }
 
 func validatePriorAgentExecutionTask(ctx context.Context, tx *sql.Tx, draft events.ProjectionDraft, task core.Task) error {

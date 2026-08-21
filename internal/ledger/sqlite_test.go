@@ -864,6 +864,126 @@ func TestAgentExecutionStartBindsExactActiveRosterRevision(t *testing.T) {
 	}
 }
 
+func TestAgentExecutionStartAtomicallyRejectsStrategicRevisionDrift(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	const correlationID = "strategic-dispatch"
+	now := time.Now().UTC()
+	agent, config := appendTaskAssignmentAgent(t, ctx, store, "org-1", correlationID, true)
+	mission := core.Mission{ID: "mission-1", OrganizationID: "org-1", Statement: "durable direction", Status: core.MissionActive, CreatedAt: now}
+	goal := core.Goal{ID: "goal-1", OrganizationID: "org-1", MissionID: mission.ID, Objective: "measurable outcome", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "evidence", Origin: "TEST"}}, Status: core.GoalActive, CreatedAt: now}
+	var missionEvent, goalEvent events.Event
+	for index, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "mission-1"}, ProjectionKind: "mission", RecordID: string(mission.ID), Version: 1, Value: mission},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_CREATED", SourceActorID: "runtime", CorrelationID: "goal-1"}, ProjectionKind: "goal", RecordID: string(goal.ID), Version: 1, Value: goal},
+	} {
+		appended, appendErr := store.AppendProjection(ctx, draft)
+		if appendErr != nil {
+			t.Fatal(appendErr)
+		}
+		if index == 0 {
+			missionEvent = appended
+		} else if index == 1 {
+			goalEvent = appended
+		}
+	}
+	gateway := events.NewGateway(store)
+	const sourceMessageID = "message-strategic-dispatch"
+	originalInstruction := "bounded work under goal-1"
+	goalRef := core.IntentValue{Value: string(goal.ID), Origin: "EXPLICIT", SourceMessageID: sourceMessageID}
+	draft := core.IntentDraft{
+		ID: "intent-" + correlationID, OrganizationID: "org-1", Version: 1, Status: core.IntentStatusReadyForReview, Mode: core.IntentModeStandard,
+		RequestedExecutionKind: core.ExecutionAgent, Goal: &goalRef, Objective: "bounded work", Context: []core.IntentValue{},
+		Deliverables:       []core.IntentValue{{Value: "The submitted work is performed.", Origin: "RUNTIME_DEFAULT"}},
+		CompletionCriteria: []core.IntentValue{{Value: "The requested outcome is produced and independently evaluated.", Origin: "RUNTIME_DEFAULT"}},
+		Constraints:        []core.IntentValue{}, ResolvedDecisions: []core.IntentDecision{}, ConsequenceCandidates: []string{}, MissingUserInputs: []core.IntentValue{}, CreatedAt: now,
+	}
+	draft.Fingerprint, err = core.FingerprintIntentDraft(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTAKE_MESSAGE_RECORDED", SourceActorID: "user-1", TaskID: "task-" + correlationID, CorrelationID: correlationID,
+		Payload: events.IntakeMessageRecordedPayload{MessageID: sourceMessageID, Text: originalInstruction, SourcePrincipalID: "user-1", SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", RequestedExecutionKind: core.ExecutionAgent},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_DRAFTED", SourceActorID: "runtime", TaskID: "task-" + correlationID, CorrelationID: correlationID,
+		Payload: events.IntentDraftedPayload{SourceMessageID: sourceMessageID, Draft: draft, Reply: "Review the proposed intent before work begins."},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	confirmation := events.IntentConfirmedPayload{
+		IntentID: string(draft.ID), GoalID: string(goal.ID), Version: draft.Version, Fingerprint: draft.Fingerprint,
+		ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-strategic-dispatch",
+	}
+	if _, err := store.AppendIntentConfirmation(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-" + correlationID, CorrelationID: correlationID, Payload: confirmation,
+	}, goal.ID); err != nil {
+		t.Fatal(err)
+	}
+	intent := core.Intent{
+		ID: draft.ID, OrganizationID: "org-1", GoalID: goal.ID, OriginalInstruction: originalInstruction, NormalizedObjective: draft.Objective,
+		SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: sourceMessageID,
+		Context: draft.Context, Deliverables: draft.Deliverables, CompletionCriteria: draft.CompletionCriteria, AcceptedFingerprint: draft.Fingerprint, CreatedAt: now,
+	}
+	work := core.Work{ID: "work-1", IntentID: intent.ID, GoalID: goal.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	for _, projection := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: correlationID}, ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: correlationID}, ProjectionKind: "work", RecordID: string(work.ID), Version: 1, Value: work},
+	} {
+		if _, err := store.AppendProjection(ctx, projection); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task := appendPendingAgentExecutionTask(t, ctx, store, correlationID, "task-"+correlationID, agent, config)
+	contextRefs := []core.VersionedRef{
+		{ID: "mission/mission-1", Version: "1", MaterializationState: core.MaterializedFull},
+		{ID: "goal/goal-1", Version: "1", MaterializationState: core.MaterializedFull},
+	}
+	eventRefs := []string{missionEvent.EventID, goalEvent.EventID}
+	plan := core.Plan{
+		ID: "plan-" + correlationID, IntentID: intent.ID, IntentFingerprint: intent.AcceptedFingerprint, Version: 1,
+		StrategicEventRefs: eventRefs, StrategicContextRefs: contextRefs,
+		Tasks: []core.PlanTask{{Key: "root", Description: task.Description, ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, DependsOn: []string{}}}, CreatedAt: now,
+	}
+	plan.Fingerprint, err = core.FingerprintPlan(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "PLAN_CREATED", SourceActorID: "runtime", TaskID: "task-" + correlationID, CorrelationID: correlationID, Payload: plan,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	goal.Objective = "changed before dispatch"
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_REFINED", SourceActorID: "runtime", CorrelationID: "goal-1"},
+		ProjectionKind: "goal", RecordID: string(goal.ID), Version: 2, Value: goal,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task.Status = core.TaskRunning
+	if _, _, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
+		Event: events.TrustedDraft{
+			OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: correlationID,
+			Payload: events.ExecutionStartDetail{StrategicEventRefs: eventRefs, StrategicContextRefs: contextRefs},
+		},
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
+	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: string(task.ID)}, {Scope: events.RecipientAgent, ID: string(task.AssigneeID)}}); err == nil {
+		t.Fatal("strategically stale Agent dispatch was committed")
+	}
+	_, persisted := latestTestProjection[core.Task](t, ctx, store, "task", task.ID)
+	if persisted.Status != core.TaskPending {
+		t.Fatalf("rejected dispatch changed Task state: %+v", persisted)
+	}
+}
+
 func TestAgentExecutionStartRejectsInactiveRosterComponents(t *testing.T) {
 	for _, kind := range []string{"agent", "agent_blueprint", "execution_profile"} {
 		t.Run(kind, func(t *testing.T) {

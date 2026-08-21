@@ -2478,18 +2478,12 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		if !intentFound || intentState.Value.OrganizationID != organizationID {
 			return taskRun{}, fmt.Errorf("load durable Intent context for task %s", task.ID)
 		}
-		correlationEvents, err = s.gateway.Events(ctx, state.CorrelationID)
-		if err != nil {
-			return taskRun{}, fmt.Errorf("load durable Plan context for task %s: %w", task.ID, err)
-		}
-		plan, planErr := workCompletionPlan(correlationEvents, intentState.Value, state.CorrelationID)
 		allEvents, streamErr := s.gateway.Events(ctx, "")
 		if streamErr != nil {
 			return taskRun{}, fmt.Errorf("load strategic execution context for task %s: %w", task.ID, streamErr)
 		}
-		if planErr == nil {
-			strategy, planErr = events.ResolveStrategicContextByRefs(string(organizationID), workState.Value, allEvents, plan.StrategicEventRefs, plan.StrategicContextRefs)
-		}
+		plan, boundStrategy, planErr := events.ResolvePlanStrategicContext(string(organizationID), state.CorrelationID, workState.Value, allEvents)
+		strategy = boundStrategy
 		var latestEventRefs []string
 		var latestContextRefs []core.VersionedRef
 		var latest *core.StrategicContext
@@ -2540,7 +2534,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			mode = "BLOCKED_DEPENDENCY_REMEDIATION"
 		}
 		selections := []events.InboxSelection(nil)
-		_, selections, err = s.state.StartAgentExecution(ctx, organizationID, state.CorrelationID, state.Version+1, task, mode, actionBoundaryRoutes(snapshot, task))
+		_, selections, err = s.state.StartAgentExecution(ctx, organizationID, state.CorrelationID, state.Version+1, task, mode, strategyEventRefs, strategyContextRefs, actionBoundaryRoutes(snapshot, task))
 		if err != nil {
 			return taskRun{}, fmt.Errorf("persist Agent execution start and inbox boundary for task %s: %w", task.ID, err)
 		}

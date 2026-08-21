@@ -461,9 +461,11 @@ type InboxObservationBinding struct {
 }
 
 type ExecutionStartDetail struct {
-	Mode                string                `json:"mode,omitempty"`
-	InboxCutoffSequence int64                 `json:"inbox_cutoff_sequence"`
-	DispatchBinding     *AgentDispatchBinding `json:"dispatch_binding,omitempty"`
+	Mode                 string                `json:"mode,omitempty"`
+	InboxCutoffSequence  int64                 `json:"inbox_cutoff_sequence"`
+	DispatchBinding      *AgentDispatchBinding `json:"dispatch_binding,omitempty"`
+	StrategicEventRefs   []string              `json:"strategic_event_refs,omitempty"`
+	StrategicContextRefs []core.VersionedRef   `json:"strategic_context_refs,omitempty"`
 }
 
 // AgentDispatchBinding is the one-shot, ledger-backed admission for an exact
@@ -588,6 +590,46 @@ func ResolveStrategicContextByRefs(organizationID string, work core.Work, stream
 	return context, nil
 }
 
+// ResolvePlanStrategicContext validates the one runtime-owned Plan for a Work
+// and reconstructs the exact Mission and Goal revisions fingerprinted into it.
+func ResolvePlanStrategicContext(organizationID, correlationID string, work core.Work, stream []Event) (core.Plan, *core.StrategicContext, error) {
+	if organizationID == "" || correlationID == "" || work.ID == "" || work.IntentID == "" {
+		return core.Plan{}, nil, fmt.Errorf("strategic Plan identity is incomplete")
+	}
+	var selected Event
+	var plan core.Plan
+	for _, event := range stream {
+		if event.EventType != "PLAN_CREATED" || event.CorrelationID != correlationID {
+			continue
+		}
+		var candidate core.Plan
+		if selected.EventID != "" || event.OrganizationID != organizationID || event.SourceActorID != "runtime" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != "task-"+correlationID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 ||
+			event.SourceExecutionID != "" && event.SourceExecutionID != "planning-plan-"+correlationID+"-attempt-1" || decodeExactEventJSON(event.Payload, &candidate) != nil {
+			return core.Plan{}, nil, fmt.Errorf("strategic Plan event is invalid")
+		}
+		selected, plan = event, candidate
+	}
+	_, offset := plan.CreatedAt.Zone()
+	expectedFingerprint, err := core.FingerprintPlan(plan)
+	if err != nil {
+		return core.Plan{}, nil, fmt.Errorf("fingerprint strategic Plan: %w", err)
+	}
+	if selected.EventID == "" {
+		return core.Plan{}, nil, fmt.Errorf("strategic Plan is unavailable")
+	}
+	if plan.ID != core.ID("plan-"+correlationID) || plan.IntentID != work.IntentID || plan.Version != 1 || len(plan.Tasks) == 0 || plan.CreatedAt.IsZero() || offset != 0 {
+		return core.Plan{}, nil, fmt.Errorf("strategic Plan identity or lifecycle is invalid")
+	}
+	if plan.Fingerprint == "" || plan.Fingerprint != expectedFingerprint {
+		return core.Plan{}, nil, fmt.Errorf("strategic Plan fingerprint is invalid")
+	}
+	context, err := ResolveStrategicContextByRefs(organizationID, work, stream, plan.StrategicEventRefs, plan.StrategicContextRefs)
+	if err != nil {
+		return core.Plan{}, nil, err
+	}
+	return plan, context, nil
+}
+
 func exactGoalProjection(organizationID string, event Event) (ProjectionRecord, core.Goal, error) {
 	return exactStrategicProjection(organizationID, event, "goal", "Goal", func(value core.Goal) core.ID { return value.ID }, func(value core.Goal) core.ID { return value.OrganizationID }, core.ValidGoal)
 }
@@ -627,6 +669,9 @@ func latestStrategicProjection[T any](organizationID string, recordID core.ID, s
 			return Event{}, ProjectionRecord{}, selectedValue, err
 		}
 		if !present || payload.Projection.ProjectionKind != kind || payload.Projection.RecordID != string(recordID) {
+			continue
+		}
+		if event.OrganizationID != organizationID {
 			continue
 		}
 		record, value, err := exactStrategicProjection(organizationID, event, kind, label, identity, tenant, valid)
@@ -1266,7 +1311,10 @@ func completionExecutionModel(binding WorkCompletionBinding, task core.Task, exe
 		return executionModel{}, fmt.Errorf("work completion Agent manifest does not match its immutable Task")
 	}
 	expectedInput, err := expectedAgentExecutionInput(binding, task, startEvent, found, manifest, stream)
-	if err != nil || manifest.ExecutionInputSHA256 != core.FingerprintExecutionInput(expectedInput) {
+	if err != nil {
+		return executionModel{}, fmt.Errorf("work completion Agent manifest context is invalid: %w", err)
+	}
+	if manifest.ExecutionInputSHA256 != core.FingerprintExecutionInput(expectedInput) {
 		return executionModel{}, fmt.Errorf("work completion Agent manifest input does not match durable execution context")
 	}
 	return executionModel{Provider: manifest.Provider, Model: manifest.Model, ExecutionInputSHA256: manifest.ExecutionInputSHA256}, nil
@@ -1281,8 +1329,22 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 	if err != nil {
 		return "", err
 	}
+	plan, plannedStrategy, err := ResolvePlanStrategicContext(binding.OrganizationID, binding.CorrelationID, binding.Work, stream)
+	startDetail, startErr := executionStartDetail(startEvent)
+	if err != nil {
+		return "", fmt.Errorf("resolve execution Plan strategic context: %w", err)
+	}
+	if startErr != nil {
+		return "", startErr
+	}
+	if !reflect.DeepEqual(strategy, plannedStrategy) || !slices.Equal(plan.StrategicEventRefs, strategyEventRefs) || !slices.Equal(plan.StrategicContextRefs, strategyContextRefs) {
+		return "", fmt.Errorf("execution strategic context does not match its durable Plan")
+	}
+	if !slices.Equal(startDetail.StrategicEventRefs, strategyEventRefs) || !slices.Equal(startDetail.StrategicContextRefs, strategyContextRefs) {
+		return "", fmt.Errorf("execution start does not bind the planned strategic context")
+	}
 	if !slices.Equal(manifest.AdditionalContextRefs, strategyContextRefs) {
-		return "", fmt.Errorf("execution strategic context references do not match durable revisions")
+		return "", fmt.Errorf("execution manifest does not bind the planned strategic context")
 	}
 	dependencyRefs, dependencies, err := executionDependencies(binding, task, manifestEvent, stream)
 	if err != nil {
@@ -1709,13 +1771,29 @@ func executionStartDetail(event Event) (ExecutionStartDetail, error) {
 	var payload ProjectionEventPayload
 	var detail ExecutionStartDetail
 	var fields map[string]json.RawMessage
-	if event.EventType != "EXECUTION_STARTED" || json.Unmarshal(event.Payload, &payload) != nil || decodeExactEventJSON(payload.Detail, &detail) != nil || json.Unmarshal(payload.Detail, &fields) != nil || len(fields) < 2 || len(fields) > 3 || fields["inbox_cutoff_sequence"] == nil || fields["dispatch_binding"] == nil || detail.DispatchBinding == nil || detail.InboxCutoffSequence < 0 || detail.InboxCutoffSequence >= event.Sequence || detail.Mode != "" && detail.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
+	if event.EventType != "EXECUTION_STARTED" || json.Unmarshal(event.Payload, &payload) != nil || decodeExactEventJSON(payload.Detail, &detail) != nil || json.Unmarshal(payload.Detail, &fields) != nil || fields["inbox_cutoff_sequence"] == nil || fields["dispatch_binding"] == nil || detail.DispatchBinding == nil || detail.InboxCutoffSequence < 0 || detail.InboxCutoffSequence >= event.Sequence || detail.Mode != "" && detail.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" || !validStrategicStartRefs(detail.StrategicEventRefs, detail.StrategicContextRefs) {
 		return ExecutionStartDetail{}, fmt.Errorf("agent execution-start detail is invalid")
 	}
-	if len(fields) == 3 && fields["mode"] == nil {
+	expectedFields := 2
+	if detail.Mode != "" {
+		expectedFields++
+	}
+	if len(detail.StrategicEventRefs) != 0 {
+		expectedFields += 2
+	}
+	if len(fields) != expectedFields {
 		return ExecutionStartDetail{}, fmt.Errorf("agent execution-start detail contains an unknown field")
 	}
 	return detail, nil
+}
+
+func validStrategicStartRefs(eventRefs []string, contextRefs []core.VersionedRef) bool {
+	if len(eventRefs) == 0 && len(contextRefs) == 0 {
+		return true
+	}
+	return len(eventRefs) == 2 && eventRefs[0] != "" && eventRefs[1] != "" && eventRefs[0] != eventRefs[1] &&
+		len(contextRefs) == 2 && contextRefs[0].ID != "" && contextRefs[0].Version != "" && contextRefs[0].MaterializationState == core.MaterializedFull &&
+		contextRefs[1].ID != "" && contextRefs[1].Version != "" && contextRefs[1].MaterializationState == core.MaterializedFull
 }
 
 // ValidateAgentDispatchStart proves that an execution started against the
@@ -3151,7 +3229,7 @@ func (g *Gateway) PublishExecutionStart(ctx context.Context, draft ProjectionDra
 	}
 	var task core.Task
 	var detail ExecutionStartDetail
-	if decodePayload(draft.Value, &task) != nil || task.ID != core.ID(draft.RecordID) || task.ExecutionKind != core.ExecutionAgent || task.Status != core.TaskRunning || task.AssigneeType != "AGENT" || task.AssigneeID == "" || decodePayload(draft.Event.Payload, &detail) != nil || detail.InboxCutoffSequence != 0 || detail.DispatchBinding != nil || detail.Mode != "" && detail.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
+	if decodePayload(draft.Value, &task) != nil || task.ID != core.ID(draft.RecordID) || task.ExecutionKind != core.ExecutionAgent || task.Status != core.TaskRunning || task.AssigneeType != "AGENT" || task.AssigneeID == "" || decodePayload(draft.Event.Payload, &detail) != nil || detail.InboxCutoffSequence != 0 || detail.DispatchBinding != nil || detail.Mode != "" && detail.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" || !validStrategicStartRefs(detail.StrategicEventRefs, detail.StrategicContextRefs) {
 		return Event{}, nil, fmt.Errorf("agent execution-start task or detail is invalid")
 	}
 	appender, ok := g.ledger.(ExecutionStartAppender)

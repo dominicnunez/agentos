@@ -248,7 +248,7 @@ func saveTestVerifiedTask(ctx context.Context, gateway *events.Gateway, reposito
 	task.Status = core.TaskRunning
 	startVersion := state.Version + 1
 	if task.ExecutionKind == core.ExecutionAgent {
-		_, selections, err := repository.StartAgentExecution(ctx, organizationID, correlationID, startVersion, task, "", actionBoundaryRoutes(snapshot, task))
+		_, selections, err := repository.StartAgentExecution(ctx, organizationID, correlationID, startVersion, task, "", nil, nil, actionBoundaryRoutes(snapshot, task))
 		if err != nil {
 			return err
 		}
@@ -2502,11 +2502,11 @@ func TestRecoverExecutesPersistedPendingWorkAndPreservesIdentity(t *testing.T) {
 		_ = l.Close()
 		t.Fatal(err)
 	}
-	if err := saveTestVerifiedTask(ctx, g, repository, organization.ID, "request-1", projections.Versioned[core.Task]{Version: 1, CorrelationID: "request-1", Value: first}); err != nil {
+	if err := saveTestPlan(ctx, g, "request-1", intent, first, second); err != nil {
 		_ = l.Close()
 		t.Fatal(err)
 	}
-	if err := saveTestPlan(ctx, g, "request-1", intent, first, second); err != nil {
+	if err := saveTestVerifiedTask(ctx, g, repository, organization.ID, "request-1", projections.Versioned[core.Task]{Version: 1, CorrelationID: "request-1", Value: first}); err != nil {
 		_ = l.Close()
 		t.Fatal(err)
 	}
@@ -3230,7 +3230,7 @@ func TestRecoveryIsDeterministicFirst(t *testing.T) {
 					if err != nil {
 						return err
 					}
-					_, _, err = repository.StartAgentExecution(ctx, organization.ID, requestID, 2, task, "", actionBoundaryRoutes(snapshot, task))
+					_, _, err = repository.StartAgentExecution(ctx, organization.ID, requestID, 2, task, "", nil, nil, actionBoundaryRoutes(snapshot, task))
 					return err
 				}
 				return repository.SaveTask(ctx, organization.ID, "EXECUTION_STARTED", "runtime", requestID, 2, task, nil)
@@ -3718,10 +3718,10 @@ func TestLateralMessagesAtActionBoundary(t *testing.T) {
 		_ = l.Close()
 		t.Fatal(err)
 	}
-	if err := saveTestVerifiedTask(ctx, gateway, repository, organization.ID, "request-1", projections.Versioned[core.Task]{Version: 1, CorrelationID: "request-1", Value: sourceTask}); err != nil {
+	if err := saveTestPlan(ctx, gateway, "request-1", intent, sourceTask, recipientTask); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveTestPlan(ctx, gateway, "request-1", intent, sourceTask, recipientTask); err != nil {
+	if err := saveTestVerifiedTask(ctx, gateway, repository, organization.ID, "request-1", projections.Versioned[core.Task]{Version: 1, CorrelationID: "request-1", Value: sourceTask}); err != nil {
 		t.Fatal(err)
 	}
 	completedStream, err := gateway.Events(ctx, "request-1")
