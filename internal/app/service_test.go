@@ -2831,6 +2831,59 @@ func TestRecoverResumesOnlyRevalidatedAssignmentBlock(t *testing.T) {
 	assertEventOrder(t, stream, "TASK_BLOCKED", "TASK_ASSIGNMENT_REVALIDATED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE")
 }
 
+func TestRecoverTerminalizesAssignmentBlockAfterStrategicDrift(t *testing.T) {
+	ctx := context.Background()
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	gateway := events.NewGateway(l)
+	repository := projections.New(gateway)
+	seedTestGoal(t, ctx, repository, "org-1", "mission-1", "goal-1", core.GoalActive)
+	agent := seedTestAgents(t, ctx, repository, "assignment-strategic-drift", "org-1", execution.FakeModel{}.Descriptor(), "agent-1")[0]
+	service := New(gateway)
+	in := confirmedGoalSubmit(t, ctx, gateway, "assignment-strategic-drift", "org-1", "goal-1", "echo governed", core.ExecutionDeterministic)
+	in.correlationID, err = gateway.ReserveExternalWork(ctx, "org-1", "assignment-strategic-drift")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, work, task, err := service.ensureSubmission(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent.Status = "INACTIVE"
+	if err := repository.SaveAgent(ctx, "AGENT_DEACTIVATED", "runtime", "assignment-strategic-drift", 2, agent, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tasks[task.ID].Value.Status != core.TaskBlocked {
+		t.Fatalf("ineligible strategic Task was not assignment-blocked: %+v", snapshot.Tasks[task.ID].Value)
+	}
+	goalState := snapshot.Goals["goal-1"]
+	goal := goalState.Value
+	goal.Status = core.GoalPaused
+	if err := repository.SaveGoal(ctx, "GOAL_PAUSED", "runtime", goalState.CorrelationID, goalState.Version+1, goal, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tasks[task.ID].Value.Status != core.TaskFailed || snapshot.Works[work.ID].Value.Status != core.WorkFailed {
+		t.Fatalf("strategic drift left assignment-blocked Work active: task=%+v work=%+v", snapshot.Tasks[task.ID].Value, snapshot.Works[work.ID].Value)
+	}
+}
+
 func TestAssignmentBlockedDependencyWaitsForRevalidation(t *testing.T) {
 	ctx := context.Background()
 	l, err := ledger.Open(":memory:")
@@ -3343,6 +3396,9 @@ func TestRecoveryIsDeterministicFirst(t *testing.T) {
 				return repository.SaveTask(ctx, organization.ID, "TASK_CREATED", "runtime", requestID, 1, task, nil)
 			},
 			func() error {
+				return saveTestPlan(ctx, events.NewGateway(l), requestID, intent, task)
+			},
+			func() error {
 				task.Status = core.TaskRunning
 				if kind == core.ExecutionAgent {
 					snapshot, err := repository.Load(ctx)
@@ -3359,9 +3415,6 @@ func TestRecoveryIsDeterministicFirst(t *testing.T) {
 			if err := save(); err != nil {
 				t.Fatal(err)
 			}
-		}
-		if err := saveTestPlan(ctx, events.NewGateway(l), requestID, intent, task); err != nil {
-			t.Fatal(err)
 		}
 		return task
 	}
@@ -4014,3 +4067,4 @@ func assertEventOrder(t *testing.T, stream []events.Event, expected ...string) {
 		t.Fatalf("event order missing %q after index %d: %+v", expected[next], next, stream)
 	}
 }
+

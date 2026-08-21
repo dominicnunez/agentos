@@ -1853,16 +1853,25 @@ func ValidateTaskExecutionStart(start Event, task core.Task, taskVersion int, wo
 	if err != nil {
 		return err
 	}
-	plan, _, err := ResolvePlanStrategicContext(start.OrganizationID, start.CorrelationID, work, intent, stream)
+	plan, planEvent, err := resolvePlan(start.OrganizationID, start.CorrelationID, work, intent, stream)
 	if err != nil {
+		return fmt.Errorf("resolve execution-start Plan context: %w", err)
+	}
+	if planEvent.Sequence >= start.Sequence {
+		return fmt.Errorf("execution start predates its durable Plan")
+	}
+	if _, err := resolveStrategicContextByRefs(start.OrganizationID, work, stream, plan.StrategicEventRefs, plan.StrategicContextRefs, planEvent.Sequence); err != nil {
 		return fmt.Errorf("resolve execution-start Plan context: %w", err)
 	}
 	if !slices.Equal(plan.StrategicEventRefs, detail.StrategicEventRefs) || !slices.Equal(plan.StrategicContextRefs, detail.StrategicContextRefs) {
 		return fmt.Errorf("execution start does not bind its durable Plan context")
 	}
-	_, currentEventRefs, currentContextRefs, err := ResolveStrategicContext(start.OrganizationID, work, stream, start.Sequence)
+	currentStrategy, currentEventRefs, currentContextRefs, err := ResolveStrategicContext(start.OrganizationID, work, stream, start.Sequence)
 	if err != nil || !slices.Equal(currentEventRefs, detail.StrategicEventRefs) || !slices.Equal(currentContextRefs, detail.StrategicContextRefs) {
 		return fmt.Errorf("execution start crossed a strategic-context revision")
+	}
+	if currentStrategy != nil && (currentStrategy.Mission.Status != core.MissionActive || currentStrategy.Goal.Status != core.GoalActive) {
+		return fmt.Errorf("execution start used inactive strategic context")
 	}
 	if task.ExecutionKind == core.ExecutionHuman {
 		inputEvent, found := eventWithID(stream, detail.InputEventRef)
@@ -3600,3 +3609,4 @@ func sameStrings(left, right []string) bool {
 	}
 	return true
 }
+

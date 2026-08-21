@@ -213,6 +213,43 @@ func TestValidateTaskExecutionStartRejectsMissingNonAgentStrategy(t *testing.T) 
 	if err := ValidateTaskExecutionStart(stale, task, 2, work, intent, append(drifted, stale)); err == nil {
 		t.Fatal("deterministic replay accepted a Plan that was stale before execution start")
 	}
+
+	postdatedPlan := plan
+	postdatedPlan.Fingerprint, _ = core.FingerprintPlan(postdatedPlan)
+	postdatedPlanBody, err := json.Marshal(postdatedPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startBeforePlan := nonAgentStrategicExecutionStartEvent(t, 3, task, refs, versions)
+	planAfterStart := Event{EventID: "plan-event-after-start", Sequence: 4, OrganizationID: "org-1", EventType: "PLAN_CREATED", SourceActorID: "runtime", TaskID: "task-run-1", Payload: postdatedPlanBody, CorrelationID: "run-1", CreatedAt: now, SchemaVersion: SchemaVersion}
+	if err := ValidateTaskExecutionStart(startBeforePlan, task, 2, work, intent, []Event{stream[0], stream[1], startBeforePlan, planAfterStart}); err == nil {
+		t.Fatal("deterministic replay accepted an execution start that predated its Plan")
+	}
+
+	pausedGoal := goal
+	pausedGoal.Status = core.GoalPaused
+	pausedRefs := []string{"event-1", "event-3"}
+	pausedVersions := []core.VersionedRef{
+		{ID: "mission/mission-1", Version: "1", MaterializationState: core.MaterializedFull},
+		{ID: "goal/goal-1", Version: "2", MaterializationState: core.MaterializedFull},
+	}
+	pausedPlan := plan
+	pausedPlan.StrategicEventRefs = pausedRefs
+	pausedPlan.StrategicContextRefs = pausedVersions
+	pausedPlan.Fingerprint, _ = core.FingerprintPlan(pausedPlan)
+	pausedPlanBody, err := json.Marshal(pausedPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pausedStream := []Event{
+		stream[0], stream[1],
+		strategicProjectionEvent(t, 3, "GOAL_PAUSED", "goal", goal.ID, 2, pausedGoal),
+		{EventID: "paused-plan-event", Sequence: 4, OrganizationID: "org-1", EventType: "PLAN_CREATED", SourceActorID: "runtime", TaskID: "task-run-1", Payload: pausedPlanBody, CorrelationID: "run-1", CreatedAt: now, SchemaVersion: SchemaVersion},
+	}
+	pausedStart := nonAgentStrategicExecutionStartEvent(t, 5, task, pausedRefs, pausedVersions)
+	if err := ValidateTaskExecutionStart(pausedStart, task, 2, work, intent, append(pausedStream, pausedStart)); err == nil {
+		t.Fatal("deterministic replay accepted an execution start under paused strategic context")
+	}
 }
 
 func strategicExecutionStartEvent(t *testing.T, sequence int64, eventRefs []string, contextRefs []core.VersionedRef) Event {
@@ -304,3 +341,4 @@ func strategicProjectionEvent(t *testing.T, sequence int64, eventType, kind stri
 	}
 	return event
 }
+

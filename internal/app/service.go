@@ -443,6 +443,16 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 				return RecoveryResult{}, fmt.Errorf("validate assignment block for task %s: %w", state.Value.ID, err)
 			}
 			if assignmentBlocked {
+				current, currentErr := s.taskUsesCurrentStrategy(ctx, snapshot, organizationID, state)
+				if currentErr != nil {
+					return RecoveryResult{}, fmt.Errorf("validate strategic context for assignment-blocked task %s: %w", state.Value.ID, currentErr)
+				}
+				if !current {
+					if failErr := s.failStrategicTask(ctx, organizationID, state); failErr != nil {
+						return RecoveryResult{}, fmt.Errorf("terminalize stale assignment-blocked task %s: %w", state.Value.ID, failErr)
+					}
+					continue
+				}
 				if _, resolveErr := assignment.ResolveAssigned(assignmentRoster(snapshot), state.Value, s.assignmentRequirement(organizationID, state.Value.ExecutionKind)); resolveErr == nil {
 					task := state.Value
 					task.Status = core.TaskPending
@@ -2479,18 +2489,6 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		return taskRun{}, err
 	}
 	var selected assignment.Selection
-	if task.ExecutionKind == core.ExecutionDeterministic || task.ExecutionKind == core.ExecutionAgent {
-		selected, err = assignment.ResolveAssigned(assignmentRoster(snapshot), task, s.assignmentRequirement(organizationID, task.ExecutionKind))
-		if err != nil {
-			task.Status = core.TaskBlocked
-			detail := blockedDetail("the durable Agent assignment is unavailable or no longer eligible", "an active same-organization Agent with the exact reviewed blueprint, execution profile, runtime adapter, and capability prerequisites", "the runtime cannot substitute another Agent, infer capabilities, or change provider identity at dispatch")
-			detail.Code = assignmentBlockedCode
-			if saveErr := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); saveErr != nil {
-				return taskRun{}, fmt.Errorf("persist assignment block for task %s: %w", task.ID, saveErr)
-			}
-			return taskRun{}, nil
-		}
-	}
 	var handler execution.Handler
 	switch task.ExecutionKind {
 	case core.ExecutionDeterministic:
@@ -2555,6 +2553,18 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		}
 		strategyEventRefs = append([]string(nil), plan.StrategicEventRefs...)
 		strategyContextRefs = append([]core.VersionedRef(nil), plan.StrategicContextRefs...)
+	}
+	if task.ExecutionKind == core.ExecutionDeterministic || task.ExecutionKind == core.ExecutionAgent {
+		selected, err = assignment.ResolveAssigned(assignmentRoster(snapshot), task, s.assignmentRequirement(organizationID, task.ExecutionKind))
+		if err != nil {
+			task.Status = core.TaskBlocked
+			detail := blockedDetail("the durable Agent assignment is unavailable or no longer eligible", "an active same-organization Agent with the exact reviewed blueprint, execution profile, runtime adapter, and capability prerequisites", "the runtime cannot substitute another Agent, infer capabilities, or change provider identity at dispatch")
+			detail.Code = assignmentBlockedCode
+			if saveErr := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); saveErr != nil {
+				return taskRun{}, fmt.Errorf("persist assignment block for task %s: %w", task.ID, saveErr)
+			}
+			return taskRun{}, nil
+		}
 	}
 	if task.ExecutionKind == core.ExecutionHuman {
 		task.Status = core.TaskBlocked
@@ -3282,6 +3292,30 @@ type strategicTaskFailureDetail struct {
 	Replacement string `json:"replacement"`
 }
 
+func (s *Service) taskUsesCurrentStrategy(ctx context.Context, snapshot projections.Snapshot, organizationID core.ID, state projections.Versioned[core.Task]) (bool, error) {
+	workState, found := snapshot.Works[state.Value.WorkID]
+	if !found || workState.Value.ID != state.Value.WorkID || workState.Value.IntentID == "" {
+		return false, fmt.Errorf("durable Work context is unavailable")
+	}
+	if workState.Value.GoalID == "" {
+		return true, nil
+	}
+	intentState, found := snapshot.Intents[workState.Value.IntentID]
+	if !found || intentState.Value.OrganizationID != organizationID {
+		return false, fmt.Errorf("durable Intent context is unavailable")
+	}
+	stream, err := s.gateway.Events(ctx, state.CorrelationID)
+	if err != nil {
+		return false, err
+	}
+	plan, err := events.ResolvePlan(string(organizationID), state.CorrelationID, workState.Value, intentState.Value, stream)
+	if err != nil {
+		return false, nil
+	}
+	strategy, err := snapshotStrategicContext(snapshot, organizationID, workState.Value, plan)
+	return err == nil && strategy != nil && strategy.Mission.Status == core.MissionActive && strategy.Goal.Status == core.GoalActive, nil
+}
+
 func (s *Service) failStrategicTask(ctx context.Context, organizationID core.ID, state projections.Versioned[core.Task]) error {
 	if organizationID == "" || state.CorrelationID == "" || state.Value.ID == "" || state.Value.Status != core.TaskPending && state.Value.Status != core.TaskBlocked {
 		return fmt.Errorf("eligible pending or blocked strategic Task is required")
@@ -3423,3 +3457,4 @@ func agentParticipates(snapshot projections.Snapshot, agentID core.ID, task core
 	}
 	return false
 }
+
