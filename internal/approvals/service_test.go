@@ -167,6 +167,10 @@ func TestApprovalWaitsAcrossRestart(t *testing.T) {
 	if err != nil || terminal.Approval.Status != core.ApprovalApproved || terminal.Effect.Status != core.EffectConfirmed || terminal.Effect.EffectFingerprint != fingerprint {
 		t.Fatalf("terminal approval context=%+v err=%v", terminal, err)
 	}
+	recent, err := service.RecentDecisionContexts(ctx, "human-approver", 20)
+	if err != nil || len(recent) != 1 || recent[0].Approval.ID != approval.ID || recent[0].Approval.Status != core.ApprovalApproved {
+		t.Fatalf("recent approval decisions=%+v err=%v", recent, err)
+	}
 	if _, err := service.DecisionContext(ctx, approval.ID, "human-approver"); err == nil {
 		t.Fatal("terminal effect remained eligible for mutation")
 	}

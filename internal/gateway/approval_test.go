@@ -60,6 +60,10 @@ func TestApprovalControlShowsTrustedEffectAndEnforcesLifecycle(t *testing.T) {
 			t.Fatalf("%s status=%s want=%s", step.path, view.Status, step.want)
 		}
 	}
+	recent := approvalRequest(t, handler, http.MethodGet, "/v1/control/approvals/recent?limit=20", testApprovalToken, "")
+	if recent.Code != http.StatusOK || !strings.Contains(recent.Body.String(), `"approval_id":"approval-1"`) || !strings.Contains(recent.Body.String(), `"status":"APPROVED"`) {
+		t.Fatalf("recent terminal approval=%d %s", recent.Code, recent.Body.String())
+	}
 }
 
 func TestApprovalControlRejectsWorkCredentialsNonExactAuthorityAndUntrustedFields(t *testing.T) {

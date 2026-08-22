@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/core"
@@ -389,6 +390,55 @@ func (s *Service) PendingDecisionContexts(ctx context.Context, humanID core.ID) 
 		if len(contexts) > maximumInboxDecisionContexts {
 			return nil, fmt.Errorf("approval inbox exceeds the V1 safety limit")
 		}
+	}
+	return contexts, nil
+}
+
+// RecentDecisionContexts returns a bounded newest-first view of terminal
+// decisions that the same principal is still authorized to inspect. It is a
+// recovery/read surface only; mutations continue to require DecisionContext.
+func (s *Service) RecentDecisionContexts(ctx context.Context, humanID core.ID, limit int) ([]DecisionContext, error) {
+	if limit < 1 || limit > 100 {
+		return nil, fmt.Errorf("recent approval limit must be between 1 and 100")
+	}
+	store, ok := s.store.(latestRecordStore)
+	if !ok {
+		return nil, fmt.Errorf("approval history is unavailable")
+	}
+	bodies, err := store.LatestRecords(ctx, "approval")
+	if err != nil {
+		return nil, err
+	}
+	contexts := make([]DecisionContext, 0, limit)
+	for _, body := range bodies {
+		var approval core.HumanApproval
+		if err := json.Unmarshal(body, &approval); err != nil {
+			return nil, fmt.Errorf("decode approval history: %w", err)
+		}
+		if approval.Status != core.ApprovalApproved && approval.Status != core.ApprovalDenied {
+			continue
+		}
+		if err := s.authorizeDecision(ctx, humanID, approval); err != nil {
+			continue
+		}
+		effect, err := s.effectForApproval(ctx, approval, false)
+		if err != nil {
+			return nil, err
+		}
+		contexts = append(contexts, DecisionContext{Approval: approval, Effect: effect})
+	}
+	sort.Slice(contexts, func(i, j int) bool {
+		left, right := contexts[i].Approval.DecisionAt, contexts[j].Approval.DecisionAt
+		if left == nil || right == nil {
+			return contexts[i].Approval.ID > contexts[j].Approval.ID
+		}
+		if left.Equal(*right) {
+			return contexts[i].Approval.ID > contexts[j].Approval.ID
+		}
+		return left.After(*right)
+	})
+	if len(contexts) > limit {
+		contexts = contexts[:limit]
 	}
 	return contexts, nil
 }

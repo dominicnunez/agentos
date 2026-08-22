@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { APIError, isDashboardSessionRejection } from './api.ts';
-import { approvalRetryBinding, confirmationMessageID, confirmationRetryBinding, hasRetryableIntentConfirmation, loadAllCompletionReviews, matchesConfirmationRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from './governance.ts';
+import { approvalRetryBinding, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, hasRetryableIntentConfirmation, loadAllCompletionReviews, matchesConfirmationRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from './governance.ts';
 import type { Approval, CompletionReview } from './types';
 
 function review(id: string): CompletionReview {
@@ -41,6 +41,12 @@ test('replays a matching durable completion decision before clearing recovery', 
   assert.equal(terminalCompletionReview(recorded), true);
   assert.equal(calls[0].path, `/api/v1/user/reviews/${current.task_id}`);
   assert.deepEqual(JSON.parse(calls[0].body), { review_id: current.review_id, fingerprint: current.fingerprint, decision: 'REVISE', feedback: 'keep exact bytes' });
+});
+
+test('retains confirmation recovery for downstream durable-work conflicts', () => {
+  assert.equal(discardConfirmationRetry(409), false);
+  assert.equal(discardConfirmationRetry(412), true);
+  assert.equal(discardConfirmationRetry(404), true);
 });
 
 test('loads every bounded completion-review page', async () => {

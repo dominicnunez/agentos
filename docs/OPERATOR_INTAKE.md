@@ -159,12 +159,17 @@ draft is never treated as an operator choice.
 Selecting **User task** before intake creates work that must wait for structured
 user completion. The Task view collects every required field and file from the
 Task's durable CompletionContract. A self-reported "done" message cannot
-complete that Task.
+complete that Task. Only a user-operated Task advertises ordinary continuation.
+If structured evidence was durably accepted but its response was interrupted,
+the dashboard invokes the server-owned recovery path and does not solicit a
+second completion identity or re-upload the evidence.
 
 The Reviews view lists pending completion judgments, including internal planned
 Tasks that are intentionally absent from A2A lookup. The dashboard binds a
 decision to the exact evidence fingerprint and states explicitly that judging
-candidate completion does not approve a consequential effect.
+candidate completion does not approve a consequential effect. It also shows a
+bounded ledger-derived history of recent terminal judgments so a fresh
+ephemeral browser origin can recover the authoritative decision.
 
 The local HTTP-shaped routes are private implementation boundaries carried over
 the Unix socket:
@@ -175,17 +180,22 @@ the Unix socket:
 - `GET /v1/user/tasks/recent`
 - `GET /v1/user/tasks/{task-id}`
 - `POST /v1/user/tasks/{task-id}/completion`
+- `POST /v1/user/tasks/{task-id}/completion/recover`
 - `GET /v1/user/reviews?after={task-id}&limit={1..100}`
+- `GET /v1/user/reviews/recent?limit=20`
 - `GET|POST /v1/user/reviews/{task-id}`
 - `GET /v1/user/reviews/{task-id}/records/{review-id}`
 - `GET /v1/control/approvals`
+- `GET /v1/control/approvals/recent?limit=20`
 - exact-effect approval operations beneath `/v1/control/approvals/{id}`
 
 The recent-Task read is bound to the authenticated principal's latest confirmed
 intake and exists only to recover an interrupted confirmation across dashboard
-processes. Exact approval and completion-review reads continue exposing their
-terminal ledger state so a lost mutation response can be resolved without
-repeating or guessing the decision.
+processes. Exact approval and completion-review reads plus their bounded
+recent-decision projections expose terminal ledger state across the launcher's
+changing loopback origin. A matching completion-review retry is replayed until
+its downstream Task transition succeeds; a conflicting authorized decision is
+shown as authoritative and releases the stale local retry.
 
 The completion endpoint accepts strict JSON. Required files are size-bounded,
 content-sniffed, stored privately by SHA-256, and recorded as untrusted user

@@ -35,6 +35,8 @@ const (
 	assignmentBlockedCode   = "ASSIGNMENT_INELIGIBLE"
 )
 
+var ErrNoDurableHumanCompletion = errors.New("durable user completion not found")
+
 var errTaskStrategicContextChanged = errors.New("task strategic context changed")
 
 type Submit struct {
@@ -806,6 +808,50 @@ func (s *Service) ProvideHumanCompletion(ctx context.Context, input HumanComplet
 		if err != nil {
 			return err
 		}
+	}
+	if err := s.continueHumanCompletionTask(ctx, actualOrganizationID, state.Value.ID, correlationID, completionEvent, payload); err != nil {
+		return err
+	}
+	return s.reconcileWorks(ctx)
+}
+
+func (s *Service) RecoverHumanCompletion(ctx context.Context, organizationID, principalID, sourceChannel, requestID, taskID string) error {
+	if err := s.acquire(ctx); err != nil {
+		return err
+	}
+	defer s.release()
+	if organizationID == "" || principalID == "" || sourceChannel != "HUMAN_DIRECT" || requestID == "" || taskID == "" {
+		return fmt.Errorf("organization, local user principal, request, and task are required")
+	}
+	snapshot, err := s.state.Load(ctx)
+	if err != nil {
+		return err
+	}
+	correlationID, err := s.requireExternalWorkCorrelation(ctx, organizationID, requestID)
+	if err != nil {
+		return err
+	}
+	state, ok := snapshot.Tasks[core.ID(taskID)]
+	if !ok || state.CorrelationID != correlationID || state.Value.ExecutionKind != core.ExecutionHuman || state.Value.CompletionContract == nil {
+		return fmt.Errorf("task is not a structured user task for this request")
+	}
+	actualOrganizationID, err := taskOrganization(snapshot, state.Value)
+	if err != nil || actualOrganizationID != core.ID(organizationID) {
+		return fmt.Errorf("task is not mapped to this request and organization")
+	}
+	stream, err := s.gateway.Events(ctx, correlationID)
+	if err != nil {
+		return err
+	}
+	completionEvent, payload, found, err := humanCompletionForTask(stream, state.Value.ID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrNoDurableHumanCompletion
+	}
+	if completionEvent.SourceActorID != principalID || payload.SourcePrincipalID != principalID || payload.SourceChannel != sourceChannel {
+		return fmt.Errorf("durable user completion does not belong to the authenticated principal")
 	}
 	if err := s.continueHumanCompletionTask(ctx, actualOrganizationID, state.Value.ID, correlationID, completionEvent, payload); err != nil {
 		return err

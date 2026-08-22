@@ -12,6 +12,10 @@ export type ApprovalRetryBinding = { approval_id: string; fingerprint: string; d
 export type ReviewRetryBinding = { task_id: string; review_id: string; fingerprint: string; decision: 'APPROVE' | 'REJECT' | 'REVISE'; feedback: string };
 export type DashboardRequest = <T>(path: string, options?: RequestInit) => Promise<T>;
 
+export function discardConfirmationRetry(status: number): boolean {
+  return status === 400 || status === 404 || status === 412;
+}
+
 export function terminalApproval(approval: Approval): boolean {
   return approval.status === 'APPROVED' || approval.status === 'DENIED';
 }

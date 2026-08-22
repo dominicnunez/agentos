@@ -1789,6 +1789,10 @@ func TestChildCompletionReviewStaysInternalAndWakesRoot(t *testing.T) {
 	if _, err := service.ReviewCompletion(ctx, reviewInput(rootReview, completion.ReviewApprove, "")); err != nil {
 		t.Fatal(err)
 	}
+	recent, err := service.RecentCompletionReviews(ctx, "org-1", 10)
+	if err != nil || len(recent) != 1 || recent[0].Request.TaskID != submitted.Task.ID {
+		t.Fatalf("recent external reviews=%+v err=%v", recent, err)
+	}
 	replayed, err := service.Submit(ctx, submission)
 	if err != nil || replayed.Task.Status != core.TaskCompleted || replayed.Work.Status != "COMPLETED" {
 		t.Fatalf("replayed=%+v err=%v", replayed, err)

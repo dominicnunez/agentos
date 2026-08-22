@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"sort"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/completion"
@@ -84,6 +85,69 @@ func (s *Service) PendingCompletionReviews(ctx context.Context, organizationID s
 		page.Reviews = append(page.Reviews, view)
 	}
 	return page, nil
+}
+
+// RecentCompletionReviews returns bounded, newest-first terminal review
+// records for root Tasks. It exists for operator recovery and does not make a
+// recorded review mutable or expose internal child Task review traffic.
+func (s *Service) RecentCompletionReviews(ctx context.Context, organizationID string, limit int) ([]CompletionReviewView, error) {
+	if organizationID == "" || limit < 1 || limit > 100 {
+		return nil, fmt.Errorf("organization and recent review limit are required")
+	}
+	if err := s.acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer s.release()
+	snapshot, err := s.state.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]CompletionReviewView, 0, limit)
+	for _, state := range sortedTaskStates(snapshot.Tasks) {
+		if state.Value.ParentID != "" {
+			continue
+		}
+		owner, err := taskOrganization(snapshot, state.Value)
+		if err != nil {
+			return nil, err
+		}
+		if owner != core.ID(organizationID) {
+			continue
+		}
+		stream, err := s.internalTaskEvents(ctx, organizationID, string(state.Value.ID))
+		if err != nil {
+			return nil, err
+		}
+		requests, decisions, err := completionReviewRecords(stream)
+		if err != nil {
+			return nil, err
+		}
+		for reviewID, decided := range decisions {
+			request, ok := requests[reviewID]
+			if !ok || request.TaskID != state.Value.ID {
+				continue
+			}
+			_, result, err := reviewEvidence(stream, request)
+			if err != nil {
+				return nil, err
+			}
+			views = append(views, CompletionReviewView{
+				Request: request, Result: result.Summary, Decision: decided.Review.Decision,
+				ReviewerID: decided.Review.ReviewerID, Feedback: decided.Review.Feedback,
+				UpdatedAt: decided.Review.DecidedAt,
+			})
+		}
+	}
+	sort.Slice(views, func(i, j int) bool {
+		if views[i].UpdatedAt.Equal(views[j].UpdatedAt) {
+			return views[i].Request.ID > views[j].Request.ID
+		}
+		return views[i].UpdatedAt.After(views[j].UpdatedAt)
+	})
+	if len(views) > limit {
+		views = views[:limit]
+	}
+	return views, nil
 }
 
 func (s *Service) CompletionReview(ctx context.Context, organizationID, taskID string) (CompletionReviewView, bool, error) {

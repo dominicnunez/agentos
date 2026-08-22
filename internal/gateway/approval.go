@@ -69,6 +69,10 @@ func (c *ApprovalControl) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.list(w, r, c.owner.ID)
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/control/approvals/recent" {
+		c.listRecent(w, r, c.owner.ID)
+		return
+	}
 	approvalID, operation, ok := approvalRoute(r.URL.Path)
 	if !ok {
 		http.NotFound(w, r)
@@ -87,6 +91,23 @@ func (c *ApprovalControl) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (c *ApprovalControl) listRecent(w http.ResponseWriter, r *http.Request, humanID core.ID) {
+	if r.URL.RawQuery != "limit=20" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "recent approval query is invalid"})
+		return
+	}
+	contexts, err := c.service.RecentDecisionContexts(r.Context(), humanID, 20)
+	if err != nil {
+		writeApprovalError(w, err)
+		return
+	}
+	responses := make([]approvalControlResponse, 0, len(contexts))
+	for _, decisionContext := range contexts {
+		responses = append(responses, approvalResponse(decisionContext))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"approvals": responses})
 }
 
 func (c *ApprovalControl) list(w http.ResponseWriter, r *http.Request, humanID core.ID) {

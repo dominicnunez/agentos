@@ -20,6 +20,12 @@ The local dashboard lists pending work through:
 GET /v1/control/approvals
 ```
 
+`GET /v1/control/approvals/recent?limit=20` returns a bounded newest-first,
+read-only ledger projection of terminal decisions for the same authorized
+owner. This keeps interrupted outcomes visible when a new dashboard launch has
+a different ephemeral browser origin; it never makes a terminal approval
+eligible for mutation.
+
 It then displays the trusted action, resource, scope, consequence boundary,
 risk, urgency, canonical descriptor, complete replay arguments, fingerprint,
 expiry, and single-use status. These values come from the ledger and cannot be

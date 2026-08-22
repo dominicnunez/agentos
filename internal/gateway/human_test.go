@@ -133,6 +133,10 @@ func TestHumanGatewayRequiresStructuredCompletionAndCannotApproveThroughText(t *
 	if len(afterReplay) != len(beforeReplay) {
 		t.Fatalf("completion replay appended events: before=%d after=%d", len(beforeReplay), len(afterReplay))
 	}
+	response = serveHuman(handler, http.MethodPost, "/v1/user/tasks/"+task.TaskID+"/completion/recover", testOwnerMarker, "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) {
+		t.Fatalf("structured completion recovery=%d %s", response.Code, response.Body.String())
+	}
 	stream := gatewayExternalStream(t, store, "direct-blocked")
 	foundHumanCompletion := false
 	for _, event := range stream {
@@ -247,6 +251,10 @@ func TestLocalOwnerCanFinalizeExactCompletionReview(t *testing.T) {
 	response = serveHuman(handler, http.MethodGet, "/v1/user/reviews/"+task.TaskID+"/records/"+review.ReviewID, testOwnerMarker, "")
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"APPROVE"`) || !strings.Contains(response.Body.String(), `"review_id":"`+review.ReviewID+`"`) {
 		t.Fatalf("exact terminal review recovery=%d %s", response.Code, response.Body.String())
+	}
+	response = serveHuman(handler, http.MethodGet, "/v1/user/reviews/recent?limit=20", testOwnerMarker, "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"review_id":"`+review.ReviewID+`"`) || !strings.Contains(response.Body.String(), `"state":"APPROVE"`) {
+		t.Fatalf("recent completion review=%d %s", response.Code, response.Body.String())
 	}
 	response = serveHuman(handler, http.MethodGet, "/v1/user/tasks/"+task.TaskID, testOwnerMarker, "")
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) || !strings.Contains(response.Body.String(), `"result":"candidate: Operate only as this runtime-selected durable Agent blueprint.`) {
