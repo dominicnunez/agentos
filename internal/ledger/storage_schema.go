@@ -247,7 +247,7 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 	}
 }
 
-func rebuildPendingApprovals(ctx context.Context, tx *sql.Tx) error {
+func rebuildPendingApprovals(ctx context.Context, tx *sql.Tx) (finalErr error) {
 	rows, err := tx.QueryContext(ctx, `SELECT current.record_id,current.version,current.body
 FROM records AS current
 JOIN (SELECT record_id,MAX(version) AS version FROM records WHERE kind='approval' GROUP BY record_id) AS latest
@@ -257,6 +257,7 @@ ORDER BY current.record_id`)
 	if err != nil {
 		return fmt.Errorf("read pending approvals for migration: %w", err)
 	}
+	defer func() { finalErr = errors.Join(finalErr, rows.Close()) }()
 	type record struct {
 		id      string
 		version int
@@ -266,7 +267,6 @@ ORDER BY current.record_id`)
 	for rows.Next() {
 		var item record
 		if err := rows.Scan(&item.id, &item.version, &item.body); err != nil {
-			_ = rows.Close()
 			return fmt.Errorf("decode pending approval migration record: %w", err)
 		}
 		records = append(records, item)
@@ -536,3 +536,4 @@ func storageSchemaFingerprint(ctx context.Context, query storageQueryer) (finger
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
+

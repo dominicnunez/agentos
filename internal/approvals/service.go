@@ -380,8 +380,10 @@ func (s *Service) PendingDecisionContexts(ctx context.Context, organizationID, h
 		}
 		switch approval.Status {
 		case core.ApprovalPending, core.ApprovalNotified, core.ApprovalAcknowledged, core.ApprovalPendingDecision:
+		case core.ApprovalApproved, core.ApprovalDenied:
+			return nil, fmt.Errorf("approval inbox contains terminal state")
 		default:
-			return nil, fmt.Errorf("approval inbox contains terminal or invalid state")
+			return nil, fmt.Errorf("approval inbox contains invalid state")
 		}
 		if err := s.authorizeDecision(ctx, humanID, approval); err != nil {
 			continue
@@ -550,3 +552,4 @@ func validateRequest(approval core.HumanApproval) error {
 	}
 	return nil
 }
+
