@@ -109,7 +109,7 @@ func TestDashboardCompletesDurableAgentWorkThroughKernelAuthenticatedGateway(t *
 	if draft.TaskID == "" || draft.WorkID != "" {
 		t.Fatalf("unconfirmed intent identity=%+v", draft)
 	}
-	preConfirmation, err := store.Events(t.Context(), "dashboard-organization-loop")
+	preConfirmation, err := runtime.ExternalEvents(t.Context(), "org-1", "dashboard-organization-loop")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,11 @@ func TestDashboardCompletesDurableAgentWorkThroughKernelAuthenticatedGateway(t *
 		t.Fatalf("dashboard durable task=%d %s", response.Code, response.Body.String())
 	}
 
-	stream, err := store.Events(t.Context(), "dashboard-organization-loop")
+	correlationID, found, err := store.ResolveExternalWork(t.Context(), "org-1", "dashboard-organization-loop")
+	if err != nil || !found || correlationID == "" {
+		t.Fatalf("durable external Work mapping=%q found=%t err=%v", correlationID, found, err)
+	}
+	stream, err := store.Events(t.Context(), correlationID)
 	if err != nil {
 		t.Fatal(err)
 	}
