@@ -57,18 +57,26 @@ func runDashboard(ctx context.Context, config bootstrap.Config, output io.Writer
 		_ = listener.Close()
 		return err
 	}
+	if err := startDashboardBrowser(ctx, bootstrapPath); err != nil {
+		if _, writeErr := fmt.Fprintf(output, "Automatic browser launch unavailable. Open this private bootstrap file in a local browser:\n%s\n", bootstrapPath); writeErr != nil {
+			_ = listener.Close()
+			return writeErr
+		}
+	}
+	return serveAll(ctx, []serverBinding{{server: server, listener: listener}})
+}
+
+func startDashboardBrowser(ctx context.Context, bootstrapPath string) error {
 	opener, err := exec.LookPath("xdg-open")
 	if err != nil {
-		_ = listener.Close()
-		return fmt.Errorf("open dashboard without disclosing its bootstrap credential: xdg-open is required")
+		return err
 	}
 	command := exec.CommandContext(ctx, opener, bootstrapPath)
 	if err := command.Start(); err != nil {
-		_ = listener.Close()
-		return fmt.Errorf("open dashboard: %w", err)
+		return err
 	}
 	go func() { _ = command.Wait() }()
-	return serveAll(ctx, []serverBinding{{server: server, listener: listener}})
+	return nil
 }
 
 func writeDashboardBootstrap(host, token string) (path string, err error) {

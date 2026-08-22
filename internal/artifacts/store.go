@@ -35,12 +35,11 @@ func (s Store) Put(organizationID, taskID, principalID string, upload Upload) (c
 	if !filepath.IsAbs(s.Root) || organizationID == "" || taskID == "" || principalID == "" {
 		return core.ArtifactEvidence{}, false, fmt.Errorf("artifact store and durable origin are required")
 	}
-	mediaType, err := validateUpload(upload)
+	evidence, err := Inspect(principalID, upload)
 	if err != nil {
 		return core.ArtifactEvidence{}, false, err
 	}
-	digest := sha256.Sum256(upload.Data)
-	hash := hex.EncodeToString(digest[:])
+	hash := evidence.SHA256
 	directory := filepath.Join(s.Root, hash[:2])
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return core.ArtifactEvidence{}, false, err
@@ -72,11 +71,26 @@ func (s Store) Put(organizationID, taskID, principalID string, upload Upload) (c
 			return core.ArtifactEvidence{}, false, err
 		}
 	}
-	evidence := core.ArtifactEvidence{
+	return evidence, created, nil
+}
+
+// Inspect validates an upload and derives its immutable evidence metadata
+// without writing any bytes. Callers can use it to validate an entire
+// completion contract before admitting artifacts to durable storage.
+func Inspect(principalID string, upload Upload) (core.ArtifactEvidence, error) {
+	if principalID == "" {
+		return core.ArtifactEvidence{}, fmt.Errorf("artifact origin is required")
+	}
+	mediaType, err := validateUpload(upload)
+	if err != nil {
+		return core.ArtifactEvidence{}, err
+	}
+	digest := sha256.Sum256(upload.Data)
+	hash := hex.EncodeToString(digest[:])
+	return core.ArtifactEvidence{
 		Ref: "artifact/sha256/" + hash, Role: upload.Role, Name: upload.Name, MediaType: mediaType,
 		SHA256: hash, Size: int64(len(upload.Data)), Origin: principalID, Trust: "UNTRUSTED_USER_ARTIFACT",
-	}
-	return evidence, created, nil
+	}, nil
 }
 
 func readExistingArtifact(path string, expectedSize int64) ([]byte, error) {

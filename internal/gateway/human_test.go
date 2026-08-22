@@ -19,6 +19,23 @@ import (
 
 const testOwnerMarker = "local-owner-uid-marker"
 
+func TestInspectHumanCompletionRejectsDisallowedContentBeforePersistence(t *testing.T) {
+	contract := &core.CompletionContract{TaskID: "task-1", TaskVersion: 1, ArtifactRequirements: []core.ArtifactRequirement{{
+		Role: "report", MediaTypes: []string{"application/pdf"}, MinCount: 1, MaxCount: 1,
+	}}}
+	request := humanCompletionRequest{MessageID: "completion-1", Fields: map[string]string{}, Artifacts: []artifacts.Upload{{
+		Role: "report", Name: "report.pdf", Data: []byte("\x89PNG\r\n\x1a\n"),
+	}}}
+	if _, err := inspectHumanCompletion("local-uid-1000", contract, request); err == nil || !strings.Contains(err.Error(), "media type is not allowed") {
+		t.Fatalf("disallowed content prevalidation error=%v", err)
+	}
+	request.Artifacts[0].Data = []byte("%PDF-1.7\n")
+	evidence, err := inspectHumanCompletion("local-uid-1000", contract, request)
+	if err != nil || len(evidence) != 1 || evidence[0].MediaType != "application/pdf" {
+		t.Fatalf("content-derived evidence=%+v err=%v", evidence, err)
+	}
+}
+
 func TestHumanResponseRetainsWorkIdentityAndExperimentalTrustLabel(t *testing.T) {
 	response := humanResponse(intake.View{TaskID: "task-1", WorkID: "work-1", ConversationID: "context-1", State: intake.StateCompleted, Result: "lab result", Mode: core.IntentModeExperiment, TrustLabel: core.ExperimentTrustUnverified})
 	if response.WorkID != "work-1" || response.Mode != core.IntentModeExperiment || response.TrustLabel != core.ExperimentTrustUnverified {

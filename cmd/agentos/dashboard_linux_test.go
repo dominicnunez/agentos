@@ -3,10 +3,18 @@
 package main
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
 )
+
+func TestStartDashboardBrowserAllowsManualFallbackWithoutXDGOpen(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	if err := startDashboardBrowser(context.Background(), "/private/bootstrap.html"); err == nil {
+		t.Fatal("missing xdg-open was treated as an automatic browser launch")
+	}
+}
 
 func TestWriteDashboardBootstrapKeepsCredentialPrivateAndOffPath(t *testing.T) {
 	const token = "private-bootstrap-token"

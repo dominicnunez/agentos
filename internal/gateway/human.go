@@ -196,27 +196,62 @@ func (h *Human) handleTaskCompletion(w http.ResponseWriter, r *http.Request, pri
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if len(request.Artifacts) > 32 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user task completion has too many artifacts"})
+	if err := intake.ValidateIdentifier("message", request.MessageID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user task completion message identity is invalid"})
 		return
+	}
+	task, err := h.service.Get(r.Context(), principal, taskID)
+	if err != nil {
+		h.writeIntakeError(w, err)
+		return
+	}
+	evidence, err := inspectHumanCompletion(principal.ID, task.CompletionContract, request)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	for index, upload := range request.Artifacts {
+		stored, _, err := h.artifacts.Put(principal.OrganizationID, taskID, principal.ID, upload)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if stored != evidence[index] {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "user task artifact evidence changed during persistence"})
+			return
+		}
+	}
+	view, err := h.service.CompleteHumanTask(r.Context(), principal, taskID, core.HumanTaskSubmission{MessageID: request.MessageID, Fields: request.Fields, Artifacts: evidence})
+	h.writeView(w, view, err)
+}
+
+func inspectHumanCompletion(principalID string, contract *core.CompletionContract, request humanCompletionRequest) ([]core.ArtifactEvidence, error) {
+	if contract == nil {
+		return nil, fmt.Errorf("user task has no completion contract")
+	}
+	if len(request.Artifacts) > 32 {
+		return nil, fmt.Errorf("user task completion has too many artifacts")
 	}
 	total := 0
 	evidence := make([]core.ArtifactEvidence, 0, len(request.Artifacts))
 	for _, upload := range request.Artifacts {
 		total += len(upload.Data)
 		if total > 32<<20 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user task artifacts exceed 33554432 bytes"})
-			return
+			return nil, fmt.Errorf("user task artifacts exceed 33554432 bytes")
 		}
-		stored, _, err := h.artifacts.Put(principal.OrganizationID, taskID, principal.ID, upload)
+		inspected, err := artifacts.Inspect(principalID, upload)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
+			return nil, err
 		}
-		evidence = append(evidence, stored)
+		evidence = append(evidence, inspected)
 	}
-	view, err := h.service.CompleteHumanTask(r.Context(), principal, taskID, core.HumanTaskSubmission{MessageID: request.MessageID, Fields: request.Fields, Artifacts: evidence})
-	h.writeView(w, view, err)
+	result := core.EvaluateHumanTaskCompletion(*contract, core.HumanTaskSubmission{
+		MessageID: request.MessageID, Fields: request.Fields, Artifacts: evidence,
+	})
+	if !result.Complete {
+		return nil, fmt.Errorf("user task completion does not satisfy its contract: %s", strings.Join(result.Reasons, "; "))
+	}
+	return evidence, nil
 }
 
 func (h *Human) principal() intake.Principal {
