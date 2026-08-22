@@ -136,7 +136,7 @@
       const artifacts: { role: string; name: string; media_type: string; data: string }[] = [];
       for (const requirement of currentTask.completion_contract!.artifact_requirements ?? []) {
         for (const file of completionFiles[requirement.role] ?? []) {
-          artifacts.push({ role: requirement.role, name: file.name, media_type: file.type || requirement.media_types[0], data: await base64(file) });
+          artifacts.push({ role: requirement.role, name: file.name, media_type: '', data: await base64(file) });
         }
       }
       task = await api<TaskView>(`/api/v1/user/tasks/${encodeURIComponent(currentTask.task_id)}/completion`, {

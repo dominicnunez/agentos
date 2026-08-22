@@ -69,12 +69,6 @@ export function validateArtifactSelections(
       if (file.size < 1 || file.size > maximumArtifactBytes) {
         return `${file.name} must contain 1 byte to 16 MiB.`;
       }
-      if (file.type && !requirement.media_types.includes(file.type)) {
-        return `${file.name} does not declare an allowed media type for ${requirement.role}.`;
-      }
-      if (!file.type && requirement.media_types.length !== 1) {
-        return `${file.name} has no browser media type and ${requirement.role} allows multiple types.`;
-      }
       total += file.size;
       if (total > maximumCompletionBytes) {
         return 'Completion evidence must not exceed 32 MiB in total.';

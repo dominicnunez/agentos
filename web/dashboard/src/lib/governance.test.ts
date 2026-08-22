@@ -43,8 +43,7 @@ test('derives a stable confirmation message identity from the reviewed fingerpri
   assert.throws(() => confirmationMessageID('not-a-fingerprint'), /invalid/);
 });
 
-test('allows empty browser media metadata only for an unambiguous contract type', () => {
-  const file = { name: 'report', size: 10, type: '' };
-  assert.equal(validateArtifactSelections([{ role: 'report', media_types: ['application/pdf'], min_count: 1, max_count: 1 }], { report: [file] }), null);
-  assert.match(validateArtifactSelections([{ role: 'report', media_types: ['application/pdf', 'text/plain'], min_count: 1, max_count: 1 }], { report: [file] }) ?? '', /allows multiple types/);
+test('leaves artifact media validation to content-derived server checks', () => {
+  const requirement = [{ role: 'report', media_types: ['application/pdf'], min_count: 1, max_count: 1 }];
+  assert.equal(validateArtifactSelections(requirement, { report: [{ name: 'report.txt', size: 10, type: 'text/plain' }] }), null);
 });

@@ -35,7 +35,8 @@ func (s Store) Put(organizationID, taskID, principalID string, upload Upload) (c
 	if !filepath.IsAbs(s.Root) || organizationID == "" || taskID == "" || principalID == "" {
 		return core.ArtifactEvidence{}, false, fmt.Errorf("artifact store and durable origin are required")
 	}
-	if err := validateUpload(upload); err != nil {
+	mediaType, err := validateUpload(upload)
+	if err != nil {
 		return core.ArtifactEvidence{}, false, err
 	}
 	digest := sha256.Sum256(upload.Data)
@@ -72,7 +73,7 @@ func (s Store) Put(organizationID, taskID, principalID string, upload Upload) (c
 		}
 	}
 	evidence := core.ArtifactEvidence{
-		Ref: "artifact/sha256/" + hash, Role: upload.Role, Name: upload.Name, MediaType: upload.MediaType,
+		Ref: "artifact/sha256/" + hash, Role: upload.Role, Name: upload.Name, MediaType: mediaType,
 		SHA256: hash, Size: int64(len(upload.Data)), Origin: principalID, Trust: "UNTRUSTED_USER_ARTIFACT",
 	}
 	return evidence, created, nil
@@ -103,25 +104,31 @@ func readExistingArtifact(path string, expectedSize int64) ([]byte, error) {
 	return value, nil
 }
 
-func validateUpload(upload Upload) error {
+func validateUpload(upload Upload) (string, error) {
 	if upload.Role == "" || len(upload.Role) > 64 || strings.TrimSpace(upload.Role) != upload.Role || strings.ContainsAny(upload.Role, `/\\`) || hasUnsafeTextControl(upload.Role) {
-		return fmt.Errorf("artifact role is invalid")
+		return "", fmt.Errorf("artifact role is invalid")
 	}
 	if upload.Name == "" || len(upload.Name) > 255 || !utf8.ValidString(upload.Name) || filepath.Base(upload.Name) != upload.Name || hasUnsafeTextControl(upload.Name) {
-		return fmt.Errorf("artifact name is invalid")
+		return "", fmt.Errorf("artifact name is invalid")
 	}
 	if len(upload.Data) == 0 || len(upload.Data) > MaximumArtifactBytes {
-		return fmt.Errorf("artifact must contain 1 to %d bytes", MaximumArtifactBytes)
+		return "", fmt.Errorf("artifact must contain 1 to %d bytes", MaximumArtifactBytes)
+	}
+	detected, _, err := mime.ParseMediaType(http.DetectContentType(upload.Data))
+	if err != nil {
+		return "", fmt.Errorf("artifact content type is invalid")
+	}
+	if upload.MediaType == "" {
+		return detected, nil
 	}
 	mediaType, parameters, err := mime.ParseMediaType(upload.MediaType)
 	if err != nil || len(parameters) != 0 || mediaType != upload.MediaType {
-		return fmt.Errorf("artifact media type is invalid")
+		return "", fmt.Errorf("artifact media type is invalid")
 	}
-	detected, _, err := mime.ParseMediaType(http.DetectContentType(upload.Data))
-	if err != nil || detected != mediaType {
-		return fmt.Errorf("artifact content does not match its media type")
+	if detected != mediaType {
+		return "", fmt.Errorf("artifact content does not match its media type")
 	}
-	return nil
+	return detected, nil
 }
 
 func hasUnsafeTextControl(value string) bool {
