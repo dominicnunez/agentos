@@ -251,19 +251,7 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 		if err := rebuildPendingApprovals(ctx, tx); err != nil {
 			return err
 		}
-		fingerprint, err := storageSchemaFingerprint(ctx, tx)
-		if err != nil {
-			return err
-		}
-		result, err := tx.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=?,schema_fingerprint=? WHERE singleton=1 AND storage_version=? AND event_schema_version=?`, to, fingerprint, from, events.SchemaVersion)
-		if err != nil {
-			return fmt.Errorf("advance pending-approval storage contract: %w", err)
-		}
-		rows, err := result.RowsAffected()
-		if err != nil || rows != 1 {
-			return fmt.Errorf("pending-approval storage metadata did not match the reviewed migration boundary")
-		}
-		return nil
+		return advanceProjectionStorageContract(ctx, tx, from, to, "pending-approval")
 	case from == 4 && to == 5:
 		if _, err := tx.ExecContext(ctx, storageSchemaV5SQL); err != nil {
 			return err
@@ -271,22 +259,26 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 		if err := rebuildPendingCompletionReviews(ctx, tx); err != nil {
 			return err
 		}
-		fingerprint, err := storageSchemaFingerprint(ctx, tx)
-		if err != nil {
-			return err
-		}
-		result, err := tx.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=?,schema_fingerprint=? WHERE singleton=1 AND storage_version=? AND event_schema_version=?`, to, fingerprint, from, events.SchemaVersion)
-		if err != nil {
-			return fmt.Errorf("advance governance-queue storage contract: %w", err)
-		}
-		rows, err := result.RowsAffected()
-		if err != nil || rows != 1 {
-			return fmt.Errorf("governance-queue storage metadata did not match the reviewed migration boundary")
-		}
-		return nil
+		return advanceProjectionStorageContract(ctx, tx, from, to, "governance-queue")
 	default:
 		return fmt.Errorf("no reviewed storage migration exists")
 	}
+}
+
+func advanceProjectionStorageContract(ctx context.Context, tx *sql.Tx, from, to int, boundary string) error {
+	fingerprint, err := storageSchemaFingerprint(ctx, tx)
+	if err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=?,schema_fingerprint=? WHERE singleton=1 AND storage_version=? AND event_schema_version=?`, to, fingerprint, from, events.SchemaVersion)
+	if err != nil {
+		return fmt.Errorf("advance %s storage contract: %w", boundary, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows != 1 {
+		return fmt.Errorf("%s storage metadata did not match the reviewed migration boundary", boundary)
+	}
+	return nil
 }
 
 func rebuildPendingCompletionReviews(ctx context.Context, tx *sql.Tx) error {
