@@ -36,7 +36,7 @@ type dashboardLoopTask struct {
 func TestDashboardCompletesDurableAgentWorkThroughKernelAuthenticatedGateway(t *testing.T) {
 	uid, gid := syscall.Geteuid(), syscall.Getegid()
 	root := t.TempDir()
-	runtimeBase, err := os.MkdirTemp("", "aos-loop-")
+	runtimeBase, err := os.MkdirTemp("/tmp", "aos-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,6 +149,11 @@ func TestDashboardCompletesDurableAgentWorkThroughKernelAuthenticatedGateway(t *
 		t.Fatal(err)
 	}
 	assertDashboardOrganizationLoop(t, stream, owner.ID)
+	allEvents, err := store.Events(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDashboardCreatedNoAuthorityEvents(t, allEvents)
 }
 
 func marshalDashboardLoopBody(t *testing.T, value map[string]string) string {
@@ -169,9 +174,6 @@ func assertDashboardOrganizationLoop(t *testing.T, stream []events.Event, ownerI
 	next := 0
 	var manifest core.ExecutionContextManifest
 	for _, event := range stream {
-		if strings.HasPrefix(event.EventType, "APPROVAL_") || strings.HasPrefix(event.EventType, "EFFECT_") {
-			t.Fatalf("private dashboard work created an authority event: %s", event.EventType)
-		}
 		if event.EventType == "INTENT_CONFIRMED" && event.SourceActorID != string(ownerID) {
 			t.Fatalf("intent confirmation actor=%q want %q", event.SourceActorID, ownerID)
 		}
@@ -189,6 +191,15 @@ func assertDashboardOrganizationLoop(t *testing.T, stream []events.Event, ownerI
 	}
 	if manifest.AgentID == "" || manifest.Provider != "fake" || manifest.Model != "fake-model/v1" || manifest.ExecutionProfileVersion != "v1-fake" {
 		t.Fatalf("bounded Agent execution manifest=%+v", manifest)
+	}
+}
+
+func assertDashboardCreatedNoAuthorityEvents(t *testing.T, stream []events.Event) {
+	t.Helper()
+	for _, event := range stream {
+		if strings.HasPrefix(event.EventType, "APPROVAL_") || strings.HasPrefix(event.EventType, "EFFECT_") {
+			t.Fatalf("private dashboard work created an authority event: %s", event.EventType)
+		}
 	}
 }
 
