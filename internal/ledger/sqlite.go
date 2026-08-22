@@ -3296,6 +3296,14 @@ func (l *SQLite) Events(ctx context.Context, correlationID string) ([]events.Eve
 	return collectEvents(l.db.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE (?='' OR correlation_id=?) ORDER BY sequence`, correlationID, correlationID))
 }
 
+func (l *SQLite) RecentEvents(ctx context.Context, organizationID, eventType string, limit int) ([]events.Event, error) {
+	if organizationID == "" || eventType == "" || limit < 1 || limit > 100 {
+		return nil, fmt.Errorf("organization, event type, and bounded limit are required")
+	}
+	return collectEvents(l.db.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? AND event_type=? ORDER BY sequence DESC LIMIT ?`, organizationID, eventType, limit))
+}
+
 func (l *SQLite) Inbox(ctx context.Context, recipientScope, recipientID string) ([]events.Event, error) {
 	return collectEvents(l.db.QueryContext(ctx, `SELECT e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version
 FROM inbox i JOIN events e ON e.event_id=i.event_id

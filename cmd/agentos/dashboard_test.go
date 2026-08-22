@@ -154,6 +154,7 @@ func TestAllowedDashboardRoute(t *testing.T) {
 		{http.MethodGet, "/v1/user/tasks/recent", "", true},
 		{http.MethodPost, "/v1/user/tasks/task-1/completion", "", true},
 		{http.MethodPost, "/v1/user/tasks/task-1/completion/recover", "", true},
+		{http.MethodPost, "/v1/user/tasks/task-1/input/recover", "", true},
 		{http.MethodGet, "/v1/user/tasks/task-case@partner", "", true},
 		{http.MethodGet, "/v1/user/tasks/task-\u6848\u4ef6", "", true},
 		{http.MethodGet, "/v1/user/reviews", "after=task-1&limit=10", true},

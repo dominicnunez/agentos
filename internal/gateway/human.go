@@ -82,6 +82,7 @@ type humanTaskResponse struct {
 	CompletionContract         *core.CompletionContract `json:"completion_contract,omitempty"`
 	ReviewRequired             bool                     `json:"review_required,omitempty"`
 	UserInputAllowed           bool                     `json:"user_input_allowed,omitempty"`
+	InputRecoveryRequired      bool                     `json:"input_recovery_required,omitempty"`
 	CompletionRecoveryRequired bool                     `json:"completion_recovery_required,omitempty"`
 	Intent                     *core.IntentDraft        `json:"intent,omitempty"`
 }
@@ -136,6 +137,15 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	const taskPrefix = "/v1/user/tasks/"
+	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, taskPrefix) && strings.HasSuffix(r.URL.Path, "/input/recover") {
+		taskID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, taskPrefix), "/input/recover")
+		if taskID == "" || strings.Contains(taskID, "/") || r.URL.RawQuery != "" || r.ContentLength > 0 {
+			http.NotFound(w, r)
+			return
+		}
+		h.handleTaskInputRecovery(w, r, principal, taskID)
+		return
+	}
 	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, taskPrefix) && strings.HasSuffix(r.URL.Path, "/completion/recover") {
 		taskID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, taskPrefix), "/completion/recover")
 		if taskID == "" || strings.Contains(taskID, "/") || r.URL.RawQuery != "" || r.ContentLength > 0 {
@@ -201,6 +211,17 @@ func (h *Human) handleTaskCompletionRecovery(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	view, err := h.service.RecoverHumanCompletion(r.Context(), principal, taskID)
+	h.writeView(w, view, err)
+}
+
+func (h *Human) handleTaskInputRecovery(w http.ResponseWriter, r *http.Request, principal intake.Principal, taskID string) {
+	defer func() { _ = r.Body.Close() }()
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1))
+	if err != nil || len(body) != 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user input recovery requires an empty body"})
+		return
+	}
+	view, err := h.service.RecoverHumanInput(r.Context(), principal, taskID)
 	h.writeView(w, view, err)
 }
 
@@ -453,7 +474,7 @@ func humanResponse(view intake.View) humanTaskResponse {
 	response := humanTaskResponse{
 		TaskID: view.TaskID, WorkID: view.WorkID, ConversationID: view.ConversationID,
 		State: view.State, Prompt: view.Prompt, Result: view.Result, Mode: view.Mode, TrustLabel: view.TrustLabel,
-		ReviewRequired: view.ReviewRequired, UserInputAllowed: view.UserInputAllowed,
+		ReviewRequired: view.ReviewRequired, UserInputAllowed: view.UserInputAllowed, InputRecoveryRequired: view.InputRecoveryRequired,
 		CompletionRecoveryRequired: view.CompletionRecoveryRequired,
 	}
 	response.CompletionContract = view.CompletionContract

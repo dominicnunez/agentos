@@ -80,6 +80,47 @@ func TestExternalViewProjectsRootDependencyFailure(t *testing.T) {
 	}
 }
 
+func TestExternalViewProjectsDurableInputRecoveryOutsideBlockedState(t *testing.T) {
+	started := time.Now().UTC()
+	structuredTask := core.Task{
+		ID: "task-structured", ExecutionKind: core.ExecutionHuman, Status: core.TaskRunning,
+		CompletionContract: &core.CompletionContract{TaskID: "task-structured", TaskVersion: 1},
+	}
+	structuredPayload, err := json.Marshal(events.HumanTaskCompletionSubmittedPayload{
+		MessageID: "completion-1", Fields: map[string]string{"answer": "ready"}, SourcePrincipalID: "user-1", SourceChannel: ChannelHumanDirect,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	structured := []events.Event{
+		{EventType: "INTAKE_MESSAGE_RECORDED", TaskID: string(structuredTask.ID), CreatedAt: started},
+		taskProjectionEvent(t, "EXECUTION_STARTED", structuredTask, started.Add(time.Second)),
+		{EventID: "event-completion", Sequence: 2, OrganizationID: "org-1", EventType: "HUMAN_TASK_COMPLETION_SUBMITTED", TaskID: string(structuredTask.ID), SourceActorID: "user-1", CorrelationID: "work-structured", Payload: structuredPayload, CreatedAt: started.Add(2 * time.Second), SchemaVersion: events.SchemaVersion},
+	}
+	view := projectView("work-structured", structured, false)
+	if view.State != StateWorking || !view.CompletionRecoveryRequired {
+		t.Fatalf("structured recovery projection=%+v", view)
+	}
+
+	inputTask := core.Task{ID: "task-input", ExecutionKind: core.ExecutionHuman, Status: core.TaskPending}
+	inputPayload, err := json.Marshal(events.OperatorInputReceivedPayload{
+		MessageID: "input-1", Text: "required context", SourcePrincipalID: "user-1",
+		SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: ChannelHumanDirect,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := []events.Event{
+		{EventType: "INTAKE_MESSAGE_RECORDED", TaskID: string(inputTask.ID), CreatedAt: started},
+		taskProjectionEvent(t, "TASK_RESUMED", inputTask, started.Add(time.Second)),
+		{EventID: "event-input", Sequence: 2, OrganizationID: "org-1", EventType: "HUMAN_INPUT_RECEIVED", SourceActorID: "user-1", TaskID: string(inputTask.ID), CorrelationID: "work-input", Payload: inputPayload, CreatedAt: started.Add(2 * time.Second), SchemaVersion: events.SchemaVersion},
+	}
+	view = projectView("work-input", input, false)
+	if view.State != StateWorking || !view.InputRecoveryRequired || view.UserInputAllowed {
+		t.Fatalf("ordinary input recovery projection=%+v", view)
+	}
+}
+
 func TestExternalViewProjectsPlanningAndRemediationFailures(t *testing.T) {
 	started := time.Now().UTC()
 	rootID := "task-work-1"

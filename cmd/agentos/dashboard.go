@@ -266,6 +266,8 @@ func allowedDashboardRoute(method, requestPath, rawQuery string) bool {
 		return true
 	case method == http.MethodPost && len(segments) == 6 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "tasks" && validDashboardIdentifier(segments[3]) && segments[4] == "completion" && segments[5] == "recover" && rawQuery == "":
 		return true
+	case method == http.MethodPost && len(segments) == 6 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "tasks" && validDashboardIdentifier(segments[3]) && segments[4] == "input" && segments[5] == "recover" && rawQuery == "":
+		return true
 	case method == http.MethodGet && requestPath == "/v1/user/reviews":
 		return validReviewQuery(rawQuery)
 	case method == http.MethodGet && requestPath == "/v1/user/reviews/recent" && rawQuery == "limit=20":

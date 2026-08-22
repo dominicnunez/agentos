@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { APIError, isDashboardSessionRejection } from './api.ts';
+import { APIError, emptyJSONPost, isDashboardSessionRejection } from './api.ts';
 import { approvalRetryBinding, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, hasRetryableIntentConfirmation, loadAllCompletionReviews, matchesConfirmationRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from './governance.ts';
 import type { Approval, CompletionReview } from './types';
 
@@ -94,6 +94,13 @@ test('clears stored dashboard sessions only after an explicit credential rejecti
   assert.equal(isDashboardSessionRejection(new APIError(401, 'expired')), true);
   assert.equal(isDashboardSessionRejection(new APIError(503, 'unavailable')), false);
   assert.equal(isDashboardSessionRejection(new TypeError('network failure')), false);
+});
+
+test('marks bodyless recovery mutations as exact JSON', () => {
+  const options = emptyJSONPost();
+  assert.equal(options.method, 'POST');
+  assert.equal(new Headers(options.headers).get('Content-Type'), 'application/json');
+  assert.equal(options.body, undefined);
 });
 
 test('preserves evidence only for the same durable completion contract', () => {

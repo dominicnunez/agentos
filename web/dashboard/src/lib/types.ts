@@ -29,6 +29,7 @@ export type TaskView = {
   completion_contract?: CompletionContract;
   review_required?: boolean;
   user_input_allowed?: boolean;
+  input_recovery_required?: boolean;
   completion_recovery_required?: boolean;
   intent?: IntentDraft;
 };

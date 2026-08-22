@@ -92,6 +92,7 @@ type View struct {
 	CompletionContract         *core.CompletionContract
 	ReviewRequired             bool
 	UserInputAllowed           bool
+	InputRecoveryRequired      bool
 	CompletionRecoveryRequired bool
 	Intent                     *core.IntentDraft
 }
@@ -584,6 +585,36 @@ func (s *Service) RecoverHumanCompletion(ctx context.Context, principal Principa
 	return projectView(conversationID, stream, principal.Allowed(CapabilityReadResult)), nil
 }
 
+func (s *Service) RecoverHumanInput(ctx context.Context, principal Principal, taskID string) (View, error) {
+	if err := validatePrincipal(principal); err != nil {
+		return View{}, err
+	}
+	if principal.Kind != core.PrincipalHuman || principal.Channel != ChannelHumanDirect || !principal.Allowed(CapabilityProvideInput) {
+		return View{}, fmt.Errorf("%w: user input recovery requires local user access", ErrForbidden)
+	}
+	if err := ValidateIdentifier("task", taskID); err != nil {
+		return View{}, err
+	}
+	conversationID, stream, err := s.app.ExternalTaskEvents(ctx, principal.OrganizationID, taskID)
+	if err != nil || len(stream) == 0 {
+		return View{}, ErrNotFound
+	}
+	if _, err := authorizedInitialWork(principal, stream); err != nil {
+		return View{}, err
+	}
+	if err := s.app.RecoverOperatorInput(ctx, principal.OrganizationID, principal.ID, principal.Kind, principal.Channel, conversationID, taskID); err != nil {
+		if errors.Is(err, app.ErrNoDurableOperatorInput) {
+			return View{}, ErrNotFound
+		}
+		return View{}, fmt.Errorf("%w: recover user input", ErrConflict)
+	}
+	stream, err = s.app.ExternalEvents(ctx, principal.OrganizationID, conversationID)
+	if err != nil {
+		return View{}, fmt.Errorf("%w: reload recovered user task", ErrUnavailable)
+	}
+	return projectView(conversationID, stream, principal.Allowed(CapabilityReadResult)), nil
+}
+
 func (s *Service) Get(ctx context.Context, principal Principal, taskID string) (View, error) {
 	if err := validatePrincipal(principal); err != nil {
 		return View{}, err
@@ -846,12 +877,19 @@ func projectView(conversationID string, stream []events.Event, includeResult boo
 			}
 		}
 	}
+	if task, found := streamTask(stream); found && view.State != StateCompleted && view.State != StateFailed {
+		if task.ExecutionKind == core.ExecutionHuman && task.CompletionContract != nil {
+			view.CompletionRecoveryRequired = durableHumanCompletionExists(stream, view.TaskID)
+		}
+		if task.ExecutionKind == core.ExecutionHuman && task.CompletionContract == nil {
+			view.InputRecoveryRequired = durableHumanInputExists(stream, view.TaskID)
+		}
+	}
 	if view.State == StateInputRequired {
 		view.Prompt = blockedStatusText(stream)
 		view.ReviewRequired = pendingCompletionReview(stream, view.TaskID)
-		view.CompletionRecoveryRequired = durableHumanCompletionExists(stream, view.TaskID)
 		if task, found := streamTask(stream); found {
-			view.UserInputAllowed = task.ExecutionKind == core.ExecutionHuman && task.CompletionContract == nil && !view.ReviewRequired
+			view.UserInputAllowed = task.ExecutionKind == core.ExecutionHuman && task.CompletionContract == nil && !view.ReviewRequired && !view.InputRecoveryRequired
 			if task.CompletionContract != nil {
 				contract := *task.CompletionContract
 				view.CompletionContract = &contract
@@ -869,13 +907,24 @@ func projectView(conversationID string, stream []events.Event, includeResult boo
 	return view
 }
 
+func durableHumanInputExists(stream []events.Event, taskID string) bool {
+	for _, event := range stream {
+		if event.EventType != "HUMAN_INPUT_RECEIVED" || event.TaskID != taskID {
+			continue
+		}
+		payload, err := events.DecodeDurableOperatorInput(event)
+		return err == nil && payload.SourcePrincipalID != "" && payload.SourcePrincipalKind == string(core.PrincipalHuman) && payload.SourceChannel == ChannelHumanDirect
+	}
+	return false
+}
+
 func durableHumanCompletionExists(stream []events.Event, taskID string) bool {
 	for _, event := range stream {
 		if event.EventType != "HUMAN_TASK_COMPLETION_SUBMITTED" || event.TaskID != taskID {
 			continue
 		}
-		var payload events.HumanTaskCompletionSubmittedPayload
-		return json.Unmarshal(event.Payload, &payload) == nil && payload.MessageID != "" && payload.SourcePrincipalID != "" && payload.SourceChannel == ChannelHumanDirect
+		payload, err := events.DecodeHumanTaskCompletion(event)
+		return err == nil && payload.MessageID != "" && payload.SourcePrincipalID == event.SourceActorID && payload.SourceChannel == ChannelHumanDirect
 	}
 	return false
 }

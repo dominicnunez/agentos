@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"sort"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/completion"
@@ -88,8 +87,9 @@ func (s *Service) PendingCompletionReviews(ctx context.Context, organizationID s
 }
 
 // RecentCompletionReviews returns bounded, newest-first terminal review
-// records for root Tasks. It exists for operator recovery and does not make a
-// recorded review mutable or expose internal child Task review traffic.
+// records for operator recovery. The ledger applies the decision limit before
+// the service loads any task stream, keeping this read bounded while including
+// both root and internal child reviews that the local review queue can decide.
 func (s *Service) RecentCompletionReviews(ctx context.Context, organizationID string, limit int) ([]CompletionReviewView, error) {
 	if organizationID == "" || limit < 1 || limit > 100 {
 		return nil, fmt.Errorf("organization and recent review limit are required")
@@ -98,23 +98,22 @@ func (s *Service) RecentCompletionReviews(ctx context.Context, organizationID st
 		return nil, err
 	}
 	defer s.release()
-	snapshot, err := s.state.Load(ctx)
+	decisionEvents, err := s.gateway.RecentEvents(ctx, organizationID, "COMPLETION_REVIEW_DECIDED", limit)
 	if err != nil {
 		return nil, err
 	}
 	views := make([]CompletionReviewView, 0, limit)
-	for _, state := range sortedTaskStates(snapshot.Tasks) {
-		if state.Value.ParentID != "" {
-			continue
+	seen := make(map[core.ID]struct{}, len(decisionEvents))
+	for _, decisionEvent := range decisionEvents {
+		var indexed completion.HumanReview
+		if err := json.Unmarshal(decisionEvent.Payload, &indexed); err != nil || indexed.ReviewID == "" || indexed.TaskID == "" || indexed.OrganizationID != core.ID(organizationID) || decisionEvent.TaskID != string(indexed.TaskID) || decisionEvent.SourceActorID != string(indexed.ReviewerID) {
+			return nil, fmt.Errorf("recent completion review decision is invalid")
 		}
-		owner, err := taskOrganization(snapshot, state.Value)
-		if err != nil {
-			return nil, err
+		if _, duplicate := seen[indexed.ReviewID]; duplicate {
+			return nil, fmt.Errorf("recent completion review decision is duplicated")
 		}
-		if owner != core.ID(organizationID) {
-			continue
-		}
-		stream, err := s.internalTaskEvents(ctx, organizationID, string(state.Value.ID))
+		seen[indexed.ReviewID] = struct{}{}
+		stream, err := s.internalTaskEvents(ctx, organizationID, string(indexed.TaskID))
 		if err != nil {
 			return nil, err
 		}
@@ -122,30 +121,20 @@ func (s *Service) RecentCompletionReviews(ctx context.Context, organizationID st
 		if err != nil {
 			return nil, err
 		}
-		for reviewID, decided := range decisions {
-			request, ok := requests[reviewID]
-			if !ok || request.TaskID != state.Value.ID {
-				continue
-			}
-			_, result, err := reviewEvidence(stream, request)
-			if err != nil {
-				return nil, err
-			}
-			views = append(views, CompletionReviewView{
-				Request: request, Result: result.Summary, Decision: decided.Review.Decision,
-				ReviewerID: decided.Review.ReviewerID, Feedback: decided.Review.Feedback,
-				UpdatedAt: decided.Review.DecidedAt,
-			})
+		request, ok := requests[indexed.ReviewID]
+		decided, decidedOK := decisions[indexed.ReviewID]
+		if !ok || !decidedOK || decided.Event.EventID != decisionEvent.EventID || !completion.SameHumanReview(decided.Review, indexed) {
+			return nil, fmt.Errorf("recent completion review decision does not match its durable stream")
 		}
-	}
-	sort.Slice(views, func(i, j int) bool {
-		if views[i].UpdatedAt.Equal(views[j].UpdatedAt) {
-			return views[i].Request.ID > views[j].Request.ID
+		_, result, err := reviewEvidence(stream, request)
+		if err != nil {
+			return nil, err
 		}
-		return views[i].UpdatedAt.After(views[j].UpdatedAt)
-	})
-	if len(views) > limit {
-		views = views[:limit]
+		views = append(views, CompletionReviewView{
+			Request: request, Result: result.Summary, Decision: decided.Review.Decision,
+			ReviewerID: decided.Review.ReviewerID, Feedback: decided.Review.Feedback,
+			UpdatedAt: decided.Review.DecidedAt,
+		})
 	}
 	return views, nil
 }

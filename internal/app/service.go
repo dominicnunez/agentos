@@ -36,6 +36,7 @@ const (
 )
 
 var ErrNoDurableHumanCompletion = errors.New("durable user completion not found")
+var ErrNoDurableOperatorInput = errors.New("durable user input not found")
 
 var errTaskStrategicContextChanged = errors.New("task strategic context changed")
 
@@ -1055,6 +1056,54 @@ func (s *Service) ProvideOperatorInput(ctx context.Context, input OperatorInput)
 		}
 	}
 	if err := s.continueExternalInputTask(ctx, actualOrganizationID, core.ID(input.TaskID), correlationID, inputEvent); err != nil {
+		return err
+	}
+	return s.reconcileWorks(ctx)
+}
+
+// RecoverOperatorInput replays only the missing runtime-owned continuation
+// phases for an already durable operator-input Event Contract. The authenticated
+// principal must exactly own the original direct-user input; no replacement
+// text or message identity is accepted at this recovery boundary.
+func (s *Service) RecoverOperatorInput(ctx context.Context, organizationID, principalID string, principalKind core.PrincipalKind, sourceChannel, requestID, taskID string) error {
+	if err := s.acquire(ctx); err != nil {
+		return err
+	}
+	defer s.release()
+	if organizationID == "" || principalID == "" || principalKind != core.PrincipalHuman || sourceChannel != "HUMAN_DIRECT" || requestID == "" || taskID == "" {
+		return fmt.Errorf("organization, local user principal, request, and task are required")
+	}
+	snapshot, err := s.state.Load(ctx)
+	if err != nil {
+		return err
+	}
+	correlationID, err := s.requireExternalWorkCorrelation(ctx, organizationID, requestID)
+	if err != nil {
+		return err
+	}
+	state, ok := snapshot.Tasks[core.ID(taskID)]
+	if !ok || state.CorrelationID != correlationID || state.Value.ExecutionKind != core.ExecutionHuman || state.Value.CompletionContract != nil {
+		return fmt.Errorf("task is not an ordinary user-input task for this request")
+	}
+	actualOrganizationID, err := taskOrganization(snapshot, state.Value)
+	if err != nil || actualOrganizationID != core.ID(organizationID) {
+		return fmt.Errorf("task is not mapped to this request and organization")
+	}
+	stream, err := s.gateway.Events(ctx, correlationID)
+	if err != nil {
+		return err
+	}
+	inputEvent, payload, found, err := externalInputForTask(stream, state.Value.ID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrNoDurableOperatorInput
+	}
+	if inputEvent.EventType != "HUMAN_INPUT_RECEIVED" || inputEvent.SourceActorID != principalID || payload.SourcePrincipalID != principalID || payload.SourcePrincipalKind != string(principalKind) || payload.SourceChannel != sourceChannel {
+		return fmt.Errorf("durable user input does not belong to the authenticated principal")
+	}
+	if err := s.continueExternalInputTask(ctx, actualOrganizationID, state.Value.ID, correlationID, inputEvent); err != nil {
 		return err
 	}
 	return s.reconcileWorks(ctx)

@@ -160,12 +160,16 @@ Selecting **User task** before intake creates work that must wait for structured
 user completion. The Task view collects every required field and file from the
 Task's durable CompletionContract. A self-reported "done" message cannot
 complete that Task. Only a user-operated Task advertises ordinary continuation.
-If structured evidence was durably accepted but its response was interrupted,
-the dashboard invokes the server-owned recovery path and does not solicit a
-second completion identity or re-upload the evidence.
+If structured evidence or ordinary requested input was durably accepted but a
+later continuation response was interrupted, the Task view exposes a
+server-owned recovery signal in every unfinished state. The dashboard replays
+only missing runtime phases from the exact durable event and does not solicit a
+second message identity, replacement text, or evidence re-upload.
 
 The Reviews view lists pending completion judgments, including internal planned
-Tasks that are intentionally absent from A2A lookup. The dashboard binds a
+Tasks that are intentionally absent from A2A lookup. Its bounded recent history
+includes those locally reviewable child Tasks so a lost terminal response can
+be recovered without making the child addressable through A2A. The dashboard binds a
 decision to the exact evidence fingerprint and states explicitly that judging
 candidate completion does not approve a consequential effect. It also shows a
 bounded ledger-derived history of recent terminal judgments so a fresh
@@ -181,6 +185,7 @@ the Unix socket:
 - `GET /v1/user/tasks/{task-id}`
 - `POST /v1/user/tasks/{task-id}/completion`
 - `POST /v1/user/tasks/{task-id}/completion/recover`
+- `POST /v1/user/tasks/{task-id}/input/recover`
 - `GET /v1/user/reviews?after={task-id}&limit={1..100}`
 - `GET /v1/user/reviews/recent?limit=20`
 - `GET|POST /v1/user/reviews/{task-id}`
@@ -193,7 +198,9 @@ The recent-Task read is bound to the authenticated principal's latest confirmed
 intake and exists only to recover an interrupted confirmation across dashboard
 processes. Exact approval and completion-review reads plus their bounded
 recent-decision projections expose terminal ledger state across the launcher's
-changing loopback origin. A matching completion-review retry is replayed until
+changing loopback origin. Recent review decisions are selected by a bounded,
+tenant-scoped SQLite query before their exact Task streams are validated. A
+matching completion-review retry is replayed until
 its downstream Task transition succeeds; a conflicting authorized decision is
 shown as authoritative and releases the stale local retry.
 

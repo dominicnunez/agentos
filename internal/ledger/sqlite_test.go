@@ -149,6 +149,33 @@ func TestAppendAndRead(t *testing.T) {
 	}
 }
 
+func TestRecentEventsAppliesTenantTypeAndLimitInLedger(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	for _, draft := range []events.TrustedDraft{
+		{OrganizationID: "org-1", EventType: "RECOVERY_MARKER", TaskID: "task-1", CorrelationID: "one", Payload: map[string]int{"order": 1}},
+		{OrganizationID: "org-2", EventType: "RECOVERY_MARKER", TaskID: "task-other", CorrelationID: "other", Payload: map[string]int{"order": 2}},
+		{OrganizationID: "org-1", EventType: "IGNORED_MARKER", TaskID: "task-ignored", CorrelationID: "ignored", Payload: map[string]int{"order": 3}},
+		{OrganizationID: "org-1", EventType: "RECOVERY_MARKER", TaskID: "task-2", CorrelationID: "two", Payload: map[string]int{"order": 4}},
+		{OrganizationID: "org-1", EventType: "RECOVERY_MARKER", TaskID: "task-3", CorrelationID: "three", Payload: map[string]int{"order": 5}},
+	} {
+		if _, err := store.Append(ctx, draft); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recent, err := store.RecentEvents(ctx, "org-1", "RECOVERY_MARKER", 2)
+	if err != nil || len(recent) != 2 || recent[0].TaskID != "task-3" || recent[1].TaskID != "task-2" {
+		t.Fatalf("recent events=%+v err=%v", recent, err)
+	}
+	if _, err := store.RecentEvents(ctx, "", "RECOVERY_MARKER", 2); err == nil {
+		t.Fatal("unscoped recent-event read was accepted")
+	}
+}
+
 func TestEventsSurviveReopen(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "agentos.db")

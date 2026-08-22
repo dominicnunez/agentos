@@ -17,6 +17,10 @@ export function isDashboardSessionRejection(error: unknown): boolean {
   return error instanceof APIError && error.status === 401;
 }
 
+export function emptyJSONPost(): RequestInit {
+  return { method: 'POST', headers: { 'Content-Type': 'application/json' } };
+}
+
 function currentBootstrapToken(): string {
   const params = new URLSearchParams(window.location.hash.slice(1));
   return params.get('bootstrap') ?? '';

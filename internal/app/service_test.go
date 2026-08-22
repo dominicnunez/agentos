@@ -1734,7 +1734,7 @@ func TestAcceptedIntentBecomesDurableTaskDAGWithDependencyEvidence(t *testing.T)
 	}
 }
 
-func TestChildCompletionReviewStaysInternalAndWakesRoot(t *testing.T) {
+func TestChildCompletionReviewStaysOffA2AAndRemainsLocallyRecoverable(t *testing.T) {
 	ctx := context.Background()
 	l, err := ledger.Open(":memory:")
 	if err != nil {
@@ -1790,8 +1790,8 @@ func TestChildCompletionReviewStaysInternalAndWakesRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	recent, err := service.RecentCompletionReviews(ctx, "org-1", 10)
-	if err != nil || len(recent) != 1 || recent[0].Request.TaskID != submitted.Task.ID {
-		t.Fatalf("recent external reviews=%+v err=%v", recent, err)
+	if err != nil || len(recent) != 2 || recent[0].Request.TaskID != submitted.Task.ID || recent[1].Request.TaskID != child.ID {
+		t.Fatalf("recent local reviews=%+v err=%v", recent, err)
 	}
 	replayed, err := service.Submit(ctx, submission)
 	if err != nil || replayed.Task.Status != core.TaskCompleted || replayed.Work.Status != "COMPLETED" {
@@ -3467,11 +3467,13 @@ func TestRecoveryIsDeterministicFirst(t *testing.T) {
 
 func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 	tests := []struct {
-		name, stage string
+		name, stage, eventType, principalID, sourceKind, sourceChannel string
+		explicitUserRecovery                                           bool
 	}{
-		{name: "input_durable", stage: "input_durable"},
-		{name: "task_resumed", stage: "task_resumed"},
-		{name: "completion_verified", stage: "completion_verified"},
+		{name: "input_durable", stage: "input_durable", eventType: "A2A_INPUT_RECEIVED", principalID: "external-agent", sourceKind: string(core.PrincipalExternalAgent), sourceChannel: "A2A"},
+		{name: "task_resumed", stage: "task_resumed", eventType: "A2A_INPUT_RECEIVED", principalID: "external-agent", sourceKind: string(core.PrincipalExternalAgent), sourceChannel: "A2A"},
+		{name: "completion_verified", stage: "completion_verified", eventType: "A2A_INPUT_RECEIVED", principalID: "external-agent", sourceKind: string(core.PrincipalExternalAgent), sourceChannel: "A2A"},
+		{name: "explicit_user_recovery", stage: "input_durable", eventType: "HUMAN_INPUT_RECEIVED", principalID: "user-1", sourceKind: string(core.PrincipalHuman), sourceChannel: "HUMAN_DIRECT", explicitUserRecovery: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -3489,13 +3491,13 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 			}
 			correlationID := result.Events[0].CorrelationID
 			inputPayload := events.OperatorInputReceivedPayload{
-				MessageID: "message-1", Text: "approved task input", SourcePrincipalID: "external-agent",
-				SourcePrincipalKind: string(core.PrincipalExternalAgent), SourceChannel: "A2A",
+				MessageID: "message-1", Text: "approved task input", SourcePrincipalID: test.principalID,
+				SourcePrincipalKind: test.sourceKind, SourceChannel: test.sourceChannel,
 			}
 			inputEvent, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
 				OrganizationID: "org-1",
-				EventType:      "A2A_INPUT_RECEIVED",
-				SourceActorID:  "external-agent",
+				EventType:      test.eventType,
+				SourceActorID:  test.principalID,
 				TaskID:         string(result.Task.ID),
 				CorrelationID:  correlationID,
 				Payload:        inputPayload,
@@ -3553,9 +3555,20 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 			}
 
 			recovered := New(gateway)
-			recovery, err := recovered.Recover(ctx)
-			if err != nil || recovery.TasksExecuted != 1 {
-				t.Fatalf("recovery=%+v err=%v", recovery, err)
+			if test.explicitUserRecovery {
+				if err := recovered.RecoverOperatorInput(ctx, "org-1", "other-user", core.PrincipalHuman, test.sourceChannel, "request-1", string(result.Task.ID)); err == nil {
+					t.Fatal("different local user recovered another principal's durable input")
+				}
+				err = recovered.RecoverOperatorInput(ctx, "org-1", test.principalID, core.PrincipalHuman, test.sourceChannel, "request-1", string(result.Task.ID))
+			} else {
+				var recovery RecoveryResult
+				recovery, err = recovered.Recover(ctx)
+				if recovery.TasksExecuted != 1 {
+					t.Fatalf("recovery=%+v err=%v", recovery, err)
+				}
+			}
+			if err != nil {
+				t.Fatalf("recovery error=%v", err)
 			}
 			snapshot, err = recovered.state.Load(ctx)
 			if err != nil || snapshot.Tasks[result.Task.ID].Value.Status != core.TaskCompleted {
@@ -3565,7 +3578,7 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, eventType := range []string{"A2A_INPUT_RECEIVED", "TASK_RESUMED", "EXECUTION_STARTED", "TOOL_OUTCOME_RECORDED", "EXECUTION_FINISHED", "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_VERIFIED", "TASK_VERIFIED_COMPLETE"} {
+			for _, eventType := range []string{test.eventType, "TASK_RESUMED", "EXECUTION_STARTED", "TOOL_OUTCOME_RECORDED", "EXECUTION_FINISHED", "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_VERIFIED", "TASK_VERIFIED_COMPLETE"} {
 				count := 0
 				for _, event := range stream {
 					if event.EventType == eventType && event.TaskID == string(result.Task.ID) {
