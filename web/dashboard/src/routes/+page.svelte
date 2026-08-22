@@ -81,6 +81,7 @@
       } else if (!hasStoredConfirmationRetry(displayedActive)) {
         active = null;
         conversationID = '';
+        executionKind = '';
       }
     }
     if (approvalResult.status === 'fulfilled') approvals = approvalResult.value.approvals;
