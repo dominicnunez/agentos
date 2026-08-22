@@ -200,6 +200,10 @@ func TestLegacyVerificationRejectsTamperedAdmissionsAfterMigration(t *testing.T)
 		_ = db.Close()
 		t.Fatal(err)
 	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
 	if _, err := db.ExecContext(ctx, `DROP TABLE pending_approvals`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)

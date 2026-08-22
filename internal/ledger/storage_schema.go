@@ -25,7 +25,7 @@ const (
 	// not identify or publish an Agent OS release.
 	OldestSupportedStorageVersion = 1
 	// CurrentStorageVersion is the only layout accepted after runtime startup.
-	CurrentStorageVersion = 4
+	CurrentStorageVersion = 5
 	// LegacyEventSchemaVersion identifies the immediately preceding Event
 	// Contract. Its payload semantics already included Intent mode; migration
 	// validates review evidence and reseals schema-bound projection admissions.
@@ -56,6 +56,10 @@ var storageColumnsV4 = map[string][]string{
 	"pending_approvals": {"organization_id", "approval_id", "record_version", "body", "expires_at", "updated_at"},
 }
 
+var storageColumnsV5 = map[string][]string{
+	"pending_completion_reviews": {"organization_id", "task_id", "correlation_id", "request_event_id", "request_sequence", "updated_at"},
+}
+
 var storageIndexes = map[string]string{
 	"events_correlation_idx":            "events",
 	"events_intake_actor_idx":           "events",
@@ -65,6 +69,12 @@ var storageIndexes = map[string]string{
 	"inference_reservations_window_idx": "inference_reservations",
 	"records_admission_event_idx":       "records",
 	"records_kind_idx":                  "records",
+}
+
+var storageIndexesV5 = map[string]string{
+	"events_recent_commit_idx":                "events",
+	"pending_approvals_expiry_idx":            "pending_approvals",
+	"pending_completion_reviews_sequence_idx": "pending_completion_reviews",
 }
 
 const storageSchemaV1SQL = `CREATE TABLE events (
@@ -126,6 +136,18 @@ organization_id TEXT NOT NULL, approval_id TEXT NOT NULL UNIQUE,
 record_version INTEGER NOT NULL, body BLOB NOT NULL,
 expires_at INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,
 PRIMARY KEY(organization_id,approval_id));`
+
+const storageSchemaV5SQL = `CREATE INDEX events_recent_commit_idx
+ON events(organization_id,event_type,sequence);
+CREATE INDEX pending_approvals_expiry_idx
+ON pending_approvals(organization_id,expires_at,approval_id);
+CREATE TABLE pending_completion_reviews (
+organization_id TEXT NOT NULL, task_id TEXT NOT NULL, correlation_id TEXT NOT NULL,
+request_event_id TEXT NOT NULL UNIQUE, request_sequence INTEGER NOT NULL UNIQUE,
+updated_at TEXT NOT NULL,
+PRIMARY KEY(organization_id,task_id,correlation_id));
+CREATE INDEX pending_completion_reviews_sequence_idx
+ON pending_completion_reviews(organization_id,request_sequence);`
 
 func migrateStorage(ctx context.Context, db *sql.DB) error {
 	if ctx == nil || db == nil {
@@ -242,9 +264,43 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 			return fmt.Errorf("pending-approval storage metadata did not match the reviewed migration boundary")
 		}
 		return nil
+	case from == 4 && to == 5:
+		if _, err := tx.ExecContext(ctx, storageSchemaV5SQL); err != nil {
+			return err
+		}
+		if err := rebuildPendingCompletionReviews(ctx, tx); err != nil {
+			return err
+		}
+		fingerprint, err := storageSchemaFingerprint(ctx, tx)
+		if err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=?,schema_fingerprint=? WHERE singleton=1 AND storage_version=? AND event_schema_version=?`, to, fingerprint, from, events.SchemaVersion)
+		if err != nil {
+			return fmt.Errorf("advance governance-queue storage contract: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil || rows != 1 {
+			return fmt.Errorf("governance-queue storage metadata did not match the reviewed migration boundary")
+		}
+		return nil
 	default:
 		return fmt.Errorf("no reviewed storage migration exists")
 	}
+}
+
+func rebuildPendingCompletionReviews(ctx context.Context, tx *sql.Tx) error {
+	reviewEvents, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE event_type IN ('COMPLETION_REVIEW_REQUESTED','COMPLETION_REVIEW_DECIDED') ORDER BY sequence`))
+	if err != nil {
+		return fmt.Errorf("read completion reviews for migration: %w", err)
+	}
+	for _, event := range reviewEvents {
+		if err := syncPendingCompletionReview(ctx, tx, event); err != nil {
+			return fmt.Errorf("rebuild pending completion review at event %s: %w", event.EventID, err)
+		}
+	}
+	return nil
 }
 
 func rebuildPendingApprovals(ctx context.Context, tx *sql.Tx) (finalErr error) {
@@ -404,6 +460,11 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 			expected[table] = columns
 		}
 	}
+	if version >= 5 {
+		for table, columns := range storageColumnsV5 {
+			expected[table] = columns
+		}
+	}
 	tables, err := userStorageTables(ctx, query)
 	if err != nil {
 		return StorageContract{}, err
@@ -432,6 +493,17 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 		}
 		if count != 1 {
 			return StorageContract{}, fmt.Errorf("storage schema version %d lacks exact index %s", version, index)
+		}
+	}
+	if version >= 5 {
+		for index, table := range storageIndexesV5 {
+			var count int
+			if err := query.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name=? AND tbl_name=?`, index, table).Scan(&count); err != nil {
+				return StorageContract{}, fmt.Errorf("inspect storage index %s: %w", index, err)
+			}
+			if count != 1 {
+				return StorageContract{}, fmt.Errorf("storage schema version %d lacks exact index %s", version, index)
+			}
 		}
 	}
 	var unsupportedEvents int

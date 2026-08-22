@@ -24,8 +24,9 @@ This read comes from a tenant-scoped durable pending-approval projection. Each
 approval lifecycle update maintains that projection in the same SQLite
 transaction as its event and versioned record; terminal decisions are removed.
 The dashboard therefore never scans terminal approval history to build its
-current decision queue. Expiry and the V1 inbox ceiling are applied before the
-service loads exact prepared effects.
+current decision queue. An expiry-ordered index purges expired projection rows
+before the primary-key-bounded inbox read; expiry and the V1 inbox ceiling are
+therefore applied before the service loads exact prepared effects.
 
 `GET /v1/control/approvals/recent?limit=20` returns a bounded newest-first,
 read-only ledger projection of terminal decisions in authoritative commit

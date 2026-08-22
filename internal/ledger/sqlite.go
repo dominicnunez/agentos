@@ -2802,9 +2802,16 @@ func (l *SQLite) PendingApprovalRecords(ctx context.Context, organizationID stri
 	if organizationID == "" || now.IsZero() || limit < 1 || limit > 1001 {
 		return nil, fmt.Errorf("organization, current time, and bounded pending-approval limit are required")
 	}
-	return collectRecordBodies(l.db.QueryContext(ctx, `SELECT body FROM pending_approvals
-WHERE organization_id=? AND (expires_at=0 OR expires_at>?)
-ORDER BY approval_id LIMIT ?`, organizationID, now.UnixNano(), limit))
+	var bodies [][]byte
+	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM pending_approvals WHERE organization_id=? AND expires_at<>0 AND expires_at<=?`, organizationID, now.UnixNano()); err != nil {
+			return fmt.Errorf("purge expired pending approvals: %w", err)
+		}
+		var err error
+		bodies, err = collectRecordBodies(tx.QueryContext(ctx, `SELECT body FROM pending_approvals WHERE organization_id=? ORDER BY approval_id LIMIT ?`, organizationID, limit))
+		return err
+	})
+	return bodies, err
 }
 
 func (l *SQLite) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
@@ -2945,7 +2952,13 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 	if d.EventType == "MESSAGE" || d.RecipientScope != "" || d.RecipientID != "" {
 		return l.appendAddressed(ctx, d)
 	}
-	return appendEvent(ctx, l.db, d)
+	var appended events.Event
+	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		appended, err = appendEvent(ctx, tx, d)
+		return err
+	})
+	return appended, err
 }
 
 func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.TrustedDraft, goalID, replacesWorkID core.ID) (events.Event, error) {
@@ -3340,7 +3353,44 @@ func insertEvent(ctx context.Context, db sqlExecutor, d events.TrustedDraft, id 
 	if err != nil {
 		return events.Event{}, err
 	}
-	return events.Event{EventID: id, Sequence: seq, OrganizationID: d.OrganizationID, EventType: d.EventType, SourceActorID: d.SourceActorID, SourceExecutionID: d.SourceExecutionID, RecipientScope: d.RecipientScope, RecipientID: d.RecipientID, TaskID: d.TaskID, AuthorizationRefs: d.AuthorizationRefs, ArtifactRefs: d.ArtifactRefs, CreatedAt: now, SchemaVersion: events.SchemaVersion, Payload: data, CorrelationID: d.CorrelationID}, nil
+	event := events.Event{EventID: id, Sequence: seq, OrganizationID: d.OrganizationID, EventType: d.EventType, SourceActorID: d.SourceActorID, SourceExecutionID: d.SourceExecutionID, RecipientScope: d.RecipientScope, RecipientID: d.RecipientID, TaskID: d.TaskID, AuthorizationRefs: d.AuthorizationRefs, ArtifactRefs: d.ArtifactRefs, CreatedAt: now, SchemaVersion: events.SchemaVersion, Payload: data, CorrelationID: d.CorrelationID}
+	if err := syncPendingCompletionReview(ctx, db, event); err != nil {
+		return events.Event{}, err
+	}
+	return event, nil
+}
+
+func syncPendingCompletionReview(ctx context.Context, db sqlExecutor, event events.Event) error {
+	switch event.EventType {
+	case "COMPLETION_REVIEW_REQUESTED":
+		if event.OrganizationID == "" || event.TaskID == "" || event.CorrelationID == "" || event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() {
+			return fmt.Errorf("pending completion-review projection identity is invalid")
+		}
+		result, err := db.ExecContext(ctx, `INSERT INTO pending_completion_reviews(organization_id,task_id,correlation_id,request_event_id,request_sequence,updated_at)
+VALUES(?,?,?,?,?,?)
+ON CONFLICT(organization_id,task_id,correlation_id) DO UPDATE SET request_event_id=excluded.request_event_id,request_sequence=excluded.request_sequence,updated_at=excluded.updated_at
+WHERE pending_completion_reviews.request_sequence<excluded.request_sequence`, event.OrganizationID, event.TaskID, event.CorrelationID, event.EventID, event.Sequence, event.CreatedAt.Format(time.RFC3339Nano))
+		if err != nil {
+			return fmt.Errorf("update pending completion-review projection: %w", err)
+		}
+		changed, err := result.RowsAffected()
+		if err != nil || changed != 1 {
+			return fmt.Errorf("pending completion-review projection conflicts with durable event sequence")
+		}
+	case "COMPLETION_REVIEW_DECIDED":
+		if event.OrganizationID == "" || event.TaskID == "" || event.CorrelationID == "" || event.Sequence < 1 {
+			return fmt.Errorf("terminal completion-review projection identity is invalid")
+		}
+		result, err := db.ExecContext(ctx, `DELETE FROM pending_completion_reviews WHERE organization_id=? AND task_id=? AND correlation_id=? AND request_sequence<?`, event.OrganizationID, event.TaskID, event.CorrelationID, event.Sequence)
+		if err != nil {
+			return fmt.Errorf("remove terminal pending completion review: %w", err)
+		}
+		changed, err := result.RowsAffected()
+		if err != nil || changed != 1 {
+			return fmt.Errorf("terminal completion review lacks its pending durable request")
+		}
+	}
+	return nil
 }
 func (l *SQLite) Events(ctx context.Context, correlationID string) ([]events.Event, error) {
 	return collectEvents(l.db.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE (?='' OR correlation_id=?) ORDER BY sequence`, correlationID, correlationID))
@@ -3368,27 +3418,15 @@ func (l *SQLite) PendingCompletionReviewEvents(ctx context.Context, organization
 		}
 	}
 	return collectEvents(l.db.QueryContext(ctx, `SELECT request.event_id,request.sequence,request.organization_id,request.event_type,request.source_actor_id,request.source_execution_id,request.recipient_scope,request.recipient_id,request.task_id,request.authorization_refs,request.artifact_refs,request.payload,request.correlation_id,request.created_at,request.schema_version
-FROM events AS request
-WHERE request.organization_id=?
+FROM pending_completion_reviews AS pending
+JOIN events AS request ON request.event_id=pending.request_event_id
+  AND request.sequence=pending.request_sequence
+  AND request.organization_id=pending.organization_id
+  AND request.task_id=pending.task_id
+  AND request.correlation_id=pending.correlation_id
   AND request.event_type='COMPLETION_REVIEW_REQUESTED'
-  AND request.sequence<?
-  AND NOT EXISTS (
-    SELECT 1 FROM events AS newer_request
-    WHERE newer_request.organization_id=request.organization_id
-      AND newer_request.event_type='COMPLETION_REVIEW_REQUESTED'
-      AND newer_request.task_id=request.task_id
-      AND newer_request.correlation_id=request.correlation_id
-      AND newer_request.sequence>request.sequence
-  )
-  AND NOT EXISTS (
-    SELECT 1 FROM events AS decision
-    WHERE decision.organization_id=request.organization_id
-      AND decision.event_type='COMPLETION_REVIEW_DECIDED'
-      AND decision.task_id=request.task_id
-      AND decision.correlation_id=request.correlation_id
-      AND decision.sequence>request.sequence
-  )
-ORDER BY request.sequence DESC LIMIT ?`, organizationID, cursorSequence, limit))
+WHERE pending.organization_id=? AND pending.request_sequence<?
+ORDER BY pending.request_sequence DESC LIMIT ?`, organizationID, cursorSequence, limit))
 }
 
 func (l *SQLite) Inbox(ctx context.Context, recipientScope, recipientID string) ([]events.Event, error) {

@@ -35,8 +35,10 @@ POST /v1/user/reviews/{task-id}
 The collection GET returns pending organization-scoped reviews newest first
 from a cursor-bounded SQLite projection, including internal child Tasks that
 remain unavailable through A2A. It does not scan the organization's Task
-history. The default page size is 50; `next_after` is an opaque ledger cursor
-present only when another page exists.
+or review history. Request and decision events maintain the tenant-scoped
+pending projection in the same SQLite transaction, and the projection is
+indexed by authoritative ledger sequence. The default page size is 50;
+`next_after` is an opaque ledger cursor present only when another page exists.
 The Task GET supplies the review ID, Task version, objective, fingerprint,
 candidate, criteria, and evidence event references. A decision body is:
 
