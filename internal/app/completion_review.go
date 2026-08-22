@@ -43,9 +43,9 @@ type CompletionReviewPage struct {
 	NextAfter core.ID
 }
 
-// PendingCompletionReviews exposes only review contracts for one organization
-// through the local control surface. Internal child Tasks remain absent from
-// the external A2A task index.
+// PendingCompletionReviews exposes a bounded durable review-request projection
+// for one organization. Internal child Tasks remain absent from the external
+// A2A task index, while the local control surface may review them.
 func (s *Service) PendingCompletionReviews(ctx context.Context, organizationID string, after core.ID, limit int) (CompletionReviewPage, error) {
 	if organizationID == "" || limit < 1 || limit > 100 {
 		return CompletionReviewPage{}, fmt.Errorf("organization and review page limit are required")
@@ -54,34 +54,34 @@ func (s *Service) PendingCompletionReviews(ctx context.Context, organizationID s
 		return CompletionReviewPage{}, err
 	}
 	defer s.release()
-	snapshot, err := s.state.Load(ctx)
+	requestEvents, err := s.gateway.PendingCompletionReviewEvents(ctx, organizationID, string(after), limit+1)
 	if err != nil {
 		return CompletionReviewPage{}, err
 	}
+	hasMore := len(requestEvents) > limit
+	if hasMore {
+		requestEvents = requestEvents[:limit]
+	}
 	page := CompletionReviewPage{Reviews: make([]CompletionReviewView, 0, limit)}
-	for _, state := range sortedTaskStates(snapshot.Tasks) {
-		if state.Value.ID <= after {
-			continue
+	for _, requestEvent := range requestEvents {
+		var indexed completion.ReviewRequest
+		if err := json.Unmarshal(requestEvent.Payload, &indexed); err != nil || !indexed.Valid() ||
+			indexed.OrganizationID != core.ID(organizationID) || requestEvent.OrganizationID != organizationID ||
+			requestEvent.EventType != "COMPLETION_REVIEW_REQUESTED" || requestEvent.SourceActorID != "runtime" ||
+			requestEvent.TaskID != string(indexed.TaskID) {
+			return CompletionReviewPage{}, fmt.Errorf("pending completion review request is invalid")
 		}
-		owner, err := taskOrganization(snapshot, state.Value)
+		view, found, err := s.completionReviewLocked(ctx, organizationID, string(indexed.TaskID))
 		if err != nil {
 			return CompletionReviewPage{}, err
 		}
-		if owner != core.ID(organizationID) {
-			continue
-		}
-		view, found, err := s.completionReviewLocked(ctx, organizationID, string(state.Value.ID))
-		if err != nil {
-			return CompletionReviewPage{}, err
-		}
-		if !found {
-			continue
-		}
-		if len(page.Reviews) == limit {
-			page.NextAfter = page.Reviews[len(page.Reviews)-1].Request.TaskID
-			break
+		if !found || view.Request.ID != indexed.ID || view.Request.Fingerprint != indexed.Fingerprint {
+			return CompletionReviewPage{}, fmt.Errorf("pending completion review does not match its durable task stream")
 		}
 		page.Reviews = append(page.Reviews, view)
+	}
+	if hasMore {
+		page.NextAfter = core.ID(requestEvents[len(requestEvents)-1].EventID)
 	}
 	return page, nil
 }
@@ -126,6 +126,9 @@ func (s *Service) RecentCompletionReviews(ctx context.Context, organizationID st
 		if !ok || !decidedOK || decided.Event.EventID != decisionEvent.EventID || !completion.SameHumanReview(decided.Review, indexed) {
 			return nil, fmt.Errorf("recent completion review decision does not match its durable stream")
 		}
+		if err := s.continueCompletionReview(ctx, request, decided.Review, decided.Event); err != nil {
+			return nil, fmt.Errorf("recover recent completion review: %w", err)
+		}
 		_, result, err := reviewEvidence(stream, request)
 		if err != nil {
 			return nil, err
@@ -135,6 +138,14 @@ func (s *Service) RecentCompletionReviews(ctx context.Context, organizationID st
 			ReviewerID: decided.Review.ReviewerID, Feedback: decided.Review.Feedback,
 			UpdatedAt: decided.Review.DecidedAt,
 		})
+	}
+	if len(views) > 0 {
+		if _, err := s.runReady(ctx); err != nil {
+			return nil, fmt.Errorf("continue work after recent completion review: %w", err)
+		}
+		if err := s.reconcileWorks(ctx); err != nil {
+			return nil, fmt.Errorf("reconcile work after recent completion review: %w", err)
+		}
 	}
 	return views, nil
 }

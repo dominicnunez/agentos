@@ -3170,6 +3170,9 @@ type Reader interface {
 type RecentEventReader interface {
 	RecentEvents(context.Context, string, string, int) ([]Event, error)
 }
+type PendingCompletionReviewReader interface {
+	PendingCompletionReviewEvents(context.Context, string, string, int) ([]Event, error)
+}
 type ProjectionAppender interface {
 	AppendProjection(context.Context, ProjectionDraft) (Event, error)
 }
@@ -3553,6 +3556,17 @@ func (g *Gateway) RecentEvents(ctx context.Context, organizationID, eventType st
 		return nil, fmt.Errorf("event ledger does not support bounded recent-event reads")
 	}
 	return reader.RecentEvents(ctx, organizationID, eventType, limit)
+}
+
+// PendingCompletionReviewEvents returns a bounded, newest-first page of the
+// latest durable review requests that have no later decision. The cursor is an
+// opaque request Event ID scoped to the same organization and Event Contract.
+func (g *Gateway) PendingCompletionReviewEvents(ctx context.Context, organizationID, afterEventID string, limit int) ([]Event, error) {
+	reader, ok := g.ledger.(PendingCompletionReviewReader)
+	if !ok {
+		return nil, fmt.Errorf("event ledger does not support bounded completion-review reads")
+	}
+	return reader.PendingCompletionReviewEvents(ctx, organizationID, afterEventID, limit)
 }
 
 func (g *Gateway) Inbox(ctx context.Context, recipientScope, recipientID string) ([]Event, error) {

@@ -176,6 +176,50 @@ func TestRecentEventsAppliesTenantTypeAndLimitInLedger(t *testing.T) {
 	}
 }
 
+func TestPendingCompletionReviewEventsAreTenantScopedAndCursorBounded(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	appendReview := func(organizationID, eventType, taskID, correlationID string, payload any) events.Event {
+		t.Helper()
+		event, err := store.Append(ctx, events.TrustedDraft{
+			OrganizationID: organizationID, EventType: eventType, SourceActorID: "runtime",
+			TaskID: taskID, CorrelationID: correlationID, Payload: payload,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return event
+	}
+	appendReview("org-1", "COMPLETION_REVIEW_REQUESTED", "task-1", "work-1", map[string]string{"review_id": "review-1"})
+	second := appendReview("org-1", "COMPLETION_REVIEW_REQUESTED", "task-2", "work-2", map[string]string{"review_id": "review-2"})
+	appendReview("org-1", "COMPLETION_REVIEW_DECIDED", "task-1", "work-1", map[string]string{"review_id": "review-1"})
+	latest := appendReview("org-1", "COMPLETION_REVIEW_REQUESTED", "task-1", "work-1", map[string]string{"review_id": "review-3"})
+	foreign := appendReview("org-2", "COMPLETION_REVIEW_REQUESTED", "task-3", "work-3", map[string]string{"review_id": "review-other"})
+
+	firstPage, err := store.PendingCompletionReviewEvents(ctx, "org-1", "", 1)
+	if err != nil || len(firstPage) != 1 || firstPage[0].EventID != latest.EventID {
+		t.Fatalf("first pending page=%+v err=%v", firstPage, err)
+	}
+	secondPage, err := store.PendingCompletionReviewEvents(ctx, "org-1", firstPage[0].EventID, 1)
+	if err != nil || len(secondPage) != 1 || secondPage[0].EventID != second.EventID {
+		t.Fatalf("second pending page=%+v err=%v", secondPage, err)
+	}
+	lastPage, err := store.PendingCompletionReviewEvents(ctx, "org-1", secondPage[0].EventID, 1)
+	if err != nil || len(lastPage) != 0 {
+		t.Fatalf("last pending page=%+v err=%v", lastPage, err)
+	}
+	if _, err := store.PendingCompletionReviewEvents(ctx, "org-1", foreign.EventID, 1); err == nil {
+		t.Fatal("cross-organization completion-review cursor was accepted")
+	}
+	if _, err := store.PendingCompletionReviewEvents(ctx, "org-1", "missing", 1); err == nil {
+		t.Fatal("unknown completion-review cursor was accepted")
+	}
+}
+
 func TestEventsSurviveReopen(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "agentos.db")

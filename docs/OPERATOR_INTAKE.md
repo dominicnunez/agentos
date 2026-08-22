@@ -148,9 +148,10 @@ work skips planning inference; adaptive work may use the configured provider
 to propose the smallest useful Task DAG. The complete graph is committed
 atomically before scheduling, and model output cannot introduce authority or
 new execution mechanisms. An unfinished
-conversation is recovered from SQLite when the dashboard restarts. A
-confirmation that reached the ledger before Task creation is resumed by the
-server from the exact durable confirmer identity, message ID, and fingerprint.
+conversation is recovered from SQLite when the dashboard restarts. A durable
+confirmation whose Task creation, operator acceptance, execution, or Work
+reconciliation stopped partway is resumed by the server from the exact durable
+confirmer identity, message ID, and fingerprint.
 Confirmation
 means Agent OS understood the requested work; it is never approval for a
 financial, public, destructive, privileged, legal, deployment, or other
@@ -172,8 +173,9 @@ server-owned recovery signal in every unfinished state. The dashboard replays
 only missing runtime phases from the exact durable event and does not solicit a
 second message identity, replacement text, or evidence re-upload.
 
-The Reviews view lists pending completion judgments, including internal planned
-Tasks that are intentionally absent from A2A lookup. Its bounded recent history
+The Reviews view lists pending completion judgments from a cursor-bounded,
+tenant-scoped ledger projection instead of scanning Task history, including
+internal planned Tasks that are intentionally absent from A2A lookup. Its bounded recent history
 includes those locally reviewable child Tasks so a lost terminal response can
 be recovered without making the child addressable through A2A. The dashboard binds a
 decision to the exact evidence fingerprint and states explicitly that judging
@@ -192,7 +194,7 @@ the Unix socket:
 - `POST /v1/user/tasks/{task-id}/completion`
 - `POST /v1/user/tasks/{task-id}/completion/recover`
 - `POST /v1/user/tasks/{task-id}/input/recover`
-- `GET /v1/user/reviews?after={task-id}&limit={1..100}`
+- `GET /v1/user/reviews?after={opaque-review-cursor}&limit={1..100}`
 - `GET /v1/user/reviews/recent?limit=20`
 - `GET|POST /v1/user/reviews/{task-id}`
 - `GET /v1/user/reviews/{task-id}/records/{review-id}`
@@ -201,17 +203,18 @@ the Unix socket:
 - exact-effect approval operations beneath `/v1/control/approvals/{id}`
 
 The recent-Task read is bound to the authenticated principal's latest confirmed
-intake and exists only to recover an interrupted confirmation across dashboard
-processes. Exact approval and completion-review reads plus their bounded
+intake and exists only to recover every missing runtime-owned phase after an
+interrupted durable confirmation across dashboard processes. Exact approval and completion-review reads plus their bounded
 recent-decision projections expose terminal ledger state across the launcher's
 changing loopback origin. Recent review decisions are selected by a bounded,
 tenant-scoped SQLite query before their exact Task streams are validated. A
 matching completion-review retry is replayed until
 its downstream Task transition succeeds; a conflicting authorized decision is
 shown as authoritative and releases the stale local retry. Exact terminal
-review reads continue missing runtime-owned phases with the reviewer identity
-already recorded in the ledger, even when a different authorized user opened
-the new dashboard session.
+review reads and the bounded recent-decision projection continue missing
+runtime-owned phases with the reviewer identity already recorded in the
+ledger, even when a different authorized user opened the new dashboard
+session.
 
 The completion endpoint accepts strict JSON. Required files are size-bounded,
 content-sniffed, stored privately by SHA-256, and recorded as untrusted user

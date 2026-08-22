@@ -3304,6 +3304,43 @@ func (l *SQLite) RecentEvents(ctx context.Context, organizationID, eventType str
 FROM events WHERE organization_id=? AND event_type=? ORDER BY sequence DESC LIMIT ?`, organizationID, eventType, limit))
 }
 
+func (l *SQLite) PendingCompletionReviewEvents(ctx context.Context, organizationID, afterEventID string, limit int) ([]events.Event, error) {
+	if organizationID == "" || limit < 1 || limit > 101 {
+		return nil, fmt.Errorf("organization and bounded completion-review limit are required")
+	}
+	cursorSequence := int64(^uint64(0) >> 1)
+	if afterEventID != "" {
+		if err := l.db.QueryRowContext(ctx, `SELECT sequence FROM events WHERE organization_id=? AND event_type='COMPLETION_REVIEW_REQUESTED' AND event_id=?`, organizationID, afterEventID).Scan(&cursorSequence); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, fmt.Errorf("completion-review cursor is outside the requested organization")
+			}
+			return nil, fmt.Errorf("resolve completion-review cursor: %w", err)
+		}
+	}
+	return collectEvents(l.db.QueryContext(ctx, `SELECT request.event_id,request.sequence,request.organization_id,request.event_type,request.source_actor_id,request.source_execution_id,request.recipient_scope,request.recipient_id,request.task_id,request.authorization_refs,request.artifact_refs,request.payload,request.correlation_id,request.created_at,request.schema_version
+FROM events AS request
+WHERE request.organization_id=?
+  AND request.event_type='COMPLETION_REVIEW_REQUESTED'
+  AND request.sequence<?
+  AND NOT EXISTS (
+    SELECT 1 FROM events AS newer_request
+    WHERE newer_request.organization_id=request.organization_id
+      AND newer_request.event_type='COMPLETION_REVIEW_REQUESTED'
+      AND newer_request.task_id=request.task_id
+      AND newer_request.correlation_id=request.correlation_id
+      AND newer_request.sequence>request.sequence
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM events AS decision
+    WHERE decision.organization_id=request.organization_id
+      AND decision.event_type='COMPLETION_REVIEW_DECIDED'
+      AND decision.task_id=request.task_id
+      AND decision.correlation_id=request.correlation_id
+      AND decision.sequence>request.sequence
+  )
+ORDER BY request.sequence DESC LIMIT ?`, organizationID, cursorSequence, limit))
+}
+
 func (l *SQLite) Inbox(ctx context.Context, recipientScope, recipientID string) ([]events.Event, error) {
 	return collectEvents(l.db.QueryContext(ctx, `SELECT e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version
 FROM inbox i JOIN events e ON e.event_id=i.event_id

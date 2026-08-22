@@ -1799,6 +1799,63 @@ func TestChildCompletionReviewStaysOffA2AAndRemainsLocallyRecoverable(t *testing
 	}
 }
 
+func TestRecentCompletionReviewsResumeDurableTerminalDecision(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	interrupted := &failOnceProjectionEvent{SQLite: store, eventType: "TASK_VERIFIED_COMPLETE"}
+	service := NewWithModel(events.NewGateway(interrupted), describedModel{})
+	submission := Submit{RequestID: "recent-review-recovery", OrganizationID: "org-1", Statement: "prepare a reviewed note", Kind: core.ExecutionAgent}
+	submitted, err := service.Submit(ctx, submission)
+	if err != nil || submitted.Task.Status != core.TaskBlocked {
+		t.Fatalf("submitted=%+v err=%v", submitted, err)
+	}
+	review, found, err := service.CompletionReview(ctx, "org-1", string(submitted.Task.ID))
+	if err != nil || !found {
+		t.Fatalf("review=%+v found=%t err=%v", review, found, err)
+	}
+	if _, err := service.ReviewCompletion(ctx, reviewInput(review, completion.ReviewApprove, "")); err == nil {
+		t.Fatal("injected completion continuation failure was not returned")
+	}
+
+	restarted := NewWithModel(events.NewGateway(store), describedModel{})
+	recent, err := restarted.RecentCompletionReviews(ctx, "org-1", 10)
+	if err != nil || len(recent) != 1 || recent[0].Request.ID != review.Request.ID {
+		t.Fatalf("recent=%+v err=%v", recent, err)
+	}
+	snapshot, err := projections.New(events.NewGateway(store)).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tasks[submitted.Task.ID].Value.Status != core.TaskCompleted || snapshot.Works[submitted.Work.ID].Value.Status != core.WorkCompleted {
+		t.Fatalf("task=%+v work=%+v", snapshot.Tasks[submitted.Task.ID], snapshot.Works[submitted.Work.ID])
+	}
+	stream, err := store.Events(ctx, submitted.Events[0].CorrelationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countEventType(stream, "COMPLETION_REVIEW_DECIDED") != 1 || countEventType(stream, "TASK_VERIFIED_COMPLETE") != 1 || countEventType(stream, "WORK_COMPLETED") != 1 {
+		t.Fatalf("terminal review recovery duplicated durable phases: %+v", stream)
+	}
+}
+
+type failOnceProjectionEvent struct {
+	*ledger.SQLite
+	eventType string
+	failed    bool
+}
+
+func (f *failOnceProjectionEvent) AppendProjection(ctx context.Context, draft events.ProjectionDraft) (events.Event, error) {
+	if draft.Event.EventType == f.eventType && !f.failed {
+		f.failed = true
+		return events.Event{}, errProjectionWrite
+	}
+	return f.SQLite.AppendProjection(ctx, draft)
+}
+
 type failingExecutionModel struct{ calls int }
 
 func (*failingExecutionModel) Name() string { return "failing-model/v1" }
@@ -4134,4 +4191,14 @@ func assertEventOrder(t *testing.T, stream []events.Event, expected ...string) {
 	if next != len(expected) {
 		t.Fatalf("event order missing %q after index %d: %+v", expected[next], next, stream)
 	}
+}
+
+func countEventType(stream []events.Event, eventType string) int {
+	count := 0
+	for _, event := range stream {
+		if event.EventType == eventType {
+			count++
+		}
+	}
+	return count
 }

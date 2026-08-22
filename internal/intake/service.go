@@ -595,11 +595,7 @@ func (s *Service) RecoverHumanCompletion(ctx context.Context, principal Principa
 		}
 		return View{}, fmt.Errorf("%w: recover structured user completion", ErrConflict)
 	}
-	stream, err := s.app.ExternalEvents(ctx, principal.OrganizationID, conversationID)
-	if err != nil {
-		return View{}, fmt.Errorf("%w: reload recovered user task", ErrUnavailable)
-	}
-	return projectView(conversationID, stream, principal.Allowed(CapabilityReadResult)), nil
+	return s.recoveredHumanTaskView(ctx, principal, conversationID)
 }
 
 func (s *Service) RecoverHumanInput(ctx context.Context, principal Principal, taskID string) (View, error) {
@@ -613,6 +609,10 @@ func (s *Service) RecoverHumanInput(ctx context.Context, principal Principal, ta
 		}
 		return View{}, fmt.Errorf("%w: recover user input", ErrConflict)
 	}
+	return s.recoveredHumanTaskView(ctx, principal, conversationID)
+}
+
+func (s *Service) recoveredHumanTaskView(ctx context.Context, principal Principal, conversationID string) (View, error) {
 	stream, err := s.app.ExternalEvents(ctx, principal.OrganizationID, conversationID)
 	if err != nil {
 		return View{}, fmt.Errorf("%w: reload recovered user task", ErrUnavailable)
@@ -686,7 +686,7 @@ func (s *Service) LatestTask(ctx context.Context, principal Principal) (View, er
 	if !found || len(stream) == 0 || !streamHasEvent(stream, "INTENT_CONFIRMED") {
 		return View{}, ErrNotFound
 	}
-	if !streamHasEvent(stream, "TASK_CREATED") {
+	if confirmedWorkNeedsRecovery(stream) && principal.Allowed(CapabilityConfirmIntent) {
 		if err := authorizeIntakePrincipal(principal, stream); err != nil {
 			return View{}, err
 		}
@@ -709,6 +709,16 @@ func (s *Service) LatestTask(ctx context.Context, principal Principal) (View, er
 		return View{}, err
 	}
 	return projectView(conversationID, stream, principal.Allowed(CapabilityReadResult)), nil
+}
+
+func confirmedWorkNeedsRecovery(stream []events.Event) bool {
+	for _, event := range stream {
+		switch event.EventType {
+		case "WORK_COMPLETED", "WORK_FAILED", "WORK_PLANNING_FAILED":
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) GetCompletionReview(ctx context.Context, principal Principal, taskID string) (CompletionReviewView, error) {

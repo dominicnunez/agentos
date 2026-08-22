@@ -562,6 +562,53 @@ func TestLatestTaskRecoversDurableConfirmationBeforeTaskCreation(t *testing.T) {
 	}
 }
 
+func TestLatestTaskRecoversDurableConfirmationAfterTaskCreation(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	interrupted := &failOnceOrdinaryEvent{SQLite: store, eventType: "HUMAN_WORK_ACCEPTED"}
+	service := New(app.New(events.NewGateway(interrupted)))
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	draft, err := service.Handle(ctx, principal, Message{ConversationID: "partial-submission", MessageID: "message-1", Text: "echo resumed"})
+	if err != nil || draft.Intent == nil {
+		t.Fatalf("draft=%+v err=%v", draft, err)
+	}
+	if _, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: draft.ConversationID, MessageID: "confirmation-1", Fingerprint: draft.Intent.Fingerprint}); err == nil {
+		t.Fatal("injected operator-acceptance failure was not returned")
+	}
+	stream := externalStream(t, store, draft.ConversationID)
+	if countEvents(stream, "TASK_CREATED") != 1 || countEvents(stream, "HUMAN_WORK_ACCEPTED") != 0 || countEvents(stream, "EXECUTION_STARTED") != 0 {
+		t.Fatalf("unexpected partial submission stream: %+v", stream)
+	}
+
+	restarted := New(app.New(events.NewGateway(store)))
+	recovered, err := restarted.LatestTask(ctx, principal)
+	if err != nil || recovered.State != StateCompleted || recovered.Result != "resumed" {
+		t.Fatalf("recovered=%+v err=%v", recovered, err)
+	}
+	stream = externalStream(t, store, draft.ConversationID)
+	if countEvents(stream, "INTENT_CONFIRMED") != 1 || countEvents(stream, "TASK_CREATED") != 1 || countEvents(stream, "HUMAN_WORK_ACCEPTED") != 1 || countEvents(stream, "EXECUTION_STARTED") != 1 || countEvents(stream, "WORK_COMPLETED") != 1 {
+		t.Fatalf("partial submission recovery duplicated durable phases: %+v", stream)
+	}
+}
+
+type failOnceOrdinaryEvent struct {
+	*ledger.SQLite
+	eventType string
+	failed    bool
+}
+
+func (f *failOnceOrdinaryEvent) Append(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {
+	if draft.EventType == f.eventType && !f.failed {
+		f.failed = true
+		return events.Event{}, errors.New("injected ordinary event failure")
+	}
+	return f.SQLite.Append(ctx, draft)
+}
+
 func TestOwnScopeBindsCompleteAuthenticatedPrincipalIdentity(t *testing.T) {
 	ctx := context.Background()
 	store, err := ledger.Open(":memory:")
