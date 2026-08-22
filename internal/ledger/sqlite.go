@@ -2975,6 +2975,7 @@ func (l *SQLite) AppendIntakeAbandonment(ctx context.Context, draft events.Trust
 	if draft.EventType != "INTAKE_ABANDONED" || draft.OrganizationID == "" ||
 		decodeExactJSON(draft.Payload, &abandonment) != nil || abandonment.MessageID == "" ||
 		abandonment.SourcePrincipalID == "" || abandonment.SourcePrincipalKind == "" || abandonment.SourceChannel == "" ||
+		abandonment.SourcePrincipalKind != string(core.PrincipalHuman) || abandonment.SourceChannel != "HUMAN_DIRECT" ||
 		!core.ValidIntentSourceIdentity(core.ID(abandonment.SourcePrincipalID), core.PrincipalKind(abandonment.SourcePrincipalKind), abandonment.SourceChannel) ||
 		draft.SourceActorID != abandonment.SourcePrincipalID || draft.SourceExecutionID != "" ||
 		draft.RecipientScope != "" || draft.RecipientID != "" || draft.TaskID != "task-"+draft.CorrelationID ||

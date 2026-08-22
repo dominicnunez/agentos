@@ -378,6 +378,14 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 
 func validateRecoveryIntentConfirmations(stream []events.Event) error {
 	reviewEvidence := events.IndexReviewedIntentEvidence(stream)
+	for _, event := range stream {
+		if event.EventType != "INTAKE_ABANDONED" {
+			continue
+		}
+		if err := events.ValidateIndexedIntakeAbandonment(reviewEvidence.At(event), event); err != nil {
+			return fmt.Errorf("event %s: %w", event.EventID, err)
+		}
+	}
 	replacements := make(map[core.ID]string)
 	for _, event := range stream {
 		if event.EventType != "INTENT_CONFIRMED" {

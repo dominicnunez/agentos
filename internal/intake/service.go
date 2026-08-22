@@ -183,9 +183,6 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 	if err != nil {
 		return View{}, fmt.Errorf("%w: load work stream", ErrUnavailable)
 	}
-	if streamHasEvent(stream, "INTAKE_ABANDONED") {
-		return View{}, fmt.Errorf("%w: intake was abandoned", ErrConflict)
-	}
 	if !streamHasEvent(stream, "INTENT_CONFIRMED") {
 		return s.handleIntentConversation(ctx, principal, message, stream)
 	}
@@ -382,7 +379,10 @@ func (s *Service) AbandonIntent(ctx context.Context, principal Principal, abando
 	unlock := s.lockStream(principal.OrganizationID, abandonment.ConversationID)
 	defer unlock()
 	stream, err := s.app.ExternalEvents(ctx, principal.OrganizationID, abandonment.ConversationID)
-	if err != nil || len(stream) == 0 {
+	if err != nil {
+		return View{}, fmt.Errorf("%w: load intake for abandonment", ErrUnavailable)
+	}
+	if len(stream) == 0 {
 		return View{}, ErrNotFound
 	}
 	if err := authorizeIntakePrincipal(principal, stream); err != nil {
@@ -487,6 +487,9 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 		if err := authorizeIntakePrincipal(principal, stream); err != nil {
 			return View{}, err
 		}
+		if streamHasEvent(stream, "INTAKE_ABANDONED") {
+			return View{}, fmt.Errorf("%w: intake was abandoned", ErrConflict)
+		}
 		boundGoalID, err := selectedGoalBinding(stream)
 		if err != nil {
 			return View{}, fmt.Errorf("%w: durable selected Goal binding is invalid", ErrUnavailable)
@@ -499,6 +502,11 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 			return View{}, replayErr
 		} else if found {
 			return replay, nil
+		}
+		if boundGoalID != "" {
+			if err := s.app.ValidateSelectedGoal(ctx, core.ID(principal.OrganizationID), boundGoalID); err != nil {
+				return View{}, fmt.Errorf("%w: recheck selected Goal binding: %w", ErrConflict, err)
+			}
 		}
 		if !principal.Allowed(CapabilityProvideInput) {
 			return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityProvideInput)

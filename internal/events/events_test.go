@@ -841,6 +841,94 @@ func TestIntakeAbandonmentCannotUseGenericTrustedAdmission(t *testing.T) {
 	}
 }
 
+func TestIntakeAbandonmentRequiresOneOwnedLocalUserBoundary(t *testing.T) {
+	now := time.Now().UTC()
+	intakePayload := IntakeMessageRecordedPayload{
+		MessageID: "message-1", Text: "Prepare bounded work.", SourcePrincipalID: "user-1",
+		SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT",
+	}
+	intakeBody, err := json.Marshal(intakePayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abandonmentPayload := IntakeAbandonedPayload{
+		MessageID: "abandon-1", SourcePrincipalID: "user-1",
+		SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT",
+	}
+	abandonmentBody, err := json.Marshal(abandonmentPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intake := Event{
+		EventID: "event-1", Sequence: 1, OrganizationID: "org-1", EventType: "INTAKE_MESSAGE_RECORDED",
+		SourceActorID: "user-1", TaskID: "task-intake-1", Payload: intakeBody, CorrelationID: "intake-1",
+		CreatedAt: now, SchemaVersion: SchemaVersion,
+	}
+	abandonment := Event{
+		EventID: "event-2", Sequence: 2, OrganizationID: "org-1", EventType: "INTAKE_ABANDONED",
+		SourceActorID: "user-1", TaskID: "task-intake-1", Payload: abandonmentBody, CorrelationID: "intake-1",
+		CreatedAt: now, SchemaVersion: SchemaVersion,
+	}
+	if err := ValidateIntakeAbandonment([]Event{intake, abandonment}, abandonment); err != nil {
+		t.Fatalf("valid intake abandonment: %v", err)
+	}
+	for name, evidence := range map[string][]Event{
+		"wrong actor": func() []Event {
+			changed := abandonment
+			changed.SourceActorID = "user-2"
+			return []Event{intake, changed}
+		}(),
+		"external agent": func() []Event {
+			changed := abandonment
+			payload := abandonmentPayload
+			payload.SourcePrincipalID = "agent-1"
+			payload.SourcePrincipalKind = string(core.PrincipalExternalAgent)
+			payload.SourceChannel = "A2A"
+			changed.SourceActorID = "agent-1"
+			changed.Payload, _ = json.Marshal(payload)
+			return []Event{intake, changed}
+		}(),
+		"after confirmation": {
+			intake,
+			{EventID: "event-confirmed", Sequence: 2, OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-intake-1", CorrelationID: "intake-1", CreatedAt: now, SchemaVersion: SchemaVersion},
+			func() Event { changed := abandonment; changed.Sequence = 3; return changed }(),
+		},
+		"duplicate": {
+			intake,
+			abandonment,
+			func() Event {
+				changed := abandonment
+				changed.EventID = "event-3"
+				changed.Sequence = 3
+				return changed
+			}(),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := evidence[len(evidence)-1]
+			if err := ValidateIntakeAbandonment(evidence, candidate); err == nil {
+				t.Fatal("invalid intake abandonment was accepted")
+			}
+		})
+	}
+}
+
+func TestGatewayRejectsExternalAgentIntakeAbandonment(t *testing.T) {
+	ledger := &memoryLedger{}
+	gateway := NewGateway(ledger)
+	_, err := gateway.PublishIntakeAbandonment(context.Background(), TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTAKE_ABANDONED", SourceActorID: "agent-1",
+		TaskID: "task-run-1", CorrelationID: "run-1",
+		Payload: IntakeAbandonedPayload{
+			MessageID: "abandon-1", SourcePrincipalID: "agent-1",
+			SourcePrincipalKind: string(core.PrincipalExternalAgent), SourceChannel: "A2A",
+		},
+	})
+	if err == nil || len(ledger.events) != 0 {
+		t.Fatalf("external agent abandonment reached the ledger: events=%+v err=%v", ledger.events, err)
+	}
+}
+
 func TestInboxObservationCannotBypassAtomicAdmission(t *testing.T) {
 	ledger := &memoryLedger{}
 	gateway := NewGateway(ledger)

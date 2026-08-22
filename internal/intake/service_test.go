@@ -1224,32 +1224,44 @@ func TestAbandonIntentClosesPausedGoalIntakeWithoutDeletingHistory(t *testing.T)
 	if _, err := service.Handle(ctx, principal, Message{ConversationID: message.ConversationID, MessageID: "message-2", Text: "Add context."}); err == nil {
 		t.Fatal("paused Goal intake accepted another normalization turn")
 	}
-	abandoned, err := service.AbandonIntent(ctx, principal, IntentAbandonment{ConversationID: message.ConversationID, MessageID: "abandon-1"})
+	stream := externalStream(t, store, message.ConversationID)
+	if countEvents(stream, "INTAKE_MESSAGE_RECORDED") != 1 {
+		t.Fatalf("rejected continuation became durable: %+v", stream)
+	}
+	restarted := NewWithNormalizer(app.New(gateway), fixedNormalizer{})
+	active, err := restarted.ActiveIntent(ctx, principal)
+	if err != nil || active.ConversationID != message.ConversationID || active.State != StateAwaitingConfirmation || active.Intent == nil {
+		t.Fatalf("active intake after restart=%+v err=%v", active, err)
+	}
+	abandoned, err := restarted.AbandonIntent(ctx, principal, IntentAbandonment{ConversationID: message.ConversationID, MessageID: "abandon-1"})
 	if err != nil || abandoned.State != StateAbandoned || abandoned.SelectedGoalID != goal.ID {
 		t.Fatalf("abandoned=%+v err=%v", abandoned, err)
 	}
-	if replay, err := service.AbandonIntent(ctx, principal, IntentAbandonment{ConversationID: message.ConversationID, MessageID: "abandon-1"}); err != nil || replay.State != StateAbandoned {
+	if replay, err := restarted.AbandonIntent(ctx, principal, IntentAbandonment{ConversationID: message.ConversationID, MessageID: "abandon-1"}); err != nil || replay.State != StateAbandoned {
 		t.Fatalf("exact abandonment replay=%+v err=%v", replay, err)
 	}
-	if _, err := service.AbandonIntent(ctx, principal, IntentAbandonment{ConversationID: message.ConversationID, MessageID: "abandon-changed"}); !errors.Is(err, ErrConflict) {
+	if _, err := restarted.AbandonIntent(ctx, principal, IntentAbandonment{ConversationID: message.ConversationID, MessageID: "abandon-changed"}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("changed abandonment replay=%v", err)
 	}
-	if _, err := service.ActiveIntent(ctx, principal); !errors.Is(err, ErrNotFound) {
+	if _, err := restarted.ActiveIntent(ctx, principal); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("abandoned intake remained active: %v", err)
 	}
-	if _, err := service.Handle(ctx, principal, message); !errors.Is(err, ErrConflict) {
+	if _, err := restarted.Handle(ctx, principal, message); !errors.Is(err, ErrConflict) {
 		t.Fatalf("abandoned conversation accepted a message: %v", err)
 	}
-	if _, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: message.ConversationID, MessageID: "confirm-1", Fingerprint: draft.Intent.Fingerprint}); !errors.Is(err, ErrConflict) {
+	if _, err := restarted.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: message.ConversationID, MessageID: "confirm-1", Fingerprint: draft.Intent.Fingerprint}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("abandoned conversation accepted confirmation: %v", err)
 	}
 	external := testPrincipal("agent-1", core.PrincipalExternalAgent, ChannelA2A)
+	if _, err := restarted.Handle(ctx, external, Message{ConversationID: message.ConversationID, MessageID: "probe-1", Text: "Probe abandoned intake."}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("abandoned intake existence leaked to another principal: %v", err)
+	}
 	external.Capabilities = append(external.Capabilities, CapabilityAbandonIntent)
-	if _, err := service.AbandonIntent(ctx, external, IntentAbandonment{ConversationID: message.ConversationID, MessageID: "agent-abandon"}); !errors.Is(err, ErrForbidden) {
+	if _, err := restarted.AbandonIntent(ctx, external, IntentAbandonment{ConversationID: message.ConversationID, MessageID: "agent-abandon"}); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("external principal abandoned local intake: %v", err)
 	}
-	stream := externalStream(t, store, message.ConversationID)
-	if countEvents(stream, "INTAKE_ABANDONED") != 1 || countEvents(stream, "INTAKE_MESSAGE_RECORDED") != 2 || countEvents(stream, "INTENT_DRAFTED") != 1 || containsEvent(stream, "INTENT_CONFIRMED") {
+	stream = externalStream(t, store, message.ConversationID)
+	if countEvents(stream, "INTAKE_ABANDONED") != 1 || countEvents(stream, "INTAKE_MESSAGE_RECORDED") != 1 || countEvents(stream, "INTENT_DRAFTED") != 1 || containsEvent(stream, "INTENT_CONFIRMED") {
 		t.Fatalf("abandonment changed durable intake history: %+v", stream)
 	}
 	newDraft, err := service.Handle(ctx, principal, Message{ConversationID: "replacement-intake", MessageID: "message-new", Text: "Produce different bounded work."})

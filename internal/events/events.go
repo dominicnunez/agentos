@@ -437,6 +437,71 @@ func validReviewedOperatorIdentity(id, kind, channel string) bool {
 	return principalKind != core.PrincipalRuntime && core.ValidIntentSourceIdentity(core.ID(id), principalKind, channel)
 }
 
+// ValidateIntakeAbandonment replays the bounded intake evidence that permits a
+// local user to terminalize one unconfirmed intake without deleting history.
+func ValidateIntakeAbandonment(stream []Event, abandonmentEvent Event) error {
+	return ValidateIndexedIntakeAbandonment(IndexReviewedIntentEvidence(stream).At(abandonmentEvent), abandonmentEvent)
+}
+
+// ValidateIndexedIntakeAbandonment validates a pre-indexed, time-bounded
+// abandonment boundary. It rejects malformed, duplicated, externally sourced,
+// or post-confirmation terminal events recovered from durable storage.
+func ValidateIndexedIntakeAbandonment(stream []Event, abandonmentEvent Event) error {
+	if len(stream) > ReviewedIntentEvidenceLimit {
+		return fmt.Errorf("intake evidence exceeds its admission bound")
+	}
+	var abandonment IntakeAbandonedPayload
+	if decodeExactEventJSON(abandonmentEvent.Payload, &abandonment) != nil || !validIntakeAbandonmentEvent(abandonmentEvent, abandonment) {
+		return fmt.Errorf("intake abandonment event contract is invalid")
+	}
+	var initial IntakeMessageRecordedPayload
+	var initialSequence int64
+	foundInitial := false
+	foundBoundary := false
+	for _, event := range stream {
+		if event.CorrelationID != abandonmentEvent.CorrelationID || abandonmentEvent.Sequence > 0 && event.Sequence > abandonmentEvent.Sequence {
+			continue
+		}
+		switch event.EventType {
+		case "INTAKE_MESSAGE_RECORDED":
+			var payload IntakeMessageRecordedPayload
+			if decodeExactEventJSON(event.Payload, &payload) != nil || !validReviewedIntakeMessage(event, payload, abandonmentEvent) {
+				return fmt.Errorf("intake abandonment has invalid durable intake evidence")
+			}
+			if !foundInitial || event.Sequence < initialSequence {
+				initial = payload
+				initialSequence = event.Sequence
+				foundInitial = true
+			}
+		case "INTENT_CONFIRMED":
+			return fmt.Errorf("confirmed intent cannot be abandoned")
+		case "INTAKE_ABANDONED":
+			var payload IntakeAbandonedPayload
+			if decodeExactEventJSON(event.Payload, &payload) != nil || !validIntakeAbandonmentEvent(event, payload) {
+				return fmt.Errorf("intake abandonment event contract is invalid")
+			}
+			if foundBoundary || event.EventID != abandonmentEvent.EventID || event.Sequence != abandonmentEvent.Sequence || !reflect.DeepEqual(payload, abandonment) {
+				return fmt.Errorf("intake has multiple durable abandonments")
+			}
+			foundBoundary = true
+		}
+	}
+	if !foundBoundary || !foundInitial || initialSequence >= abandonmentEvent.Sequence ||
+		initial.SourcePrincipalID != abandonment.SourcePrincipalID || initial.SourcePrincipalKind != abandonment.SourcePrincipalKind || initial.SourceChannel != abandonment.SourceChannel {
+		return fmt.Errorf("intake abandonment is not owned by its original local user")
+	}
+	return nil
+}
+
+func validIntakeAbandonmentEvent(event Event, abandonment IntakeAbandonedPayload) bool {
+	return event.EventID != "" && event.Sequence > 0 && !event.CreatedAt.IsZero() && event.SchemaVersion == SchemaVersion &&
+		event.EventType == "INTAKE_ABANDONED" && event.OrganizationID != "" && event.SourceActorID != "" && event.SourceActorID == abandonment.SourcePrincipalID &&
+		event.SourceExecutionID == "" && event.RecipientScope == "" && event.RecipientID == "" && event.TaskID == "task-"+event.CorrelationID &&
+		len(event.AuthorizationRefs) == 0 && len(event.ArtifactRefs) == 0 && event.CorrelationID != "" && abandonment.MessageID != "" &&
+		abandonment.SourcePrincipalKind == string(core.PrincipalHuman) && abandonment.SourceChannel == "HUMAN_DIRECT" &&
+		core.ValidIntentSourceIdentity(core.ID(abandonment.SourcePrincipalID), core.PrincipalHuman, abandonment.SourceChannel)
+}
+
 type WorkCompletionTransitionPayload struct {
 	EvidenceEventRef string `json:"evidence_event_ref"`
 	Fingerprint      string `json:"fingerprint"`
@@ -3429,6 +3494,7 @@ func (g *Gateway) PublishIntakeAbandonment(ctx context.Context, draft TrustedDra
 		draft.SourceExecutionID != "" || draft.RecipientScope != "" || draft.RecipientID != "" ||
 		draft.TaskID != "task-"+draft.CorrelationID || draft.CorrelationID == "" ||
 		len(draft.AuthorizationRefs) != 0 || len(draft.ArtifactRefs) != 0 || abandonment.MessageID == "" ||
+		abandonment.SourcePrincipalKind != string(core.PrincipalHuman) || abandonment.SourceChannel != "HUMAN_DIRECT" ||
 		!validReviewedOperatorIdentity(abandonment.SourcePrincipalID, abandonment.SourcePrincipalKind, abandonment.SourceChannel) {
 		return Event{}, fmt.Errorf("intake abandonment requires complete operator identity")
 	}
