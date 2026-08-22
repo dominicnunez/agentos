@@ -57,11 +57,12 @@ func runDashboard(ctx context.Context, config bootstrap.Config, output io.Writer
 		_ = listener.Close()
 		return err
 	}
+	if _, err := fmt.Fprintf(output, "Private manual launch: open this file in a local browser:\n%s\n", bootstrapPath); err != nil {
+		_ = listener.Close()
+		return err
+	}
 	if err := startDashboardBrowser(ctx, bootstrapPath); err != nil {
-		if _, writeErr := fmt.Fprintf(output, "Automatic browser launch unavailable. Open this private bootstrap file in a local browser:\n%s\n", bootstrapPath); writeErr != nil {
-			_ = listener.Close()
-			return writeErr
-		}
+		_, _ = fmt.Fprintln(output, "Automatic browser launch unavailable; use the private manual launch path above.")
 	}
 	return serveAll(ctx, []serverBinding{{server: server, listener: listener}})
 }

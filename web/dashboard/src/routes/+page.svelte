@@ -28,6 +28,9 @@
   let revisionFeedback = '';
   let completionFields: Record<string, string> = {};
   let completionFiles: Record<string, File[]> = {};
+  let pendingWorkMessageID = '';
+  let pendingWorkKey = '';
+  let completionMessageID = '';
   let refreshGeneration = 0;
 
   onMount(async () => {
@@ -79,17 +82,26 @@
   async function submitWork(): Promise<void> {
     const text = workText.trim();
     if (!text) return;
+    if (!conversationID) conversationID = identifier('user');
+    const currentConversation = conversationID;
+    const requestKey = JSON.stringify([currentConversation, text, executionKind]);
+    if (!pendingWorkMessageID || pendingWorkKey !== requestKey) {
+      pendingWorkMessageID = identifier('message');
+      pendingWorkKey = requestKey;
+    }
+    const messageID = pendingWorkMessageID;
     await action(async () => {
-      if (!conversationID) conversationID = identifier('user');
       active = await api<TaskView>('/api/v1/user/messages', {
         method: 'POST',
         body: JSON.stringify({
-          conversation_id: conversationID,
-          message_id: identifier('message'),
+          conversation_id: currentConversation,
+          message_id: messageID,
           text,
           ...(executionKind ? { execution_kind: executionKind } : {})
         })
       });
+      pendingWorkMessageID = '';
+      pendingWorkKey = '';
       workText = '';
       notice = active.prompt || 'The proposed work was updated.';
     });
@@ -106,7 +118,10 @@
       });
       completionFields = {};
       completionFiles = {};
+      completionMessageID = '';
       executionKind = '';
+      pendingWorkMessageID = '';
+      pendingWorkKey = '';
       task = confirmed;
       taskID = confirmed.task_id;
       conversationID = '';
@@ -122,6 +137,7 @@
       task = await api<TaskView>(`/api/v1/user/tasks/${encodeURIComponent(id)}`);
       completionFields = {};
       completionFiles = {};
+      completionMessageID = '';
     });
   }
 
@@ -139,10 +155,13 @@
           artifacts.push({ role: requirement.role, name: file.name, media_type: '', data: await base64(file) });
         }
       }
+      if (!completionMessageID) completionMessageID = identifier('completion');
+      const messageID = completionMessageID;
       task = await api<TaskView>(`/api/v1/user/tasks/${encodeURIComponent(currentTask.task_id)}/completion`, {
         method: 'POST',
-        body: JSON.stringify({ message_id: identifier('completion'), fields: completionFields, artifacts })
+        body: JSON.stringify({ message_id: messageID, fields: completionFields, artifacts })
       });
+      completionMessageID = '';
       notice = 'Completion evidence was submitted for deterministic validation.';
       await refresh();
     });
@@ -215,7 +234,13 @@
 
   function setFiles(role: string, event: Event): void {
     const input = event.currentTarget as HTMLInputElement;
+    completionMessageID = '';
     completionFiles = { ...completionFiles, [role]: Array.from(input.files ?? []) };
+  }
+
+  function setCompletionField(name: string, value: string): void {
+    completionMessageID = '';
+    completionFields = { ...completionFields, [name]: value };
   }
 
   async function base64(file: File): Promise<string> {
@@ -293,7 +318,7 @@
       </section>
       <section class="panel task-lookup"><div><p class="eyebrow">Durable status</p><h2>Find a Task</h2></div><div class="inline"><input bind:value={taskID} placeholder="task-id" /><button onclick={findTask} disabled={busy || !taskID.trim()}>Open</button></div>
         {#if task}<div class="task"><div><span class="status">{safeDisplay(task.state)}</span><h3>{safeDisplay(task.task_id)}</h3>{#if task.work_id}<p class="mono">Work {safeDisplay(task.work_id)}</p>{/if}{#if task.mode}<p>Mode: <strong>{safeDisplay(task.mode)}</strong></p>{/if}{#if task.trust_label}<p class="risk">Trust: {safeDisplay(task.trust_label)}</p>{/if}{#if task.prompt}<p class="boundary-note governed-text">{safeDisplay(task.prompt)}</p>{/if}{#if task.result}<p class="governed-text">{safeDisplay(task.result)}</p>{/if}</div>
-          {#if task.completion_contract}<form onsubmit={(event) => { event.preventDefault(); submitCompletion(); }}><h4>Required completion evidence</h4>{#each task.completion_contract.required_fields ?? [] as field}<label>{safeDisplay(field.name)}<small>{safeDisplay(field.description)}; {field.min_bytes} to {field.max_bytes} UTF-8 bytes</small><textarea required value={completionFields[field.name] ?? ''} oninput={(event) => completionFields = {...completionFields, [field.name]: event.currentTarget.value}}></textarea></label>{/each}{#each task.completion_contract.artifact_requirements ?? [] as requirement}<label>{safeDisplay(requirement.role)}<small>{requirement.min_count} to {requirement.max_count} files; {requirement.media_types.map(safeDisplay).join(', ')}</small><input type="file" required={requirement.min_count > 0} multiple={requirement.max_count > 1} accept={requirement.media_types.join(',')} onchange={(event) => setFiles(requirement.role, event)} /></label>{/each}<button class="primary" type="submit" disabled={busy}>Submit complete evidence</button></form>{/if}
+          {#if task.completion_contract}<form onsubmit={(event) => { event.preventDefault(); submitCompletion(); }}><h4>Required completion evidence</h4>{#each task.completion_contract.required_fields ?? [] as field}<label>{safeDisplay(field.name)}<small>{safeDisplay(field.description)}; {field.min_bytes} to {field.max_bytes} UTF-8 bytes</small><textarea required value={completionFields[field.name] ?? ''} oninput={(event) => setCompletionField(field.name, event.currentTarget.value)}></textarea></label>{/each}{#each task.completion_contract.artifact_requirements ?? [] as requirement}<label>{safeDisplay(requirement.role)}<small>{requirement.min_count} to {requirement.max_count} files; {requirement.media_types.map(safeDisplay).join(', ')}</small><input type="file" required={requirement.min_count > 0} multiple={requirement.max_count > 1} accept={requirement.media_types.join(',')} onchange={(event) => setFiles(requirement.role, event)} /></label>{/each}<button class="primary" type="submit" disabled={busy}>Submit complete evidence</button></form>{/if}
         </div>{/if}
       </section>
     {:else if section === 'approvals'}
