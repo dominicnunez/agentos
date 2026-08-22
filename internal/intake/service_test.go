@@ -1279,6 +1279,45 @@ func TestAbandonIntentClosesPausedGoalIntakeWithoutDeletingHistory(t *testing.T)
 	}
 }
 
+func TestActiveIntentKeepsRacedGoalContinuationAbandonable(t *testing.T) {
+	ctx := t.Context()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	goal := seedIntakeGoal(t, ctx, gateway, "org-1", "goal-1", core.GoalActive)
+	application := app.New(gateway)
+	service := NewWithNormalizer(application, fixedNormalizer{})
+	principal := testPrincipal("user-1", core.PrincipalHuman, ChannelHumanDirect)
+	message := Message{ConversationID: "raced-goal-continuation", MessageID: "message-1", Text: "Produce a bounded result.", SelectedGoalID: goal.ID}
+	if draft, err := service.Handle(ctx, principal, message); err != nil || draft.Intent == nil {
+		t.Fatalf("initial draft=%+v err=%v", draft, err)
+	}
+	if _, err := application.RecordIntakeMessage(ctx, app.IntakeMessage{
+		RequestID: message.ConversationID, OrganizationID: principal.OrganizationID, MessageID: "message-2", Text: "Add raced context.",
+		SourcePrincipalID: core.ID(principal.ID), SourcePrincipalKind: principal.Kind, SourceChannel: principal.Channel, SelectedGoalID: goal.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	goal.Status = core.GoalPaused
+	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_PAUSED", SourceActorID: "runtime", CorrelationID: "seed-goal-1"},
+		ProjectionKind: "goal", RecordID: string(goal.ID), Version: 2, Value: goal,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewWithNormalizer(application, fixedNormalizer{})
+	active, err := restarted.ActiveIntent(ctx, principal)
+	if err != nil || active.ConversationID != message.ConversationID || active.State != StateInputRequired || active.SelectedGoalID != goal.ID || active.Intent != nil {
+		t.Fatalf("raced active intake=%+v err=%v", active, err)
+	}
+	if abandoned, err := restarted.AbandonIntent(ctx, principal, IntentAbandonment{ConversationID: message.ConversationID, MessageID: "abandon-raced"}); err != nil || abandoned.State != StateAbandoned {
+		t.Fatalf("abandon raced intake=%+v err=%v", abandoned, err)
+	}
+}
+
 func TestSelectedGoalFailsClosedAtSourceAndStrategicBoundaries(t *testing.T) {
 	ctx := context.Background()
 	store, err := ledger.Open(":memory:")

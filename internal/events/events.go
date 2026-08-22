@@ -458,6 +458,7 @@ func ValidateIndexedIntakeAbandonment(stream []Event, abandonmentEvent Event) er
 	var initialSequence int64
 	foundInitial := false
 	foundBoundary := false
+	messageIDs := make(map[string]struct{})
 	for _, event := range stream {
 		if event.CorrelationID != abandonmentEvent.CorrelationID || abandonmentEvent.Sequence > 0 && event.Sequence > abandonmentEvent.Sequence {
 			continue
@@ -468,10 +469,16 @@ func ValidateIndexedIntakeAbandonment(stream []Event, abandonmentEvent Event) er
 			if decodeExactEventJSON(event.Payload, &payload) != nil || !validReviewedIntakeMessage(event, payload, abandonmentEvent) {
 				return fmt.Errorf("intake abandonment has invalid durable intake evidence")
 			}
+			if _, duplicate := messageIDs[payload.MessageID]; duplicate {
+				return fmt.Errorf("intake abandonment has duplicate durable message identity")
+			}
+			messageIDs[payload.MessageID] = struct{}{}
 			if !foundInitial || event.Sequence < initialSequence {
 				initial = payload
 				initialSequence = event.Sequence
 				foundInitial = true
+			} else if payload.SourcePrincipalID != initial.SourcePrincipalID || payload.SourcePrincipalKind != initial.SourcePrincipalKind || payload.SourceChannel != initial.SourceChannel {
+				return fmt.Errorf("intake abandonment contains a message from a different principal")
 			}
 		case "INTENT_CONFIRMED":
 			return fmt.Errorf("confirmed intent cannot be abandoned")

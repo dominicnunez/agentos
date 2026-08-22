@@ -888,6 +888,22 @@ func TestIntakeAbandonmentRequiresOneOwnedLocalUserBoundary(t *testing.T) {
 			changed.Payload, _ = json.Marshal(payload)
 			return []Event{intake, changed}
 		}(),
+		"mixed continuation principal": func() []Event {
+			continuationPayload := intakePayload
+			continuationPayload.MessageID = "message-2"
+			continuationPayload.SourcePrincipalID = "agent-1"
+			continuationPayload.SourcePrincipalKind = string(core.PrincipalExternalAgent)
+			continuationPayload.SourceChannel = "A2A"
+			continuationBody, _ := json.Marshal(continuationPayload)
+			continuation := intake
+			continuation.EventID = "event-continuation"
+			continuation.Sequence = 2
+			continuation.SourceActorID = "agent-1"
+			continuation.Payload = continuationBody
+			changed := abandonment
+			changed.Sequence = 3
+			return []Event{intake, continuation, changed}
+		}(),
 		"after confirmation": {
 			intake,
 			{EventID: "event-confirmed", Sequence: 2, OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-intake-1", CorrelationID: "intake-1", CreatedAt: now, SchemaVersion: SchemaVersion},

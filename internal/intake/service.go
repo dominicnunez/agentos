@@ -439,6 +439,19 @@ func (s *Service) ActiveIntent(ctx context.Context, principal Principal) (View, 
 	if _, drafted, draftErr := intentPayloadForMessage(stream, message.MessageID); draftErr != nil {
 		return View{}, fmt.Errorf("%w: active intake has an invalid durable draft", ErrUnavailable)
 	} else if !drafted {
+		selectedGoalID, bindingErr := selectedGoalBinding(stream)
+		if bindingErr != nil {
+			return View{}, fmt.Errorf("%w: active intake has an invalid selected Goal binding", ErrUnavailable)
+		}
+		if selectedGoalID != "" {
+			if err := s.app.ValidateSelectedGoal(ctx, core.ID(principal.OrganizationID), selectedGoalID); err != nil {
+				return View{
+					TaskID: streamTaskID(stream), ConversationID: conversationID, SelectedGoalID: selectedGoalID,
+					State: StateInputRequired, Prompt: "This intake cannot continue while its selected Goal is unavailable. It may be abandoned without deleting its durable history.",
+					UpdatedAt: stream[len(stream)-1].CreatedAt,
+				}, nil
+			}
+		}
 		return s.normalizeRecordedIntentMessage(ctx, principal, message, stream)
 	}
 	return projectCurrentIntentView(conversationID, stream)
