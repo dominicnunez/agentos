@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { APIError, api, connect, identifier } from '$lib/api';
-  import { confirmationMessageID, loadAllCompletionReviews, safeDisplay, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
+  import { confirmationMessageID, loadAllCompletionReviews, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
   import '$lib/app.css';
   import type { Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, IntentDraft, TaskView } from '$lib/types';
 
@@ -45,14 +45,16 @@
   async function refresh(): Promise<void> {
     if (!identity) return;
     const generation = ++refreshGeneration;
+    const displayedTask = task;
     error = '';
-    const [activeResult, approvalResult, reviewResult] = await Promise.allSettled([
+    const [activeResult, approvalResult, reviewResult, taskResult] = await Promise.allSettled([
       loadActiveIntent(),
       api<{ approvals: Approval[] }>('/api/v1/control/approvals'),
-      loadReviews()
+      loadReviews(),
+      displayedTask ? api<TaskView>(`/api/v1/user/tasks/${encodeURIComponent(displayedTask.task_id)}`) : Promise.resolve(null)
     ]);
     if (generation !== refreshGeneration) return;
-    const failures = [activeResult, approvalResult, reviewResult]
+    const failures = [activeResult, approvalResult, reviewResult, taskResult]
       .filter((result) => result.status === 'rejected')
       .map((result) => message((result as PromiseRejectedResult).reason));
     if (activeResult.status === 'fulfilled') {
@@ -61,6 +63,11 @@
     }
     if (approvalResult.status === 'fulfilled') approvals = approvalResult.value.approvals;
     if (reviewResult.status === 'fulfilled') reviews = reviewResult.value;
+    if (taskResult.status === 'fulfilled' && taskResult.value) {
+      if (!sameCompletionContract(displayedTask?.completion_contract, taskResult.value.completion_contract)) clearCompletionEvidence();
+      task = taskResult.value;
+      taskID = taskResult.value.task_id;
+    }
     if (failures.length) error = `Dashboard refresh failed; previously loaded governance data was preserved. ${failures.join(' ')}`;
     selectedApproval = approvals.find((item) => item.approval_id === selectedApproval?.approval_id) ?? null;
     selectedReview = reviews.find((item) => item.review_id === selectedReview?.review_id) ?? null;
@@ -116,9 +123,7 @@
         method: 'POST',
         body: JSON.stringify({ message_id: confirmationMessageID(draft.fingerprint), fingerprint: draft.fingerprint })
       });
-      completionFields = {};
-      completionFiles = {};
-      completionMessageID = '';
+      clearCompletionEvidence();
       executionKind = '';
       pendingWorkMessageID = '';
       pendingWorkKey = '';
@@ -135,31 +140,30 @@
     if (!id) return;
     await action(async () => {
       task = await api<TaskView>(`/api/v1/user/tasks/${encodeURIComponent(id)}`);
-      completionFields = {};
-      completionFiles = {};
-      completionMessageID = '';
+      clearCompletionEvidence();
     });
   }
 
   async function submitCompletion(): Promise<void> {
     if (!task?.completion_contract) return;
     const currentTask = task;
+    const evidence = snapshotCompletionEvidence(completionFields, completionFiles);
+    if (!completionMessageID) completionMessageID = identifier('completion');
+    const messageID = completionMessageID;
     await action(async () => {
-      const fieldError = validateCompletionFields(currentTask.completion_contract!.required_fields ?? [], completionFields);
+      const fieldError = validateCompletionFields(currentTask.completion_contract!.required_fields ?? [], evidence.fields);
       if (fieldError) throw new Error(fieldError);
-      const selectionError = validateArtifactSelections(currentTask.completion_contract!.artifact_requirements ?? [], completionFiles);
+      const selectionError = validateArtifactSelections(currentTask.completion_contract!.artifact_requirements ?? [], evidence.files);
       if (selectionError) throw new Error(selectionError);
       const artifacts: { role: string; name: string; media_type: string; data: string }[] = [];
       for (const requirement of currentTask.completion_contract!.artifact_requirements ?? []) {
-        for (const file of completionFiles[requirement.role] ?? []) {
+        for (const file of evidence.files[requirement.role] ?? []) {
           artifacts.push({ role: requirement.role, name: file.name, media_type: '', data: await base64(file) });
         }
       }
-      if (!completionMessageID) completionMessageID = identifier('completion');
-      const messageID = completionMessageID;
       task = await api<TaskView>(`/api/v1/user/tasks/${encodeURIComponent(currentTask.task_id)}/completion`, {
         method: 'POST',
-        body: JSON.stringify({ message_id: messageID, fields: completionFields, artifacts })
+        body: JSON.stringify({ message_id: messageID, fields: evidence.fields, artifacts })
       });
       completionMessageID = '';
       notice = 'Completion evidence was submitted for deterministic validation.';
@@ -243,6 +247,12 @@
     completionFields = { ...completionFields, [name]: value };
   }
 
+  function clearCompletionEvidence(): void {
+    completionFields = {};
+    completionFiles = {};
+    completionMessageID = '';
+  }
+
   async function base64(file: File): Promise<string> {
     const bytes = new Uint8Array(await file.arrayBuffer());
     let binary = '';
@@ -318,7 +328,7 @@
       </section>
       <section class="panel task-lookup"><div><p class="eyebrow">Durable status</p><h2>Find a Task</h2></div><div class="inline"><input bind:value={taskID} placeholder="task-id" /><button onclick={findTask} disabled={busy || !taskID.trim()}>Open</button></div>
         {#if task}<div class="task"><div><span class="status">{safeDisplay(task.state)}</span><h3>{safeDisplay(task.task_id)}</h3>{#if task.work_id}<p class="mono">Work {safeDisplay(task.work_id)}</p>{/if}{#if task.mode}<p>Mode: <strong>{safeDisplay(task.mode)}</strong></p>{/if}{#if task.trust_label}<p class="risk">Trust: {safeDisplay(task.trust_label)}</p>{/if}{#if task.prompt}<p class="boundary-note governed-text">{safeDisplay(task.prompt)}</p>{/if}{#if task.result}<p class="governed-text">{safeDisplay(task.result)}</p>{/if}</div>
-          {#if task.completion_contract}{#key task.task_id}<form onsubmit={(event) => { event.preventDefault(); submitCompletion(); }}><h4>Required completion evidence</h4>{#each task.completion_contract.required_fields ?? [] as field}<label>{safeDisplay(field.name)}<small>{safeDisplay(field.description)}; {field.min_bytes} to {field.max_bytes} UTF-8 bytes</small><textarea required value={completionFields[field.name] ?? ''} oninput={(event) => setCompletionField(field.name, event.currentTarget.value)}></textarea></label>{/each}{#each task.completion_contract.artifact_requirements ?? [] as requirement}<label>{safeDisplay(requirement.role)}<small>{requirement.min_count} to {requirement.max_count} files; {requirement.media_types.map(safeDisplay).join(', ')}</small><input type="file" required={requirement.min_count > 0} multiple={requirement.max_count > 1} accept={requirement.media_types.join(',')} onchange={(event) => setFiles(requirement.role, event)} /></label>{/each}<button class="primary" type="submit" disabled={busy}>Submit complete evidence</button></form>{/key}{/if}
+          {#if task.completion_contract}{#key `${task.task_id}:${task.completion_contract.task_version}`}<form onsubmit={(event) => { event.preventDefault(); submitCompletion(); }}><h4>Required completion evidence</h4>{#each task.completion_contract.required_fields ?? [] as field}<label>{safeDisplay(field.name)}<small>{safeDisplay(field.description)}; {field.min_bytes} to {field.max_bytes} UTF-8 bytes</small><textarea required disabled={busy} value={completionFields[field.name] ?? ''} oninput={(event) => setCompletionField(field.name, event.currentTarget.value)}></textarea></label>{/each}{#each task.completion_contract.artifact_requirements ?? [] as requirement}<label>{safeDisplay(requirement.role)}<small>{requirement.min_count} to {requirement.max_count} files; {requirement.media_types.map(safeDisplay).join(', ')}</small><input type="file" disabled={busy} required={requirement.min_count > 0} multiple={requirement.max_count > 1} accept={requirement.media_types.join(',')} onchange={(event) => setFiles(requirement.role, event)} /></label>{/each}<button class="primary" type="submit" disabled={busy}>Submit complete evidence</button></form>{/key}{/if}
         </div>{/if}
       </section>
     {:else if section === 'approvals'}

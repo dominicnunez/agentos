@@ -4,10 +4,17 @@ const sessionKey = 'agentos.dashboard.session';
 let sessionToken = '';
 
 export class APIError extends Error {
-  constructor(readonly status: number, message: string) {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
     super(message);
     this.name = 'APIError';
+    this.status = status;
   }
+}
+
+export function isDashboardSessionRejection(error: unknown): boolean {
+  return error instanceof APIError && error.status === 401;
 }
 
 function currentBootstrapToken(): string {
@@ -45,8 +52,10 @@ export async function connect(): Promise<DashboardIdentity> {
     }
     return await api<DashboardIdentity>('/api/dashboard');
   } catch (error) {
-    sessionStorage.removeItem(sessionKey);
-    sessionToken = '';
+    if (isDashboardSessionRejection(error)) {
+      sessionStorage.removeItem(sessionKey);
+      sessionToken = '';
+    }
     throw error;
   }
 }

@@ -1,4 +1,4 @@
-import type { CompletionReview, CompletionReviewPage } from './types';
+import type { CompletionContract, CompletionReview, CompletionReviewPage } from './types';
 
 const maximumReviewPages = 100;
 const maximumArtifactBytes = 16 * 1024 * 1024;
@@ -7,6 +7,20 @@ const maximumCompletionBytes = 32 * 1024 * 1024;
 export type ArtifactSelection = { name: string; size: number; type: string };
 export type ArtifactRequirement = { role: string; media_types: string[]; min_count: number; max_count: number };
 export type FieldRequirement = { name: string; min_bytes: number; max_bytes: number };
+
+export function sameCompletionContract(previous?: CompletionContract, next?: CompletionContract): boolean {
+  return Boolean(previous && next && previous.task_id === next.task_id && previous.task_version === next.task_version);
+}
+
+export function snapshotCompletionEvidence<T>(
+  fields: Record<string, string>,
+  files: Record<string, T[]>
+): { fields: Record<string, string>; files: Record<string, T[]> } {
+  return {
+    fields: { ...fields },
+    files: Object.fromEntries(Object.entries(files).map(([role, selected]) => [role, [...selected]]))
+  };
+}
 
 export function safeDisplay(value: string): string {
   return value.replace(/[\p{Cc}\p{Cf}]/gu, (character) =>

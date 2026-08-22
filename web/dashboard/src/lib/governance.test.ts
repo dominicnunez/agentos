@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { confirmationMessageID, loadAllCompletionReviews, safeDisplay, validateArtifactSelections, validateCompletionFields } from './governance.ts';
+import { APIError, isDashboardSessionRejection } from './api.ts';
+import { confirmationMessageID, loadAllCompletionReviews, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from './governance.ts';
 import type { CompletionReview } from './types';
 
 function review(id: string): CompletionReview {
@@ -46,4 +47,28 @@ test('derives a stable confirmation message identity from the reviewed fingerpri
 test('leaves artifact media validation to content-derived server checks', () => {
   const requirement = [{ role: 'report', media_types: ['application/pdf'], min_count: 1, max_count: 1 }];
   assert.equal(validateArtifactSelections(requirement, { report: [{ name: 'report.txt', size: 10, type: 'text/plain' }] }), null);
+});
+
+test('clears stored dashboard sessions only after an explicit credential rejection', () => {
+  assert.equal(isDashboardSessionRejection(new APIError(401, 'expired')), true);
+  assert.equal(isDashboardSessionRejection(new APIError(503, 'unavailable')), false);
+  assert.equal(isDashboardSessionRejection(new TypeError('network failure')), false);
+});
+
+test('preserves evidence only for the same durable completion contract', () => {
+  const contract = { task_id: 'task-1', task_version: 2, criteria: [] };
+  assert.equal(sameCompletionContract(contract, { ...contract }), true);
+  assert.equal(sameCompletionContract(contract, { ...contract, task_version: 3 }), false);
+  assert.equal(sameCompletionContract(contract, undefined), false);
+});
+
+test('snapshots completion evidence before asynchronous encoding', () => {
+  const fields = { answer: 'reviewed' };
+  const first = { name: 'first.txt', size: 1, type: 'text/plain' };
+  const files = { report: [first] };
+  const snapshot = snapshotCompletionEvidence(fields, files);
+  fields.answer = 'changed';
+  files.report.push({ name: 'second.txt', size: 1, type: 'text/plain' });
+  assert.deepEqual(snapshot.fields, { answer: 'reviewed' });
+  assert.deepEqual(snapshot.files, { report: [first] });
 });

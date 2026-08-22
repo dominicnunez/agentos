@@ -90,7 +90,7 @@ func TestDashboardBridgeProxiesOnlyAllowlistedJSONWithoutBrowserCredential(t *te
 	var requests atomic.Int32
 	upstream := &http.Client{Transport: dashboardRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		requests.Add(1)
-		if request.URL.Path != "/v1/user/reviews" || request.URL.RawQuery != "limit=100" {
+		if request.URL.Path != "/v1/user/tasks/task?case@partner" || request.URL.RawQuery != "" {
 			t.Fatalf("upstream target=%s?%s", request.URL.Path, request.URL.RawQuery)
 		}
 		if request.Header.Get("Authorization") != "" || request.Header.Get("Cookie") != "" {
@@ -107,7 +107,7 @@ func TestDashboardBridgeProxiesOnlyAllowlistedJSONWithoutBrowserCredential(t *te
 		t.Fatal(err)
 	}
 	token := dashboardSession(t, bridge)
-	response := dashboardAuthorizedRequest(bridge, http.MethodGet, "/api/v1/user/reviews?limit=100", token, "")
+	response := dashboardAuthorizedRequest(bridge, http.MethodGet, "/api/v1/user/tasks/task%3Fcase@partner", token, "")
 	if response.Code != http.StatusOK || response.Body.String() != `{"reviews":[]}` {
 		t.Fatalf("proxy=%d %q", response.Code, response.Body.String())
 	}
@@ -152,7 +152,10 @@ func TestAllowedDashboardRoute(t *testing.T) {
 		{http.MethodPost, "/v1/user/messages", "", true},
 		{http.MethodPost, "/v1/user/intents/conversation-1/confirm", "", true},
 		{http.MethodPost, "/v1/user/tasks/task-1/completion", "", true},
+		{http.MethodGet, "/v1/user/tasks/task-case@partner", "", true},
+		{http.MethodGet, "/v1/user/tasks/task-\u6848\u4ef6", "", true},
 		{http.MethodGet, "/v1/user/reviews", "after=task-1&limit=10", true},
+		{http.MethodGet, "/v1/user/reviews", "after=task-case%40partner&limit=10", true},
 		{http.MethodPost, "/v1/control/approvals/approval-1/decision", "", true},
 		{http.MethodPost, "/v1/control/approvals/approval-1/approve", "", false},
 		{http.MethodGet, "/v1/user/reviews", "limit=10&limit=20", false},

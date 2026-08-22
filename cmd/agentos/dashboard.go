@@ -11,12 +11,14 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/bootstrap"
+	"github.com/dominicnunez/agentos/internal/intake"
 )
 
 const (
@@ -211,12 +213,12 @@ func (b *dashboardBridge) proxy(w http.ResponseWriter, incoming *http.Request) {
 		defer func() { _ = incoming.Body.Close() }()
 		body = http.MaxBytesReader(w, incoming.Body, bodyLimit)
 	}
-	request, err := http.NewRequestWithContext(incoming.Context(), incoming.Method, "http://agentos.local"+upstreamPath, body)
+	target := url.URL{Scheme: "http", Host: "agentos.local", Path: upstreamPath, RawQuery: incoming.URL.RawQuery}
+	request, err := http.NewRequestWithContext(incoming.Context(), incoming.Method, target.String(), body)
 	if err != nil {
 		writeDashboardJSON(w, http.StatusBadGateway, map[string]string{"error": "local user gateway request is invalid"})
 		return
 	}
-	request.URL.RawQuery = incoming.URL.RawQuery
 	request.Header.Set("Accept", "application/json")
 	if incoming.Method == http.MethodPost {
 		if incoming.Header.Get("Content-Type") != "application/json" {
@@ -249,31 +251,26 @@ func (b *dashboardBridge) proxy(w http.ResponseWriter, incoming *http.Request) {
 
 func allowedDashboardRoute(method, requestPath, rawQuery string) bool {
 	segments := strings.Split(strings.TrimPrefix(requestPath, "/"), "/")
-	for _, segment := range segments {
-		if !validDashboardSegment(segment) {
-			return false
-		}
-	}
 	switch {
 	case method == http.MethodPost && requestPath == "/v1/user/messages" && rawQuery == "":
 		return true
 	case method == http.MethodGet && requestPath == "/v1/user/intents/active" && rawQuery == "":
 		return true
-	case method == http.MethodPost && len(segments) == 5 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "intents" && segments[4] == "confirm" && rawQuery == "":
+	case method == http.MethodPost && len(segments) == 5 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "intents" && validDashboardIdentifier(segments[3]) && segments[4] == "confirm" && rawQuery == "":
 		return true
-	case method == http.MethodGet && len(segments) == 4 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "tasks" && rawQuery == "":
+	case method == http.MethodGet && len(segments) == 4 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "tasks" && validDashboardIdentifier(segments[3]) && rawQuery == "":
 		return true
-	case method == http.MethodPost && len(segments) == 5 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "tasks" && segments[4] == "completion" && rawQuery == "":
+	case method == http.MethodPost && len(segments) == 5 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "tasks" && validDashboardIdentifier(segments[3]) && segments[4] == "completion" && rawQuery == "":
 		return true
 	case method == http.MethodGet && requestPath == "/v1/user/reviews":
 		return validReviewQuery(rawQuery)
-	case (method == http.MethodGet || method == http.MethodPost) && len(segments) == 4 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "reviews" && rawQuery == "":
+	case (method == http.MethodGet || method == http.MethodPost) && len(segments) == 4 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "reviews" && validDashboardIdentifier(segments[3]) && rawQuery == "":
 		return true
 	case method == http.MethodGet && requestPath == "/v1/control/approvals" && rawQuery == "":
 		return true
-	case method == http.MethodGet && len(segments) == 4 && segments[0] == "v1" && segments[1] == "control" && segments[2] == "approvals" && rawQuery == "":
+	case method == http.MethodGet && len(segments) == 4 && segments[0] == "v1" && segments[1] == "control" && segments[2] == "approvals" && validDashboardIdentifier(segments[3]) && rawQuery == "":
 		return true
-	case method == http.MethodPost && len(segments) == 5 && segments[0] == "v1" && segments[1] == "control" && segments[2] == "approvals" &&
+	case method == http.MethodPost && len(segments) == 5 && segments[0] == "v1" && segments[1] == "control" && segments[2] == "approvals" && validDashboardIdentifier(segments[3]) &&
 		(segments[4] == "acknowledge" || segments[4] == "begin" || segments[4] == "decision") && rawQuery == "":
 		return true
 	default:
@@ -285,7 +282,10 @@ func validReviewQuery(raw string) bool {
 	if raw == "" {
 		return true
 	}
-	values, err := parseDashboardQuery(raw)
+	if strings.HasPrefix(raw, "&") || strings.HasSuffix(raw, "&") || strings.Contains(raw, "&&") {
+		return false
+	}
+	values, err := url.ParseQuery(raw)
 	if err != nil {
 		return false
 	}
@@ -293,7 +293,7 @@ func validReviewQuery(raw string) bool {
 		if key != "after" && key != "limit" || len(entries) != 1 {
 			return false
 		}
-		if key == "after" && !validDashboardSegment(entries[0]) {
+		if key == "after" && !validDashboardIdentifier(entries[0]) {
 			return false
 		}
 		if key == "limit" {
@@ -306,30 +306,8 @@ func validReviewQuery(raw string) bool {
 	return true
 }
 
-func validDashboardSegment(segment string) bool {
-	if segment == "" || len(segment) > 256 {
-		return false
-	}
-	for _, character := range segment {
-		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
-			character >= '0' && character <= '9' || strings.ContainsRune("-._:", character) {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
-func parseDashboardQuery(raw string) (map[string][]string, error) {
-	values := make(map[string][]string)
-	for _, pair := range strings.Split(raw, "&") {
-		key, value, found := strings.Cut(pair, "=")
-		if !found || key == "" || strings.ContainsAny(key+value, "%+;") {
-			return nil, fmt.Errorf("non-canonical query")
-		}
-		values[key] = append(values[key], value)
-	}
-	return values, nil
+func validDashboardIdentifier(identifier string) bool {
+	return identifier != "." && identifier != ".." && !strings.Contains(identifier, "/") && intake.ValidateIdentifier("dashboard route", identifier) == nil
 }
 
 func randomDashboardToken() (string, error) {
