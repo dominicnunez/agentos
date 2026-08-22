@@ -358,7 +358,7 @@ func (s *Service) ActiveIntent(ctx context.Context, principal Principal) (View, 
 	if !principal.Allowed(CapabilityProvideInput) {
 		return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityProvideInput)
 	}
-	conversationID, stream, found, err := s.app.ActiveIntake(ctx, principal.OrganizationID, core.ID(principal.ID), principal.Kind, principal.Channel)
+	conversationID, _, found, err := s.app.ActiveIntake(ctx, principal.OrganizationID, core.ID(principal.ID), principal.Kind, principal.Channel)
 	if err != nil {
 		return View{}, fmt.Errorf("%w: load active intent", ErrUnavailable)
 	}
@@ -367,7 +367,7 @@ func (s *Service) ActiveIntent(ctx context.Context, principal Principal) (View, 
 	}
 	unlock := s.lockStream(principal.OrganizationID, conversationID)
 	defer unlock()
-	stream, err = s.app.ExternalEvents(ctx, principal.OrganizationID, conversationID)
+	stream, err := s.app.ExternalEvents(ctx, principal.OrganizationID, conversationID)
 	if err != nil || len(stream) == 0 {
 		return View{}, fmt.Errorf("%w: reload active intent", ErrUnavailable)
 	}
