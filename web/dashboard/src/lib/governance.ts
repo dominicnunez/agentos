@@ -1,4 +1,4 @@
-import type { CompletionContract, CompletionReview, CompletionReviewPage, TaskView } from './types';
+import type { Approval, CompletionContract, CompletionReview, CompletionReviewPage, TaskView } from './types';
 
 const maximumReviewPages = 100;
 const maximumArtifactBytes = 16 * 1024 * 1024;
@@ -10,6 +10,54 @@ export type FieldRequirement = { name: string; min_bytes: number; max_bytes: num
 export type ConfirmationRetryBinding = { conversation_id: string; fingerprint: string };
 export type ApprovalRetryBinding = { approval_id: string; fingerprint: string; decision: 'APPROVE' | 'DENY' };
 export type ReviewRetryBinding = { task_id: string; review_id: string; fingerprint: string; decision: 'APPROVE' | 'REJECT' | 'REVISE'; feedback: string };
+export type DashboardRequest = <T>(path: string, options?: RequestInit) => Promise<T>;
+
+export function terminalApproval(approval: Approval): boolean {
+  return approval.status === 'APPROVED' || approval.status === 'DENIED';
+}
+
+export function terminalCompletionReview(review: CompletionReview): boolean {
+  return review.state !== 'PENDING';
+}
+
+export async function replayApprovalDecision(request: DashboardRequest, current: Approval, decision: 'APPROVE' | 'DENY'): Promise<Approval> {
+  const terminal = (approval: Approval): Approval | null => {
+    if (!terminalApproval(approval)) return null;
+    const recorded = approval.status === 'APPROVED' ? 'APPROVE' : 'DENY';
+    if (recorded !== decision) throw new Error('The approval has a different durable decision.');
+    return approval;
+  };
+  const recorded = terminal(current);
+  if (recorded) return recorded;
+  const body = JSON.stringify({ effect_fingerprint: current.effect_fingerprint });
+  if (current.status === 'PENDING' || current.status === 'NOTIFIED') {
+    current = await request<Approval>(`/api/v1/control/approvals/${encodeURIComponent(current.approval_id)}/acknowledge`, { method: 'POST', body });
+  }
+  const afterAcknowledge = terminal(current);
+  if (afterAcknowledge) return afterAcknowledge;
+  if (current.status === 'ACKNOWLEDGED') {
+    current = await request<Approval>(`/api/v1/control/approvals/${encodeURIComponent(current.approval_id)}/begin`, { method: 'POST', body });
+  }
+  const afterBegin = terminal(current);
+  if (afterBegin) return afterBegin;
+  if (current.status !== 'IN_REVIEW') throw new Error('The approval is not in a decision-ready state.');
+  return request<Approval>(`/api/v1/control/approvals/${encodeURIComponent(current.approval_id)}/decision`, {
+    method: 'POST',
+    body: JSON.stringify({ effect_fingerprint: current.effect_fingerprint, decision })
+  });
+}
+
+export function replayCompletionReviewDecision(request: DashboardRequest, current: CompletionReview, binding: ReviewRetryBinding): Promise<CompletionReview> {
+  return request<CompletionReview>(`/api/v1/user/reviews/${encodeURIComponent(current.task_id)}`, {
+    method: 'POST',
+    body: JSON.stringify({
+      review_id: current.review_id,
+      fingerprint: current.fingerprint,
+      decision: binding.decision,
+      ...(binding.decision === 'REVISE' ? { feedback: binding.feedback } : {})
+    })
+  });
+}
 
 export function confirmationRetryBinding(conversationID: string, fingerprint: string): ConfirmationRetryBinding {
   if (!validBoundaryIdentifier(conversationID)) throw new Error('Intent conversation identity is invalid.');

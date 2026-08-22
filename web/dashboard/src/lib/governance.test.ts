@@ -1,12 +1,47 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { APIError, isDashboardSessionRejection } from './api.ts';
-import { approvalRetryBinding, confirmationMessageID, confirmationRetryBinding, hasRetryableIntentConfirmation, loadAllCompletionReviews, matchesConfirmationRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from './governance.ts';
-import type { CompletionReview } from './types';
+import { approvalRetryBinding, confirmationMessageID, confirmationRetryBinding, hasRetryableIntentConfirmation, loadAllCompletionReviews, matchesConfirmationRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from './governance.ts';
+import type { Approval, CompletionReview } from './types';
 
 function review(id: string): CompletionReview {
   return { review_id: id, task_id: `task-${id}`, fingerprint: id, state: 'PENDING', objective: id, criteria: [], evidence_refs: [], updated_at: '2026-01-01T00:00:00Z' };
 }
+
+function approval(status: string): Approval {
+  return { approval_id: 'approval-1', task_id: 'task-1', action: 'publish', resource: 'release', scope: 'public', canonical_effect_descriptor: 'publish release', effect_arguments: {}, boundary: 'PUBLIC_EXTERNAL', risk: 'HIGH', urgency: 'NORMAL', effect_fingerprint: 'a'.repeat(64), status, single_use: true, created_at: '2026-01-01T00:00:00Z' };
+}
+
+test('reconciles an uncertain approval before another decision can replace it', async () => {
+  const calls: { path: string; body: string }[] = [];
+  const responses = [approval('IN_REVIEW'), approval('APPROVED')];
+  const request = async <T>(path: string, options?: RequestInit): Promise<T> => {
+    calls.push({ path, body: String(options?.body ?? '') });
+    return responses.shift() as T;
+  };
+  const recorded = await replayApprovalDecision(request, approval('ACKNOWLEDGED'), 'APPROVE');
+  assert.equal(recorded.status, 'APPROVED');
+  assert.deepEqual(calls.map((call) => call.path), [
+    '/api/v1/control/approvals/approval-1/begin',
+    '/api/v1/control/approvals/approval-1/decision'
+  ]);
+  assert.match(calls[1].body, /"decision":"APPROVE"/);
+  assert.equal(terminalApproval(recorded), true);
+});
+
+test('replays a matching durable completion decision before clearing recovery', async () => {
+  const current = { ...review('review-1'), fingerprint: 'b'.repeat(64), state: 'REVISE', feedback: 'keep exact bytes', reviewer_id: 'operator-1' };
+  const binding = reviewRetryBinding(current.task_id, current.review_id, current.fingerprint, 'REVISE', current.feedback);
+  const calls: { path: string; body: string }[] = [];
+  const request = async <T>(path: string, options?: RequestInit): Promise<T> => {
+    calls.push({ path, body: String(options?.body ?? '') });
+    return current as T;
+  };
+  const recorded = await replayCompletionReviewDecision(request, current, binding);
+  assert.equal(terminalCompletionReview(recorded), true);
+  assert.equal(calls[0].path, `/api/v1/user/reviews/${current.task_id}`);
+  assert.deepEqual(JSON.parse(calls[0].body), { review_id: current.review_id, fingerprint: current.fingerprint, decision: 'REVISE', feedback: 'keep exact bytes' });
+});
 
 test('loads every bounded completion-review page', async () => {
   const seen: string[] = [];

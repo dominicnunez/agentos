@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { APIError, api, connect, identifier } from '$lib/api';
-  import { approvalRetryBinding, confirmationMessageID, confirmationRetryBinding, loadAllCompletionReviews, matchesConfirmationRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
+  import { approvalRetryBinding, confirmationMessageID, confirmationRetryBinding, loadAllCompletionReviews, matchesConfirmationRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
   import type { ApprovalRetryBinding, ReviewRetryBinding } from '$lib/governance';
   import '$lib/app.css';
   import type { Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, IntentDraft, TaskView } from '$lib/types';
@@ -113,7 +113,7 @@
       approvals = approvalResult.value;
       if (pendingApprovalDecision) {
         const recovered = approvals.find((item) => item.approval_id === pendingApprovalDecision?.approval_id);
-        if (recovered && (recovered.status === 'APPROVED' || recovered.status === 'DENIED')) {
+        if (recovered && terminalApproval(recovered)) {
           selectedApproval = recovered;
           clearPendingApprovalDecision();
         }
@@ -123,7 +123,7 @@
       reviews = reviewResult.value;
       if (pendingReviewDecision) {
         const recovered = reviews.find((item) => item.review_id === pendingReviewDecision?.review_id);
-        if (recovered && recovered.state !== 'PENDING') {
+        if (recovered && terminalCompletionReview(recovered)) {
           selectedReview = recovered;
           clearPendingReviewDecision();
         }
@@ -136,8 +136,8 @@
       if (taskResult.value.state !== 'INPUT_REQUIRED' || taskResult.value.task_id !== displayedTask?.task_id || taskResult.value.updated_at !== displayedTask.updated_at || taskResult.value.prompt !== displayedTask.prompt) clearTaskInput();
     }
     if (failures.length) error = `Dashboard refresh failed; previously loaded governance data was preserved. ${failures.join(' ')}`;
-    selectedApproval = approvals.find((item) => item.approval_id === selectedApproval?.approval_id) ?? (selectedApproval && (selectedApproval.status === 'APPROVED' || selectedApproval.status === 'DENIED' || pendingApprovalDecision) ? selectedApproval : null);
-    selectedReview = reviews.find((item) => item.review_id === selectedReview?.review_id) ?? (selectedReview?.state !== 'PENDING' || pendingReviewDecision ? selectedReview : null);
+    selectedApproval = approvals.find((item) => item.approval_id === selectedApproval?.approval_id) ?? (selectedApproval && (terminalApproval(selectedApproval) || pendingApprovalDecision) ? selectedApproval : null);
+    selectedReview = reviews.find((item) => item.review_id === selectedReview?.review_id) ?? (selectedReview && (terminalCompletionReview(selectedReview) || pendingReviewDecision) ? selectedReview : null);
   }
 
   async function loadActiveIntent(): Promise<TaskView | null> {
@@ -152,11 +152,13 @@
   async function loadApprovals(): Promise<Approval[]> {
     const pending = (await api<{ approvals: Approval[] }>('/api/v1/control/approvals')).approvals;
     if (!pendingApprovalDecision) return pending;
-    const exact = await api<Approval>(`/api/v1/control/approvals/${encodeURIComponent(pendingApprovalDecision.approval_id)}`);
+    let exact = await api<Approval>(`/api/v1/control/approvals/${encodeURIComponent(pendingApprovalDecision.approval_id)}`);
     if (exact.approval_id !== pendingApprovalDecision.approval_id || exact.effect_fingerprint !== pendingApprovalDecision.fingerprint) throw new Error('The durable approval changed while recovering a decision.');
-    if (exact.status === 'APPROVED' || exact.status === 'DENIED') {
+    if (terminalApproval(exact)) {
       const recorded = exact.status === 'APPROVED' ? 'APPROVE' : 'DENY';
       if (recorded !== pendingApprovalDecision.decision) throw new Error('The approval has a different durable decision.');
+    } else {
+      exact = await replayApprovalDecision(api, exact, pendingApprovalDecision.decision);
     }
     return [...pending.filter((item) => item.approval_id !== exact.approval_id), exact];
   }
@@ -164,15 +166,16 @@
   async function loadReviews(): Promise<CompletionReview[]> {
     const pending = await loadAllCompletionReviews((after) => api<CompletionReviewPage>(`/api/v1/user/reviews?limit=100${after ? `&after=${encodeURIComponent(after)}` : ''}`));
     if (!pendingReviewDecision) return pending;
-    const exact = await api<CompletionReview>(`/api/v1/user/reviews/${encodeURIComponent(pendingReviewDecision.task_id)}/records/${encodeURIComponent(pendingReviewDecision.review_id)}`);
+    let exact = await api<CompletionReview>(`/api/v1/user/reviews/${encodeURIComponent(pendingReviewDecision.task_id)}/records/${encodeURIComponent(pendingReviewDecision.review_id)}`);
     if (exact.review_id !== pendingReviewDecision.review_id || exact.fingerprint !== pendingReviewDecision.fingerprint) {
       throw new Error('The durable completion review changed while recovering a decision.');
     }
-    if (exact.state !== 'PENDING') {
+    if (terminalCompletionReview(exact)) {
       if (exact.state !== pendingReviewDecision.decision || (exact.state === 'REVISE' && exact.feedback !== pendingReviewDecision.feedback)) {
         throw new Error('The completion review has a different durable decision.');
       }
     }
+    exact = await replayCompletionReviewDecision(api, exact, pendingReviewDecision);
     return [...pending.filter((item) => item.review_id !== exact.review_id), exact];
   }
 
@@ -336,7 +339,12 @@
 
   async function decideApproval(decision: 'APPROVE' | 'DENY'): Promise<void> {
     if (!selectedApproval) return;
+    if (pendingApprovalDecision) {
+      error = 'The earlier approval decision must be recovered before another decision can begin.';
+      return;
+    }
     const approval = selectedApproval;
+    if (terminalApproval(approval)) return;
     const expected = decision === 'APPROVE' ? `APPROVE ${approval.effect_fingerprint.slice(0, 12)}` : 'DENY';
     if (approvalPhrase.trim() !== expected) {
       error = `Type ${expected} exactly.`;
@@ -347,7 +355,7 @@
     await action(async () => {
       let current = await api<Approval>(`/api/v1/control/approvals/${encodeURIComponent(approval.approval_id)}`);
       if (current.effect_fingerprint !== approval.effect_fingerprint) throw new Error('The durable approval fingerprint changed.');
-      if (current.status === 'APPROVED' || current.status === 'DENIED') {
+      if (terminalApproval(current)) {
         const recorded = current.status === 'APPROVED' ? 'APPROVE' : 'DENY';
         if (recorded !== decision) throw new Error(`The exact effect was already ${current.status.toLowerCase()}.`);
         selectedApproval = current;
@@ -357,17 +365,7 @@
         await refresh();
         return;
       }
-      const body = JSON.stringify({ effect_fingerprint: current.effect_fingerprint });
-      if (current.status === 'PENDING' || current.status === 'NOTIFIED') {
-        current = await api<Approval>(`/api/v1/control/approvals/${encodeURIComponent(current.approval_id)}/acknowledge`, { method: 'POST', body });
-      }
-      if (current.status === 'ACKNOWLEDGED') {
-        current = await api<Approval>(`/api/v1/control/approvals/${encodeURIComponent(current.approval_id)}/begin`, { method: 'POST', body });
-      }
-      selectedApproval = await api<Approval>(`/api/v1/control/approvals/${encodeURIComponent(current.approval_id)}/decision`, {
-        method: 'POST',
-        body: JSON.stringify({ effect_fingerprint: current.effect_fingerprint, decision })
-      });
+      selectedApproval = await replayApprovalDecision(api, current, decision);
       clearPendingApprovalDecision();
       approvalPhrase = '';
       notice = `Exact effect ${decision === 'APPROVE' ? 'approved' : 'denied'}.`;
@@ -377,7 +375,12 @@
 
   async function decideReview(decision: 'APPROVE' | 'REJECT' | 'REVISE'): Promise<void> {
     if (!selectedReview) return;
+    if (pendingReviewDecision) {
+      error = 'The earlier completion-review decision must be recovered before another decision can begin.';
+      return;
+    }
     const review = selectedReview;
+    if (terminalCompletionReview(review)) return;
     const expected = `${decision} ${review.fingerprint.slice(0, 12)}`;
     if (reviewPhrase.trim() !== expected) {
       error = `Type ${expected} exactly.`;
@@ -393,20 +396,8 @@
     await action(async () => {
       const current = await api<CompletionReview>(`/api/v1/user/reviews/${encodeURIComponent(review.task_id)}/records/${encodeURIComponent(review.review_id)}`);
       if (current.review_id !== review.review_id || current.fingerprint !== review.fingerprint) throw new Error('The durable completion review changed.');
-      if (current.state !== 'PENDING') {
-        if (current.state !== decision || (decision === 'REVISE' && current.feedback !== feedback)) throw new Error('The completion review already has a different durable decision.');
-        selectedReview = current;
-        clearPendingReviewDecision();
-        reviewPhrase = '';
-        revisionFeedback = '';
-        notice = `Completion evidence marked ${decision.toLowerCase()}.`;
-        await refresh();
-        return;
-      }
-      selectedReview = await api<CompletionReview>(`/api/v1/user/reviews/${encodeURIComponent(review.task_id)}`, {
-        method: 'POST',
-        body: JSON.stringify({ review_id: review.review_id, fingerprint: review.fingerprint, decision, ...(decision === 'REVISE' ? { feedback } : {}) })
-      });
+      if (terminalCompletionReview(current) && (current.state !== decision || (decision === 'REVISE' && current.feedback !== feedback))) throw new Error('The completion review already has a different durable decision.');
+      selectedReview = await replayCompletionReviewDecision(api, current, pendingReviewDecision!);
       clearPendingReviewDecision();
       reviewPhrase = '';
       revisionFeedback = '';
@@ -542,11 +533,11 @@
       </section>
     {:else if section === 'approvals'}
       <section class="split"><div class="panel list"><div class="panel-title"><div><p class="eyebrow">Consequential effects</p><h2>Pending approvals</h2></div><span class="count">{approvals.length}</span></div>{#if approvals.length}{#each approvals as approval}<button class:selected={selectedApproval?.approval_id === approval.approval_id} onclick={() => {selectedApproval=approval; approvalPhrase='';}}><div><strong>{safeDisplay(approval.action)}</strong><span>{safeDisplay(approval.resource)}</span></div><div><span class="risk">{safeDisplay(approval.risk)}</span><small>{safeDisplay(approval.boundary)}</small></div></button>{/each}{:else}<div class="empty">No exact effects are awaiting a decision.</div>{/if}</div>
-        <div class="panel detail">{#if selectedApproval}<p class="eyebrow">Exact proposed effect</p><h2>{safeDisplay(selectedApproval.canonical_effect_descriptor)}</h2><dl><div><dt>Action</dt><dd>{safeDisplay(selectedApproval.action)}</dd></div><div><dt>Resource</dt><dd>{safeDisplay(selectedApproval.resource)}</dd></div><div><dt>Scope</dt><dd>{safeDisplay(selectedApproval.scope)}</dd></div><div><dt>Boundary</dt><dd>{safeDisplay(selectedApproval.boundary)}</dd></div><div><dt>Risk</dt><dd>{safeDisplay(selectedApproval.risk)}</dd></div><div><dt>Urgency</dt><dd>{safeDisplay(selectedApproval.urgency)}</dd></div><div><dt>Expires</dt><dd>{safeDisplay(selectedApproval.expires_at ?? 'No expiry recorded')}</dd></div><div><dt>Single use</dt><dd>{selectedApproval.single_use ? 'Yes' : 'No'}</dd></div></dl>{#if Object.keys(selectedApproval.effect_arguments).length}<h4>Arguments</h4><pre>{safeDisplay(JSON.stringify(selectedApproval.effect_arguments, null, 2))}</pre>{/if}<div class="fingerprint"><span>Effect fingerprint</span><code>{selectedApproval.effect_fingerprint}</code></div><label>Type <code>APPROVE {selectedApproval.effect_fingerprint.slice(0,12)}</code> or <code>DENY</code><input bind:value={approvalPhrase} autocomplete="off" /></label><div class="actions"><button class="danger" onclick={() => decideApproval('DENY')} disabled={busy}>Deny</button><button class="primary" onclick={() => decideApproval('APPROVE')} disabled={busy}>Approve exact effect</button></div>{:else}<div class="empty">Select an approval to inspect the immutable effect details.</div>{/if}</div>
+        <div class="panel detail">{#if selectedApproval}<p class="eyebrow">Exact proposed effect</p><h2>{safeDisplay(selectedApproval.canonical_effect_descriptor)}</h2><dl><div><dt>Status</dt><dd>{safeDisplay(selectedApproval.status)}</dd></div><div><dt>Action</dt><dd>{safeDisplay(selectedApproval.action)}</dd></div><div><dt>Resource</dt><dd>{safeDisplay(selectedApproval.resource)}</dd></div><div><dt>Scope</dt><dd>{safeDisplay(selectedApproval.scope)}</dd></div><div><dt>Boundary</dt><dd>{safeDisplay(selectedApproval.boundary)}</dd></div><div><dt>Risk</dt><dd>{safeDisplay(selectedApproval.risk)}</dd></div><div><dt>Urgency</dt><dd>{safeDisplay(selectedApproval.urgency)}</dd></div><div><dt>Expires</dt><dd>{safeDisplay(selectedApproval.expires_at ?? 'No expiry recorded')}</dd></div><div><dt>Single use</dt><dd>{selectedApproval.single_use ? 'Yes' : 'No'}</dd></div></dl>{#if Object.keys(selectedApproval.effect_arguments).length}<h4>Arguments</h4><pre>{safeDisplay(JSON.stringify(selectedApproval.effect_arguments, null, 2))}</pre>{/if}<div class="fingerprint"><span>Effect fingerprint</span><code>{selectedApproval.effect_fingerprint}</code></div>{#if selectedApproval.status === 'APPROVED' || selectedApproval.status === 'DENIED'}<p class="boundary-note">The authoritative ledger recorded this exact effect as <strong>{safeDisplay(selectedApproval.status)}</strong>. This decision is immutable.</p>{:else if pendingApprovalDecision}<p class="boundary-note">The earlier approval decision is being recovered. Refresh before deciding another effect.</p><button onclick={() => refresh()} disabled={busy}>Retry recovery</button>{:else}<label>Type <code>APPROVE {selectedApproval.effect_fingerprint.slice(0,12)}</code> or <code>DENY</code><input bind:value={approvalPhrase} autocomplete="off" /></label><div class="actions"><button class="danger" onclick={() => decideApproval('DENY')} disabled={busy}>Deny</button><button class="primary" onclick={() => decideApproval('APPROVE')} disabled={busy}>Approve exact effect</button></div>{/if}{:else}<div class="empty">Select an approval to inspect the immutable effect details.</div>{/if}</div>
       </section>
     {:else if section === 'reviews'}
       <section class="split"><div class="panel list"><div class="panel-title"><div><p class="eyebrow">Completion evidence</p><h2>Review queue</h2></div><span class="count">{reviews.length}</span></div>{#if reviews.length}{#each reviews as review}<button class:selected={selectedReview?.review_id === review.review_id} onclick={() => {selectedReview=review; reviewPhrase=''; revisionFeedback='';}}><div><strong>{safeDisplay(review.objective)}</strong><span>{safeDisplay(review.task_id)}</span></div><span class="status">{safeDisplay(review.state)}</span></button>{/each}{:else}<div class="empty">No completion evidence is awaiting judgment.</div>{/if}</div>
-        <div class="panel detail">{#if selectedReview}<p class="eyebrow">Candidate result</p><h2>{safeDisplay(selectedReview.objective)}</h2><blockquote>{safeDisplay(selectedReview.candidate_result ?? selectedReview.result ?? 'No text result supplied.')}</blockquote><h4>Done when</h4><ul>{#each selectedReview.criteria as criterion}<li>{safeDisplay(criterion.description)}</li>{/each}</ul><h4>Evidence references</h4><ul class="mono">{#each selectedReview.evidence_refs as ref}<li>{safeDisplay(ref)}</li>{/each}</ul><div class="fingerprint"><span>Evidence fingerprint</span><code>{selectedReview.fingerprint}</code></div><p class="boundary-note">This judgment verifies the recorded candidate only. It does not approve any consequential effect.</p><label>Type <code>APPROVE {selectedReview.fingerprint.slice(0,12)}</code>, <code>REJECT {selectedReview.fingerprint.slice(0,12)}</code>, or <code>REVISE {selectedReview.fingerprint.slice(0,12)}</code><input bind:value={reviewPhrase} autocomplete="off" /></label>{#if reviewPhrase.startsWith('REVISE')}<label>Revision feedback<textarea bind:value={revisionFeedback} required></textarea></label>{/if}<div class="actions three"><button class="danger" onclick={() => decideReview('REJECT')} disabled={busy}>Reject</button><button onclick={() => decideReview('REVISE')} disabled={busy}>Request revision</button><button class="primary" onclick={() => decideReview('APPROVE')} disabled={busy}>Approve evidence</button></div>{:else}<div class="empty">Select a review to compare the candidate result with its exact completion contract.</div>{/if}</div>
+        <div class="panel detail">{#if selectedReview}<p class="eyebrow">Candidate result</p><h2>{safeDisplay(selectedReview.objective)}</h2><blockquote>{safeDisplay(selectedReview.candidate_result ?? selectedReview.result ?? 'No text result supplied.')}</blockquote><h4>Done when</h4><ul>{#each selectedReview.criteria as criterion}<li>{safeDisplay(criterion.description)}</li>{/each}</ul><h4>Evidence references</h4><ul class="mono">{#each selectedReview.evidence_refs as ref}<li>{safeDisplay(ref)}</li>{/each}</ul><div class="fingerprint"><span>Evidence fingerprint</span><code>{selectedReview.fingerprint}</code></div><p class="boundary-note">This judgment verifies the recorded candidate only. It does not approve any consequential effect.</p>{#if selectedReview.state !== 'PENDING'}<dl><div><dt>Decision</dt><dd>{safeDisplay(selectedReview.state)}</dd></div><div><dt>Reviewer</dt><dd>{safeDisplay(selectedReview.reviewer_id ?? 'No reviewer recorded')}</dd></div></dl>{#if selectedReview.state === 'REVISE'}<h4>Recorded revision feedback</h4><pre>{safeDisplay(selectedReview.feedback ?? '')}</pre>{/if}<p class="boundary-note">The authoritative ledger recorded this completion-review decision. It is immutable.</p>{:else if pendingReviewDecision}<p class="boundary-note">The earlier completion-review decision is being recovered. Refresh before beginning another judgment.</p><button onclick={() => refresh()} disabled={busy}>Retry recovery</button>{:else}<label>Type <code>APPROVE {selectedReview.fingerprint.slice(0,12)}</code>, <code>REJECT {selectedReview.fingerprint.slice(0,12)}</code>, or <code>REVISE {selectedReview.fingerprint.slice(0,12)}</code><input bind:value={reviewPhrase} autocomplete="off" /></label>{#if reviewPhrase.startsWith('REVISE')}<label>Revision feedback<textarea bind:value={revisionFeedback} required></textarea></label>{/if}<div class="actions three"><button class="danger" onclick={() => decideReview('REJECT')} disabled={busy}>Reject</button><button onclick={() => decideReview('REVISE')} disabled={busy}>Request revision</button><button class="primary" onclick={() => decideReview('APPROVE')} disabled={busy}>Approve evidence</button></div>{/if}{:else}<div class="empty">Select a review to compare the candidate result with its exact completion contract.</div>{/if}</div>
       </section>
     {:else}
       <section class="grid two"><div class="panel"><p class="eyebrow">Local boundary</p><h2>Dashboard session</h2><dl><div><dt>Organization</dt><dd>{safeDisplay(identity?.organization ?? 'Unavailable')}</dd></div><div><dt>Install mode</dt><dd>{safeDisplay(identity?.mode ?? 'Unavailable')}</dd></div><div><dt>Agent OS</dt><dd>{safeDisplay(identity?.version ?? 'Unavailable')}</dd></div><div><dt>Expires</dt><dd>{safeDisplay(identity?.session_expires_at ?? 'Unavailable')}</dd></div></dl></div><div class="panel"><p class="eyebrow">Diagnostics</p><h2>Read-only system checks</h2><p>Use <code>agentos doctor</code> for configuration, credential, service, private-gateway, and SQLite integrity checks.</p><pre>agentos doctor
