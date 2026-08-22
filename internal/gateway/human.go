@@ -205,8 +205,17 @@ func (h *Human) handleTaskCompletion(w http.ResponseWriter, r *http.Request, pri
 		h.writeIntakeError(w, err)
 		return
 	}
-	evidence, err := inspectHumanCompletion(principal.ID, task.CompletionContract, request)
+	evidence, err := inspectHumanArtifacts(principal.ID, request.Artifacts)
 	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if task.CompletionContract == nil {
+		view, err := h.service.CompleteHumanTask(r.Context(), principal, taskID, core.HumanTaskSubmission{MessageID: request.MessageID, Fields: request.Fields, Artifacts: evidence})
+		h.writeView(w, view, err)
+		return
+	}
+	if err := validateHumanCompletion(*task.CompletionContract, request, evidence); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -225,16 +234,13 @@ func (h *Human) handleTaskCompletion(w http.ResponseWriter, r *http.Request, pri
 	h.writeView(w, view, err)
 }
 
-func inspectHumanCompletion(principalID string, contract *core.CompletionContract, request humanCompletionRequest) ([]core.ArtifactEvidence, error) {
-	if contract == nil {
-		return nil, fmt.Errorf("user task has no completion contract")
-	}
-	if len(request.Artifacts) > 32 {
+func inspectHumanArtifacts(principalID string, uploads []artifacts.Upload) ([]core.ArtifactEvidence, error) {
+	if len(uploads) > 32 {
 		return nil, fmt.Errorf("user task completion has too many artifacts")
 	}
 	total := 0
-	evidence := make([]core.ArtifactEvidence, 0, len(request.Artifacts))
-	for _, upload := range request.Artifacts {
+	evidence := make([]core.ArtifactEvidence, 0, len(uploads))
+	for _, upload := range uploads {
 		total += len(upload.Data)
 		if total > 32<<20 {
 			return nil, fmt.Errorf("user task artifacts exceed 33554432 bytes")
@@ -245,13 +251,31 @@ func inspectHumanCompletion(principalID string, contract *core.CompletionContrac
 		}
 		evidence = append(evidence, inspected)
 	}
-	result := core.EvaluateHumanTaskCompletion(*contract, core.HumanTaskSubmission{
+	return evidence, nil
+}
+
+func inspectHumanCompletion(principalID string, contract *core.CompletionContract, request humanCompletionRequest) ([]core.ArtifactEvidence, error) {
+	if contract == nil {
+		return nil, fmt.Errorf("user task has no completion contract")
+	}
+	evidence, err := inspectHumanArtifacts(principalID, request.Artifacts)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateHumanCompletion(*contract, request, evidence); err != nil {
+		return nil, err
+	}
+	return evidence, nil
+}
+
+func validateHumanCompletion(contract core.CompletionContract, request humanCompletionRequest, evidence []core.ArtifactEvidence) error {
+	result := core.EvaluateHumanTaskCompletion(contract, core.HumanTaskSubmission{
 		MessageID: request.MessageID, Fields: request.Fields, Artifacts: evidence,
 	})
 	if !result.Complete {
-		return nil, fmt.Errorf("user task completion does not satisfy its contract: %s", strings.Join(result.Reasons, "; "))
+		return fmt.Errorf("user task completion does not satisfy its contract: %s", strings.Join(result.Reasons, "; "))
 	}
-	return evidence, nil
+	return nil
 }
 
 func (h *Human) principal() intake.Principal {

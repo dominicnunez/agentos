@@ -124,6 +124,15 @@ func TestHumanGatewayRequiresStructuredCompletionAndCannotApproveThroughText(t *
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) {
 		t.Fatalf("structured Human completion=%d %s", response.Code, response.Body.String())
 	}
+	beforeReplay := gatewayExternalStream(t, store, "direct-blocked")
+	response = serveHuman(handler, http.MethodPost, "/v1/user/tasks/"+task.TaskID+"/completion", testOwnerMarker, completion)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) {
+		t.Fatalf("structured Human completion replay=%d %s", response.Code, response.Body.String())
+	}
+	afterReplay := gatewayExternalStream(t, store, "direct-blocked")
+	if len(afterReplay) != len(beforeReplay) {
+		t.Fatalf("completion replay appended events: before=%d after=%d", len(beforeReplay), len(afterReplay))
+	}
 	stream := gatewayExternalStream(t, store, "direct-blocked")
 	foundHumanCompletion := false
 	for _, event := range stream {
