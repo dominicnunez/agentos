@@ -6,6 +6,28 @@ const maximumCompletionBytes = 32 * 1024 * 1024;
 
 export type ArtifactSelection = { name: string; size: number; type: string };
 export type ArtifactRequirement = { role: string; media_types: string[]; min_count: number; max_count: number };
+export type FieldRequirement = { name: string; min_bytes: number; max_bytes: number };
+
+export function safeDisplay(value: string): string {
+  return value.replace(/[\p{Cc}\p{Cf}]/gu, '');
+}
+
+export function validateCompletionFields(
+  requirements: FieldRequirement[],
+  fields: Record<string, string>
+): string | null {
+  const required = new Set(requirements.map((item) => item.name));
+  for (const requirement of requirements) {
+    const length = new TextEncoder().encode(fields[requirement.name] ?? '').byteLength;
+    if (length < requirement.min_bytes || length > requirement.max_bytes) {
+      return `${requirement.name} must contain ${requirement.min_bytes} to ${requirement.max_bytes} UTF-8 bytes.`;
+    }
+  }
+  for (const name of Object.keys(fields)) {
+    if (!required.has(name)) return `Unexpected completion field: ${name}.`;
+  }
+  return null;
+}
 
 export async function loadAllCompletionReviews(
   page: (after: string) => Promise<CompletionReviewPage>
