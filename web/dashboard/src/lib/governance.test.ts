@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { APIError, isDashboardSessionRejection } from './api.ts';
-import { confirmationMessageID, hasRetryableIntentConfirmation, loadAllCompletionReviews, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from './governance.ts';
+import { confirmationMessageID, confirmationRetryBinding, hasRetryableIntentConfirmation, loadAllCompletionReviews, parseConfirmationRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from './governance.ts';
 import type { CompletionReview } from './types';
 
 function review(id: string): CompletionReview {
@@ -78,4 +78,16 @@ test('retains only a complete confirmation retry state after active-intake looku
   assert.equal(hasRetryableIntentConfirmation(retry), true);
   assert.equal(hasRetryableIntentConfirmation({ ...retry, state: 'WORKING' }), false);
   assert.equal(hasRetryableIntentConfirmation({ ...retry, intent: undefined }), false);
+});
+
+test('round-trips a minimal pending confirmation binding', () => {
+  const binding = confirmationRetryBinding('conversation-case@partner', 'b'.repeat(64));
+  assert.deepEqual(parseConfirmationRetryBinding(JSON.stringify(binding)), binding);
+});
+
+test('rejects tampered pending confirmation bindings', () => {
+  assert.throws(() => parseConfirmationRetryBinding('{'), /invalid/);
+  assert.throws(() => parseConfirmationRetryBinding(JSON.stringify({ conversation_id: 'conversation-1', fingerprint: 'b'.repeat(64), authority: 'admin' })), /invalid/);
+  assert.throws(() => parseConfirmationRetryBinding(JSON.stringify({ conversation_id: 'conversation\nforged', fingerprint: 'b'.repeat(64) })), /invalid/);
+  assert.throws(() => parseConfirmationRetryBinding(JSON.stringify({ conversation_id: 'conversation-1', fingerprint: 'not-a-fingerprint' })), /invalid/);
 });

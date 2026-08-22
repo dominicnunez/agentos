@@ -7,6 +7,29 @@ const maximumCompletionBytes = 32 * 1024 * 1024;
 export type ArtifactSelection = { name: string; size: number; type: string };
 export type ArtifactRequirement = { role: string; media_types: string[]; min_count: number; max_count: number };
 export type FieldRequirement = { name: string; min_bytes: number; max_bytes: number };
+export type ConfirmationRetryBinding = { conversation_id: string; fingerprint: string };
+
+export function confirmationRetryBinding(conversationID: string, fingerprint: string): ConfirmationRetryBinding {
+  if (!validBoundaryIdentifier(conversationID)) throw new Error('Intent conversation identity is invalid.');
+  confirmationMessageID(fingerprint);
+  return { conversation_id: conversationID, fingerprint };
+}
+
+export function parseConfirmationRetryBinding(value: string | null): ConfirmationRetryBinding | null {
+  if (!value) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error('Stored Intent confirmation retry is invalid.');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Stored Intent confirmation retry is invalid.');
+  const record = parsed as Record<string, unknown>;
+  if (Object.keys(record).sort().join(',') !== 'conversation_id,fingerprint' || typeof record.conversation_id !== 'string' || typeof record.fingerprint !== 'string') {
+    throw new Error('Stored Intent confirmation retry is invalid.');
+  }
+  return confirmationRetryBinding(record.conversation_id, record.fingerprint);
+}
 
 export function hasRetryableIntentConfirmation(view: TaskView | null): boolean {
   return Boolean(view?.state === 'AWAITING_CONFIRMATION' && view.intent && view.conversation_id);
@@ -35,6 +58,15 @@ export function safeDisplay(value: string): string {
 export function confirmationMessageID(fingerprint: string): string {
   if (!/^[0-9a-f]{64}$/.test(fingerprint)) throw new Error('Intent fingerprint is invalid.');
   return `confirmation-${fingerprint}`;
+}
+
+function validBoundaryIdentifier(value: string): boolean {
+  if (!value || /[\p{Cc}\p{White_Space}]/u.test(value)) return false;
+  try {
+    return new TextEncoder().encode(value).byteLength <= 256 && decodeURIComponent(encodeURIComponent(value)) === value;
+  } catch {
+    return false;
+  }
 }
 
 export function validateCompletionFields(

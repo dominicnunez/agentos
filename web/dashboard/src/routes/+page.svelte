@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { APIError, api, connect, identifier } from '$lib/api';
-  import { confirmationMessageID, hasRetryableIntentConfirmation, loadAllCompletionReviews, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
+  import { confirmationMessageID, confirmationRetryBinding, hasRetryableIntentConfirmation, loadAllCompletionReviews, parseConfirmationRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
   import '$lib/app.css';
   import type { Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, IntentDraft, TaskView } from '$lib/types';
 
   type Section = 'overview' | 'work' | 'approvals' | 'reviews' | 'system';
   type IntentList = 'context' | 'deliverables' | 'completion_criteria' | 'constraints';
+  const pendingConfirmationKey = 'agentos.dashboard.pending-confirmation';
 
   let section: Section = 'overview';
   let identity: DashboardIdentity | null = null;
@@ -39,7 +40,19 @@
   onMount(async () => {
     try {
       identity = await connect();
+      let recoveryFailure = '';
+      try {
+        const recovered = await recoverPendingConfirmation();
+        if (recovered) {
+          task = recovered;
+          taskID = recovered.task_id;
+          notice = `Recovered Task ${recovered.task_id} after an interrupted Intent confirmation.`;
+        }
+      } catch (cause) {
+        recoveryFailure = message(cause);
+      }
       await refresh();
+      if (recoveryFailure) error = `Pending Intent confirmation recovery failed. ${recoveryFailure}${error ? ` ${error}` : ''}`;
     } catch (cause) {
       error = message(cause);
     }
@@ -129,10 +142,16 @@
     const draft = active.intent;
     const currentConversation = active.conversation_id;
     await action(async () => {
-      const confirmed = await api<TaskView>(`/api/v1/user/intents/${encodeURIComponent(currentConversation)}/confirm`, {
-        method: 'POST',
-        body: JSON.stringify({ message_id: confirmationMessageID(draft.fingerprint), fingerprint: draft.fingerprint })
-      });
+      const binding = confirmationRetryBinding(currentConversation, draft.fingerprint);
+      sessionStorage.setItem(pendingConfirmationKey, JSON.stringify(binding));
+      let confirmed: TaskView;
+      try {
+        confirmed = await sendConfirmation(binding.conversation_id, binding.fingerprint);
+      } catch (cause) {
+        clearTerminalConfirmationRetry(cause);
+        throw cause;
+      }
+      sessionStorage.removeItem(pendingConfirmationKey);
       clearCompletionEvidence();
       executionKind = '';
       pendingWorkMessageID = '';
@@ -144,6 +163,36 @@
       conversationID = '';
       notice = `Task ${confirmed.task_id} for Work ${confirmed.work_id || ''} was created from the confirmed Intent.`;
       await refresh();
+    });
+  }
+
+  async function recoverPendingConfirmation(): Promise<TaskView | null> {
+    let binding;
+    try {
+      binding = parseConfirmationRetryBinding(sessionStorage.getItem(pendingConfirmationKey));
+    } catch (cause) {
+      sessionStorage.removeItem(pendingConfirmationKey);
+      throw cause;
+    }
+    if (!binding) return null;
+    try {
+      const recovered = await sendConfirmation(binding.conversation_id, binding.fingerprint);
+      sessionStorage.removeItem(pendingConfirmationKey);
+      return recovered;
+    } catch (cause) {
+      clearTerminalConfirmationRetry(cause);
+      throw cause;
+    }
+  }
+
+  function clearTerminalConfirmationRetry(cause: unknown): void {
+    if (cause instanceof APIError && [400, 404, 409].includes(cause.status)) sessionStorage.removeItem(pendingConfirmationKey);
+  }
+
+  function sendConfirmation(conversation: string, fingerprint: string): Promise<TaskView> {
+    return api<TaskView>(`/api/v1/user/intents/${encodeURIComponent(conversation)}/confirm`, {
+      method: 'POST',
+      body: JSON.stringify({ message_id: confirmationMessageID(fingerprint), fingerprint })
     });
   }
 
