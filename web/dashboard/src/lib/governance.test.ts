@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { APIError, isDashboardSessionRejection } from './api.ts';
-import { confirmationMessageID, confirmationRetryBinding, hasRetryableIntentConfirmation, loadAllCompletionReviews, parseConfirmationRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from './governance.ts';
+import { confirmationMessageID, confirmationRetryBinding, hasRetryableIntentConfirmation, loadAllCompletionReviews, matchesConfirmationRetry, parseConfirmationRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from './governance.ts';
 import type { CompletionReview } from './types';
 
 function review(id: string): CompletionReview {
@@ -83,6 +83,10 @@ test('retains only a complete confirmation retry state after active-intake looku
 test('round-trips a minimal pending confirmation binding', () => {
   const binding = confirmationRetryBinding('conversation-case@partner', 'b'.repeat(64));
   assert.deepEqual(parseConfirmationRetryBinding(JSON.stringify(binding)), binding);
+  const view = { task_id: '', conversation_id: binding.conversation_id, state: 'AWAITING_CONFIRMATION', intent: { objective: 'work', mode: 'STANDARD', version: 1, fingerprint: binding.fingerprint } };
+  assert.equal(matchesConfirmationRetry(view, binding), true);
+  assert.equal(matchesConfirmationRetry(view, { ...binding, fingerprint: 'c'.repeat(64) }), false);
+  assert.equal(matchesConfirmationRetry(view, null), false);
 });
 
 test('rejects tampered pending confirmation bindings', () => {

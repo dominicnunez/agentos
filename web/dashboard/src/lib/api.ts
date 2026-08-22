@@ -29,7 +29,7 @@ function clearBootstrapFragment(): void {
 export async function connect(): Promise<DashboardIdentity> {
   sessionToken = sessionStorage.getItem(sessionKey) ?? '';
   const bootstrapToken = currentBootstrapToken();
-  if (bootstrapToken && !sessionToken) {
+  if (bootstrapToken) {
     const response = await fetch('/api/session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -38,8 +38,8 @@ export async function connect(): Promise<DashboardIdentity> {
     const body = await decode<{ session_token: string }>(response);
     sessionToken = body.session_token;
     sessionStorage.setItem(sessionKey, sessionToken);
+    clearBootstrapFragment();
   }
-  if (bootstrapToken && sessionToken) clearBootstrapFragment();
   if (!sessionToken) {
     throw new Error('Launch the dashboard with `agentos` to establish a local session.');
   }

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { APIError, api, connect, identifier } from '$lib/api';
-  import { confirmationMessageID, confirmationRetryBinding, hasRetryableIntentConfirmation, loadAllCompletionReviews, parseConfirmationRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
+  import { confirmationMessageID, confirmationRetryBinding, loadAllCompletionReviews, matchesConfirmationRetry, parseConfirmationRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
   import '$lib/app.css';
   import type { Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, IntentDraft, TaskView } from '$lib/types';
 
@@ -78,7 +78,7 @@
       if (activeResult.value) {
         active = activeResult.value;
         conversationID = activeResult.value.conversation_id;
-      } else if (!hasRetryableIntentConfirmation(displayedActive)) {
+      } else if (!hasStoredConfirmationRetry(displayedActive)) {
         active = null;
         conversationID = '';
       }
@@ -89,7 +89,7 @@
       if (!sameCompletionContract(displayedTask?.completion_contract, taskResult.value.completion_contract)) clearCompletionEvidence();
       task = taskResult.value;
       taskID = taskResult.value.task_id;
-      if (taskResult.value.state !== 'INPUT_REQUIRED') clearTaskInput();
+      if (taskResult.value.state !== 'INPUT_REQUIRED' || taskResult.value.task_id !== displayedTask?.task_id || taskResult.value.updated_at !== displayedTask.updated_at || taskResult.value.prompt !== displayedTask.prompt) clearTaskInput();
     }
     if (failures.length) error = `Dashboard refresh failed; previously loaded governance data was preserved. ${failures.join(' ')}`;
     selectedApproval = approvals.find((item) => item.approval_id === selectedApproval?.approval_id) ?? null;
@@ -185,6 +185,15 @@
     }
   }
 
+  function hasStoredConfirmationRetry(view: TaskView | null): boolean {
+    try {
+      return matchesConfirmationRetry(view, parseConfirmationRetryBinding(sessionStorage.getItem(pendingConfirmationKey)));
+    } catch {
+      sessionStorage.removeItem(pendingConfirmationKey);
+      return false;
+    }
+  }
+
   function clearTerminalConfirmationRetry(cause: unknown): void {
     if (cause instanceof APIError && [400, 404, 409].includes(cause.status)) sessionStorage.removeItem(pendingConfirmationKey);
   }
@@ -267,7 +276,17 @@
       return;
     }
     await action(async () => {
-      let current = approval;
+      let current = await api<Approval>(`/api/v1/control/approvals/${encodeURIComponent(approval.approval_id)}`);
+      if (current.effect_fingerprint !== approval.effect_fingerprint) throw new Error('The durable approval fingerprint changed.');
+      if (current.status === 'APPROVED' || current.status === 'DENIED') {
+        const recorded = current.status === 'APPROVED' ? 'APPROVE' : 'DENY';
+        if (recorded !== decision) throw new Error(`The exact effect was already ${current.status.toLowerCase()}.`);
+        selectedApproval = current;
+        approvalPhrase = '';
+        notice = `Exact effect ${decision === 'APPROVE' ? 'approved' : 'denied'}.`;
+        await refresh();
+        return;
+      }
       const body = JSON.stringify({ effect_fingerprint: current.effect_fingerprint });
       if (current.status === 'PENDING' || current.status === 'NOTIFIED') {
         current = await api<Approval>(`/api/v1/control/approvals/${encodeURIComponent(current.approval_id)}/acknowledge`, { method: 'POST', body });

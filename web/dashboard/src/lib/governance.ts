@@ -35,6 +35,13 @@ export function hasRetryableIntentConfirmation(view: TaskView | null): boolean {
   return Boolean(view?.state === 'AWAITING_CONFIRMATION' && view.intent && view.conversation_id);
 }
 
+export function matchesConfirmationRetry(view: TaskView | null, binding: ConfirmationRetryBinding | null): boolean {
+  return Boolean(
+    hasRetryableIntentConfirmation(view) && binding &&
+    view!.conversation_id === binding.conversation_id && view!.intent!.fingerprint === binding.fingerprint
+  );
+}
+
 export function sameCompletionContract(previous?: CompletionContract, next?: CompletionContract): boolean {
   return Boolean(previous && next && previous.task_id === next.task_id && previous.task_version === next.task_version);
 }
