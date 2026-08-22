@@ -151,10 +151,12 @@ func TestAllowedDashboardRoute(t *testing.T) {
 	}{
 		{http.MethodPost, "/v1/user/messages", "", true},
 		{http.MethodPost, "/v1/user/intents/conversation-1/confirm", "", true},
+		{http.MethodGet, "/v1/user/tasks/recent", "", true},
 		{http.MethodPost, "/v1/user/tasks/task-1/completion", "", true},
 		{http.MethodGet, "/v1/user/tasks/task-case@partner", "", true},
 		{http.MethodGet, "/v1/user/tasks/task-\u6848\u4ef6", "", true},
 		{http.MethodGet, "/v1/user/reviews", "after=task-1&limit=10", true},
+		{http.MethodGet, "/v1/user/reviews/task-1/records/review-task-1-v1", "", true},
 		{http.MethodGet, "/v1/user/reviews", "after=task-case%40partner&limit=10", true},
 		{http.MethodPost, "/v1/control/approvals/approval-1/decision", "", true},
 		{http.MethodPost, "/v1/control/approvals/approval-1/approve", "", false},

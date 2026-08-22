@@ -61,6 +61,8 @@ export type CompletionReview = {
   task_id: string;
   fingerprint: string;
   state: string;
+  reviewer_id?: string;
+  feedback?: string;
   objective: string;
   candidate_result?: string;
   result?: string;

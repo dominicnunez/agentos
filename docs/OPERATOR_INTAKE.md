@@ -172,12 +172,20 @@ the Unix socket:
 - `POST /v1/user/messages`
 - `GET /v1/user/intents/active`
 - `POST /v1/user/intents/{conversation-id}/confirm`
+- `GET /v1/user/tasks/recent`
 - `GET /v1/user/tasks/{task-id}`
 - `POST /v1/user/tasks/{task-id}/completion`
 - `GET /v1/user/reviews?after={task-id}&limit={1..100}`
 - `GET|POST /v1/user/reviews/{task-id}`
+- `GET /v1/user/reviews/{task-id}/records/{review-id}`
 - `GET /v1/control/approvals`
 - exact-effect approval operations beneath `/v1/control/approvals/{id}`
+
+The recent-Task read is bound to the authenticated principal's latest confirmed
+intake and exists only to recover an interrupted confirmation across dashboard
+processes. Exact approval and completion-review reads continue exposing their
+terminal ledger state so a lost mutation response can be resolved without
+repeating or guessing the decision.
 
 The completion endpoint accepts strict JSON. Required files are size-bounded,
 content-sniffed, stored privately by SHA-256, and recorded as untrusted user

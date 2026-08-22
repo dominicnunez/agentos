@@ -116,6 +116,11 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeView(w, view, err)
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/user/tasks/recent" {
+		view, err := h.service.LatestTask(r.Context(), principal)
+		h.writeView(w, view, err)
+		return
+	}
 	const intentPrefix = "/v1/user/intents/"
 	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, intentPrefix) && strings.HasSuffix(r.URL.Path, "/confirm") {
 		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, intentPrefix), "/confirm")
@@ -146,7 +151,14 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, reviewPrefix) && len(r.URL.Path) > len(reviewPrefix) {
-		taskID := strings.TrimPrefix(r.URL.Path, reviewPrefix)
+		remainder := strings.TrimPrefix(r.URL.Path, reviewPrefix)
+		parts := strings.Split(remainder, "/")
+		if r.Method == http.MethodGet && len(parts) == 3 && parts[0] != "" && parts[1] == "records" && parts[2] != "" {
+			view, err := h.service.GetCompletionReviewRecord(r.Context(), principal, parts[0], parts[2])
+			h.writeReviewView(w, view, err)
+			return
+		}
+		taskID := remainder
 		if strings.Contains(taskID, "/") {
 			http.NotFound(w, r)
 			return

@@ -163,6 +163,13 @@ func TestApprovalWaitsAcrossRestart(t *testing.T) {
 	if err != nil || result.Status != core.EffectConfirmed || adapter.calls != 1 {
 		t.Fatalf("approved effect result=%+v calls=%d err=%v", result, adapter.calls, err)
 	}
+	terminal, err := service.ReadContext(ctx, approval.ID, "human-approver")
+	if err != nil || terminal.Approval.Status != core.ApprovalApproved || terminal.Effect.Status != core.EffectConfirmed || terminal.Effect.EffectFingerprint != fingerprint {
+		t.Fatalf("terminal approval context=%+v err=%v", terminal, err)
+	}
+	if _, err := service.DecisionContext(ctx, approval.ID, "human-approver"); err == nil {
+		t.Fatal("terminal effect remained eligible for mutation")
+	}
 	stream, err := l.Events(ctx, "")
 	if err != nil {
 		t.Fatal(err)

@@ -2382,6 +2382,10 @@ func TestCompletionReviewRevisionIsUntrustedExecutionContext(t *testing.T) {
 	if err != nil || !found || second.Request.ID == first.Request.ID || !strings.Contains(second.Result, "Make the conclusion specific.") {
 		t.Fatalf("revised review=%+v found=%t err=%v", second, found, err)
 	}
+	decided, found, err := service.CompletionReviewRecord(context.Background(), "org-1", string(submitted.Task.ID), first.Request.ID)
+	if err != nil || !found || decided.Request.ID != first.Request.ID || decided.Decision != completion.ReviewRevise || decided.Feedback != "Make the conclusion specific." || decided.ReviewerID != "reviewer-1" {
+		t.Fatalf("exact revised review=%+v found=%t err=%v", decided, found, err)
+	}
 	stream, err := service.Events(context.Background(), submitted.Events[0].CorrelationID)
 	if err != nil {
 		t.Fatal(err)

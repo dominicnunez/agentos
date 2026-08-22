@@ -323,6 +323,30 @@ func (s *Service) DecisionContext(ctx context.Context, approvalID, humanID core.
 	return DecisionContext{Approval: approval, Effect: obligation}, nil
 }
 
+// ReadContext returns an authorized immutable approval/effect binding for
+// display and uncertain-response recovery. Terminal decisions remain readable
+// after their effect leaves PENDING; mutation callers must use DecisionContext.
+func (s *Service) ReadContext(ctx context.Context, approvalID, humanID core.ID) (DecisionContext, error) {
+	approval, _, err := s.load(ctx, approvalID)
+	if err != nil {
+		return DecisionContext{}, err
+	}
+	if err := s.authorizeDecision(ctx, humanID, approval); err != nil {
+		return DecisionContext{}, err
+	}
+	terminal := approval.Status == core.ApprovalApproved || approval.Status == core.ApprovalDenied
+	if !terminal {
+		if err := s.validateUnexpired(approval); err != nil {
+			return DecisionContext{}, err
+		}
+	}
+	obligation, err := s.effectForApproval(ctx, approval, !terminal)
+	if err != nil {
+		return DecisionContext{}, err
+	}
+	return DecisionContext{Approval: approval, Effect: obligation}, nil
+}
+
 // PendingDecisionContexts returns current, exactly authorized approval work for
 // the local inbox. Every mutation still reloads the individual record.
 func (s *Service) PendingDecisionContexts(ctx context.Context, humanID core.ID) ([]DecisionContext, error) {
@@ -411,6 +435,10 @@ func (s *Service) validatePreparedEffect(ctx context.Context, approval core.Huma
 }
 
 func (s *Service) preparedEffect(ctx context.Context, approval core.HumanApproval) (core.EffectObligation, error) {
+	return s.effectForApproval(ctx, approval, true)
+}
+
+func (s *Service) effectForApproval(ctx context.Context, approval core.HumanApproval, requirePending bool) (core.EffectObligation, error) {
 	body, _, err := latestRecord(ctx, s.store, "effect", string(approval.EffectObligationID))
 	if errors.Is(err, errRecordNotFound) {
 		return core.EffectObligation{}, fmt.Errorf("approval requires a prepared effect obligation")
@@ -422,7 +450,7 @@ func (s *Service) preparedEffect(ctx context.Context, approval core.HumanApprova
 	if err := json.Unmarshal(body, &obligation); err != nil {
 		return core.EffectObligation{}, fmt.Errorf("decode prepared effect %s: %w", approval.EffectObligationID, err)
 	}
-	if obligation.Status != core.EffectPending || !approvalMatchesEffect(approval, obligation) {
+	if (requirePending && obligation.Status != core.EffectPending) || !approvalMatchesEffect(approval, obligation) {
 		return core.EffectObligation{}, fmt.Errorf("approval does not match the prepared effect obligation")
 	}
 	return obligation, nil

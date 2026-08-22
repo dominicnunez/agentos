@@ -98,6 +98,8 @@ type CompletionReviewView struct {
 	TaskVersion  int                        `json:"task_version"`
 	Fingerprint  string                     `json:"fingerprint"`
 	State        string                     `json:"state"`
+	ReviewerID   string                     `json:"reviewer_id,omitempty"`
+	Feedback     string                     `json:"feedback,omitempty"`
 	Objective    string                     `json:"objective"`
 	Result       string                     `json:"candidate_result"`
 	Criteria     []core.CompletionCriterion `json:"criteria"`
@@ -561,6 +563,26 @@ func (s *Service) Get(ctx context.Context, principal Principal, taskID string) (
 	return projectView(conversationID, stream, principal.Allowed(CapabilityReadResult)), nil
 }
 
+func (s *Service) LatestTask(ctx context.Context, principal Principal) (View, error) {
+	if err := validatePrincipal(principal); err != nil {
+		return View{}, err
+	}
+	if !principal.Allowed(CapabilityReadStatus) {
+		return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
+	}
+	conversationID, stream, found, err := s.app.LatestConfirmedIntake(ctx, principal.OrganizationID, core.ID(principal.ID), principal.Kind, principal.Channel)
+	if err != nil {
+		return View{}, fmt.Errorf("%w: load recent work", ErrUnavailable)
+	}
+	if !found || len(stream) == 0 || !streamHasEvent(stream, "INTENT_CONFIRMED") {
+		return View{}, ErrNotFound
+	}
+	if _, err := authorizedInitialWork(principal, stream); err != nil {
+		return View{}, err
+	}
+	return projectView(conversationID, stream, principal.Allowed(CapabilityReadResult)), nil
+}
+
 func (s *Service) GetCompletionReview(ctx context.Context, principal Principal, taskID string) (CompletionReviewView, error) {
 	if err := validateCompletionReviewer(principal); err != nil {
 		return CompletionReviewView{}, err
@@ -575,7 +597,35 @@ func (s *Service) GetCompletionReview(ctx context.Context, principal Principal, 
 	if !found {
 		return CompletionReviewView{}, ErrNotFound
 	}
-	return projectCompletionReview(view, "PENDING"), nil
+	state := "PENDING"
+	if view.Decision != "" {
+		state = string(view.Decision)
+	}
+	return projectCompletionReview(view, state), nil
+}
+
+func (s *Service) GetCompletionReviewRecord(ctx context.Context, principal Principal, taskID, reviewID string) (CompletionReviewView, error) {
+	if err := validateCompletionReviewer(principal); err != nil {
+		return CompletionReviewView{}, err
+	}
+	if err := ValidateIdentifier("task", taskID); err != nil {
+		return CompletionReviewView{}, err
+	}
+	if err := ValidateIdentifier("review", reviewID); err != nil {
+		return CompletionReviewView{}, err
+	}
+	view, found, err := s.app.CompletionReviewRecord(ctx, principal.OrganizationID, taskID, core.ID(reviewID))
+	if err != nil {
+		return CompletionReviewView{}, fmt.Errorf("%w: load completion review record", ErrUnavailable)
+	}
+	if !found {
+		return CompletionReviewView{}, ErrNotFound
+	}
+	state := "PENDING"
+	if view.Decision != "" {
+		state = string(view.Decision)
+	}
+	return projectCompletionReview(view, state), nil
 }
 
 func (s *Service) ListCompletionReviews(ctx context.Context, principal Principal, after string, limit int) (CompletionReviewList, error) {
@@ -657,7 +707,8 @@ func projectCompletionReview(view app.CompletionReviewView, state string) Comple
 	return CompletionReviewView{
 		ReviewID: string(view.Request.ID), TaskID: string(view.Request.TaskID),
 		TaskVersion: view.Request.TaskVersion, Fingerprint: view.Request.Fingerprint,
-		State: state, Objective: view.Request.Objective, Result: view.Result,
+		State: state, ReviewerID: string(view.ReviewerID), Feedback: view.Feedback,
+		Objective: view.Request.Objective, Result: view.Result,
 		Criteria:     append([]core.CompletionCriterion(nil), view.Request.Contract.Criteria...),
 		EvidenceRefs: append([]string(nil), view.Request.EvidenceRefs...), UpdatedAt: view.UpdatedAt,
 	}

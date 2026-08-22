@@ -13,10 +13,12 @@ import (
 )
 
 type CompletionReviewView struct {
-	Request   completion.ReviewRequest
-	Result    string
-	Decision  completion.ReviewDecision
-	UpdatedAt time.Time
+	Request    completion.ReviewRequest
+	Result     string
+	Decision   completion.ReviewDecision
+	ReviewerID core.ID
+	Feedback   string
+	UpdatedAt  time.Time
 }
 
 type CompletionReviewInput struct {
@@ -89,10 +91,38 @@ func (s *Service) CompletionReview(ctx context.Context, organizationID, taskID s
 		return CompletionReviewView{}, false, err
 	}
 	defer s.release()
-	return s.completionReviewLocked(ctx, organizationID, taskID)
+	return s.completionReviewReadLocked(ctx, organizationID, taskID, "")
+}
+
+func (s *Service) CompletionReviewRecord(ctx context.Context, organizationID, taskID string, reviewID core.ID) (CompletionReviewView, bool, error) {
+	if err := s.acquire(ctx); err != nil {
+		return CompletionReviewView{}, false, err
+	}
+	defer s.release()
+	return s.completionReviewReadLocked(ctx, organizationID, taskID, reviewID)
 }
 
 func (s *Service) completionReviewLocked(ctx context.Context, organizationID, taskID string) (CompletionReviewView, bool, error) {
+	view, found, err := s.completionReviewReadLocked(ctx, organizationID, taskID, "")
+	if err != nil || !found || view.Decision != "" {
+		return CompletionReviewView{}, false, err
+	}
+	stream, err := s.internalTaskEvents(ctx, organizationID, taskID)
+	if err != nil || len(stream) == 0 {
+		return CompletionReviewView{}, false, err
+	}
+	snapshot, err := s.state.Load(ctx)
+	if err != nil {
+		return CompletionReviewView{}, false, err
+	}
+	state, ok := snapshot.Tasks[view.Request.TaskID]
+	if !ok || state.Value.Status != core.TaskBlocked || state.CorrelationID != stream[0].CorrelationID {
+		return CompletionReviewView{}, false, nil
+	}
+	return view, true, nil
+}
+
+func (s *Service) completionReviewReadLocked(ctx context.Context, organizationID, taskID string, reviewID core.ID) (CompletionReviewView, bool, error) {
 	stream, err := s.internalTaskEvents(ctx, organizationID, taskID)
 	if err != nil || len(stream) == 0 {
 		return CompletionReviewView{}, false, err
@@ -101,37 +131,38 @@ func (s *Service) completionReviewLocked(ctx context.Context, organizationID, ta
 	if err != nil {
 		return CompletionReviewView{}, false, err
 	}
-	var pending completion.ReviewRequest
-	for _, event := range stream {
-		if event.EventType != "COMPLETION_REVIEW_REQUESTED" {
-			continue
-		}
-		var request completion.ReviewRequest
-		if err := json.Unmarshal(event.Payload, &request); err != nil {
-			return CompletionReviewView{}, false, fmt.Errorf("decode completion review request: %w", err)
-		}
-		if request.TaskID == core.ID(taskID) {
-			if _, decided := decisions[request.ID]; !decided {
-				pending = requests[request.ID]
+	var latest completion.ReviewRequest
+	if reviewID != "" {
+		latest = requests[reviewID]
+	} else {
+		for _, event := range stream {
+			if event.EventType != "COMPLETION_REVIEW_REQUESTED" {
+				continue
+			}
+			var request completion.ReviewRequest
+			if err := json.Unmarshal(event.Payload, &request); err != nil {
+				return CompletionReviewView{}, false, fmt.Errorf("decode completion review request: %w", err)
+			}
+			if request.TaskID == core.ID(taskID) {
+				latest = requests[request.ID]
 			}
 		}
 	}
-	if pending.ID == "" || pending.TaskID != core.ID(taskID) {
+	if latest.ID == "" || latest.TaskID != core.ID(taskID) || latest.OrganizationID != core.ID(organizationID) {
 		return CompletionReviewView{}, false, nil
 	}
-	snapshot, err := s.state.Load(ctx)
+	_, result, err := reviewEvidence(stream, latest)
 	if err != nil {
 		return CompletionReviewView{}, false, err
 	}
-	state, ok := snapshot.Tasks[pending.TaskID]
-	if !ok || state.Value.Status != core.TaskBlocked || state.CorrelationID != stream[0].CorrelationID {
-		return CompletionReviewView{}, false, nil
+	view := CompletionReviewView{Request: latest, Result: result.Summary, UpdatedAt: latest.CreatedAt}
+	if decided, ok := decisions[latest.ID]; ok {
+		view.Decision = decided.Review.Decision
+		view.ReviewerID = decided.Review.ReviewerID
+		view.Feedback = decided.Review.Feedback
+		view.UpdatedAt = decided.Review.DecidedAt
 	}
-	_, result, err := reviewEvidence(stream, pending)
-	if err != nil {
-		return CompletionReviewView{}, false, err
-	}
-	return CompletionReviewView{Request: pending, Result: result.Summary, UpdatedAt: pending.CreatedAt}, true, nil
+	return view, true, nil
 }
 
 func (s *Service) ReviewCompletion(ctx context.Context, input CompletionReviewInput) (CompletionReviewView, error) {
@@ -208,6 +239,8 @@ func (s *Service) ReviewCompletion(ctx context.Context, input CompletionReviewIn
 		return CompletionReviewView{}, err
 	}
 	view.Decision = review.Decision
+	view.ReviewerID = review.ReviewerID
+	view.Feedback = review.Feedback
 	view.UpdatedAt = review.DecidedAt
 	return view, nil
 }

@@ -101,6 +101,26 @@ func (s *Service) ActiveIntake(ctx context.Context, organizationID string, princ
 	return requestID, stream, true, nil
 }
 
+func (s *Service) LatestConfirmedIntake(ctx context.Context, organizationID string, principalID core.ID, principalKind core.PrincipalKind, sourceChannel string) (string, []events.Event, bool, error) {
+	if ctx == nil || organizationID == "" || principalID == "" || principalKind == "" || sourceChannel == "" {
+		return "", nil, false, fmt.Errorf("organization and complete principal identity are required")
+	}
+	requestID, correlationID, found, err := s.gateway.ResolveLatestConfirmedIntake(ctx, organizationID, string(principalID), string(principalKind), sourceChannel)
+	if err != nil || !found {
+		return "", nil, false, err
+	}
+	stream, err := s.gateway.Events(ctx, correlationID)
+	if err != nil {
+		return "", nil, false, err
+	}
+	for _, event := range stream {
+		if event.OrganizationID != organizationID {
+			return "", nil, false, nil
+		}
+	}
+	return requestID, stream, true, nil
+}
+
 func (s *Service) RecordIntakeMessage(ctx context.Context, in IntakeMessage) ([]events.Event, error) {
 	if ctx == nil || in.RequestID == "" || in.OrganizationID == "" || in.MessageID == "" || in.Text == "" || in.SourcePrincipalID == "" || in.SourcePrincipalKind == "" || in.SourceChannel == "" {
 		return nil, fmt.Errorf("complete intake message identity and content are required")

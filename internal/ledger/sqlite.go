@@ -2515,6 +2515,26 @@ ORDER BY e.sequence DESC LIMIT 1`, organizationID, principalID, principalKind, s
 	return requestID, correlationID, err == nil, err
 }
 
+func (l *SQLite) ResolveLatestConfirmedIntake(ctx context.Context, organizationID, principalID, principalKind, sourceChannel string) (string, string, bool, error) {
+	var requestID, correlationID string
+	err := l.db.QueryRowContext(ctx, `SELECT w.request_id,e.correlation_id
+FROM events e JOIN external_work w ON w.organization_id=e.organization_id AND w.correlation_id=e.correlation_id
+WHERE e.organization_id=? AND e.event_type='INTAKE_MESSAGE_RECORDED' AND e.source_actor_id=?
+AND json_extract(CAST(e.payload AS TEXT),'$.source_principal_kind')=?
+AND json_extract(CAST(e.payload AS TEXT),'$.source_channel')=?
+AND EXISTS (
+  SELECT 1 FROM events confirmed
+  WHERE confirmed.organization_id=e.organization_id
+    AND confirmed.correlation_id=e.correlation_id
+    AND confirmed.event_type='INTENT_CONFIRMED'
+)
+ORDER BY e.sequence DESC LIMIT 1`, organizationID, principalID, principalKind, sourceChannel).Scan(&requestID, &correlationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, nil
+	}
+	return requestID, correlationID, err == nil, err
+}
+
 // ReserveExternalWork returns the durable correlation for one tenant/request.
 // New correlations are random and checked against both migrated caller-owned
 // streams and prior reservations before they enter the shared ledger namespace.

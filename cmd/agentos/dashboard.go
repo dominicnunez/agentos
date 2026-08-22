@@ -258,12 +258,16 @@ func allowedDashboardRoute(method, requestPath, rawQuery string) bool {
 		return true
 	case method == http.MethodPost && len(segments) == 5 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "intents" && validDashboardIdentifier(segments[3]) && segments[4] == "confirm" && rawQuery == "":
 		return true
+	case method == http.MethodGet && requestPath == "/v1/user/tasks/recent" && rawQuery == "":
+		return true
 	case method == http.MethodGet && len(segments) == 4 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "tasks" && validDashboardIdentifier(segments[3]) && rawQuery == "":
 		return true
 	case method == http.MethodPost && len(segments) == 5 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "tasks" && validDashboardIdentifier(segments[3]) && segments[4] == "completion" && rawQuery == "":
 		return true
 	case method == http.MethodGet && requestPath == "/v1/user/reviews":
 		return validReviewQuery(rawQuery)
+	case method == http.MethodGet && len(segments) == 6 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "reviews" && validDashboardIdentifier(segments[3]) && segments[4] == "records" && validDashboardIdentifier(segments[5]) && rawQuery == "":
+		return true
 	case (method == http.MethodGet || method == http.MethodPost) && len(segments) == 4 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "reviews" && validDashboardIdentifier(segments[3]) && rawQuery == "":
 		return true
 	case method == http.MethodGet && requestPath == "/v1/control/approvals" && rawQuery == "":

@@ -240,9 +240,39 @@ func TestLocalOwnerCanFinalizeExactCompletionReview(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"APPROVE"`) {
 		t.Fatalf("review decision=%d %s", response.Code, response.Body.String())
 	}
+	response = serveHuman(handler, http.MethodGet, "/v1/user/reviews/"+task.TaskID, testOwnerMarker, "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"APPROVE"`) || !strings.Contains(response.Body.String(), `"reviewer_id":"local-uid-1000"`) {
+		t.Fatalf("terminal review recovery=%d %s", response.Code, response.Body.String())
+	}
+	response = serveHuman(handler, http.MethodGet, "/v1/user/reviews/"+task.TaskID+"/records/"+review.ReviewID, testOwnerMarker, "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"APPROVE"`) || !strings.Contains(response.Body.String(), `"review_id":"`+review.ReviewID+`"`) {
+		t.Fatalf("exact terminal review recovery=%d %s", response.Code, response.Body.String())
+	}
 	response = serveHuman(handler, http.MethodGet, "/v1/user/tasks/"+task.TaskID, testOwnerMarker, "")
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) || !strings.Contains(response.Body.String(), `"result":"candidate: Operate only as this runtime-selected durable Agent blueprint.`) {
 		t.Fatalf("reviewed task=%d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestHumanGatewayRecoversMostRecentConfirmedTask(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	handler := testHumanHandler(t, intake.New(app.New(events.NewGateway(store))))
+	confirmed := submitAndConfirmHuman(t, handler, humanMessageRequest{ConversationID: "recent-work", MessageID: "message-1", Text: "echo recent"})
+	var want humanTaskResponse
+	if err := json.Unmarshal(confirmed.Body.Bytes(), &want); err != nil {
+		t.Fatal(err)
+	}
+	response := serveHuman(handler, http.MethodGet, "/v1/user/tasks/recent", testOwnerMarker, "")
+	var got humanTaskResponse
+	if response.Code != http.StatusOK {
+		t.Fatalf("recent task=%d %s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil || got.TaskID != want.TaskID || got.ConversationID != want.ConversationID {
+		t.Fatalf("recent task=%+v want=%+v err=%v", got, want, err)
 	}
 }
 

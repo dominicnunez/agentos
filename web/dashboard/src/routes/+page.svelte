@@ -9,6 +9,8 @@
   type IntentList = 'context' | 'deliverables' | 'completion_criteria' | 'constraints';
   const pendingConfirmationKey = 'agentos.dashboard.pending-confirmation';
 
+  type PendingReviewDecision = { taskID: string; reviewID: string; fingerprint: string; decision: 'APPROVE' | 'REJECT' | 'REVISE'; feedback: string };
+
   let section: Section = 'overview';
   let identity: DashboardIdentity | null = null;
   let active: TaskView | null = null;
@@ -35,6 +37,7 @@
   let taskInput = '';
   let pendingTaskInputMessageID = '';
   let pendingTaskInputKey = '';
+  let pendingReviewDecision: PendingReviewDecision | null = null;
   let refreshGeneration = 0;
 
   onMount(async () => {
@@ -50,6 +53,14 @@
         }
       } catch (cause) {
         recoveryFailure = message(cause);
+      }
+      if (!task) {
+        try {
+          task = await api<TaskView>('/api/v1/user/tasks/recent');
+          taskID = task.task_id;
+        } catch (cause) {
+          if (!(cause instanceof APIError && cause.status === 404)) throw cause;
+        }
       }
       await refresh();
       if (recoveryFailure) error = `Pending Intent confirmation recovery failed. ${recoveryFailure}${error ? ` ${error}` : ''}`;
@@ -94,7 +105,7 @@
     }
     if (failures.length) error = `Dashboard refresh failed; previously loaded governance data was preserved. ${failures.join(' ')}`;
     selectedApproval = approvals.find((item) => item.approval_id === selectedApproval?.approval_id) ?? null;
-    selectedReview = reviews.find((item) => item.review_id === selectedReview?.review_id) ?? null;
+    selectedReview = reviews.find((item) => item.review_id === selectedReview?.review_id) ?? (selectedReview?.state !== 'PENDING' || pendingReviewDecision ? selectedReview : null);
   }
 
   async function loadActiveIntent(): Promise<TaskView | null> {
@@ -107,12 +118,24 @@
   }
 
   async function loadReviews(): Promise<CompletionReview[]> {
-    return loadAllCompletionReviews((after) => api<CompletionReviewPage>(`/api/v1/user/reviews?limit=100${after ? `&after=${encodeURIComponent(after)}` : ''}`));
+    const pending = await loadAllCompletionReviews((after) => api<CompletionReviewPage>(`/api/v1/user/reviews?limit=100${after ? `&after=${encodeURIComponent(after)}` : ''}`));
+    if (!pendingReviewDecision) return pending;
+    const exact = await api<CompletionReview>(`/api/v1/user/reviews/${encodeURIComponent(pendingReviewDecision.taskID)}/records/${encodeURIComponent(pendingReviewDecision.reviewID)}`);
+    if (exact.review_id !== pendingReviewDecision.reviewID || exact.fingerprint !== pendingReviewDecision.fingerprint) {
+      throw new Error('The durable completion review changed while recovering a decision.');
+    }
+    if (exact.state !== 'PENDING') {
+      if (exact.state !== pendingReviewDecision.decision || (exact.state === 'REVISE' && exact.feedback !== pendingReviewDecision.feedback)) {
+        throw new Error('The completion review has a different durable decision.');
+      }
+      pendingReviewDecision = null;
+    }
+    return [...pending.filter((item) => item.review_id !== exact.review_id), exact];
   }
 
   async function submitWork(): Promise<void> {
-    const text = workText.trim();
-    if (!text) return;
+    const text = workText;
+    if (!text.trim()) return;
     if (!conversationID) conversationID = identifier('user');
     const currentConversation = conversationID;
     const requestKey = JSON.stringify([currentConversation, text, executionKind]);
@@ -133,7 +156,7 @@
       });
       pendingWorkMessageID = '';
       pendingWorkKey = '';
-      if (workText.trim() === text) workText = '';
+      if (workText === text) workText = '';
       notice = active.prompt || 'The proposed work was updated.';
     });
   }
@@ -218,8 +241,8 @@
 
   async function submitTaskInput(): Promise<void> {
     if (!task?.conversation_id || task.state !== 'INPUT_REQUIRED' || task.completion_contract) return;
-    const text = taskInput.trim();
-    if (!text) return;
+    const text = taskInput;
+    if (!text.trim()) return;
     const currentTask = task;
     const requestKey = JSON.stringify([currentTask.conversation_id, currentTask.task_id, text]);
     if (!pendingTaskInputMessageID || pendingTaskInputKey !== requestKey) {
@@ -235,7 +258,7 @@
       taskID = task.task_id;
       pendingTaskInputMessageID = '';
       pendingTaskInputKey = '';
-      if (taskInput.trim() === text) taskInput = '';
+      if (taskInput === text) taskInput = '';
       notice = task.prompt || 'The requested input was recorded and work resumed.';
       await refresh();
     });
@@ -317,11 +340,26 @@
       error = 'Revision feedback is required.';
       return;
     }
+    const feedback = decision === 'REVISE' ? revisionFeedback : '';
+    pendingReviewDecision = { taskID: review.task_id, reviewID: review.review_id, fingerprint: review.fingerprint, decision, feedback };
     await action(async () => {
+      const current = await api<CompletionReview>(`/api/v1/user/reviews/${encodeURIComponent(review.task_id)}/records/${encodeURIComponent(review.review_id)}`);
+      if (current.review_id !== review.review_id || current.fingerprint !== review.fingerprint) throw new Error('The durable completion review changed.');
+      if (current.state !== 'PENDING') {
+        if (current.state !== decision || (decision === 'REVISE' && current.feedback !== feedback)) throw new Error('The completion review already has a different durable decision.');
+        selectedReview = current;
+        pendingReviewDecision = null;
+        reviewPhrase = '';
+        revisionFeedback = '';
+        notice = `Completion evidence marked ${decision.toLowerCase()}.`;
+        await refresh();
+        return;
+      }
       selectedReview = await api<CompletionReview>(`/api/v1/user/reviews/${encodeURIComponent(review.task_id)}`, {
         method: 'POST',
-        body: JSON.stringify({ review_id: review.review_id, fingerprint: review.fingerprint, decision, feedback: revisionFeedback.trim() || undefined })
+        body: JSON.stringify({ review_id: review.review_id, fingerprint: review.fingerprint, decision, ...(decision === 'REVISE' ? { feedback } : {}) })
       });
+      pendingReviewDecision = null;
       reviewPhrase = '';
       revisionFeedback = '';
       notice = `Completion evidence marked ${decision.toLowerCase()}.`;

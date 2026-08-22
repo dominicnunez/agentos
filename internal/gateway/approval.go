@@ -103,7 +103,7 @@ func (c *ApprovalControl) list(w http.ResponseWriter, r *http.Request, humanID c
 }
 
 func (c *ApprovalControl) inspect(w http.ResponseWriter, r *http.Request, approvalID, humanID core.ID) {
-	decisionContext, err := c.service.DecisionContext(r.Context(), approvalID, humanID)
+	decisionContext, err := c.service.ReadContext(r.Context(), approvalID, humanID)
 	if err != nil {
 		writeApprovalError(w, err)
 		return

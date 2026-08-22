@@ -409,6 +409,32 @@ func TestUnconfirmedIntentResumesAfterServiceRestart(t *testing.T) {
 	}
 }
 
+func TestLatestTaskRecoversConfirmedWorkAcrossServiceRestart(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	first := New(app.New(events.NewGateway(store)))
+	confirmed, err := submitAndConfirm(t, ctx, first, principal, Message{ConversationID: "recover-confirmed", MessageID: "message-1", Text: "echo durable recovery"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := New(app.New(events.NewGateway(store)))
+	recovered, err := restarted.LatestTask(ctx, principal)
+	if err != nil || recovered.TaskID != confirmed.TaskID || recovered.ConversationID != confirmed.ConversationID || recovered.Result != confirmed.Result {
+		t.Fatalf("recovered=%+v want=%+v err=%v", recovered, confirmed, err)
+	}
+	other := principal
+	other.ID = "human-2"
+	if _, err := restarted.LatestTask(ctx, other); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("different principal recovered private work: %v", err)
+	}
+}
+
 func TestOwnScopeBindsCompleteAuthenticatedPrincipalIdentity(t *testing.T) {
 	ctx := context.Background()
 	store, err := ledger.Open(":memory:")

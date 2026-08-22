@@ -3206,6 +3206,7 @@ type ExternalWorkResolver interface {
 }
 type ActiveIntakeResolver interface {
 	ResolveActiveIntake(context.Context, string, string, string, string) (string, string, bool, error)
+	ResolveLatestConfirmedIntake(context.Context, string, string, string, string) (string, string, bool, error)
 }
 type ExternalWorkAllocator interface {
 	ReserveExternalWork(context.Context, string, string) (string, error)
@@ -3286,6 +3287,14 @@ func (g *Gateway) ResolveActiveIntake(ctx context.Context, organizationID, princ
 		return "", "", false, nil
 	}
 	return resolver.ResolveActiveIntake(ctx, organizationID, principalID, principalKind, sourceChannel)
+}
+
+func (g *Gateway) ResolveLatestConfirmedIntake(ctx context.Context, organizationID, principalID, principalKind, sourceChannel string) (string, string, bool, error) {
+	resolver, ok := g.ledger.(ActiveIntakeResolver)
+	if !ok {
+		return "", "", false, nil
+	}
+	return resolver.ResolveLatestConfirmedIntake(ctx, organizationID, principalID, principalKind, sourceChannel)
 }
 
 func (g *Gateway) ReserveExternalWork(ctx context.Context, organizationID, requestID string) (string, error) {
