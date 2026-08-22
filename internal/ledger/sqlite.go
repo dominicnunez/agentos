@@ -3389,6 +3389,13 @@ WHERE pending_completion_reviews.request_sequence<excluded.request_sequence`, ev
 		if err != nil || changed != 1 {
 			return fmt.Errorf("terminal completion review lacks its pending durable request")
 		}
+	case "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED":
+		if event.OrganizationID == "" || event.TaskID == "" || event.CorrelationID == "" || event.Sequence < 1 {
+			return fmt.Errorf("terminal task projection identity is invalid")
+		}
+		if _, err := db.ExecContext(ctx, `DELETE FROM pending_completion_reviews WHERE organization_id=? AND task_id=? AND correlation_id=? AND request_sequence<?`, event.OrganizationID, event.TaskID, event.CorrelationID, event.Sequence); err != nil {
+			return fmt.Errorf("remove terminal task's pending completion review: %w", err)
+		}
 	}
 	return nil
 }

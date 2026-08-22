@@ -283,7 +283,7 @@ func advanceProjectionStorageContract(ctx context.Context, tx *sql.Tx, from, to 
 
 func rebuildPendingCompletionReviews(ctx context.Context, tx *sql.Tx) error {
 	reviewEvents, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
-FROM events WHERE event_type IN ('COMPLETION_REVIEW_REQUESTED','COMPLETION_REVIEW_DECIDED') ORDER BY sequence`))
+FROM events WHERE event_type IN ('COMPLETION_REVIEW_REQUESTED','COMPLETION_REVIEW_DECIDED','TASK_VERIFIED_COMPLETE','COMPLETION_REJECTED','TASK_DEPENDENCY_FAILED','TASK_REMEDIATION_FAILED','TASK_WORK_FAILED') ORDER BY sequence`))
 	if err != nil {
 		return fmt.Errorf("read completion reviews for migration: %w", err)
 	}

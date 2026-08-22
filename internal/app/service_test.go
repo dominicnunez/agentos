@@ -1942,6 +1942,20 @@ func (describedModel) Complete(_ context.Context, prompt string) (execution.Mode
 	return execution.ModelResponse{Text: "configured-model: " + prompt, Usage: events.InferenceUsageRecordedPayload{Source: "provider_cli", Provider: "codex-subscription", Model: "test-model", InputTokens: 1, OutputTokens: 1, TotalTokens: 2}}, nil
 }
 
+type failRevisionExecutionModel struct{ calls int }
+
+func (*failRevisionExecutionModel) Name() string { return describedModel{}.Name() }
+func (*failRevisionExecutionModel) Descriptor() execution.ModelDescriptor {
+	return describedModel{}.Descriptor()
+}
+func (m *failRevisionExecutionModel) Complete(ctx context.Context, prompt string) (execution.ModelResponse, error) {
+	m.calls++
+	if m.calls > 1 {
+		return execution.ModelResponse{}, errors.New("revised execution failed")
+	}
+	return describedModel{}.Complete(ctx, prompt)
+}
+
 type changedDescriptorModel struct{}
 
 func (changedDescriptorModel) Name() string { return "openai/changed-model" }
@@ -2473,6 +2487,39 @@ func TestCompletionReviewRevisionIsUntrustedExecutionContext(t *testing.T) {
 	}
 	if !manifested {
 		t.Fatal("revision decision was not referenced by the next execution manifest")
+	}
+}
+
+func TestRecentCompletionReviewAcceptsFailedProgressAfterRevision(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	model := &failRevisionExecutionModel{}
+	service := NewWithModel(events.NewGateway(store), model)
+	submitted, err := service.Submit(ctx, Submit{RequestID: "failed-review-revision", OrganizationID: "org-1", Statement: "summarize", Kind: core.ExecutionAgent})
+	if err != nil || submitted.Task.Status != core.TaskBlocked {
+		t.Fatalf("submitted=%+v err=%v", submitted, err)
+	}
+	review, found, err := service.CompletionReview(ctx, "org-1", string(submitted.Task.ID))
+	if err != nil || !found {
+		t.Fatalf("review=%+v found=%t err=%v", review, found, err)
+	}
+	if _, err := service.ReviewCompletion(ctx, reviewInput(review, completion.ReviewRevise, "try a different approach")); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := projections.New(events.NewGateway(store)).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tasks[submitted.Task.ID].Value.Status != core.TaskFailed {
+		t.Fatalf("revised task status=%s", snapshot.Tasks[submitted.Task.ID].Value.Status)
+	}
+	recent, err := service.RecentCompletionReviews(ctx, "org-1", 10)
+	if err != nil || len(recent) != 1 || recent[0].Request.ID != review.Request.ID || recent[0].Decision != completion.ReviewRevise {
+		t.Fatalf("recent progressed revision=%+v err=%v", recent, err)
 	}
 }
 

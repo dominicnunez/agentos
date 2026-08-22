@@ -38,6 +38,11 @@ type recordedReview struct {
 	Event  events.Event
 }
 
+type completionRevisionDetail struct {
+	Reason         string `json:"reason"`
+	ReviewEventRef string `json:"review_event_ref"`
+}
+
 type CompletionReviewPage struct {
 	Reviews   []CompletionReviewView
 	NextAfter core.ID
@@ -407,18 +412,42 @@ func (s *Service) continueCompletionReview(ctx context.Context, request completi
 		detail := completionDetail{Contract: request.Contract, Result: s.completion.EvaluateHuman(request.Contract, outcome, false), OutcomeEventRef: request.EvidenceRefs[0], JudgmentRef: decisionEvent.EventID}
 		return s.state.SaveTask(ctx, request.OrganizationID, "COMPLETION_REJECTED", "runtime", state.CorrelationID, state.Version+1, task, detail)
 	case completion.ReviewRevise:
-		if task.Status == core.TaskPending || task.Status == core.TaskRunning {
-			return nil
-		}
 		if task.Status != core.TaskBlocked {
+			continued, err := completionRevisionContinued(stream, request, decisionEvent)
+			if err != nil {
+				return err
+			}
+			if continued {
+				return nil
+			}
 			return fmt.Errorf("completion review cannot revise task in status %s", task.Status)
 		}
 		task.Status = core.TaskPending
-		detail := map[string]string{"reason": "reviewer requested revision", "review_event_ref": decisionEvent.EventID}
+		detail := completionRevisionDetail{Reason: "reviewer requested revision", ReviewEventRef: decisionEvent.EventID}
 		return s.state.SaveTask(ctx, request.OrganizationID, "TASK_RESUMED", "runtime", state.CorrelationID, state.Version+1, task, detail)
 	default:
 		return fmt.Errorf("unsupported completion review decision")
 	}
+}
+
+func completionRevisionContinued(stream []events.Event, request completion.ReviewRequest, decisionEvent events.Event) (bool, error) {
+	for _, event := range stream {
+		if event.Sequence <= decisionEvent.Sequence || event.EventType != "TASK_RESUMED" || event.OrganizationID != string(request.OrganizationID) || event.TaskID != string(request.TaskID) || event.CorrelationID != decisionEvent.CorrelationID {
+			continue
+		}
+		payload, present, err := events.AdmittedProjection(event)
+		if err != nil || !present || payload.Projection.ProjectionKind != "task" || payload.Projection.RecordID != string(request.TaskID) {
+			return false, fmt.Errorf("completion-review revision continuation is invalid")
+		}
+		var detail completionRevisionDetail
+		if err := json.Unmarshal(payload.Detail, &detail); err != nil {
+			return false, fmt.Errorf("decode completion-review revision continuation: %w", err)
+		}
+		if detail.Reason == "reviewer requested revision" && detail.ReviewEventRef == decisionEvent.EventID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func completionReviewRecords(stream []events.Event) (map[core.ID]completion.ReviewRequest, map[core.ID]recordedReview, error) {

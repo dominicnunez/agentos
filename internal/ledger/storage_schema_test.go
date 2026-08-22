@@ -254,6 +254,22 @@ func TestStorageV4MigrationRebuildsBoundedGovernanceQueues(t *testing.T) {
 	appendReview("COMPLETION_REVIEW_REQUESTED", "task-1", "work-1", "review-1")
 	appendReview("COMPLETION_REVIEW_DECIDED", "task-1", "work-1", "review-1")
 	pending := appendReview("COMPLETION_REVIEW_REQUESTED", "task-2", "work-2", "review-2")
+	appendTaskProjectionParents(t, ctx, store, "org-1", "work-3", "work-3")
+	terminal := core.Task{ID: "task-3", WorkID: "work-3", Description: "terminalized before review", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(terminal.ID), CorrelationID: "work-3"},
+		ProjectionKind: "task", RecordID: string(terminal.ID), Version: 1, Value: terminal,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	appendReview("COMPLETION_REVIEW_REQUESTED", "task-3", "work-3", "review-3")
+	terminal.Status = core.TaskFailed
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_WORK_FAILED", SourceActorID: "runtime", TaskID: string(terminal.ID), CorrelationID: "work-3"},
+		ProjectionKind: "task", RecordID: string(terminal.ID), Version: 2, Value: terminal,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}

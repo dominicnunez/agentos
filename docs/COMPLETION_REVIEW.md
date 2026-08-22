@@ -63,3 +63,10 @@ perform the same continuation from the durable decision. If another authorized
 user reconnects after the response was lost, Agent OS keeps the original
 reviewer identity and never rewrites the decision merely to match the current
 session.
+
+The pending-review projection is updated in the same transaction as its source
+event. A decision removes its request, and an authoritative terminal Task
+transition also removes an abandoned request. During `REVISE` recovery, the
+runtime accepts an already-progressed Task only when its sealed `TASK_RESUMED`
+event references the exact durable decision; a later execution failure does not
+make that accepted continuation ambiguous.

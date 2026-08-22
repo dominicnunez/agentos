@@ -260,6 +260,18 @@ func TestPendingCompletionReviewEventsAreTenantScopedAndCursorBounded(t *testing
 	if _, err := store.PendingCompletionReviewEvents(ctx, "org-1", "missing", 1); err == nil {
 		t.Fatal("unknown completion-review cursor was accepted")
 	}
+	if err := store.withTx(ctx, func(tx *sql.Tx) error {
+		return syncPendingCompletionReview(ctx, tx, events.Event{
+			EventID: "terminal-task", Sequence: latest.Sequence + 1, OrganizationID: "org-1",
+			EventType: "TASK_WORK_FAILED", TaskID: latest.TaskID, CorrelationID: latest.CorrelationID,
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := store.PendingCompletionReviewEvents(ctx, "org-1", "", 10)
+	if err != nil || len(remaining) != 1 || remaining[0].EventID != second.EventID {
+		t.Fatalf("terminal task did not remove only its pending review: %+v err=%v", remaining, err)
+	}
 }
 
 func TestCompletionReviewDecisionAndPendingProjectionAreAtomic(t *testing.T) {
