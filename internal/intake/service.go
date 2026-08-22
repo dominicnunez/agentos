@@ -389,6 +389,26 @@ func (s *Service) ActiveIntent(ctx context.Context, principal Principal) (View, 
 	return projectCurrentIntentView(conversationID, stream)
 }
 
+// OrganizationState exposes only the authenticated local user's current
+// tenant-scoped organizational projection. A2A principals cannot use this
+// operator view even when their role can read their own Work status.
+func (s *Service) OrganizationState(ctx context.Context, principal Principal) (app.OrganizationSnapshot, error) {
+	if err := validatePrincipal(principal); err != nil {
+		return app.OrganizationSnapshot{}, err
+	}
+	if principal.Kind != core.PrincipalHuman || principal.Channel != ChannelHumanDirect || principal.WorkScope != WorkScopeOrganization || !principal.Allowed(CapabilityReadStatus) {
+		return app.OrganizationSnapshot{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
+	}
+	view, found, err := s.app.OrganizationState(ctx, core.ID(principal.OrganizationID))
+	if err != nil {
+		return app.OrganizationSnapshot{}, fmt.Errorf("%w: load organization state", ErrUnavailable)
+	}
+	if !found {
+		return app.OrganizationSnapshot{}, ErrNotFound
+	}
+	return view, nil
+}
+
 func (s *Service) handleIntentConversation(ctx context.Context, principal Principal, message Message, stream []events.Event) (View, error) {
 	if err := ValidateIdentifier("conversation", message.ConversationID); err != nil {
 		return View{}, err

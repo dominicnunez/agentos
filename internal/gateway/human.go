@@ -121,6 +121,15 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeView(w, view, err)
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/user/organization" && r.URL.RawQuery == "" {
+		view, err := h.service.OrganizationState(r.Context(), principal)
+		if err != nil {
+			h.writeIntakeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, view)
+		return
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/user/tasks/recent" {
 		view, err := h.service.LatestTask(r.Context(), principal)
 		h.writeView(w, view, err)

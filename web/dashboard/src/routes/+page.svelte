@@ -4,16 +4,28 @@
   import { approvalRetryBinding, completionReviewFeedback, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, loadAllCompletionReviews, matchesConfirmationRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
   import type { ApprovalRetryBinding, ReviewRetryBinding } from '$lib/governance';
   import '$lib/app.css';
-  import type { Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, IntentDraft, TaskView } from '$lib/types';
+  import type { Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, IntentDraft, OrganizationSnapshot, TaskView } from '$lib/types';
 
-  type Section = 'overview' | 'work' | 'approvals' | 'reviews' | 'system';
+  type Section = 'overview' | 'organization' | 'work' | 'approvals' | 'reviews' | 'system';
   type IntentList = 'context' | 'deliverables' | 'completion_criteria' | 'constraints';
+  type GoalSummary = OrganizationSnapshot['goals'][number];
+  type WorkSummary = OrganizationSnapshot['works'][number];
+  type TaskSummary = OrganizationSnapshot['tasks'][number];
+  type OrganizationIndex = {
+    goalsByMission: Map<string, GoalSummary[]>;
+    worksByGoal: Map<string, WorkSummary[]>;
+    tasksByWork: Map<string, TaskSummary[]>;
+    unalignedWorks: WorkSummary[];
+    activeWorkCount: number;
+  };
   const pendingConfirmationKey = 'agentos.dashboard.pending-confirmation';
   const pendingApprovalKey = 'agentos.dashboard.pending-approval';
   const pendingReviewKey = 'agentos.dashboard.pending-review';
 
   let section: Section = 'overview';
   let identity: DashboardIdentity | null = null;
+  let organization: OrganizationSnapshot | null = null;
+  let organizationIndex = emptyOrganizationIndex();
   let active: TaskView | null = null;
   let approvals: Approval[] = [];
   let reviews: CompletionReview[] = [];
@@ -89,16 +101,18 @@
     const displayedTask = task;
     const displayedActive = active;
     error = '';
-    const [activeResult, approvalResult, reviewResult, taskResult] = await Promise.allSettled([
+    const [organizationResult, activeResult, approvalResult, reviewResult, taskResult] = await Promise.allSettled([
+      loadOrganization(),
       loadActiveIntent(),
       loadApprovals(),
       loadReviews(),
       displayedTask ? loadTask(displayedTask.task_id) : Promise.resolve(null)
     ]);
     if (generation !== refreshGeneration) return;
-    const failures = [activeResult, approvalResult, reviewResult, taskResult]
+    const failures = [organizationResult, activeResult, approvalResult, reviewResult, taskResult]
       .filter((result) => result.status === 'rejected')
       .map((result) => message((result as PromiseRejectedResult).reason));
+    if (organizationResult.status === 'fulfilled') setOrganization(organizationResult.value);
     if (activeResult.status === 'fulfilled') {
       if (activeResult.value) {
         active = activeResult.value;
@@ -141,6 +155,10 @@
     if (failures.length) error = `Dashboard refresh failed; previously loaded governance data was preserved. ${failures.join(' ')}`;
     selectedApproval = approvals.find((item) => item.approval_id === selectedApproval?.approval_id) ?? (selectedApproval && (terminalApproval(selectedApproval) || pendingApprovalDecision) ? selectedApproval : null);
     selectedReview = reviews.find((item) => item.review_id === selectedReview?.review_id) ?? (selectedReview && (terminalCompletionReview(selectedReview) || pendingReviewDecision) ? selectedReview : null);
+  }
+
+  function loadOrganization(): Promise<OrganizationSnapshot> {
+    return api<OrganizationSnapshot>('/api/v1/user/organization');
   }
 
   async function loadActiveIntent(): Promise<TaskView | null> {
@@ -515,6 +533,29 @@
   function pendingReviewCount(): number {
     return reviews.filter((item) => !terminalCompletionReview(item)).length;
   }
+
+  function emptyOrganizationIndex(): OrganizationIndex {
+    return { goalsByMission: new Map(), worksByGoal: new Map(), tasksByWork: new Map(), unalignedWorks: [], activeWorkCount: 0 };
+  }
+
+  function setOrganization(next: OrganizationSnapshot): void {
+    const index = emptyOrganizationIndex();
+    for (const goal of next.goals) addIndexed(index.goalsByMission, goal.mission_id, goal);
+    for (const work of next.works) {
+      if (work.goal_id) addIndexed(index.worksByGoal, work.goal_id, work);
+      else index.unalignedWorks.push(work);
+      if (work.status === 'ACTIVE') index.activeWorkCount++;
+    }
+    for (const item of next.tasks) addIndexed(index.tasksByWork, item.work_id, item);
+    organizationIndex = index;
+    organization = next;
+  }
+
+  function addIndexed<T>(index: Map<string, T[]>, key: string, value: T): void {
+    const values = index.get(key);
+    if (values) values.push(value);
+    else index.set(key, [value]);
+  }
 </script>
 
 <svelte:head>
@@ -526,7 +567,7 @@
   <aside>
     <div class="brand"><span class="mark">AO</span><div><strong>Agent OS</strong><small>Organization control</small></div></div>
     <nav aria-label="Dashboard">
-      {#each [['overview','Overview'],['work','Work'],['approvals','Approvals'],['reviews','Reviews'],['system','System']] as item}
+      {#each [['overview','Overview'],['organization','Organization'],['work','Work'],['approvals','Approvals'],['reviews','Reviews'],['system','System']] as item}
         <button class:active={section === item[0]} onclick={() => section = item[0] as Section}><span class="nav-dot"></span>{item[1]}</button>
       {/each}
     </nav>
@@ -540,18 +581,58 @@
 
     {#if section === 'overview'}
       <section class="metrics">
-        <button onclick={() => section='work'}><span>Active intake</span><strong>{active ? '1' : '0'}</strong><small>{safeDisplay(active?.state ?? 'No open conversation')}</small></button>
+        <button onclick={() => section='organization'}><span>Active Work</span><strong>{organizationIndex.activeWorkCount}</strong><small>{organization ? `${organization.missions.length} Missions · ${organization.goals.length} Goals · ${organization.teams.length} Teams · ${organization.agents.length} Agents` : 'Organization state unavailable'}</small></button>
         <button onclick={() => section='approvals'}><span>Approvals</span><strong>{pendingApprovalCount()}</strong><small>Exact effects awaiting a decision</small></button>
         <button onclick={() => section='reviews'}><span>Completion reviews</span><strong>{pendingReviewCount()}</strong><small>Evidence awaiting judgment</small></button>
       </section>
       <section class="panel mission">
-        <div><p class="eyebrow">Current organization</p><h2>{safeDisplay(identity?.organization ?? 'Connect to Agent OS')}</h2><p>Durable work enters through one governed intake boundary. Language can propose work; it cannot grant authority or prove completion.</p></div>
-        <div class="flow"><span>Intent</span><i></i><span>Plan</span><i></i><span>Work</span><i></i><span>Evidence</span></div>
+        <div><p class="eyebrow">Current organization</p><h2>{safeDisplay(organization?.organization.name ?? identity?.organization ?? 'Connect to Agent OS')}</h2><p>Durable Missions provide direction, Goals define measurable outcomes, and bounded Work becomes Task DAGs assigned to reviewed Agents.</p><button class="text" onclick={() => section='organization'}>Open organization</button></div>
+        <div class="flow"><span>Mission</span><i></i><span>Goal</span><i></i><span>Work</span><i></i><span>Task</span></div>
       </section>
       <section class="grid two">
         <div class="panel"><div class="panel-title"><h2>Continue work</h2><button class="text" onclick={() => section='work'}>Open work</button></div>{#if active}<span class="status">{safeDisplay(active.state)}</span><h3>{safeDisplay(active.intent?.objective ?? active.prompt ?? 'Intake conversation')}</h3><p class="mono">{safeDisplay(active.conversation_id)}</p>{:else}<div class="empty">No unfinished intake conversation.</div>{/if}</div>
         <div class="panel"><div class="panel-title"><h2>Governance queue</h2></div><div class="queue"><div><strong>{pendingApprovalCount()}</strong><span>effect decisions</span></div><div><strong>{pendingReviewCount()}</strong><span>evidence reviews</span></div></div></div>
       </section>
+    {:else if section === 'organization'}
+      {#if organization}
+        <section class="organization-layout">
+          <div class="panel organization-tree">
+            <div class="panel-title"><div><p class="eyebrow">Durable direction</p><h2>{safeDisplay(organization.organization.name)}</h2></div><span class="status">Policy {safeDisplay(organization.organization.policy_version)}</span></div>
+            <p class="boundary-note">This is a read-only tenant-scoped projection. It grants no authority and exposes no model instructions, credentials, tools, event payloads, or private execution context.</p>
+            {#if organization.missions.length}
+              {#each organization.missions as mission}
+                {@const missionGoals = organizationIndex.goalsByMission.get(mission.id) ?? []}
+                <article class="mission-card">
+                  <div class="organization-heading"><div><p class="eyebrow">Mission</p><h3>{safeDisplay(mission.statement)}</h3><small class="mono">{safeDisplay(mission.id)} · revision {mission.version}</small></div><span class="status">{safeDisplay(mission.status)}</span></div>
+                  {#if missionGoals.length}
+                    {#each missionGoals as goal}
+                      {@const goalWorks = organizationIndex.worksByGoal.get(goal.id) ?? []}
+                      <div class="goal-card">
+                        <div class="organization-heading"><div><p class="eyebrow">Goal · {safeDisplay(goal.mode)}</p><h3>{safeDisplay(goal.objective)}</h3><small class="mono">{safeDisplay(goal.id)} · revision {goal.version}</small></div><span class="status">{safeDisplay(goal.status)}</span></div>
+                        {#if goal.success_criteria.length}<h4>Success criteria</h4><ul>{#each goal.success_criteria as criterion}<li>{safeDisplay(criterion)}</li>{/each}</ul>{/if}
+                        {#if goalWorks.length}
+                          {#each goalWorks as work}
+                            {@const workTasks = organizationIndex.tasksByWork.get(work.id) ?? []}
+                            <div class="work-card"><div class="organization-heading"><div><strong>{safeDisplay(work.objective)}</strong><small class="mono">{safeDisplay(work.id)}</small>{#if work.replaces_work_id}<small>Replaces {safeDisplay(work.replaces_work_id)}</small>{/if}</div><span class="status">{safeDisplay(work.status)}</span></div>
+                              <small>{safeDisplay(work.mode)}{work.experiment_status ? ` · ${safeDisplay(work.experiment_status)}` : ''}</small>{#if work.trust_label}<span class="risk">{safeDisplay(work.trust_label)}</span>{/if}
+                              {#if workTasks.length}<div class="task-dag">{#each workTasks as item}<div><span class="task-node"></span><p><strong>{safeDisplay(item.description)}</strong><small>{safeDisplay(item.execution_kind)} · {safeDisplay(item.model_inference_policy)} · {safeDisplay(item.status)}</small>{#if item.assignee_id}<small>Assigned to {safeDisplay(item.assignee_type ?? 'UNKNOWN')} {safeDisplay(item.assignee_id)}</small>{/if}{#if item.parent_id}<small>Parent {safeDisplay(item.parent_id)}</small>{/if}{#if item.depends_on.length}<small>Depends on {item.depends_on.map(safeDisplay).join(', ')}</small>{/if}</p></div>{/each}</div>{/if}
+                            </div>
+                          {/each}
+                        {:else}<div class="organization-empty">No Work is currently bound to this Goal.</div>{/if}
+                      </div>
+                    {/each}
+                  {:else}<div class="organization-empty">No Goals are currently bound to this Mission.</div>{/if}
+                </article>
+              {/each}
+            {:else}<div class="organization-empty">No durable Mission has been created yet.</div>{/if}
+            {#if organizationIndex.unalignedWorks.length}<article class="mission-card"><p class="eyebrow">Work without a Goal</p><h3>Unaligned Work</h3>{#each organizationIndex.unalignedWorks as work}{@const workTasks = organizationIndex.tasksByWork.get(work.id) ?? []}<div class="work-card"><div class="organization-heading"><div><strong>{safeDisplay(work.objective)}</strong><small class="mono">{safeDisplay(work.id)}</small>{#if work.replaces_work_id}<small>Replaces {safeDisplay(work.replaces_work_id)}</small>{/if}</div><span class="status">{safeDisplay(work.status)}</span></div><small>{safeDisplay(work.mode)}{work.experiment_status ? ` · ${safeDisplay(work.experiment_status)}` : ''}</small>{#if work.trust_label}<span class="risk">{safeDisplay(work.trust_label)}</span>{/if}{#if workTasks.length}<div class="task-dag">{#each workTasks as item}<div><span class="task-node"></span><p><strong>{safeDisplay(item.description)}</strong><small>{safeDisplay(item.execution_kind)} · {safeDisplay(item.model_inference_policy)} · {safeDisplay(item.status)}</small>{#if item.assignee_id}<small>Assigned to {safeDisplay(item.assignee_type ?? 'UNKNOWN')} {safeDisplay(item.assignee_id)}</small>{/if}{#if item.parent_id}<small>Parent {safeDisplay(item.parent_id)}</small>{/if}{#if item.depends_on.length}<small>Depends on {item.depends_on.map(safeDisplay).join(', ')}</small>{/if}</p></div>{/each}</div>{/if}</div>{/each}</article>{/if}
+          </div>
+          <div class="organization-roster">
+            <div class="panel agent-roster"><div class="panel-title"><div><p class="eyebrow">Durable structure</p><h2>Teams</h2></div><span class="count">{organization.teams.length}</span></div>{#if organization.teams.length}{#each organization.teams as team}<article><div class="organization-heading"><div><h3>{safeDisplay(team.name)}</h3><small class="mono">{safeDisplay(team.id)} · revision {team.version}</small></div><span class="status">{safeDisplay(team.status)}</span></div>{#if team.mission}<p>{safeDisplay(team.mission)}</p>{/if}<p><strong>Members:</strong> {team.member_agent_ids.length ? team.member_agent_ids.map(safeDisplay).join(', ') : 'None'}</p></article>{/each}{:else}<div class="organization-empty">No durable Teams have been admitted.</div>{/if}</div>
+            <div class="panel agent-roster"><div class="panel-title"><div><p class="eyebrow">Durable identities</p><h2>Agents</h2></div><span class="count">{organization.agents.length}</span></div>{#if organization.agents.length}{#each organization.agents as agent}<article><div class="organization-heading"><div><h3>{safeDisplay(agent.role)}</h3><small class="mono">{safeDisplay(agent.id)} · revision {agent.version}</small></div><span class:offline={!agent.available} class="status">{agent.available ? 'AVAILABLE' : 'UNAVAILABLE'}</span></div><dl><div><dt>Agent</dt><dd>{safeDisplay(agent.status)}</dd></div><div><dt>Blueprint</dt><dd>{safeDisplay(agent.blueprint_status)}</dd></div><div><dt>Profile</dt><dd>{safeDisplay(agent.execution_profile_status)}</dd></div><div><dt>Model</dt><dd>{safeDisplay(agent.model_provider)} / {safeDisplay(agent.model)}</dd></div><div><dt>Runtime</dt><dd>{safeDisplay(agent.runtime_adapter)}</dd></div></dl></article>{/each}{:else}<div class="organization-empty">No durable Agents have been admitted.</div>{/if}</div>
+          </div>
+        </section>
+      {:else}<div class="panel empty">Organization state is unavailable.</div>{/if}
     {:else if section === 'work'}
       <section class="grid work-grid">
         <div class="panel composer"><p class="eyebrow">Natural-language intake</p><h2>{active ? 'Continue the conversation' : 'What should the organization accomplish?'}</h2><textarea bind:value={workText} disabled={busy} rows="7" placeholder="Describe the outcome, relevant context, constraints, and anything only you can provide."></textarea><label>Execution<select bind:value={executionKind} disabled={busy || Boolean(active)}><option value="">Automatic</option><option value="HUMAN">User task</option></select><small>Automatic prefers deterministic work and uses an Agent only when justified.</small></label><div class="actions"><button class="primary" onclick={submitWork} disabled={busy || !identity || !workText.trim()}>Send</button><small>The model proposes a bounded Intent. Nothing starts until you confirm the exact review.</small></div></div>

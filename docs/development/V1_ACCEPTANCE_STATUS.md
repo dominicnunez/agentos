@@ -43,7 +43,8 @@ persisted review decision after restart.
 crosses the dashboard session bridge, real Unix socket and kernel peer identity,
 local user gateway, confirmed Intent, planning, durable Agent assignment,
 bounded AgentExecution, verified completion, and SQLite-backed Task retrieval
-without creating approval or effect authority.
+without creating approval or effect authority. The same path retrieves the
+tenant-scoped durable Mission, Goal, Work, Task, Team, and Agent organization view.
 
 - Identity and inbox tests reopen SQLite and compare stored state with replay.
 - Projection-admission tests bind each materialized organizational record to
@@ -78,7 +79,7 @@ without creating approval or effect authority.
 | Runtime and credential confinement | Exact ownership and modes, stable bounded same-file reads, shared symlink-checked atomic replacement with caller-owned privacy policy, systemd private credential imports, and service umask `0077` fail closed before runtime state is opened |
 | Durable storage upgrades | Agent OS application ID, exact versioned layouts, atomic ordered migrations, Event Contract binding, oldest-supported fixtures, and no inferred pre-release compatibility state |
 | Required user deliverables | Durable structured fields and content-addressed artifact evidence; plain-text self-report cannot complete the Task |
-| Local dashboard safety | One-time owner bootstrap, expiring in-memory bearer, exact loopback Host/origin checks, no CORS or cookies, allowlisted proxy routes, bounded responses, and hash-bound CSP |
+| Local dashboard safety | One-time owner bootstrap, expiring in-memory bearer, exact loopback Host/origin checks, no CORS or cookies, allowlisted proxy routes, bounded responses, tenant-scoped read-only organization projection, and hash-bound CSP |
 
 Production consequential-effect adapters remain disabled. A security finding
 that weakens a row returns it to partial until the runtime path and adversarial
