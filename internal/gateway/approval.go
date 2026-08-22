@@ -111,7 +111,7 @@ func (c *ApprovalControl) listRecent(w http.ResponseWriter, r *http.Request, hum
 }
 
 func (c *ApprovalControl) list(w http.ResponseWriter, r *http.Request, humanID core.ID) {
-	contexts, err := c.service.PendingDecisionContexts(r.Context(), humanID)
+	contexts, err := c.service.PendingDecisionContexts(r.Context(), c.owner.OrganizationID, humanID)
 	if err != nil {
 		writeApprovalError(w, err)
 		return

@@ -2754,7 +2754,57 @@ func appendRecord(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft, ki
 	if _, err := tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, kind, id, version, body, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("append record: %w", err)
 	}
+	if kind == "approval" {
+		if err := syncPendingApproval(ctx, tx, id, version, body); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func syncPendingApproval(ctx context.Context, tx *sql.Tx, id string, version int, body []byte) error {
+	var approval core.HumanApproval
+	if err := decodeExactJSONBytes(body, &approval); err != nil || approval.ID == "" || string(approval.ID) != id || approval.OrganizationID == "" || version < 1 {
+		return fmt.Errorf("pending approval projection identity is invalid")
+	}
+	switch approval.Status {
+	case core.ApprovalPending, core.ApprovalNotified, core.ApprovalAcknowledged, core.ApprovalPendingDecision:
+		var expiresAt int64
+		if approval.ExpiresAt != nil {
+			expiresAt = approval.ExpiresAt.UnixNano()
+		}
+		result, err := tx.ExecContext(ctx, `INSERT INTO pending_approvals(organization_id,approval_id,record_version,body,expires_at,updated_at)
+VALUES(?,?,?,?,?,?)
+ON CONFLICT(approval_id) DO UPDATE SET organization_id=excluded.organization_id,record_version=excluded.record_version,body=excluded.body,expires_at=excluded.expires_at,updated_at=excluded.updated_at
+WHERE pending_approvals.organization_id=excluded.organization_id AND pending_approvals.record_version<excluded.record_version`, approval.OrganizationID, approval.ID, version, body, expiresAt, time.Now().UTC().Format(time.RFC3339Nano))
+		if err != nil {
+			return fmt.Errorf("update pending approval projection: %w", err)
+		}
+		changed, err := result.RowsAffected()
+		if err != nil || changed != 1 {
+			return fmt.Errorf("pending approval projection version or tenant conflicts with durable record")
+		}
+	case core.ApprovalApproved, core.ApprovalDenied:
+		result, err := tx.ExecContext(ctx, `DELETE FROM pending_approvals WHERE organization_id=? AND approval_id=? AND record_version<?`, approval.OrganizationID, approval.ID, version)
+		if err != nil {
+			return fmt.Errorf("remove terminal pending approval: %w", err)
+		}
+		if _, err := result.RowsAffected(); err != nil {
+			return fmt.Errorf("inspect terminal pending-approval removal: %w", err)
+		}
+	default:
+		return fmt.Errorf("approval status is invalid for pending projection")
+	}
+	return nil
+}
+
+func (l *SQLite) PendingApprovalRecords(ctx context.Context, organizationID string, now time.Time, limit int) ([][]byte, error) {
+	if organizationID == "" || now.IsZero() || limit < 1 || limit > 1001 {
+		return nil, fmt.Errorf("organization, current time, and bounded pending-approval limit are required")
+	}
+	return collectRecordBodies(l.db.QueryContext(ctx, `SELECT body FROM pending_approvals
+WHERE organization_id=? AND (expires_at=0 OR expires_at>?)
+ORDER BY approval_id LIMIT ?`, organizationID, now.UnixNano(), limit))
 }
 
 func (l *SQLite) withTx(ctx context.Context, fn func(*sql.Tx) error) error {

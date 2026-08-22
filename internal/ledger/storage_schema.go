@@ -25,7 +25,7 @@ const (
 	// not identify or publish an Agent OS release.
 	OldestSupportedStorageVersion = 1
 	// CurrentStorageVersion is the only layout accepted after runtime startup.
-	CurrentStorageVersion = 3
+	CurrentStorageVersion = 4
 	// LegacyEventSchemaVersion identifies the immediately preceding Event
 	// Contract. Its payload semantics already included Intent mode; migration
 	// validates review evidence and reseals schema-bound projection admissions.
@@ -50,6 +50,10 @@ var storageColumnsV1 = map[string][]string{
 	"inference_policies":     {"organization_id", "policy_fingerprint", "body", "activation_event_id", "activated_at", "active"},
 	"inference_reservations": {"reservation_id", "request_id", "organization_id", "purpose", "intent_id", "task_id", "execution_id", "correlation_id", "prompt_sha256", "provider", "model", "execution_profile_version", "policy_fingerprint", "state", "reserved_input_tokens", "reserved_output_tokens", "reserved_cost_nano_usd", "charged_input_tokens", "charged_output_tokens", "charged_cost_nano_usd", "window_started_at", "window_expires_at", "created_at", "updated_at"},
 	"records":                {"kind", "record_id", "version", "body", "admission_event_id", "admission_fingerprint", "created_at"},
+}
+
+var storageColumnsV4 = map[string][]string{
+	"pending_approvals": {"organization_id", "approval_id", "record_version", "body", "expires_at", "updated_at"},
 }
 
 var storageIndexes = map[string]string{
@@ -116,6 +120,12 @@ storage_version INTEGER NOT NULL,
 event_schema_version INTEGER NOT NULL,
 application_id INTEGER NOT NULL,
 schema_fingerprint TEXT NOT NULL);`
+
+const storageSchemaV4SQL = `CREATE TABLE pending_approvals (
+organization_id TEXT NOT NULL, approval_id TEXT NOT NULL UNIQUE,
+record_version INTEGER NOT NULL, body BLOB NOT NULL,
+expires_at INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,
+PRIMARY KEY(organization_id,approval_id));`
 
 func migrateStorage(ctx context.Context, db *sql.DB) error {
 	if ctx == nil || db == nil {
@@ -212,9 +222,67 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 			return fmt.Errorf("storage contract metadata did not match the reviewed migration boundary")
 		}
 		return nil
+	case from == 3 && to == 4:
+		if _, err := tx.ExecContext(ctx, storageSchemaV4SQL); err != nil {
+			return err
+		}
+		if err := rebuildPendingApprovals(ctx, tx); err != nil {
+			return err
+		}
+		fingerprint, err := storageSchemaFingerprint(ctx, tx)
+		if err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=?,schema_fingerprint=? WHERE singleton=1 AND storage_version=? AND event_schema_version=?`, to, fingerprint, from, events.SchemaVersion)
+		if err != nil {
+			return fmt.Errorf("advance pending-approval storage contract: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil || rows != 1 {
+			return fmt.Errorf("pending-approval storage metadata did not match the reviewed migration boundary")
+		}
+		return nil
 	default:
 		return fmt.Errorf("no reviewed storage migration exists")
 	}
+}
+
+func rebuildPendingApprovals(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT current.record_id,current.version,current.body
+FROM records AS current
+JOIN (SELECT record_id,MAX(version) AS version FROM records WHERE kind='approval' GROUP BY record_id) AS latest
+  ON latest.record_id=current.record_id AND latest.version=current.version
+WHERE current.kind='approval'
+ORDER BY current.record_id`)
+	if err != nil {
+		return fmt.Errorf("read pending approvals for migration: %w", err)
+	}
+	type record struct {
+		id      string
+		version int
+		body    []byte
+	}
+	var records []record
+	for rows.Next() {
+		var item record
+		if err := rows.Scan(&item.id, &item.version, &item.body); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("decode pending approval migration record: %w", err)
+		}
+		records = append(records, item)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close pending approval migration records: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("scan pending approval migration records: %w", err)
+	}
+	for _, item := range records {
+		if err := syncPendingApproval(ctx, tx, item.id, item.version, item.body); err != nil {
+			return fmt.Errorf("rebuild pending approval %s: %w", item.id, err)
+		}
+	}
+	return nil
 }
 
 type projectionReseal struct {
@@ -321,7 +389,7 @@ func sqliteStorageHeader(ctx context.Context, query storageQueryer) (application
 
 func validateStorageLayout(ctx context.Context, query storageQueryer, version int) (StorageContract, error) {
 	expectedEventVersion := events.SchemaVersion
-	if version < CurrentStorageVersion {
+	if version < 3 {
 		expectedEventVersion = LegacyEventSchemaVersion
 	}
 	expected := make(map[string][]string, len(storageColumnsV1)+1)
@@ -330,6 +398,11 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 	}
 	if version >= 2 {
 		expected["agentos_storage"] = []string{"singleton", "storage_version", "event_schema_version", "application_id", "schema_fingerprint"}
+	}
+	if version >= 4 {
+		for table, columns := range storageColumnsV4 {
+			expected[table] = columns
+		}
 	}
 	tables, err := userStorageTables(ctx, query)
 	if err != nil {

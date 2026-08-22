@@ -91,8 +91,8 @@ type Store interface {
 	Records(context.Context, string, string) ([][]byte, error)
 }
 
-type latestRecordStore interface {
-	LatestRecords(context.Context, string) ([][]byte, error)
+type pendingApprovalStore interface {
+	PendingApprovalRecords(context.Context, string, time.Time, int) ([][]byte, error)
 }
 
 type recentEventStore interface {
@@ -354,31 +354,34 @@ func (s *Service) ReadContext(ctx context.Context, approvalID, humanID core.ID) 
 
 // PendingDecisionContexts returns current, exactly authorized approval work for
 // the local inbox. Every mutation still reloads the individual record.
-func (s *Service) PendingDecisionContexts(ctx context.Context, humanID core.ID) ([]DecisionContext, error) {
-	store, ok := s.store.(latestRecordStore)
+func (s *Service) PendingDecisionContexts(ctx context.Context, organizationID, humanID core.ID) ([]DecisionContext, error) {
+	if organizationID == "" {
+		return nil, fmt.Errorf("approval inbox organization is required")
+	}
+	store, ok := s.store.(pendingApprovalStore)
 	if !ok {
 		return nil, fmt.Errorf("approval inbox is unavailable")
 	}
-	bodies, err := store.LatestRecords(ctx, "approval")
+	bodies, err := store.PendingApprovalRecords(ctx, string(organizationID), s.now(), maximumInboxDecisionContexts+1)
 	if err != nil {
 		return nil, err
 	}
-	capacity := len(bodies)
-	if capacity > maximumInboxDecisionContexts {
-		capacity = maximumInboxDecisionContexts
+	if len(bodies) > maximumInboxDecisionContexts {
+		return nil, fmt.Errorf("approval inbox exceeds the V1 safety limit")
 	}
-	contexts := make([]DecisionContext, 0, capacity)
+	contexts := make([]DecisionContext, 0, len(bodies))
 	for _, body := range bodies {
 		var approval core.HumanApproval
 		if err := json.Unmarshal(body, &approval); err != nil {
 			return nil, fmt.Errorf("decode approval inbox: %w", err)
 		}
+		if approval.OrganizationID != organizationID {
+			return nil, fmt.Errorf("approval inbox crossed its organization boundary")
+		}
 		switch approval.Status {
 		case core.ApprovalPending, core.ApprovalNotified, core.ApprovalAcknowledged, core.ApprovalPendingDecision:
-		case core.ApprovalApproved, core.ApprovalDenied:
-			continue
 		default:
-			continue
+			return nil, fmt.Errorf("approval inbox contains terminal or invalid state")
 		}
 		if err := s.authorizeDecision(ctx, humanID, approval); err != nil {
 			continue
@@ -391,9 +394,6 @@ func (s *Service) PendingDecisionContexts(ctx context.Context, humanID core.ID) 
 			return nil, err
 		}
 		contexts = append(contexts, DecisionContext{Approval: approval, Effect: effect})
-		if len(contexts) > maximumInboxDecisionContexts {
-			return nil, fmt.Errorf("approval inbox exceeds the V1 safety limit")
-		}
 	}
 	return contexts, nil
 }

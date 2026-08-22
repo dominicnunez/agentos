@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { APIError, emptyJSONPost, isDashboardSessionRejection } from './api.ts';
-import { approvalRetryBinding, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, hasRetryableIntentConfirmation, loadAllCompletionReviews, matchesConfirmationRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from './governance.ts';
+import { approvalRetryBinding, completionReviewFeedback, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, hasRetryableIntentConfirmation, loadAllCompletionReviews, matchesConfirmationRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from './governance.ts';
 import type { Approval, CompletionReview } from './types';
 
 function review(id: string): CompletionReview {
@@ -83,6 +83,12 @@ test('derives a stable confirmation message identity from the reviewed fingerpri
   const fingerprint = 'a'.repeat(64);
   assert.equal(confirmationMessageID(fingerprint), `confirmation-${fingerprint}`);
   assert.throws(() => confirmationMessageID('not-a-fingerprint'), /invalid/);
+});
+
+test('preserves feedback for rejection and revision decisions only', () => {
+	assert.equal(completionReviewFeedback('REJECT', 'candidate omitted evidence'), 'candidate omitted evidence');
+	assert.equal(completionReviewFeedback('REVISE', 'supply the report'), 'supply the report');
+	assert.equal(completionReviewFeedback('APPROVE', 'not applicable'), '');
 });
 
 test('leaves artifact media validation to content-derived server checks', () => {

@@ -159,6 +159,10 @@ export function confirmationMessageID(fingerprint: string): string {
   return `confirmation-${fingerprint}`;
 }
 
+export function completionReviewFeedback(decision: 'APPROVE' | 'REJECT' | 'REVISE', feedback: string): string {
+	return decision === 'APPROVE' ? '' : feedback;
+}
+
 function validFingerprint(value: string): boolean {
   return /^[0-9a-f]{64}$/.test(value);
 }

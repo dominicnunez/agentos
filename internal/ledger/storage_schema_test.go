@@ -195,7 +195,16 @@ func TestStorageV2MigrationPreservesReviewedIntentEvidence(t *testing.T) {
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=2,event_schema_version=?`, LegacyEventSchemaVersion); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE pending_approvals`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	fingerprint, err := storageSchemaFingerprint(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=2,event_schema_version=?,schema_fingerprint=?`, LegacyEventSchemaVersion, fingerprint); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/dominicnunez/agentos/internal/approvals"
 	"github.com/dominicnunez/agentos/internal/core"
@@ -40,7 +41,7 @@ func (s latestInboxStore) AppendRecord(context.Context, string, string, string, 
 
 func (s latestInboxStore) Records(context.Context, string, string) ([][]byte, error) { return nil, nil }
 
-func (s latestInboxStore) LatestRecords(context.Context, string) ([][]byte, error) {
+func (s latestInboxStore) PendingApprovalRecords(context.Context, string, time.Time, int) ([][]byte, error) {
 	return s.bodies, nil
 }
 
@@ -53,9 +54,9 @@ func TestApprovalInboxLimitExcludesHistoricalRecords(t *testing.T) {
 		}
 		bodies = append(bodies, body)
 	}
-	contexts, err := approvals.New(latestInboxStore{bodies: bodies}, nil, nil).PendingDecisionContexts(t.Context(), "approver")
-	if err != nil || len(contexts) != 0 {
-		t.Fatalf("historical approvals blocked the inbox: contexts=%d err=%v", len(contexts), err)
+	contexts, err := approvals.New(latestInboxStore{bodies: bodies}, nil, nil).PendingDecisionContexts(t.Context(), "org-1", "approver")
+	if err == nil || contexts != nil {
+		t.Fatalf("oversized pending approval projection was accepted: contexts=%d err=%v", len(contexts), err)
 	}
 }
 

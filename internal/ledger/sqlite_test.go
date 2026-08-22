@@ -220,6 +220,42 @@ func TestPendingCompletionReviewEventsAreTenantScopedAndCursorBounded(t *testing
 	}
 }
 
+func TestPendingApprovalRecordsExcludeTerminalHistoryAndOtherTenants(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	appendApproval := func(approval core.HumanApproval, version int) {
+		t.Helper()
+		if err := store.AppendRecord(ctx, string(approval.OrganizationID), "APPROVAL_STATE_TEST", "runtime", string(approval.TaskID), nil, nil, "approval", string(approval.ID), version, approval); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := core.HumanApproval{ID: "approval-1", OrganizationID: "org-1", TaskID: "task-1", Status: core.ApprovalPending}
+	appendApproval(first, 1)
+	appendApproval(core.HumanApproval{ID: "approval-other", OrganizationID: "org-2", TaskID: "task-other", Status: core.ApprovalPendingDecision}, 1)
+	expiredAt := time.Now().UTC().Add(-time.Nanosecond)
+	appendApproval(core.HumanApproval{ID: "approval-expired", OrganizationID: "org-1", TaskID: "task-expired", Status: core.ApprovalPending, ExpiresAt: &expiredAt}, 1)
+	first.Status = core.ApprovalDenied
+	appendApproval(first, 2)
+	appendApproval(core.HumanApproval{ID: "approval-2", OrganizationID: "org-1", TaskID: "task-2", Status: core.ApprovalAcknowledged}, 1)
+
+	bodies, err := store.PendingApprovalRecords(ctx, "org-1", time.Now().UTC(), 10)
+	if err != nil || len(bodies) != 1 {
+		t.Fatalf("org-1 pending approvals=%d err=%v", len(bodies), err)
+	}
+	var pending core.HumanApproval
+	if err := json.Unmarshal(bodies[0], &pending); err != nil || pending.ID != "approval-2" {
+		t.Fatalf("pending approval=%+v err=%v", pending, err)
+	}
+	foreign, err := store.PendingApprovalRecords(ctx, "org-2", time.Now().UTC(), 10)
+	if err != nil || len(foreign) != 1 {
+		t.Fatalf("org-2 pending approvals=%d err=%v", len(foreign), err)
+	}
+}
+
 func TestEventsSurviveReopen(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "agentos.db")
