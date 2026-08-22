@@ -22,6 +22,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/gateway"
 	"github.com/dominicnunez/agentos/internal/intake"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	"github.com/dominicnunez/agentos/internal/projections"
 )
 
 type dashboardLoopTask struct {
@@ -55,7 +56,9 @@ func TestDashboardCompletesDurableAgentWorkThroughKernelAuthenticatedGateway(t *
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	runtime := app.New(events.NewGateway(store))
+	eventGateway := events.NewGateway(store)
+	runtime := app.New(eventGateway)
+	repository := projections.New(eventGateway)
 	operator := intake.New(runtime)
 	owner := gateway.LocalHuman{
 		UID: uid, ID: core.ID("local-uid-" + strconv.Itoa(uid)), OrganizationID: "org-1",
@@ -139,6 +142,18 @@ func TestDashboardCompletesDurableAgentWorkThroughKernelAuthenticatedGateway(t *
 	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &recovered) != nil || recovered.TaskID != completed.TaskID || recovered.State != intake.StateCompleted || recovered.Result != completed.Result {
 		t.Fatalf("dashboard durable task=%d %s", response.Code, response.Body.String())
 	}
+	seedDashboardOrganizationHierarchy(t, runtime, repository)
+	response = dashboardAuthorizedRequest(bridge, http.MethodGet, "/api/v1/user/organization", session, "")
+	var organization app.OrganizationSnapshot
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &organization) != nil || organization.Organization.ID != "org-1" ||
+		len(organization.Missions) != 1 || organization.Missions[0].ID != "mission-dashboard" ||
+		len(organization.Goals) != 1 || organization.Goals[0].ID != "goal-dashboard" || organization.Goals[0].MissionID != "mission-dashboard" ||
+		len(organization.Works) != 1 || organization.Works[0].ID != core.ID(completed.WorkID) ||
+		len(organization.Tasks) != 1 || organization.Tasks[0].ID != core.ID(completed.TaskID) ||
+		len(organization.Teams) != 1 || organization.Teams[0].ID != "team-dashboard" || len(organization.Teams[0].MemberAgentIDs) != 1 ||
+		len(organization.Agents) != 1 || organization.Teams[0].MemberAgentIDs[0] != organization.Agents[0].ID {
+		t.Fatalf("dashboard organization state=%d %s", response.Code, response.Body.String())
+	}
 
 	correlationID, found, err := store.ResolveExternalWork(t.Context(), "org-1", "dashboard-organization-loop")
 	if err != nil || !found || correlationID == "" {
@@ -154,6 +169,38 @@ func TestDashboardCompletesDurableAgentWorkThroughKernelAuthenticatedGateway(t *
 		t.Fatal(err)
 	}
 	assertDashboardCreatedNoAuthorityEvents(t, allEvents)
+}
+
+func seedDashboardOrganizationHierarchy(t *testing.T, runtime *app.Service, repository *projections.Repository) {
+	t.Helper()
+	ctx := t.Context()
+	current, found, err := runtime.OrganizationState(ctx, "org-1")
+	if err != nil || !found || len(current.Agents) != 1 {
+		t.Fatalf("dashboard Agent roster found=%t err=%v state=%+v", found, err, current)
+	}
+	now := time.Now().UTC()
+	mission := core.Mission{
+		ID: "mission-dashboard", OrganizationID: "org-1", Statement: "Deliver governed outcomes",
+		Status: core.MissionActive, CreatedAt: now,
+	}
+	if err := repository.SaveMission(ctx, "MISSION_CREATED", "runtime", "dashboard-mission", 1, mission, nil); err != nil {
+		t.Fatal(err)
+	}
+	goal := core.Goal{
+		ID: "goal-dashboard", OrganizationID: "org-1", MissionID: mission.ID, Objective: "Demonstrate the organization loop",
+		Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "the dashboard exposes durable organization state", Origin: "RUNTIME_TEST"}},
+		Status: core.GoalActive, CreatedAt: now,
+	}
+	if err := repository.SaveGoal(ctx, "GOAL_CREATED", "runtime", "dashboard-goal", 1, goal, nil); err != nil {
+		t.Fatal(err)
+	}
+	team := core.Team{
+		ID: "team-dashboard", OrganizationID: "org-1", Name: "Delivery", Mission: "Deliver governed outcomes",
+		MemberAgentIDs: []core.ID{current.Agents[0].ID}, Status: "ACTIVE", CreatedAt: now,
+	}
+	if err := repository.SaveTeam(ctx, "TEAM_CREATED", "runtime", "dashboard-team", 1, team, nil); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func marshalDashboardLoopBody(t *testing.T, value map[string]string) string {

@@ -43,6 +43,41 @@ func TestHumanResponseRetainsWorkIdentityAndExperimentalTrustLabel(t *testing.T)
 	}
 }
 
+func TestHumanOrganizationViewIsReadOnlyAndTenantScoped(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	operator := intake.New(app.New(events.NewGateway(store)))
+	first := testHumanHandler(t, operator)
+	second, err := NewHuman(operator, LocalHuman{UID: 1000, ID: "local-uid-1000", OrganizationID: "org-2", MaxConcurrent: 4, RequestsPerMinute: 100}, artifacts.Store{Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstResult := submitAndConfirmHuman(t, first, humanMessageRequest{ConversationID: "organization-first", MessageID: "message-first", Text: "echo first tenant objective"})
+	secondResult := submitAndConfirmHuman(t, second, humanMessageRequest{ConversationID: "organization-second", MessageID: "message-second", Text: "echo second tenant objective"})
+	if firstResult.Code != http.StatusOK || secondResult.Code != http.StatusOK {
+		t.Fatalf("seed organization views first=%d second=%d", firstResult.Code, secondResult.Code)
+	}
+
+	response := serveHuman(first, http.MethodGet, "/v1/user/organization", testOwnerMarker, "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"id":"org-1"`) || !strings.Contains(response.Body.String(), "first tenant objective") {
+		t.Fatalf("organization view=%d %s", response.Code, response.Body.String())
+	}
+	for _, forbidden := range []string{"org-2", "second tenant objective", "operating_instructions", "tool_refs", "event_type", "payload", "authorization_refs"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("organization view leaked %q: %s", forbidden, response.Body.String())
+		}
+	}
+	if response := serveHuman(first, http.MethodGet, "/v1/user/organization?scope=all", testOwnerMarker, ""); response.Code != http.StatusNotFound {
+		t.Fatalf("organization query expansion=%d %s", response.Code, response.Body.String())
+	}
+	if response := serveHuman(first, http.MethodPost, "/v1/user/organization", testOwnerMarker, `{}`); response.Code != http.StatusNotFound {
+		t.Fatalf("organization mutation=%d %s", response.Code, response.Body.String())
+	}
+}
+
 type reviewerModel struct{}
 
 func (reviewerModel) Name() string { return "review-provider/test-model" }

@@ -86,3 +86,13 @@ export type DashboardIdentity = {
   version: string;
   session_expires_at: string;
 };
+
+export type OrganizationSnapshot = {
+  organization: { id: string; name: string; policy_version: string; version: number; created_at: string };
+  missions: { id: string; statement: string; status: string; version: number; created_at: string }[];
+  goals: { id: string; mission_id: string; objective: string; mode: string; success_criteria: string[]; status: string; version: number; created_at: string }[];
+  works: { id: string; goal_id?: string; replaces_work_id?: string; objective: string; mode: string; experiment_status?: string; trust_label?: string; status: string; version: number; created_at: string }[];
+  tasks: { id: string; work_id: string; parent_id?: string; description: string; execution_kind: string; model_inference_policy: string; depends_on: string[]; assignee_type?: string; assignee_id?: string; status: string; version: number }[];
+  teams: { id: string; name: string; mission?: string; member_agent_ids: string[]; status: string; version: number; created_at: string }[];
+  agents: { id: string; role: string; status: string; blueprint_status: string; execution_profile_status: string; available: boolean; runtime_adapter: string; model_provider: string; model: string; version: number }[];
+};
