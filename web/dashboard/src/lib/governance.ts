@@ -1,4 +1,4 @@
-import type { CompletionContract, CompletionReview, CompletionReviewPage } from './types';
+import type { CompletionContract, CompletionReview, CompletionReviewPage, TaskView } from './types';
 
 const maximumReviewPages = 100;
 const maximumArtifactBytes = 16 * 1024 * 1024;
@@ -7,6 +7,10 @@ const maximumCompletionBytes = 32 * 1024 * 1024;
 export type ArtifactSelection = { name: string; size: number; type: string };
 export type ArtifactRequirement = { role: string; media_types: string[]; min_count: number; max_count: number };
 export type FieldRequirement = { name: string; min_bytes: number; max_bytes: number };
+
+export function hasRetryableIntentConfirmation(view: TaskView | null): boolean {
+  return Boolean(view?.state === 'AWAITING_CONFIRMATION' && view.intent && view.conversation_id);
+}
 
 export function sameCompletionContract(previous?: CompletionContract, next?: CompletionContract): boolean {
   return Boolean(previous && next && previous.task_id === next.task_id && previous.task_version === next.task_version);

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { APIError, api, connect, identifier } from '$lib/api';
-  import { confirmationMessageID, loadAllCompletionReviews, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
+  import { confirmationMessageID, hasRetryableIntentConfirmation, loadAllCompletionReviews, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
   import '$lib/app.css';
   import type { Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, IntentDraft, TaskView } from '$lib/types';
 
@@ -31,6 +31,9 @@
   let pendingWorkMessageID = '';
   let pendingWorkKey = '';
   let completionMessageID = '';
+  let taskInput = '';
+  let pendingTaskInputMessageID = '';
+  let pendingTaskInputKey = '';
   let refreshGeneration = 0;
 
   onMount(async () => {
@@ -46,6 +49,7 @@
     if (!identity) return;
     const generation = ++refreshGeneration;
     const displayedTask = task;
+    const displayedActive = active;
     error = '';
     const [activeResult, approvalResult, reviewResult, taskResult] = await Promise.allSettled([
       loadActiveIntent(),
@@ -58,8 +62,13 @@
       .filter((result) => result.status === 'rejected')
       .map((result) => message((result as PromiseRejectedResult).reason));
     if (activeResult.status === 'fulfilled') {
-      active = activeResult.value;
-      conversationID = activeResult.value?.conversation_id ?? '';
+      if (activeResult.value) {
+        active = activeResult.value;
+        conversationID = activeResult.value.conversation_id;
+      } else if (!hasRetryableIntentConfirmation(displayedActive)) {
+        active = null;
+        conversationID = '';
+      }
     }
     if (approvalResult.status === 'fulfilled') approvals = approvalResult.value.approvals;
     if (reviewResult.status === 'fulfilled') reviews = reviewResult.value;
@@ -67,6 +76,7 @@
       if (!sameCompletionContract(displayedTask?.completion_contract, taskResult.value.completion_contract)) clearCompletionEvidence();
       task = taskResult.value;
       taskID = taskResult.value.task_id;
+      if (taskResult.value.state !== 'INPUT_REQUIRED') clearTaskInput();
     }
     if (failures.length) error = `Dashboard refresh failed; previously loaded governance data was preserved. ${failures.join(' ')}`;
     selectedApproval = approvals.find((item) => item.approval_id === selectedApproval?.approval_id) ?? null;
@@ -109,7 +119,7 @@
       });
       pendingWorkMessageID = '';
       pendingWorkKey = '';
-      workText = '';
+      if (workText.trim() === text) workText = '';
       notice = active.prompt || 'The proposed work was updated.';
     });
   }
@@ -127,8 +137,10 @@
       executionKind = '';
       pendingWorkMessageID = '';
       pendingWorkKey = '';
+      active = null;
       task = confirmed;
       taskID = confirmed.task_id;
+      clearTaskInput();
       conversationID = '';
       notice = `Task ${confirmed.task_id} for Work ${confirmed.work_id || ''} was created from the confirmed Intent.`;
       await refresh();
@@ -141,6 +153,32 @@
     await action(async () => {
       task = await api<TaskView>(`/api/v1/user/tasks/${encodeURIComponent(id)}`);
       clearCompletionEvidence();
+      clearTaskInput();
+    });
+  }
+
+  async function submitTaskInput(): Promise<void> {
+    if (!task?.conversation_id || task.state !== 'INPUT_REQUIRED' || task.completion_contract) return;
+    const text = taskInput.trim();
+    if (!text) return;
+    const currentTask = task;
+    const requestKey = JSON.stringify([currentTask.conversation_id, currentTask.task_id, text]);
+    if (!pendingTaskInputMessageID || pendingTaskInputKey !== requestKey) {
+      pendingTaskInputMessageID = identifier('input');
+      pendingTaskInputKey = requestKey;
+    }
+    const messageID = pendingTaskInputMessageID;
+    await action(async () => {
+      task = await api<TaskView>('/api/v1/user/messages', {
+        method: 'POST',
+        body: JSON.stringify({ conversation_id: currentTask.conversation_id, message_id: messageID, text })
+      });
+      taskID = task.task_id;
+      pendingTaskInputMessageID = '';
+      pendingTaskInputKey = '';
+      if (taskInput.trim() === text) taskInput = '';
+      notice = task.prompt || 'The requested input was recorded and work resumed.';
+      await refresh();
     });
   }
 
@@ -253,6 +291,12 @@
     completionMessageID = '';
   }
 
+  function clearTaskInput(): void {
+    taskInput = '';
+    pendingTaskInputMessageID = '';
+    pendingTaskInputKey = '';
+  }
+
   async function base64(file: File): Promise<string> {
     const bytes = new Uint8Array(await file.arrayBuffer());
     let binary = '';
@@ -309,7 +353,7 @@
       </section>
     {:else if section === 'work'}
       <section class="grid work-grid">
-        <div class="panel composer"><p class="eyebrow">Natural-language intake</p><h2>{active ? 'Continue the conversation' : 'What should the organization accomplish?'}</h2><textarea bind:value={workText} rows="7" placeholder="Describe the outcome, relevant context, constraints, and anything only you can provide."></textarea><label>Execution<select bind:value={executionKind} disabled={Boolean(active)}><option value="">Automatic</option><option value="HUMAN">User task</option></select><small>Automatic prefers deterministic work and uses an Agent only when justified.</small></label><div class="actions"><button class="primary" onclick={submitWork} disabled={busy || !identity || !workText.trim()}>Send</button><small>The model proposes a bounded Intent. Nothing starts until you confirm the exact review.</small></div></div>
+        <div class="panel composer"><p class="eyebrow">Natural-language intake</p><h2>{active ? 'Continue the conversation' : 'What should the organization accomplish?'}</h2><textarea bind:value={workText} disabled={busy} rows="7" placeholder="Describe the outcome, relevant context, constraints, and anything only you can provide."></textarea><label>Execution<select bind:value={executionKind} disabled={busy || Boolean(active)}><option value="">Automatic</option><option value="HUMAN">User task</option></select><small>Automatic prefers deterministic work and uses an Agent only when justified.</small></label><div class="actions"><button class="primary" onclick={submitWork} disabled={busy || !identity || !workText.trim()}>Send</button><small>The model proposes a bounded Intent. Nothing starts until you confirm the exact review.</small></div></div>
         <div class="panel intent"><div class="panel-title"><div><p class="eyebrow">Intent contract</p><h2>Review before work begins</h2></div>{#if active?.state}<span class="status">{safeDisplay(active.state)}</span>{/if}</div>
           {#if active?.intent}
             {#if active.prompt}<div class="banner notice governed-text" role="status"><strong>More information required</strong><br />{safeDisplay(active.prompt)}</div>{/if}
@@ -328,7 +372,7 @@
       </section>
       <section class="panel task-lookup"><div><p class="eyebrow">Durable status</p><h2>Find a Task</h2></div><div class="inline"><input bind:value={taskID} placeholder="task-id" /><button onclick={findTask} disabled={busy || !taskID.trim()}>Open</button></div>
         {#if task}<div class="task"><div><span class="status">{safeDisplay(task.state)}</span><h3>{safeDisplay(task.task_id)}</h3>{#if task.work_id}<p class="mono">Work {safeDisplay(task.work_id)}</p>{/if}{#if task.mode}<p>Mode: <strong>{safeDisplay(task.mode)}</strong></p>{/if}{#if task.trust_label}<p class="risk">Trust: {safeDisplay(task.trust_label)}</p>{/if}{#if task.prompt}<p class="boundary-note governed-text">{safeDisplay(task.prompt)}</p>{/if}{#if task.result}<p class="governed-text">{safeDisplay(task.result)}</p>{/if}</div>
-          {#if task.completion_contract}{#key `${task.task_id}:${task.completion_contract.task_version}`}<form onsubmit={(event) => { event.preventDefault(); submitCompletion(); }}><h4>Required completion evidence</h4>{#each task.completion_contract.required_fields ?? [] as field}<label>{safeDisplay(field.name)}<small>{safeDisplay(field.description)}; {field.min_bytes} to {field.max_bytes} UTF-8 bytes</small><textarea required disabled={busy} value={completionFields[field.name] ?? ''} oninput={(event) => setCompletionField(field.name, event.currentTarget.value)}></textarea></label>{/each}{#each task.completion_contract.artifact_requirements ?? [] as requirement}<label>{safeDisplay(requirement.role)}<small>{requirement.min_count} to {requirement.max_count} files; {requirement.media_types.map(safeDisplay).join(', ')}</small><input type="file" disabled={busy} required={requirement.min_count > 0} multiple={requirement.max_count > 1} accept={requirement.media_types.join(',')} onchange={(event) => setFiles(requirement.role, event)} /></label>{/each}<button class="primary" type="submit" disabled={busy}>Submit complete evidence</button></form>{/key}{/if}
+          {#if task.completion_contract}{#key `${task.task_id}:${task.completion_contract.task_version}`}<form onsubmit={(event) => { event.preventDefault(); submitCompletion(); }}><h4>Required completion evidence</h4>{#each task.completion_contract.required_fields ?? [] as field}<label>{safeDisplay(field.name)}<small>{safeDisplay(field.description)}; {field.min_bytes} to {field.max_bytes} UTF-8 bytes</small><textarea required disabled={busy} value={completionFields[field.name] ?? ''} oninput={(event) => setCompletionField(field.name, event.currentTarget.value)}></textarea></label>{/each}{#each task.completion_contract.artifact_requirements ?? [] as requirement}<label>{safeDisplay(requirement.role)}<small>{requirement.min_count} to {requirement.max_count} files; {requirement.media_types.map(safeDisplay).join(', ')}</small><input type="file" disabled={busy} required={requirement.min_count > 0} multiple={requirement.max_count > 1} accept={requirement.media_types.join(',')} onchange={(event) => setFiles(requirement.role, event)} /></label>{/each}<button class="primary" type="submit" disabled={busy}>Submit complete evidence</button></form>{/key}{:else if task.state === 'INPUT_REQUIRED' && task.conversation_id}<form onsubmit={(event) => { event.preventDefault(); submitTaskInput(); }}><h4>Provide requested input</h4><label>Response<textarea bind:value={taskInput} disabled={busy} required placeholder="Provide the information requested above."></textarea></label><button class="primary" type="submit" disabled={busy || !taskInput.trim()}>Continue Task</button></form>{/if}
         </div>{/if}
       </section>
     {:else if section === 'approvals'}

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { APIError, isDashboardSessionRejection } from './api.ts';
-import { confirmationMessageID, loadAllCompletionReviews, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from './governance.ts';
+import { confirmationMessageID, hasRetryableIntentConfirmation, loadAllCompletionReviews, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from './governance.ts';
 import type { CompletionReview } from './types';
 
 function review(id: string): CompletionReview {
@@ -71,4 +71,11 @@ test('snapshots completion evidence before asynchronous encoding', () => {
   files.report.push({ name: 'second.txt', size: 1, type: 'text/plain' });
   assert.deepEqual(snapshot.fields, { answer: 'reviewed' });
   assert.deepEqual(snapshot.files, { report: [first] });
+});
+
+test('retains only a complete confirmation retry state after active-intake lookup misses', () => {
+  const retry = { task_id: '', conversation_id: 'conversation-1', state: 'AWAITING_CONFIRMATION', intent: { objective: 'work', mode: 'STANDARD', version: 1, fingerprint: 'a'.repeat(64) } };
+  assert.equal(hasRetryableIntentConfirmation(retry), true);
+  assert.equal(hasRetryableIntentConfirmation({ ...retry, state: 'WORKING' }), false);
+  assert.equal(hasRetryableIntentConfirmation({ ...retry, intent: undefined }), false);
 });
