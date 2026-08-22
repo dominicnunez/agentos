@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -106,6 +107,78 @@ func TestLocalUserSocketDerivesOwnerFromKernelPeerCredentials(t *testing.T) {
 		t.Fatalf("forged owner header status=%d", response.StatusCode)
 	}
 	_ = response.Body.Close()
+}
+
+func TestLocalHTTPClientRejectsUnsafeUserSocket(t *testing.T) {
+	uid, gid := syscall.Geteuid(), syscall.Getegid()
+	runtimeBase := t.TempDir()
+	if err := os.Chmod(runtimeBase, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeDir := filepath.Join(runtimeBase, "agentos")
+	if err := os.Mkdir(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	socketPath := filepath.Join(runtimeDir, "user.sock")
+	listener, err := listenLocalHuman(t.Context(), socketPath, uid, gid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := bootstrap.NewConfig(bootstrap.ModeUser, bootstrap.Owner{
+		Username: "current-user", UID: uid, GID: gid,
+	}, bootstrap.Paths{RuntimeDir: runtimeDir, UserSocket: socketPath}, time.Now())
+	client, err := localHTTPClient(config)
+	if err != nil {
+		_ = listener.Close()
+		t.Fatalf("safe socket was rejected: %v", err)
+	}
+	client.CloseIdleConnections()
+
+	if err := os.Chmod(socketPath, 0o660); err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
+	requireLocalHTTPClientRejected(t, config, "broad socket mode")
+	if err := os.Chmod(socketPath, 0o600); err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
+
+	wrongOwner := config
+	wrongOwner.Owner.UID = uid + 1
+	requireLocalHTTPClientRejected(t, wrongOwner, "different socket owner")
+
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(socketPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(socketPath, []byte("not a socket"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireLocalHTTPClientRejected(t, config, "regular file")
+
+	target := filepath.Join(runtimeDir, "target")
+	if err := os.Rename(socketPath, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, socketPath); err != nil {
+		t.Fatal(err)
+	}
+	requireLocalHTTPClientRejected(t, config, "symlink")
+}
+
+func requireLocalHTTPClientRejected(t *testing.T, config bootstrap.Config, condition string) {
+	t.Helper()
+	client, err := localHTTPClient(config)
+	if err == nil {
+		client.CloseIdleConnections()
+		t.Fatalf("local client accepted %s", condition)
+	}
+	if !strings.Contains(err.Error(), "socket ownership, type, or permissions are invalid") {
+		t.Fatalf("local client rejected %s for the wrong reason: %v", condition, err)
+	}
 }
 
 func localUserSocketRequest(t *testing.T, client *http.Client, path, forgedUID string) *http.Response {
