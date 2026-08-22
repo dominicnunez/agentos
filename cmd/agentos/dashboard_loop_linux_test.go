@@ -106,8 +106,18 @@ func TestDashboardCompletesDurableAgentWorkThroughKernelAuthenticatedGateway(t *
 	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &draft) != nil || draft.State != intake.StateAwaitingConfirmation || draft.Intent == nil {
 		t.Fatalf("dashboard intent draft=%d %s", response.Code, response.Body.String())
 	}
-	if draft.TaskID != "" || draft.WorkID != "" {
-		t.Fatalf("unconfirmed intent created addressable work: %+v", draft)
+	if draft.TaskID == "" || draft.WorkID != "" {
+		t.Fatalf("unconfirmed intent identity=%+v", draft)
+	}
+	preConfirmation, err := store.Events(t.Context(), "dashboard-organization-loop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range preConfirmation {
+		switch event.EventType {
+		case "WORK_CREATED", "PLAN_CREATED", "TASK_CREATED", "EXECUTION_STARTED":
+			t.Fatalf("unconfirmed intent reached execution event %s", event.EventType)
+		}
 	}
 
 	confirmation := marshalDashboardLoopBody(t, map[string]string{
@@ -119,7 +129,7 @@ func TestDashboardCompletesDurableAgentWorkThroughKernelAuthenticatedGateway(t *
 	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &completed) != nil {
 		t.Fatalf("dashboard confirmation=%d %s", response.Code, response.Body.String())
 	}
-	if completed.State != intake.StateCompleted || completed.TaskID == "" || completed.WorkID == "" || completed.ConversationID != "dashboard-organization-loop" ||
+	if completed.State != intake.StateCompleted || completed.TaskID != draft.TaskID || completed.WorkID == "" || completed.ConversationID != "dashboard-organization-loop" ||
 		!strings.Contains(completed.Result, "fake-model:") || !strings.Contains(completed.Result, "draft a private briefing") {
 		t.Fatalf("completed dashboard work=%+v", completed)
 	}
