@@ -67,12 +67,14 @@ type humanMessageRequest struct {
 	MessageID      string             `json:"message_id"`
 	Text           string             `json:"text"`
 	ExecutionKind  core.ExecutionKind `json:"execution_kind,omitempty"`
+	GoalID         core.ID            `json:"goal_id,omitempty"`
 }
 
 type humanTaskResponse struct {
 	TaskID                     string                   `json:"task_id"`
 	WorkID                     string                   `json:"work_id,omitempty"`
 	ConversationID             string                   `json:"conversation_id"`
+	SelectedGoalID             core.ID                  `json:"selected_goal_id,omitempty"`
 	State                      string                   `json:"state"`
 	Prompt                     string                   `json:"prompt,omitempty"`
 	Result                     string                   `json:"result,omitempty"`
@@ -370,7 +372,7 @@ func (h *Human) handleMessage(w http.ResponseWriter, r *http.Request, principal 
 	}
 	view, err := h.service.Handle(r.Context(), principal, intake.Message{
 		ConversationID: request.ConversationID, MessageID: request.MessageID,
-		Text: request.Text, RequestedKind: request.ExecutionKind,
+		Text: request.Text, RequestedKind: request.ExecutionKind, SelectedGoalID: request.GoalID,
 	})
 	h.writeView(w, view, err)
 }
@@ -482,7 +484,8 @@ func (h *Human) writeIntakeError(w http.ResponseWriter, err error) {
 func humanResponse(view intake.View) humanTaskResponse {
 	response := humanTaskResponse{
 		TaskID: view.TaskID, WorkID: view.WorkID, ConversationID: view.ConversationID,
-		State: view.State, Prompt: view.Prompt, Result: view.Result, Mode: view.Mode, TrustLabel: view.TrustLabel,
+		SelectedGoalID: view.SelectedGoalID,
+		State:          view.State, Prompt: view.Prompt, Result: view.Result, Mode: view.Mode, TrustLabel: view.TrustLabel,
 		ReviewRequired: view.ReviewRequired, UserInputAllowed: view.UserInputAllowed, InputRecoveryRequired: view.InputRecoveryRequired,
 		CompletionRecoveryRequired: view.CompletionRecoveryRequired,
 	}

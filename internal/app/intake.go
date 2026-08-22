@@ -21,6 +21,7 @@ type IntakeMessage struct {
 	SourcePrincipalKind core.PrincipalKind
 	SourceChannel       string
 	RequestedKind       core.ExecutionKind
+	SelectedGoalID      core.ID
 }
 
 type IntentConfirmation struct {
@@ -125,6 +126,9 @@ func (s *Service) RecordIntakeMessage(ctx context.Context, in IntakeMessage) ([]
 	if ctx == nil || in.RequestID == "" || in.OrganizationID == "" || in.MessageID == "" || in.Text == "" || in.SourcePrincipalID == "" || in.SourcePrincipalKind == "" || in.SourceChannel == "" {
 		return nil, fmt.Errorf("complete intake message identity and content are required")
 	}
+	if in.SelectedGoalID != "" && (in.SourcePrincipalKind != core.PrincipalHuman || in.SourceChannel != "HUMAN_DIRECT" || !core.ValidGoalReferenceID(string(in.SelectedGoalID))) {
+		return nil, fmt.Errorf("selected Goal requires valid local user intake")
+	}
 	correlationID, err := s.gateway.ReserveExternalWork(ctx, in.OrganizationID, in.RequestID)
 	if err != nil {
 		return nil, err
@@ -133,7 +137,9 @@ func (s *Service) RecordIntakeMessage(ctx context.Context, in IntakeMessage) ([]
 	if err != nil {
 		return nil, err
 	}
-	payload := events.IntakeMessageRecordedPayload{MessageID: in.MessageID, Text: in.Text, SourcePrincipalID: string(in.SourcePrincipalID), SourcePrincipalKind: string(in.SourcePrincipalKind), SourceChannel: in.SourceChannel, RequestedExecutionKind: in.RequestedKind}
+	payload := events.IntakeMessageRecordedPayload{MessageID: in.MessageID, Text: in.Text, SourcePrincipalID: string(in.SourcePrincipalID), SourcePrincipalKind: string(in.SourcePrincipalKind), SourceChannel: in.SourceChannel, RequestedExecutionKind: in.RequestedKind, SelectedGoalID: string(in.SelectedGoalID)}
+	var durableSelectedGoalID string
+	hasDurableSelectedGoal := false
 	for _, event := range stream {
 		if event.EventType == "INTENT_CONFIRMED" {
 			return nil, fmt.Errorf("confirmed intent cannot accept more intake messages")
@@ -145,6 +151,12 @@ func (s *Service) RecordIntakeMessage(ctx context.Context, in IntakeMessage) ([]
 		if json.Unmarshal(event.Payload, &recorded) != nil {
 			return nil, fmt.Errorf("durable intake message is invalid")
 		}
+		if !hasDurableSelectedGoal {
+			durableSelectedGoalID = recorded.SelectedGoalID
+			hasDurableSelectedGoal = true
+		} else if recorded.SelectedGoalID != durableSelectedGoalID {
+			return nil, fmt.Errorf("durable intake selected Goal changed")
+		}
 		if recorded.MessageID != in.MessageID {
 			continue
 		}
@@ -152,6 +164,9 @@ func (s *Service) RecordIntakeMessage(ctx context.Context, in IntakeMessage) ([]
 			return nil, fmt.Errorf("intake message id is bound to different content")
 		}
 		return stream, nil
+	}
+	if hasDurableSelectedGoal && payload.SelectedGoalID != durableSelectedGoalID {
+		return nil, fmt.Errorf("intake conversation is bound to a different Goal")
 	}
 	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
 		OrganizationID: in.OrganizationID, EventType: "INTAKE_MESSAGE_RECORDED",
@@ -161,6 +176,28 @@ func (s *Service) RecordIntakeMessage(ctx context.Context, in IntakeMessage) ([]
 		return nil, fmt.Errorf("persist intake message: %w", err)
 	}
 	return s.gateway.Events(ctx, correlationID)
+}
+
+// ValidateSelectedGoal rechecks the runtime-owned strategic projection before
+// local user intake can bind Work to a Goal. Selection conveys no authority to
+// revise the Goal or its Mission and both must still be active.
+func (s *Service) ValidateSelectedGoal(ctx context.Context, organizationID, goalID core.ID) error {
+	if ctx == nil || organizationID == "" || goalID == "" || !core.ValidGoalReferenceID(string(goalID)) {
+		return fmt.Errorf("valid organization and selected Goal are required")
+	}
+	snapshot, err := s.state.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("load selected Goal state: %w", err)
+	}
+	goal, found := snapshot.Goals[goalID]
+	if !found || goal.Value.ID != goalID || goal.Value.OrganizationID != organizationID || goal.Value.Status != core.GoalActive {
+		return fmt.Errorf("selected Goal is not active in this organization")
+	}
+	mission, found := snapshot.Missions[goal.Value.MissionID]
+	if !found || mission.Value.ID != goal.Value.MissionID || mission.Value.OrganizationID != organizationID || mission.Value.Status != core.MissionActive {
+		return fmt.Errorf("selected Goal does not belong to an active Mission")
+	}
+	return nil
 }
 
 func (s *Service) RecordIntentNormalizationContext(ctx context.Context, organizationID, requestID string, in IntentNormalizationContext) ([]events.Event, error) {

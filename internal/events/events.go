@@ -181,6 +181,7 @@ type IntakeMessageRecordedPayload struct {
 	SourcePrincipalKind    string             `json:"source_principal_kind"`
 	SourceChannel          string             `json:"source_channel"`
 	RequestedExecutionKind core.ExecutionKind `json:"requested_execution_kind,omitempty"`
+	SelectedGoalID         string             `json:"selected_goal_id,omitempty"`
 }
 
 type IntentDraftedPayload struct {
@@ -304,6 +305,8 @@ func validateReviewedIntent(stream []Event, confirmationEvent Event, confirmatio
 	var latestDraftEvent Event
 	var latestDraft IntentDraftedPayload
 	draftCount := 0
+	var selectedGoalID string
+	selectedGoalBound := false
 	for _, event := range stream {
 		switch event.EventType {
 		case "INTAKE_MESSAGE_RECORDED":
@@ -313,6 +316,12 @@ func validateReviewedIntent(stream []Event, confirmationEvent Event, confirmatio
 			}
 			if _, exists := intakeMessages[payload.MessageID]; exists {
 				return fmt.Errorf("intent source message is not unique")
+			}
+			if !selectedGoalBound {
+				selectedGoalID = payload.SelectedGoalID
+				selectedGoalBound = true
+			} else if payload.SelectedGoalID != selectedGoalID {
+				return fmt.Errorf("intent selected Goal changed during review")
 			}
 			intakeMessages[payload.MessageID] = payload
 			intakeSequences[payload.MessageID] = event.Sequence
@@ -364,7 +373,8 @@ func validateReviewedIntent(stream []Event, confirmationEvent Event, confirmatio
 		switch reviewed.Goal.Origin {
 		case "EXPLICIT", "CONFIRMED":
 			goalMessage, found := intakeMessages[reviewed.Goal.SourceMessageID]
-			if !found || intakeSequences[reviewed.Goal.SourceMessageID] >= latestDraftEvent.Sequence || !core.ContainsExactGoalReference(goalMessage.Text, string(goalID)) {
+			if !found || intakeSequences[reviewed.Goal.SourceMessageID] >= latestDraftEvent.Sequence ||
+				goalMessage.SelectedGoalID != string(goalID) && !core.ContainsExactGoalReference(goalMessage.Text, string(goalID)) {
 				return fmt.Errorf("goal-bound intent Goal is not present in its attributed source message")
 			}
 		case "POLICY":
@@ -395,6 +405,9 @@ func validReviewedIntakeMessage(event Event, payload IntakeMessageRecordedPayloa
 		return false
 	}
 	if !validReviewedOperatorIdentity(payload.SourcePrincipalID, payload.SourcePrincipalKind, payload.SourceChannel) {
+		return false
+	}
+	if payload.SelectedGoalID != "" && (payload.SourcePrincipalKind != string(core.PrincipalHuman) || payload.SourceChannel != "HUMAN_DIRECT" || !core.ValidGoalReferenceID(payload.SelectedGoalID)) {
 		return false
 	}
 	switch payload.RequestedExecutionKind {

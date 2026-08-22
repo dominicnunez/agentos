@@ -35,6 +35,7 @@
   let taskID = '';
   let workText = '';
   let executionKind = '';
+  let selectedGoalID = '';
   let conversationID = '';
   let busy = false;
   let error = '';
@@ -117,10 +118,12 @@
       if (activeResult.value) {
         active = activeResult.value;
         conversationID = activeResult.value.conversation_id;
+        selectedGoalID = activeResult.value.selected_goal_id ?? '';
       } else if (!hasStoredConfirmationRetry(displayedActive)) {
         active = null;
         conversationID = '';
         executionKind = '';
+        selectedGoalID = '';
       }
     }
     if (approvalResult.status === 'fulfilled') {
@@ -230,7 +233,7 @@
     if (!text.trim()) return;
     if (!conversationID) conversationID = identifier('user');
     const currentConversation = conversationID;
-    const requestKey = JSON.stringify([currentConversation, text, executionKind]);
+    const requestKey = JSON.stringify([currentConversation, text, executionKind, selectedGoalID]);
     if (!pendingWorkMessageID || pendingWorkKey !== requestKey) {
       pendingWorkMessageID = identifier('message');
       pendingWorkKey = requestKey;
@@ -243,7 +246,8 @@
           conversation_id: currentConversation,
           message_id: messageID,
           text,
-          ...(executionKind ? { execution_kind: executionKind } : {})
+          ...(executionKind ? { execution_kind: executionKind } : {}),
+          ...(selectedGoalID ? { goal_id: selectedGoalID } : {})
         })
       });
       pendingWorkMessageID = '';
@@ -270,6 +274,7 @@
       sessionStorage.removeItem(pendingConfirmationKey);
       clearCompletionEvidence();
       executionKind = '';
+      selectedGoalID = '';
       pendingWorkMessageID = '';
       pendingWorkKey = '';
       active = null;
@@ -280,6 +285,12 @@
       notice = `Task ${confirmed.task_id} for Work ${confirmed.work_id || ''} was created from the confirmed Intent.`;
       await refresh();
     });
+  }
+
+  function selectableGoals(): GoalSummary[] {
+    if (!organization) return [];
+    const activeMissions = new Set(organization.missions.filter((mission) => mission.status === 'ACTIVE').map((mission) => mission.id));
+    return organization.goals.filter((goal) => goal.status === 'ACTIVE' && activeMissions.has(goal.mission_id));
   }
 
   async function recoverPendingConfirmation(): Promise<TaskView | null> {
@@ -635,7 +646,7 @@
       {:else}<div class="panel empty">Organization state is unavailable.</div>{/if}
     {:else if section === 'work'}
       <section class="grid work-grid">
-        <div class="panel composer"><p class="eyebrow">Natural-language intake</p><h2>{active ? 'Continue the conversation' : 'What should the organization accomplish?'}</h2><textarea bind:value={workText} disabled={busy} rows="7" placeholder="Describe the outcome, relevant context, constraints, and anything only you can provide."></textarea><label>Execution<select bind:value={executionKind} disabled={busy || Boolean(active)}><option value="">Automatic</option><option value="HUMAN">User task</option></select><small>Automatic prefers deterministic work and uses an Agent only when justified.</small></label><div class="actions"><button class="primary" onclick={submitWork} disabled={busy || !identity || !workText.trim()}>Send</button><small>The model proposes a bounded Intent. Nothing starts until you confirm the exact review.</small></div></div>
+        <div class="panel composer"><p class="eyebrow">Natural-language intake</p><h2>{active ? 'Continue the conversation' : 'What should the organization accomplish?'}</h2><textarea bind:value={workText} disabled={busy} rows="7" placeholder="Describe the outcome, relevant context, constraints, and anything only you can provide."></textarea><label>Goal<select bind:value={selectedGoalID} disabled={busy || Boolean(active)}><option value="">Ad hoc work</option>{#each selectableGoals() as goal}<option value={goal.id}>{safeDisplay(goal.objective)} · {safeDisplay(goal.id)}</option>{/each}</select><small>Choosing a Goal binds the reviewed Work to that existing durable objective. It grants no new authority.</small></label><label>Execution<select bind:value={executionKind} disabled={busy || Boolean(active)}><option value="">Automatic</option><option value="HUMAN">User task</option></select><small>Automatic prefers deterministic work and uses an Agent only when justified.</small></label><div class="actions"><button class="primary" onclick={submitWork} disabled={busy || !identity || !workText.trim()}>Send</button><small>The model proposes a bounded Intent. Nothing starts until you confirm the exact review.</small></div></div>
         <div class="panel intent"><div class="panel-title"><div><p class="eyebrow">Intent contract</p><h2>Review before work begins</h2></div>{#if active?.state}<span class="status">{safeDisplay(active.state)}</span>{/if}</div>
           {#if active?.intent}
             {#if active.prompt}<div class="banner notice governed-text" role="status"><strong>{active.state === 'INPUT_REQUIRED' ? 'More information required' : 'Review guidance'}</strong><br />{safeDisplay(active.prompt)}</div>{/if}

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dominicnunez/agentos/internal/app"
 	"github.com/dominicnunez/agentos/internal/artifacts"
@@ -121,6 +122,56 @@ func TestHumanGatewayRoutesNaturalLanguageAndReturnsNarrowTaskView(t *testing.T)
 	for _, event := range stream {
 		if strings.HasPrefix(event.EventType, "APPROVAL_") || strings.HasPrefix(event.EventType, "CAPABILITY_") || strings.HasPrefix(event.EventType, "EFFECT_") {
 			t.Fatalf("natural-language work crossed governance boundary: %+v", event)
+		}
+	}
+}
+
+func TestHumanGatewayBindsSelectedActiveGoalWithoutGrantingAuthority(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	mission := core.Mission{ID: "mission-1", OrganizationID: organization.ID, Statement: "Deliver governed work", Status: core.MissionActive, CreatedAt: now}
+	goal := core.Goal{ID: "goal-1", OrganizationID: organization.ID, MissionID: mission.ID, Objective: "Produce verified outcomes", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "Verified", Origin: "RUNTIME_TEST"}}, Status: core.GoalActive, CreatedAt: now}
+	for _, projection := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "seed-org"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "seed-mission"}, ProjectionKind: "mission", RecordID: string(mission.ID), Version: 1, Value: mission},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_CREATED", SourceActorID: "runtime", CorrelationID: "seed-goal"}, ProjectionKind: "goal", RecordID: string(goal.ID), Version: 1, Value: goal},
+	} {
+		if _, err := gateway.PublishProjection(ctx, projection); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime := app.New(gateway)
+	handler := testHumanHandler(t, intake.New(runtime))
+
+	request := humanMessageRequest{ConversationID: "goal-bound", MessageID: "message-1", Text: "echo a verified result", GoalID: goal.ID}
+	draftResponse := serveHuman(handler, http.MethodPost, "/v1/user/messages", testOwnerMarker, humanBody(t, request))
+	var draft humanTaskResponse
+	if draftResponse.Code != http.StatusOK || json.Unmarshal(draftResponse.Body.Bytes(), &draft) != nil || draft.Intent == nil || draft.SelectedGoalID != goal.ID {
+		t.Fatalf("goal-bound draft=%d %s", draftResponse.Code, draftResponse.Body.String())
+	}
+	confirmationBody, err := json.Marshal(humanIntentConfirmationRequest{MessageID: "confirmation-1", Fingerprint: draft.Intent.Fingerprint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := serveHuman(handler, http.MethodPost, "/v1/user/intents/"+request.ConversationID+"/confirm", testOwnerMarker, string(confirmationBody))
+	if response.Code != http.StatusOK {
+		t.Fatalf("goal-bound submit=%d %s", response.Code, response.Body.String())
+	}
+	snapshot, found, err := runtime.OrganizationState(ctx, organization.ID)
+	if err != nil || !found || len(snapshot.Works) != 1 || snapshot.Works[0].GoalID != goal.ID {
+		t.Fatalf("goal-bound organization=%+v found=%t err=%v", snapshot, found, err)
+	}
+	stream := gatewayExternalStream(t, store, request.ConversationID)
+	for _, event := range stream {
+		if strings.HasPrefix(event.EventType, "APPROVAL_") || strings.HasPrefix(event.EventType, "CAPABILITY_") || strings.HasPrefix(event.EventType, "EFFECT_") {
+			t.Fatalf("Goal selection crossed an authority boundary: %+v", event)
 		}
 	}
 }

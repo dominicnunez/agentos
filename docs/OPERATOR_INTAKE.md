@@ -16,13 +16,18 @@ or policy. The authenticated boundary injects those values before work enters
 the event ledger.
 
 The Mission/Goal link is optional for ad hoc Work. When present, it must point
-to an active Goal in the same organization and cannot be changed by later Task
-output or Work state transitions. A user or Agent may identify that Goal during
-the natural-language intake conversation. The normalizer may carry only an
-exact Goal ID present in the cited message, and the Goal is shown in the
-fingerprinted Intent review before confirmation. It may not invent or select a
-Goal. Goal and Mission activity and tenant ownership are checked in the same
-SQLite transaction that records confirmation. Planning fingerprints the exact
+to an active Goal under an active Mission in the same organization and cannot
+be changed by later conversation, Task output, or Work state transitions. The
+authenticated local user may select an existing Goal in the dashboard before
+the first intake message. That selection is recorded in every intake event and
+inherited across clarification turns; it grants no authority to create or
+revise strategic direction. An A2A Agent cannot use this local-user field. A
+user or Agent may instead identify a Goal in natural language, in which case
+the normalizer may carry only an exact Goal ID present in the cited message.
+The Goal is shown in the fingerprinted Intent review before confirmation; the
+model may not invent or select one. Goal and Mission activity and tenant
+ownership are rechecked before normalization and in the SQLite confirmation
+boundary. Planning fingerprints the exact
 Mission and Goal revisions it uses. Retry and recovery retain that context; if
 either revision changes before execution, Agent OS terminalizes the stale Work
 so replacement Work can be reviewed against the current direction instead of
@@ -106,7 +111,8 @@ and Linux `SO_PEERCRED` re-establishes the configured owner.
 The initial views are:
 
 - Overview: current intake and governance queues.
-- Work: submit natural-language work and inspect its narrow Task view.
+- Work: optionally select an active Goal, submit natural-language work, and
+  inspect its narrow Task view.
 - Approvals: inspect the exact prepared effect and approve or deny it.
 - Reviews: judge exact candidate results and completion evidence.
 - System: inspect the dashboard session and use the read-only `agentos doctor`

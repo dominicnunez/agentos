@@ -77,12 +77,14 @@ type Message struct {
 	MessageID      string
 	Text           string
 	RequestedKind  core.ExecutionKind
+	SelectedGoalID core.ID
 }
 
 type View struct {
 	TaskID                     string
 	WorkID                     string
 	ConversationID             string
+	SelectedGoalID             core.ID
 	State                      string
 	Prompt                     string
 	Result                     string
@@ -420,10 +422,26 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 		if message.TaskID != "" || !principal.Allowed(CapabilitySubmitWork) {
 			return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilitySubmitWork)
 		}
+		if message.SelectedGoalID != "" {
+			if principal.Kind != core.PrincipalHuman || principal.Channel != ChannelHumanDirect {
+				return View{}, fmt.Errorf("%w: only authenticated local user intake can select a Goal", ErrForbidden)
+			}
+			if err := s.app.ValidateSelectedGoal(ctx, core.ID(principal.OrganizationID), message.SelectedGoalID); err != nil {
+				return View{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+			}
+		}
 	} else {
 		if err := authorizeIntakePrincipal(principal, stream); err != nil {
 			return View{}, err
 		}
+		boundGoalID, err := selectedGoalBinding(stream)
+		if err != nil {
+			return View{}, fmt.Errorf("%w: durable selected Goal binding is invalid", ErrUnavailable)
+		}
+		if message.SelectedGoalID != "" && message.SelectedGoalID != boundGoalID {
+			return View{}, fmt.Errorf("%w: intake conversation is bound to a different Goal", ErrConflict)
+		}
+		message.SelectedGoalID = boundGoalID
 		if replay, found, replayErr := replayedIntentView(message.ConversationID, principal, message, stream); replayErr != nil {
 			return View{}, replayErr
 		} else if found {
@@ -442,7 +460,7 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 	stream, err := s.app.RecordIntakeMessage(ctx, app.IntakeMessage{
 		RequestID: message.ConversationID, OrganizationID: principal.OrganizationID,
 		MessageID: message.MessageID, Text: message.Text, SourcePrincipalID: core.ID(principal.ID),
-		SourcePrincipalKind: principal.Kind, SourceChannel: principal.Channel, RequestedKind: message.RequestedKind,
+		SourcePrincipalKind: principal.Kind, SourceChannel: principal.Channel, RequestedKind: message.RequestedKind, SelectedGoalID: message.SelectedGoalID,
 	})
 	if err != nil {
 		return View{}, fmt.Errorf("%w: record intake message", ErrConflict)
@@ -498,6 +516,23 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 	}
 	if usesModel != (normalized.Usage != nil) {
 		return View{}, fmt.Errorf("%w: intent normalizer model usage contract is inconsistent", ErrUnavailable)
+	}
+	selectedGoalID, err := selectedGoalBinding(stream)
+	if err != nil {
+		return View{}, fmt.Errorf("%w: load selected Goal binding", ErrUnavailable)
+	}
+	if selectedGoalID != "" {
+		if err := s.app.ValidateSelectedGoal(ctx, core.ID(principal.OrganizationID), selectedGoalID); err != nil {
+			return View{}, fmt.Errorf("%w: recheck selected Goal binding: %w", ErrConflict, err)
+		}
+		if normalized.Candidate.Goal != nil && core.ID(normalized.Candidate.Goal.Value) != selectedGoalID {
+			return View{}, fmt.Errorf("%w: normalized Goal conflicts with the authenticated user selection", ErrConflict)
+		}
+		initial, found, intakeErr := initialIntakePayload(stream)
+		if intakeErr != nil || !found || initial.SelectedGoalID != string(selectedGoalID) {
+			return View{}, fmt.Errorf("%w: selected Goal lacks durable intake provenance", ErrUnavailable)
+		}
+		normalized.Candidate.Goal = &core.IntentValue{Value: string(selectedGoalID), Origin: "EXPLICIT", SourceMessageID: initial.MessageID}
 	}
 	if normalized.Candidate.ReplacesWork != nil {
 		goalID, resolveErr := s.app.ResolveReplacementGoal(ctx, principal.OrganizationID, core.ID(normalized.Candidate.ReplacesWork.Value))
@@ -569,6 +604,41 @@ func explicitRequestedKind(stream []events.Event) (core.ExecutionKind, error) {
 		}
 	}
 	return requested, nil
+}
+
+func selectedGoalBinding(stream []events.Event) (core.ID, error) {
+	initial, found, err := initialIntakePayload(stream)
+	if err != nil || !found {
+		return "", err
+	}
+	goalID := core.ID(initial.SelectedGoalID)
+	if goalID != "" && !core.ValidGoalReferenceID(string(goalID)) {
+		return "", fmt.Errorf("selected Goal identifier is invalid")
+	}
+	for _, event := range stream {
+		if event.EventType != "INTAKE_MESSAGE_RECORDED" {
+			continue
+		}
+		var payload events.IntakeMessageRecordedPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.SelectedGoalID != initial.SelectedGoalID {
+			return "", fmt.Errorf("selected Goal changed within the intake conversation")
+		}
+	}
+	return goalID, nil
+}
+
+func initialIntakePayload(stream []events.Event) (events.IntakeMessageRecordedPayload, bool, error) {
+	for _, event := range stream {
+		if event.EventType != "INTAKE_MESSAGE_RECORDED" {
+			continue
+		}
+		var payload events.IntakeMessageRecordedPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return events.IntakeMessageRecordedPayload{}, false, err
+		}
+		return payload, true, nil
+	}
+	return events.IntakeMessageRecordedPayload{}, false, nil
 }
 
 func (s *Service) CompleteHumanTask(ctx context.Context, principal Principal, taskID string, submission core.HumanTaskSubmission) (View, error) {
@@ -915,6 +985,9 @@ func validateMessageContent(message Message) error {
 	if message.ConversationID == "" || message.MessageID == "" {
 		return fmt.Errorf("%w: conversation and message identifiers are required", ErrInvalid)
 	}
+	if message.SelectedGoalID != "" && !core.ValidGoalReferenceID(string(message.SelectedGoalID)) {
+		return fmt.Errorf("%w: selected Goal identifier is invalid", ErrInvalid)
+	}
 	if strings.TrimSpace(message.Text) == "" || len(message.Text) > 64<<10 || !utf8.ValidString(message.Text) {
 		return fmt.Errorf("%w: text must be valid UTF-8 between 1 and 65536 bytes", ErrInvalid)
 	}
@@ -1151,7 +1224,7 @@ func initialMessage(stream []events.Event) (initialWork, bool) {
 				return initialWork{}, false
 			}
 			return initialWork{
-				Message:       Message{MessageID: intent.SourceMessageID, Text: intent.OriginalInstruction, RequestedKind: requestedKind},
+				Message:       Message{MessageID: intent.SourceMessageID, Text: intent.OriginalInstruction, RequestedKind: requestedKind, SelectedGoalID: selectedGoalIDForMessage(stream, intent.SourceMessageID)},
 				PrincipalID:   intent.SourcePrincipalID,
 				PrincipalKind: intent.SourcePrincipalKind,
 				Channel:       intent.SourceChannel,
@@ -1262,7 +1335,7 @@ func replayedIntentView(conversationID string, principal Principal, message Mess
 		if payload.SourcePrincipalID != principal.ID || payload.SourcePrincipalKind != string(principal.Kind) || payload.SourceChannel != principal.Channel {
 			return View{}, false, fmt.Errorf("%w: intake replay does not match its authenticated source", ErrForbidden)
 		}
-		if payload.Text != message.Text || payload.RequestedExecutionKind != message.RequestedKind {
+		if payload.Text != message.Text || payload.RequestedExecutionKind != message.RequestedKind || core.ID(payload.SelectedGoalID) != message.SelectedGoalID {
 			return View{}, false, fmt.Errorf("%w: intake message id is already bound to different input", ErrConflict)
 		}
 		found = true
@@ -1323,7 +1396,20 @@ func latestRecordedIntentMessage(conversationID string, stream []events.Event, p
 	if ValidateIdentifier("message", payload.MessageID) != nil || payload.Text == "" {
 		return Message{}, false, fmt.Errorf("%w: durable intake message identity is invalid", ErrUnavailable)
 	}
-	return Message{ConversationID: conversationID, MessageID: payload.MessageID, Text: payload.Text, RequestedKind: payload.RequestedExecutionKind}, true, nil
+	return Message{ConversationID: conversationID, MessageID: payload.MessageID, Text: payload.Text, RequestedKind: payload.RequestedExecutionKind, SelectedGoalID: core.ID(payload.SelectedGoalID)}, true, nil
+}
+
+func selectedGoalIDForMessage(stream []events.Event, messageID string) core.ID {
+	for _, event := range stream {
+		if event.EventType != "INTAKE_MESSAGE_RECORDED" {
+			continue
+		}
+		var payload events.IntakeMessageRecordedPayload
+		if json.Unmarshal(event.Payload, &payload) == nil && payload.MessageID == messageID {
+			return core.ID(payload.SelectedGoalID)
+		}
+	}
+	return ""
 }
 
 func durableIntentConfirmation(conversationID string, principal Principal, stream []events.Event) (IntentConfirmation, error) {
@@ -1412,7 +1498,8 @@ func projectIntentView(conversationID string, stream []events.Event, draft core.
 		state = StateAwaitingConfirmation
 	}
 	copy := draft
-	return View{TaskID: streamTaskID(stream), WorkID: streamWorkID(stream), ConversationID: conversationID, State: state, Prompt: reply, UpdatedAt: stream[len(stream)-1].CreatedAt, Intent: &copy}
+	initial, _, _ := initialIntakePayload(stream)
+	return View{TaskID: streamTaskID(stream), WorkID: streamWorkID(stream), ConversationID: conversationID, SelectedGoalID: core.ID(initial.SelectedGoalID), State: state, Prompt: reply, UpdatedAt: stream[len(stream)-1].CreatedAt, Intent: &copy}
 }
 
 func matchesDurableInput(stream []events.Event, principal Principal, message Message) (bool, error) {

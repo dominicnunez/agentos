@@ -1140,6 +1140,104 @@ func seedIntakeGoal(t *testing.T, ctx context.Context, gateway *events.Gateway, 
 	}
 }
 
+func TestAuthenticatedSelectedGoalBindsReviewedWorkWithoutModelInference(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	seedIntakeGoal(t, ctx, gateway, "org-1", "goal-1", core.GoalActive)
+	runtime := app.New(gateway)
+	service := NewWithNormalizer(runtime, fixedNormalizer{})
+	principal := testPrincipal("user-1", core.PrincipalHuman, ChannelHumanDirect)
+	message := Message{ConversationID: "selected-goal", MessageID: "message-1", Text: "Produce a bounded result.", SelectedGoalID: "goal-1"}
+
+	draft, err := service.Handle(ctx, principal, message)
+	if err != nil || draft.Intent == nil || draft.Intent.Goal == nil || draft.Intent.Goal.Value != "goal-1" || draft.Intent.Goal.Origin != "EXPLICIT" || draft.Intent.Goal.SourceMessageID != message.MessageID {
+		t.Fatalf("selected Goal draft=%+v err=%v", draft, err)
+	}
+	beforeReplay := externalStream(t, store, message.ConversationID)
+	if replay, err := service.Handle(ctx, principal, message); err != nil || replay.Intent == nil || replay.Intent.Fingerprint != draft.Intent.Fingerprint {
+		t.Fatalf("exact selected Goal replay=%+v err=%v", replay, err)
+	}
+	if afterReplay := externalStream(t, store, message.ConversationID); len(afterReplay) != len(beforeReplay) {
+		t.Fatalf("selected Goal replay appended events: before=%d after=%d", len(beforeReplay), len(afterReplay))
+	}
+
+	continued, err := service.Handle(ctx, principal, Message{ConversationID: message.ConversationID, MessageID: "message-2", Text: "Keep the result concise."})
+	if err != nil || continued.Intent == nil || continued.Intent.Goal == nil || continued.Intent.Goal.Value != "goal-1" || continued.Intent.Goal.SourceMessageID != message.MessageID {
+		t.Fatalf("selected Goal continuation=%+v err=%v", continued, err)
+	}
+	if _, err := service.Handle(ctx, principal, Message{ConversationID: message.ConversationID, MessageID: "message-3", Text: "Change direction.", SelectedGoalID: "goal-other"}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("changed selected Goal error=%v", err)
+	}
+
+	confirmed, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: message.ConversationID, MessageID: "confirmation-1", Fingerprint: continued.Intent.Fingerprint})
+	if err != nil || confirmed.WorkID == "" {
+		t.Fatalf("selected Goal confirmation=%+v err=%v", confirmed, err)
+	}
+	snapshot, found, err := runtime.OrganizationState(ctx, "org-1")
+	if err != nil || !found || len(snapshot.Works) != 1 || snapshot.Works[0].GoalID != "goal-1" {
+		t.Fatalf("durable selected Goal snapshot=%+v found=%t err=%v", snapshot, found, err)
+	}
+}
+
+func TestSelectedGoalFailsClosedAtSourceAndStrategicBoundaries(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	seedIntakeGoal(t, ctx, gateway, "org-1", "goal-paused", core.GoalPaused)
+	service := NewWithNormalizer(app.New(gateway), fixedNormalizer{})
+	human := testPrincipal("user-1", core.PrincipalHuman, ChannelHumanDirect)
+	external := testPrincipal("agent-1", core.PrincipalExternalAgent, ChannelA2A)
+
+	for name, test := range map[string]struct {
+		principal Principal
+		message   Message
+	}{
+		"paused":  {human, Message{ConversationID: "paused-goal", MessageID: "message-1", Text: "Do work.", SelectedGoalID: "goal-paused"}},
+		"missing": {human, Message{ConversationID: "missing-goal", MessageID: "message-1", Text: "Do work.", SelectedGoalID: "goal-missing"}},
+		"a2a":     {external, Message{ConversationID: "a2a-goal", MessageID: "message-1", Text: "Do work.", SelectedGoalID: "goal-paused"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := service.Handle(ctx, test.principal, test.message); err == nil {
+				t.Fatal("invalid selected Goal was accepted")
+			}
+			if stream := externalStream(t, store, test.message.ConversationID); len(stream) != 0 {
+				t.Fatalf("rejected selected Goal reached ledger: %+v", stream)
+			}
+		})
+	}
+}
+
+func TestSelectedGoalRejectsConflictingNormalizerOutput(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	seedIntakeGoal(t, ctx, gateway, "org-1", "goal-1", core.GoalActive)
+	service := NewWithNormalizer(app.New(gateway), goalNormalizer{goalID: "goal-other"})
+	principal := testPrincipal("user-1", core.PrincipalHuman, ChannelHumanDirect)
+	message := Message{ConversationID: "conflicting-goal", MessageID: "message-1", Text: "Use goal-other for this result.", SelectedGoalID: "goal-1"}
+
+	if _, err := service.Handle(ctx, principal, message); !errors.Is(err, ErrConflict) {
+		t.Fatalf("conflicting normalized Goal error=%v", err)
+	}
+	stream := externalStream(t, store, message.ConversationID)
+	if countEvents(stream, "INTAKE_MESSAGE_RECORDED") != 1 || containsEvent(stream, "INTENT_DRAFTED") || containsEvent(stream, "INTENT_CONFIRMED") {
+		t.Fatalf("conflicting normalized Goal crossed review boundary: %+v", stream)
+	}
+}
+
 func (fixedNormalizer) Normalize(_ context.Context, turns []ConversationTurn) (Normalization, error) {
 	latest := turns[len(turns)-1]
 	value := core.IntentValue{Value: "Bounded result", Origin: "DEFAULT", SourceMessageID: latest.MessageID}
