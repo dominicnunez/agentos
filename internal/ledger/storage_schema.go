@@ -536,4 +536,3 @@ func storageSchemaFingerprint(ctx context.Context, query storageQueryer) (finger
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
-

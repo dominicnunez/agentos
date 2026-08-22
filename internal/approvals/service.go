@@ -552,4 +552,3 @@ func validateRequest(approval core.HumanApproval) error {
 	}
 	return nil
 }
-
