@@ -39,6 +39,12 @@ Completion and restart coverage also binds user judgment to exact evidence,
 denies Agent authority, retains unchecked postcondition status, and resumes a
 persisted review decision after restart.
 
+[`TestDashboardCompletesDurableAgentWorkThroughKernelAuthenticatedGateway`](../../cmd/agentos/dashboard_loop_linux_test.go)
+crosses the dashboard session bridge, real Unix socket and kernel peer identity,
+local user gateway, confirmed Intent, planning, durable Agent assignment,
+bounded AgentExecution, verified completion, and SQLite-backed Task retrieval
+without creating approval or effect authority.
+
 - Identity and inbox tests reopen SQLite and compare stored state with replay.
 - Projection-admission tests bind each materialized organizational record to
   one exact runtime-owned Event Contract and reject generic publication,
