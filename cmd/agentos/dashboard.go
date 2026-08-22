@@ -45,6 +45,7 @@ type dashboardBridge struct {
 	mu               sync.Mutex
 	bootstrapDigest  [sha256.Size]byte
 	bootstrapUsed    bool
+	pendingSession   string
 	sessionDigest    [sha256.Size]byte
 	sessionExpires   time.Time
 	bootstrapCleanup func()
@@ -89,6 +90,10 @@ func (b *dashboardBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !b.authorized(r.Header.Get("Authorization")) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			writeDashboardJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard session is invalid or expired"})
+			return
+		}
+		if r.URL.Path == "/api/session/ack" {
+			b.acknowledgeSession(w, r)
 			return
 		}
 		if r.URL.Path == "/api/dashboard" {
@@ -143,18 +148,37 @@ func (b *dashboardBridge) establishSession(w http.ResponseWriter, r *http.Reques
 		writeDashboardJSON(w, http.StatusUnauthorized, map[string]string{"error": "dashboard bootstrap token is invalid or already used"})
 		return
 	}
+	if b.pendingSession != "" && b.now().UTC().Before(b.sessionExpires) {
+		writeDashboardJSON(w, http.StatusOK, map[string]string{"session_token": b.pendingSession})
+		return
+	}
 	sessionToken, err := randomDashboardToken()
 	if err != nil {
 		writeDashboardJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "dashboard session is unavailable"})
 		return
 	}
-	b.bootstrapUsed = true
-	b.bootstrapDigest = [sha256.Size]byte{}
-	b.bootstrapCleanup()
-	b.bootstrapCleanup = func() {}
+	b.pendingSession = sessionToken
 	b.sessionDigest = sha256.Sum256([]byte(sessionToken))
 	b.sessionExpires = b.now().UTC().Add(dashboardSessionLifetime)
 	writeDashboardJSON(w, http.StatusOK, map[string]string{"session_token": sessionToken})
+}
+
+func (b *dashboardBridge) acknowledgeSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || r.URL.RawQuery != "" {
+		http.NotFound(w, r)
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.bootstrapUsed {
+		b.bootstrapUsed = true
+		b.bootstrapDigest = [sha256.Size]byte{}
+		b.pendingSession = ""
+		b.bootstrapCleanup()
+		b.bootstrapCleanup = func() {}
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (b *dashboardBridge) authorized(header string) bool {

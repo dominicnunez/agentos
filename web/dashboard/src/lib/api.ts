@@ -22,21 +22,27 @@ function clearBootstrapFragment(): void {
 export async function connect(): Promise<DashboardIdentity> {
   sessionToken = sessionStorage.getItem(sessionKey) ?? '';
   const bootstrapToken = currentBootstrapToken();
-  if (bootstrapToken) {
+  if (bootstrapToken && !sessionToken) {
     const response = await fetch('/api/session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ bootstrap_token: bootstrapToken })
     });
-    clearBootstrapFragment();
     const body = await decode<{ session_token: string }>(response);
     sessionToken = body.session_token;
     sessionStorage.setItem(sessionKey, sessionToken);
   }
+  if (bootstrapToken && sessionToken) clearBootstrapFragment();
   if (!sessionToken) {
     throw new Error('Launch the dashboard with `agentos` to establish a local session.');
   }
   try {
+    try {
+      await api<void>('/api/session/ack', { method: 'POST' });
+    } catch {
+      // A lost acknowledgement response is recoverable: the stored session
+      // remains usable and the next dashboard load retries acknowledgement.
+    }
     return await api<DashboardIdentity>('/api/dashboard');
   } catch (error) {
     sessionStorage.removeItem(sessionKey);

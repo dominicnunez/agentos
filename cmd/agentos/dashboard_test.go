@@ -52,8 +52,24 @@ func TestDashboardBridgeUsesOneTimeSessionAndExactBrowserOrigin(t *testing.T) {
 		t.Fatal("dashboard session token was not independently generated")
 	}
 	response = dashboardRequest(bridge, http.MethodPost, "/api/session", "http://127.0.0.1:41000", "application/json", `{"bootstrap_token":"bootstrap-secret"}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unacknowledged bootstrap retry=%d", response.Code)
+	}
+	var retry map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &retry); err != nil || retry["session_token"] != token {
+		t.Fatalf("unacknowledged bootstrap returned a different session: %v err=%v", retry, err)
+	}
+	response = dashboardAuthorizedRequest(bridge, http.MethodPost, "/api/session/ack", token, "")
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("session acknowledgement=%d %s", response.Code, response.Body.String())
+	}
+	response = dashboardAuthorizedRequest(bridge, http.MethodPost, "/api/session/ack", token, "")
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("session acknowledgement replay=%d %s", response.Code, response.Body.String())
+	}
+	response = dashboardRequest(bridge, http.MethodPost, "/api/session", "http://127.0.0.1:41000", "application/json", `{"bootstrap_token":"bootstrap-secret"}`)
 	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("replayed bootstrap=%d", response.Code)
+		t.Fatalf("acknowledged bootstrap replay=%d", response.Code)
 	}
 
 	response = dashboardAuthorizedRequest(bridge, http.MethodGet, "/api/dashboard", token, "")
