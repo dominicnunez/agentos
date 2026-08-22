@@ -33,7 +33,11 @@ jobs:
           corepack prepare pnpm@11.19.0 --activate
           pnpm install --frozen-lockfile --ignore-scripts
           pnpm build
-          git diff --exit-code -- ../../internal/dashboard/dist
+          dashboard_status=$(git status --porcelain=v1 --untracked-files=all -- ../../internal/dashboard/dist)
+          if [ -n "$dashboard_status" ]; then
+            printf '%s\n' "$dashboard_status"
+            exit 1
+          fi
 
   verify:
     needs: frontend
