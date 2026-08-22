@@ -54,3 +54,7 @@ before a decision event is written.
 Delivery is idempotent for the same identity and exact content. Startup
 recovery continues a durable decision from its last completed phase without
 inventing judgment or replaying an uncertain model call.
+An exact terminal-record read performs the same bounded continuation from the
+durable decision. If another authorized user reconnects after the response was
+lost, Agent OS keeps the original reviewer identity and never rewrites the
+decision merely to match the current session.

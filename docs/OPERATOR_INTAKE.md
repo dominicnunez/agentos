@@ -133,7 +133,10 @@ confirmation.
 Every model-backed normalization records its prompt-contract version, provider,
 model, execution profile, exact input event references, and provider-reported
 token usage in the ledger. Exact message retries reuse the durable draft and do
-not repeat inference. Intake is capped at 32 messages and 128 KiB of text per
+not repeat inference. If a message was committed but its draft response was
+interrupted, active-intake discovery resumes normalization from that exact
+authenticated durable message under the per-conversation lock; the browser
+does not reconstruct the lost message identity. Intake is capped at 32 messages and 128 KiB of text per
 conversation; a request that would exceed either limit is rejected before its
 message is appended.
 
@@ -145,7 +148,10 @@ work skips planning inference; adaptive work may use the configured provider
 to propose the smallest useful Task DAG. The complete graph is committed
 atomically before scheduling, and model output cannot introduce authority or
 new execution mechanisms. An unfinished
-conversation is recovered from SQLite when the dashboard restarts. Confirmation
+conversation is recovered from SQLite when the dashboard restarts. A
+confirmation that reached the ledger before Task creation is resumed by the
+server from the exact durable confirmer identity, message ID, and fingerprint.
+Confirmation
 means Agent OS understood the requested work; it is never approval for a
 financial, public, destructive, privileged, legal, deployment, or other
 consequential effect.
@@ -202,7 +208,10 @@ changing loopback origin. Recent review decisions are selected by a bounded,
 tenant-scoped SQLite query before their exact Task streams are validated. A
 matching completion-review retry is replayed until
 its downstream Task transition succeeds; a conflicting authorized decision is
-shown as authoritative and releases the stale local retry.
+shown as authoritative and releases the stale local retry. Exact terminal
+review reads continue missing runtime-owned phases with the reviewer identity
+already recorded in the ledger, even when a different authorized user opened
+the new dashboard session.
 
 The completion endpoint accepts strict JSON. Required files are size-bounded,
 content-sniffed, stored privately by SHA-256, and recorded as untrusted user

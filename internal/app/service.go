@@ -824,23 +824,7 @@ func (s *Service) RecoverHumanCompletion(ctx context.Context, organizationID, pr
 	if organizationID == "" || principalID == "" || sourceChannel != "HUMAN_DIRECT" || requestID == "" || taskID == "" {
 		return fmt.Errorf("organization, local user principal, request, and task are required")
 	}
-	snapshot, err := s.state.Load(ctx)
-	if err != nil {
-		return err
-	}
-	correlationID, err := s.requireExternalWorkCorrelation(ctx, organizationID, requestID)
-	if err != nil {
-		return err
-	}
-	state, ok := snapshot.Tasks[core.ID(taskID)]
-	if !ok || state.CorrelationID != correlationID || state.Value.ExecutionKind != core.ExecutionHuman || state.Value.CompletionContract == nil {
-		return fmt.Errorf("task is not a structured user task for this request")
-	}
-	actualOrganizationID, err := taskOrganization(snapshot, state.Value)
-	if err != nil || actualOrganizationID != core.ID(organizationID) {
-		return fmt.Errorf("task is not mapped to this request and organization")
-	}
-	stream, err := s.gateway.Events(ctx, correlationID)
+	state, actualOrganizationID, correlationID, stream, err := s.humanRecoveryTask(ctx, organizationID, requestID, taskID, true)
 	if err != nil {
 		return err
 	}
@@ -1073,23 +1057,7 @@ func (s *Service) RecoverOperatorInput(ctx context.Context, organizationID, prin
 	if organizationID == "" || principalID == "" || principalKind != core.PrincipalHuman || sourceChannel != "HUMAN_DIRECT" || requestID == "" || taskID == "" {
 		return fmt.Errorf("organization, local user principal, request, and task are required")
 	}
-	snapshot, err := s.state.Load(ctx)
-	if err != nil {
-		return err
-	}
-	correlationID, err := s.requireExternalWorkCorrelation(ctx, organizationID, requestID)
-	if err != nil {
-		return err
-	}
-	state, ok := snapshot.Tasks[core.ID(taskID)]
-	if !ok || state.CorrelationID != correlationID || state.Value.ExecutionKind != core.ExecutionHuman || state.Value.CompletionContract != nil {
-		return fmt.Errorf("task is not an ordinary user-input task for this request")
-	}
-	actualOrganizationID, err := taskOrganization(snapshot, state.Value)
-	if err != nil || actualOrganizationID != core.ID(organizationID) {
-		return fmt.Errorf("task is not mapped to this request and organization")
-	}
-	stream, err := s.gateway.Events(ctx, correlationID)
+	state, actualOrganizationID, correlationID, stream, err := s.humanRecoveryTask(ctx, organizationID, requestID, taskID, false)
 	if err != nil {
 		return err
 	}
@@ -1107,6 +1075,31 @@ func (s *Service) RecoverOperatorInput(ctx context.Context, organizationID, prin
 		return err
 	}
 	return s.reconcileWorks(ctx)
+}
+
+func (s *Service) humanRecoveryTask(ctx context.Context, organizationID, requestID, taskID string, structured bool) (projections.Versioned[core.Task], core.ID, string, []events.Event, error) {
+	snapshot, err := s.state.Load(ctx)
+	if err != nil {
+		return projections.Versioned[core.Task]{}, "", "", nil, err
+	}
+	correlationID, err := s.requireExternalWorkCorrelation(ctx, organizationID, requestID)
+	if err != nil {
+		return projections.Versioned[core.Task]{}, "", "", nil, err
+	}
+	state, ok := snapshot.Tasks[core.ID(taskID)]
+	validKind := ok && state.CorrelationID == correlationID && state.Value.ExecutionKind == core.ExecutionHuman
+	if !validKind || structured != (state.Value.CompletionContract != nil) {
+		return projections.Versioned[core.Task]{}, "", "", nil, fmt.Errorf("task is not the expected user task for this request")
+	}
+	actualOrganizationID, err := taskOrganization(snapshot, state.Value)
+	if err != nil || actualOrganizationID != core.ID(organizationID) {
+		return projections.Versioned[core.Task]{}, "", "", nil, fmt.Errorf("task is not mapped to this request and organization")
+	}
+	stream, err := s.gateway.Events(ctx, correlationID)
+	if err != nil {
+		return projections.Versioned[core.Task]{}, "", "", nil, err
+	}
+	return state, actualOrganizationID, correlationID, stream, nil
 }
 
 // continueExternalInputTask resumes from the durable input Event Contract and

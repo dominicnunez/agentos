@@ -7,10 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/core"
+	"github.com/dominicnunez/agentos/internal/events"
 )
 
 var (
@@ -93,6 +93,10 @@ type Store interface {
 
 type latestRecordStore interface {
 	LatestRecords(context.Context, string) ([][]byte, error)
+}
+
+type recentEventStore interface {
+	RecentEvents(context.Context, string, string, int) ([]events.Event, error)
 }
 
 type Notifier interface {
@@ -397,26 +401,30 @@ func (s *Service) PendingDecisionContexts(ctx context.Context, humanID core.ID) 
 // RecentDecisionContexts returns a bounded newest-first view of terminal
 // decisions that the same principal is still authorized to inspect. It is a
 // recovery/read surface only; mutations continue to require DecisionContext.
-func (s *Service) RecentDecisionContexts(ctx context.Context, humanID core.ID, limit int) ([]DecisionContext, error) {
+func (s *Service) RecentDecisionContexts(ctx context.Context, organizationID, humanID core.ID, limit int) ([]DecisionContext, error) {
 	if limit < 1 || limit > 100 {
 		return nil, fmt.Errorf("recent approval limit must be between 1 and 100")
 	}
-	store, ok := s.store.(latestRecordStore)
+	if organizationID == "" {
+		return nil, fmt.Errorf("recent approval organization is required")
+	}
+	store, ok := s.store.(recentEventStore)
 	if !ok {
 		return nil, fmt.Errorf("approval history is unavailable")
 	}
-	bodies, err := store.LatestRecords(ctx, "approval")
+	recent, err := store.RecentEvents(ctx, string(organizationID), "APPROVAL_DECIDED", limit)
 	if err != nil {
 		return nil, err
 	}
 	contexts := make([]DecisionContext, 0, limit)
-	for _, body := range bodies {
+	for _, event := range recent {
 		var approval core.HumanApproval
-		if err := json.Unmarshal(body, &approval); err != nil {
+		if err := json.Unmarshal(event.Payload, &approval); err != nil {
 			return nil, fmt.Errorf("decode approval history: %w", err)
 		}
-		if approval.Status != core.ApprovalApproved && approval.Status != core.ApprovalDenied {
-			continue
+		if approval.OrganizationID != organizationID || approval.ID == "" || string(approval.TaskID) != event.TaskID || event.SourceActorID != string(approval.DecidedBy) ||
+			(approval.Status != core.ApprovalApproved && approval.Status != core.ApprovalDenied) {
+			return nil, fmt.Errorf("recent approval decision identity is invalid")
 		}
 		if err := s.authorizeDecision(ctx, humanID, approval); err != nil {
 			continue
@@ -426,19 +434,6 @@ func (s *Service) RecentDecisionContexts(ctx context.Context, humanID core.ID, l
 			return nil, err
 		}
 		contexts = append(contexts, DecisionContext{Approval: approval, Effect: effect})
-	}
-	sort.Slice(contexts, func(i, j int) bool {
-		left, right := contexts[i].Approval.DecisionAt, contexts[j].Approval.DecisionAt
-		if left == nil || right == nil {
-			return contexts[i].Approval.ID > contexts[j].Approval.ID
-		}
-		if left.Equal(*right) {
-			return contexts[i].Approval.ID > contexts[j].Approval.ID
-		}
-		return left.After(*right)
-	})
-	if len(contexts) > limit {
-		contexts = contexts[:limit]
 	}
 	return contexts, nil
 }

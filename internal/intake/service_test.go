@@ -450,6 +450,34 @@ func TestUnconfirmedIntentResumesAfterServiceRestart(t *testing.T) {
 	}
 }
 
+func TestActiveIntentRecoversDurableMessageBeforeDraft(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	runtime := app.New(gateway)
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	if _, err := runtime.RecordIntakeMessage(ctx, app.IntakeMessage{
+		RequestID: "interrupted-intake", OrganizationID: principal.OrganizationID,
+		MessageID: "message-1", Text: "prepare a bounded result", SourcePrincipalID: core.ID(principal.ID),
+		SourcePrincipalKind: principal.Kind, SourceChannel: principal.Channel,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewWithNormalizer(runtime, fixedNormalizer{})
+	recovered, err := service.ActiveIntent(ctx, principal)
+	if err != nil || recovered.Intent == nil || recovered.ConversationID != "interrupted-intake" || recovered.State != StateAwaitingConfirmation {
+		t.Fatalf("recovered=%+v err=%v", recovered, err)
+	}
+	stream := externalStream(t, store, "interrupted-intake")
+	if countEvents(stream, "INTAKE_MESSAGE_RECORDED") != 1 || countEvents(stream, "INTENT_DRAFTED") != 1 {
+		t.Fatalf("server recovery duplicated intake state: %+v", stream)
+	}
+}
+
 func TestLatestTaskRecoversConfirmedWorkAcrossServiceRestart(t *testing.T) {
 	ctx := context.Background()
 	store, err := ledger.Open(":memory:")
@@ -484,6 +512,53 @@ func TestLatestTaskRecoversConfirmedWorkAcrossServiceRestart(t *testing.T) {
 	other.ID = "human-2"
 	if _, err := restarted.LatestTask(ctx, other); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("different principal recovered private work: %v", err)
+	}
+}
+
+func TestLatestTaskRecoversDurableConfirmationBeforeTaskCreation(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	service := New(app.New(gateway))
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	draft, err := service.Handle(ctx, principal, Message{ConversationID: "interrupted-confirmation", MessageID: "message-1", Text: "echo recovered"})
+	if err != nil || draft.Intent == nil {
+		t.Fatalf("draft=%+v err=%v", draft, err)
+	}
+	correlationID, found, err := gateway.ResolveExternalWork(ctx, principal.OrganizationID, draft.ConversationID)
+	if err != nil || !found {
+		t.Fatalf("resolve interrupted confirmation: found=%t err=%v", found, err)
+	}
+	goalID, err := core.AcceptedIntentGoalID(*draft.Intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacesWorkID, err := core.AcceptedIntentReplacesWorkID(*draft.Intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := events.IntentConfirmedPayload{
+		IntentID: string(draft.Intent.ID), GoalID: string(goalID), ReplacesWorkID: string(replacesWorkID),
+		Version: draft.Intent.Version, Fingerprint: draft.Intent.Fingerprint, ConfirmingActorID: principal.ID,
+		ConfirmingActorKind: string(principal.Kind), SourceChannel: principal.Channel, MessageID: "confirmation-1",
+	}
+	if _, err := gateway.PublishIntentConfirmation(ctx, events.TrustedDraft{
+		OrganizationID: principal.OrganizationID, EventType: "INTENT_CONFIRMED", SourceActorID: principal.ID,
+		TaskID: "task-" + correlationID, CorrelationID: correlationID, Payload: payload,
+	}, goalID, replacesWorkID); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := service.LatestTask(ctx, principal)
+	if err != nil || recovered.TaskID != draft.TaskID || recovered.State != StateCompleted || recovered.Result != "recovered" {
+		t.Fatalf("recovered=%+v err=%v", recovered, err)
+	}
+	stream := externalStream(t, store, draft.ConversationID)
+	if countEvents(stream, "INTENT_CONFIRMED") != 1 || countEvents(stream, "TASK_CREATED") != 1 {
+		t.Fatalf("confirmation recovery duplicated durable work: %+v", stream)
 	}
 }
 

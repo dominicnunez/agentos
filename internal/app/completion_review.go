@@ -152,7 +152,33 @@ func (s *Service) CompletionReviewRecord(ctx context.Context, organizationID, ta
 		return CompletionReviewView{}, false, err
 	}
 	defer s.release()
-	return s.completionReviewReadLocked(ctx, organizationID, taskID, reviewID)
+	view, found, err := s.completionReviewReadLocked(ctx, organizationID, taskID, reviewID)
+	if err != nil || !found || view.Decision == "" {
+		return view, found, err
+	}
+	stream, err := s.internalTaskEvents(ctx, organizationID, taskID)
+	if err != nil {
+		return CompletionReviewView{}, false, err
+	}
+	requests, decisions, err := completionReviewRecords(stream)
+	if err != nil {
+		return CompletionReviewView{}, false, err
+	}
+	request, requestFound := requests[reviewID]
+	recorded, decisionFound := decisions[reviewID]
+	if !requestFound || !decisionFound {
+		return CompletionReviewView{}, false, fmt.Errorf("terminal completion review evidence is unavailable")
+	}
+	if err := s.continueCompletionReview(ctx, request, recorded.Review, recorded.Event); err != nil {
+		return CompletionReviewView{}, false, err
+	}
+	if _, err := s.runReady(ctx); err != nil {
+		return CompletionReviewView{}, false, err
+	}
+	if err := s.reconcileWorks(ctx); err != nil {
+		return CompletionReviewView{}, false, err
+	}
+	return view, true, nil
 }
 
 func (s *Service) completionReviewLocked(ctx context.Context, organizationID, taskID string) (CompletionReviewView, bool, error) {
@@ -260,7 +286,7 @@ func (s *Service) ReviewCompletion(ctx context.Context, input CompletionReviewIn
 	}
 	var decisionEvent events.Event
 	if recorded, exists := decisions[request.ID]; exists {
-		if !completion.SameHumanReview(recorded.Review, review) {
+		if recorded.Review.Fingerprint != review.Fingerprint || recorded.Review.Decision != review.Decision || recorded.Review.Feedback != review.Feedback {
 			return CompletionReviewView{}, fmt.Errorf("completion review already has a different decision")
 		}
 		decisionEvent = recorded.Event

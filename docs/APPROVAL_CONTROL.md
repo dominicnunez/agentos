@@ -21,7 +21,8 @@ GET /v1/control/approvals
 ```
 
 `GET /v1/control/approvals/recent?limit=20` returns a bounded newest-first,
-read-only ledger projection of terminal decisions for the same authorized
+read-only ledger projection of terminal decisions in authoritative commit
+sequence for the same authorized
 owner. This keeps interrupted outcomes visible when a new dashboard launch has
 a different ephemeral browser origin; it never makes a terminal approval
 eligible for mutation.
@@ -61,6 +62,11 @@ Unknown approvals, another organization, changed or non-pending effects,
 expired approvals, stale fingerprints, and requests from any UID other than the
 configured owner do not authorize a transition. Conversation text and A2A
 messages never call this control.
+
+An exact read of an expired nonterminal approval returns `410 Gone`. That
+server-proven result lets the dashboard discard only the matching local retry
+binding; expiry never becomes denial, approval, or permission to replace the
+effect.
 
 The fingerprint covers the obligation identity, organization, task, actor,
 action, resource, scope, consequence boundary, descriptor, authorization

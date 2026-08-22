@@ -288,7 +288,11 @@ func (s *Service) ConfirmIntent(ctx context.Context, principal Principal, confir
 	unlock := s.lockStream(principal.OrganizationID, confirmation.ConversationID)
 	defer unlock()
 	stream, err := s.app.ExternalEvents(ctx, principal.OrganizationID, confirmation.ConversationID)
-	if err != nil || len(stream) == 0 {
+	return s.confirmIntentLocked(ctx, principal, confirmation, stream, err)
+}
+
+func (s *Service) confirmIntentLocked(ctx context.Context, principal Principal, confirmation IntentConfirmation, stream []events.Event, streamErr error) (View, error) {
+	if streamErr != nil || len(stream) == 0 {
 		return View{}, ErrNotFound
 	}
 	if err := authorizeIntakePrincipal(principal, stream); err != nil {
@@ -361,6 +365,27 @@ func (s *Service) ActiveIntent(ctx context.Context, principal Principal) (View, 
 	if !found {
 		return View{}, ErrNotFound
 	}
+	unlock := s.lockStream(principal.OrganizationID, conversationID)
+	defer unlock()
+	stream, err = s.app.ExternalEvents(ctx, principal.OrganizationID, conversationID)
+	if err != nil || len(stream) == 0 {
+		return View{}, fmt.Errorf("%w: reload active intent", ErrUnavailable)
+	}
+	if err := authorizeIntakePrincipal(principal, stream); err != nil {
+		return View{}, err
+	}
+	message, found, err := latestRecordedIntentMessage(conversationID, stream, principal)
+	if err != nil {
+		return View{}, err
+	}
+	if !found {
+		return View{}, fmt.Errorf("%w: active intake has no durable message", ErrUnavailable)
+	}
+	if _, drafted, draftErr := intentPayloadForMessage(stream, message.MessageID); draftErr != nil {
+		return View{}, fmt.Errorf("%w: active intake has an invalid durable draft", ErrUnavailable)
+	} else if !drafted {
+		return s.normalizeRecordedIntentMessage(ctx, principal, message, stream)
+	}
 	return projectCurrentIntentView(conversationID, stream)
 }
 
@@ -402,6 +427,10 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 	if err != nil {
 		return View{}, fmt.Errorf("%w: record intake message", ErrConflict)
 	}
+	return s.normalizeRecordedIntentMessage(ctx, principal, message, stream)
+}
+
+func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal Principal, message Message, stream []events.Event) (View, error) {
 	turns, err := intakeTurns(stream)
 	if err != nil {
 		return View{}, fmt.Errorf("%w: load intake conversation", ErrUnavailable)
@@ -556,20 +585,8 @@ func (s *Service) CompleteHumanTask(ctx context.Context, principal Principal, ta
 }
 
 func (s *Service) RecoverHumanCompletion(ctx context.Context, principal Principal, taskID string) (View, error) {
-	if err := validatePrincipal(principal); err != nil {
-		return View{}, err
-	}
-	if principal.Kind != core.PrincipalHuman || principal.Channel != ChannelHumanDirect || !principal.Allowed(CapabilityProvideInput) {
-		return View{}, fmt.Errorf("%w: structured user completion recovery requires local user access", ErrForbidden)
-	}
-	if err := ValidateIdentifier("task", taskID); err != nil {
-		return View{}, err
-	}
-	conversationID, stream, err := s.app.ExternalTaskEvents(ctx, principal.OrganizationID, taskID)
-	if err != nil || len(stream) == 0 {
-		return View{}, ErrNotFound
-	}
-	if _, err := authorizedInitialWork(principal, stream); err != nil {
+	conversationID, _, err := s.authorizedHumanRecoveryTask(ctx, principal, taskID, "structured user completion")
+	if err != nil {
 		return View{}, err
 	}
 	if err := s.app.RecoverHumanCompletion(ctx, principal.OrganizationID, principal.ID, principal.Channel, conversationID, taskID); err != nil {
@@ -578,7 +595,7 @@ func (s *Service) RecoverHumanCompletion(ctx context.Context, principal Principa
 		}
 		return View{}, fmt.Errorf("%w: recover structured user completion", ErrConflict)
 	}
-	stream, err = s.app.ExternalEvents(ctx, principal.OrganizationID, conversationID)
+	stream, err := s.app.ExternalEvents(ctx, principal.OrganizationID, conversationID)
 	if err != nil {
 		return View{}, fmt.Errorf("%w: reload recovered user task", ErrUnavailable)
 	}
@@ -586,20 +603,8 @@ func (s *Service) RecoverHumanCompletion(ctx context.Context, principal Principa
 }
 
 func (s *Service) RecoverHumanInput(ctx context.Context, principal Principal, taskID string) (View, error) {
-	if err := validatePrincipal(principal); err != nil {
-		return View{}, err
-	}
-	if principal.Kind != core.PrincipalHuman || principal.Channel != ChannelHumanDirect || !principal.Allowed(CapabilityProvideInput) {
-		return View{}, fmt.Errorf("%w: user input recovery requires local user access", ErrForbidden)
-	}
-	if err := ValidateIdentifier("task", taskID); err != nil {
-		return View{}, err
-	}
-	conversationID, stream, err := s.app.ExternalTaskEvents(ctx, principal.OrganizationID, taskID)
-	if err != nil || len(stream) == 0 {
-		return View{}, ErrNotFound
-	}
-	if _, err := authorizedInitialWork(principal, stream); err != nil {
+	conversationID, _, err := s.authorizedHumanRecoveryTask(ctx, principal, taskID, "user input")
+	if err != nil {
 		return View{}, err
 	}
 	if err := s.app.RecoverOperatorInput(ctx, principal.OrganizationID, principal.ID, principal.Kind, principal.Channel, conversationID, taskID); err != nil {
@@ -608,11 +613,31 @@ func (s *Service) RecoverHumanInput(ctx context.Context, principal Principal, ta
 		}
 		return View{}, fmt.Errorf("%w: recover user input", ErrConflict)
 	}
-	stream, err = s.app.ExternalEvents(ctx, principal.OrganizationID, conversationID)
+	stream, err := s.app.ExternalEvents(ctx, principal.OrganizationID, conversationID)
 	if err != nil {
 		return View{}, fmt.Errorf("%w: reload recovered user task", ErrUnavailable)
 	}
 	return projectView(conversationID, stream, principal.Allowed(CapabilityReadResult)), nil
+}
+
+func (s *Service) authorizedHumanRecoveryTask(ctx context.Context, principal Principal, taskID, operation string) (string, []events.Event, error) {
+	if err := validatePrincipal(principal); err != nil {
+		return "", nil, err
+	}
+	if principal.Kind != core.PrincipalHuman || principal.Channel != ChannelHumanDirect || !principal.Allowed(CapabilityProvideInput) {
+		return "", nil, fmt.Errorf("%w: %s recovery requires local user access", ErrForbidden, operation)
+	}
+	if err := ValidateIdentifier("task", taskID); err != nil {
+		return "", nil, err
+	}
+	conversationID, stream, err := s.app.ExternalTaskEvents(ctx, principal.OrganizationID, taskID)
+	if err != nil || len(stream) == 0 {
+		return "", nil, ErrNotFound
+	}
+	if _, err := authorizedInitialWork(principal, stream); err != nil {
+		return "", nil, err
+	}
+	return conversationID, stream, nil
 }
 
 func (s *Service) Get(ctx context.Context, principal Principal, taskID string) (View, error) {
@@ -660,6 +685,25 @@ func (s *Service) LatestTask(ctx context.Context, principal Principal) (View, er
 	}
 	if !found || len(stream) == 0 || !streamHasEvent(stream, "INTENT_CONFIRMED") {
 		return View{}, ErrNotFound
+	}
+	if !streamHasEvent(stream, "TASK_CREATED") {
+		if err := authorizeIntakePrincipal(principal, stream); err != nil {
+			return View{}, err
+		}
+		if !principal.Allowed(CapabilityConfirmIntent) {
+			return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityConfirmIntent)
+		}
+		unlock := s.lockStream(principal.OrganizationID, conversationID)
+		defer unlock()
+		stream, err = s.app.ExternalEvents(ctx, principal.OrganizationID, conversationID)
+		if err != nil || len(stream) == 0 {
+			return View{}, fmt.Errorf("%w: reload confirmed intent", ErrUnavailable)
+		}
+		confirmation, recoverErr := durableIntentConfirmation(conversationID, principal, stream)
+		if recoverErr != nil {
+			return View{}, recoverErr
+		}
+		return s.confirmIntentLocked(ctx, principal, confirmation, stream, nil)
 	}
 	if _, err := authorizedInitialWork(principal, stream); err != nil {
 		return View{}, err
@@ -1236,6 +1280,37 @@ func intentNormalizationAttempt(stream []events.Event, messageID string) int {
 
 func latestIntentPayload(stream []events.Event) (events.IntentDraftedPayload, bool, error) {
 	return events.LatestPayload[events.IntentDraftedPayload](stream, "INTENT_DRAFTED")
+}
+
+func latestRecordedIntentMessage(conversationID string, stream []events.Event, principal Principal) (Message, bool, error) {
+	payload, found, err := events.LatestPayload[events.IntakeMessageRecordedPayload](stream, "INTAKE_MESSAGE_RECORDED")
+	if err != nil || !found {
+		return Message{}, found, fmt.Errorf("%w: durable intake message is invalid", ErrUnavailable)
+	}
+	if payload.SourcePrincipalID != principal.ID || payload.SourcePrincipalKind != string(principal.Kind) || payload.SourceChannel != principal.Channel {
+		return Message{}, false, fmt.Errorf("%w: durable intake message source differs", ErrUnavailable)
+	}
+	if ValidateIdentifier("message", payload.MessageID) != nil || payload.Text == "" {
+		return Message{}, false, fmt.Errorf("%w: durable intake message identity is invalid", ErrUnavailable)
+	}
+	return Message{ConversationID: conversationID, MessageID: payload.MessageID, Text: payload.Text, RequestedKind: payload.RequestedExecutionKind}, true, nil
+}
+
+func durableIntentConfirmation(conversationID string, principal Principal, stream []events.Event) (IntentConfirmation, error) {
+	for index := len(stream) - 1; index >= 0; index-- {
+		if stream[index].EventType != "INTENT_CONFIRMED" {
+			continue
+		}
+		var payload events.IntentConfirmedPayload
+		if json.Unmarshal(stream[index].Payload, &payload) != nil || payload.MessageID == "" || payload.Fingerprint == "" {
+			return IntentConfirmation{}, fmt.Errorf("%w: durable confirmation is invalid", ErrUnavailable)
+		}
+		if payload.ConfirmingActorID != principal.ID || payload.ConfirmingActorKind != string(principal.Kind) || payload.SourceChannel != principal.Channel {
+			return IntentConfirmation{}, fmt.Errorf("%w: durable confirmation source differs", ErrUnavailable)
+		}
+		return IntentConfirmation{ConversationID: conversationID, TaskID: streamTaskID(stream), MessageID: payload.MessageID, Fingerprint: payload.Fingerprint}, nil
+	}
+	return IntentConfirmation{}, fmt.Errorf("%w: durable confirmation is missing", ErrUnavailable)
 }
 
 func intentPayloadForMessage(stream []events.Event, messageID string) (events.IntentDraftedPayload, bool, error) {

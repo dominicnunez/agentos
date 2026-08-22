@@ -98,7 +98,7 @@ func (c *ApprovalControl) listRecent(w http.ResponseWriter, r *http.Request, hum
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "recent approval query is invalid"})
 		return
 	}
-	contexts, err := c.service.RecentDecisionContexts(r.Context(), humanID, 20)
+	contexts, err := c.service.RecentDecisionContexts(r.Context(), c.owner.OrganizationID, humanID, 20)
 	if err != nil {
 		writeApprovalError(w, err)
 		return
@@ -252,7 +252,7 @@ func writeApprovalError(w http.ResponseWriter, err error) {
 	case errors.Is(err, approvals.ErrApprovalNotFound), errors.Is(err, approvals.ErrDecisionUnauthorized):
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "approval not found"})
 	case errors.Is(err, approvals.ErrApprovalExpired):
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "approval expired"})
+		writeJSON(w, http.StatusGone, map[string]string{"error": "approval expired"})
 	default:
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "approval state conflicts with the requested operation"})
 	}

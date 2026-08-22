@@ -96,7 +96,7 @@ policy:
       from:
         module: approvals
       to:
-        module: core
+        modules: [core, events]
 
     - name: audit-events
       from:

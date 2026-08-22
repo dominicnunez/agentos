@@ -2465,6 +2465,53 @@ func TestRecoveryFinishesDurableCompletionReviewDecision(t *testing.T) {
 	}
 }
 
+func TestCompletionReviewRecordFinishesAnotherReviewersDurableDecision(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	service := NewWithModel(gateway, describedModel{})
+	submitted, err := service.Submit(ctx, Submit{RequestID: "review-read-recovery", OrganizationID: "org-1", Statement: "summarize", Kind: core.ExecutionAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, found, err := service.CompletionReview(ctx, "org-1", string(submitted.Task.ID))
+	if err != nil || !found {
+		t.Fatalf("review found=%t err=%v", found, err)
+	}
+	review := completion.HumanReview{
+		ReviewID: view.Request.ID, OrganizationID: view.Request.OrganizationID, TaskID: view.Request.TaskID,
+		TaskVersion: view.Request.TaskVersion, Fingerprint: view.Request.Fingerprint,
+		Decision: completion.ReviewApprove, ReviewerID: "reviewer-1", Method: core.AssuranceHumanJudgment,
+		EvidenceRefs: append([]string(nil), view.Request.EvidenceRefs...), DecidedAt: time.Now().UTC(),
+	}
+	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "COMPLETION_REVIEW_DECIDED", SourceActorID: string(review.ReviewerID),
+		TaskID: string(submitted.Task.ID), Payload: review, CorrelationID: submitted.Events[0].CorrelationID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	recovered, found, err := service.CompletionReviewRecord(ctx, "org-1", string(submitted.Task.ID), view.Request.ID)
+	if err != nil || !found || recovered.Decision != completion.ReviewApprove || recovered.ReviewerID != "reviewer-1" {
+		t.Fatalf("recovered review=%+v found=%t err=%v", recovered, found, err)
+	}
+	exactRetry, err := service.ReviewCompletion(ctx, CompletionReviewInput{
+		OrganizationID: "org-1", TaskID: string(submitted.Task.ID), ReviewID: string(view.Request.ID),
+		Fingerprint: view.Request.Fingerprint, Decision: completion.ReviewApprove,
+		ReviewerID: "reviewer-2", ReviewerKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT",
+	})
+	if err != nil || exactRetry.ReviewerID != "reviewer-1" {
+		t.Fatalf("another reviewer did not recover the authoritative decision: view=%+v err=%v", exactRetry, err)
+	}
+	replayed, err := service.Submit(ctx, Submit{RequestID: "review-read-recovery", OrganizationID: "org-1", Statement: "summarize", Kind: core.ExecutionAgent})
+	if err != nil || replayed.Task.Status != core.TaskCompleted || !replayed.Completion.Complete {
+		t.Fatalf("recovered task=%+v err=%v", replayed, err)
+	}
+}
+
 func reviewInput(view CompletionReviewView, decision completion.ReviewDecision, feedback string) CompletionReviewInput {
 	return CompletionReviewInput{
 		OrganizationID: string(view.Request.OrganizationID), TaskID: string(view.Request.TaskID),

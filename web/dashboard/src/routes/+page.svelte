@@ -157,11 +157,20 @@
     const recent = (await api<{ approvals: Approval[] }>('/api/v1/control/approvals/recent?limit=20')).approvals;
     const available = [...pending, ...recent.filter((item) => !pending.some((pendingItem) => pendingItem.approval_id === item.approval_id))];
     if (!pendingApprovalDecision) return available;
-    let exact = await api<Approval>(`/api/v1/control/approvals/${encodeURIComponent(pendingApprovalDecision.approval_id)}`);
+    let exact: Approval;
+    try {
+      exact = await api<Approval>(`/api/v1/control/approvals/${encodeURIComponent(pendingApprovalDecision.approval_id)}`);
+    } catch (cause) {
+      if (cause instanceof APIError && cause.status === 410) {
+        clearPendingApprovalDecision();
+        notice = 'The interrupted approval expired without authorizing its effect.';
+        return available;
+      }
+      throw cause;
+    }
     if (exact.approval_id !== pendingApprovalDecision.approval_id || exact.effect_fingerprint !== pendingApprovalDecision.fingerprint) throw new Error('The durable approval changed while recovering a decision.');
     if (terminalApproval(exact)) {
-      const recorded = exact.status === 'APPROVED' ? 'APPROVE' : 'DENY';
-      if (recorded !== pendingApprovalDecision.decision) return [...available.filter((item) => item.approval_id !== exact.approval_id), exact];
+      return [...available.filter((item) => item.approval_id !== exact.approval_id), exact];
     } else {
       exact = await replayApprovalDecision(api, exact, pendingApprovalDecision.decision);
     }
@@ -178,9 +187,7 @@
       throw new Error('The durable completion review changed while recovering a decision.');
     }
     if (terminalCompletionReview(exact)) {
-      if (exact.state !== pendingReviewDecision.decision || (exact.state === 'REVISE' && exact.feedback !== pendingReviewDecision.feedback)) {
-        return [...available.filter((item) => item.review_id !== exact.review_id), exact];
-      }
+      return [...available.filter((item) => item.review_id !== exact.review_id), exact];
     }
     exact = await replayCompletionReviewDecision(api, exact, pendingReviewDecision);
     return [...available.filter((item) => item.review_id !== exact.review_id), exact];
@@ -417,7 +424,16 @@
     await action(async () => {
       const current = await api<CompletionReview>(`/api/v1/user/reviews/${encodeURIComponent(review.task_id)}/records/${encodeURIComponent(review.review_id)}`);
       if (current.review_id !== review.review_id || current.fingerprint !== review.fingerprint) throw new Error('The durable completion review changed.');
-      if (terminalCompletionReview(current) && (current.state !== decision || (decision === 'REVISE' && current.feedback !== feedback))) throw new Error('The completion review already has a different durable decision.');
+      if (terminalCompletionReview(current)) {
+        if (current.state !== decision || (decision === 'REVISE' && current.feedback !== feedback)) throw new Error('The completion review already has a different durable decision.');
+        selectedReview = current;
+        clearPendingReviewDecision();
+        reviewPhrase = '';
+        revisionFeedback = '';
+        notice = `Completion evidence is already marked ${decision.toLowerCase()}.`;
+        await refresh();
+        return;
+      }
       selectedReview = await replayCompletionReviewDecision(api, current, pendingReviewDecision!);
       clearPendingReviewDecision();
       reviewPhrase = '';
