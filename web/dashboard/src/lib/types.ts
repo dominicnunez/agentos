@@ -20,6 +20,7 @@ export type TaskView = {
   task_id: string;
   work_id?: string;
   conversation_id: string;
+  selected_goal_id?: string;
   state: string;
   prompt?: string;
   result?: string;
