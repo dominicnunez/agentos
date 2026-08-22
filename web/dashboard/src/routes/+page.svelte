@@ -104,6 +104,9 @@
         method: 'POST',
         body: JSON.stringify({ message_id: confirmationMessageID(draft.fingerprint), fingerprint: draft.fingerprint })
       });
+      completionFields = {};
+      completionFiles = {};
+      executionKind = '';
       task = confirmed;
       taskID = confirmed.task_id;
       conversationID = '';
@@ -274,7 +277,7 @@
         <div class="panel composer"><p class="eyebrow">Natural-language intake</p><h2>{active ? 'Continue the conversation' : 'What should the organization accomplish?'}</h2><textarea bind:value={workText} rows="7" placeholder="Describe the outcome, relevant context, constraints, and anything only you can provide."></textarea><label>Execution<select bind:value={executionKind} disabled={Boolean(active)}><option value="">Automatic</option><option value="HUMAN">User task</option></select><small>Automatic prefers deterministic work and uses an Agent only when justified.</small></label><div class="actions"><button class="primary" onclick={submitWork} disabled={busy || !identity || !workText.trim()}>Send</button><small>The model proposes a bounded Intent. Nothing starts until you confirm the exact review.</small></div></div>
         <div class="panel intent"><div class="panel-title"><div><p class="eyebrow">Intent contract</p><h2>Review before work begins</h2></div>{#if active?.state}<span class="status">{safeDisplay(active.state)}</span>{/if}</div>
           {#if active?.intent}
-            {#if active.prompt}<div class="banner notice" role="status"><strong>More information required</strong><br />{safeDisplay(active.prompt)}</div>{/if}
+            {#if active.prompt}<div class="banner notice governed-text" role="status"><strong>More information required</strong><br />{safeDisplay(active.prompt)}</div>{/if}
             <h3>{safeDisplay(active.intent.objective)}</h3>
             <dl><div><dt>Mode</dt><dd>{safeDisplay(active.intent.mode)}</dd></div>{#if active.intent.requested_execution_kind}<div><dt>Requested execution</dt><dd>{safeDisplay(active.intent.requested_execution_kind)}</dd></div>{/if}{#if active.intent.goal}<div><dt>Goal</dt><dd>{safeDisplay(active.intent.goal.value)}</dd></div>{/if}{#if active.intent.replaces_work}<div><dt>Replaces Work</dt><dd>{safeDisplay(active.intent.replaces_work.value)}</dd></div>{/if}</dl>
             {#each [['Context','context'],['Deliverables','deliverables'],['Done when','completion_criteria'],['Requirements','constraints']] as group}
@@ -289,7 +292,7 @@
         </div>
       </section>
       <section class="panel task-lookup"><div><p class="eyebrow">Durable status</p><h2>Find a Task</h2></div><div class="inline"><input bind:value={taskID} placeholder="task-id" /><button onclick={findTask} disabled={busy || !taskID.trim()}>Open</button></div>
-        {#if task}<div class="task"><div><span class="status">{safeDisplay(task.state)}</span><h3>{safeDisplay(task.task_id)}</h3>{#if task.work_id}<p class="mono">Work {safeDisplay(task.work_id)}</p>{/if}{#if task.mode}<p>Mode: <strong>{safeDisplay(task.mode)}</strong></p>{/if}{#if task.trust_label}<p class="risk">Trust: {safeDisplay(task.trust_label)}</p>{/if}{#if task.prompt}<p class="boundary-note">{safeDisplay(task.prompt)}</p>{/if}{#if task.result}<p>{safeDisplay(task.result)}</p>{/if}</div>
+        {#if task}<div class="task"><div><span class="status">{safeDisplay(task.state)}</span><h3>{safeDisplay(task.task_id)}</h3>{#if task.work_id}<p class="mono">Work {safeDisplay(task.work_id)}</p>{/if}{#if task.mode}<p>Mode: <strong>{safeDisplay(task.mode)}</strong></p>{/if}{#if task.trust_label}<p class="risk">Trust: {safeDisplay(task.trust_label)}</p>{/if}{#if task.prompt}<p class="boundary-note governed-text">{safeDisplay(task.prompt)}</p>{/if}{#if task.result}<p class="governed-text">{safeDisplay(task.result)}</p>{/if}</div>
           {#if task.completion_contract}<form onsubmit={(event) => { event.preventDefault(); submitCompletion(); }}><h4>Required completion evidence</h4>{#each task.completion_contract.required_fields ?? [] as field}<label>{safeDisplay(field.name)}<small>{safeDisplay(field.description)}; {field.min_bytes} to {field.max_bytes} UTF-8 bytes</small><textarea required value={completionFields[field.name] ?? ''} oninput={(event) => completionFields = {...completionFields, [field.name]: event.currentTarget.value}}></textarea></label>{/each}{#each task.completion_contract.artifact_requirements ?? [] as requirement}<label>{safeDisplay(requirement.role)}<small>{requirement.min_count} to {requirement.max_count} files; {requirement.media_types.map(safeDisplay).join(', ')}</small><input type="file" required={requirement.min_count > 0} multiple={requirement.max_count > 1} accept={requirement.media_types.join(',')} onchange={(event) => setFiles(requirement.role, event)} /></label>{/each}<button class="primary" type="submit" disabled={busy}>Submit complete evidence</button></form>{/if}
         </div>{/if}
       </section>
