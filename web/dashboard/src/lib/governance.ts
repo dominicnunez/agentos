@@ -58,7 +58,7 @@ export function replayCompletionReviewDecision(request: DashboardRequest, curren
       review_id: current.review_id,
       fingerprint: current.fingerprint,
       decision: binding.decision,
-      ...(binding.decision === 'REVISE' ? { feedback: binding.feedback } : {})
+      ...(binding.decision === 'APPROVE' ? {} : { feedback: binding.feedback })
     })
   });
 }
@@ -100,7 +100,7 @@ export function parseApprovalRetryBinding(value: string | null): ApprovalRetryBi
 export function reviewRetryBinding(taskID: string, reviewID: string, fingerprint: string, decision: 'APPROVE' | 'REJECT' | 'REVISE', feedback: string): ReviewRetryBinding {
   if (!validBoundaryIdentifier(taskID) || !validBoundaryIdentifier(reviewID) || !validFingerprint(fingerprint) || !['APPROVE', 'REJECT', 'REVISE'].includes(decision)) throw new Error('Completion-review retry binding is invalid.');
   const bytes = new TextEncoder().encode(feedback).byteLength;
-  if (bytes > 64 * 1024 || (decision === 'REVISE' ? !feedback.trim() : feedback !== '')) throw new Error('Completion-review retry binding is invalid.');
+  if (bytes > 64 * 1024 || (decision === 'REVISE' && !feedback.trim()) || (decision === 'APPROVE' && feedback !== '')) throw new Error('Completion-review retry binding is invalid.');
   return { task_id: taskID, review_id: reviewID, fingerprint, decision, feedback };
 }
 
@@ -160,7 +160,7 @@ export function confirmationMessageID(fingerprint: string): string {
 }
 
 export function completionReviewFeedback(decision: 'APPROVE' | 'REJECT' | 'REVISE', feedback: string): string {
-	return decision === 'APPROVE' ? '' : feedback;
+  return decision === 'APPROVE' ? '' : feedback;
 }
 
 function validFingerprint(value: string): boolean {

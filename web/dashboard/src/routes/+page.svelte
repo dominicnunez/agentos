@@ -126,7 +126,7 @@
       if (pendingReviewDecision) {
         const recovered = reviews.find((item) => item.review_id === pendingReviewDecision?.review_id);
         if (recovered && terminalCompletionReview(recovered)) {
-          if (recovered.state !== pendingReviewDecision.decision || (recovered.state === 'REVISE' && recovered.feedback !== pendingReviewDecision.feedback)) notice = `Another authorized operator recorded ${recovered.state} for the recovered completion review.`;
+          if (recovered.state !== pendingReviewDecision.decision || (recovered.state !== 'APPROVE' && recovered.feedback !== pendingReviewDecision.feedback)) notice = `Another authorized operator recorded ${recovered.state} for the recovered completion review.`;
           selectedReview = recovered;
           clearPendingReviewDecision();
         }
@@ -425,7 +425,7 @@
       const current = await api<CompletionReview>(`/api/v1/user/reviews/${encodeURIComponent(review.task_id)}/records/${encodeURIComponent(review.review_id)}`);
       if (current.review_id !== review.review_id || current.fingerprint !== review.fingerprint) throw new Error('The durable completion review changed.');
       if (terminalCompletionReview(current)) {
-        if (current.state !== decision || (decision === 'REVISE' && current.feedback !== feedback)) throw new Error('The completion review already has a different durable decision.');
+        if (current.state !== decision || (decision !== 'APPROVE' && current.feedback !== feedback)) throw new Error('The completion review already has a different durable decision.');
         selectedReview = current;
         clearPendingReviewDecision();
         reviewPhrase = '';

@@ -43,6 +43,18 @@ test('replays a matching durable completion decision before clearing recovery', 
   assert.deepEqual(JSON.parse(calls[0].body), { review_id: current.review_id, fingerprint: current.fingerprint, decision: 'REVISE', feedback: 'keep exact bytes' });
 });
 
+test('preserves optional rejection feedback through retry validation and replay', async () => {
+  const current = { ...review('review-reject'), fingerprint: 'c'.repeat(64) };
+  const binding = reviewRetryBinding(current.task_id, current.review_id, current.fingerprint, 'REJECT', 'candidate omitted evidence');
+  const calls: { body: string }[] = [];
+  const request = async <T>(_path: string, options?: RequestInit): Promise<T> => {
+    calls.push({ body: String(options?.body ?? '') });
+    return { ...current, state: 'REJECT', feedback: binding.feedback } as T;
+  };
+  await replayCompletionReviewDecision(request, current, binding);
+  assert.deepEqual(JSON.parse(calls[0].body), { review_id: current.review_id, fingerprint: current.fingerprint, decision: 'REJECT', feedback: 'candidate omitted evidence' });
+});
+
 test('retains confirmation recovery for downstream durable-work conflicts', () => {
   assert.equal(discardConfirmationRetry(409), false);
   assert.equal(discardConfirmationRetry(412), true);
@@ -86,9 +98,9 @@ test('derives a stable confirmation message identity from the reviewed fingerpri
 });
 
 test('preserves feedback for rejection and revision decisions only', () => {
-	assert.equal(completionReviewFeedback('REJECT', 'candidate omitted evidence'), 'candidate omitted evidence');
-	assert.equal(completionReviewFeedback('REVISE', 'supply the report'), 'supply the report');
-	assert.equal(completionReviewFeedback('APPROVE', 'not applicable'), '');
+  assert.equal(completionReviewFeedback('REJECT', 'candidate omitted evidence'), 'candidate omitted evidence');
+  assert.equal(completionReviewFeedback('REVISE', 'supply the report'), 'supply the report');
+  assert.equal(completionReviewFeedback('APPROVE', 'not applicable'), '');
 });
 
 test('leaves artifact media validation to content-derived server checks', () => {
@@ -155,6 +167,8 @@ test('round-trips strict approval and review retry bindings', () => {
   assert.deepEqual(parseApprovalRetryBinding(JSON.stringify(approval)), approval);
   const review = reviewRetryBinding('task-1', 'review-1', 'b'.repeat(64), 'REVISE', '  exact feedback\n');
   assert.deepEqual(parseReviewRetryBinding(JSON.stringify(review)), review);
+  const rejection = reviewRetryBinding('task-2', 'review-2', 'c'.repeat(64), 'REJECT', 'optional rationale');
+  assert.deepEqual(parseReviewRetryBinding(JSON.stringify(rejection)), rejection);
 });
 
 test('rejects authority-shaped and internally inconsistent decision retries', () => {
