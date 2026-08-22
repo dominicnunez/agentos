@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { APIError, api, connect, identifier } from '$lib/api';
-  import { loadAllCompletionReviews, safeDisplay, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
+  import { confirmationMessageID, loadAllCompletionReviews, safeDisplay, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
   import '$lib/app.css';
   import type { Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, IntentDraft, TaskView } from '$lib/types';
 
@@ -28,6 +28,7 @@
   let revisionFeedback = '';
   let completionFields: Record<string, string> = {};
   let completionFiles: Record<string, File[]> = {};
+  let refreshGeneration = 0;
 
   onMount(async () => {
     try {
@@ -40,12 +41,14 @@
 
   async function refresh(): Promise<void> {
     if (!identity) return;
+    const generation = ++refreshGeneration;
     error = '';
     const [activeResult, approvalResult, reviewResult] = await Promise.allSettled([
       loadActiveIntent(),
       api<{ approvals: Approval[] }>('/api/v1/control/approvals'),
       loadReviews()
     ]);
+    if (generation !== refreshGeneration) return;
     const failures = [activeResult, approvalResult, reviewResult]
       .filter((result) => result.status === 'rejected')
       .map((result) => message((result as PromiseRejectedResult).reason));
@@ -97,12 +100,14 @@
     const draft = active.intent;
     const currentConversation = active.conversation_id;
     await action(async () => {
-      active = await api<TaskView>(`/api/v1/user/intents/${encodeURIComponent(currentConversation)}/confirm`, {
+      const confirmed = await api<TaskView>(`/api/v1/user/intents/${encodeURIComponent(currentConversation)}/confirm`, {
         method: 'POST',
-        body: JSON.stringify({ message_id: identifier('confirmation'), fingerprint: draft.fingerprint })
+        body: JSON.stringify({ message_id: confirmationMessageID(draft.fingerprint), fingerprint: draft.fingerprint })
       });
+      task = confirmed;
+      taskID = confirmed.task_id;
       conversationID = '';
-      notice = `Work ${active.work_id || ''} was created from the confirmed Intent.`;
+      notice = `Task ${confirmed.task_id} for Work ${confirmed.work_id || ''} was created from the confirmed Intent.`;
       await refresh();
     });
   }
@@ -128,7 +133,7 @@
       const artifacts: { role: string; name: string; media_type: string; data: string }[] = [];
       for (const requirement of currentTask.completion_contract!.artifact_requirements ?? []) {
         for (const file of completionFiles[requirement.role] ?? []) {
-          artifacts.push({ role: requirement.role, name: file.name, media_type: file.type, data: await base64(file) });
+          artifacts.push({ role: requirement.role, name: file.name, media_type: file.type || requirement.media_types[0], data: await base64(file) });
         }
       }
       task = await api<TaskView>(`/api/v1/user/tasks/${encodeURIComponent(currentTask.task_id)}/completion`, {
@@ -192,6 +197,7 @@
   }
 
   async function action(run: () => Promise<void>): Promise<void> {
+    refreshGeneration += 1;
     busy = true;
     error = '';
     notice = '';
@@ -220,7 +226,7 @@
   }
 
   function message(cause: unknown): string {
-    return cause instanceof Error ? cause.message : 'The request failed.';
+    return cause instanceof Error ? safeDisplay(cause.message) : 'The request failed.';
   }
 
   function values(draft: IntentDraft, key: IntentList) {
@@ -241,49 +247,49 @@
         <button class:active={section === item[0]} onclick={() => section = item[0] as Section}><span class="nav-dot"></span>{item[1]}</button>
       {/each}
     </nav>
-    <div class="identity"><span class:online={Boolean(identity)}></span><div><strong>{identity?.organization ?? 'Not connected'}</strong><small>{identity ? `${identity.mode} installation` : 'local session required'}</small></div></div>
+    <div class="identity"><span class:online={Boolean(identity)}></span><div><strong>{safeDisplay(identity?.organization ?? 'Not connected')}</strong><small>{identity ? `${safeDisplay(identity.mode)} installation` : 'local session required'}</small></div></div>
   </aside>
 
   <main>
     <header><div><p class="eyebrow">Artificial organization</p><h1>{section === 'overview' ? 'Command center' : section[0].toUpperCase() + section.slice(1)}</h1></div><button class="quiet" onclick={refresh} disabled={!identity || busy}>Refresh</button></header>
-    {#if error}<div class="banner error" role="alert">{error}</div>{/if}
-    {#if notice}<div class="banner notice" role="status">{notice}</div>{/if}
+    {#if error}<div class="banner error" role="alert">{safeDisplay(error)}</div>{/if}
+    {#if notice}<div class="banner notice" role="status">{safeDisplay(notice)}</div>{/if}
 
     {#if section === 'overview'}
       <section class="metrics">
-        <button onclick={() => section='work'}><span>Active intake</span><strong>{active ? '1' : '0'}</strong><small>{active?.state ?? 'No open conversation'}</small></button>
+        <button onclick={() => section='work'}><span>Active intake</span><strong>{active ? '1' : '0'}</strong><small>{safeDisplay(active?.state ?? 'No open conversation')}</small></button>
         <button onclick={() => section='approvals'}><span>Approvals</span><strong>{approvals.length}</strong><small>Exact effects awaiting a decision</small></button>
         <button onclick={() => section='reviews'}><span>Completion reviews</span><strong>{reviews.length}</strong><small>Evidence awaiting judgment</small></button>
       </section>
       <section class="panel mission">
-        <div><p class="eyebrow">Current organization</p><h2>{identity?.organization ?? 'Connect to Agent OS'}</h2><p>Durable work enters through one governed intake boundary. Language can propose work; it cannot grant authority or prove completion.</p></div>
+        <div><p class="eyebrow">Current organization</p><h2>{safeDisplay(identity?.organization ?? 'Connect to Agent OS')}</h2><p>Durable work enters through one governed intake boundary. Language can propose work; it cannot grant authority or prove completion.</p></div>
         <div class="flow"><span>Intent</span><i></i><span>Plan</span><i></i><span>Work</span><i></i><span>Evidence</span></div>
       </section>
       <section class="grid two">
-        <div class="panel"><div class="panel-title"><h2>Continue work</h2><button class="text" onclick={() => section='work'}>Open work</button></div>{#if active}<span class="status">{active.state}</span><h3>{active.intent?.objective ?? active.prompt ?? 'Intake conversation'}</h3><p class="mono">{active.conversation_id}</p>{:else}<div class="empty">No unfinished intake conversation.</div>{/if}</div>
+        <div class="panel"><div class="panel-title"><h2>Continue work</h2><button class="text" onclick={() => section='work'}>Open work</button></div>{#if active}<span class="status">{safeDisplay(active.state)}</span><h3>{safeDisplay(active.intent?.objective ?? active.prompt ?? 'Intake conversation')}</h3><p class="mono">{safeDisplay(active.conversation_id)}</p>{:else}<div class="empty">No unfinished intake conversation.</div>{/if}</div>
         <div class="panel"><div class="panel-title"><h2>Governance queue</h2></div><div class="queue"><div><strong>{approvals.length}</strong><span>effect decisions</span></div><div><strong>{reviews.length}</strong><span>evidence reviews</span></div></div></div>
       </section>
     {:else if section === 'work'}
       <section class="grid work-grid">
         <div class="panel composer"><p class="eyebrow">Natural-language intake</p><h2>{active ? 'Continue the conversation' : 'What should the organization accomplish?'}</h2><textarea bind:value={workText} rows="7" placeholder="Describe the outcome, relevant context, constraints, and anything only you can provide."></textarea><label>Execution<select bind:value={executionKind} disabled={Boolean(active)}><option value="">Automatic</option><option value="HUMAN">User task</option></select><small>Automatic prefers deterministic work and uses an Agent only when justified.</small></label><div class="actions"><button class="primary" onclick={submitWork} disabled={busy || !identity || !workText.trim()}>Send</button><small>The model proposes a bounded Intent. Nothing starts until you confirm the exact review.</small></div></div>
-        <div class="panel intent"><div class="panel-title"><div><p class="eyebrow">Intent contract</p><h2>Review before work begins</h2></div>{#if active?.state}<span class="status">{active.state}</span>{/if}</div>
+        <div class="panel intent"><div class="panel-title"><div><p class="eyebrow">Intent contract</p><h2>Review before work begins</h2></div>{#if active?.state}<span class="status">{safeDisplay(active.state)}</span>{/if}</div>
           {#if active?.intent}
-            {#if active.prompt}<div class="banner notice" role="status"><strong>More information required</strong><br />{active.prompt}</div>{/if}
-            <h3>{active.intent.objective}</h3>
-            <dl><div><dt>Mode</dt><dd>{active.intent.mode}</dd></div>{#if active.intent.requested_execution_kind}<div><dt>Requested execution</dt><dd>{active.intent.requested_execution_kind}</dd></div>{/if}{#if active.intent.goal}<div><dt>Goal</dt><dd>{active.intent.goal.value}</dd></div>{/if}{#if active.intent.replaces_work}<div><dt>Replaces Work</dt><dd>{active.intent.replaces_work.value}</dd></div>{/if}</dl>
+            {#if active.prompt}<div class="banner notice" role="status"><strong>More information required</strong><br />{safeDisplay(active.prompt)}</div>{/if}
+            <h3>{safeDisplay(active.intent.objective)}</h3>
+            <dl><div><dt>Mode</dt><dd>{safeDisplay(active.intent.mode)}</dd></div>{#if active.intent.requested_execution_kind}<div><dt>Requested execution</dt><dd>{safeDisplay(active.intent.requested_execution_kind)}</dd></div>{/if}{#if active.intent.goal}<div><dt>Goal</dt><dd>{safeDisplay(active.intent.goal.value)}</dd></div>{/if}{#if active.intent.replaces_work}<div><dt>Replaces Work</dt><dd>{safeDisplay(active.intent.replaces_work.value)}</dd></div>{/if}</dl>
             {#each [['Context','context'],['Deliverables','deliverables'],['Done when','completion_criteria'],['Requirements','constraints']] as group}
-              {#if values(active.intent, group[1] as IntentList).length}<h4>{group[0]}</h4><ul>{#each values(active.intent, group[1] as IntentList) as value}<li>{value.value}</li>{/each}</ul>{/if}
+              {#if values(active.intent, group[1] as IntentList).length}<h4>{group[0]}</h4><ul>{#each values(active.intent, group[1] as IntentList) as value}<li>{safeDisplay(value.value)}</li>{/each}</ul>{/if}
             {/each}
-            {#if active.intent.resolved_decisions?.length}<h4>Resolved decisions</h4><ul>{#each active.intent.resolved_decisions as decision}<li><strong>{decision.subject}:</strong> {decision.value}</li>{/each}</ul>{/if}
-            {#if active.intent.consequence_candidates?.length}<h4>Potential task boundaries</h4><ul>{#each active.intent.consequence_candidates as boundary}<li>{boundary}</li>{/each}</ul>{/if}
+            {#if active.intent.resolved_decisions?.length}<h4>Resolved decisions</h4><ul>{#each active.intent.resolved_decisions as decision}<li><strong>{safeDisplay(decision.subject)}:</strong> {safeDisplay(decision.value)}</li>{/each}</ul>{/if}
+            {#if active.intent.consequence_candidates?.length}<h4>Potential task boundaries</h4><ul>{#each active.intent.consequence_candidates as boundary}<li>{safeDisplay(boundary)}</li>{/each}</ul>{/if}
             <div class="fingerprint"><span>Intent v{active.intent.version}</span><code>{active.intent.fingerprint}</code></div>
             <button class="primary wide" onclick={confirmIntent} disabled={busy || active.state !== 'AWAITING_CONFIRMATION'}>Confirm exact Intent</button>
             <p class="boundary-note">Confirming starts planning. It does not approve financial, public, destructive, privileged, legal, deployment, or other consequential effects.</p>
-          {:else if active}<div class="empty"><p>{active.prompt || 'More information is required before an Intent can be reviewed.'}</p></div>{:else}<div class="empty">Submit an outcome to begin a durable intake conversation.</div>{/if}
+          {:else if active}<div class="empty"><p>{safeDisplay(active.prompt || 'More information is required before an Intent can be reviewed.')}</p></div>{:else}<div class="empty">Submit an outcome to begin a durable intake conversation.</div>{/if}
         </div>
       </section>
       <section class="panel task-lookup"><div><p class="eyebrow">Durable status</p><h2>Find a Task</h2></div><div class="inline"><input bind:value={taskID} placeholder="task-id" /><button onclick={findTask} disabled={busy || !taskID.trim()}>Open</button></div>
-        {#if task}<div class="task"><div><span class="status">{task.state}</span><h3>{safeDisplay(task.task_id)}</h3>{#if task.work_id}<p class="mono">Work {safeDisplay(task.work_id)}</p>{/if}{#if task.mode}<p>Mode: <strong>{safeDisplay(task.mode)}</strong></p>{/if}{#if task.trust_label}<p class="risk">Trust: {safeDisplay(task.trust_label)}</p>{/if}{#if task.prompt}<p class="boundary-note">{safeDisplay(task.prompt)}</p>{/if}{#if task.result}<p>{safeDisplay(task.result)}</p>{/if}</div>
+        {#if task}<div class="task"><div><span class="status">{safeDisplay(task.state)}</span><h3>{safeDisplay(task.task_id)}</h3>{#if task.work_id}<p class="mono">Work {safeDisplay(task.work_id)}</p>{/if}{#if task.mode}<p>Mode: <strong>{safeDisplay(task.mode)}</strong></p>{/if}{#if task.trust_label}<p class="risk">Trust: {safeDisplay(task.trust_label)}</p>{/if}{#if task.prompt}<p class="boundary-note">{safeDisplay(task.prompt)}</p>{/if}{#if task.result}<p>{safeDisplay(task.result)}</p>{/if}</div>
           {#if task.completion_contract}<form onsubmit={(event) => { event.preventDefault(); submitCompletion(); }}><h4>Required completion evidence</h4>{#each task.completion_contract.required_fields ?? [] as field}<label>{safeDisplay(field.name)}<small>{safeDisplay(field.description)}; {field.min_bytes} to {field.max_bytes} UTF-8 bytes</small><textarea required value={completionFields[field.name] ?? ''} oninput={(event) => completionFields = {...completionFields, [field.name]: event.currentTarget.value}}></textarea></label>{/each}{#each task.completion_contract.artifact_requirements ?? [] as requirement}<label>{safeDisplay(requirement.role)}<small>{requirement.min_count} to {requirement.max_count} files; {requirement.media_types.map(safeDisplay).join(', ')}</small><input type="file" required={requirement.min_count > 0} multiple={requirement.max_count > 1} accept={requirement.media_types.join(',')} onchange={(event) => setFiles(requirement.role, event)} /></label>{/each}<button class="primary" type="submit" disabled={busy}>Submit complete evidence</button></form>{/if}
         </div>{/if}
       </section>
@@ -292,11 +298,11 @@
         <div class="panel detail">{#if selectedApproval}<p class="eyebrow">Exact proposed effect</p><h2>{safeDisplay(selectedApproval.canonical_effect_descriptor)}</h2><dl><div><dt>Action</dt><dd>{safeDisplay(selectedApproval.action)}</dd></div><div><dt>Resource</dt><dd>{safeDisplay(selectedApproval.resource)}</dd></div><div><dt>Scope</dt><dd>{safeDisplay(selectedApproval.scope)}</dd></div><div><dt>Boundary</dt><dd>{safeDisplay(selectedApproval.boundary)}</dd></div><div><dt>Risk</dt><dd>{safeDisplay(selectedApproval.risk)}</dd></div><div><dt>Urgency</dt><dd>{safeDisplay(selectedApproval.urgency)}</dd></div><div><dt>Expires</dt><dd>{safeDisplay(selectedApproval.expires_at ?? 'No expiry recorded')}</dd></div><div><dt>Single use</dt><dd>{selectedApproval.single_use ? 'Yes' : 'No'}</dd></div></dl>{#if Object.keys(selectedApproval.effect_arguments).length}<h4>Arguments</h4><pre>{safeDisplay(JSON.stringify(selectedApproval.effect_arguments, null, 2))}</pre>{/if}<div class="fingerprint"><span>Effect fingerprint</span><code>{selectedApproval.effect_fingerprint}</code></div><label>Type <code>APPROVE {selectedApproval.effect_fingerprint.slice(0,12)}</code> or <code>DENY</code><input bind:value={approvalPhrase} autocomplete="off" /></label><div class="actions"><button class="danger" onclick={() => decideApproval('DENY')} disabled={busy}>Deny</button><button class="primary" onclick={() => decideApproval('APPROVE')} disabled={busy}>Approve exact effect</button></div>{:else}<div class="empty">Select an approval to inspect the immutable effect details.</div>{/if}</div>
       </section>
     {:else if section === 'reviews'}
-      <section class="split"><div class="panel list"><div class="panel-title"><div><p class="eyebrow">Completion evidence</p><h2>Review queue</h2></div><span class="count">{reviews.length}</span></div>{#if reviews.length}{#each reviews as review}<button class:selected={selectedReview?.review_id === review.review_id} onclick={() => {selectedReview=review; reviewPhrase=''; revisionFeedback='';}}><div><strong>{review.objective}</strong><span>{review.task_id}</span></div><span class="status">{review.state}</span></button>{/each}{:else}<div class="empty">No completion evidence is awaiting judgment.</div>{/if}</div>
-        <div class="panel detail">{#if selectedReview}<p class="eyebrow">Candidate result</p><h2>{selectedReview.objective}</h2><blockquote>{selectedReview.candidate_result ?? selectedReview.result ?? 'No text result supplied.'}</blockquote><h4>Done when</h4><ul>{#each selectedReview.criteria as criterion}<li>{criterion.description}</li>{/each}</ul><h4>Evidence references</h4><ul class="mono">{#each selectedReview.evidence_refs as ref}<li>{ref}</li>{/each}</ul><div class="fingerprint"><span>Evidence fingerprint</span><code>{selectedReview.fingerprint}</code></div><p class="boundary-note">This judgment verifies the recorded candidate only. It does not approve any consequential effect.</p><label>Type <code>APPROVE {selectedReview.fingerprint.slice(0,12)}</code>, <code>REJECT {selectedReview.fingerprint.slice(0,12)}</code>, or <code>REVISE {selectedReview.fingerprint.slice(0,12)}</code><input bind:value={reviewPhrase} autocomplete="off" /></label>{#if reviewPhrase.startsWith('REVISE')}<label>Revision feedback<textarea bind:value={revisionFeedback} required></textarea></label>{/if}<div class="actions three"><button class="danger" onclick={() => decideReview('REJECT')} disabled={busy}>Reject</button><button onclick={() => decideReview('REVISE')} disabled={busy}>Request revision</button><button class="primary" onclick={() => decideReview('APPROVE')} disabled={busy}>Approve evidence</button></div>{:else}<div class="empty">Select a review to compare the candidate result with its exact completion contract.</div>{/if}</div>
+      <section class="split"><div class="panel list"><div class="panel-title"><div><p class="eyebrow">Completion evidence</p><h2>Review queue</h2></div><span class="count">{reviews.length}</span></div>{#if reviews.length}{#each reviews as review}<button class:selected={selectedReview?.review_id === review.review_id} onclick={() => {selectedReview=review; reviewPhrase=''; revisionFeedback='';}}><div><strong>{safeDisplay(review.objective)}</strong><span>{safeDisplay(review.task_id)}</span></div><span class="status">{safeDisplay(review.state)}</span></button>{/each}{:else}<div class="empty">No completion evidence is awaiting judgment.</div>{/if}</div>
+        <div class="panel detail">{#if selectedReview}<p class="eyebrow">Candidate result</p><h2>{safeDisplay(selectedReview.objective)}</h2><blockquote>{safeDisplay(selectedReview.candidate_result ?? selectedReview.result ?? 'No text result supplied.')}</blockquote><h4>Done when</h4><ul>{#each selectedReview.criteria as criterion}<li>{safeDisplay(criterion.description)}</li>{/each}</ul><h4>Evidence references</h4><ul class="mono">{#each selectedReview.evidence_refs as ref}<li>{safeDisplay(ref)}</li>{/each}</ul><div class="fingerprint"><span>Evidence fingerprint</span><code>{selectedReview.fingerprint}</code></div><p class="boundary-note">This judgment verifies the recorded candidate only. It does not approve any consequential effect.</p><label>Type <code>APPROVE {selectedReview.fingerprint.slice(0,12)}</code>, <code>REJECT {selectedReview.fingerprint.slice(0,12)}</code>, or <code>REVISE {selectedReview.fingerprint.slice(0,12)}</code><input bind:value={reviewPhrase} autocomplete="off" /></label>{#if reviewPhrase.startsWith('REVISE')}<label>Revision feedback<textarea bind:value={revisionFeedback} required></textarea></label>{/if}<div class="actions three"><button class="danger" onclick={() => decideReview('REJECT')} disabled={busy}>Reject</button><button onclick={() => decideReview('REVISE')} disabled={busy}>Request revision</button><button class="primary" onclick={() => decideReview('APPROVE')} disabled={busy}>Approve evidence</button></div>{:else}<div class="empty">Select a review to compare the candidate result with its exact completion contract.</div>{/if}</div>
       </section>
     {:else}
-      <section class="grid two"><div class="panel"><p class="eyebrow">Local boundary</p><h2>Dashboard session</h2><dl><div><dt>Organization</dt><dd>{identity?.organization ?? 'Unavailable'}</dd></div><div><dt>Install mode</dt><dd>{identity?.mode ?? 'Unavailable'}</dd></div><div><dt>Agent OS</dt><dd>{identity?.version ?? 'Unavailable'}</dd></div><div><dt>Expires</dt><dd>{identity?.session_expires_at ?? 'Unavailable'}</dd></div></dl></div><div class="panel"><p class="eyebrow">Diagnostics</p><h2>Read-only system checks</h2><p>Use <code>agentos doctor</code> for configuration, credential, service, private-gateway, and SQLite integrity checks.</p><pre>agentos doctor
+      <section class="grid two"><div class="panel"><p class="eyebrow">Local boundary</p><h2>Dashboard session</h2><dl><div><dt>Organization</dt><dd>{safeDisplay(identity?.organization ?? 'Unavailable')}</dd></div><div><dt>Install mode</dt><dd>{safeDisplay(identity?.mode ?? 'Unavailable')}</dd></div><div><dt>Agent OS</dt><dd>{safeDisplay(identity?.version ?? 'Unavailable')}</dd></div><div><dt>Expires</dt><dd>{safeDisplay(identity?.session_expires_at ?? 'Unavailable')}</dd></div></dl></div><div class="panel"><p class="eyebrow">Diagnostics</p><h2>Read-only system checks</h2><p>Use <code>agentos doctor</code> for configuration, credential, service, private-gateway, and SQLite integrity checks.</p><pre>agentos doctor
 sudo agentos doctor</pre></div></section>
     {/if}
   </main>

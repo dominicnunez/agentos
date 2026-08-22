@@ -9,7 +9,14 @@ export type ArtifactRequirement = { role: string; media_types: string[]; min_cou
 export type FieldRequirement = { name: string; min_bytes: number; max_bytes: number };
 
 export function safeDisplay(value: string): string {
-  return value.replace(/[\p{Cc}\p{Cf}]/gu, '');
+  return value.replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
+    character === '\n' || character === '\r' || character === '\t' ? character : ''
+  );
+}
+
+export function confirmationMessageID(fingerprint: string): string {
+  if (!/^[0-9a-f]{64}$/.test(fingerprint)) throw new Error('Intent fingerprint is invalid.');
+  return `confirmation-${fingerprint}`;
 }
 
 export function validateCompletionFields(
@@ -62,8 +69,11 @@ export function validateArtifactSelections(
       if (file.size < 1 || file.size > maximumArtifactBytes) {
         return `${file.name} must contain 1 byte to 16 MiB.`;
       }
-      if (!file.type || !requirement.media_types.includes(file.type)) {
+      if (file.type && !requirement.media_types.includes(file.type)) {
         return `${file.name} does not declare an allowed media type for ${requirement.role}.`;
+      }
+      if (!file.type && requirement.media_types.length !== 1) {
+        return `${file.name} has no browser media type and ${requirement.role} allows multiple types.`;
       }
       total += file.size;
       if (total > maximumCompletionBytes) {

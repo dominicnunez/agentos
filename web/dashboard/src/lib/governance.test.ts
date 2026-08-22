@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { loadAllCompletionReviews, safeDisplay, validateArtifactSelections, validateCompletionFields } from './governance.ts';
+import { confirmationMessageID, loadAllCompletionReviews, safeDisplay, validateArtifactSelections, validateCompletionFields } from './governance.ts';
 import type { CompletionReview } from './types';
 
 function review(id: string): CompletionReview {
@@ -34,5 +34,17 @@ test('validates completion fields by UTF-8 byte length', () => {
 });
 
 test('removes control and direction-format characters from governed display text', () => {
-  assert.equal(safeDisplay('safe\u202Etxt\n'), 'safetxt');
+  assert.equal(safeDisplay('safe\u202Etxt\nnext\titem'), 'safetxt\nnext\titem');
+});
+
+test('derives a stable confirmation message identity from the reviewed fingerprint', () => {
+  const fingerprint = 'a'.repeat(64);
+  assert.equal(confirmationMessageID(fingerprint), `confirmation-${fingerprint}`);
+  assert.throws(() => confirmationMessageID('not-a-fingerprint'), /invalid/);
+});
+
+test('allows empty browser media metadata only for an unambiguous contract type', () => {
+  const file = { name: 'report', size: 10, type: '' };
+  assert.equal(validateArtifactSelections([{ role: 'report', media_types: ['application/pdf'], min_count: 1, max_count: 1 }], { report: [file] }), null);
+  assert.match(validateArtifactSelections([{ role: 'report', media_types: ['application/pdf', 'text/plain'], min_count: 1, max_count: 1 }], { report: [file] }) ?? '', /allows multiple types/);
 });
