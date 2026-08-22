@@ -14,7 +14,7 @@ function approval(status: string): Approval {
 
 test('reconciles an uncertain approval before another decision can replace it', async () => {
   const calls: { path: string; body: string }[] = [];
-  const responses = [approval('IN_REVIEW'), approval('APPROVED')];
+  const responses = [approval('PENDING_DECISION'), approval('APPROVED')];
   const request = async <T>(path: string, options?: RequestInit): Promise<T> => {
     calls.push({ path, body: String(options?.body ?? '') });
     return responses.shift() as T;

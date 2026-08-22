@@ -44,7 +44,7 @@ export async function replayApprovalDecision(request: DashboardRequest, current:
   }
   const afterBegin = terminal(current);
   if (afterBegin) return afterBegin;
-  if (current.status !== 'IN_REVIEW') throw new Error('The approval is not in a decision-ready state.');
+  if (current.status !== 'PENDING_DECISION') throw new Error('The approval is not in a decision-ready state.');
   return request<Approval>(`/api/v1/control/approvals/${encodeURIComponent(current.approval_id)}/decision`, {
     method: 'POST',
     body: JSON.stringify({ effect_fingerprint: current.effect_fingerprint, decision })
