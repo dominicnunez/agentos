@@ -36,8 +36,12 @@ type dashboardLoopTask struct {
 func TestDashboardCompletesDurableAgentWorkThroughKernelAuthenticatedGateway(t *testing.T) {
 	uid, gid := syscall.Geteuid(), syscall.Getegid()
 	root := t.TempDir()
-	runtimeBase := filepath.Join(root, "runtime")
-	if err := os.Mkdir(runtimeBase, 0o700); err != nil {
+	runtimeBase, err := os.MkdirTemp("", "aos-loop-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeBase) })
+	if err := os.Chmod(runtimeBase, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	runtimeDir := filepath.Join(runtimeBase, "agentos")
