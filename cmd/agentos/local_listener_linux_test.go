@@ -151,7 +151,7 @@ func TestLocalHTTPClientRejectsUnsafeUserSocket(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(socketPath); err != nil {
+	if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(socketPath, []byte("not a socket"), 0o600); err != nil {
