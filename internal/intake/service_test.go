@@ -1117,7 +1117,7 @@ func TestGoalBoundIntentConcurrentConfirmationIsIdempotent(t *testing.T) {
 	}
 }
 
-func seedIntakeGoal(t *testing.T, ctx context.Context, gateway *events.Gateway, organizationID, goalID core.ID, status core.GoalStatus) {
+func seedIntakeGoal(t *testing.T, ctx context.Context, gateway *events.Gateway, organizationID, goalID core.ID, status core.GoalStatus) core.Goal {
 	t.Helper()
 	now := time.Now().UTC()
 	organization := core.Organization{ID: organizationID, Name: string(organizationID), PolicyVersion: "v1", CreatedAt: now}
@@ -1138,6 +1138,7 @@ func seedIntakeGoal(t *testing.T, ctx context.Context, gateway *events.Gateway, 
 			t.Fatal(err)
 		}
 	}
+	return goal
 }
 
 func TestAuthenticatedSelectedGoalBindsReviewedWorkWithoutModelInference(t *testing.T) {
@@ -1178,9 +1179,91 @@ func TestAuthenticatedSelectedGoalBindsReviewedWorkWithoutModelInference(t *test
 	if err != nil || confirmed.WorkID == "" {
 		t.Fatalf("selected Goal confirmation=%+v err=%v", confirmed, err)
 	}
+	if replay, err := service.Handle(ctx, principal, message); err != nil || replay.TaskID != confirmed.TaskID {
+		t.Fatalf("confirmed exact selected Goal replay=%+v err=%v", replay, err)
+	}
+	omittedGoal := message
+	omittedGoal.SelectedGoalID = ""
+	if _, err := service.Handle(ctx, principal, omittedGoal); !errors.Is(err, ErrConflict) {
+		t.Fatalf("confirmed replay omitted its selected Goal: %v", err)
+	}
+	changedGoal := message
+	changedGoal.SelectedGoalID = "goal-other"
+	if _, err := service.Handle(ctx, principal, changedGoal); !errors.Is(err, ErrConflict) {
+		t.Fatalf("confirmed replay changed its selected Goal: %v", err)
+	}
 	snapshot, found, err := runtime.OrganizationState(ctx, "org-1")
 	if err != nil || !found || len(snapshot.Works) != 1 || snapshot.Works[0].GoalID != "goal-1" {
 		t.Fatalf("durable selected Goal snapshot=%+v found=%t err=%v", snapshot, found, err)
+	}
+}
+
+func TestAbandonIntentClosesPausedGoalIntakeWithoutDeletingHistory(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	goal := seedIntakeGoal(t, ctx, gateway, "org-1", "goal-1", core.GoalActive)
+	service := NewWithNormalizer(app.New(gateway), fixedNormalizer{})
+	principal := testPrincipal("user-1", core.PrincipalHuman, ChannelHumanDirect)
+	message := Message{ConversationID: "abandon-paused-goal", MessageID: "message-1", Text: "Produce a bounded result.", SelectedGoalID: goal.ID}
+	draft, err := service.Handle(ctx, principal, message)
+	if err != nil || draft.Intent == nil {
+		t.Fatalf("draft=%+v err=%v", draft, err)
+	}
+	goal.Status = core.GoalPaused
+	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_PAUSED", SourceActorID: "runtime", CorrelationID: "seed-goal-1"},
+		ProjectionKind: "goal", RecordID: string(goal.ID), Version: 2, Value: goal,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Handle(ctx, principal, Message{ConversationID: message.ConversationID, MessageID: "message-2", Text: "Add context."}); err == nil {
+		t.Fatal("paused Goal intake accepted another normalization turn")
+	}
+	abandoned, err := service.AbandonIntent(ctx, principal, IntentAbandonment{ConversationID: message.ConversationID, MessageID: "abandon-1"})
+	if err != nil || abandoned.State != StateAbandoned || abandoned.SelectedGoalID != goal.ID {
+		t.Fatalf("abandoned=%+v err=%v", abandoned, err)
+	}
+	if replay, err := service.AbandonIntent(ctx, principal, IntentAbandonment{ConversationID: message.ConversationID, MessageID: "abandon-1"}); err != nil || replay.State != StateAbandoned {
+		t.Fatalf("exact abandonment replay=%+v err=%v", replay, err)
+	}
+	if _, err := service.AbandonIntent(ctx, principal, IntentAbandonment{ConversationID: message.ConversationID, MessageID: "abandon-changed"}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("changed abandonment replay=%v", err)
+	}
+	if _, err := service.ActiveIntent(ctx, principal); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("abandoned intake remained active: %v", err)
+	}
+	if _, err := service.Handle(ctx, principal, message); !errors.Is(err, ErrConflict) {
+		t.Fatalf("abandoned conversation accepted a message: %v", err)
+	}
+	if _, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: message.ConversationID, MessageID: "confirm-1", Fingerprint: draft.Intent.Fingerprint}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("abandoned conversation accepted confirmation: %v", err)
+	}
+	external := testPrincipal("agent-1", core.PrincipalExternalAgent, ChannelA2A)
+	external.Capabilities = append(external.Capabilities, CapabilityAbandonIntent)
+	if _, err := service.AbandonIntent(ctx, external, IntentAbandonment{ConversationID: message.ConversationID, MessageID: "agent-abandon"}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("external principal abandoned local intake: %v", err)
+	}
+	stream := externalStream(t, store, message.ConversationID)
+	if countEvents(stream, "INTAKE_ABANDONED") != 1 || countEvents(stream, "INTAKE_MESSAGE_RECORDED") != 2 || countEvents(stream, "INTENT_DRAFTED") != 1 || containsEvent(stream, "INTENT_CONFIRMED") {
+		t.Fatalf("abandonment changed durable intake history: %+v", stream)
+	}
+	newDraft, err := service.Handle(ctx, principal, Message{ConversationID: "replacement-intake", MessageID: "message-new", Text: "Produce different bounded work."})
+	if err != nil || newDraft.Intent == nil {
+		t.Fatalf("new intake after abandonment=%+v err=%v", newDraft, err)
+	}
+	if _, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: newDraft.ConversationID, MessageID: "confirm-new", Fingerprint: newDraft.Intent.Fingerprint}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AbandonIntent(ctx, principal, IntentAbandonment{ConversationID: newDraft.ConversationID, MessageID: "abandon-confirmed"}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("confirmed intake was abandoned: %v", err)
+	}
+	if confirmedStream := externalStream(t, store, newDraft.ConversationID); containsEvent(confirmedStream, "INTAKE_ABANDONED") {
+		t.Fatalf("rejected confirmed-intake abandonment reached ledger: %+v", confirmedStream)
 	}
 }
 
@@ -1572,9 +1655,13 @@ func testPrincipal(id string, kind core.PrincipalKind, channel string) Principal
 	if kind == core.PrincipalHuman {
 		scope = WorkScopeOrganization
 	}
+	capabilities := []string{CapabilitySubmitWork, CapabilityConfirmIntent, CapabilityReadStatus, CapabilityReadResult, CapabilityProvideInput}
+	if kind == core.PrincipalHuman {
+		capabilities = append(capabilities, CapabilityAbandonIntent)
+	}
 	return Principal{
 		ID: id, Kind: kind, OrganizationID: "org-1", Channel: channel,
-		Capabilities: []string{CapabilitySubmitWork, CapabilityConfirmIntent, CapabilityReadStatus, CapabilityReadResult, CapabilityProvideInput}, WorkScope: scope,
+		Capabilities: capabilities, WorkScope: scope,
 	}
 }
 

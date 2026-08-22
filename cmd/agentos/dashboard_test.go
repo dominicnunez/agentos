@@ -152,6 +152,7 @@ func TestAllowedDashboardRoute(t *testing.T) {
 		{http.MethodPost, "/v1/user/messages", "", true},
 		{http.MethodGet, "/v1/user/organization", "", true},
 		{http.MethodPost, "/v1/user/intents/conversation-1/confirm", "", true},
+		{http.MethodPost, "/v1/user/intents/conversation-1/abandon", "", true},
 		{http.MethodGet, "/v1/user/tasks/recent", "", true},
 		{http.MethodPost, "/v1/user/tasks/task-1/completion", "", true},
 		{http.MethodPost, "/v1/user/tasks/task-1/completion/recover", "", true},

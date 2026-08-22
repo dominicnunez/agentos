@@ -158,6 +158,13 @@ conversation is recovered from SQLite when the dashboard restarts. A durable
 confirmation whose Task creation, operator acceptance, execution, or Work
 reconciliation stopped partway is resumed by the server from the exact durable
 confirmer identity, message ID, and fingerprint.
+If an unconfirmed conversation can no longer proceed—for example, because its
+selected Goal or Mission was paused—the authenticated local user may abandon
+that intake and begin a new one. Abandonment appends a terminal
+`INTAKE_ABANDONED` event; it does not delete messages or drafts, rebind the
+Intent, cancel Work, or grant approval authority. The ledger serializes
+abandonment against confirmation, exact retries are idempotent, and abandoned
+streams are excluded from active-intake recovery.
 Confirmation
 means Agent OS understood the requested work; it is never approval for a
 financial, public, destructive, privileged, legal, deployment, or other
@@ -195,6 +202,7 @@ the Unix socket:
 - `POST /v1/user/messages`
 - `GET /v1/user/intents/active`
 - `POST /v1/user/intents/{conversation-id}/confirm`
+- `POST /v1/user/intents/{conversation-id}/abandon`
 - `GET /v1/user/tasks/recent`
 - `GET /v1/user/tasks/{task-id}`
 - `POST /v1/user/tasks/{task-id}/completion`

@@ -825,6 +825,22 @@ func TestTerminalEvidenceCannotUseGenericTrustedAdmission(t *testing.T) {
 	}
 }
 
+func TestIntakeAbandonmentCannotUseGenericTrustedAdmission(t *testing.T) {
+	ledger := &memoryLedger{}
+	gateway := NewGateway(ledger)
+	_, err := gateway.PublishTrusted(context.Background(), TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTAKE_ABANDONED", SourceActorID: "user-1",
+		TaskID: "task-run-1", CorrelationID: "run-1",
+		Payload: IntakeAbandonedPayload{
+			MessageID: "abandon-1", SourcePrincipalID: "user-1",
+			SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT",
+		},
+	})
+	if err == nil || len(ledger.events) != 0 {
+		t.Fatalf("generic trusted admission persisted intake abandonment: events=%+v err=%v", ledger.events, err)
+	}
+}
+
 func TestInboxObservationCannotBypassAtomicAdmission(t *testing.T) {
 	ledger := &memoryLedger{}
 	gateway := NewGateway(ledger)
@@ -1034,5 +1050,58 @@ func TestReviewedIntentEvidenceIndexUsesConfirmationBoundary(t *testing.T) {
 	evidence := IndexReviewedIntentEvidence(stream).At(stream[3])
 	if len(evidence) != 2 || evidence[0].Sequence != 1 || evidence[1].Sequence != 3 {
 		t.Fatalf("bounded evidence=%+v", evidence)
+	}
+}
+
+func TestReviewedIntentAdmissionRequiresDurableSelectedGoalMatch(t *testing.T) {
+	now := time.Now().UTC()
+	for name, goalID := range map[string]core.ID{"unbound": "", "different": "goal-2"} {
+		t.Run(name, func(t *testing.T) {
+			const correlationID = "selected-goal-admission"
+			const sourceMessageID = "message-1"
+			draft := core.IntentDraft{
+				ID: "intent-" + correlationID, OrganizationID: "org-1", Version: 1,
+				Status: core.IntentStatusReadyForReview, Mode: core.IntentModeStandard,
+				RequestedExecutionKind: core.ExecutionAgent, Objective: "bounded work",
+				Context:            []core.IntentValue{},
+				Deliverables:       []core.IntentValue{{Value: "bounded result", Origin: "EXPLICIT", SourceMessageID: sourceMessageID}},
+				CompletionCriteria: []core.IntentValue{{Value: "result is verified", Origin: "EXPLICIT", SourceMessageID: sourceMessageID}},
+				Constraints:        []core.IntentValue{}, ResolvedDecisions: []core.IntentDecision{},
+				ConsequenceCandidates: []string{}, MissingUserInputs: []core.IntentValue{}, CreatedAt: now,
+			}
+			if goalID != "" {
+				draft.Goal = &core.IntentValue{Value: string(goalID), Origin: "EXPLICIT", SourceMessageID: sourceMessageID}
+			}
+			var err error
+			draft.Fingerprint, err = core.FingerprintIntentDraft(draft)
+			if err != nil {
+				t.Fatal(err)
+			}
+			intakeBody, _ := json.Marshal(IntakeMessageRecordedPayload{
+				MessageID: sourceMessageID, Text: "Perform bounded work for goal-2.", SourcePrincipalID: "user-1",
+				SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT",
+				RequestedExecutionKind: core.ExecutionAgent, SelectedGoalID: "goal-1",
+			})
+			draftBody, _ := json.Marshal(IntentDraftedPayload{SourceMessageID: sourceMessageID, Draft: draft, Reply: "Review the proposed intent."})
+			confirmationBody, _ := json.Marshal(IntentConfirmedPayload{
+				IntentID: string(draft.ID), GoalID: string(goalID), Version: 1, Fingerprint: draft.Fingerprint,
+				ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1",
+			})
+			stream := []Event{
+				{EventID: "event-1", Sequence: 1, OrganizationID: "org-1", EventType: "INTAKE_MESSAGE_RECORDED", SourceActorID: "user-1", TaskID: "task-" + correlationID, Payload: intakeBody, CorrelationID: correlationID, CreatedAt: now, SchemaVersion: SchemaVersion},
+				{EventID: "event-2", Sequence: 2, OrganizationID: "org-1", EventType: "INTENT_DRAFTED", SourceActorID: "runtime", TaskID: "task-" + correlationID, Payload: draftBody, CorrelationID: correlationID, CreatedAt: now, SchemaVersion: SchemaVersion},
+				{EventID: "event-3", Sequence: 3, OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-" + correlationID, Payload: confirmationBody, CorrelationID: correlationID, CreatedAt: now, SchemaVersion: SchemaVersion},
+			}
+			if goalID == "" {
+				if err := ValidateReviewedIntentAdmission(stream, stream[2]); err == nil {
+					t.Fatal("durably selected Goal was admitted as unbound")
+				}
+				return
+			}
+			goal := core.Goal{ID: goalID, OrganizationID: "org-1", MissionID: "mission-1", Objective: "different goal", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "verified", Origin: "TEST"}}, Status: core.GoalActive, CreatedAt: now}
+			if err := ValidateReviewedGoalIntentAdmission(stream, stream[2], goal); err == nil {
+				t.Fatal("durably selected Goal was admitted under a different Goal")
+			}
+		})
 	}
 }

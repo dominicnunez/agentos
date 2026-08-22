@@ -2268,7 +2268,7 @@ func intentRequiresConfirmation(intent core.Intent) bool {
 }
 
 func validateExternalIntentConfirmation(ctx context.Context, tx *sql.Tx, item preparedProjection, intent core.Intent) error {
-	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_DRAFTED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, item.draft.Event.CorrelationID, events.ReviewedIntentEvidenceLimit+1))
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_DRAFTED','INTAKE_ABANDONED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, item.draft.Event.CorrelationID, events.ReviewedIntentEvidenceLimit+1))
 	if err != nil {
 		return fmt.Errorf("read reviewed intent confirmation: %w", err)
 	}
@@ -2507,6 +2507,12 @@ AND NOT EXISTS (
   WHERE confirmed.organization_id=e.organization_id
     AND confirmed.correlation_id=e.correlation_id
     AND confirmed.event_type='INTENT_CONFIRMED'
+)
+AND NOT EXISTS (
+  SELECT 1 FROM events abandoned
+  WHERE abandoned.organization_id=e.organization_id
+    AND abandoned.correlation_id=e.correlation_id
+    AND abandoned.event_type='INTAKE_ABANDONED'
 )
 ORDER BY e.sequence DESC LIMIT 1`, organizationID, principalID, principalKind, sourceChannel).Scan(&requestID, &correlationID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -2946,8 +2952,8 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 	case "WORK_COMPLETION_EVALUATED", "WORK_COMPLETED", "GOAL_PROGRESS_EVALUATED", "GOAL_ACHIEVED":
 		return events.Event{}, fmt.Errorf("terminal evidence requires its typed admission")
 	}
-	if d.EventType == "INTENT_CONFIRMED" {
-		return events.Event{}, fmt.Errorf("intent confirmation requires typed review admission")
+	if d.EventType == "INTENT_CONFIRMED" || d.EventType == "INTAKE_ABANDONED" {
+		return events.Event{}, fmt.Errorf("intent terminal event requires typed admission")
 	}
 	if d.EventType == "MESSAGE" || d.RecipientScope != "" || d.RecipientID != "" {
 		return l.appendAddressed(ctx, d)
@@ -2956,6 +2962,73 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		appended, err = appendEvent(ctx, tx, d)
+		return err
+	})
+	return appended, err
+}
+
+// AppendIntakeAbandonment serializes the terminal transition with the current
+// intake stream so it cannot race an Intent confirmation. Exact retries are
+// idempotent; a changed request or a confirmed stream fails closed.
+func (l *SQLite) AppendIntakeAbandonment(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {
+	var abandonment events.IntakeAbandonedPayload
+	if draft.EventType != "INTAKE_ABANDONED" || draft.OrganizationID == "" ||
+		decodeExactJSON(draft.Payload, &abandonment) != nil || abandonment.MessageID == "" ||
+		abandonment.SourcePrincipalID == "" || abandonment.SourcePrincipalKind == "" || abandonment.SourceChannel == "" ||
+		!core.ValidIntentSourceIdentity(core.ID(abandonment.SourcePrincipalID), core.PrincipalKind(abandonment.SourcePrincipalKind), abandonment.SourceChannel) ||
+		draft.SourceActorID != abandonment.SourcePrincipalID || draft.SourceExecutionID != "" ||
+		draft.RecipientScope != "" || draft.RecipientID != "" || draft.TaskID != "task-"+draft.CorrelationID ||
+		draft.CorrelationID == "" || len(draft.AuthorizationRefs) != 0 || len(draft.ArtifactRefs) != 0 {
+		return events.Event{}, fmt.Errorf("complete intake abandonment is required")
+	}
+	var appended events.Event
+	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? AND correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTAKE_ABANDONED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, draft.OrganizationID, draft.CorrelationID, events.ReviewedIntentEvidenceLimit+1))
+		if err != nil {
+			return fmt.Errorf("read intake abandonment boundary: %w", err)
+		}
+		if len(stream) > events.ReviewedIntentEvidenceLimit {
+			return fmt.Errorf("intake evidence exceeds its admission bound")
+		}
+		var initial events.IntakeMessageRecordedPayload
+		foundInitial := false
+		var existing *events.Event
+		for _, candidate := range stream {
+			switch candidate.EventType {
+			case "INTENT_CONFIRMED":
+				return fmt.Errorf("confirmed intent cannot be abandoned")
+			case "INTAKE_ABANDONED":
+				var recorded events.IntakeAbandonedPayload
+				if existing != nil || decodeExactJSONBytes(candidate.Payload, &recorded) != nil || !reflect.DeepEqual(recorded, abandonment) ||
+					candidate.OrganizationID != draft.OrganizationID || candidate.SourceActorID != draft.SourceActorID ||
+					candidate.SourceExecutionID != "" || candidate.RecipientScope != "" || candidate.RecipientID != "" ||
+					candidate.TaskID != draft.TaskID || len(candidate.AuthorizationRefs) != 0 || len(candidate.ArtifactRefs) != 0 ||
+					candidate.CorrelationID != draft.CorrelationID || candidate.SchemaVersion != events.SchemaVersion {
+					return fmt.Errorf("intake abandonment conflicts with durable state")
+				}
+				copy := candidate
+				existing = &copy
+			case "INTAKE_MESSAGE_RECORDED":
+				if foundInitial {
+					continue
+				}
+				if decodeExactJSONBytes(candidate.Payload, &initial) != nil || candidate.SourceActorID != initial.SourcePrincipalID ||
+					candidate.OrganizationID != draft.OrganizationID || candidate.TaskID != draft.TaskID || candidate.CorrelationID != draft.CorrelationID {
+					return fmt.Errorf("intake abandonment source is invalid")
+				}
+				foundInitial = true
+			}
+		}
+		if !foundInitial || initial.SourcePrincipalID != abandonment.SourcePrincipalID ||
+			initial.SourcePrincipalKind != abandonment.SourcePrincipalKind || initial.SourceChannel != abandonment.SourceChannel {
+			return fmt.Errorf("intake abandonment is not owned by its original principal")
+		}
+		if existing != nil {
+			appended = *existing
+			return nil
+		}
+		appended, err = appendEvent(ctx, tx, draft)
 		return err
 	})
 	return appended, err
@@ -2972,7 +3045,7 @@ func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.Trus
 	}
 	var event events.Event
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
-		stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_DRAFTED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, draft.CorrelationID, events.ReviewedIntentEvidenceLimit+1))
+		stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_DRAFTED','INTAKE_ABANDONED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, draft.CorrelationID, events.ReviewedIntentEvidenceLimit+1))
 		if err != nil {
 			return fmt.Errorf("read reviewed intent evidence: %w", err)
 		}

@@ -47,6 +47,8 @@
   let completionFiles: Record<string, File[]> = {};
   let pendingWorkMessageID = '';
   let pendingWorkKey = '';
+  let pendingAbandonMessageID = '';
+  let pendingAbandonConversationID = '';
   let completionMessageID = '';
   let taskInput = '';
   let pendingTaskInputMessageID = '';
@@ -283,6 +285,31 @@
       clearTaskInput();
       conversationID = '';
       notice = `Task ${confirmed.task_id} for Work ${confirmed.work_id || ''} was created from the confirmed Intent.`;
+      await refresh();
+    });
+  }
+
+  async function abandonIntent(): Promise<void> {
+    if (!active?.conversation_id) return;
+    const currentConversation = active.conversation_id;
+    if (!pendingAbandonMessageID || pendingAbandonConversationID !== currentConversation) {
+      pendingAbandonMessageID = identifier('abandon');
+      pendingAbandonConversationID = currentConversation;
+    }
+    await action(async () => {
+      await api<TaskView>(`/api/v1/user/intents/${encodeURIComponent(currentConversation)}/abandon`, {
+        method: 'POST',
+        body: JSON.stringify({ message_id: pendingAbandonMessageID })
+      });
+      active = null;
+      conversationID = '';
+      selectedGoalID = '';
+      executionKind = '';
+      pendingWorkMessageID = '';
+      pendingWorkKey = '';
+      pendingAbandonMessageID = '';
+      pendingAbandonConversationID = '';
+      notice = 'The intake was abandoned. Its event history remains immutable.';
       await refresh();
     });
   }
@@ -661,6 +688,7 @@
             <button class="primary wide" onclick={confirmIntent} disabled={busy || active.state !== 'AWAITING_CONFIRMATION'}>Confirm exact Intent</button>
             <p class="boundary-note">Confirming starts planning. It does not approve financial, public, destructive, privileged, legal, deployment, or other consequential effects.</p>
           {:else if active}<div class="empty"><p>{safeDisplay(active.prompt || 'More information is required before an Intent can be reviewed.')}</p></div>{:else}<div class="empty">Submit an outcome to begin a durable intake conversation.</div>{/if}
+          {#if active}<button class="danger wide" onclick={abandonIntent} disabled={busy}>Abandon intake</button><p class="boundary-note">Abandoning closes only this unconfirmed intake. It does not delete its durable history or affect existing Work.</p>{/if}
         </div>
       </section>
       <section class="panel task-lookup"><div><p class="eyebrow">Durable status</p><h2>Find a Task</h2></div><div class="inline"><input bind:value={taskID} placeholder="task-id" /><button onclick={findTask} disabled={busy || !taskID.trim()}>Open</button></div>

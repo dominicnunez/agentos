@@ -38,7 +38,7 @@ func IndexReviewedIntentEvidence(stream []Event) ReviewedIntentEvidenceIndex {
 	index := make(ReviewedIntentEvidenceIndex)
 	for _, event := range stream {
 		switch event.EventType {
-		case "INTAKE_MESSAGE_RECORDED", "INTENT_DRAFTED", "INTENT_CONFIRMED":
+		case "INTAKE_MESSAGE_RECORDED", "INTENT_DRAFTED", "INTAKE_ABANDONED", "INTENT_CONFIRMED":
 			index[event.CorrelationID] = append(index[event.CorrelationID], event)
 		}
 	}
@@ -190,6 +190,13 @@ type IntentDraftedPayload struct {
 	Reply           string           `json:"reply"`
 }
 
+type IntakeAbandonedPayload struct {
+	MessageID           string `json:"message_id"`
+	SourcePrincipalID   string `json:"source_principal_id"`
+	SourcePrincipalKind string `json:"source_principal_kind"`
+	SourceChannel       string `json:"source_channel"`
+}
+
 type IntentNormalizationContextPayload struct {
 	SourceMessageID         string   `json:"source_message_id"`
 	PromptVersion           string   `json:"prompt_version"`
@@ -335,6 +342,8 @@ func validateReviewedIntent(stream []Event, confirmationEvent Event, confirmatio
 			draftCount++
 			latestDraftEvent = event
 			latestDraft = payload
+		case "INTAKE_ABANDONED":
+			return fmt.Errorf("abandoned intake cannot be confirmed")
 		}
 	}
 	if latestDraftEvent.EventID == "" || latestIntakeMessageID == "" || latestDraftEvent.Sequence <= latestIntakeSequence || latestDraft.SourceMessageID != latestIntakeMessageID || latestDraft.Draft.CreatedAt.IsZero() || strings.TrimSpace(latestDraft.Reply) == "" {
@@ -357,6 +366,9 @@ func validateReviewedIntent(stream []Event, confirmationEvent Event, confirmatio
 	reviewedGoalID, err := core.AcceptedIntentGoalID(reviewed)
 	if err != nil || reviewedGoalID != goalID {
 		return fmt.Errorf("intent reviewed Goal provenance is invalid")
+	}
+	if selectedGoalID != "" && selectedGoalID != string(goalID) {
+		return fmt.Errorf("intent reviewed Goal does not match its durable user selection")
 	}
 	replacesWorkID, err := core.AcceptedIntentReplacesWorkID(reviewed)
 	if err != nil || string(replacesWorkID) != confirmation.ReplacesWorkID {
@@ -3218,6 +3230,9 @@ type ProjectionReader interface {
 type IntentConfirmer interface {
 	AppendIntentConfirmation(context.Context, TrustedDraft, core.ID, core.ID) (Event, error)
 }
+type IntakeAbandoner interface {
+	AppendIntakeAbandonment(context.Context, TrustedDraft) (Event, error)
+}
 type ExternalWorkResolver interface {
 	ResolveExternalWork(context.Context, string, string) (string, bool, error)
 	ResolveExternalRequest(context.Context, string, string) (string, bool, error)
@@ -3359,8 +3374,8 @@ func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event
 	case "WORK_COMPLETION_EVALUATED", "WORK_COMPLETED", "GOAL_PROGRESS_EVALUATED", "GOAL_ACHIEVED":
 		return Event{}, fmt.Errorf("terminal evidence requires its typed admission")
 	}
-	if draft.EventType == "INTENT_CONFIRMED" {
-		return Event{}, fmt.Errorf("intent confirmation requires typed review admission")
+	if draft.EventType == "INTENT_CONFIRMED" || draft.EventType == "INTAKE_ABANDONED" {
+		return Event{}, fmt.Errorf("intent terminal event requires typed admission")
 	}
 	if err := g.validateAddressed(ctx, draft, false); err != nil {
 		return Event{}, err
@@ -3403,6 +3418,28 @@ func (g *Gateway) PublishIntentConfirmation(ctx context.Context, draft TrustedDr
 		return Event{}, fmt.Errorf("ledger does not support typed intent confirmation")
 	}
 	return confirmer.AppendIntentConfirmation(ctx, draft, goalID, replacesWorkID)
+}
+
+// PublishIntakeAbandonment atomically terminalizes an unconfirmed intake
+// without deleting its evidence or granting authority over any Work.
+func (g *Gateway) PublishIntakeAbandonment(ctx context.Context, draft TrustedDraft) (Event, error) {
+	var abandonment IntakeAbandonedPayload
+	if draft.EventType != "INTAKE_ABANDONED" || decodePayload(draft.Payload, &abandonment) != nil ||
+		draft.OrganizationID == "" || draft.SourceActorID == "" || draft.SourceActorID != abandonment.SourcePrincipalID ||
+		draft.SourceExecutionID != "" || draft.RecipientScope != "" || draft.RecipientID != "" ||
+		draft.TaskID != "task-"+draft.CorrelationID || draft.CorrelationID == "" ||
+		len(draft.AuthorizationRefs) != 0 || len(draft.ArtifactRefs) != 0 || abandonment.MessageID == "" ||
+		!validReviewedOperatorIdentity(abandonment.SourcePrincipalID, abandonment.SourcePrincipalKind, abandonment.SourceChannel) {
+		return Event{}, fmt.Errorf("intake abandonment requires complete operator identity")
+	}
+	if err := g.validateAddressed(ctx, draft, false); err != nil {
+		return Event{}, err
+	}
+	abandoner, ok := g.ledger.(IntakeAbandoner)
+	if !ok {
+		return Event{}, fmt.Errorf("ledger does not support typed intake abandonment")
+	}
+	return abandoner.AppendIntakeAbandonment(ctx, draft)
 }
 func (g *Gateway) PublishProjection(ctx context.Context, draft ProjectionDraft) (Event, error) {
 	if draft.Event.EventType == "" || draft.ProjectionKind == "" || draft.RecordID == "" || draft.Version < 1 {

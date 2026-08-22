@@ -24,6 +24,7 @@ const (
 
 	CapabilitySubmitWork           = "submit_work"
 	CapabilityConfirmIntent        = "confirm_intent"
+	CapabilityAbandonIntent        = "abandon_intent"
 	CapabilityReadStatus           = "read_status"
 	CapabilityReadResult           = "read_result"
 	CapabilityProvideInput         = "provide_input"
@@ -37,6 +38,7 @@ const (
 
 	StateWorking              = "WORKING"
 	StateAwaitingConfirmation = "AWAITING_CONFIRMATION"
+	StateAbandoned            = "ABANDONED"
 	StateInputRequired        = "INPUT_REQUIRED"
 	StateCompleted            = "COMPLETED"
 	StateFailed               = "FAILED"
@@ -181,6 +183,9 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 	if err != nil {
 		return View{}, fmt.Errorf("%w: load work stream", ErrUnavailable)
 	}
+	if streamHasEvent(stream, "INTAKE_ABANDONED") {
+		return View{}, fmt.Errorf("%w: intake was abandoned", ErrConflict)
+	}
 	if !streamHasEvent(stream, "INTENT_CONFIRMED") {
 		return s.handleIntentConversation(ctx, principal, message, stream)
 	}
@@ -189,7 +194,7 @@ func (s *Service) Handle(ctx context.Context, principal Principal, message Messa
 		return View{}, err
 	}
 	initialIDMatches := initial.MessageID == message.MessageID
-	initialReplay := initialIDMatches && initial.Text == message.Text && initial.RequestedKind == message.RequestedKind
+	initialReplay := initialIDMatches && initial.Text == message.Text && initial.RequestedKind == message.RequestedKind && initial.SelectedGoalID == message.SelectedGoalID
 	if initialReplay && !principal.Allowed(CapabilityReadStatus) {
 		if !principal.Allowed(CapabilitySubmitWork) || !initial.matches(principal) {
 			return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
@@ -277,6 +282,11 @@ type IntentConfirmation struct {
 	Fingerprint    string
 }
 
+type IntentAbandonment struct {
+	ConversationID string
+	MessageID      string
+}
+
 func (s *Service) ConfirmIntent(ctx context.Context, principal Principal, confirmation IntentConfirmation) (View, error) {
 	if err := validatePrincipal(principal); err != nil {
 		return View{}, err
@@ -299,6 +309,9 @@ func (s *Service) confirmIntentLocked(ctx context.Context, principal Principal, 
 	}
 	if err := authorizeIntakePrincipal(principal, stream); err != nil {
 		return View{}, err
+	}
+	if streamHasEvent(stream, "INTAKE_ABANDONED") {
+		return View{}, fmt.Errorf("%w: abandoned intake cannot be confirmed", ErrConflict)
 	}
 	if confirmation.TaskID != "" && confirmation.TaskID != streamTaskID(stream) {
 		return View{}, fmt.Errorf("%w: confirmation task does not match durable intake", ErrConflict)
@@ -351,6 +364,46 @@ func (s *Service) confirmIntentLocked(ctx context.Context, principal Principal, 
 		return projectSubmissionReceipt(confirmation.ConversationID, stream), nil
 	}
 	return projectView(confirmation.ConversationID, stream, principal.Allowed(CapabilityReadResult)), nil
+}
+
+// AbandonIntent closes an unconfirmed local-user intake while preserving its
+// complete event stream. It neither creates nor cancels Work and grants no
+// approval or effect authority.
+func (s *Service) AbandonIntent(ctx context.Context, principal Principal, abandonment IntentAbandonment) (View, error) {
+	if err := validatePrincipal(principal); err != nil {
+		return View{}, err
+	}
+	if principal.Kind != core.PrincipalHuman || principal.Channel != ChannelHumanDirect || !principal.Allowed(CapabilityAbandonIntent) {
+		return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityAbandonIntent)
+	}
+	if ValidateIdentifier("conversation", abandonment.ConversationID) != nil || ValidateIdentifier("message", abandonment.MessageID) != nil {
+		return View{}, fmt.Errorf("%w: valid abandonment identity is required", ErrInvalid)
+	}
+	unlock := s.lockStream(principal.OrganizationID, abandonment.ConversationID)
+	defer unlock()
+	stream, err := s.app.ExternalEvents(ctx, principal.OrganizationID, abandonment.ConversationID)
+	if err != nil || len(stream) == 0 {
+		return View{}, ErrNotFound
+	}
+	if err := authorizeIntakePrincipal(principal, stream); err != nil {
+		return View{}, err
+	}
+	if streamHasEvent(stream, "INTENT_CONFIRMED") {
+		return View{}, fmt.Errorf("%w: confirmed intent cannot be abandoned", ErrConflict)
+	}
+	stream, err = s.app.AbandonIntake(ctx, app.IntakeAbandonment{
+		RequestID: abandonment.ConversationID, OrganizationID: principal.OrganizationID, MessageID: abandonment.MessageID,
+		SourcePrincipalID: core.ID(principal.ID), SourcePrincipalKind: principal.Kind, SourceChannel: principal.Channel,
+	})
+	if err != nil {
+		return View{}, fmt.Errorf("%w: abandon intake", ErrConflict)
+	}
+	initial, _, _ := initialIntakePayload(stream)
+	return View{
+		TaskID: streamTaskID(stream), ConversationID: abandonment.ConversationID,
+		SelectedGoalID: core.ID(initial.SelectedGoalID), State: StateAbandoned,
+		Prompt: "The intake was abandoned. Its event history remains immutable.", UpdatedAt: stream[len(stream)-1].CreatedAt,
+	}, nil
 }
 
 func (s *Service) ActiveIntent(ctx context.Context, principal Principal) (View, error) {
