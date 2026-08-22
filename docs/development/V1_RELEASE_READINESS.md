@@ -6,11 +6,11 @@ checklist does not authorize deployment or publication.
 
 | Gate | Status | Evidence or next action |
 |---|---|---|
-| Architecture acceptance | PASS | All 24 current V1 requirements have linked automated evidence. |
+| Architecture acceptance | PASS | All 25 current V1 requirements have linked automated evidence. |
 | Required CI | PASS | Build, vet, lint, race tests, vulnerability scanning, architecture checks, interoperability, and advisory dead-code analysis run on pushes and pull requests. |
 | Resumable initialization | PARTIAL | System-default and current-account user modes, stable paths, setup checkpoints, provider discovery, and service installation are implemented. Complete a clean Linux VM installation test before a release candidate. |
 | Controlled startup | PASS | The runtime refuses incomplete configuration and requires exactly one validated real provider. A2A remains disabled without a reviewed Agent registry. |
-| Private user access | PARTIAL | The HTTP-shaped user and approval boundaries run only over a mode-`0600` Unix socket and verify kernel peer UID. Runtime and credential directories enforce exact ownership, modes, and symlink-safe paths; systemd services use umask `0077`. Complete process-level root-owner and ordinary-user tests on Linux. |
+| Private user access | PARTIAL | The HTTP-shaped user and approval boundaries run only over a mode-`0600` Unix socket and verify kernel peer UID. [`TestLocalUserSocketDerivesOwnerFromKernelPeerCredentials`](../../cmd/agentos/local_listener_linux_test.go) exercises the real socket, `SO_PEERCRED`, HTTP context, client validation, and header-impersonation rejection in-process as the CI runner's ordinary Linux user; [`TestLocalHTTPClientRejectsUnsafeUserSocket`](../../cmd/agentos/local_listener_linux_test.go) covers fail-closed ownership, type, mode, and symlink rejection. Runtime and credential directories enforce exact ownership, modes, and symlink-safe paths; systemd services use umask `0077`. Complete installed process-level ordinary-user and root-owner tests on Linux. |
 | Graceful shutdown | PASS | Process signals cancel the runtime context, stop intake, drain active requests within a bounded timeout, and close SQLite. |
 | Input robustness | PASS | Strict size-limited decoding, authority-field rejection, adversarial tests, and bounded fuzzing cover local user and A2A work content. |
 | Binary version identity | PASS | Both commands receive the repository `VERSION` at build time and are checked in CI. |
