@@ -27,6 +27,7 @@ export type TaskView = {
   trust_label?: string;
   updated_at?: string;
   completion_contract?: CompletionContract;
+  review_required?: boolean;
   intent?: IntentDraft;
 };
 

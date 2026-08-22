@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { APIError, isDashboardSessionRejection } from './api.ts';
-import { confirmationMessageID, confirmationRetryBinding, hasRetryableIntentConfirmation, loadAllCompletionReviews, matchesConfirmationRetry, parseConfirmationRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from './governance.ts';
+import { approvalRetryBinding, confirmationMessageID, confirmationRetryBinding, hasRetryableIntentConfirmation, loadAllCompletionReviews, matchesConfirmationRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from './governance.ts';
 import type { CompletionReview } from './types';
 
 function review(id: string): CompletionReview {
@@ -94,4 +94,17 @@ test('rejects tampered pending confirmation bindings', () => {
   assert.throws(() => parseConfirmationRetryBinding(JSON.stringify({ conversation_id: 'conversation-1', fingerprint: 'b'.repeat(64), authority: 'admin' })), /invalid/);
   assert.throws(() => parseConfirmationRetryBinding(JSON.stringify({ conversation_id: 'conversation\nforged', fingerprint: 'b'.repeat(64) })), /invalid/);
   assert.throws(() => parseConfirmationRetryBinding(JSON.stringify({ conversation_id: 'conversation-1', fingerprint: 'not-a-fingerprint' })), /invalid/);
+});
+
+test('round-trips strict approval and review retry bindings', () => {
+  const approval = approvalRetryBinding('approval-1', 'a'.repeat(64), 'APPROVE');
+  assert.deepEqual(parseApprovalRetryBinding(JSON.stringify(approval)), approval);
+  const review = reviewRetryBinding('task-1', 'review-1', 'b'.repeat(64), 'REVISE', '  exact feedback\n');
+  assert.deepEqual(parseReviewRetryBinding(JSON.stringify(review)), review);
+});
+
+test('rejects authority-shaped and internally inconsistent decision retries', () => {
+  assert.throws(() => parseApprovalRetryBinding(JSON.stringify({ approval_id: 'approval-1', fingerprint: 'a'.repeat(64), decision: 'APPROVE', role: 'owner' })), /invalid/);
+  assert.throws(() => parseReviewRetryBinding(JSON.stringify({ task_id: 'task-1', review_id: 'review-1', fingerprint: 'b'.repeat(64), decision: 'APPROVE', feedback: 'hidden' })), /invalid/);
+  assert.throws(() => parseReviewRetryBinding(JSON.stringify({ task_id: 'task-1', review_id: 'review-1', fingerprint: 'b'.repeat(64), decision: 'REVISE', feedback: '   ' })), /invalid/);
 });

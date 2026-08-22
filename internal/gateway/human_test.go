@@ -206,7 +206,7 @@ func TestLocalOwnerCanFinalizeExactCompletionReview(t *testing.T) {
 	response := submitAndConfirmHuman(t, handler, humanMessageRequest{
 		ConversationID: "reviewed-work", MessageID: "message-1", Text: "draft a release update",
 	})
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"INPUT_REQUIRED"`) || strings.Contains(response.Body.String(), `"result"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"INPUT_REQUIRED"`) || !strings.Contains(response.Body.String(), `"review_required":true`) || strings.Contains(response.Body.String(), `"result"`) {
 		t.Fatalf("unreviewed submit=%d %s", response.Code, response.Body.String())
 	}
 	var task humanTaskResponse

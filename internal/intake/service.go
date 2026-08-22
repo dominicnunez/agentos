@@ -89,6 +89,7 @@ type View struct {
 	TrustLabel         string
 	UpdatedAt          time.Time
 	CompletionContract *core.CompletionContract
+	ReviewRequired     bool
 	Intent             *core.IntentDraft
 }
 
@@ -777,6 +778,7 @@ func projectView(conversationID string, stream []events.Event, includeResult boo
 	}
 	if view.State == StateInputRequired {
 		view.Prompt = blockedStatusText(stream)
+		view.ReviewRequired = pendingCompletionReview(stream, view.TaskID)
 		if task, found := streamTask(stream); found && task.CompletionContract != nil {
 			contract := *task.CompletionContract
 			view.CompletionContract = &contract
@@ -791,6 +793,31 @@ func projectView(conversationID string, stream []events.Event, includeResult boo
 		}
 	}
 	return view
+}
+
+func pendingCompletionReview(stream []events.Event, taskID string) bool {
+	var latest core.ID
+	decided := make(map[core.ID]bool)
+	for _, event := range stream {
+		switch event.EventType {
+		case "COMPLETION_REVIEW_REQUESTED":
+			var request struct {
+				ID     core.ID `json:"id"`
+				TaskID core.ID `json:"task_id"`
+			}
+			if json.Unmarshal(event.Payload, &request) == nil && request.ID != "" && request.TaskID == core.ID(taskID) {
+				latest = request.ID
+			}
+		case "COMPLETION_REVIEW_DECIDED":
+			var decision struct {
+				ReviewID core.ID `json:"review_id"`
+			}
+			if json.Unmarshal(event.Payload, &decision) == nil && decision.ReviewID != "" {
+				decided[decision.ReviewID] = true
+			}
+		}
+	}
+	return latest != "" && !decided[latest]
 }
 
 func streamTask(stream []events.Event) (core.Task, bool) {

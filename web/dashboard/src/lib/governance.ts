@@ -8,6 +8,8 @@ export type ArtifactSelection = { name: string; size: number; type: string };
 export type ArtifactRequirement = { role: string; media_types: string[]; min_count: number; max_count: number };
 export type FieldRequirement = { name: string; min_bytes: number; max_bytes: number };
 export type ConfirmationRetryBinding = { conversation_id: string; fingerprint: string };
+export type ApprovalRetryBinding = { approval_id: string; fingerprint: string; decision: 'APPROVE' | 'DENY' };
+export type ReviewRetryBinding = { task_id: string; review_id: string; fingerprint: string; decision: 'APPROVE' | 'REJECT' | 'REVISE'; feedback: string };
 
 export function confirmationRetryBinding(conversationID: string, fingerprint: string): ConfirmationRetryBinding {
   if (!validBoundaryIdentifier(conversationID)) throw new Error('Intent conversation identity is invalid.');
@@ -29,6 +31,44 @@ export function parseConfirmationRetryBinding(value: string | null): Confirmatio
     throw new Error('Stored Intent confirmation retry is invalid.');
   }
   return confirmationRetryBinding(record.conversation_id, record.fingerprint);
+}
+
+export function approvalRetryBinding(approvalID: string, fingerprint: string, decision: 'APPROVE' | 'DENY'): ApprovalRetryBinding {
+  if (!validBoundaryIdentifier(approvalID) || !validFingerprint(fingerprint) || (decision !== 'APPROVE' && decision !== 'DENY')) throw new Error('Approval retry binding is invalid.');
+  return { approval_id: approvalID, fingerprint, decision };
+}
+
+export function parseApprovalRetryBinding(value: string | null): ApprovalRetryBinding | null {
+  const record = parseStrictRecord(value, ['approval_id', 'decision', 'fingerprint'], 'approval');
+  if (!record) return null;
+  if (typeof record.approval_id !== 'string' || typeof record.fingerprint !== 'string' || (record.decision !== 'APPROVE' && record.decision !== 'DENY')) throw new Error('Stored approval retry is invalid.');
+  return approvalRetryBinding(record.approval_id, record.fingerprint, record.decision);
+}
+
+export function reviewRetryBinding(taskID: string, reviewID: string, fingerprint: string, decision: 'APPROVE' | 'REJECT' | 'REVISE', feedback: string): ReviewRetryBinding {
+  if (!validBoundaryIdentifier(taskID) || !validBoundaryIdentifier(reviewID) || !validFingerprint(fingerprint) || !['APPROVE', 'REJECT', 'REVISE'].includes(decision)) throw new Error('Completion-review retry binding is invalid.');
+  const bytes = new TextEncoder().encode(feedback).byteLength;
+  if (bytes > 64 * 1024 || (decision === 'REVISE' ? !feedback.trim() : feedback !== '')) throw new Error('Completion-review retry binding is invalid.');
+  return { task_id: taskID, review_id: reviewID, fingerprint, decision, feedback };
+}
+
+export function parseReviewRetryBinding(value: string | null): ReviewRetryBinding | null {
+  const record = parseStrictRecord(value, ['decision', 'feedback', 'fingerprint', 'review_id', 'task_id'], 'completion-review');
+  if (!record) return null;
+  if (typeof record.task_id !== 'string' || typeof record.review_id !== 'string' || typeof record.fingerprint !== 'string' || typeof record.feedback !== 'string' || (record.decision !== 'APPROVE' && record.decision !== 'REJECT' && record.decision !== 'REVISE')) throw new Error('Stored completion-review retry is invalid.');
+  return reviewRetryBinding(record.task_id, record.review_id, record.fingerprint, record.decision, record.feedback);
+}
+
+function parseStrictRecord(value: string | null, keys: string[], name: string): Record<string, unknown> | null {
+  if (!value) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error(`Stored ${name} retry is invalid.`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Object.keys(parsed).sort().join(',') !== keys.join(',')) throw new Error(`Stored ${name} retry is invalid.`);
+  return parsed as Record<string, unknown>;
 }
 
 export function hasRetryableIntentConfirmation(view: TaskView | null): boolean {
@@ -63,8 +103,12 @@ export function safeDisplay(value: string): string {
 }
 
 export function confirmationMessageID(fingerprint: string): string {
-  if (!/^[0-9a-f]{64}$/.test(fingerprint)) throw new Error('Intent fingerprint is invalid.');
+	if (!validFingerprint(fingerprint)) throw new Error('Intent fingerprint is invalid.');
   return `confirmation-${fingerprint}`;
+}
+
+function validFingerprint(value: string): boolean {
+  return /^[0-9a-f]{64}$/.test(value);
 }
 
 function validBoundaryIdentifier(value: string): boolean {

@@ -418,7 +418,18 @@ func TestLatestTaskRecoversConfirmedWorkAcrossServiceRestart(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
 	first := New(app.New(events.NewGateway(store)))
-	confirmed, err := submitAndConfirm(t, ctx, first, principal, Message{ConversationID: "recover-confirmed", MessageID: "message-1", Text: "echo durable recovery"})
+	older, err := first.Handle(ctx, principal, Message{ConversationID: "confirmed-last", MessageID: "message-older", Text: "echo confirmed last"})
+	if err != nil || older.Intent == nil {
+		t.Fatalf("older draft=%+v err=%v", older, err)
+	}
+	newerIntake, err := first.Handle(ctx, principal, Message{ConversationID: "intake-last", MessageID: "message-newer", Text: "echo intake last"})
+	if err != nil || newerIntake.Intent == nil {
+		t.Fatalf("newer draft=%+v err=%v", newerIntake, err)
+	}
+	if _, err := first.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: newerIntake.ConversationID, MessageID: "confirm-newer-intake", Fingerprint: newerIntake.Intent.Fingerprint}); err != nil {
+		t.Fatal(err)
+	}
+	confirmed, err := first.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: older.ConversationID, MessageID: "confirm-last", Fingerprint: older.Intent.Fingerprint})
 	if err != nil {
 		t.Fatal(err)
 	}

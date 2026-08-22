@@ -79,6 +79,7 @@ type humanTaskResponse struct {
 	TrustLabel         string                   `json:"trust_label,omitempty"`
 	UpdatedAt          string                   `json:"updated_at,omitempty"`
 	CompletionContract *core.CompletionContract `json:"completion_contract,omitempty"`
+	ReviewRequired     bool                     `json:"review_required,omitempty"`
 	Intent             *core.IntentDraft        `json:"intent,omitempty"`
 }
 
@@ -410,6 +411,7 @@ func humanResponse(view intake.View) humanTaskResponse {
 	response := humanTaskResponse{
 		TaskID: view.TaskID, WorkID: view.WorkID, ConversationID: view.ConversationID,
 		State: view.State, Prompt: view.Prompt, Result: view.Result, Mode: view.Mode, TrustLabel: view.TrustLabel,
+		ReviewRequired: view.ReviewRequired,
 	}
 	response.CompletionContract = view.CompletionContract
 	response.Intent = view.Intent

@@ -1,15 +1,16 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { APIError, api, connect, identifier } from '$lib/api';
-  import { confirmationMessageID, confirmationRetryBinding, loadAllCompletionReviews, matchesConfirmationRetry, parseConfirmationRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
+  import { approvalRetryBinding, confirmationMessageID, confirmationRetryBinding, loadAllCompletionReviews, matchesConfirmationRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
+  import type { ApprovalRetryBinding, ReviewRetryBinding } from '$lib/governance';
   import '$lib/app.css';
   import type { Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, IntentDraft, TaskView } from '$lib/types';
 
   type Section = 'overview' | 'work' | 'approvals' | 'reviews' | 'system';
   type IntentList = 'context' | 'deliverables' | 'completion_criteria' | 'constraints';
   const pendingConfirmationKey = 'agentos.dashboard.pending-confirmation';
-
-  type PendingReviewDecision = { taskID: string; reviewID: string; fingerprint: string; decision: 'APPROVE' | 'REJECT' | 'REVISE'; feedback: string };
+  const pendingApprovalKey = 'agentos.dashboard.pending-approval';
+  const pendingReviewKey = 'agentos.dashboard.pending-review';
 
   let section: Section = 'overview';
   let identity: DashboardIdentity | null = null;
@@ -37,13 +38,26 @@
   let taskInput = '';
   let pendingTaskInputMessageID = '';
   let pendingTaskInputKey = '';
-  let pendingReviewDecision: PendingReviewDecision | null = null;
+  let pendingApprovalDecision: ApprovalRetryBinding | null = null;
+  let pendingReviewDecision: ReviewRetryBinding | null = null;
   let refreshGeneration = 0;
 
   onMount(async () => {
     try {
       identity = await connect();
-      let recoveryFailure = '';
+      const recoveryFailures: string[] = [];
+      try {
+        pendingApprovalDecision = parseApprovalRetryBinding(sessionStorage.getItem(pendingApprovalKey));
+      } catch (cause) {
+        sessionStorage.removeItem(pendingApprovalKey);
+        recoveryFailures.push(message(cause));
+      }
+      try {
+        pendingReviewDecision = parseReviewRetryBinding(sessionStorage.getItem(pendingReviewKey));
+      } catch (cause) {
+        sessionStorage.removeItem(pendingReviewKey);
+        recoveryFailures.push(message(cause));
+      }
       try {
         const recovered = await recoverPendingConfirmation();
         if (recovered) {
@@ -52,7 +66,7 @@
           notice = `Recovered Task ${recovered.task_id} after an interrupted Intent confirmation.`;
         }
       } catch (cause) {
-        recoveryFailure = message(cause);
+        recoveryFailures.push(message(cause));
       }
       if (!task) {
         try {
@@ -63,7 +77,7 @@
         }
       }
       await refresh();
-      if (recoveryFailure) error = `Pending Intent confirmation recovery failed. ${recoveryFailure}${error ? ` ${error}` : ''}`;
+      if (recoveryFailures.length) error = `Pending decision recovery failed. ${recoveryFailures.join(' ')}${error ? ` ${error}` : ''}`;
     } catch (cause) {
       error = message(cause);
     }
@@ -77,7 +91,7 @@
     error = '';
     const [activeResult, approvalResult, reviewResult, taskResult] = await Promise.allSettled([
       loadActiveIntent(),
-      api<{ approvals: Approval[] }>('/api/v1/control/approvals'),
+      loadApprovals(),
       loadReviews(),
       displayedTask ? api<TaskView>(`/api/v1/user/tasks/${encodeURIComponent(displayedTask.task_id)}`) : Promise.resolve(null)
     ]);
@@ -95,8 +109,26 @@
         executionKind = '';
       }
     }
-    if (approvalResult.status === 'fulfilled') approvals = approvalResult.value.approvals;
-    if (reviewResult.status === 'fulfilled') reviews = reviewResult.value;
+    if (approvalResult.status === 'fulfilled') {
+      approvals = approvalResult.value;
+      if (pendingApprovalDecision) {
+        const recovered = approvals.find((item) => item.approval_id === pendingApprovalDecision?.approval_id);
+        if (recovered && (recovered.status === 'APPROVED' || recovered.status === 'DENIED')) {
+          selectedApproval = recovered;
+          clearPendingApprovalDecision();
+        }
+      }
+    }
+    if (reviewResult.status === 'fulfilled') {
+      reviews = reviewResult.value;
+      if (pendingReviewDecision) {
+        const recovered = reviews.find((item) => item.review_id === pendingReviewDecision?.review_id);
+        if (recovered && recovered.state !== 'PENDING') {
+          selectedReview = recovered;
+          clearPendingReviewDecision();
+        }
+      }
+    }
     if (taskResult.status === 'fulfilled' && taskResult.value) {
       if (!sameCompletionContract(displayedTask?.completion_contract, taskResult.value.completion_contract)) clearCompletionEvidence();
       task = taskResult.value;
@@ -104,7 +136,7 @@
       if (taskResult.value.state !== 'INPUT_REQUIRED' || taskResult.value.task_id !== displayedTask?.task_id || taskResult.value.updated_at !== displayedTask.updated_at || taskResult.value.prompt !== displayedTask.prompt) clearTaskInput();
     }
     if (failures.length) error = `Dashboard refresh failed; previously loaded governance data was preserved. ${failures.join(' ')}`;
-    selectedApproval = approvals.find((item) => item.approval_id === selectedApproval?.approval_id) ?? null;
+    selectedApproval = approvals.find((item) => item.approval_id === selectedApproval?.approval_id) ?? (selectedApproval && (selectedApproval.status === 'APPROVED' || selectedApproval.status === 'DENIED' || pendingApprovalDecision) ? selectedApproval : null);
     selectedReview = reviews.find((item) => item.review_id === selectedReview?.review_id) ?? (selectedReview?.state !== 'PENDING' || pendingReviewDecision ? selectedReview : null);
   }
 
@@ -117,18 +149,29 @@
     }
   }
 
+  async function loadApprovals(): Promise<Approval[]> {
+    const pending = (await api<{ approvals: Approval[] }>('/api/v1/control/approvals')).approvals;
+    if (!pendingApprovalDecision) return pending;
+    const exact = await api<Approval>(`/api/v1/control/approvals/${encodeURIComponent(pendingApprovalDecision.approval_id)}`);
+    if (exact.approval_id !== pendingApprovalDecision.approval_id || exact.effect_fingerprint !== pendingApprovalDecision.fingerprint) throw new Error('The durable approval changed while recovering a decision.');
+    if (exact.status === 'APPROVED' || exact.status === 'DENIED') {
+      const recorded = exact.status === 'APPROVED' ? 'APPROVE' : 'DENY';
+      if (recorded !== pendingApprovalDecision.decision) throw new Error('The approval has a different durable decision.');
+    }
+    return [...pending.filter((item) => item.approval_id !== exact.approval_id), exact];
+  }
+
   async function loadReviews(): Promise<CompletionReview[]> {
     const pending = await loadAllCompletionReviews((after) => api<CompletionReviewPage>(`/api/v1/user/reviews?limit=100${after ? `&after=${encodeURIComponent(after)}` : ''}`));
     if (!pendingReviewDecision) return pending;
-    const exact = await api<CompletionReview>(`/api/v1/user/reviews/${encodeURIComponent(pendingReviewDecision.taskID)}/records/${encodeURIComponent(pendingReviewDecision.reviewID)}`);
-    if (exact.review_id !== pendingReviewDecision.reviewID || exact.fingerprint !== pendingReviewDecision.fingerprint) {
+    const exact = await api<CompletionReview>(`/api/v1/user/reviews/${encodeURIComponent(pendingReviewDecision.task_id)}/records/${encodeURIComponent(pendingReviewDecision.review_id)}`);
+    if (exact.review_id !== pendingReviewDecision.review_id || exact.fingerprint !== pendingReviewDecision.fingerprint) {
       throw new Error('The durable completion review changed while recovering a decision.');
     }
     if (exact.state !== 'PENDING') {
       if (exact.state !== pendingReviewDecision.decision || (exact.state === 'REVISE' && exact.feedback !== pendingReviewDecision.feedback)) {
         throw new Error('The completion review has a different durable decision.');
       }
-      pendingReviewDecision = null;
     }
     return [...pending.filter((item) => item.review_id !== exact.review_id), exact];
   }
@@ -299,6 +342,8 @@
       error = `Type ${expected} exactly.`;
       return;
     }
+    pendingApprovalDecision = approvalRetryBinding(approval.approval_id, approval.effect_fingerprint, decision);
+    sessionStorage.setItem(pendingApprovalKey, JSON.stringify(pendingApprovalDecision));
     await action(async () => {
       let current = await api<Approval>(`/api/v1/control/approvals/${encodeURIComponent(approval.approval_id)}`);
       if (current.effect_fingerprint !== approval.effect_fingerprint) throw new Error('The durable approval fingerprint changed.');
@@ -306,6 +351,7 @@
         const recorded = current.status === 'APPROVED' ? 'APPROVE' : 'DENY';
         if (recorded !== decision) throw new Error(`The exact effect was already ${current.status.toLowerCase()}.`);
         selectedApproval = current;
+        clearPendingApprovalDecision();
         approvalPhrase = '';
         notice = `Exact effect ${decision === 'APPROVE' ? 'approved' : 'denied'}.`;
         await refresh();
@@ -322,6 +368,7 @@
         method: 'POST',
         body: JSON.stringify({ effect_fingerprint: current.effect_fingerprint, decision })
       });
+      clearPendingApprovalDecision();
       approvalPhrase = '';
       notice = `Exact effect ${decision === 'APPROVE' ? 'approved' : 'denied'}.`;
       await refresh();
@@ -341,14 +388,15 @@
       return;
     }
     const feedback = decision === 'REVISE' ? revisionFeedback : '';
-    pendingReviewDecision = { taskID: review.task_id, reviewID: review.review_id, fingerprint: review.fingerprint, decision, feedback };
+    pendingReviewDecision = reviewRetryBinding(review.task_id, review.review_id, review.fingerprint, decision, feedback);
+    sessionStorage.setItem(pendingReviewKey, JSON.stringify(pendingReviewDecision));
     await action(async () => {
       const current = await api<CompletionReview>(`/api/v1/user/reviews/${encodeURIComponent(review.task_id)}/records/${encodeURIComponent(review.review_id)}`);
       if (current.review_id !== review.review_id || current.fingerprint !== review.fingerprint) throw new Error('The durable completion review changed.');
       if (current.state !== 'PENDING') {
         if (current.state !== decision || (decision === 'REVISE' && current.feedback !== feedback)) throw new Error('The completion review already has a different durable decision.');
         selectedReview = current;
-        pendingReviewDecision = null;
+        clearPendingReviewDecision();
         reviewPhrase = '';
         revisionFeedback = '';
         notice = `Completion evidence marked ${decision.toLowerCase()}.`;
@@ -359,7 +407,7 @@
         method: 'POST',
         body: JSON.stringify({ review_id: review.review_id, fingerprint: review.fingerprint, decision, ...(decision === 'REVISE' ? { feedback } : {}) })
       });
-      pendingReviewDecision = null;
+      clearPendingReviewDecision();
       reviewPhrase = '';
       revisionFeedback = '';
       notice = `Completion evidence marked ${decision.toLowerCase()}.`;
@@ -402,6 +450,16 @@
     taskInput = '';
     pendingTaskInputMessageID = '';
     pendingTaskInputKey = '';
+  }
+
+  function clearPendingApprovalDecision(): void {
+    pendingApprovalDecision = null;
+    sessionStorage.removeItem(pendingApprovalKey);
+  }
+
+  function clearPendingReviewDecision(): void {
+    pendingReviewDecision = null;
+    sessionStorage.removeItem(pendingReviewKey);
   }
 
   async function base64(file: File): Promise<string> {
@@ -463,7 +521,7 @@
         <div class="panel composer"><p class="eyebrow">Natural-language intake</p><h2>{active ? 'Continue the conversation' : 'What should the organization accomplish?'}</h2><textarea bind:value={workText} disabled={busy} rows="7" placeholder="Describe the outcome, relevant context, constraints, and anything only you can provide."></textarea><label>Execution<select bind:value={executionKind} disabled={busy || Boolean(active)}><option value="">Automatic</option><option value="HUMAN">User task</option></select><small>Automatic prefers deterministic work and uses an Agent only when justified.</small></label><div class="actions"><button class="primary" onclick={submitWork} disabled={busy || !identity || !workText.trim()}>Send</button><small>The model proposes a bounded Intent. Nothing starts until you confirm the exact review.</small></div></div>
         <div class="panel intent"><div class="panel-title"><div><p class="eyebrow">Intent contract</p><h2>Review before work begins</h2></div>{#if active?.state}<span class="status">{safeDisplay(active.state)}</span>{/if}</div>
           {#if active?.intent}
-            {#if active.prompt}<div class="banner notice governed-text" role="status"><strong>More information required</strong><br />{safeDisplay(active.prompt)}</div>{/if}
+            {#if active.prompt}<div class="banner notice governed-text" role="status"><strong>{active.state === 'INPUT_REQUIRED' ? 'More information required' : 'Review guidance'}</strong><br />{safeDisplay(active.prompt)}</div>{/if}
             <h3>{safeDisplay(active.intent.objective)}</h3>
             <dl><div><dt>Mode</dt><dd>{safeDisplay(active.intent.mode)}</dd></div>{#if active.intent.requested_execution_kind}<div><dt>Requested execution</dt><dd>{safeDisplay(active.intent.requested_execution_kind)}</dd></div>{/if}{#if active.intent.goal}<div><dt>Goal</dt><dd>{safeDisplay(active.intent.goal.value)}</dd></div>{/if}{#if active.intent.replaces_work}<div><dt>Replaces Work</dt><dd>{safeDisplay(active.intent.replaces_work.value)}</dd></div>{/if}</dl>
             {#each [['Context','context'],['Deliverables','deliverables'],['Done when','completion_criteria'],['Requirements','constraints']] as group}
@@ -479,7 +537,7 @@
       </section>
       <section class="panel task-lookup"><div><p class="eyebrow">Durable status</p><h2>Find a Task</h2></div><div class="inline"><input bind:value={taskID} placeholder="task-id" /><button onclick={findTask} disabled={busy || !taskID.trim()}>Open</button></div>
         {#if task}<div class="task"><div><span class="status">{safeDisplay(task.state)}</span><h3>{safeDisplay(task.task_id)}</h3>{#if task.work_id}<p class="mono">Work {safeDisplay(task.work_id)}</p>{/if}{#if task.mode}<p>Mode: <strong>{safeDisplay(task.mode)}</strong></p>{/if}{#if task.trust_label}<p class="risk">Trust: {safeDisplay(task.trust_label)}</p>{/if}{#if task.prompt}<p class="boundary-note governed-text">{safeDisplay(task.prompt)}</p>{/if}{#if task.result}<p class="governed-text">{safeDisplay(task.result)}</p>{/if}</div>
-          {#if task.completion_contract}{#key `${task.task_id}:${task.completion_contract.task_version}`}<form onsubmit={(event) => { event.preventDefault(); submitCompletion(); }}><h4>Required completion evidence</h4>{#each task.completion_contract.required_fields ?? [] as field}<label>{safeDisplay(field.name)}<small>{safeDisplay(field.description)}; {field.min_bytes} to {field.max_bytes} UTF-8 bytes</small><textarea required disabled={busy} value={completionFields[field.name] ?? ''} oninput={(event) => setCompletionField(field.name, event.currentTarget.value)}></textarea></label>{/each}{#each task.completion_contract.artifact_requirements ?? [] as requirement}<label>{safeDisplay(requirement.role)}<small>{requirement.min_count} to {requirement.max_count} files; {requirement.media_types.map(safeDisplay).join(', ')}</small><input type="file" disabled={busy} required={requirement.min_count > 0} multiple={requirement.max_count > 1} accept={requirement.media_types.join(',')} onchange={(event) => setFiles(requirement.role, event)} /></label>{/each}<button class="primary" type="submit" disabled={busy}>Submit complete evidence</button></form>{/key}{:else if task.state === 'INPUT_REQUIRED' && task.conversation_id}<form onsubmit={(event) => { event.preventDefault(); submitTaskInput(); }}><h4>Provide requested input</h4><label>Response<textarea bind:value={taskInput} disabled={busy} required placeholder="Provide the information requested above."></textarea></label><button class="primary" type="submit" disabled={busy || !taskInput.trim()}>Continue Task</button></form>{/if}
+          {#if task.completion_contract}{#key `${task.task_id}:${task.completion_contract.task_version}`}<form onsubmit={(event) => { event.preventDefault(); submitCompletion(); }}><h4>Required completion evidence</h4>{#each task.completion_contract.required_fields ?? [] as field}<label>{safeDisplay(field.name)}<small>{safeDisplay(field.description)}; {field.min_bytes} to {field.max_bytes} UTF-8 bytes</small><textarea required disabled={busy} value={completionFields[field.name] ?? ''} oninput={(event) => setCompletionField(field.name, event.currentTarget.value)}></textarea></label>{/each}{#each task.completion_contract.artifact_requirements ?? [] as requirement}<label>{safeDisplay(requirement.role)}<small>{requirement.min_count} to {requirement.max_count} files; {requirement.media_types.map(safeDisplay).join(', ')}</small><input type="file" disabled={busy} required={requirement.min_count > 0} multiple={requirement.max_count > 1} accept={requirement.media_types.join(',')} onchange={(event) => setFiles(requirement.role, event)} /></label>{/each}<button class="primary" type="submit" disabled={busy}>Submit complete evidence</button></form>{/key}{:else if task.review_required}<div class="empty"><p>This Task is waiting for an independent completion judgment.</p><button class="text" onclick={() => section='reviews'}>Open Reviews</button></div>{:else if task.state === 'INPUT_REQUIRED' && task.conversation_id}<form onsubmit={(event) => { event.preventDefault(); submitTaskInput(); }}><h4>Provide requested input</h4><label>Response<textarea bind:value={taskInput} disabled={busy} required placeholder="Provide the information requested above."></textarea></label><button class="primary" type="submit" disabled={busy || !taskInput.trim()}>Continue Task</button></form>{/if}
         </div>{/if}
       </section>
     {:else if section === 'approvals'}
