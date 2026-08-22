@@ -6,6 +6,9 @@
 /.idea/
 /.vscode/
 /work/
+/web/dashboard/.svelte-kit/
+/web/dashboard/build/
+/web/dashboard/node_modules/
 __pycache__/
 *.py[cod]
 go.local.mod

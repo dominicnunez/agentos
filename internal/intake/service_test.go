@@ -80,6 +80,47 @@ func TestExternalViewProjectsRootDependencyFailure(t *testing.T) {
 	}
 }
 
+func TestExternalViewProjectsDurableInputRecoveryOutsideBlockedState(t *testing.T) {
+	started := time.Now().UTC()
+	structuredTask := core.Task{
+		ID: "task-structured", ExecutionKind: core.ExecutionHuman, Status: core.TaskRunning,
+		CompletionContract: &core.CompletionContract{TaskID: "task-structured", TaskVersion: 1},
+	}
+	structuredPayload, err := json.Marshal(events.HumanTaskCompletionSubmittedPayload{
+		MessageID: "completion-1", Fields: map[string]string{"answer": "ready"}, SourcePrincipalID: "user-1", SourceChannel: ChannelHumanDirect,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	structured := []events.Event{
+		{EventType: "INTAKE_MESSAGE_RECORDED", TaskID: string(structuredTask.ID), CreatedAt: started},
+		taskProjectionEvent(t, "EXECUTION_STARTED", structuredTask, started.Add(time.Second)),
+		{EventID: "event-completion", Sequence: 2, OrganizationID: "org-1", EventType: "HUMAN_TASK_COMPLETION_SUBMITTED", TaskID: string(structuredTask.ID), SourceActorID: "user-1", CorrelationID: "work-structured", Payload: structuredPayload, CreatedAt: started.Add(2 * time.Second), SchemaVersion: events.SchemaVersion},
+	}
+	view := projectView("work-structured", structured, false)
+	if view.State != StateWorking || !view.CompletionRecoveryRequired {
+		t.Fatalf("structured recovery projection=%+v", view)
+	}
+
+	inputTask := core.Task{ID: "task-input", ExecutionKind: core.ExecutionHuman, Status: core.TaskPending}
+	inputPayload, err := json.Marshal(events.OperatorInputReceivedPayload{
+		MessageID: "input-1", Text: "required context", SourcePrincipalID: "user-1",
+		SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: ChannelHumanDirect,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := []events.Event{
+		{EventType: "INTAKE_MESSAGE_RECORDED", TaskID: string(inputTask.ID), CreatedAt: started},
+		taskProjectionEvent(t, "TASK_RESUMED", inputTask, started.Add(time.Second)),
+		{EventID: "event-input", Sequence: 2, OrganizationID: "org-1", EventType: "HUMAN_INPUT_RECEIVED", SourceActorID: "user-1", TaskID: string(inputTask.ID), CorrelationID: "work-input", Payload: inputPayload, CreatedAt: started.Add(2 * time.Second), SchemaVersion: events.SchemaVersion},
+	}
+	view = projectView("work-input", input, false)
+	if view.State != StateWorking || !view.InputRecoveryRequired || view.UserInputAllowed {
+		t.Fatalf("ordinary input recovery projection=%+v", view)
+	}
+}
+
 func TestExternalViewProjectsPlanningAndRemediationFailures(t *testing.T) {
 	started := time.Now().UTC()
 	rootID := "task-work-1"
@@ -407,6 +448,165 @@ func TestUnconfirmedIntentResumesAfterServiceRestart(t *testing.T) {
 	if _, err := restarted.ActiveIntent(ctx, principal); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("confirmed intake remained active: %v", err)
 	}
+}
+
+func TestActiveIntentRecoversDurableMessageBeforeDraft(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	runtime := app.New(gateway)
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	if _, err := runtime.RecordIntakeMessage(ctx, app.IntakeMessage{
+		RequestID: "interrupted-intake", OrganizationID: principal.OrganizationID,
+		MessageID: "message-1", Text: "prepare a bounded result", SourcePrincipalID: core.ID(principal.ID),
+		SourcePrincipalKind: principal.Kind, SourceChannel: principal.Channel,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewWithNormalizer(runtime, fixedNormalizer{})
+	recovered, err := service.ActiveIntent(ctx, principal)
+	if err != nil || recovered.Intent == nil || recovered.ConversationID != "interrupted-intake" || recovered.State != StateAwaitingConfirmation {
+		t.Fatalf("recovered=%+v err=%v", recovered, err)
+	}
+	stream := externalStream(t, store, "interrupted-intake")
+	if countEvents(stream, "INTAKE_MESSAGE_RECORDED") != 1 || countEvents(stream, "INTENT_DRAFTED") != 1 {
+		t.Fatalf("server recovery duplicated intake state: %+v", stream)
+	}
+}
+
+func TestLatestTaskRecoversConfirmedWorkAcrossServiceRestart(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	first := New(app.New(events.NewGateway(store)))
+	older, err := first.Handle(ctx, principal, Message{ConversationID: "confirmed-last", MessageID: "message-older", Text: "echo confirmed last"})
+	if err != nil || older.Intent == nil {
+		t.Fatalf("older draft=%+v err=%v", older, err)
+	}
+	newerIntake, err := first.Handle(ctx, principal, Message{ConversationID: "intake-last", MessageID: "message-newer", Text: "echo intake last"})
+	if err != nil || newerIntake.Intent == nil {
+		t.Fatalf("newer draft=%+v err=%v", newerIntake, err)
+	}
+	if _, err := first.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: newerIntake.ConversationID, MessageID: "confirm-newer-intake", Fingerprint: newerIntake.Intent.Fingerprint}); err != nil {
+		t.Fatal(err)
+	}
+	confirmed, err := first.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: older.ConversationID, MessageID: "confirm-last", Fingerprint: older.Intent.Fingerprint})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := New(app.New(events.NewGateway(store)))
+	recovered, err := restarted.LatestTask(ctx, principal)
+	if err != nil || recovered.TaskID != confirmed.TaskID || recovered.ConversationID != confirmed.ConversationID || recovered.Result != confirmed.Result {
+		t.Fatalf("recovered=%+v want=%+v err=%v", recovered, confirmed, err)
+	}
+	other := principal
+	other.ID = "human-2"
+	if _, err := restarted.LatestTask(ctx, other); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("different principal recovered private work: %v", err)
+	}
+}
+
+func TestLatestTaskRecoversDurableConfirmationBeforeTaskCreation(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	service := New(app.New(gateway))
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	draft, err := service.Handle(ctx, principal, Message{ConversationID: "interrupted-confirmation", MessageID: "message-1", Text: "echo recovered"})
+	if err != nil || draft.Intent == nil {
+		t.Fatalf("draft=%+v err=%v", draft, err)
+	}
+	correlationID, found, err := gateway.ResolveExternalWork(ctx, principal.OrganizationID, draft.ConversationID)
+	if err != nil || !found {
+		t.Fatalf("resolve interrupted confirmation: found=%t err=%v", found, err)
+	}
+	goalID, err := core.AcceptedIntentGoalID(*draft.Intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacesWorkID, err := core.AcceptedIntentReplacesWorkID(*draft.Intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := events.IntentConfirmedPayload{
+		IntentID: string(draft.Intent.ID), GoalID: string(goalID), ReplacesWorkID: string(replacesWorkID),
+		Version: draft.Intent.Version, Fingerprint: draft.Intent.Fingerprint, ConfirmingActorID: principal.ID,
+		ConfirmingActorKind: string(principal.Kind), SourceChannel: principal.Channel, MessageID: "confirmation-1",
+	}
+	if _, err := gateway.PublishIntentConfirmation(ctx, events.TrustedDraft{
+		OrganizationID: principal.OrganizationID, EventType: "INTENT_CONFIRMED", SourceActorID: principal.ID,
+		TaskID: "task-" + correlationID, CorrelationID: correlationID, Payload: payload,
+	}, goalID, replacesWorkID); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := service.LatestTask(ctx, principal)
+	if err != nil || recovered.TaskID != draft.TaskID || recovered.State != StateCompleted || recovered.Result != "recovered" {
+		t.Fatalf("recovered=%+v err=%v", recovered, err)
+	}
+	stream := externalStream(t, store, draft.ConversationID)
+	if countEvents(stream, "INTENT_CONFIRMED") != 1 || countEvents(stream, "TASK_CREATED") != 1 {
+		t.Fatalf("confirmation recovery duplicated durable work: %+v", stream)
+	}
+}
+
+func TestLatestTaskRecoversDurableConfirmationAfterTaskCreation(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	interrupted := &failOnceOrdinaryEvent{SQLite: store, eventType: "HUMAN_WORK_ACCEPTED"}
+	service := New(app.New(events.NewGateway(interrupted)))
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	draft, err := service.Handle(ctx, principal, Message{ConversationID: "partial-submission", MessageID: "message-1", Text: "echo resumed"})
+	if err != nil || draft.Intent == nil {
+		t.Fatalf("draft=%+v err=%v", draft, err)
+	}
+	if _, err := service.ConfirmIntent(ctx, principal, IntentConfirmation{ConversationID: draft.ConversationID, MessageID: "confirmation-1", Fingerprint: draft.Intent.Fingerprint}); err == nil {
+		t.Fatal("injected operator-acceptance failure was not returned")
+	}
+	stream := externalStream(t, store, draft.ConversationID)
+	if countEvents(stream, "TASK_CREATED") != 1 || countEvents(stream, "HUMAN_WORK_ACCEPTED") != 0 || countEvents(stream, "EXECUTION_STARTED") != 0 {
+		t.Fatalf("unexpected partial submission stream: %+v", stream)
+	}
+
+	restarted := New(app.New(events.NewGateway(store)))
+	recovered, err := restarted.LatestTask(ctx, principal)
+	if err != nil || recovered.State != StateCompleted || recovered.Result != "resumed" {
+		t.Fatalf("recovered=%+v err=%v", recovered, err)
+	}
+	stream = externalStream(t, store, draft.ConversationID)
+	if countEvents(stream, "INTENT_CONFIRMED") != 1 || countEvents(stream, "TASK_CREATED") != 1 || countEvents(stream, "HUMAN_WORK_ACCEPTED") != 1 || countEvents(stream, "EXECUTION_STARTED") != 1 || countEvents(stream, "WORK_COMPLETED") != 1 {
+		t.Fatalf("partial submission recovery duplicated durable phases: %+v", stream)
+	}
+}
+
+type failOnceOrdinaryEvent struct {
+	*ledger.SQLite
+	eventType string
+	failed    bool
+}
+
+func (f *failOnceOrdinaryEvent) Append(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {
+	if draft.EventType == f.eventType && !f.failed {
+		f.failed = true
+		return events.Event{}, errors.New("injected ordinary event failure")
+	}
+	return f.SQLite.Append(ctx, draft)
 }
 
 func TestOwnScopeBindsCompleteAuthenticatedPrincipalIdentity(t *testing.T) {

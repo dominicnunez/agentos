@@ -13,10 +13,12 @@ import (
 )
 
 type CompletionReviewView struct {
-	Request   completion.ReviewRequest
-	Result    string
-	Decision  completion.ReviewDecision
-	UpdatedAt time.Time
+	Request    completion.ReviewRequest
+	Result     string
+	Decision   completion.ReviewDecision
+	ReviewerID core.ID
+	Feedback   string
+	UpdatedAt  time.Time
 }
 
 type CompletionReviewInput struct {
@@ -36,14 +38,19 @@ type recordedReview struct {
 	Event  events.Event
 }
 
+type completionRevisionDetail struct {
+	Reason         string `json:"reason"`
+	ReviewEventRef string `json:"review_event_ref"`
+}
+
 type CompletionReviewPage struct {
 	Reviews   []CompletionReviewView
 	NextAfter core.ID
 }
 
-// PendingCompletionReviews exposes only review contracts for one organization
-// through the local control surface. Internal child Tasks remain absent from
-// the external A2A task index.
+// PendingCompletionReviews exposes a bounded durable review-request projection
+// for one organization. Internal child Tasks remain absent from the external
+// A2A task index, while the local control surface may review them.
 func (s *Service) PendingCompletionReviews(ctx context.Context, organizationID string, after core.ID, limit int) (CompletionReviewPage, error) {
 	if organizationID == "" || limit < 1 || limit > 100 {
 		return CompletionReviewPage{}, fmt.Errorf("organization and review page limit are required")
@@ -52,36 +59,100 @@ func (s *Service) PendingCompletionReviews(ctx context.Context, organizationID s
 		return CompletionReviewPage{}, err
 	}
 	defer s.release()
-	snapshot, err := s.state.Load(ctx)
+	requestEvents, err := s.gateway.PendingCompletionReviewEvents(ctx, organizationID, string(after), limit+1)
 	if err != nil {
 		return CompletionReviewPage{}, err
 	}
+	hasMore := len(requestEvents) > limit
+	if hasMore {
+		requestEvents = requestEvents[:limit]
+	}
 	page := CompletionReviewPage{Reviews: make([]CompletionReviewView, 0, limit)}
-	for _, state := range sortedTaskStates(snapshot.Tasks) {
-		if state.Value.ID <= after {
-			continue
+	for _, requestEvent := range requestEvents {
+		var indexed completion.ReviewRequest
+		if err := json.Unmarshal(requestEvent.Payload, &indexed); err != nil || !indexed.Valid() ||
+			indexed.OrganizationID != core.ID(organizationID) || requestEvent.OrganizationID != organizationID ||
+			requestEvent.EventType != "COMPLETION_REVIEW_REQUESTED" || requestEvent.SourceActorID != "runtime" ||
+			requestEvent.TaskID != string(indexed.TaskID) {
+			return CompletionReviewPage{}, fmt.Errorf("pending completion review request is invalid")
 		}
-		owner, err := taskOrganization(snapshot, state.Value)
+		view, found, err := s.completionReviewLocked(ctx, organizationID, string(indexed.TaskID))
 		if err != nil {
 			return CompletionReviewPage{}, err
 		}
-		if owner != core.ID(organizationID) {
-			continue
-		}
-		view, found, err := s.completionReviewLocked(ctx, organizationID, string(state.Value.ID))
-		if err != nil {
-			return CompletionReviewPage{}, err
-		}
-		if !found {
-			continue
-		}
-		if len(page.Reviews) == limit {
-			page.NextAfter = page.Reviews[len(page.Reviews)-1].Request.TaskID
-			break
+		if !found || view.Request.ID != indexed.ID || view.Request.Fingerprint != indexed.Fingerprint {
+			return CompletionReviewPage{}, fmt.Errorf("pending completion review does not match its durable task stream")
 		}
 		page.Reviews = append(page.Reviews, view)
 	}
+	if hasMore {
+		page.NextAfter = core.ID(requestEvents[len(requestEvents)-1].EventID)
+	}
 	return page, nil
+}
+
+// RecentCompletionReviews returns bounded, newest-first terminal review
+// records for operator recovery. The ledger applies the decision limit before
+// the service loads any task stream, keeping this read bounded while including
+// both root and internal child reviews that the local review queue can decide.
+func (s *Service) RecentCompletionReviews(ctx context.Context, organizationID string, limit int) ([]CompletionReviewView, error) {
+	if organizationID == "" || limit < 1 || limit > 100 {
+		return nil, fmt.Errorf("organization and recent review limit are required")
+	}
+	if err := s.acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer s.release()
+	decisionEvents, err := s.gateway.RecentEvents(ctx, organizationID, "COMPLETION_REVIEW_DECIDED", limit)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]CompletionReviewView, 0, limit)
+	seen := make(map[core.ID]struct{}, len(decisionEvents))
+	for _, decisionEvent := range decisionEvents {
+		var indexed completion.HumanReview
+		if err := json.Unmarshal(decisionEvent.Payload, &indexed); err != nil || indexed.ReviewID == "" || indexed.TaskID == "" || indexed.OrganizationID != core.ID(organizationID) || decisionEvent.TaskID != string(indexed.TaskID) || decisionEvent.SourceActorID != string(indexed.ReviewerID) {
+			return nil, fmt.Errorf("recent completion review decision is invalid")
+		}
+		if _, duplicate := seen[indexed.ReviewID]; duplicate {
+			return nil, fmt.Errorf("recent completion review decision is duplicated")
+		}
+		seen[indexed.ReviewID] = struct{}{}
+		stream, err := s.internalTaskEvents(ctx, organizationID, string(indexed.TaskID))
+		if err != nil {
+			return nil, err
+		}
+		requests, decisions, err := completionReviewRecords(stream)
+		if err != nil {
+			return nil, err
+		}
+		request, ok := requests[indexed.ReviewID]
+		decided, decidedOK := decisions[indexed.ReviewID]
+		if !ok || !decidedOK || decided.Event.EventID != decisionEvent.EventID || !completion.SameHumanReview(decided.Review, indexed) {
+			return nil, fmt.Errorf("recent completion review decision does not match its durable stream")
+		}
+		if err := s.continueCompletionReview(ctx, request, decided.Review, decided.Event); err != nil {
+			return nil, fmt.Errorf("recover recent completion review: %w", err)
+		}
+		_, result, err := reviewEvidence(stream, request)
+		if err != nil {
+			return nil, err
+		}
+		views = append(views, CompletionReviewView{
+			Request: request, Result: result.Summary, Decision: decided.Review.Decision,
+			ReviewerID: decided.Review.ReviewerID, Feedback: decided.Review.Feedback,
+			UpdatedAt: decided.Review.DecidedAt,
+		})
+	}
+	if len(views) > 0 {
+		if _, err := s.runReady(ctx); err != nil {
+			return nil, fmt.Errorf("continue work after recent completion review: %w", err)
+		}
+		if err := s.reconcileWorks(ctx); err != nil {
+			return nil, fmt.Errorf("reconcile work after recent completion review: %w", err)
+		}
+	}
+	return views, nil
 }
 
 func (s *Service) CompletionReview(ctx context.Context, organizationID, taskID string) (CompletionReviewView, bool, error) {
@@ -89,10 +160,64 @@ func (s *Service) CompletionReview(ctx context.Context, organizationID, taskID s
 		return CompletionReviewView{}, false, err
 	}
 	defer s.release()
-	return s.completionReviewLocked(ctx, organizationID, taskID)
+	return s.completionReviewReadLocked(ctx, organizationID, taskID, "")
+}
+
+func (s *Service) CompletionReviewRecord(ctx context.Context, organizationID, taskID string, reviewID core.ID) (CompletionReviewView, bool, error) {
+	if err := s.acquire(ctx); err != nil {
+		return CompletionReviewView{}, false, err
+	}
+	defer s.release()
+	view, found, err := s.completionReviewReadLocked(ctx, organizationID, taskID, reviewID)
+	if err != nil || !found || view.Decision == "" {
+		return view, found, err
+	}
+	stream, err := s.internalTaskEvents(ctx, organizationID, taskID)
+	if err != nil {
+		return CompletionReviewView{}, false, err
+	}
+	requests, decisions, err := completionReviewRecords(stream)
+	if err != nil {
+		return CompletionReviewView{}, false, err
+	}
+	request, requestFound := requests[reviewID]
+	recorded, decisionFound := decisions[reviewID]
+	if !requestFound || !decisionFound {
+		return CompletionReviewView{}, false, fmt.Errorf("terminal completion review evidence is unavailable")
+	}
+	if err := s.continueCompletionReview(ctx, request, recorded.Review, recorded.Event); err != nil {
+		return CompletionReviewView{}, false, err
+	}
+	if _, err := s.runReady(ctx); err != nil {
+		return CompletionReviewView{}, false, err
+	}
+	if err := s.reconcileWorks(ctx); err != nil {
+		return CompletionReviewView{}, false, err
+	}
+	return view, true, nil
 }
 
 func (s *Service) completionReviewLocked(ctx context.Context, organizationID, taskID string) (CompletionReviewView, bool, error) {
+	view, found, err := s.completionReviewReadLocked(ctx, organizationID, taskID, "")
+	if err != nil || !found || view.Decision != "" {
+		return CompletionReviewView{}, false, err
+	}
+	stream, err := s.internalTaskEvents(ctx, organizationID, taskID)
+	if err != nil || len(stream) == 0 {
+		return CompletionReviewView{}, false, err
+	}
+	snapshot, err := s.state.Load(ctx)
+	if err != nil {
+		return CompletionReviewView{}, false, err
+	}
+	state, ok := snapshot.Tasks[view.Request.TaskID]
+	if !ok || state.Value.Status != core.TaskBlocked || state.CorrelationID != stream[0].CorrelationID {
+		return CompletionReviewView{}, false, nil
+	}
+	return view, true, nil
+}
+
+func (s *Service) completionReviewReadLocked(ctx context.Context, organizationID, taskID string, reviewID core.ID) (CompletionReviewView, bool, error) {
 	stream, err := s.internalTaskEvents(ctx, organizationID, taskID)
 	if err != nil || len(stream) == 0 {
 		return CompletionReviewView{}, false, err
@@ -101,37 +226,38 @@ func (s *Service) completionReviewLocked(ctx context.Context, organizationID, ta
 	if err != nil {
 		return CompletionReviewView{}, false, err
 	}
-	var pending completion.ReviewRequest
-	for _, event := range stream {
-		if event.EventType != "COMPLETION_REVIEW_REQUESTED" {
-			continue
-		}
-		var request completion.ReviewRequest
-		if err := json.Unmarshal(event.Payload, &request); err != nil {
-			return CompletionReviewView{}, false, fmt.Errorf("decode completion review request: %w", err)
-		}
-		if request.TaskID == core.ID(taskID) {
-			if _, decided := decisions[request.ID]; !decided {
-				pending = requests[request.ID]
+	var latest completion.ReviewRequest
+	if reviewID != "" {
+		latest = requests[reviewID]
+	} else {
+		for _, event := range stream {
+			if event.EventType != "COMPLETION_REVIEW_REQUESTED" {
+				continue
+			}
+			var request completion.ReviewRequest
+			if err := json.Unmarshal(event.Payload, &request); err != nil {
+				return CompletionReviewView{}, false, fmt.Errorf("decode completion review request: %w", err)
+			}
+			if request.TaskID == core.ID(taskID) {
+				latest = requests[request.ID]
 			}
 		}
 	}
-	if pending.ID == "" || pending.TaskID != core.ID(taskID) {
+	if latest.ID == "" || latest.TaskID != core.ID(taskID) || latest.OrganizationID != core.ID(organizationID) {
 		return CompletionReviewView{}, false, nil
 	}
-	snapshot, err := s.state.Load(ctx)
+	_, result, err := reviewEvidence(stream, latest)
 	if err != nil {
 		return CompletionReviewView{}, false, err
 	}
-	state, ok := snapshot.Tasks[pending.TaskID]
-	if !ok || state.Value.Status != core.TaskBlocked || state.CorrelationID != stream[0].CorrelationID {
-		return CompletionReviewView{}, false, nil
+	view := CompletionReviewView{Request: latest, Result: result.Summary, UpdatedAt: latest.CreatedAt}
+	if decided, ok := decisions[latest.ID]; ok {
+		view.Decision = decided.Review.Decision
+		view.ReviewerID = decided.Review.ReviewerID
+		view.Feedback = decided.Review.Feedback
+		view.UpdatedAt = decided.Review.DecidedAt
 	}
-	_, result, err := reviewEvidence(stream, pending)
-	if err != nil {
-		return CompletionReviewView{}, false, err
-	}
-	return CompletionReviewView{Request: pending, Result: result.Summary, UpdatedAt: pending.CreatedAt}, true, nil
+	return view, true, nil
 }
 
 func (s *Service) ReviewCompletion(ctx context.Context, input CompletionReviewInput) (CompletionReviewView, error) {
@@ -176,7 +302,7 @@ func (s *Service) ReviewCompletion(ctx context.Context, input CompletionReviewIn
 	}
 	var decisionEvent events.Event
 	if recorded, exists := decisions[request.ID]; exists {
-		if !completion.SameHumanReview(recorded.Review, review) {
+		if recorded.Review.Fingerprint != review.Fingerprint || recorded.Review.Decision != review.Decision || recorded.Review.Feedback != review.Feedback {
 			return CompletionReviewView{}, fmt.Errorf("completion review already has a different decision")
 		}
 		decisionEvent = recorded.Event
@@ -208,6 +334,8 @@ func (s *Service) ReviewCompletion(ctx context.Context, input CompletionReviewIn
 		return CompletionReviewView{}, err
 	}
 	view.Decision = review.Decision
+	view.ReviewerID = review.ReviewerID
+	view.Feedback = review.Feedback
 	view.UpdatedAt = review.DecidedAt
 	return view, nil
 }
@@ -284,18 +412,42 @@ func (s *Service) continueCompletionReview(ctx context.Context, request completi
 		detail := completionDetail{Contract: request.Contract, Result: s.completion.EvaluateHuman(request.Contract, outcome, false), OutcomeEventRef: request.EvidenceRefs[0], JudgmentRef: decisionEvent.EventID}
 		return s.state.SaveTask(ctx, request.OrganizationID, "COMPLETION_REJECTED", "runtime", state.CorrelationID, state.Version+1, task, detail)
 	case completion.ReviewRevise:
-		if task.Status == core.TaskPending || task.Status == core.TaskRunning {
-			return nil
-		}
 		if task.Status != core.TaskBlocked {
+			continued, err := completionRevisionContinued(stream, request, decisionEvent)
+			if err != nil {
+				return err
+			}
+			if continued {
+				return nil
+			}
 			return fmt.Errorf("completion review cannot revise task in status %s", task.Status)
 		}
 		task.Status = core.TaskPending
-		detail := map[string]string{"reason": "reviewer requested revision", "review_event_ref": decisionEvent.EventID}
+		detail := completionRevisionDetail{Reason: "reviewer requested revision", ReviewEventRef: decisionEvent.EventID}
 		return s.state.SaveTask(ctx, request.OrganizationID, "TASK_RESUMED", "runtime", state.CorrelationID, state.Version+1, task, detail)
 	default:
 		return fmt.Errorf("unsupported completion review decision")
 	}
+}
+
+func completionRevisionContinued(stream []events.Event, request completion.ReviewRequest, decisionEvent events.Event) (bool, error) {
+	for _, event := range stream {
+		if event.Sequence <= decisionEvent.Sequence || event.EventType != "TASK_RESUMED" || event.OrganizationID != string(request.OrganizationID) || event.TaskID != string(request.TaskID) || event.CorrelationID != decisionEvent.CorrelationID {
+			continue
+		}
+		payload, present, err := events.AdmittedProjection(event)
+		if err != nil || !present || payload.Projection.ProjectionKind != "task" || payload.Projection.RecordID != string(request.TaskID) {
+			return false, fmt.Errorf("completion-review revision continuation is invalid")
+		}
+		var detail completionRevisionDetail
+		if err := json.Unmarshal(payload.Detail, &detail); err != nil {
+			return false, fmt.Errorf("decode completion-review revision continuation: %w", err)
+		}
+		if detail.Reason == "reviewer requested revision" && detail.ReviewEventRef == decisionEvent.EventID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func completionReviewRecords(stream []events.Event) (map[core.ID]completion.ReviewRequest, map[core.ID]recordedReview, error) {

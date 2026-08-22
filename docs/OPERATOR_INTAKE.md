@@ -86,17 +86,31 @@ elevation, but reports service-private ledger and credential inspection as
 informational. Run `sudo agentos doctor` for full at-rest verification and
 `sudo agentos doctor --online` for the external provider check in system mode.
 
-## Organization console
+## Organization dashboard
 
-After setup, `agentos` opens the terminal organization console. It uses the
-private user gateway; it never reads or edits the SQLite ledger directly.
+After setup, `agentos` opens the embedded organization dashboard in the
+owner's browser. SvelteKit is compiled to static assets inside the Go binary;
+there is no production Node server. The dashboard uses the private user
+gateway and never reads or edits the SQLite ledger directly.
+
+The launcher binds an ephemeral IPv4 loopback port. Loopback is not treated as
+identity. The verified installation owner receives a one-time 256-bit
+bootstrap credential through a mode-`0600` temporary page, so the credential
+does not appear in terminal output or the browser-launch command line. The
+bridge exchanges it once for an in-memory, eight-hour bearer session, deletes
+the bootstrap file, requires an exact Host and browser origin, sends no CORS
+permission, and applies a strict hash-bound Content Security Policy. Browser
+credentials never cross into the Unix gateway; the bridge connects separately
+and Linux `SO_PEERCRED` re-establishes the configured owner.
 
 The initial views are:
 
+- Overview: current intake and governance queues.
 - Work: submit natural-language work and inspect its narrow Task view.
 - Approvals: inspect the exact prepared effect and approve or deny it.
-- Agents: view the authorized Agent roster as that capability is added.
-- System: direct the user to the read-only `agentos doctor` report.
+- Reviews: judge exact candidate results and completion evidence.
+- System: inspect the dashboard session and use the read-only `agentos doctor`
+  report.
 
 Natural-language input first enters a durable, resumable intake conversation.
 The configured model may propose a structured Intent, but its output is
@@ -119,11 +133,14 @@ confirmation.
 Every model-backed normalization records its prompt-contract version, provider,
 model, execution profile, exact input event references, and provider-reported
 token usage in the ledger. Exact message retries reuse the durable draft and do
-not repeat inference. Intake is capped at 32 messages and 128 KiB of text per
+not repeat inference. If a message was committed but its draft response was
+interrupted, active-intake discovery resumes normalization from that exact
+authenticated durable message under the per-conversation lock; the browser
+does not reconstruct the lost message identity. Intake is capped at 32 messages and 128 KiB of text per
 conversation; a request that would exceed either limit is rejected before its
 message is appended.
 
-The console presents the complete Intent for review. `/confirm` binds the
+The dashboard presents the complete Intent for review. **Confirm exact Intent** binds the
 current Linux user to the exact Intent version and SHA-256 fingerprint. Only
 then may Agent OS create the Work and executable Task state. The confirmed
 Intent is fingerprint-bound to a runtime-validated Plan. Exact deterministic
@@ -131,7 +148,11 @@ work skips planning inference; adaptive work may use the configured provider
 to propose the smallest useful Task DAG. The complete graph is committed
 atomically before scheduling, and model output cannot introduce authority or
 new execution mechanisms. An unfinished
-conversation is recovered from SQLite when the console restarts. Confirmation
+conversation is recovered from SQLite when the dashboard restarts. A durable
+confirmation whose Task creation, operator acceptance, execution, or Work
+reconciliation stopped partway is resumed by the server from the exact durable
+confirmer identity, message ID, and fingerprint.
+Confirmation
 means Agent OS understood the requested work; it is never approval for a
 financial, public, destructive, privileged, legal, deployment, or other
 consequential effect.
@@ -142,15 +163,25 @@ OS reruns deterministic-first routing after every clarification against the
 latest normalized objective; an inferred route from an earlier incomplete
 draft is never treated as an operator choice.
 
-`/user-task <instruction>` creates work that must wait for structured user
-completion. `/complete <task-id>` collects every required field and file from
-the Task's durable CompletionContract. A self-reported "done" message cannot
-complete that Task.
+Selecting **User task** before intake creates work that must wait for structured
+user completion. The Task view collects every required field and file from the
+Task's durable CompletionContract. A self-reported "done" message cannot
+complete that Task. Only a user-operated Task advertises ordinary continuation.
+If structured evidence or ordinary requested input was durably accepted but a
+later continuation response was interrupted, the Task view exposes a
+server-owned recovery signal in every unfinished state. The dashboard replays
+only missing runtime phases from the exact durable event and does not solicit a
+second message identity, replacement text, or evidence re-upload.
 
-`/reviews` lists pending completion judgments, including internal planned
-Tasks that are intentionally absent from A2A lookup. The console binds a
+The Reviews view lists pending completion judgments from a cursor-bounded,
+tenant-scoped ledger projection instead of scanning Task history, including
+internal planned Tasks that are intentionally absent from A2A lookup. Its bounded recent history
+includes those locally reviewable child Tasks so a lost terminal response can
+be recovered without making the child addressable through A2A. The dashboard binds a
 decision to the exact evidence fingerprint and states explicitly that judging
-candidate completion does not approve a consequential effect.
+candidate completion does not approve a consequential effect. It also shows a
+bounded ledger-derived history of recent terminal judgments so a fresh
+ephemeral browser origin can recover the authoritative decision.
 
 The local HTTP-shaped routes are private implementation boundaries carried over
 the Unix socket:
@@ -158,12 +189,32 @@ the Unix socket:
 - `POST /v1/user/messages`
 - `GET /v1/user/intents/active`
 - `POST /v1/user/intents/{conversation-id}/confirm`
+- `GET /v1/user/tasks/recent`
 - `GET /v1/user/tasks/{task-id}`
 - `POST /v1/user/tasks/{task-id}/completion`
-- `GET /v1/user/reviews?after={task-id}&limit={1..100}`
+- `POST /v1/user/tasks/{task-id}/completion/recover`
+- `POST /v1/user/tasks/{task-id}/input/recover`
+- `GET /v1/user/reviews?after={opaque-review-cursor}&limit={1..100}`
+- `GET /v1/user/reviews/recent?limit=20`
 - `GET|POST /v1/user/reviews/{task-id}`
+- `GET /v1/user/reviews/{task-id}/records/{review-id}`
 - `GET /v1/control/approvals`
+- `GET /v1/control/approvals/recent?limit=20`
 - exact-effect approval operations beneath `/v1/control/approvals/{id}`
+
+The recent-Task read is bound to the authenticated principal's latest confirmed
+intake and exists only to recover every missing runtime-owned phase after an
+interrupted durable confirmation across dashboard processes. Exact approval and completion-review reads plus their bounded
+recent-decision projections expose terminal ledger state across the launcher's
+changing loopback origin. Recent review decisions are selected by a bounded,
+tenant-scoped SQLite query before their exact Task streams are validated. A
+matching completion-review retry is replayed until
+its downstream Task transition succeeds; a conflicting authorized decision is
+shown as authoritative and releases the stale local retry. Exact terminal
+review reads and the bounded recent-decision projection continue missing
+runtime-owned phases with the reviewer identity already recorded in the
+ledger, even when a different authorized user opened the new dashboard
+session.
 
 The completion endpoint accepts strict JSON. Required files are size-bounded,
 content-sniffed, stored privately by SHA-256, and recorded as untrusted user

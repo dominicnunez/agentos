@@ -200,7 +200,20 @@ func TestLegacyVerificationRejectsTamperedAdmissionsAfterMigration(t *testing.T)
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=2,event_schema_version=?`, ledger.LegacyEventSchemaVersion); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE pending_approvals`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	fingerprint, err := testStorageSchemaFingerprint(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=2,event_schema_version=?,schema_fingerprint=?`, ledger.LegacyEventSchemaVersion, fingerprint); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -214,6 +227,26 @@ func TestLegacyVerificationRejectsTamperedAdmissionsAfterMigration(t *testing.T)
 	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "durable parent Organization") {
 		t.Fatalf("legacy tampered-admission verification error=%v", err)
 	}
+}
+
+func testStorageSchemaFingerprint(ctx context.Context, db *sql.DB) (string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT type,name,tbl_name,COALESCE(sql,'') FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name,tbl_name`)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = rows.Close() }()
+	hash := sha256.New()
+	for rows.Next() {
+		var kind, name, table, statement string
+		if err := rows.Scan(&kind, &name, &table, &statement); err != nil {
+			return "", err
+		}
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%s\x00%s\n", kind, name, table, strings.TrimSpace(statement))
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func TestBackupAndRestorePreserveInferenceAdmissionAuthority(t *testing.T) {

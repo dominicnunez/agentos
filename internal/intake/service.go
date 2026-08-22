@@ -45,11 +45,12 @@ const (
 type WorkScope string
 
 var (
-	ErrInvalid     = errors.New("invalid operator message")
-	ErrForbidden   = errors.New("operator capability denied")
-	ErrNotFound    = errors.New("operator work not found")
-	ErrConflict    = errors.New("operator conversation conflict")
-	ErrUnavailable = errors.New("operator work unavailable")
+	ErrInvalid              = errors.New("invalid operator message")
+	ErrForbidden            = errors.New("operator capability denied")
+	ErrNotFound             = errors.New("operator work not found")
+	ErrConflict             = errors.New("operator conversation conflict")
+	ErrConfirmationMismatch = errors.New("intent confirmation conflicts with durable state")
+	ErrUnavailable          = errors.New("operator work unavailable")
 )
 
 type Principal struct {
@@ -79,17 +80,21 @@ type Message struct {
 }
 
 type View struct {
-	TaskID             string
-	WorkID             string
-	ConversationID     string
-	State              string
-	Prompt             string
-	Result             string
-	Mode               core.IntentMode
-	TrustLabel         string
-	UpdatedAt          time.Time
-	CompletionContract *core.CompletionContract
-	Intent             *core.IntentDraft
+	TaskID                     string
+	WorkID                     string
+	ConversationID             string
+	State                      string
+	Prompt                     string
+	Result                     string
+	Mode                       core.IntentMode
+	TrustLabel                 string
+	UpdatedAt                  time.Time
+	CompletionContract         *core.CompletionContract
+	ReviewRequired             bool
+	UserInputAllowed           bool
+	InputRecoveryRequired      bool
+	CompletionRecoveryRequired bool
+	Intent                     *core.IntentDraft
 }
 
 type CompletionReviewView struct {
@@ -98,6 +103,8 @@ type CompletionReviewView struct {
 	TaskVersion  int                        `json:"task_version"`
 	Fingerprint  string                     `json:"fingerprint"`
 	State        string                     `json:"state"`
+	ReviewerID   string                     `json:"reviewer_id,omitempty"`
+	Feedback     string                     `json:"feedback,omitempty"`
 	Objective    string                     `json:"objective"`
 	Result       string                     `json:"candidate_result"`
 	Criteria     []core.CompletionCriterion `json:"criteria"`
@@ -281,7 +288,11 @@ func (s *Service) ConfirmIntent(ctx context.Context, principal Principal, confir
 	unlock := s.lockStream(principal.OrganizationID, confirmation.ConversationID)
 	defer unlock()
 	stream, err := s.app.ExternalEvents(ctx, principal.OrganizationID, confirmation.ConversationID)
-	if err != nil || len(stream) == 0 {
+	return s.confirmIntentLocked(ctx, principal, confirmation, stream, err)
+}
+
+func (s *Service) confirmIntentLocked(ctx context.Context, principal Principal, confirmation IntentConfirmation, stream []events.Event, streamErr error) (View, error) {
+	if streamErr != nil || len(stream) == 0 {
 		return View{}, ErrNotFound
 	}
 	if err := authorizeIntakePrincipal(principal, stream); err != nil {
@@ -301,6 +312,25 @@ func (s *Service) ConfirmIntent(ctx context.Context, principal Principal, confir
 	}
 	if err := app.ValidateReviewedIntentExecution(draft, core.ID(principal.OrganizationID), kind); err != nil {
 		return View{}, fmt.Errorf("%w: reviewed intent is not executable: %w", ErrInvalid, err)
+	}
+	goalID, goalErr := core.AcceptedIntentGoalID(draft)
+	replacesWorkID, replacesErr := core.AcceptedIntentReplacesWorkID(draft)
+	if goalErr != nil || replacesErr != nil {
+		return View{}, fmt.Errorf("%w: confirmed intent relationship is invalid", ErrInvalid)
+	}
+	for _, event := range stream {
+		if event.EventType != "INTENT_CONFIRMED" {
+			continue
+		}
+		var recorded events.IntentConfirmedPayload
+		if json.Unmarshal(event.Payload, &recorded) != nil {
+			return View{}, fmt.Errorf("%w: durable confirmation is invalid", ErrUnavailable)
+		}
+		if recorded.IntentID != string(draft.ID) || recorded.GoalID != string(goalID) || recorded.ReplacesWorkID != string(replacesWorkID) || recorded.Version != draft.Version ||
+			recorded.Fingerprint != confirmation.Fingerprint || recorded.MessageID != confirmation.MessageID || recorded.ConfirmingActorID != principal.ID ||
+			recorded.ConfirmingActorKind != string(principal.Kind) || recorded.SourceChannel != principal.Channel {
+			return View{}, fmt.Errorf("%w: exact confirmation differs", ErrConfirmationMismatch)
+		}
 	}
 	_, err = s.app.ConfirmIntent(ctx, app.IntentConfirmation{
 		RequestID: confirmation.ConversationID, OrganizationID: principal.OrganizationID,
@@ -328,12 +358,33 @@ func (s *Service) ActiveIntent(ctx context.Context, principal Principal) (View, 
 	if !principal.Allowed(CapabilityProvideInput) {
 		return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityProvideInput)
 	}
-	conversationID, stream, found, err := s.app.ActiveIntake(ctx, principal.OrganizationID, core.ID(principal.ID), principal.Kind, principal.Channel)
+	conversationID, _, found, err := s.app.ActiveIntake(ctx, principal.OrganizationID, core.ID(principal.ID), principal.Kind, principal.Channel)
 	if err != nil {
 		return View{}, fmt.Errorf("%w: load active intent", ErrUnavailable)
 	}
 	if !found {
 		return View{}, ErrNotFound
+	}
+	unlock := s.lockStream(principal.OrganizationID, conversationID)
+	defer unlock()
+	stream, err := s.app.ExternalEvents(ctx, principal.OrganizationID, conversationID)
+	if err != nil || len(stream) == 0 {
+		return View{}, fmt.Errorf("%w: reload active intent", ErrUnavailable)
+	}
+	if err := authorizeIntakePrincipal(principal, stream); err != nil {
+		return View{}, err
+	}
+	message, found, err := latestRecordedIntentMessage(conversationID, stream, principal)
+	if err != nil {
+		return View{}, err
+	}
+	if !found {
+		return View{}, fmt.Errorf("%w: active intake has no durable message", ErrUnavailable)
+	}
+	if _, drafted, draftErr := intentPayloadForMessage(stream, message.MessageID); draftErr != nil {
+		return View{}, fmt.Errorf("%w: active intake has an invalid durable draft", ErrUnavailable)
+	} else if !drafted {
+		return s.normalizeRecordedIntentMessage(ctx, principal, message, stream)
 	}
 	return projectCurrentIntentView(conversationID, stream)
 }
@@ -376,6 +427,10 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 	if err != nil {
 		return View{}, fmt.Errorf("%w: record intake message", ErrConflict)
 	}
+	return s.normalizeRecordedIntentMessage(ctx, principal, message, stream)
+}
+
+func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal Principal, message Message, stream []events.Event) (View, error) {
 	turns, err := intakeTurns(stream)
 	if err != nil {
 		return View{}, fmt.Errorf("%w: load intake conversation", ErrUnavailable)
@@ -529,6 +584,62 @@ func (s *Service) CompleteHumanTask(ctx context.Context, principal Principal, ta
 	return projectView(conversationID, stream, principal.Allowed(CapabilityReadResult)), nil
 }
 
+func (s *Service) RecoverHumanCompletion(ctx context.Context, principal Principal, taskID string) (View, error) {
+	conversationID, _, err := s.authorizedHumanRecoveryTask(ctx, principal, taskID, "structured user completion")
+	if err != nil {
+		return View{}, err
+	}
+	if err := s.app.RecoverHumanCompletion(ctx, principal.OrganizationID, principal.ID, principal.Channel, conversationID, taskID); err != nil {
+		if errors.Is(err, app.ErrNoDurableHumanCompletion) {
+			return View{}, ErrNotFound
+		}
+		return View{}, fmt.Errorf("%w: recover structured user completion", ErrConflict)
+	}
+	return s.recoveredHumanTaskView(ctx, principal, conversationID)
+}
+
+func (s *Service) RecoverHumanInput(ctx context.Context, principal Principal, taskID string) (View, error) {
+	conversationID, _, err := s.authorizedHumanRecoveryTask(ctx, principal, taskID, "user input")
+	if err != nil {
+		return View{}, err
+	}
+	if err := s.app.RecoverOperatorInput(ctx, principal.OrganizationID, principal.ID, principal.Kind, principal.Channel, conversationID, taskID); err != nil {
+		if errors.Is(err, app.ErrNoDurableOperatorInput) {
+			return View{}, ErrNotFound
+		}
+		return View{}, fmt.Errorf("%w: recover user input", ErrConflict)
+	}
+	return s.recoveredHumanTaskView(ctx, principal, conversationID)
+}
+
+func (s *Service) recoveredHumanTaskView(ctx context.Context, principal Principal, conversationID string) (View, error) {
+	stream, err := s.app.ExternalEvents(ctx, principal.OrganizationID, conversationID)
+	if err != nil {
+		return View{}, fmt.Errorf("%w: reload recovered user task", ErrUnavailable)
+	}
+	return projectView(conversationID, stream, principal.Allowed(CapabilityReadResult)), nil
+}
+
+func (s *Service) authorizedHumanRecoveryTask(ctx context.Context, principal Principal, taskID, operation string) (string, []events.Event, error) {
+	if err := validatePrincipal(principal); err != nil {
+		return "", nil, err
+	}
+	if principal.Kind != core.PrincipalHuman || principal.Channel != ChannelHumanDirect || !principal.Allowed(CapabilityProvideInput) {
+		return "", nil, fmt.Errorf("%w: %s recovery requires local user access", ErrForbidden, operation)
+	}
+	if err := ValidateIdentifier("task", taskID); err != nil {
+		return "", nil, err
+	}
+	conversationID, stream, err := s.app.ExternalTaskEvents(ctx, principal.OrganizationID, taskID)
+	if err != nil || len(stream) == 0 {
+		return "", nil, ErrNotFound
+	}
+	if _, err := authorizedInitialWork(principal, stream); err != nil {
+		return "", nil, err
+	}
+	return conversationID, stream, nil
+}
+
 func (s *Service) Get(ctx context.Context, principal Principal, taskID string) (View, error) {
 	if err := validatePrincipal(principal); err != nil {
 		return View{}, err
@@ -561,6 +672,55 @@ func (s *Service) Get(ctx context.Context, principal Principal, taskID string) (
 	return projectView(conversationID, stream, principal.Allowed(CapabilityReadResult)), nil
 }
 
+func (s *Service) LatestTask(ctx context.Context, principal Principal) (View, error) {
+	if err := validatePrincipal(principal); err != nil {
+		return View{}, err
+	}
+	if !principal.Allowed(CapabilityReadStatus) {
+		return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
+	}
+	conversationID, stream, found, err := s.app.LatestConfirmedIntake(ctx, principal.OrganizationID, core.ID(principal.ID), principal.Kind, principal.Channel)
+	if err != nil {
+		return View{}, fmt.Errorf("%w: load recent work", ErrUnavailable)
+	}
+	if !found || len(stream) == 0 || !streamHasEvent(stream, "INTENT_CONFIRMED") {
+		return View{}, ErrNotFound
+	}
+	if confirmedWorkNeedsRecovery(stream) && principal.Allowed(CapabilityConfirmIntent) {
+		if err := authorizeIntakePrincipal(principal, stream); err != nil {
+			return View{}, err
+		}
+		if !principal.Allowed(CapabilityConfirmIntent) {
+			return View{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityConfirmIntent)
+		}
+		unlock := s.lockStream(principal.OrganizationID, conversationID)
+		defer unlock()
+		stream, err = s.app.ExternalEvents(ctx, principal.OrganizationID, conversationID)
+		if err != nil || len(stream) == 0 {
+			return View{}, fmt.Errorf("%w: reload confirmed intent", ErrUnavailable)
+		}
+		confirmation, recoverErr := durableIntentConfirmation(conversationID, principal, stream)
+		if recoverErr != nil {
+			return View{}, recoverErr
+		}
+		return s.confirmIntentLocked(ctx, principal, confirmation, stream, nil)
+	}
+	if _, err := authorizedInitialWork(principal, stream); err != nil {
+		return View{}, err
+	}
+	return projectView(conversationID, stream, principal.Allowed(CapabilityReadResult)), nil
+}
+
+func confirmedWorkNeedsRecovery(stream []events.Event) bool {
+	for _, event := range stream {
+		switch event.EventType {
+		case "WORK_COMPLETED", "WORK_FAILED", "WORK_PLANNING_FAILED":
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Service) GetCompletionReview(ctx context.Context, principal Principal, taskID string) (CompletionReviewView, error) {
 	if err := validateCompletionReviewer(principal); err != nil {
 		return CompletionReviewView{}, err
@@ -575,7 +735,35 @@ func (s *Service) GetCompletionReview(ctx context.Context, principal Principal, 
 	if !found {
 		return CompletionReviewView{}, ErrNotFound
 	}
-	return projectCompletionReview(view, "PENDING"), nil
+	state := "PENDING"
+	if view.Decision != "" {
+		state = string(view.Decision)
+	}
+	return projectCompletionReview(view, state), nil
+}
+
+func (s *Service) GetCompletionReviewRecord(ctx context.Context, principal Principal, taskID, reviewID string) (CompletionReviewView, error) {
+	if err := validateCompletionReviewer(principal); err != nil {
+		return CompletionReviewView{}, err
+	}
+	if err := ValidateIdentifier("task", taskID); err != nil {
+		return CompletionReviewView{}, err
+	}
+	if err := ValidateIdentifier("review", reviewID); err != nil {
+		return CompletionReviewView{}, err
+	}
+	view, found, err := s.app.CompletionReviewRecord(ctx, principal.OrganizationID, taskID, core.ID(reviewID))
+	if err != nil {
+		return CompletionReviewView{}, fmt.Errorf("%w: load completion review record", ErrUnavailable)
+	}
+	if !found {
+		return CompletionReviewView{}, ErrNotFound
+	}
+	state := "PENDING"
+	if view.Decision != "" {
+		state = string(view.Decision)
+	}
+	return projectCompletionReview(view, state), nil
 }
 
 func (s *Service) ListCompletionReviews(ctx context.Context, principal Principal, after string, limit int) (CompletionReviewList, error) {
@@ -597,6 +785,24 @@ func (s *Service) ListCompletionReviews(ctx context.Context, principal Principal
 	result := CompletionReviewList{Reviews: make([]CompletionReviewView, 0, len(page.Reviews)), NextAfter: string(page.NextAfter)}
 	for _, view := range page.Reviews {
 		result.Reviews = append(result.Reviews, projectCompletionReview(view, "PENDING"))
+	}
+	return result, nil
+}
+
+func (s *Service) ListRecentCompletionReviews(ctx context.Context, principal Principal, limit int) (CompletionReviewList, error) {
+	if err := validateCompletionReviewer(principal); err != nil {
+		return CompletionReviewList{}, err
+	}
+	if limit < 1 || limit > 100 {
+		return CompletionReviewList{}, fmt.Errorf("%w: recent review limit must be between 1 and 100", ErrInvalid)
+	}
+	views, err := s.app.RecentCompletionReviews(ctx, principal.OrganizationID, limit)
+	if err != nil {
+		return CompletionReviewList{}, fmt.Errorf("%w: list recent completion reviews", ErrUnavailable)
+	}
+	result := CompletionReviewList{Reviews: make([]CompletionReviewView, 0, len(views))}
+	for _, view := range views {
+		result.Reviews = append(result.Reviews, projectCompletionReview(view, string(view.Decision)))
 	}
 	return result, nil
 }
@@ -657,7 +863,8 @@ func projectCompletionReview(view app.CompletionReviewView, state string) Comple
 	return CompletionReviewView{
 		ReviewID: string(view.Request.ID), TaskID: string(view.Request.TaskID),
 		TaskVersion: view.Request.TaskVersion, Fingerprint: view.Request.Fingerprint,
-		State: state, Objective: view.Request.Objective, Result: view.Result,
+		State: state, ReviewerID: string(view.ReviewerID), Feedback: view.Feedback,
+		Objective: view.Request.Objective, Result: view.Result,
 		Criteria:     append([]core.CompletionCriterion(nil), view.Request.Contract.Criteria...),
 		EvidenceRefs: append([]string(nil), view.Request.EvidenceRefs...), UpdatedAt: view.UpdatedAt,
 	}
@@ -724,11 +931,23 @@ func projectView(conversationID string, stream []events.Event, includeResult boo
 			}
 		}
 	}
+	if task, found := streamTask(stream); found && view.State != StateCompleted && view.State != StateFailed {
+		if task.ExecutionKind == core.ExecutionHuman && task.CompletionContract != nil {
+			view.CompletionRecoveryRequired = durableHumanCompletionExists(stream, view.TaskID)
+		}
+		if task.ExecutionKind == core.ExecutionHuman && task.CompletionContract == nil {
+			view.InputRecoveryRequired = durableHumanInputExists(stream, view.TaskID)
+		}
+	}
 	if view.State == StateInputRequired {
 		view.Prompt = blockedStatusText(stream)
-		if task, found := streamTask(stream); found && task.CompletionContract != nil {
-			contract := *task.CompletionContract
-			view.CompletionContract = &contract
+		view.ReviewRequired = pendingCompletionReview(stream, view.TaskID)
+		if task, found := streamTask(stream); found {
+			view.UserInputAllowed = task.ExecutionKind == core.ExecutionHuman && task.CompletionContract == nil && !view.ReviewRequired && !view.InputRecoveryRequired
+			if task.CompletionContract != nil {
+				contract := *task.CompletionContract
+				view.CompletionContract = &contract
+			}
 		}
 	}
 	if view.State == StateFailed {
@@ -740,6 +959,53 @@ func projectView(conversationID string, stream []events.Event, includeResult boo
 		}
 	}
 	return view
+}
+
+func durableHumanInputExists(stream []events.Event, taskID string) bool {
+	for _, event := range stream {
+		if event.EventType != "HUMAN_INPUT_RECEIVED" || event.TaskID != taskID {
+			continue
+		}
+		payload, err := events.DecodeDurableOperatorInput(event)
+		return err == nil && payload.SourcePrincipalID != "" && payload.SourcePrincipalKind == string(core.PrincipalHuman) && payload.SourceChannel == ChannelHumanDirect
+	}
+	return false
+}
+
+func durableHumanCompletionExists(stream []events.Event, taskID string) bool {
+	for _, event := range stream {
+		if event.EventType != "HUMAN_TASK_COMPLETION_SUBMITTED" || event.TaskID != taskID {
+			continue
+		}
+		payload, err := events.DecodeHumanTaskCompletion(event)
+		return err == nil && payload.MessageID != "" && payload.SourcePrincipalID == event.SourceActorID && payload.SourceChannel == ChannelHumanDirect
+	}
+	return false
+}
+
+func pendingCompletionReview(stream []events.Event, taskID string) bool {
+	var latest core.ID
+	decided := make(map[core.ID]bool)
+	for _, event := range stream {
+		switch event.EventType {
+		case "COMPLETION_REVIEW_REQUESTED":
+			var request struct {
+				ID     core.ID `json:"id"`
+				TaskID core.ID `json:"task_id"`
+			}
+			if json.Unmarshal(event.Payload, &request) == nil && request.ID != "" && request.TaskID == core.ID(taskID) {
+				latest = request.ID
+			}
+		case "COMPLETION_REVIEW_DECIDED":
+			var decision struct {
+				ReviewID core.ID `json:"review_id"`
+			}
+			if json.Unmarshal(event.Payload, &decision) == nil && decision.ReviewID != "" {
+				decided[decision.ReviewID] = true
+			}
+		}
+	}
+	return latest != "" && !decided[latest]
 }
 
 func streamTask(stream []events.Event) (core.Task, bool) {
@@ -1024,6 +1290,37 @@ func intentNormalizationAttempt(stream []events.Event, messageID string) int {
 
 func latestIntentPayload(stream []events.Event) (events.IntentDraftedPayload, bool, error) {
 	return events.LatestPayload[events.IntentDraftedPayload](stream, "INTENT_DRAFTED")
+}
+
+func latestRecordedIntentMessage(conversationID string, stream []events.Event, principal Principal) (Message, bool, error) {
+	payload, found, err := events.LatestPayload[events.IntakeMessageRecordedPayload](stream, "INTAKE_MESSAGE_RECORDED")
+	if err != nil || !found {
+		return Message{}, found, fmt.Errorf("%w: durable intake message is invalid", ErrUnavailable)
+	}
+	if payload.SourcePrincipalID != principal.ID || payload.SourcePrincipalKind != string(principal.Kind) || payload.SourceChannel != principal.Channel {
+		return Message{}, false, fmt.Errorf("%w: durable intake message source differs", ErrUnavailable)
+	}
+	if ValidateIdentifier("message", payload.MessageID) != nil || payload.Text == "" {
+		return Message{}, false, fmt.Errorf("%w: durable intake message identity is invalid", ErrUnavailable)
+	}
+	return Message{ConversationID: conversationID, MessageID: payload.MessageID, Text: payload.Text, RequestedKind: payload.RequestedExecutionKind}, true, nil
+}
+
+func durableIntentConfirmation(conversationID string, principal Principal, stream []events.Event) (IntentConfirmation, error) {
+	for index := len(stream) - 1; index >= 0; index-- {
+		if stream[index].EventType != "INTENT_CONFIRMED" {
+			continue
+		}
+		var payload events.IntentConfirmedPayload
+		if json.Unmarshal(stream[index].Payload, &payload) != nil || payload.MessageID == "" || payload.Fingerprint == "" {
+			return IntentConfirmation{}, fmt.Errorf("%w: durable confirmation is invalid", ErrUnavailable)
+		}
+		if payload.ConfirmingActorID != principal.ID || payload.ConfirmingActorKind != string(principal.Kind) || payload.SourceChannel != principal.Channel {
+			return IntentConfirmation{}, fmt.Errorf("%w: durable confirmation source differs", ErrUnavailable)
+		}
+		return IntentConfirmation{ConversationID: conversationID, TaskID: streamTaskID(stream), MessageID: payload.MessageID, Fingerprint: payload.Fingerprint}, nil
+	}
+	return IntentConfirmation{}, fmt.Errorf("%w: durable confirmation is missing", ErrUnavailable)
 }
 
 func intentPayloadForMessage(stream []events.Event, messageID string) (events.IntentDraftedPayload, bool, error) {

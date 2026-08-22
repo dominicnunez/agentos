@@ -1734,7 +1734,7 @@ func TestAcceptedIntentBecomesDurableTaskDAGWithDependencyEvidence(t *testing.T)
 	}
 }
 
-func TestChildCompletionReviewStaysInternalAndWakesRoot(t *testing.T) {
+func TestChildCompletionReviewStaysOffA2AAndRemainsLocallyRecoverable(t *testing.T) {
 	ctx := context.Background()
 	l, err := ledger.Open(":memory:")
 	if err != nil {
@@ -1789,10 +1789,71 @@ func TestChildCompletionReviewStaysInternalAndWakesRoot(t *testing.T) {
 	if _, err := service.ReviewCompletion(ctx, reviewInput(rootReview, completion.ReviewApprove, "")); err != nil {
 		t.Fatal(err)
 	}
+	recent, err := service.RecentCompletionReviews(ctx, "org-1", 10)
+	if err != nil || len(recent) != 2 || recent[0].Request.TaskID != submitted.Task.ID || recent[1].Request.TaskID != child.ID {
+		t.Fatalf("recent local reviews=%+v err=%v", recent, err)
+	}
 	replayed, err := service.Submit(ctx, submission)
 	if err != nil || replayed.Task.Status != core.TaskCompleted || replayed.Work.Status != "COMPLETED" {
 		t.Fatalf("replayed=%+v err=%v", replayed, err)
 	}
+}
+
+func TestRecentCompletionReviewsResumeDurableTerminalDecision(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	interrupted := &failOnceProjectionEvent{SQLite: store, eventType: "TASK_VERIFIED_COMPLETE"}
+	service := NewWithModel(events.NewGateway(interrupted), describedModel{})
+	submission := Submit{RequestID: "recent-review-recovery", OrganizationID: "org-1", Statement: "prepare a reviewed note", Kind: core.ExecutionAgent}
+	submitted, err := service.Submit(ctx, submission)
+	if err != nil || submitted.Task.Status != core.TaskBlocked {
+		t.Fatalf("submitted=%+v err=%v", submitted, err)
+	}
+	review, found, err := service.CompletionReview(ctx, "org-1", string(submitted.Task.ID))
+	if err != nil || !found {
+		t.Fatalf("review=%+v found=%t err=%v", review, found, err)
+	}
+	if _, err := service.ReviewCompletion(ctx, reviewInput(review, completion.ReviewApprove, "")); err == nil {
+		t.Fatal("injected completion continuation failure was not returned")
+	}
+
+	restarted := NewWithModel(events.NewGateway(store), describedModel{})
+	recent, err := restarted.RecentCompletionReviews(ctx, "org-1", 10)
+	if err != nil || len(recent) != 1 || recent[0].Request.ID != review.Request.ID {
+		t.Fatalf("recent=%+v err=%v", recent, err)
+	}
+	snapshot, err := projections.New(events.NewGateway(store)).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tasks[submitted.Task.ID].Value.Status != core.TaskCompleted || snapshot.Works[submitted.Work.ID].Value.Status != core.WorkCompleted {
+		t.Fatalf("task=%+v work=%+v", snapshot.Tasks[submitted.Task.ID], snapshot.Works[submitted.Work.ID])
+	}
+	stream, err := store.Events(ctx, submitted.Events[0].CorrelationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countEventType(stream, "COMPLETION_REVIEW_DECIDED") != 1 || countEventType(stream, "TASK_VERIFIED_COMPLETE") != 1 || countEventType(stream, "WORK_COMPLETED") != 1 {
+		t.Fatalf("terminal review recovery duplicated durable phases: %+v", stream)
+	}
+}
+
+type failOnceProjectionEvent struct {
+	*ledger.SQLite
+	eventType string
+	failed    bool
+}
+
+func (f *failOnceProjectionEvent) AppendProjection(ctx context.Context, draft events.ProjectionDraft) (events.Event, error) {
+	if draft.Event.EventType == f.eventType && !f.failed {
+		f.failed = true
+		return events.Event{}, errProjectionWrite
+	}
+	return f.SQLite.AppendProjection(ctx, draft)
 }
 
 type failingExecutionModel struct{ calls int }
@@ -1879,6 +1940,20 @@ func (describedModel) Descriptor() execution.ModelDescriptor {
 }
 func (describedModel) Complete(_ context.Context, prompt string) (execution.ModelResponse, error) {
 	return execution.ModelResponse{Text: "configured-model: " + prompt, Usage: events.InferenceUsageRecordedPayload{Source: "provider_cli", Provider: "codex-subscription", Model: "test-model", InputTokens: 1, OutputTokens: 1, TotalTokens: 2}}, nil
+}
+
+type failRevisionExecutionModel struct{ calls int }
+
+func (*failRevisionExecutionModel) Name() string { return describedModel{}.Name() }
+func (*failRevisionExecutionModel) Descriptor() execution.ModelDescriptor {
+	return describedModel{}.Descriptor()
+}
+func (m *failRevisionExecutionModel) Complete(ctx context.Context, prompt string) (execution.ModelResponse, error) {
+	m.calls++
+	if m.calls > 1 {
+		return execution.ModelResponse{}, errors.New("revised execution failed")
+	}
+	return describedModel{}.Complete(ctx, prompt)
 }
 
 type changedDescriptorModel struct{}
@@ -2382,6 +2457,10 @@ func TestCompletionReviewRevisionIsUntrustedExecutionContext(t *testing.T) {
 	if err != nil || !found || second.Request.ID == first.Request.ID || !strings.Contains(second.Result, "Make the conclusion specific.") {
 		t.Fatalf("revised review=%+v found=%t err=%v", second, found, err)
 	}
+	decided, found, err := service.CompletionReviewRecord(context.Background(), "org-1", string(submitted.Task.ID), first.Request.ID)
+	if err != nil || !found || decided.Request.ID != first.Request.ID || decided.Decision != completion.ReviewRevise || decided.Feedback != "Make the conclusion specific." || decided.ReviewerID != "reviewer-1" {
+		t.Fatalf("exact revised review=%+v found=%t err=%v", decided, found, err)
+	}
 	stream, err := service.Events(context.Background(), submitted.Events[0].CorrelationID)
 	if err != nil {
 		t.Fatal(err)
@@ -2408,6 +2487,39 @@ func TestCompletionReviewRevisionIsUntrustedExecutionContext(t *testing.T) {
 	}
 	if !manifested {
 		t.Fatal("revision decision was not referenced by the next execution manifest")
+	}
+}
+
+func TestRecentCompletionReviewAcceptsFailedProgressAfterRevision(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	model := &failRevisionExecutionModel{}
+	service := NewWithModel(events.NewGateway(store), model)
+	submitted, err := service.Submit(ctx, Submit{RequestID: "failed-review-revision", OrganizationID: "org-1", Statement: "summarize", Kind: core.ExecutionAgent})
+	if err != nil || submitted.Task.Status != core.TaskBlocked {
+		t.Fatalf("submitted=%+v err=%v", submitted, err)
+	}
+	review, found, err := service.CompletionReview(ctx, "org-1", string(submitted.Task.ID))
+	if err != nil || !found {
+		t.Fatalf("review=%+v found=%t err=%v", review, found, err)
+	}
+	if _, err := service.ReviewCompletion(ctx, reviewInput(review, completion.ReviewRevise, "try a different approach")); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := projections.New(events.NewGateway(store)).Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tasks[submitted.Task.ID].Value.Status != core.TaskFailed {
+		t.Fatalf("revised task status=%s", snapshot.Tasks[submitted.Task.ID].Value.Status)
+	}
+	recent, err := service.RecentCompletionReviews(ctx, "org-1", 10)
+	if err != nil || len(recent) != 1 || recent[0].Request.ID != review.Request.ID || recent[0].Decision != completion.ReviewRevise {
+		t.Fatalf("recent progressed revision=%+v err=%v", recent, err)
 	}
 }
 
@@ -2454,6 +2566,53 @@ func TestRecoveryFinishesDurableCompletionReviewDecision(t *testing.T) {
 	replayed, err := recovered.Submit(context.Background(), Submit{RequestID: "review-recovery", OrganizationID: "org-1", Statement: "summarize", Kind: core.ExecutionAgent})
 	if err != nil || replayed.Task.Status != core.TaskCompleted || !replayed.Completion.Complete {
 		t.Fatalf("recovered=%+v err=%v", replayed, err)
+	}
+}
+
+func TestCompletionReviewRecordFinishesAnotherReviewersDurableDecision(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	service := NewWithModel(gateway, describedModel{})
+	submitted, err := service.Submit(ctx, Submit{RequestID: "review-read-recovery", OrganizationID: "org-1", Statement: "summarize", Kind: core.ExecutionAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, found, err := service.CompletionReview(ctx, "org-1", string(submitted.Task.ID))
+	if err != nil || !found {
+		t.Fatalf("review found=%t err=%v", found, err)
+	}
+	review := completion.HumanReview{
+		ReviewID: view.Request.ID, OrganizationID: view.Request.OrganizationID, TaskID: view.Request.TaskID,
+		TaskVersion: view.Request.TaskVersion, Fingerprint: view.Request.Fingerprint,
+		Decision: completion.ReviewApprove, ReviewerID: "reviewer-1", Method: core.AssuranceHumanJudgment,
+		EvidenceRefs: append([]string(nil), view.Request.EvidenceRefs...), DecidedAt: time.Now().UTC(),
+	}
+	if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "COMPLETION_REVIEW_DECIDED", SourceActorID: string(review.ReviewerID),
+		TaskID: string(submitted.Task.ID), Payload: review, CorrelationID: submitted.Events[0].CorrelationID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	recovered, found, err := service.CompletionReviewRecord(ctx, "org-1", string(submitted.Task.ID), view.Request.ID)
+	if err != nil || !found || recovered.Decision != completion.ReviewApprove || recovered.ReviewerID != "reviewer-1" {
+		t.Fatalf("recovered review=%+v found=%t err=%v", recovered, found, err)
+	}
+	exactRetry, err := service.ReviewCompletion(ctx, CompletionReviewInput{
+		OrganizationID: "org-1", TaskID: string(submitted.Task.ID), ReviewID: string(view.Request.ID),
+		Fingerprint: view.Request.Fingerprint, Decision: completion.ReviewApprove,
+		ReviewerID: "reviewer-2", ReviewerKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT",
+	})
+	if err != nil || exactRetry.ReviewerID != "reviewer-1" {
+		t.Fatalf("another reviewer did not recover the authoritative decision: view=%+v err=%v", exactRetry, err)
+	}
+	replayed, err := service.Submit(ctx, Submit{RequestID: "review-read-recovery", OrganizationID: "org-1", Statement: "summarize", Kind: core.ExecutionAgent})
+	if err != nil || replayed.Task.Status != core.TaskCompleted || !replayed.Completion.Complete {
+		t.Fatalf("recovered task=%+v err=%v", replayed, err)
 	}
 }
 
@@ -3459,11 +3618,13 @@ func TestRecoveryIsDeterministicFirst(t *testing.T) {
 
 func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 	tests := []struct {
-		name, stage string
+		name, stage, eventType, principalID, sourceKind, sourceChannel string
+		explicitUserRecovery                                           bool
 	}{
-		{name: "input_durable", stage: "input_durable"},
-		{name: "task_resumed", stage: "task_resumed"},
-		{name: "completion_verified", stage: "completion_verified"},
+		{name: "input_durable", stage: "input_durable", eventType: "A2A_INPUT_RECEIVED", principalID: "external-agent", sourceKind: string(core.PrincipalExternalAgent), sourceChannel: "A2A"},
+		{name: "task_resumed", stage: "task_resumed", eventType: "A2A_INPUT_RECEIVED", principalID: "external-agent", sourceKind: string(core.PrincipalExternalAgent), sourceChannel: "A2A"},
+		{name: "completion_verified", stage: "completion_verified", eventType: "A2A_INPUT_RECEIVED", principalID: "external-agent", sourceKind: string(core.PrincipalExternalAgent), sourceChannel: "A2A"},
+		{name: "explicit_user_recovery", stage: "input_durable", eventType: "HUMAN_INPUT_RECEIVED", principalID: "user-1", sourceKind: string(core.PrincipalHuman), sourceChannel: "HUMAN_DIRECT", explicitUserRecovery: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -3481,13 +3642,13 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 			}
 			correlationID := result.Events[0].CorrelationID
 			inputPayload := events.OperatorInputReceivedPayload{
-				MessageID: "message-1", Text: "approved task input", SourcePrincipalID: "external-agent",
-				SourcePrincipalKind: string(core.PrincipalExternalAgent), SourceChannel: "A2A",
+				MessageID: "message-1", Text: "approved task input", SourcePrincipalID: test.principalID,
+				SourcePrincipalKind: test.sourceKind, SourceChannel: test.sourceChannel,
 			}
 			inputEvent, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
 				OrganizationID: "org-1",
-				EventType:      "A2A_INPUT_RECEIVED",
-				SourceActorID:  "external-agent",
+				EventType:      test.eventType,
+				SourceActorID:  test.principalID,
 				TaskID:         string(result.Task.ID),
 				CorrelationID:  correlationID,
 				Payload:        inputPayload,
@@ -3545,9 +3706,20 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 			}
 
 			recovered := New(gateway)
-			recovery, err := recovered.Recover(ctx)
-			if err != nil || recovery.TasksExecuted != 1 {
-				t.Fatalf("recovery=%+v err=%v", recovery, err)
+			if test.explicitUserRecovery {
+				if err := recovered.RecoverOperatorInput(ctx, "org-1", "other-user", core.PrincipalHuman, test.sourceChannel, "request-1", string(result.Task.ID)); err == nil {
+					t.Fatal("different local user recovered another principal's durable input")
+				}
+				err = recovered.RecoverOperatorInput(ctx, "org-1", test.principalID, core.PrincipalHuman, test.sourceChannel, "request-1", string(result.Task.ID))
+			} else {
+				var recovery RecoveryResult
+				recovery, err = recovered.Recover(ctx)
+				if recovery.TasksExecuted != 1 {
+					t.Fatalf("recovery=%+v err=%v", recovery, err)
+				}
+			}
+			if err != nil {
+				t.Fatalf("recovery error=%v", err)
 			}
 			snapshot, err = recovered.state.Load(ctx)
 			if err != nil || snapshot.Tasks[result.Task.ID].Value.Status != core.TaskCompleted {
@@ -3557,7 +3729,7 @@ func TestRecoverCompletesDurableExternalInputExactlyOnce(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, eventType := range []string{"A2A_INPUT_RECEIVED", "TASK_RESUMED", "EXECUTION_STARTED", "TOOL_OUTCOME_RECORDED", "EXECUTION_FINISHED", "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_VERIFIED", "TASK_VERIFIED_COMPLETE"} {
+			for _, eventType := range []string{test.eventType, "TASK_RESUMED", "EXECUTION_STARTED", "TOOL_OUTCOME_RECORDED", "EXECUTION_FINISHED", "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_VERIFIED", "TASK_VERIFIED_COMPLETE"} {
 				count := 0
 				for _, event := range stream {
 					if event.EventType == eventType && event.TaskID == string(result.Task.ID) {
@@ -4066,4 +4238,14 @@ func assertEventOrder(t *testing.T, stream []events.Event, expected ...string) {
 	if next != len(expected) {
 		t.Fatalf("event order missing %q after index %d: %+v", expected[next], next, stream)
 	}
+}
+
+func countEventType(stream []events.Event, eventType string) int {
+	count := 0
+	for _, event := range stream {
+		if event.EventType == eventType {
+			count++
+		}
+	}
+	return count
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -69,17 +70,21 @@ type humanMessageRequest struct {
 }
 
 type humanTaskResponse struct {
-	TaskID             string                   `json:"task_id"`
-	WorkID             string                   `json:"work_id,omitempty"`
-	ConversationID     string                   `json:"conversation_id"`
-	State              string                   `json:"state"`
-	Prompt             string                   `json:"prompt,omitempty"`
-	Result             string                   `json:"result,omitempty"`
-	Mode               core.IntentMode          `json:"mode,omitempty"`
-	TrustLabel         string                   `json:"trust_label,omitempty"`
-	UpdatedAt          string                   `json:"updated_at,omitempty"`
-	CompletionContract *core.CompletionContract `json:"completion_contract,omitempty"`
-	Intent             *core.IntentDraft        `json:"intent,omitempty"`
+	TaskID                     string                   `json:"task_id"`
+	WorkID                     string                   `json:"work_id,omitempty"`
+	ConversationID             string                   `json:"conversation_id"`
+	State                      string                   `json:"state"`
+	Prompt                     string                   `json:"prompt,omitempty"`
+	Result                     string                   `json:"result,omitempty"`
+	Mode                       core.IntentMode          `json:"mode,omitempty"`
+	TrustLabel                 string                   `json:"trust_label,omitempty"`
+	UpdatedAt                  string                   `json:"updated_at,omitempty"`
+	CompletionContract         *core.CompletionContract `json:"completion_contract,omitempty"`
+	ReviewRequired             bool                     `json:"review_required,omitempty"`
+	UserInputAllowed           bool                     `json:"user_input_allowed,omitempty"`
+	InputRecoveryRequired      bool                     `json:"input_recovery_required,omitempty"`
+	CompletionRecoveryRequired bool                     `json:"completion_recovery_required,omitempty"`
+	Intent                     *core.IntentDraft        `json:"intent,omitempty"`
 }
 
 type humanIntentConfirmationRequest struct {
@@ -116,6 +121,11 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeView(w, view, err)
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/user/tasks/recent" {
+		view, err := h.service.LatestTask(r.Context(), principal)
+		h.writeView(w, view, err)
+		return
+	}
 	const intentPrefix = "/v1/user/intents/"
 	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, intentPrefix) && strings.HasSuffix(r.URL.Path, "/confirm") {
 		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, intentPrefix), "/confirm")
@@ -127,6 +137,24 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	const taskPrefix = "/v1/user/tasks/"
+	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, taskPrefix) && strings.HasSuffix(r.URL.Path, "/input/recover") {
+		taskID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, taskPrefix), "/input/recover")
+		if taskID == "" || strings.Contains(taskID, "/") || r.URL.RawQuery != "" || r.ContentLength > 0 {
+			http.NotFound(w, r)
+			return
+		}
+		h.handleTaskInputRecovery(w, r, principal, taskID)
+		return
+	}
+	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, taskPrefix) && strings.HasSuffix(r.URL.Path, "/completion/recover") {
+		taskID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, taskPrefix), "/completion/recover")
+		if taskID == "" || strings.Contains(taskID, "/") || r.URL.RawQuery != "" || r.ContentLength > 0 {
+			http.NotFound(w, r)
+			return
+		}
+		h.handleTaskCompletionRecovery(w, r, principal, taskID)
+		return
+	}
 	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, taskPrefix) && strings.HasSuffix(r.URL.Path, "/completion") {
 		taskID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, taskPrefix), "/completion")
 		if taskID == "" || strings.Contains(taskID, "/") {
@@ -145,8 +173,19 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleListReviews(w, r, principal)
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/user/reviews/recent" {
+		h.handleListRecentReviews(w, r, principal)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, reviewPrefix) && len(r.URL.Path) > len(reviewPrefix) {
-		taskID := strings.TrimPrefix(r.URL.Path, reviewPrefix)
+		remainder := strings.TrimPrefix(r.URL.Path, reviewPrefix)
+		parts := strings.Split(remainder, "/")
+		if r.Method == http.MethodGet && len(parts) == 3 && parts[0] != "" && parts[1] == "records" && parts[2] != "" {
+			view, err := h.service.GetCompletionReviewRecord(r.Context(), principal, parts[0], parts[2])
+			h.writeReviewView(w, view, err)
+			return
+		}
+		taskID := remainder
 		if strings.Contains(taskID, "/") {
 			http.NotFound(w, r)
 			return
@@ -162,6 +201,28 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.NotFound(w, r)
+}
+
+func (h *Human) handleTaskCompletionRecovery(w http.ResponseWriter, r *http.Request, principal intake.Principal, taskID string) {
+	defer func() { _ = r.Body.Close() }()
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1))
+	if err != nil || len(body) != 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user completion recovery requires an empty body"})
+		return
+	}
+	view, err := h.service.RecoverHumanCompletion(r.Context(), principal, taskID)
+	h.writeView(w, view, err)
+}
+
+func (h *Human) handleTaskInputRecovery(w http.ResponseWriter, r *http.Request, principal intake.Principal, taskID string) {
+	defer func() { _ = r.Body.Close() }()
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1))
+	if err != nil || len(body) != 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user input recovery requires an empty body"})
+		return
+	}
+	view, err := h.service.RecoverHumanInput(r.Context(), principal, taskID)
+	h.writeView(w, view, err)
 }
 
 func (h *Human) handleIntentConfirmation(w http.ResponseWriter, r *http.Request, principal intake.Principal, conversationID string) {
@@ -196,27 +257,86 @@ func (h *Human) handleTaskCompletion(w http.ResponseWriter, r *http.Request, pri
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if len(request.Artifacts) > 32 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user task completion has too many artifacts"})
+	if err := intake.ValidateIdentifier("message", request.MessageID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user task completion message identity is invalid"})
 		return
 	}
-	total := 0
-	evidence := make([]core.ArtifactEvidence, 0, len(request.Artifacts))
-	for _, upload := range request.Artifacts {
-		total += len(upload.Data)
-		if total > 32<<20 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user task artifacts exceed 33554432 bytes"})
-			return
-		}
+	task, err := h.service.Get(r.Context(), principal, taskID)
+	if err != nil {
+		h.writeIntakeError(w, err)
+		return
+	}
+	evidence, err := inspectHumanArtifacts(principal.ID, request.Artifacts)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if task.CompletionContract == nil {
+		view, err := h.service.CompleteHumanTask(r.Context(), principal, taskID, core.HumanTaskSubmission{MessageID: request.MessageID, Fields: request.Fields, Artifacts: evidence})
+		h.writeView(w, view, err)
+		return
+	}
+	if err := validateHumanCompletion(*task.CompletionContract, request, evidence); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	for index, upload := range request.Artifacts {
 		stored, _, err := h.artifacts.Put(principal.OrganizationID, taskID, principal.ID, upload)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		evidence = append(evidence, stored)
+		if stored != evidence[index] {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "user task artifact evidence changed during persistence"})
+			return
+		}
 	}
 	view, err := h.service.CompleteHumanTask(r.Context(), principal, taskID, core.HumanTaskSubmission{MessageID: request.MessageID, Fields: request.Fields, Artifacts: evidence})
 	h.writeView(w, view, err)
+}
+
+func inspectHumanArtifacts(principalID string, uploads []artifacts.Upload) ([]core.ArtifactEvidence, error) {
+	if len(uploads) > 32 {
+		return nil, fmt.Errorf("user task completion has too many artifacts")
+	}
+	total := 0
+	evidence := make([]core.ArtifactEvidence, 0, len(uploads))
+	for _, upload := range uploads {
+		total += len(upload.Data)
+		if total > 32<<20 {
+			return nil, fmt.Errorf("user task artifacts exceed 33554432 bytes")
+		}
+		inspected, err := artifacts.Inspect(principalID, upload)
+		if err != nil {
+			return nil, err
+		}
+		evidence = append(evidence, inspected)
+	}
+	return evidence, nil
+}
+
+func inspectHumanCompletion(principalID string, contract *core.CompletionContract, request humanCompletionRequest) ([]core.ArtifactEvidence, error) {
+	if contract == nil {
+		return nil, fmt.Errorf("user task has no completion contract")
+	}
+	evidence, err := inspectHumanArtifacts(principalID, request.Artifacts)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateHumanCompletion(*contract, request, evidence); err != nil {
+		return nil, err
+	}
+	return evidence, nil
+}
+
+func validateHumanCompletion(contract core.CompletionContract, request humanCompletionRequest, evidence []core.ArtifactEvidence) error {
+	result := core.EvaluateHumanTaskCompletion(contract, core.HumanTaskSubmission{
+		MessageID: request.MessageID, Fields: request.Fields, Artifacts: evidence,
+	})
+	if !result.Complete {
+		return fmt.Errorf("user task completion does not satisfy its contract: %s", strings.Join(result.Reasons, "; "))
+	}
+	return nil
 }
 
 func (h *Human) principal() intake.Principal {
@@ -282,6 +402,19 @@ func (h *Human) handleListReviews(w http.ResponseWriter, r *http.Request, princi
 	writeJSON(w, http.StatusOK, page)
 }
 
+func (h *Human) handleListRecentReviews(w http.ResponseWriter, r *http.Request, principal intake.Principal) {
+	if r.URL.RawQuery != "limit=20" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "recent review query is invalid"})
+		return
+	}
+	page, err := h.service.ListRecentCompletionReviews(r.Context(), principal, 20)
+	if err != nil {
+		h.writeIntakeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
 func (h *Human) handleReviewDecision(w http.ResponseWriter, r *http.Request, principal intake.Principal, taskID string) {
 	if !hasJSONContentType(r.Header.Get("Content-Type")) {
 		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "completion reviews require application/json"})
@@ -330,6 +463,8 @@ func (h *Human) writeIntakeError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "operator message is invalid"})
 	case errors.Is(err, intake.ErrConflict):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator message conflicts with durable work"})
+	case errors.Is(err, intake.ErrConfirmationMismatch):
+		writeJSON(w, http.StatusPreconditionFailed, map[string]string{"error": "intent confirmation differs from durable state"})
 	default:
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "operator work is unavailable"})
 	}
@@ -339,6 +474,8 @@ func humanResponse(view intake.View) humanTaskResponse {
 	response := humanTaskResponse{
 		TaskID: view.TaskID, WorkID: view.WorkID, ConversationID: view.ConversationID,
 		State: view.State, Prompt: view.Prompt, Result: view.Result, Mode: view.Mode, TrustLabel: view.TrustLabel,
+		ReviewRequired: view.ReviewRequired, UserInputAllowed: view.UserInputAllowed, InputRecoveryRequired: view.InputRecoveryRequired,
+		CompletionRecoveryRequired: view.CompletionRecoveryRequired,
 	}
 	response.CompletionContract = view.CompletionContract
 	response.Intent = view.Intent

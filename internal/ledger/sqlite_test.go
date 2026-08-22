@@ -149,6 +149,191 @@ func TestAppendAndRead(t *testing.T) {
 	}
 }
 
+func TestRecentEventsAppliesTenantTypeAndLimitInLedger(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	for _, draft := range []events.TrustedDraft{
+		{OrganizationID: "org-1", EventType: "RECOVERY_MARKER", TaskID: "task-1", CorrelationID: "one", Payload: map[string]int{"order": 1}},
+		{OrganizationID: "org-2", EventType: "RECOVERY_MARKER", TaskID: "task-other", CorrelationID: "other", Payload: map[string]int{"order": 2}},
+		{OrganizationID: "org-1", EventType: "IGNORED_MARKER", TaskID: "task-ignored", CorrelationID: "ignored", Payload: map[string]int{"order": 3}},
+		{OrganizationID: "org-1", EventType: "RECOVERY_MARKER", TaskID: "task-2", CorrelationID: "two", Payload: map[string]int{"order": 4}},
+		{OrganizationID: "org-1", EventType: "RECOVERY_MARKER", TaskID: "task-3", CorrelationID: "three", Payload: map[string]int{"order": 5}},
+	} {
+		if _, err := store.Append(ctx, draft); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recent, err := store.RecentEvents(ctx, "org-1", "RECOVERY_MARKER", 2)
+	if err != nil || len(recent) != 2 || recent[0].TaskID != "task-3" || recent[1].TaskID != "task-2" {
+		t.Fatalf("recent events=%+v err=%v", recent, err)
+	}
+	if _, err := store.RecentEvents(ctx, "", "RECOVERY_MARKER", 2); err == nil {
+		t.Fatal("unscoped recent-event read was accepted")
+	}
+}
+
+func TestGovernanceQueueQueriesUseBoundedIndexes(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	plan := func(statement string, arguments ...any) string {
+		t.Helper()
+		rows, err := store.db.QueryContext(t.Context(), "EXPLAIN QUERY PLAN "+statement, arguments...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = rows.Close() }()
+		var details []string
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			details = append(details, detail)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(details, "\n")
+	}
+	if got := plan(`SELECT event_id FROM events WHERE organization_id=? AND event_type=? ORDER BY sequence DESC LIMIT ?`, "org-1", "COMPLETION_REVIEW_DECIDED", 20); !strings.Contains(got, "events_recent_commit_idx") {
+		t.Fatalf("recent event query is not commit-index bounded:\n%s", got)
+	}
+	if got := plan(`SELECT request_event_id FROM pending_completion_reviews WHERE organization_id=? AND request_sequence<? ORDER BY request_sequence DESC LIMIT ?`, "org-1", int64(100), 20); !strings.Contains(got, "pending_completion_reviews_sequence_idx") {
+		t.Fatalf("pending review query is not sequence-index bounded:\n%s", got)
+	}
+	if got := plan(`DELETE FROM pending_approvals WHERE organization_id=? AND expires_at<>0 AND expires_at<=?`, "org-1", time.Now().UnixNano()); !strings.Contains(got, "pending_approvals_expiry_idx") {
+		t.Fatalf("approval expiry purge is not expiry-index bounded:\n%s", got)
+	}
+}
+
+func TestPendingCompletionReviewEventsAreTenantScopedAndCursorBounded(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	appendReview := func(organizationID, eventType, taskID, correlationID string, payload any) events.Event {
+		t.Helper()
+		event, err := store.Append(ctx, events.TrustedDraft{
+			OrganizationID: organizationID, EventType: eventType, SourceActorID: "runtime",
+			TaskID: taskID, CorrelationID: correlationID, Payload: payload,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return event
+	}
+	appendReview("org-1", "COMPLETION_REVIEW_REQUESTED", "task-1", "work-1", map[string]string{"review_id": "review-1"})
+	second := appendReview("org-1", "COMPLETION_REVIEW_REQUESTED", "task-2", "work-2", map[string]string{"review_id": "review-2"})
+	appendReview("org-1", "COMPLETION_REVIEW_DECIDED", "task-1", "work-1", map[string]string{"review_id": "review-1"})
+	latest := appendReview("org-1", "COMPLETION_REVIEW_REQUESTED", "task-1", "work-1", map[string]string{"review_id": "review-3"})
+	foreign := appendReview("org-2", "COMPLETION_REVIEW_REQUESTED", "task-3", "work-3", map[string]string{"review_id": "review-other"})
+	var projected int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pending_completion_reviews WHERE organization_id='org-1'`).Scan(&projected); err != nil || projected != 2 {
+		t.Fatalf("pending completion-review projection rows=%d err=%v", projected, err)
+	}
+
+	firstPage, err := store.PendingCompletionReviewEvents(ctx, "org-1", "", 1)
+	if err != nil || len(firstPage) != 1 || firstPage[0].EventID != latest.EventID {
+		t.Fatalf("first pending page=%+v err=%v", firstPage, err)
+	}
+	secondPage, err := store.PendingCompletionReviewEvents(ctx, "org-1", firstPage[0].EventID, 1)
+	if err != nil || len(secondPage) != 1 || secondPage[0].EventID != second.EventID {
+		t.Fatalf("second pending page=%+v err=%v", secondPage, err)
+	}
+	lastPage, err := store.PendingCompletionReviewEvents(ctx, "org-1", secondPage[0].EventID, 1)
+	if err != nil || len(lastPage) != 0 {
+		t.Fatalf("last pending page=%+v err=%v", lastPage, err)
+	}
+	if _, err := store.PendingCompletionReviewEvents(ctx, "org-1", foreign.EventID, 1); err == nil {
+		t.Fatal("cross-organization completion-review cursor was accepted")
+	}
+	if _, err := store.PendingCompletionReviewEvents(ctx, "org-1", "missing", 1); err == nil {
+		t.Fatal("unknown completion-review cursor was accepted")
+	}
+	if err := store.withTx(ctx, func(tx *sql.Tx) error {
+		return syncPendingCompletionReview(ctx, tx, events.Event{
+			EventID: "terminal-task", Sequence: latest.Sequence + 1, OrganizationID: "org-1",
+			EventType: "TASK_WORK_FAILED", TaskID: latest.TaskID, CorrelationID: latest.CorrelationID,
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := store.PendingCompletionReviewEvents(ctx, "org-1", "", 10)
+	if err != nil || len(remaining) != 1 || remaining[0].EventID != second.EventID {
+		t.Fatalf("terminal task did not remove only its pending review: %+v err=%v", remaining, err)
+	}
+}
+
+func TestCompletionReviewDecisionAndPendingProjectionAreAtomic(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	_, err = store.Append(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "COMPLETION_REVIEW_DECIDED", SourceActorID: "user-1",
+		TaskID: "task-missing", CorrelationID: "work-missing", Payload: map[string]string{"review_id": "review-missing"},
+	})
+	if err == nil {
+		t.Fatal("completion-review decision without a pending request was accepted")
+	}
+	stream, err := store.Events(ctx, "work-missing")
+	if err != nil || len(stream) != 0 {
+		t.Fatalf("failed projection update left durable event=%+v err=%v", stream, err)
+	}
+}
+
+func TestPendingApprovalRecordsExcludeTerminalHistoryAndOtherTenants(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	appendApproval := func(approval core.HumanApproval, version int) {
+		t.Helper()
+		if err := store.AppendRecord(ctx, string(approval.OrganizationID), "APPROVAL_STATE_TEST", "runtime", string(approval.TaskID), nil, nil, "approval", string(approval.ID), version, approval); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := core.HumanApproval{ID: "approval-1", OrganizationID: "org-1", TaskID: "task-1", Status: core.ApprovalPending}
+	appendApproval(first, 1)
+	appendApproval(core.HumanApproval{ID: "approval-other", OrganizationID: "org-2", TaskID: "task-other", Status: core.ApprovalPendingDecision}, 1)
+	expiredAt := time.Now().UTC().Add(-time.Nanosecond)
+	appendApproval(core.HumanApproval{ID: "approval-expired", OrganizationID: "org-1", TaskID: "task-expired", Status: core.ApprovalPending, ExpiresAt: &expiredAt}, 1)
+	first.Status = core.ApprovalDenied
+	appendApproval(first, 2)
+	appendApproval(core.HumanApproval{ID: "approval-2", OrganizationID: "org-1", TaskID: "task-2", Status: core.ApprovalAcknowledged}, 1)
+
+	bodies, err := store.PendingApprovalRecords(ctx, "org-1", time.Now().UTC(), 10)
+	if err != nil || len(bodies) != 1 {
+		t.Fatalf("org-1 pending approvals=%d err=%v", len(bodies), err)
+	}
+	var pending core.HumanApproval
+	if err := json.Unmarshal(bodies[0], &pending); err != nil || pending.ID != "approval-2" {
+		t.Fatalf("pending approval=%+v err=%v", pending, err)
+	}
+	var expiredRows int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pending_approvals WHERE organization_id='org-1' AND approval_id='approval-expired'`).Scan(&expiredRows); err != nil || expiredRows != 0 {
+		t.Fatalf("expired pending projection rows=%d err=%v", expiredRows, err)
+	}
+	foreign, err := store.PendingApprovalRecords(ctx, "org-2", time.Now().UTC(), 10)
+	if err != nil || len(foreign) != 1 {
+		t.Fatalf("org-2 pending approvals=%d err=%v", len(foreign), err)
+	}
+}
+
 func TestEventsSurviveReopen(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "agentos.db")

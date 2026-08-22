@@ -28,10 +28,10 @@ func execute(ctx context.Context, args []string, input *os.File, output, errorOu
 		return err
 	}
 	if len(args) == 0 {
-		configPath, config, state, err := discoverInstallation()
+		_, config, state, err := discoverInstallation()
 		switch {
 		case err == nil && state.Version == bootstrap.ConfigVersion && config.Version == bootstrap.ConfigVersion && state.Stage == bootstrap.StageReady:
-			return runTUI(ctx, configPath, config, input, output)
+			return runDashboard(ctx, config, output)
 		case err == nil:
 			return runInit(ctx, config.Mode, true, input, output)
 		case errors.Is(err, os.ErrNotExist):
@@ -57,6 +57,16 @@ func execute(ctx context.Context, args []string, input *os.File, output, errorOu
 			return err
 		}
 		return runServer(ctx, config, secrets.CredentialDirectory{})
+	case "dashboard":
+		configPath, err := parseConfigPath("dashboard", args[1:])
+		if err != nil {
+			return err
+		}
+		config, err := bootstrap.LoadConfig(configPath)
+		if err != nil {
+			return err
+		}
+		return runDashboard(ctx, config, output)
 	case "doctor":
 		return runDoctor(ctx, args[1:], output)
 	case "setup":
@@ -215,10 +225,11 @@ func removeObsoleteProviderCredentials(config bootstrap.Config, previous, curren
 func printHelp(output io.Writer) error {
 	_, err := fmt.Fprintln(output, `Agent OS
 
-  agentos                 Resume setup or open the organization console
+  agentos                 Resume setup or open the organization dashboard
   agentos init            Set up a system installation (default)
   agentos init --user     Set up an installation for the current Linux user
   agentos doctor          Inspect local health without changing anything
+  agentos dashboard       Open the local organization dashboard
   agentos setup provider  Replace and test the configured model provider
   agentos serve           Run the configured service
   agentos version         Print the version`)

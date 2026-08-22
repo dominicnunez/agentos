@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/core"
+	"github.com/dominicnunez/agentos/internal/events"
 )
 
 var (
@@ -90,8 +91,12 @@ type Store interface {
 	Records(context.Context, string, string) ([][]byte, error)
 }
 
-type latestRecordStore interface {
-	LatestRecords(context.Context, string) ([][]byte, error)
+type pendingApprovalStore interface {
+	PendingApprovalRecords(context.Context, string, time.Time, int) ([][]byte, error)
+}
+
+type recentEventStore interface {
+	RecentEvents(context.Context, string, string, int) ([]events.Event, error)
 }
 
 type Notifier interface {
@@ -323,33 +328,62 @@ func (s *Service) DecisionContext(ctx context.Context, approvalID, humanID core.
 	return DecisionContext{Approval: approval, Effect: obligation}, nil
 }
 
+// ReadContext returns an authorized immutable approval/effect binding for
+// display and uncertain-response recovery. Terminal decisions remain readable
+// after their effect leaves PENDING; mutation callers must use DecisionContext.
+func (s *Service) ReadContext(ctx context.Context, approvalID, humanID core.ID) (DecisionContext, error) {
+	approval, _, err := s.load(ctx, approvalID)
+	if err != nil {
+		return DecisionContext{}, err
+	}
+	if err := s.authorizeDecision(ctx, humanID, approval); err != nil {
+		return DecisionContext{}, err
+	}
+	terminal := approval.Status == core.ApprovalApproved || approval.Status == core.ApprovalDenied
+	if !terminal {
+		if err := s.validateUnexpired(approval); err != nil {
+			return DecisionContext{}, err
+		}
+	}
+	obligation, err := s.effectForApproval(ctx, approval, !terminal)
+	if err != nil {
+		return DecisionContext{}, err
+	}
+	return DecisionContext{Approval: approval, Effect: obligation}, nil
+}
+
 // PendingDecisionContexts returns current, exactly authorized approval work for
 // the local inbox. Every mutation still reloads the individual record.
-func (s *Service) PendingDecisionContexts(ctx context.Context, humanID core.ID) ([]DecisionContext, error) {
-	store, ok := s.store.(latestRecordStore)
+func (s *Service) PendingDecisionContexts(ctx context.Context, organizationID, humanID core.ID) ([]DecisionContext, error) {
+	if organizationID == "" {
+		return nil, fmt.Errorf("approval inbox organization is required")
+	}
+	store, ok := s.store.(pendingApprovalStore)
 	if !ok {
 		return nil, fmt.Errorf("approval inbox is unavailable")
 	}
-	bodies, err := store.LatestRecords(ctx, "approval")
+	bodies, err := store.PendingApprovalRecords(ctx, string(organizationID), s.now(), maximumInboxDecisionContexts+1)
 	if err != nil {
 		return nil, err
 	}
-	capacity := len(bodies)
-	if capacity > maximumInboxDecisionContexts {
-		capacity = maximumInboxDecisionContexts
+	if len(bodies) > maximumInboxDecisionContexts {
+		return nil, fmt.Errorf("approval inbox exceeds the V1 safety limit")
 	}
-	contexts := make([]DecisionContext, 0, capacity)
+	contexts := make([]DecisionContext, 0, len(bodies))
 	for _, body := range bodies {
 		var approval core.HumanApproval
 		if err := json.Unmarshal(body, &approval); err != nil {
 			return nil, fmt.Errorf("decode approval inbox: %w", err)
 		}
+		if approval.OrganizationID != organizationID {
+			return nil, fmt.Errorf("approval inbox crossed its organization boundary")
+		}
 		switch approval.Status {
 		case core.ApprovalPending, core.ApprovalNotified, core.ApprovalAcknowledged, core.ApprovalPendingDecision:
 		case core.ApprovalApproved, core.ApprovalDenied:
-			continue
+			return nil, fmt.Errorf("approval inbox contains terminal state")
 		default:
-			continue
+			return nil, fmt.Errorf("approval inbox contains invalid state")
 		}
 		if err := s.authorizeDecision(ctx, humanID, approval); err != nil {
 			continue
@@ -362,9 +396,46 @@ func (s *Service) PendingDecisionContexts(ctx context.Context, humanID core.ID) 
 			return nil, err
 		}
 		contexts = append(contexts, DecisionContext{Approval: approval, Effect: effect})
-		if len(contexts) > maximumInboxDecisionContexts {
-			return nil, fmt.Errorf("approval inbox exceeds the V1 safety limit")
+	}
+	return contexts, nil
+}
+
+// RecentDecisionContexts returns a bounded newest-first view of terminal
+// decisions that the same principal is still authorized to inspect. It is a
+// recovery/read surface only; mutations continue to require DecisionContext.
+func (s *Service) RecentDecisionContexts(ctx context.Context, organizationID, humanID core.ID, limit int) ([]DecisionContext, error) {
+	if limit < 1 || limit > 100 {
+		return nil, fmt.Errorf("recent approval limit must be between 1 and 100")
+	}
+	if organizationID == "" {
+		return nil, fmt.Errorf("recent approval organization is required")
+	}
+	store, ok := s.store.(recentEventStore)
+	if !ok {
+		return nil, fmt.Errorf("approval history is unavailable")
+	}
+	recent, err := store.RecentEvents(ctx, string(organizationID), "APPROVAL_DECIDED", limit)
+	if err != nil {
+		return nil, err
+	}
+	contexts := make([]DecisionContext, 0, limit)
+	for _, event := range recent {
+		var approval core.HumanApproval
+		if err := json.Unmarshal(event.Payload, &approval); err != nil {
+			return nil, fmt.Errorf("decode approval history: %w", err)
 		}
+		if approval.OrganizationID != organizationID || approval.ID == "" || string(approval.TaskID) != event.TaskID || event.SourceActorID != string(approval.DecidedBy) ||
+			(approval.Status != core.ApprovalApproved && approval.Status != core.ApprovalDenied) {
+			return nil, fmt.Errorf("recent approval decision identity is invalid")
+		}
+		if err := s.authorizeDecision(ctx, humanID, approval); err != nil {
+			continue
+		}
+		effect, err := s.effectForApproval(ctx, approval, false)
+		if err != nil {
+			return nil, err
+		}
+		contexts = append(contexts, DecisionContext{Approval: approval, Effect: effect})
 	}
 	return contexts, nil
 }
@@ -411,6 +482,10 @@ func (s *Service) validatePreparedEffect(ctx context.Context, approval core.Huma
 }
 
 func (s *Service) preparedEffect(ctx context.Context, approval core.HumanApproval) (core.EffectObligation, error) {
+	return s.effectForApproval(ctx, approval, true)
+}
+
+func (s *Service) effectForApproval(ctx context.Context, approval core.HumanApproval, requirePending bool) (core.EffectObligation, error) {
 	body, _, err := latestRecord(ctx, s.store, "effect", string(approval.EffectObligationID))
 	if errors.Is(err, errRecordNotFound) {
 		return core.EffectObligation{}, fmt.Errorf("approval requires a prepared effect obligation")
@@ -422,7 +497,7 @@ func (s *Service) preparedEffect(ctx context.Context, approval core.HumanApprova
 	if err := json.Unmarshal(body, &obligation); err != nil {
 		return core.EffectObligation{}, fmt.Errorf("decode prepared effect %s: %w", approval.EffectObligationID, err)
 	}
-	if obligation.Status != core.EffectPending || !approvalMatchesEffect(approval, obligation) {
+	if (requirePending && obligation.Status != core.EffectPending) || !approvalMatchesEffect(approval, obligation) {
 		return core.EffectObligation{}, fmt.Errorf("approval does not match the prepared effect obligation")
 	}
 	return obligation, nil

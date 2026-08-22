@@ -19,6 +19,23 @@ import (
 
 const testOwnerMarker = "local-owner-uid-marker"
 
+func TestInspectHumanCompletionRejectsDisallowedContentBeforePersistence(t *testing.T) {
+	contract := &core.CompletionContract{TaskID: "task-1", TaskVersion: 1, ArtifactRequirements: []core.ArtifactRequirement{{
+		Role: "report", MediaTypes: []string{"application/pdf"}, MinCount: 1, MaxCount: 1,
+	}}}
+	request := humanCompletionRequest{MessageID: "completion-1", Fields: map[string]string{}, Artifacts: []artifacts.Upload{{
+		Role: "report", Name: "report.pdf", Data: []byte("\x89PNG\r\n\x1a\n"),
+	}}}
+	if _, err := inspectHumanCompletion("local-uid-1000", contract, request); err == nil || !strings.Contains(err.Error(), "media type is not allowed") {
+		t.Fatalf("disallowed content prevalidation error=%v", err)
+	}
+	request.Artifacts[0].Data = []byte("%PDF-1.7\n")
+	evidence, err := inspectHumanCompletion("local-uid-1000", contract, request)
+	if err != nil || len(evidence) != 1 || evidence[0].MediaType != "application/pdf" {
+		t.Fatalf("content-derived evidence=%+v err=%v", evidence, err)
+	}
+}
+
 func TestHumanResponseRetainsWorkIdentityAndExperimentalTrustLabel(t *testing.T) {
 	response := humanResponse(intake.View{TaskID: "task-1", WorkID: "work-1", ConversationID: "context-1", State: intake.StateCompleted, Result: "lab result", Mode: core.IntentModeExperiment, TrustLabel: core.ExperimentTrustUnverified})
 	if response.WorkID != "work-1" || response.Mode != core.IntentModeExperiment || response.TrustLabel != core.ExperimentTrustUnverified {
@@ -107,6 +124,19 @@ func TestHumanGatewayRequiresStructuredCompletionAndCannotApproveThroughText(t *
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) {
 		t.Fatalf("structured Human completion=%d %s", response.Code, response.Body.String())
 	}
+	beforeReplay := gatewayExternalStream(t, store, "direct-blocked")
+	response = serveHuman(handler, http.MethodPost, "/v1/user/tasks/"+task.TaskID+"/completion", testOwnerMarker, completion)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) {
+		t.Fatalf("structured Human completion replay=%d %s", response.Code, response.Body.String())
+	}
+	afterReplay := gatewayExternalStream(t, store, "direct-blocked")
+	if len(afterReplay) != len(beforeReplay) {
+		t.Fatalf("completion replay appended events: before=%d after=%d", len(beforeReplay), len(afterReplay))
+	}
+	response = serveHuman(handler, http.MethodPost, "/v1/user/tasks/"+task.TaskID+"/completion/recover", testOwnerMarker, "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) {
+		t.Fatalf("structured completion recovery=%d %s", response.Code, response.Body.String())
+	}
 	stream := gatewayExternalStream(t, store, "direct-blocked")
 	foundHumanCompletion := false
 	for _, event := range stream {
@@ -180,7 +210,7 @@ func TestLocalOwnerCanFinalizeExactCompletionReview(t *testing.T) {
 	response := submitAndConfirmHuman(t, handler, humanMessageRequest{
 		ConversationID: "reviewed-work", MessageID: "message-1", Text: "draft a release update",
 	})
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"INPUT_REQUIRED"`) || strings.Contains(response.Body.String(), `"result"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"INPUT_REQUIRED"`) || !strings.Contains(response.Body.String(), `"review_required":true`) || strings.Contains(response.Body.String(), `"result"`) {
 		t.Fatalf("unreviewed submit=%d %s", response.Code, response.Body.String())
 	}
 	var task humanTaskResponse
@@ -214,9 +244,43 @@ func TestLocalOwnerCanFinalizeExactCompletionReview(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"APPROVE"`) {
 		t.Fatalf("review decision=%d %s", response.Code, response.Body.String())
 	}
+	response = serveHuman(handler, http.MethodGet, "/v1/user/reviews/"+task.TaskID, testOwnerMarker, "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"APPROVE"`) || !strings.Contains(response.Body.String(), `"reviewer_id":"local-uid-1000"`) {
+		t.Fatalf("terminal review recovery=%d %s", response.Code, response.Body.String())
+	}
+	response = serveHuman(handler, http.MethodGet, "/v1/user/reviews/"+task.TaskID+"/records/"+review.ReviewID, testOwnerMarker, "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"APPROVE"`) || !strings.Contains(response.Body.String(), `"review_id":"`+review.ReviewID+`"`) {
+		t.Fatalf("exact terminal review recovery=%d %s", response.Code, response.Body.String())
+	}
+	response = serveHuman(handler, http.MethodGet, "/v1/user/reviews/recent?limit=20", testOwnerMarker, "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"review_id":"`+review.ReviewID+`"`) || !strings.Contains(response.Body.String(), `"state":"APPROVE"`) {
+		t.Fatalf("recent completion review=%d %s", response.Code, response.Body.String())
+	}
 	response = serveHuman(handler, http.MethodGet, "/v1/user/tasks/"+task.TaskID, testOwnerMarker, "")
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) || !strings.Contains(response.Body.String(), `"result":"candidate: Operate only as this runtime-selected durable Agent blueprint.`) {
 		t.Fatalf("reviewed task=%d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestHumanGatewayRecoversMostRecentConfirmedTask(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	handler := testHumanHandler(t, intake.New(app.New(events.NewGateway(store))))
+	confirmed := submitAndConfirmHuman(t, handler, humanMessageRequest{ConversationID: "recent-work", MessageID: "message-1", Text: "echo recent"})
+	var want humanTaskResponse
+	if err := json.Unmarshal(confirmed.Body.Bytes(), &want); err != nil {
+		t.Fatal(err)
+	}
+	response := serveHuman(handler, http.MethodGet, "/v1/user/tasks/recent", testOwnerMarker, "")
+	var got humanTaskResponse
+	if response.Code != http.StatusOK {
+		t.Fatalf("recent task=%d %s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil || got.TaskID != want.TaskID || got.ConversationID != want.ConversationID {
+		t.Fatalf("recent task=%+v want=%+v err=%v", got, want, err)
 	}
 }
 

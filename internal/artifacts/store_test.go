@@ -23,6 +23,12 @@ func TestStoreValidatesContentAndUsesContentAddressedPrivateFiles(t *testing.T) 
 	if err != nil || created || second.Ref != evidence.Ref {
 		t.Fatalf("idempotent put=%+v created=%t err=%v", second, created, err)
 	}
+	derived := upload
+	derived.MediaType = ""
+	derivedEvidence, created, err := store.Put("org-1", "task-1", "local-uid-1000", derived)
+	if err != nil || created || derivedEvidence.MediaType != "text/plain" || derivedEvidence.Ref != evidence.Ref {
+		t.Fatalf("content-derived media type=%+v created=%t err=%v", derivedEvidence, created, err)
+	}
 	bad := upload
 	bad.MediaType = "application/pdf"
 	if _, _, err := store.Put("org-1", "task-1", "local-uid-1000", bad); err == nil {

@@ -306,6 +306,102 @@ def third_party_licenses(modules: list[dict], version: str, commit: str) -> dict
     return files
 
 
+def add_frontend_license_bundle(
+    files: dict[str, tuple[bytes, int]],
+    source_files: dict[str, tuple[bytes, int]],
+) -> list[dict[str, str]]:
+    bundle_name = "internal/dashboard/dist/THIRD_PARTY_LICENSES.json"
+    lockfile_name = "web/dashboard/pnpm-lock.yaml"
+    bundle_record = source_files.get(bundle_name)
+    lockfile_record = source_files.get(lockfile_name)
+    if bundle_record is None or lockfile_record is None:
+        raise RuntimeError("dashboard source lacks its compiled license bundle or lockfile")
+    try:
+        bundle = json.loads(bundle_record[0].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("dashboard compiled license bundle is invalid JSON") from error
+    if not isinstance(bundle, dict) or bundle.get("schema_version") != 1:
+        raise RuntimeError("dashboard compiled license bundle schema is invalid")
+    lockfile_digest = hashlib.sha256(lockfile_record[0]).hexdigest()
+    if bundle.get("lockfile_sha256") != lockfile_digest:
+        raise RuntimeError("dashboard compiled license bundle does not match pnpm-lock.yaml")
+    packages = bundle.get("packages")
+    texts = bundle.get("license_texts")
+    if not isinstance(packages, list) or not packages or not isinstance(texts, list) or not texts:
+        raise RuntimeError("dashboard compiled license bundle is empty")
+    text_hashes: set[str] = set()
+    for item in texts:
+        if not isinstance(item, dict) or set(item) != {"sha256", "text"}:
+            raise RuntimeError("dashboard license text entry is invalid")
+        digest, text = item["sha256"], item["text"]
+        if (
+            not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or not isinstance(text, str)
+            or not text
+            or len(text.encode("utf-8")) > MAX_LICENSE_BYTES
+            or hashlib.sha256(text.encode("utf-8")).hexdigest() != digest
+            or digest in text_hashes
+        ):
+            raise RuntimeError("dashboard license text evidence is invalid")
+        text_hashes.add(digest)
+    identities: set[tuple[str, str]] = set()
+    for package in packages:
+        if not isinstance(package, dict) or set(package) != {
+            "name", "version", "declared_license", "evidence"
+        }:
+            raise RuntimeError("dashboard compiled package record is invalid")
+        name, package_version = package["name"], package["version"]
+        evidence = package["evidence"]
+        identity = (name, package_version)
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(package_version, str)
+            or not package_version
+            or not isinstance(package["declared_license"], str)
+            or not package["declared_license"]
+            or not isinstance(evidence, list)
+            or not evidence
+            or identity in identities
+        ):
+            raise RuntimeError("dashboard compiled package identity or evidence is invalid")
+        identities.add(identity)
+        for record in evidence:
+            if (
+                not isinstance(record, dict)
+                or set(record) != {"file", "sha256"}
+                or not isinstance(record["file"], str)
+                or not LICENSE_NAME.match(record["file"])
+                or record["sha256"] not in text_hashes
+            ):
+                raise RuntimeError("dashboard compiled package lacks discoverable license evidence")
+    destination = "THIRD_PARTY_LICENSES/npm-frontend.json"
+    files[destination] = bundle_record
+    manifest_body, manifest_mode = files["THIRD_PARTY_LICENSES/manifest.json"]
+    manifest = json.loads(manifest_body)
+    manifest["frontend"] = {
+        "licenseBundle": destination.removeprefix("THIRD_PARTY_LICENSES/"),
+        "lockfileSha256": lockfile_digest,
+        "packages": [
+            {"name": package["name"], "version": package["version"]}
+            for package in packages
+        ],
+    }
+    files["THIRD_PARTY_LICENSES/manifest.json"] = (
+        (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+        manifest_mode,
+    )
+    return [
+        {
+            "declared_license": package["declared_license"],
+            "name": package["name"],
+            "version": package["version"],
+        }
+        for package in packages
+    ]
+
+
 def dependency_source_files(modules: list[dict]) -> dict[str, tuple[bytes, int]]:
     required = {
         (module["path"], module["version"])
@@ -372,7 +468,12 @@ def dependency_source_files(modules: list[dict]) -> dict[str, tuple[bytes, int]]
 
 
 def cyclone_dx(
-    goos: str, goarch: str, version: str, commit: str, go_version: str
+    goos: str,
+    goarch: str,
+    version: str,
+    commit: str,
+    go_version: str,
+    frontend_packages: list[dict[str, str]],
 ) -> bytes:
     root_purl = module_purl("github.com/dominicnunez/agentos", "v" + version)
     components = []
@@ -389,6 +490,24 @@ def cyclone_dx(
                 "version": module["version"],
             }
         )
+    for package in frontend_packages:
+        purl = (
+            "pkg:npm/"
+            + quote(package["name"], safe="/")
+            + "@"
+            + quote(package["version"], safe="._-+")
+        )
+        components.append(
+            {
+                "bom-ref": purl,
+                "licenses": [{"license": {"name": package["declared_license"]}}],
+                "name": package["name"],
+                "purl": purl,
+                "type": "library",
+                "version": package["version"],
+            }
+        )
+    components.sort(key=lambda item: item["purl"])
     document = {
         "bomFormat": "CycloneDX",
         "components": components,
@@ -644,6 +763,7 @@ def main() -> int:
         raise RuntimeError("vendored dependency source collides with tracked source")
     source_files.update(vendored_sources)
     bundled_licenses = third_party_licenses(module_records, version, commit)
+    frontend_packages = add_frontend_license_bundle(bundled_licenses, source_files)
     output.mkdir(parents=True, exist_ok=False)
     host_goos = command(
         ["go", "env", "GOOS"], env=build_environment(), capture=True
@@ -689,7 +809,9 @@ def main() -> int:
                 build_binary(package, binary, goos, goarch, version)
                 packaged[filename] = (binary.read_bytes(), 0o755)
             sbom_name = f"agentos_{version}_{target}.cdx.json"
-            sbom = cyclone_dx(goos, goarch, version, commit, go_version)
+            sbom = cyclone_dx(
+                goos, goarch, version, commit, go_version, frontend_packages
+            )
             sbom_path = output / sbom_name
             sbom_path.write_bytes(sbom)
             produced.append(sbom_path)
@@ -702,6 +824,7 @@ def main() -> int:
                 "LICENSE",
                 "SOURCE.md",
                 "THIRD_PARTY_LICENSES/manifest.json",
+                "THIRD_PARTY_LICENSES/npm-frontend.json",
             ):
                 if required not in packaged:
                     raise RuntimeError(

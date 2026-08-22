@@ -27,14 +27,18 @@ and marks that feedback as untrusted content in the next execution context.
 ## Private user control
 
 ```text
-GET  /v1/user/reviews?after={task-id}&limit={1..100}
+GET  /v1/user/reviews?after={opaque-review-cursor}&limit={1..100}
 GET  /v1/user/reviews/{task-id}
 POST /v1/user/reviews/{task-id}
 ```
 
-The collection GET returns pending organization-scoped reviews in stable Task
-ID order, including internal child Tasks that remain unavailable through A2A.
-The default page size is 50; `next_after` is present when another page exists.
+The collection GET returns pending organization-scoped reviews newest first
+from a cursor-bounded SQLite projection, including internal child Tasks that
+remain unavailable through A2A. It does not scan the organization's Task
+or review history. Request and decision events maintain the tenant-scoped
+pending projection in the same SQLite transaction, and the projection is
+indexed by authoritative ledger sequence. The default page size is 50;
+`next_after` is an opaque ledger cursor present only when another page exists.
 The Task GET supplies the review ID, Task version, objective, fingerprint,
 candidate, criteria, and evidence event references. A decision body is:
 
@@ -54,3 +58,15 @@ before a decision event is written.
 Delivery is idempotent for the same identity and exact content. Startup
 recovery continues a durable decision from its last completed phase without
 inventing judgment or replaying an uncertain model call.
+An exact terminal-record read and the bounded recent-decision projection
+perform the same continuation from the durable decision. If another authorized
+user reconnects after the response was lost, Agent OS keeps the original
+reviewer identity and never rewrites the decision merely to match the current
+session.
+
+The pending-review projection is updated in the same transaction as its source
+event. A decision removes its request, and an authoritative terminal Task
+transition also removes an abandoned request. During `REVISE` recovery, the
+runtime accepts an already-progressed Task only when its sealed `TASK_RESUMED`
+event references the exact durable decision; a later execution failure does not
+make that accepted continuation ambiguous.

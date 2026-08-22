@@ -69,6 +69,10 @@ func (c *ApprovalControl) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.list(w, r, c.owner.ID)
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/control/approvals/recent" {
+		c.listRecent(w, r, c.owner.ID)
+		return
+	}
 	approvalID, operation, ok := approvalRoute(r.URL.Path)
 	if !ok {
 		http.NotFound(w, r)
@@ -89,8 +93,25 @@ func (c *ApprovalControl) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (c *ApprovalControl) listRecent(w http.ResponseWriter, r *http.Request, humanID core.ID) {
+	if r.URL.RawQuery != "limit=20" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "recent approval query is invalid"})
+		return
+	}
+	contexts, err := c.service.RecentDecisionContexts(r.Context(), c.owner.OrganizationID, humanID, 20)
+	if err != nil {
+		writeApprovalError(w, err)
+		return
+	}
+	responses := make([]approvalControlResponse, 0, len(contexts))
+	for _, decisionContext := range contexts {
+		responses = append(responses, approvalResponse(decisionContext))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"approvals": responses})
+}
+
 func (c *ApprovalControl) list(w http.ResponseWriter, r *http.Request, humanID core.ID) {
-	contexts, err := c.service.PendingDecisionContexts(r.Context(), humanID)
+	contexts, err := c.service.PendingDecisionContexts(r.Context(), c.owner.OrganizationID, humanID)
 	if err != nil {
 		writeApprovalError(w, err)
 		return
@@ -103,7 +124,7 @@ func (c *ApprovalControl) list(w http.ResponseWriter, r *http.Request, humanID c
 }
 
 func (c *ApprovalControl) inspect(w http.ResponseWriter, r *http.Request, approvalID, humanID core.ID) {
-	decisionContext, err := c.service.DecisionContext(r.Context(), approvalID, humanID)
+	decisionContext, err := c.service.ReadContext(r.Context(), approvalID, humanID)
 	if err != nil {
 		writeApprovalError(w, err)
 		return
@@ -231,7 +252,7 @@ func writeApprovalError(w http.ResponseWriter, err error) {
 	case errors.Is(err, approvals.ErrApprovalNotFound), errors.Is(err, approvals.ErrDecisionUnauthorized):
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "approval not found"})
 	case errors.Is(err, approvals.ErrApprovalExpired):
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "approval expired"})
+		writeJSON(w, http.StatusGone, map[string]string{"error": "approval expired"})
 	default:
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "approval state conflicts with the requested operation"})
 	}

@@ -24,6 +24,8 @@ modules:
     path: internal/completion
   - name: core
     path: internal/core
+  - name: dashboard
+    path: internal/dashboard
   - name: effects
     path: internal/effects
   - name: effectstatus
@@ -94,7 +96,7 @@ policy:
       from:
         module: approvals
       to:
-        module: core
+        modules: [core, events]
 
     - name: audit-events
       from:

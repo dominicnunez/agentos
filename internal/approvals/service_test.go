@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/dominicnunez/agentos/internal/approvals"
 	"github.com/dominicnunez/agentos/internal/core"
@@ -40,7 +41,7 @@ func (s latestInboxStore) AppendRecord(context.Context, string, string, string, 
 
 func (s latestInboxStore) Records(context.Context, string, string) ([][]byte, error) { return nil, nil }
 
-func (s latestInboxStore) LatestRecords(context.Context, string) ([][]byte, error) {
+func (s latestInboxStore) PendingApprovalRecords(context.Context, string, time.Time, int) ([][]byte, error) {
 	return s.bodies, nil
 }
 
@@ -53,9 +54,9 @@ func TestApprovalInboxLimitExcludesHistoricalRecords(t *testing.T) {
 		}
 		bodies = append(bodies, body)
 	}
-	contexts, err := approvals.New(latestInboxStore{bodies: bodies}, nil, nil).PendingDecisionContexts(t.Context(), "approver")
-	if err != nil || len(contexts) != 0 {
-		t.Fatalf("historical approvals blocked the inbox: contexts=%d err=%v", len(contexts), err)
+	contexts, err := approvals.New(latestInboxStore{bodies: bodies}, nil, nil).PendingDecisionContexts(t.Context(), "org-1", "approver")
+	if err == nil || contexts != nil {
+		t.Fatalf("oversized pending approval projection was accepted: contexts=%d err=%v", len(contexts), err)
 	}
 }
 
@@ -162,6 +163,17 @@ func TestApprovalWaitsAcrossRestart(t *testing.T) {
 	result, err := coordinator.Execute(ctx, obligation)
 	if err != nil || result.Status != core.EffectConfirmed || adapter.calls != 1 {
 		t.Fatalf("approved effect result=%+v calls=%d err=%v", result, adapter.calls, err)
+	}
+	terminal, err := service.ReadContext(ctx, approval.ID, "human-approver")
+	if err != nil || terminal.Approval.Status != core.ApprovalApproved || terminal.Effect.Status != core.EffectConfirmed || terminal.Effect.EffectFingerprint != fingerprint {
+		t.Fatalf("terminal approval context=%+v err=%v", terminal, err)
+	}
+	recent, err := service.RecentDecisionContexts(ctx, "org-1", "human-approver", 20)
+	if err != nil || len(recent) != 1 || recent[0].Approval.ID != approval.ID || recent[0].Approval.Status != core.ApprovalApproved {
+		t.Fatalf("recent approval decisions=%+v err=%v", recent, err)
+	}
+	if _, err := service.DecisionContext(ctx, approval.ID, "human-approver"); err == nil {
+		t.Fatal("terminal effect remained eligible for mutation")
 	}
 	stream, err := l.Events(ctx, "")
 	if err != nil {

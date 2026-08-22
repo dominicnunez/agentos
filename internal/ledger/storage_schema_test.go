@@ -195,7 +195,20 @@ func TestStorageV2MigrationPreservesReviewedIntentEvidence(t *testing.T) {
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=2,event_schema_version=?`, LegacyEventSchemaVersion); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE pending_approvals`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	fingerprint, err := storageSchemaFingerprint(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=2,event_schema_version=?,schema_fingerprint=?`, LegacyEventSchemaVersion, fingerprint); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -217,6 +230,77 @@ func TestStorageV2MigrationPreservesReviewedIntentEvidence(t *testing.T) {
 	}
 	if err := events.ValidateReviewedIntentAdmission(stream, stream[2]); err != nil {
 		t.Fatalf("migrated reviewed Intent evidence: %v", err)
+	}
+}
+
+func TestStorageV4MigrationRebuildsBoundedGovernanceQueues(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "storage-v4-governance.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendReview := func(eventType, taskID, correlationID, reviewID string) events.Event {
+		t.Helper()
+		event, err := store.Append(ctx, events.TrustedDraft{
+			OrganizationID: "org-1", EventType: eventType, SourceActorID: "runtime",
+			TaskID: taskID, CorrelationID: correlationID, Payload: map[string]string{"review_id": reviewID},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return event
+	}
+	appendReview("COMPLETION_REVIEW_REQUESTED", "task-1", "work-1", "review-1")
+	appendReview("COMPLETION_REVIEW_DECIDED", "task-1", "work-1", "review-1")
+	pending := appendReview("COMPLETION_REVIEW_REQUESTED", "task-2", "work-2", "review-2")
+	appendTaskProjectionParents(t, ctx, store, "org-1", "work-3", "work-3")
+	terminal := core.Task{ID: "task-3", WorkID: "work-3", Description: "terminalized before review", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(terminal.ID), CorrelationID: "work-3"},
+		ProjectionKind: "task", RecordID: string(terminal.ID), Version: 1, Value: terminal,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	appendReview("COMPLETION_REVIEW_REQUESTED", "task-3", "work-3", "review-3")
+	terminal.Status = core.TaskFailed
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_WORK_FAILED", SourceActorID: "runtime", TaskID: string(terminal.ID), CorrelationID: "work-3"},
+		ProjectionKind: "task", RecordID: string(terminal.ID), Version: 2, Value: terminal,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	fingerprint, err := storageSchemaFingerprint(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=4,schema_fingerprint=?; PRAGMA user_version=4`, fingerprint); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = migrated.Close() })
+	reviews, err := migrated.PendingCompletionReviewEvents(ctx, "org-1", "", 10)
+	if err != nil || len(reviews) != 1 || reviews[0].EventID != pending.EventID {
+		t.Fatalf("migrated pending completion reviews=%+v err=%v", reviews, err)
 	}
 }
 

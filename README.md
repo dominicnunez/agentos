@@ -48,7 +48,9 @@ creates standard Linux service and data locations, and requires one tested
 model provider before Agent OS can run. Use `agentos init --user` for an
 installation owned and run entirely by the current account.
 
-After setup, `agentos` opens the organization console. `agentos doctor` performs
+After setup, `agentos` opens the local organization dashboard. The SvelteKit
+interface is embedded in the Agent OS binary; it does not require a Node server
+or expose the private user gateway. `agentos doctor` performs
 a read-only health check of configuration, credentials, service state, the
 private user gateway, and SQLite ledger integrity. In system mode, run
 `sudo agentos doctor` for the full service-private credential and ledger checks.

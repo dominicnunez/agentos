@@ -60,6 +60,10 @@ func TestApprovalControlShowsTrustedEffectAndEnforcesLifecycle(t *testing.T) {
 			t.Fatalf("%s status=%s want=%s", step.path, view.Status, step.want)
 		}
 	}
+	recent := approvalRequest(t, handler, http.MethodGet, "/v1/control/approvals/recent?limit=20", testApprovalToken, "")
+	if recent.Code != http.StatusOK || !strings.Contains(recent.Body.String(), `"approval_id":"approval-1"`) || !strings.Contains(recent.Body.String(), `"status":"APPROVED"`) {
+		t.Fatalf("recent terminal approval=%d %s", recent.Code, recent.Body.String())
+	}
 }
 
 func TestApprovalControlRejectsWorkCredentialsNonExactAuthorityAndUntrustedFields(t *testing.T) {
@@ -134,14 +138,25 @@ func TestApprovalControlRejectsMalformedRequestsWithoutChangingState(t *testing.
 	}
 }
 
+func TestApprovalControlProvesExpiredRecoveryBinding(t *testing.T) {
+	handler, _ := newApprovalControlFixtureWithExpiry(t, time.Now().UTC().Add(-time.Minute))
+	response := approvalRequest(t, handler, http.MethodGet, "/v1/control/approvals/approval-1", testApprovalToken, "")
+	if response.Code != http.StatusGone || !strings.Contains(response.Body.String(), `"error":"approval expired"`) {
+		t.Fatalf("expired approval status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func newApprovalControlFixture(t *testing.T) (http.Handler, string) {
+	return newApprovalControlFixtureWithExpiry(t, time.Now().UTC().Add(time.Hour))
+}
+
+func newApprovalControlFixtureWithExpiry(t *testing.T, expires time.Time) (http.Handler, string) {
 	t.Helper()
 	store, err := ledger.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	expires := time.Now().UTC().Add(time.Hour)
 	effect := core.EffectObligation{
 		ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "agent-1",
 		Action: "send", Resource: "public-channel", Scope: "org-1", ConsequenceBoundary: core.BoundaryPublicExternal,
