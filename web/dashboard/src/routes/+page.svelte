@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api, connect, identifier } from '$lib/api';
+  import { APIError, api, connect, identifier } from '$lib/api';
+  import { loadAllCompletionReviews, validateArtifactSelections } from '$lib/governance';
   import '$lib/app.css';
-  import type { Approval, CompletionReview, DashboardIdentity, IntentDraft, TaskView } from '$lib/types';
+  import type { Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, IntentDraft, TaskView } from '$lib/types';
 
   type Section = 'overview' | 'work' | 'approvals' | 'reviews' | 'system';
   type IntentList = 'context' | 'deliverables' | 'completion_criteria' | 'constraints';
@@ -41,16 +42,34 @@
     if (!identity) return;
     error = '';
     const [activeResult, approvalResult, reviewResult] = await Promise.allSettled([
-      api<TaskView>('/api/v1/user/intents/active'),
+      loadActiveIntent(),
       api<{ approvals: Approval[] }>('/api/v1/control/approvals'),
-      api<{ reviews: CompletionReview[] }>('/api/v1/user/reviews?limit=100')
+      loadReviews()
     ]);
-    active = activeResult.status === 'fulfilled' ? activeResult.value : null;
-    if (active?.conversation_id) conversationID = active.conversation_id;
-    approvals = approvalResult.status === 'fulfilled' ? approvalResult.value.approvals : [];
-    reviews = reviewResult.status === 'fulfilled' ? reviewResult.value.reviews : [];
+    const failures = [activeResult, approvalResult, reviewResult]
+      .filter((result) => result.status === 'rejected')
+      .map((result) => message((result as PromiseRejectedResult).reason));
+    if (activeResult.status === 'fulfilled') {
+      active = activeResult.value;
+      conversationID = activeResult.value?.conversation_id ?? '';
+    }
+    if (approvalResult.status === 'fulfilled') approvals = approvalResult.value.approvals;
+    if (failures.length) error = `Dashboard refresh failed; previously loaded governance data was preserved. ${failures.join(' ')}`;
     selectedApproval = approvals.find((item) => item.approval_id === selectedApproval?.approval_id) ?? null;
     selectedReview = reviews.find((item) => item.review_id === selectedReview?.review_id) ?? null;
+  }
+
+  async function loadActiveIntent(): Promise<TaskView | null> {
+    try {
+      return await api<TaskView>('/api/v1/user/intents/active');
+    } catch (cause) {
+      if (cause instanceof APIError && cause.status === 404) return null;
+      throw cause;
+    }
+  }
+
+  async function loadReviews(): Promise<CompletionReview[]> {
+    return loadAllCompletionReviews((after) => api<CompletionReviewPage>(`/api/v1/user/reviews?limit=100${after ? `&after=${encodeURIComponent(after)}` : ''}`));
   }
 
   async function submitWork(): Promise<void> {
@@ -101,13 +120,12 @@
     if (!task?.completion_contract) return;
     const currentTask = task;
     await action(async () => {
+      const selectionError = validateArtifactSelections(currentTask.completion_contract!.artifact_requirements ?? [], completionFiles);
+      if (selectionError) throw new Error(selectionError);
       const artifacts: { role: string; name: string; media_type: string; data: string }[] = [];
       for (const requirement of currentTask.completion_contract!.artifact_requirements ?? []) {
         for (const file of completionFiles[requirement.role] ?? []) {
-          if (file.size < 1 || file.size > 16 * 1024 * 1024) {
-            throw new Error(`${file.name} must contain 1 byte to 16 MiB.`);
-          }
-          artifacts.push({ role: requirement.role, name: file.name, media_type: file.type || 'application/octet-stream', data: await base64(file) });
+          artifacts.push({ role: requirement.role, name: file.name, media_type: file.type, data: await base64(file) });
         }
       }
       task = await api<TaskView>(`/api/v1/user/tasks/${encodeURIComponent(currentTask.task_id)}/completion`, {
@@ -247,11 +265,13 @@
         <div class="panel composer"><p class="eyebrow">Natural-language intake</p><h2>{active ? 'Continue the conversation' : 'What should the organization accomplish?'}</h2><textarea bind:value={workText} rows="7" placeholder="Describe the outcome, relevant context, constraints, and anything only you can provide."></textarea><label>Execution<select bind:value={executionKind} disabled={Boolean(active)}><option value="">Automatic</option><option value="HUMAN">User task</option></select><small>Automatic prefers deterministic work and uses an Agent only when justified.</small></label><div class="actions"><button class="primary" onclick={submitWork} disabled={busy || !identity || !workText.trim()}>Send</button><small>The model proposes a bounded Intent. Nothing starts until you confirm the exact review.</small></div></div>
         <div class="panel intent"><div class="panel-title"><div><p class="eyebrow">Intent contract</p><h2>Review before work begins</h2></div>{#if active?.state}<span class="status">{active.state}</span>{/if}</div>
           {#if active?.intent}
+            {#if active.prompt}<div class="banner notice" role="status"><strong>More information required</strong><br />{active.prompt}</div>{/if}
             <h3>{active.intent.objective}</h3>
-            <dl><div><dt>Mode</dt><dd>{active.intent.mode}</dd></div>{#if active.intent.goal}<div><dt>Goal</dt><dd>{active.intent.goal.value}</dd></div>{/if}{#if active.intent.replaces_work}<div><dt>Replaces Work</dt><dd>{active.intent.replaces_work.value}</dd></div>{/if}</dl>
+            <dl><div><dt>Mode</dt><dd>{active.intent.mode}</dd></div>{#if active.intent.requested_execution_kind}<div><dt>Requested execution</dt><dd>{active.intent.requested_execution_kind}</dd></div>{/if}{#if active.intent.goal}<div><dt>Goal</dt><dd>{active.intent.goal.value}</dd></div>{/if}{#if active.intent.replaces_work}<div><dt>Replaces Work</dt><dd>{active.intent.replaces_work.value}</dd></div>{/if}</dl>
             {#each [['Context','context'],['Deliverables','deliverables'],['Done when','completion_criteria'],['Requirements','constraints']] as group}
               {#if values(active.intent, group[1] as IntentList).length}<h4>{group[0]}</h4><ul>{#each values(active.intent, group[1] as IntentList) as value}<li>{value.value}</li>{/each}</ul>{/if}
             {/each}
+            {#if active.intent.resolved_decisions?.length}<h4>Resolved decisions</h4><ul>{#each active.intent.resolved_decisions as decision}<li><strong>{decision.subject}:</strong> {decision.value}</li>{/each}</ul>{/if}
             {#if active.intent.consequence_candidates?.length}<h4>Potential task boundaries</h4><ul>{#each active.intent.consequence_candidates as boundary}<li>{boundary}</li>{/each}</ul>{/if}
             <div class="fingerprint"><span>Intent v{active.intent.version}</span><code>{active.intent.fingerprint}</code></div>
             <button class="primary wide" onclick={confirmIntent} disabled={busy || active.state !== 'AWAITING_CONFIRMATION'}>Confirm exact Intent</button>
@@ -266,7 +286,7 @@
       </section>
     {:else if section === 'approvals'}
       <section class="split"><div class="panel list"><div class="panel-title"><div><p class="eyebrow">Consequential effects</p><h2>Pending approvals</h2></div><span class="count">{approvals.length}</span></div>{#if approvals.length}{#each approvals as approval}<button class:selected={selectedApproval?.approval_id === approval.approval_id} onclick={() => {selectedApproval=approval; approvalPhrase='';}}><div><strong>{approval.action}</strong><span>{approval.resource}</span></div><div><span class="risk">{approval.risk}</span><small>{approval.boundary}</small></div></button>{/each}{:else}<div class="empty">No exact effects are awaiting a decision.</div>{/if}</div>
-        <div class="panel detail">{#if selectedApproval}<p class="eyebrow">Exact proposed effect</p><h2>{selectedApproval.canonical_effect_descriptor}</h2><dl><div><dt>Action</dt><dd>{selectedApproval.action}</dd></div><div><dt>Resource</dt><dd>{selectedApproval.resource}</dd></div><div><dt>Scope</dt><dd>{selectedApproval.scope}</dd></div><div><dt>Boundary</dt><dd>{selectedApproval.boundary}</dd></div><div><dt>Risk</dt><dd>{selectedApproval.risk}</dd></div><div><dt>Single use</dt><dd>{selectedApproval.single_use ? 'Yes' : 'No'}</dd></div></dl>{#if Object.keys(selectedApproval.effect_arguments).length}<h4>Arguments</h4><pre>{JSON.stringify(selectedApproval.effect_arguments, null, 2)}</pre>{/if}<div class="fingerprint"><span>Effect fingerprint</span><code>{selectedApproval.effect_fingerprint}</code></div><label>Type <code>APPROVE {selectedApproval.effect_fingerprint.slice(0,12)}</code> or <code>DENY</code><input bind:value={approvalPhrase} autocomplete="off" /></label><div class="actions"><button class="danger" onclick={() => decideApproval('DENY')} disabled={busy}>Deny</button><button class="primary" onclick={() => decideApproval('APPROVE')} disabled={busy}>Approve exact effect</button></div>{:else}<div class="empty">Select an approval to inspect the immutable effect details.</div>{/if}</div>
+        <div class="panel detail">{#if selectedApproval}<p class="eyebrow">Exact proposed effect</p><h2>{selectedApproval.canonical_effect_descriptor}</h2><dl><div><dt>Action</dt><dd>{selectedApproval.action}</dd></div><div><dt>Resource</dt><dd>{selectedApproval.resource}</dd></div><div><dt>Scope</dt><dd>{selectedApproval.scope}</dd></div><div><dt>Boundary</dt><dd>{selectedApproval.boundary}</dd></div><div><dt>Risk</dt><dd>{selectedApproval.risk}</dd></div><div><dt>Urgency</dt><dd>{selectedApproval.urgency}</dd></div><div><dt>Expires</dt><dd>{selectedApproval.expires_at ?? 'No expiry recorded'}</dd></div><div><dt>Single use</dt><dd>{selectedApproval.single_use ? 'Yes' : 'No'}</dd></div></dl>{#if Object.keys(selectedApproval.effect_arguments).length}<h4>Arguments</h4><pre>{JSON.stringify(selectedApproval.effect_arguments, null, 2)}</pre>{/if}<div class="fingerprint"><span>Effect fingerprint</span><code>{selectedApproval.effect_fingerprint}</code></div><label>Type <code>APPROVE {selectedApproval.effect_fingerprint.slice(0,12)}</code> or <code>DENY</code><input bind:value={approvalPhrase} autocomplete="off" /></label><div class="actions"><button class="danger" onclick={() => decideApproval('DENY')} disabled={busy}>Deny</button><button class="primary" onclick={() => decideApproval('APPROVE')} disabled={busy}>Approve exact effect</button></div>{:else}<div class="empty">Select an approval to inspect the immutable effect details.</div>{/if}</div>
       </section>
     {:else if section === 'reviews'}
       <section class="split"><div class="panel list"><div class="panel-title"><div><p class="eyebrow">Completion evidence</p><h2>Review queue</h2></div><span class="count">{reviews.length}</span></div>{#if reviews.length}{#each reviews as review}<button class:selected={selectedReview?.review_id === review.review_id} onclick={() => {selectedReview=review; reviewPhrase=''; revisionFeedback='';}}><div><strong>{review.objective}</strong><span>{review.task_id}</span></div><span class="status">{review.state}</span></button>{/each}{:else}<div class="empty">No completion evidence is awaiting judgment.</div>{/if}</div>

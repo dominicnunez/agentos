@@ -67,7 +67,10 @@ func TestEmbeddedDashboardRetainsGovernedWorkReviewFields(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"Replaces Work", "Effect fingerprint", "Evidence fingerprint", "Confirm exact Intent"} {
+	for _, required := range []string{
+		"Replaces Work", "Requested execution", "Resolved decisions", "More information required",
+		"Effect fingerprint", "Urgency", "Expires", "Evidence fingerprint", "Confirm exact Intent",
+	} {
 		if !strings.Contains(generated.String(), required) {
 			t.Fatalf("embedded dashboard omitted governed review field %q", required)
 		}

@@ -3,6 +3,13 @@ import type { DashboardIdentity } from './types';
 const sessionKey = 'agentos.dashboard.session';
 let sessionToken = '';
 
+export class APIError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = 'APIError';
+  }
+}
+
 function currentBootstrapToken(): string {
   const params = new URLSearchParams(window.location.hash.slice(1));
   return params.get('bootstrap') ?? '';
@@ -55,7 +62,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
 async function decode<T>(response: Response): Promise<T> {
   const body = (await response.json().catch(() => ({ error: `HTTP ${response.status}` }))) as T & { error?: string };
   if (!response.ok) {
-    throw new Error(body.error ?? `HTTP ${response.status}`);
+    throw new APIError(response.status, body.error ?? `HTTP ${response.status}`);
   }
   return body;
 }

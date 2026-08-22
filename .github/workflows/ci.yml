@@ -35,6 +35,7 @@ jobs:
           pnpm peers check
           pnpm audit --audit-level high
           pnpm check
+          pnpm test
 
       - name: Reproduce embedded dashboard
         working-directory: web/dashboard

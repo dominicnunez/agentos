@@ -69,6 +69,11 @@ export type CompletionReview = {
   updated_at: string;
 };
 
+export type CompletionReviewPage = {
+  reviews: CompletionReview[];
+  next_after?: string;
+};
+
 export type DashboardIdentity = {
   organization: string;
   mode: string;
