@@ -154,6 +154,18 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, view)
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/user/aims/evidence" && r.URL.RawQuery == "" {
+		export, err := h.service.AIMSEvidence(r.Context(), principal)
+		if err != nil {
+			h.writeIntakeError(w, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Disposition", `attachment; filename="agentos-aims-evidence.json"`)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		writeJSON(w, http.StatusOK, export)
+		return
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/user/tasks/recent" {
 		view, err := h.service.LatestTask(r.Context(), principal)
 		h.writeView(w, view, err)
@@ -398,7 +410,7 @@ func validateHumanCompletion(contract core.CompletionContract, request humanComp
 func (h *Human) principal() intake.Principal {
 	return operatorPrincipal(string(h.owner.ID), core.PrincipalHuman, string(h.owner.OrganizationID), intake.ChannelHumanDirect, []string{
 		intake.CapabilitySubmitWork, intake.CapabilityConfirmIntent, intake.CapabilityAbandonIntent, intake.CapabilityReadStatus, intake.CapabilityReadResult,
-		intake.CapabilityProvideInput, intake.CapabilityReviewCompletion, intake.CapabilityManageStrategy,
+		intake.CapabilityProvideInput, intake.CapabilityReviewCompletion, intake.CapabilityManageStrategy, intake.CapabilityExportAIMSEvidence,
 	}, intake.WorkScopeOrganization)
 }
 

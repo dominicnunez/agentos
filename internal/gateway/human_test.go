@@ -77,6 +77,24 @@ func TestHumanOrganizationViewIsReadOnlyAndTenantScoped(t *testing.T) {
 	if response := serveHuman(first, http.MethodPost, "/v1/user/organization", testOwnerMarker, `{}`); response.Code != http.StatusNotFound {
 		t.Fatalf("organization mutation=%d %s", response.Code, response.Body.String())
 	}
+	evidence := serveHuman(first, http.MethodGet, "/v1/user/aims/evidence", testOwnerMarker, "")
+	if evidence.Code != http.StatusOK || evidence.Header().Get("Cache-Control") != "no-store" ||
+		!strings.Contains(evidence.Header().Get("Content-Disposition"), "agentos-aims-evidence.json") ||
+		!strings.Contains(evidence.Body.String(), `"status":"READINESS_WORK_IN_PROGRESS"`) ||
+		!strings.Contains(evidence.Body.String(), `"certified":false`) || !strings.Contains(evidence.Body.String(), `"fingerprint":"`) {
+		t.Fatalf("AIMS evidence=%d headers=%v body=%s", evidence.Code, evidence.Header(), evidence.Body.String())
+	}
+	for _, forbidden := range []string{"org-2", "second tenant objective", "first tenant objective", "operating_instructions", "tool_refs", "event_type", "payload", "authorization_refs"} {
+		if strings.Contains(evidence.Body.String(), forbidden) {
+			t.Fatalf("AIMS evidence leaked %q: %s", forbidden, evidence.Body.String())
+		}
+	}
+	if response := serveHuman(first, http.MethodGet, "/v1/user/aims/evidence?scope=all", testOwnerMarker, ""); response.Code != http.StatusNotFound {
+		t.Fatalf("AIMS query expansion=%d %s", response.Code, response.Body.String())
+	}
+	if response := serveHuman(first, http.MethodPost, "/v1/user/aims/evidence", testOwnerMarker, `{}`); response.Code != http.StatusNotFound {
+		t.Fatalf("AIMS mutation=%d %s", response.Code, response.Body.String())
+	}
 }
 
 func TestHumanGatewayBootstrapsStrategyWithoutCreatingAuthority(t *testing.T) {

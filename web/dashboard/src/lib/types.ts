@@ -97,3 +97,20 @@ export type OrganizationSnapshot = {
   teams: { id: string; name: string; mission?: string; member_agent_ids: string[]; status: string; version: number; created_at: string }[];
   agents: { id: string; role: string; status: string; blueprint_status: string; execution_profile_status: string; available: boolean; runtime_adapter: string; model_provider: string; model: string; version: number }[];
 };
+
+export type AIMSEvidencePackage = {
+  schema_version: string;
+  generated_at: string;
+  claim: { status: string; certified: boolean; scope: string };
+  organization: { id: string; name: string; policy_version: string; version: number };
+  inventory: {
+    ai_systems: { agent_id: string; role: string; lifecycle_status: string; available: boolean; blueprint_status: string; execution_profile_status: string; runtime_adapter: string; model_provider: string; model: string; version: number }[];
+    direction: { missions: number; goals: number; goal_modes: EvidenceCount[]; goal_states: EvidenceCount[]; mission_states: EvidenceCount[] };
+    operations: { teams: number; agents: number; works: number; tasks: number; experiments: number; work_modes: EvidenceCount[]; work_states: EvidenceCount[]; task_kinds: EvidenceCount[]; task_states: EvidenceCount[]; inference_policies: EvidenceCount[] };
+  };
+  evidence_index: { control: string; state: string; record_count: number; projection: string; source_contracts: string[] }[];
+  open_gaps: { area: string; reason: string }[];
+  fingerprint: string;
+};
+
+type EvidenceCount = { value: string; count: number };

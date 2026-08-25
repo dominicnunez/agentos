@@ -166,6 +166,18 @@ func TestDashboardCompletesDurableAgentWorkThroughKernelAuthenticatedGateway(t *
 		len(organization.Agents) != 1 || organization.Teams[0].MemberAgentIDs[0] != organization.Agents[0].ID {
 		t.Fatalf("dashboard organization state=%d %s", response.Code, response.Body.String())
 	}
+	response = dashboardAuthorizedRequest(bridge, http.MethodGet, "/api/v1/user/aims/evidence", session, "")
+	var aimsEvidence app.AIMSEvidencePackage
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &aimsEvidence) != nil || aimsEvidence.Organization.ID != "org-1" ||
+		aimsEvidence.Claim.Certified || aimsEvidence.Claim.Status != "READINESS_WORK_IN_PROGRESS" || len(aimsEvidence.Fingerprint) != 64 ||
+		len(aimsEvidence.Inventory.AISystems) != 1 || aimsEvidence.Inventory.Operations.Works != 1 || aimsEvidence.Inventory.Operations.Tasks != 1 {
+		t.Fatalf("dashboard AIMS evidence=%d %s", response.Code, response.Body.String())
+	}
+	for _, forbidden := range []string{"Deliver governed outcomes", "draft a private briefing", "operating_instructions", "event_type", "payload", "effect_fingerprint"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("dashboard AIMS evidence leaked %q: %s", forbidden, response.Body.String())
+		}
+	}
 	quickstartMessage := marshalDashboardLoopBody(t, map[string]string{
 		"conversation_id": "dashboard-quickstart", "message_id": "quickstart-message-1",
 		"text": "echo Agent OS completed reviewed work", "execution_kind": "DETERMINISTIC", "goal_id": "goal-dashboard",

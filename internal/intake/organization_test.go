@@ -30,6 +30,23 @@ func TestOrganizationStateRejectsA2AAndUnprivilegedPrincipals(t *testing.T) {
 	}
 }
 
+func TestAIMSEvidenceRequiresAuthenticatedLocalExportCapability(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := New(app.New(events.NewGateway(store)))
+	for _, principal := range []Principal{
+		{ID: "local-user-1", Kind: core.PrincipalHuman, OrganizationID: "org-1", Channel: ChannelHumanDirect, Capabilities: []string{CapabilityReadStatus}, WorkScope: WorkScopeOrganization},
+		{ID: "external-agent-1", Kind: core.PrincipalExternalAgent, OrganizationID: "org-1", Channel: ChannelA2A, Capabilities: []string{CapabilityExportAIMSEvidence}, WorkScope: WorkScopeOrganization},
+	} {
+		if _, err := service.AIMSEvidence(context.Background(), principal); !errors.Is(err, ErrForbidden) {
+			t.Fatalf("principal %s AIMS evidence error=%v", principal.ID, err)
+		}
+	}
+}
+
 func TestStrategyBootstrapRequiresAuthenticatedLocalStrategyCapability(t *testing.T) {
 	store, err := ledger.Open(":memory:")
 	if err != nil {

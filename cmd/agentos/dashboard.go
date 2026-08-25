@@ -268,6 +268,8 @@ func allowedDashboardRoute(method, requestPath, rawQuery string) bool {
 		return true
 	case method == http.MethodGet && requestPath == "/v1/user/organization" && rawQuery == "":
 		return true
+	case method == http.MethodGet && requestPath == "/v1/user/aims/evidence" && rawQuery == "":
+		return true
 	case method == http.MethodPost && len(segments) == 5 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "intents" && validDashboardIdentifier(segments[3]) && (segments[4] == "confirm" || segments[4] == "abandon") && rawQuery == "":
 		return true
 	case method == http.MethodGet && requestPath == "/v1/user/tasks/recent" && rawQuery == "":
