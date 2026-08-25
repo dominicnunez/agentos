@@ -166,6 +166,38 @@ func TestDashboardCompletesDurableAgentWorkThroughKernelAuthenticatedGateway(t *
 		len(organization.Agents) != 1 || organization.Teams[0].MemberAgentIDs[0] != organization.Agents[0].ID {
 		t.Fatalf("dashboard organization state=%d %s", response.Code, response.Body.String())
 	}
+	quickstartMessage := marshalDashboardLoopBody(t, map[string]string{
+		"conversation_id": "dashboard-quickstart", "message_id": "quickstart-message-1",
+		"text": "echo Agent OS completed reviewed work", "execution_kind": "DETERMINISTIC", "goal_id": "goal-dashboard",
+	})
+	response = dashboardAuthorizedRequest(bridge, http.MethodPost, "/api/v1/user/messages", session, quickstartMessage)
+	var quickstartDraft dashboardLoopTask
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &quickstartDraft) != nil || quickstartDraft.State != intake.StateAwaitingConfirmation ||
+		quickstartDraft.Intent == nil || quickstartDraft.Intent.Objective != "echo Agent OS completed reviewed work" || quickstartDraft.Intent.RequestedExecutionKind != core.ExecutionDeterministic {
+		t.Fatalf("dashboard quickstart draft=%d %s", response.Code, response.Body.String())
+	}
+	quickstartConfirmation := marshalDashboardLoopBody(t, map[string]string{
+		"message_id": "quickstart-confirmation-1", "fingerprint": quickstartDraft.Intent.Fingerprint,
+	})
+	response = dashboardAuthorizedRequest(bridge, http.MethodPost, "/api/v1/user/intents/dashboard-quickstart/confirm", session, quickstartConfirmation)
+	var quickstartCompleted dashboardLoopTask
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &quickstartCompleted) != nil || quickstartCompleted.State != intake.StateCompleted ||
+		quickstartCompleted.Result != "Agent OS completed reviewed work" {
+		t.Fatalf("dashboard quickstart completion=%d %s", response.Code, response.Body.String())
+	}
+	quickstartCorrelation, found, err := store.ResolveExternalWork(t.Context(), "org-1", "dashboard-quickstart")
+	if err != nil || !found {
+		t.Fatalf("dashboard quickstart mapping=%q found=%t err=%v", quickstartCorrelation, found, err)
+	}
+	quickstartStream, err := store.Events(t.Context(), quickstartCorrelation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range quickstartStream {
+		if event.EventType == "INTENT_NORMALIZATION_CONTEXT_MANIFESTED" || event.EventType == "INFERENCE_USAGE_RECORDED" {
+			t.Fatalf("dashboard deterministic quickstart used model inference: %+v", quickstartStream)
+		}
+	}
 
 	correlationID, found, err := store.ResolveExternalWork(t.Context(), "org-1", "dashboard-organization-loop")
 	if err != nil || !found || correlationID == "" {

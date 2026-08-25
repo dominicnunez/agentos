@@ -20,9 +20,11 @@ Install both release binaries using the commands in the
 agentos init --user
 ```
 
-Complete the resumable setup and its provider connection check. Do not paste a
-provider secret into a shell command, `.env` file, repository, task, or chat;
-enter it only at Agent OS's private setup prompt.
+Complete the resumable setup and its provider connection check. At **Service:**,
+select **Enable and start** or **Start once**; do not select **Leave stopped**
+for this walkthrough. Do not paste a provider secret into a shell command,
+`.env` file, repository, task, or chat; enter it only at Agent OS's private
+setup prompt.
 
 Verify the installed state:
 
