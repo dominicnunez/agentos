@@ -598,10 +598,17 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 	if err != nil {
 		return View{}, fmt.Errorf("%w: load intake conversation", ErrUnavailable)
 	}
+	normalizer := s.normalizer
+	if len(turns) == 1 && (message.RequestedKind == "" || message.RequestedKind == core.ExecutionDeterministic) && strings.HasPrefix(message.Text, "echo ") {
+		// The exact echo grammar is a registered, bounded handler. Preserve the
+		// reviewed instruction literally instead of spending a model turn that
+		// could paraphrase it into an unsupported deterministic operation.
+		normalizer = literalNormalizer{}
+	}
 	version := intentDraftVersion(stream) + 1
 	attempt := intentNormalizationAttempt(stream, message.MessageID) + 1
 	executionID := fmt.Sprintf("intent-normalization-%s-%s-a%d", stream[0].CorrelationID, message.MessageID, attempt)
-	descriptor, usesModel := s.normalizer.Descriptor()
+	descriptor, usesModel := normalizer.Descriptor()
 	if usesModel {
 		stream, err = s.app.RecordIntentNormalizationContext(ctx, principal.OrganizationID, message.ConversationID, app.IntentNormalizationContext{
 			ExecutionID: executionID, SourceMessageID: message.MessageID, PromptVersion: descriptor.PromptVersion,
@@ -623,7 +630,7 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 			return View{}, fmt.Errorf("%w: bind intent normalization inference scope", ErrUnavailable)
 		}
 	}
-	normalized, err := s.normalizer.Normalize(normalizationCtx, turns)
+	normalized, err := normalizer.Normalize(normalizationCtx, turns)
 	if normalized.Usage != nil {
 		_, usageErr := s.app.RecordIntentNormalizationUsage(ctx, principal.OrganizationID, message.ConversationID, executionID, *normalized.Usage)
 		if usageErr != nil {

@@ -41,6 +41,88 @@ func TestRouterUsesLeastNondeterministicAvailableMechanism(t *testing.T) {
 	}
 }
 
+type forbiddenQuickstartNormalizer struct{ calls int }
+
+func (*forbiddenQuickstartNormalizer) Descriptor() (NormalizerDescriptor, bool) {
+	return NormalizerDescriptor{PromptVersion: "forbidden", Provider: "forbidden", Model: "forbidden", ExecutionProfileVersion: "forbidden"}, true
+}
+
+func (n *forbiddenQuickstartNormalizer) Normalize(context.Context, []ConversationTurn) (Normalization, error) {
+	n.calls++
+	return Normalization{}, errors.New("model normalizer must not run")
+}
+
+func TestExplicitEchoUsesLiteralIntentWithoutModelNormalization(t *testing.T) {
+	assertEchoUsesLiteralIntentWithoutModelNormalization(t, core.ExecutionDeterministic)
+}
+
+func TestAutomaticEchoUsesLiteralIntentWithoutModelNormalization(t *testing.T) {
+	assertEchoUsesLiteralIntentWithoutModelNormalization(t, "")
+}
+
+func assertEchoUsesLiteralIntentWithoutModelNormalization(t *testing.T, requestedKind core.ExecutionKind) {
+	t.Helper()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	normalizer := &forbiddenQuickstartNormalizer{}
+	service := NewWithNormalizer(app.New(events.NewGateway(store)), normalizer)
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	view, err := service.Handle(context.Background(), principal, Message{
+		ConversationID: "quickstart-echo", MessageID: "message-1",
+		Text: "echo Agent OS completed reviewed work", RequestedKind: requestedKind,
+	})
+	if err != nil || view.State != StateAwaitingConfirmation || view.Intent == nil || view.Intent.Objective != "echo Agent OS completed reviewed work" ||
+		view.Intent.RequestedExecutionKind != core.ExecutionDeterministic || normalizer.calls != 0 {
+		t.Fatalf("literal deterministic review=%+v calls=%d err=%v", view, normalizer.calls, err)
+	}
+	completed, err := service.ConfirmIntent(context.Background(), principal, IntentConfirmation{
+		ConversationID: view.ConversationID, MessageID: "confirmation-1", Fingerprint: view.Intent.Fingerprint,
+	})
+	if err != nil || completed.State != StateCompleted || completed.Result != "Agent OS completed reviewed work" || normalizer.calls != 0 {
+		t.Fatalf("literal deterministic completion=%+v calls=%d err=%v", completed, normalizer.calls, err)
+	}
+	correlationID, found, err := store.ResolveExternalWork(context.Background(), principal.OrganizationID, view.ConversationID)
+	if err != nil || !found {
+		t.Fatalf("resolve quickstart work=%q found=%t err=%v", correlationID, found, err)
+	}
+	stream, err := store.Events(context.Background(), correlationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsEvent(stream, "INTENT_NORMALIZATION_CONTEXT_MANIFESTED") || containsEvent(stream, "INFERENCE_USAGE_RECORDED") {
+		t.Fatalf("deterministic quickstart used model inference: %+v", stream)
+	}
+}
+
+func TestUnsupportedDeterministicIntentCannotBeConfirmed(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := New(app.New(events.NewGateway(store)))
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	draft, err := service.Handle(context.Background(), principal, Message{
+		ConversationID: "unsupported-deterministic", MessageID: "message-1",
+		Text: "write a file", RequestedKind: core.ExecutionDeterministic,
+	})
+	if err != nil || draft.Intent == nil || draft.State != StateAwaitingConfirmation {
+		t.Fatalf("unsupported deterministic draft=%+v err=%v", draft, err)
+	}
+	if _, err := service.ConfirmIntent(context.Background(), principal, IntentConfirmation{
+		ConversationID: draft.ConversationID, MessageID: "confirmation-1", Fingerprint: draft.Intent.Fingerprint,
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unsupported deterministic confirmation error=%v", err)
+	}
+	stream := externalStream(t, store, draft.ConversationID)
+	if containsEvent(stream, "INTENT_CONFIRMED") || containsEvent(stream, "WORK_CREATED") || containsEvent(stream, "TASK_CREATED") {
+		t.Fatalf("unsupported deterministic intent crossed confirmation: %+v", stream)
+	}
+}
+
 func TestExternalViewProjectsOnlyRuntimeRootTask(t *testing.T) {
 	rootID := "task-root"
 	childID := "task-root-child"
