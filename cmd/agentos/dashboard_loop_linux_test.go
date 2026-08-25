@@ -177,8 +177,27 @@ func TestDashboardCompletesDurableAgentWorkThroughKernelAuthenticatedGateway(t *
 	}
 	assertDashboardOrganizationLoop(t, stream, owner.ID)
 	strategyEvents, err := store.Events(t.Context(), "strategy-dashboard")
-	if err != nil || len(strategyEvents) != 3 {
+	if err != nil {
 		t.Fatalf("dashboard strategy events=%+v err=%v", strategyEvents, err)
+	}
+	strategyCreation := map[string]int{
+		"ORGANIZATION_CREATED": 0,
+		"MISSION_CREATED":      0,
+		"GOAL_CREATED":         0,
+	}
+	for _, event := range strategyEvents {
+		if _, creation := strategyCreation[event.EventType]; creation {
+			strategyCreation[event.EventType]++
+			continue
+		}
+		if event.EventType != "GOAL_PROGRESS_EVALUATED" {
+			t.Fatalf("unexpected strategy-correlated event=%+v", event)
+		}
+	}
+	for eventType, count := range strategyCreation {
+		if count != 1 {
+			t.Fatalf("strategy creation event %s count=%d stream=%+v", eventType, count, strategyEvents)
+		}
 	}
 	allEvents, err := store.Events(t.Context(), "")
 	if err != nil {
