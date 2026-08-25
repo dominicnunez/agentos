@@ -544,6 +544,8 @@ func (h *Human) writeIntakeError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "operator message is invalid"})
 	case errors.Is(err, intake.ErrConflict):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator message conflicts with durable work"})
+	case errors.Is(err, intake.ErrCapacity):
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "operator request exceeds the bounded organization view"})
 	case errors.Is(err, intake.ErrConfirmationMismatch):
 		writeJSON(w, http.StatusPreconditionFailed, map[string]string{"error": "intent confirmation differs from durable state"})
 	default:

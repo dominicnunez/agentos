@@ -15,6 +15,19 @@ import (
 	"github.com/dominicnunez/agentos/internal/projections"
 )
 
+type boundedStrategyReadLedger struct {
+	*ledger.SQLite
+	unboundedStrategyReads int
+}
+
+func (l *boundedStrategyReadLedger) Events(ctx context.Context, correlationID string) ([]events.Event, error) {
+	if correlationID == "strategy-1" {
+		l.unboundedStrategyReads++
+		return nil, errors.New("unbounded strategy stream read")
+	}
+	return l.SQLite.Events(ctx, correlationID)
+}
+
 func TestBootstrapStrategyCreatesDurableDirectionAndReplaysExactly(t *testing.T) {
 	ctx := context.Background()
 	store, err := ledger.Open(":memory:")
@@ -22,7 +35,8 @@ func TestBootstrapStrategyCreatesDurableDirectionAndReplaysExactly(t *testing.T)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	service := New(events.NewGateway(store))
+	bounded := &boundedStrategyReadLedger{SQLite: store}
+	service := New(events.NewGateway(bounded))
 	input := StrategyBootstrapInput{
 		OrganizationID: "org-1", RequestID: "strategy-1", RequestedByID: "local-uid-1000",
 		RequestedByKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT",
@@ -57,6 +71,22 @@ func TestBootstrapStrategyCreatesDurableDirectionAndReplaysExactly(t *testing.T)
 	if err != nil || len(replayed) != len(stream) {
 		t.Fatalf("strategy replay appended events=%d err=%v", len(replayed), err)
 	}
+	for index := 0; index < 256; index++ {
+		if _, err := store.Append(ctx, events.TrustedDraft{
+			OrganizationID: string(input.OrganizationID), EventType: "STRATEGY_PROGRESS_OBSERVED", SourceActorID: "runtime",
+			CorrelationID: input.RequestID, Payload: map[string]int{"index": index},
+		}); err != nil {
+			t.Fatalf("append strategy-correlated noise: %v", err)
+		}
+	}
+	creationEvents, err := store.StrategyCreationEvents(ctx, string(input.OrganizationID), input.RequestID)
+	if err != nil || len(creationEvents) != 3 {
+		t.Fatalf("bounded strategy creations=%+v err=%v", creationEvents, err)
+	}
+	otherTenant, err := store.StrategyCreationEvents(ctx, "org-2", input.RequestID)
+	if err != nil || len(otherTenant) != 0 {
+		t.Fatalf("cross-tenant strategy creations=%+v err=%v", otherTenant, err)
+	}
 
 	revisedMission := core.Mission{
 		ID: input.MissionID, OrganizationID: input.OrganizationID, Statement: "Refined durable direction",
@@ -86,6 +116,9 @@ func TestBootstrapStrategyCreatesDurableDirectionAndReplaysExactly(t *testing.T)
 	if _, err := New(events.NewGateway(store)).Recover(ctx); err != nil {
 		t.Fatalf("recover bootstrapped strategy: %v", err)
 	}
+	if bounded.unboundedStrategyReads != 0 {
+		t.Fatalf("strategy retries used %d unbounded correlation reads", bounded.unboundedStrategyReads)
+	}
 }
 
 func TestPreflightStrategySnapshotRejectsRecordOverflow(t *testing.T) {
@@ -107,8 +140,8 @@ func TestPreflightStrategySnapshotRejectsRecordOverflow(t *testing.T) {
 		Mode: core.GoalTarget, Status: core.GoalActive, CreatedAt: now,
 		SuccessCriteria: []core.IntentValue{{Value: "verified", Origin: "USER_CONFIRMED"}},
 	}
-	if _, err := preflightStrategySnapshot(snapshot, nil, mission, goal); err == nil {
-		t.Fatal("strategy crossed the bounded organization record limit")
+	if _, err := preflightStrategySnapshot(snapshot, nil, mission, goal); !errors.Is(err, errOrganizationSnapshotLimit) {
+		t.Fatalf("strategy record overflow error=%v", err)
 	}
 }
 

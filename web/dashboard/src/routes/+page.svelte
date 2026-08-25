@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { APIError, api, connect, emptyJSONPost, identifier } from '$lib/api';
-  import { approvalRetryBinding, completionReviewFeedback, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, loadAllCompletionReviews, matchesConfirmationRetry, matchesStrategyRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, parseStrategyRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, strategyRetryBinding, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
+  import { approvalRetryBinding, completionReviewFeedback, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, discardStrategyRetry, loadAllCompletionReviews, matchesConfirmationRetry, matchesStrategyRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, parseStrategyRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, strategyRetryBinding, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
   import type { ApprovalRetryBinding, ReviewRetryBinding, StrategyRetryBinding } from '$lib/governance';
   import '$lib/app.css';
   import type { Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, IntentDraft, OrganizationSnapshot, TaskView } from '$lib/types';
@@ -374,7 +374,7 @@
       try {
         updated = await sendStrategy(binding);
       } catch (cause) {
-        if (cause instanceof APIError && (cause.status === 400 || cause.status === 409)) clearPendingStrategy();
+        if (cause instanceof APIError && discardStrategyRetry(cause.status)) clearPendingStrategy();
         throw cause;
       }
       refreshGeneration += 1;
@@ -419,7 +419,7 @@
       goalCriteria = '';
       return updated;
     } catch (cause) {
-      if (cause instanceof APIError && (cause.status === 400 || cause.status === 409)) clearPendingStrategy();
+      if (cause instanceof APIError && discardStrategyRetry(cause.status)) clearPendingStrategy();
       throw cause;
     }
   }

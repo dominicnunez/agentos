@@ -59,3 +59,9 @@ func TestStrategyBootstrapRequiresAuthenticatedLocalStrategyCapability(t *testin
 		}
 	}
 }
+
+func TestStrategyCapacityIsTerminalOperatorInput(t *testing.T) {
+	if err := strategyIntakeError(app.ErrStrategyCapacity); !errors.Is(err, ErrCapacity) || errors.Is(err, ErrUnavailable) {
+		t.Fatalf("strategy capacity mapping=%v", err)
+	}
+}

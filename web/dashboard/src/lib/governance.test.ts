@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { APIError, emptyJSONPost, isDashboardSessionRejection } from './api.ts';
-import { approvalRetryBinding, completionReviewFeedback, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, hasRetryableIntentConfirmation, loadAllCompletionReviews, matchesConfirmationRetry, matchesStrategyRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, parseStrategyRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, strategyRetryBinding, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from './governance.ts';
+import { approvalRetryBinding, completionReviewFeedback, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, discardStrategyRetry, hasRetryableIntentConfirmation, loadAllCompletionReviews, matchesConfirmationRetry, matchesStrategyRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, parseStrategyRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, strategyRetryBinding, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from './governance.ts';
 import type { Approval, CompletionReview } from './types';
 
 function review(id: string): CompletionReview {
@@ -59,6 +59,13 @@ test('retains confirmation recovery for downstream durable-work conflicts', () =
   assert.equal(discardConfirmationRetry(409), false);
   assert.equal(discardConfirmationRetry(412), true);
   assert.equal(discardConfirmationRetry(404), true);
+});
+
+test('discards strategy retries only after terminal client rejection', () => {
+  assert.equal(discardStrategyRetry(400), true);
+  assert.equal(discardStrategyRetry(409), true);
+  assert.equal(discardStrategyRetry(422), true);
+  assert.equal(discardStrategyRetry(503), false);
 });
 
 test('loads every bounded completion-review page', async () => {

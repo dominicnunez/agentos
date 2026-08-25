@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -15,6 +16,8 @@ const (
 	maximumOrganizationSnapshotRecords = 10_000
 	maximumOrganizationSnapshotBytes   = 8 << 20
 )
+
+var errOrganizationSnapshotLimit = errors.New("organization snapshot limit exceeded")
 
 // OrganizationSnapshot is a bounded, read-only projection of one durable
 // organization. It deliberately excludes instructions, credentials, tool
@@ -233,7 +236,7 @@ func organizationSnapshot(snapshot projections.Snapshot, organizationID core.ID)
 
 func validateOrganizationSnapshotBounds(view OrganizationSnapshot) error {
 	if len(view.Missions)+len(view.Goals)+len(view.Works)+len(view.Tasks)+len(view.Teams)+len(view.Agents) > maximumOrganizationSnapshotRecords {
-		return fmt.Errorf("organization state exceeds the bounded dashboard view")
+		return fmt.Errorf("%w: record count", errOrganizationSnapshotLimit)
 	}
 	return validateOrganizationSnapshotSize(view)
 }
@@ -244,7 +247,7 @@ func validateOrganizationSnapshotSize(view OrganizationSnapshot) error {
 		return fmt.Errorf("encode bounded organization state: %w", err)
 	}
 	if len(encoded) > maximumOrganizationSnapshotBytes {
-		return fmt.Errorf("organization state exceeds the bounded dashboard response")
+		return fmt.Errorf("%w: encoded response bytes", errOrganizationSnapshotLimit)
 	}
 	return nil
 }

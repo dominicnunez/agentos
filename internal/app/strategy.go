@@ -26,6 +26,7 @@ const (
 var (
 	ErrStrategyInvalid     = errors.New("invalid strategy bootstrap")
 	ErrStrategyConflict    = errors.New("strategy bootstrap conflicts with durable state")
+	ErrStrategyCapacity    = errors.New("strategy bootstrap exceeds organization view capacity")
 	ErrStrategyUnavailable = errors.New("strategy bootstrap unavailable")
 )
 
@@ -110,6 +111,9 @@ func (s *Service) BootstrapStrategy(ctx context.Context, input StrategyBootstrap
 	}
 	proposedView, err := preflightStrategySnapshot(snapshot, organization, mission, goal)
 	if err != nil {
+		if errors.Is(err, errOrganizationSnapshotLimit) {
+			return OrganizationSnapshot{}, ErrStrategyCapacity
+		}
 		return OrganizationSnapshot{}, fmt.Errorf("%w: preflight bounded organization view", ErrStrategyUnavailable)
 	}
 	if err := s.state.SaveStrategyBootstrap(ctx, organization, mission, goal, input.RequestID, detail); err != nil {
@@ -171,7 +175,7 @@ func validBoundedStrategyText(value string, maximum int) bool {
 }
 
 func (s *Service) strategyBootstrapAdmission(ctx context.Context, input StrategyBootstrapInput) (bool, bool, error) {
-	stream, err := s.gateway.Events(ctx, input.RequestID)
+	stream, err := s.gateway.StrategyCreationEvents(ctx, string(input.OrganizationID), input.RequestID)
 	if err != nil {
 		return false, false, err
 	}

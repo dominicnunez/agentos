@@ -127,7 +127,10 @@ resolve against the immutable creation admission even after later Mission or
 Goal revisions. The dashboard retains the exact mutation binding before send
 and reconciles it after an interrupted response. The runtime preflights the
 resulting bounded organization view before commit, conflicting identifiers fail
-closed, and the authenticated user
+closed, and capacity rejection is a terminal `422` that permits revised input.
+Retry resolution reads at most four tenant- and correlation-scoped creation
+events; cumulative Goal-progress history is never loaded for this check. The
+authenticated user
 is retained as provenance in runtime-owned Event Contracts. Creating direction
 does not grant effect, approval, capability, policy, or completion authority.
 A2A Agents cannot use this boundary.

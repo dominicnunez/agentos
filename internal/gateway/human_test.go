@@ -151,6 +151,15 @@ func TestHumanGatewayAcceptsWorstCaseEncodedValidStrategy(t *testing.T) {
 	}
 }
 
+func TestHumanGatewayReportsStrategyCapacityAsTerminal(t *testing.T) {
+	handler := &Human{}
+	response := httptest.NewRecorder()
+	handler.writeIntakeError(response, intake.ErrCapacity)
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("strategy capacity status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 type reviewerModel struct{}
 
 func (reviewerModel) Name() string { return "review-provider/test-model" }

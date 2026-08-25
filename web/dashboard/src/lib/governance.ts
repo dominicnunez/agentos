@@ -22,7 +22,11 @@ export type StrategyRetryBinding = {
 export type DashboardRequest = <T>(path: string, options?: RequestInit) => Promise<T>;
 
 export function discardConfirmationRetry(status: number): boolean {
-  return status === 400 || status === 404 || status === 412;
+	return status === 400 || status === 404 || status === 412;
+}
+
+export function discardStrategyRetry(status: number): boolean {
+  return status === 400 || status === 409 || status === 422;
 }
 
 export function terminalApproval(approval: Approval): boolean {

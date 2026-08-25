@@ -52,6 +52,7 @@ var (
 	ErrForbidden            = errors.New("operator capability denied")
 	ErrNotFound             = errors.New("operator work not found")
 	ErrConflict             = errors.New("operator conversation conflict")
+	ErrCapacity             = errors.New("operator request exceeds durable view capacity")
 	ErrConfirmationMismatch = errors.New("intent confirmation conflicts with durable state")
 	ErrUnavailable          = errors.New("operator work unavailable")
 )
@@ -508,15 +509,22 @@ func (s *Service) BootstrapStrategy(ctx context.Context, principal Principal, re
 		GoalID: request.GoalID, GoalObjective: request.GoalObjective, GoalMode: request.GoalMode,
 		SuccessCriteria: append([]string(nil), request.SuccessCriteria...),
 	})
+	if err != nil {
+		return app.OrganizationSnapshot{}, strategyIntakeError(err)
+	}
+	return view, nil
+}
+
+func strategyIntakeError(err error) error {
 	switch {
-	case err == nil:
-		return view, nil
 	case errors.Is(err, app.ErrStrategyInvalid):
-		return app.OrganizationSnapshot{}, ErrInvalid
+		return ErrInvalid
 	case errors.Is(err, app.ErrStrategyConflict):
-		return app.OrganizationSnapshot{}, ErrConflict
+		return ErrConflict
+	case errors.Is(err, app.ErrStrategyCapacity):
+		return ErrCapacity
 	default:
-		return app.OrganizationSnapshot{}, ErrUnavailable
+		return ErrUnavailable
 	}
 }
 
