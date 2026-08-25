@@ -196,7 +196,10 @@ func (s *Service) strategyBootstrapAdmission(ctx context.Context, input Strategy
 				return false, true, nil
 			}
 			var organization core.Organization
-			if json.Unmarshal(payload.Projection.Value, &organization) != nil || organization.ID != input.OrganizationID || organization.Name != string(input.OrganizationID) || organization.PolicyVersion != "v1" {
+			if err := json.Unmarshal(payload.Projection.Value, &organization); err != nil {
+				return false, true, fmt.Errorf("decode immutable Organization creation: %w", err)
+			}
+			if organization.ID != input.OrganizationID || organization.Name != string(input.OrganizationID) || organization.PolicyVersion != "v1" {
 				return false, true, nil
 			}
 			organizationSeen = true
@@ -206,7 +209,10 @@ func (s *Service) strategyBootstrapAdmission(ctx context.Context, input Strategy
 				return false, true, nil
 			}
 			var mission core.Mission
-			if json.Unmarshal(payload.Projection.Value, &mission) != nil || mission.ID != input.MissionID || mission.OrganizationID != input.OrganizationID || mission.Statement != input.MissionStatement || mission.Status != core.MissionActive {
+			if err := json.Unmarshal(payload.Projection.Value, &mission); err != nil {
+				return false, true, fmt.Errorf("decode immutable Mission creation: %w", err)
+			}
+			if mission.ID != input.MissionID || mission.OrganizationID != input.OrganizationID || mission.Statement != input.MissionStatement || mission.Status != core.MissionActive {
 				return false, true, nil
 			}
 			missionSeen = true
@@ -216,7 +222,10 @@ func (s *Service) strategyBootstrapAdmission(ctx context.Context, input Strategy
 				return false, true, nil
 			}
 			var goal core.Goal
-			if json.Unmarshal(payload.Projection.Value, &goal) != nil || !strategyCreationGoalMatches(goal, input) {
+			if err := json.Unmarshal(payload.Projection.Value, &goal); err != nil {
+				return false, true, fmt.Errorf("decode immutable Goal creation: %w", err)
+			}
+			if !strategyCreationGoalMatches(goal, input) {
 				return false, true, nil
 			}
 			goalSeen = true
