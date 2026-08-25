@@ -441,15 +441,17 @@ func ValidateReviewedIntentExecution(draft core.IntentDraft, organizationID core
 	if err := core.ValidateAcceptedIntentDraft(draft, organizationID, kind); err != nil {
 		return err
 	}
+	if kind == core.ExecutionDeterministic {
+		if err := planning.ValidateDeterministicObjective(draft.Objective); err != nil {
+			return fmt.Errorf("reviewed deterministic intent is not executable: %w", err)
+		}
+	}
 	if draft.Mode == core.IntentModeExperiment {
 		if draft.ReplacesWork != nil {
 			return fmt.Errorf("V1 experimental intent cannot replace production Work")
 		}
 		if kind != core.ExecutionDeterministic || draft.RequestedExecutionKind != core.ExecutionDeterministic {
 			return fmt.Errorf("V1 experimental intent requires deterministic execution")
-		}
-		if err := planning.ValidateDeterministicObjective(draft.Objective); err != nil {
-			return fmt.Errorf("reviewed experiment is not executable: %w", err)
 		}
 	}
 	return nil

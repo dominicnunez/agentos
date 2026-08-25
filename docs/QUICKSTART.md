@@ -3,8 +3,10 @@
 This walkthrough creates durable organizational direction and completes one
 reviewed task through the local dashboard. It uses the built-in deterministic
 echo grammar, so Agent OS preserves the instruction literally and does not call
-a model, tool, shell, or external service for either normalization or execution.
-The configured provider remains required for ordinary natural-language work.
+a model, shell, or external service for either normalization or execution. The
+runtime does invoke its internal `builtin.echo` handler and records the result
+as a structured `ToolOutcome`. The configured provider remains required for
+ordinary natural-language work.
 
 Agent OS releases are Linux-only. If the
 [release page](https://github.com/dominicnunez/agentos/releases) has no approved

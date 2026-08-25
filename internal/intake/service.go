@@ -599,7 +599,7 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 		return View{}, fmt.Errorf("%w: load intake conversation", ErrUnavailable)
 	}
 	normalizer := s.normalizer
-	if len(turns) == 1 && message.RequestedKind == core.ExecutionDeterministic && strings.HasPrefix(message.Text, "echo ") {
+	if len(turns) == 1 && (message.RequestedKind == "" || message.RequestedKind == core.ExecutionDeterministic) && strings.HasPrefix(message.Text, "echo ") {
 		// The exact echo grammar is a registered, bounded handler. Preserve the
 		// reviewed instruction literally instead of spending a model turn that
 		// could paraphrase it into an unsupported deterministic operation.
