@@ -40,13 +40,6 @@ func TestBuildAIMSEvidenceIsBoundedVerifiableAndExcludesPrivateContent(t *testin
 	if export.GeneratedAt.Location() != time.UTC || export.Inventory.Operations.Experiments != 1 || export.Inventory.Operations.Tasks != 2 || len(export.Inventory.AISystems) != 1 {
 		t.Fatalf("export=%+v", export)
 	}
-	if len(export.Fingerprint) != 64 {
-		t.Fatalf("fingerprint=%q", export.Fingerprint)
-	}
-	wantFingerprint, err := aimsEvidenceFingerprint(export)
-	if err != nil || wantFingerprint != export.Fingerprint {
-		t.Fatalf("fingerprint=%q want=%q err=%v", export.Fingerprint, wantFingerprint, err)
-	}
 	encoded, err := json.Marshal(export)
 	if err != nil {
 		t.Fatal(err)
@@ -58,6 +51,9 @@ func TestBuildAIMSEvidenceIsBoundedVerifiableAndExcludesPrivateContent(t *testin
 	}
 	if !strings.Contains(string(encoded), `"control":"task_lifecycle_projection"`) || !strings.Contains(string(encoded), `"state":"PROJECTION_AVAILABLE"`) || !strings.Contains(string(encoded), `"area":"impact_and_risk"`) {
 		t.Fatalf("AIMS evidence omitted controls or explicit gaps: %s", encoded)
+	}
+	if strings.Contains(string(encoded), "TASK_ASSIGNED") || !strings.Contains(string(encoded), "TASK_ASSIGNMENT_REVALIDATED") || !strings.Contains(string(encoded), "WORK_COMPLETED") || !strings.Contains(string(encoded), "WORK_FAILED") {
+		t.Fatalf("AIMS evidence did not use the closed projection lifecycle contracts: %s", encoded)
 	}
 }
 

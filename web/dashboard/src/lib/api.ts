@@ -78,6 +78,33 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   return decode<T>(response);
 }
 
+export async function verifiedDownload(path: string): Promise<{ body: ArrayBuffer; sha256: string }> {
+  if (!sessionToken) {
+    sessionToken = sessionStorage.getItem(sessionKey) ?? '';
+  }
+  const response = await fetch(path, {
+    headers: { Accept: 'application/json', Authorization: `Bearer ${sessionToken}` }
+  });
+  if (!response.ok) {
+    await decode<never>(response);
+  }
+  const expected = response.headers.get('X-AgentOS-SHA256') ?? '';
+  const body = await response.arrayBuffer();
+  await verifySHA256(body, expected);
+  return { body, sha256: expected };
+}
+
+export async function verifySHA256(body: ArrayBuffer, expected: string): Promise<void> {
+  if (!/^[0-9a-f]{64}$/.test(expected)) {
+    throw new Error('The evidence response did not include a valid SHA-256 checksum.');
+  }
+  const digest = await crypto.subtle.digest('SHA-256', body);
+  const actual = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, '0')).join('');
+  if (actual !== expected) {
+    throw new Error('The evidence response did not match its SHA-256 checksum.');
+  }
+}
+
 async function decode<T>(response: Response): Promise<T> {
   const body = (await response.json().catch(() => ({ error: `HTTP ${response.status}` }))) as T & { error?: string };
   if (!response.ok) {

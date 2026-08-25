@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -240,6 +241,16 @@ func (b *dashboardBridge) proxy(w http.ResponseWriter, incoming *http.Request) {
 	if err != nil || len(payload) > maxDashboardResponse {
 		writeDashboardJSON(w, http.StatusBadGateway, map[string]string{"error": "local user gateway response is invalid"})
 		return
+	}
+	if upstreamPath == "/v1/user/aims/evidence" && response.StatusCode == http.StatusOK {
+		digest := sha256.Sum256(payload)
+		checksum := hex.EncodeToString(digest[:])
+		if response.Header.Get("X-AgentOS-SHA256") != checksum {
+			writeDashboardJSON(w, http.StatusBadGateway, map[string]string{"error": "local user gateway returned unverifiable AIMS evidence"})
+			return
+		}
+		w.Header().Set("Content-Disposition", `attachment; filename="agentos-aims-evidence.json"`)
+		w.Header().Set("X-AgentOS-SHA256", checksum)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

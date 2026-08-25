@@ -3,6 +3,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -169,9 +171,13 @@ func TestDashboardCompletesDurableAgentWorkThroughKernelAuthenticatedGateway(t *
 	response = dashboardAuthorizedRequest(bridge, http.MethodGet, "/api/v1/user/aims/evidence", session, "")
 	var aimsEvidence app.AIMSEvidencePackage
 	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &aimsEvidence) != nil || aimsEvidence.Organization.ID != "org-1" ||
-		aimsEvidence.Claim.Certified || aimsEvidence.Claim.Status != "READINESS_WORK_IN_PROGRESS" || len(aimsEvidence.Fingerprint) != 64 ||
+		aimsEvidence.Claim.Certified || aimsEvidence.Claim.Status != "READINESS_WORK_IN_PROGRESS" ||
 		len(aimsEvidence.Inventory.AISystems) != 1 || aimsEvidence.Inventory.Operations.Works != 1 || aimsEvidence.Inventory.Operations.Tasks != 1 {
 		t.Fatalf("dashboard AIMS evidence=%d %s", response.Code, response.Body.String())
+	}
+	digest := sha256.Sum256(response.Body.Bytes())
+	if got, want := response.Header().Get("X-AgentOS-SHA256"), hex.EncodeToString(digest[:]); got != want {
+		t.Fatalf("dashboard AIMS checksum=%q want=%q", got, want)
 	}
 	for _, forbidden := range []string{"Deliver governed outcomes", "draft a private briefing", "operating_instructions", "event_type", "payload", "effect_fingerprint"} {
 		if strings.Contains(response.Body.String(), forbidden) {

@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -81,8 +83,12 @@ func TestHumanOrganizationViewIsReadOnlyAndTenantScoped(t *testing.T) {
 	if evidence.Code != http.StatusOK || evidence.Header().Get("Cache-Control") != "no-store" ||
 		!strings.Contains(evidence.Header().Get("Content-Disposition"), "agentos-aims-evidence.json") ||
 		!strings.Contains(evidence.Body.String(), `"status":"READINESS_WORK_IN_PROGRESS"`) ||
-		!strings.Contains(evidence.Body.String(), `"certified":false`) || !strings.Contains(evidence.Body.String(), `"fingerprint":"`) {
+		!strings.Contains(evidence.Body.String(), `"certified":false`) {
 		t.Fatalf("AIMS evidence=%d headers=%v body=%s", evidence.Code, evidence.Header(), evidence.Body.String())
+	}
+	digest := sha256.Sum256(evidence.Body.Bytes())
+	if got, want := evidence.Header().Get("X-AgentOS-SHA256"), hex.EncodeToString(digest[:]); got != want {
+		t.Fatalf("AIMS evidence checksum=%q want=%q", got, want)
 	}
 	for _, forbidden := range []string{"org-2", "second tenant objective", "first tenant objective", "operating_instructions", "tool_refs", "event_type", "payload", "authorization_refs"} {
 		if strings.Contains(evidence.Body.String(), forbidden) {

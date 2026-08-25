@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { APIError, api, connect, emptyJSONPost, identifier } from '$lib/api';
+  import { APIError, api, connect, emptyJSONPost, identifier, verifiedDownload } from '$lib/api';
   import { approvalRetryBinding, completionReviewFeedback, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, discardStrategyRetry, loadAllCompletionReviews, matchesConfirmationRetry, matchesStrategyRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, parseStrategyRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, strategyRetryBinding, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
   import type { ApprovalRetryBinding, ReviewRetryBinding, StrategyRetryBinding } from '$lib/governance';
   import '$lib/app.css';
-  import type { AIMSEvidencePackage, Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, IntentDraft, OrganizationSnapshot, TaskView } from '$lib/types';
+  import type { Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, IntentDraft, OrganizationSnapshot, TaskView } from '$lib/types';
 
   type Section = 'overview' | 'organization' | 'work' | 'approvals' | 'reviews' | 'system';
   type IntentList = 'context' | 'deliverables' | 'completion_criteria' | 'constraints';
@@ -189,23 +189,30 @@
     error = '';
     notice = '';
     try {
-      const evidence = await api<AIMSEvidencePackage>('/api/v1/user/aims/evidence');
-      const blob = new Blob([`${JSON.stringify(evidence, null, 2)}\n`], { type: 'application/json' });
-      const href = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = href;
-      link.download = 'agentos-aims-evidence.json';
-      link.rel = 'noopener';
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(href);
-      notice = `Downloaded bounded AIMS readiness evidence ${evidence.fingerprint.slice(0, 12)}.`;
+      const evidence = await verifiedDownload('/api/v1/user/aims/evidence');
+      downloadBlob(new Blob([evidence.body], { type: 'application/json' }), 'agentos-aims-evidence.json');
+      downloadBlob(
+        new Blob([`${evidence.sha256}  agentos-aims-evidence.json\n`], { type: 'text/plain' }),
+        'agentos-aims-evidence.json.sha256'
+      );
+      notice = `Downloaded bounded AIMS readiness evidence and checksum ${evidence.sha256.slice(0, 12)}.`;
     } catch (cause) {
       error = message(cause);
     } finally {
       busy = false;
     }
+  }
+
+  function downloadBlob(blob: Blob, filename: string): void {
+    const href = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = href;
+    link.download = filename;
+    link.rel = 'noopener';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 0);
   }
 
   async function loadOrganization(): Promise<OrganizationSnapshot | null> {

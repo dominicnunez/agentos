@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -131,6 +133,38 @@ func TestDashboardBridgeRejectsAuthorityBoundaryResponseWithJSONPrefix(t *testin
 	response := dashboardAuthorizedRequest(bridge, http.MethodGet, "/api/v1/user/reviews", token, "")
 	if response.Code != http.StatusBadGateway || strings.Contains(response.Body.String(), "untrusted") {
 		t.Fatalf("prefixed JSON media type=%d %q", response.Code, response.Body.String())
+	}
+}
+
+func TestDashboardBridgeVerifiesAIMSEvidenceBeforeForwarding(t *testing.T) {
+	payload := []byte(`{"schema_version":"agentos.aims.evidence.v1"}` + "\n")
+	digest := sha256.Sum256(payload)
+	checksum := hex.EncodeToString(digest[:])
+	upstreamChecksum := checksum
+	upstream := &http.Client{Transport: dashboardRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type":     []string{"application/json"},
+				"X-Agentos-Sha256": []string{upstreamChecksum},
+			},
+			Body: io.NopCloser(bytes.NewReader(payload)),
+		}, nil
+	})}
+	bridge := testDashboardBridge(t, upstream, time.Now)
+	token := dashboardSession(t, bridge)
+	response := dashboardAuthorizedRequest(bridge, http.MethodGet, "/api/v1/user/aims/evidence", token, "")
+	if response.Code != http.StatusOK || response.Body.String() != string(payload) || response.Header().Get("X-AgentOS-SHA256") != checksum {
+		t.Fatalf("verified evidence=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+	}
+	if got := response.Header().Get("Content-Disposition"); got != `attachment; filename="agentos-aims-evidence.json"` {
+		t.Fatalf("content disposition=%q", got)
+	}
+
+	upstreamChecksum = strings.Repeat("0", 64)
+	response = dashboardAuthorizedRequest(bridge, http.MethodGet, "/api/v1/user/aims/evidence", token, "")
+	if response.Code != http.StatusBadGateway || strings.Contains(response.Body.String(), "schema_version") || response.Header().Get("X-AgentOS-SHA256") != "" {
+		t.Fatalf("tampered evidence=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
 	}
 }
 

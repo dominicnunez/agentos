@@ -2,14 +2,13 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/core"
+	"github.com/dominicnunez/agentos/internal/events"
 )
 
 const (
@@ -28,7 +27,6 @@ type AIMSEvidencePackage struct {
 	Inventory     AIMSInventory          `json:"inventory"`
 	EvidenceIndex []AIMSEvidenceIndex    `json:"evidence_index"`
 	OpenGaps      []AIMSOpenGap          `json:"open_gaps"`
-	Fingerprint   string                 `json:"fingerprint,omitempty"`
 }
 
 type AIMSEvidenceClaim struct {
@@ -181,17 +179,12 @@ func buildAIMSEvidence(view OrganizationSnapshot, generatedAt time.Time) (AIMSEv
 	export.Inventory.Operations.TaskStates = sortedAIMSCounts(taskStates)
 	export.Inventory.Operations.InferencePolicies = sortedAIMSCounts(inferencePolicies)
 	export.EvidenceIndex = []AIMSEvidenceIndex{
-		aimsEvidenceIndex("durable_organizational_direction", len(view.Missions)+len(view.Goals), "organization.missions+goals", "MISSION_CREATED", "MISSION_REVISED", "MISSION_RETIRED", "GOAL_CREATED", "GOAL_REFINED", "GOAL_PROGRESS_EVALUATED", "GOAL_ACHIEVED"),
-		aimsEvidenceIndex("reviewed_work_lifecycle", len(view.Works)+len(view.Tasks), "organization.works+tasks", "INTENT_DRAFTED", "INTENT_CONFIRMED", "WORK_CREATED", "PLAN_CREATED", "TASK_CREATED", "TASK_ASSIGNED"),
-		aimsEvidenceIndex("task_lifecycle_projection", len(view.Tasks), "organization.tasks", "TASK_CREATED", "TASK_ASSIGNED", "EXECUTION_CONTEXT_MANIFESTED", "INFERENCE_USAGE_RECORDED", "TOOL_OUTCOME_RECORDED", "COMPLETION_VERIFIED", "TASK_VERIFIED_COMPLETE"),
-		aimsEvidenceIndex("reviewed_ai_system_configuration", len(view.Agents), "organization.agents", "AGENT_BLUEPRINT_CREATED", "EXECUTION_PROFILE_CREATED", "AGENT_CREATED", "AGENT_CONFIGURATION_UPDATED", "AGENT_DEACTIVATED", "AGENT_REACTIVATED"),
-		aimsEvidenceIndex("governed_experimentation", export.Inventory.Operations.Experiments, "organization.works[mode=EXPERIMENT]", "LAB_EXPERIMENT_STARTED", "LAB_EXPERIMENT_COMPLETED", "LAB_EXPERIMENT_FAILED", "LAB_PROMOTION_CANDIDATE_CREATED"),
+		aimsEvidenceIndex("durable_organizational_direction", len(view.Missions)+len(view.Goals), "organization.missions+goals", projectionLifecycleEventTypes("mission", "goal")...),
+		aimsEvidenceIndex("reviewed_work_lifecycle", len(view.Works)+len(view.Tasks), "organization.works+tasks", projectionLifecycleEventTypes("intent", "work", "task")...),
+		aimsEvidenceIndex("task_lifecycle_projection", len(view.Tasks), "organization.tasks", events.ProjectionLifecycleEventTypes("task")...),
+		aimsEvidenceIndex("reviewed_ai_system_configuration", len(view.Agents), "organization.agents", projectionLifecycleEventTypes("agent_blueprint", "execution_profile", "agent")...),
+		aimsEvidenceIndex("governed_experimentation", export.Inventory.Operations.Experiments, "organization.works[mode=EXPERIMENT]", projectionLifecycleEventTypes("lab_experiment", "lab_promotion_candidate")...),
 	}
-	fingerprint, err := aimsEvidenceFingerprint(export)
-	if err != nil {
-		return AIMSEvidencePackage{}, err
-	}
-	export.Fingerprint = fingerprint
 	encoded, err := json.Marshal(export)
 	if err != nil {
 		return AIMSEvidencePackage{}, fmt.Errorf("encode AIMS evidence package: %w", err)
@@ -200,6 +193,21 @@ func buildAIMSEvidence(view OrganizationSnapshot, generatedAt time.Time) (AIMSEv
 		return AIMSEvidencePackage{}, fmt.Errorf("AIMS evidence package exceeds its byte limit")
 	}
 	return export, nil
+}
+
+func projectionLifecycleEventTypes(kinds ...string) []string {
+	seen := map[string]struct{}{}
+	result := make([]string, 0)
+	for _, kind := range kinds {
+		for _, eventType := range events.ProjectionLifecycleEventTypes(kind) {
+			if _, duplicate := seen[eventType]; duplicate {
+				continue
+			}
+			seen[eventType] = struct{}{}
+			result = append(result, eventType)
+		}
+	}
+	return result
 }
 
 func sortedAIMSCounts(values map[string]int) []AIMSCount {
@@ -221,14 +229,4 @@ func aimsEvidenceIndex(control string, recordCount int, projection string, contr
 		state = "PROJECTION_AVAILABLE"
 	}
 	return AIMSEvidenceIndex{Control: control, State: state, RecordCount: recordCount, Projection: projection, SourceContracts: contracts}
-}
-
-func aimsEvidenceFingerprint(export AIMSEvidencePackage) (string, error) {
-	export.Fingerprint = ""
-	encoded, err := json.Marshal(export)
-	if err != nil {
-		return "", fmt.Errorf("fingerprint AIMS evidence package: %w", err)
-	}
-	digest := sha256.Sum256(encoded)
-	return hex.EncodeToString(digest[:]), nil
 }

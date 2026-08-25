@@ -17,12 +17,16 @@ The local organization dashboard can download a bounded JSON readiness artifact
 from **System → Readiness evidence**. The export contains the current
 tenant-scoped AI-system inventory, aggregate lifecycle counts, the typed Event
 Contracts that source each public projection, explicit management-system gaps,
-and a SHA-256 fingerprint. `PROJECTION_AVAILABLE` means only that current
+and a detached SHA-256 checksum over the exact downloaded JSON bytes.
+`PROJECTION_AVAILABLE` means only that current
 records exist in that bounded projection; it does not assert that a control is
 effective or that a management-system requirement is satisfied. The export
 excludes raw events and payloads, prompts, results,
 artifacts, credentials, approvals, capabilities, and authority records. The
-fingerprint verifies the exported JSON; it is not a cryptographic attestation of
+dashboard verifies the response before saving both
+`agentos-aims-evidence.json` and `agentos-aims-evidence.json.sha256`. On Linux,
+run `sha256sum -c agentos-aims-evidence.json.sha256` in their download directory
+to verify the artifact again. The checksum is not a cryptographic attestation of
 the SQLite ledger and does not convert readiness evidence into certification.
 
 The operating organization remains responsible for its AIMS scope, AI policy, accountable roles, legal and stakeholder obligations, risk criteria, impact assessments, competence, supplier decisions, incident handling, internal audits, management reviews, corrective actions, document retention, and selected controls. Agent OS must fail closed where one of those decisions is required but has not been supplied.

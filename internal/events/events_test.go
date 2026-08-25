@@ -13,6 +13,32 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 )
 
+func TestProjectionLifecycleEventTypesAreClosedAndImmutable(t *testing.T) {
+	for kind, contract := range projectionLifecycleContracts {
+		exported := ProjectionLifecycleEventTypes(kind)
+		for _, eventType := range contract.initial {
+			if !slices.Contains(exported, eventType) || !validProjectionEventType(kind, 1, eventType) {
+				t.Fatalf("initial %s/%s is not exported and admitted", kind, eventType)
+			}
+		}
+		for _, eventType := range contract.revision {
+			if !slices.Contains(exported, eventType) || !validProjectionEventType(kind, 2, eventType) {
+				t.Fatalf("revision %s/%s is not exported and admitted", kind, eventType)
+			}
+		}
+		if len(exported) == 0 {
+			t.Fatalf("projection kind %s has no lifecycle contracts", kind)
+		}
+		exported[0] = "TAMPERED"
+		if ProjectionLifecycleEventTypes(kind)[0] == "TAMPERED" {
+			t.Fatalf("projection lifecycle export for %s aliases trusted configuration", kind)
+		}
+	}
+	if ProjectionLifecycleEventTypes("unknown") != nil || ProjectionKindRequiresAdmission("unknown") {
+		t.Fatal("unknown projection kind was accepted")
+	}
+}
+
 func TestTaskProjectionTransitionsAreExact(t *testing.T) {
 	base := core.Task{
 		ID: "task-1", WorkID: "work-1", Description: "bounded work",

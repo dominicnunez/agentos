@@ -110,7 +110,6 @@ export type AIMSEvidencePackage = {
   };
   evidence_index: { control: string; state: string; record_count: number; projection: string; source_contracts: string[] }[];
   open_gaps: { area: string; reason: string }[];
-  fingerprint: string;
 };
 
 type EvidenceCount = { value: string; count: number };
