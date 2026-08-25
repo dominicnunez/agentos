@@ -8,15 +8,33 @@ runtime does invoke its internal `builtin.echo` handler and records the result
 as a structured `ToolOutcome`. The configured provider remains required for
 ordinary natural-language work.
 
-Agent OS releases are Linux-only. If the
+Agent OS releases are Linux-only. This user-mode walkthrough requires systemd
+256 or newer for encrypted service credentials. Check before setup:
+
+```sh
+systemctl --version
+```
+
+If the first line reports a version below 256, use the system-mode installation
+described in the [operator guide](OPERATOR_INTAKE.md) instead of this
+walkthrough. If the
 [release page](https://github.com/dominicnunez/agentos/releases) has no approved
 binary release, there is no supported public installation to use for this
 walkthrough yet.
 
 ## 1. Install and initialize
 
-Install both release binaries using the commands in the
-[README](../README.md#install-agent-os), then initialize the current-user mode:
+Download, verify, and extract the matching approved release archive as described
+in the [README](../README.md#install-agent-os). Install only the two binaries at
+this stage; do not run the README's final bare `agentos` command, because that
+starts system-mode setup:
+
+```sh
+sudo install -m 0755 agentos /usr/local/bin/agentos
+sudo install -m 0755 agentos-recovery /usr/local/bin/agentos-recovery
+```
+
+Initialize current-user mode explicitly:
 
 ```sh
 agentos init --user
