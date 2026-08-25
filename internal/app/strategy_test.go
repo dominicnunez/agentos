@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	"github.com/dominicnunez/agentos/internal/projections"
 )
 
 func TestBootstrapStrategyCreatesDurableDirectionAndReplaysExactly(t *testing.T) {
@@ -55,6 +58,26 @@ func TestBootstrapStrategyCreatesDurableDirectionAndReplaysExactly(t *testing.T)
 		t.Fatalf("strategy replay appended events=%d err=%v", len(replayed), err)
 	}
 
+	revisedMission := core.Mission{
+		ID: input.MissionID, OrganizationID: input.OrganizationID, Statement: "Refined durable direction",
+		Status: core.MissionActive, CreatedAt: view.Missions[0].CreatedAt,
+	}
+	if err := service.state.SaveMission(ctx, "MISSION_REVISED", "runtime", "mission-revision", 2, revisedMission, map[string]string{"reason": "reviewed"}); err != nil {
+		t.Fatalf("revise Mission: %v", err)
+	}
+	revisedGoal := core.Goal{
+		ID: input.GoalID, OrganizationID: input.OrganizationID, MissionID: input.MissionID,
+		Objective: "Refined verified outcome", Mode: input.GoalMode, Status: core.GoalActive, CreatedAt: view.Goals[0].CreatedAt,
+		SuccessCriteria: []core.IntentValue{{Value: "Revised evidence is durable", Origin: "USER_CONFIRMED"}},
+	}
+	if err := service.state.SaveGoal(ctx, "GOAL_REFINED", "runtime", "goal-revision", 2, revisedGoal, map[string]string{"reason": "reviewed"}); err != nil {
+		t.Fatalf("revise Goal: %v", err)
+	}
+	revisedView, err := service.BootstrapStrategy(ctx, input)
+	if err != nil || revisedView.Missions[0].Statement != revisedMission.Statement || revisedView.Goals[0].Objective != revisedGoal.Objective {
+		t.Fatalf("exact replay after revisions view=%+v err=%v", revisedView, err)
+	}
+
 	changed := input
 	changed.GoalObjective = "A different outcome"
 	if _, err := service.BootstrapStrategy(ctx, changed); !errors.Is(err, ErrStrategyConflict) {
@@ -62,6 +85,30 @@ func TestBootstrapStrategyCreatesDurableDirectionAndReplaysExactly(t *testing.T)
 	}
 	if _, err := New(events.NewGateway(store)).Recover(ctx); err != nil {
 		t.Fatalf("recover bootstrapped strategy: %v", err)
+	}
+}
+
+func TestPreflightStrategySnapshotRejectsRecordOverflow(t *testing.T) {
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "org-1", PolicyVersion: "v1", CreatedAt: now}
+	snapshot := projections.Snapshot{
+		Organizations: map[core.ID]projections.Versioned[core.Organization]{organization.ID: {Version: 1, Value: organization}},
+		Missions:      make(map[core.ID]projections.Versioned[core.Mission], maximumOrganizationSnapshotRecords-1),
+	}
+	for index := 0; index < maximumOrganizationSnapshotRecords-1; index++ {
+		id := core.ID(fmt.Sprintf("mission-existing-%05d", index))
+		snapshot.Missions[id] = projections.Versioned[core.Mission]{Version: 1, Value: core.Mission{
+			ID: id, OrganizationID: organization.ID, Statement: "existing", Status: core.MissionActive, CreatedAt: now,
+		}}
+	}
+	mission := core.Mission{ID: "mission-new", OrganizationID: organization.ID, Statement: "new", Status: core.MissionActive, CreatedAt: now}
+	goal := core.Goal{
+		ID: "goal-new", OrganizationID: organization.ID, MissionID: mission.ID, Objective: "new",
+		Mode: core.GoalTarget, Status: core.GoalActive, CreatedAt: now,
+		SuccessCriteria: []core.IntentValue{{Value: "verified", Origin: "USER_CONFIRMED"}},
+	}
+	if _, err := preflightStrategySnapshot(snapshot, nil, mission, goal); err == nil {
+		t.Fatal("strategy crossed the bounded organization record limit")
 	}
 }
 
@@ -103,6 +150,10 @@ func TestBootstrapStrategyRejectsIncompleteOrAuthorityShapedInput(t *testing.T) 
 		if _, err := service.BootstrapStrategy(context.Background(), input); !errors.Is(err, ErrStrategyInvalid) {
 			t.Fatalf("invalid strategy %d error=%v", index, err)
 		}
+	}
+	forgedDetail := json.RawMessage(`{"request_id":"strategy-1","requested_by_id":"local-uid-1000","requested_by_kind":"HUMAN","source_channel":"HUMAN_DIRECT","approval_authority":true}`)
+	if strategyCreationDetailMatches(forgedDetail, valid) {
+		t.Fatal("authority-shaped strategy provenance was accepted")
 	}
 	stream, err := store.Events(context.Background(), "")
 	if err != nil || len(stream) != 0 {

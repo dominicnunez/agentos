@@ -123,6 +123,34 @@ func TestHumanGatewayBootstrapsStrategyWithoutCreatingAuthority(t *testing.T) {
 	}
 }
 
+func TestHumanGatewayAcceptsWorstCaseEncodedValidStrategy(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	handler := testHumanHandler(t, intake.New(app.New(events.NewGateway(store))))
+	criteria := make([]string, 0, 16)
+	for index := 0; index < 16; index++ {
+		criteria = append(criteria, strings.Repeat("\"", (4<<10)-1)+string(rune('A'+index)))
+	}
+	body, err := json.Marshal(userStrategyBootstrapRequest{
+		RequestID: "strategy-escaped", MissionID: "mission-escaped", MissionStatement: strings.Repeat("<", 16<<10),
+		GoalID: "goal-escaped", GoalObjective: strings.Repeat("<", 16<<10), GoalMode: core.GoalTarget,
+		SuccessCriteria: criteria,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) <= 256<<10 || len(body) > MaximumStrategyRequestBytes {
+		t.Fatalf("encoded valid strategy bytes=%d", len(body))
+	}
+	response := serveHuman(handler, http.MethodPost, "/v1/user/strategy/bootstrap", testOwnerMarker, string(body))
+	if response.Code != http.StatusOK {
+		t.Fatalf("encoded valid strategy status=%d", response.Code)
+	}
+}
+
 type reviewerModel struct{}
 
 func (reviewerModel) Name() string { return "review-provider/test-model" }

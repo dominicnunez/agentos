@@ -10,6 +10,15 @@ export type FieldRequirement = { name: string; min_bytes: number; max_bytes: num
 export type ConfirmationRetryBinding = { conversation_id: string; fingerprint: string };
 export type ApprovalRetryBinding = { approval_id: string; fingerprint: string; decision: 'APPROVE' | 'DENY' };
 export type ReviewRetryBinding = { task_id: string; review_id: string; fingerprint: string; decision: 'APPROVE' | 'REJECT' | 'REVISE'; feedback: string };
+export type StrategyRetryBinding = {
+  request_id: string;
+  mission_id: string;
+  mission_statement: string;
+  goal_id: string;
+  goal_objective: string;
+  goal_mode: 'TARGET' | 'CONTINUOUS';
+  success_criteria: string[];
+};
 export type DashboardRequest = <T>(path: string, options?: RequestInit) => Promise<T>;
 
 export function discardConfirmationRetry(status: number): boolean {
@@ -111,6 +120,58 @@ export function parseReviewRetryBinding(value: string | null): ReviewRetryBindin
   return reviewRetryBinding(record.task_id, record.review_id, record.fingerprint, record.decision, record.feedback);
 }
 
+export function strategyRetryBinding(
+  requestID: string,
+  missionID: string,
+  missionStatement: string,
+  goalID: string,
+  goalObjective: string,
+  goalMode: 'TARGET' | 'CONTINUOUS',
+  successCriteria: string[]
+): StrategyRetryBinding {
+  const criteria = [...successCriteria];
+  const total = criteria.reduce((bytes, criterion) => bytes + new TextEncoder().encode(criterion).byteLength, 0);
+  if (!validStrategyIdentifier(requestID) || !missionID.startsWith('mission-') || !validStrategyIdentifier(missionID) ||
+    !goalID.startsWith('goal-') || !validStrategyIdentifier(goalID) || missionID === goalID ||
+    !validStrategyText(missionStatement, 16 * 1024) || !validStrategyText(goalObjective, 16 * 1024) ||
+    (goalMode !== 'TARGET' && goalMode !== 'CONTINUOUS') || criteria.length < 1 || criteria.length > 32 || total > 64 * 1024 ||
+    new Set(criteria).size !== criteria.length || criteria.some((criterion) => !validStrategyText(criterion, 4 * 1024))) {
+    throw new Error('Strategy retry binding is invalid.');
+  }
+  return {
+    request_id: requestID,
+    mission_id: missionID,
+    mission_statement: missionStatement,
+    goal_id: goalID,
+    goal_objective: goalObjective,
+    goal_mode: goalMode,
+    success_criteria: criteria
+  };
+}
+
+export function parseStrategyRetryBinding(value: string | null): StrategyRetryBinding | null {
+  const record = parseStrictRecord(value, ['goal_id', 'goal_mode', 'goal_objective', 'mission_id', 'mission_statement', 'request_id', 'success_criteria'], 'strategy');
+  if (!record) return null;
+  if (typeof record.request_id !== 'string' || typeof record.mission_id !== 'string' || typeof record.mission_statement !== 'string' ||
+    typeof record.goal_id !== 'string' || typeof record.goal_objective !== 'string' ||
+    (record.goal_mode !== 'TARGET' && record.goal_mode !== 'CONTINUOUS') || !Array.isArray(record.success_criteria) ||
+    !record.success_criteria.every((criterion) => typeof criterion === 'string')) {
+    throw new Error('Stored strategy retry is invalid.');
+  }
+  return strategyRetryBinding(record.request_id, record.mission_id, record.mission_statement, record.goal_id, record.goal_objective, record.goal_mode, record.success_criteria as string[]);
+}
+
+export function matchesStrategyRetry(
+  binding: StrategyRetryBinding,
+  missionStatement: string,
+  goalObjective: string,
+  goalMode: 'TARGET' | 'CONTINUOUS',
+  successCriteria: string[]
+): boolean {
+  return binding.mission_statement === missionStatement && binding.goal_objective === goalObjective && binding.goal_mode === goalMode &&
+    binding.success_criteria.length === successCriteria.length && binding.success_criteria.every((criterion, index) => criterion === successCriteria[index]);
+}
+
 function parseStrictRecord(value: string | null, keys: string[], name: string): Record<string, unknown> | null {
   if (!value) return null;
   let parsed: unknown;
@@ -174,6 +235,19 @@ function validBoundaryIdentifier(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function validStrategyText(value: string, maximumBytes: number): boolean {
+  if (!value || value !== value.trim() || value.includes('\0')) return false;
+  try {
+    return new TextEncoder().encode(value).byteLength <= maximumBytes && decodeURIComponent(encodeURIComponent(value)) === value;
+  } catch {
+    return false;
+  }
+}
+
+function validStrategyIdentifier(value: string): boolean {
+  return value.length <= 256 && /^[A-Za-z0-9_.:-]+$/.test(value);
 }
 
 export function validateCompletionFields(

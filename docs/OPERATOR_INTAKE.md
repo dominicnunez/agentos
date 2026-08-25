@@ -123,7 +123,11 @@ The initial views are:
 On a fresh installation, the Organization view creates a Mission and one
 measurable Goal in a single SQLite transaction. The request is accepted only
 from the configured local user through the private Unix socket. Exact retries
-are idempotent, conflicting identifiers fail closed, and the authenticated user
+resolve against the immutable creation admission even after later Mission or
+Goal revisions. The dashboard retains the exact mutation binding before send
+and reconciles it after an interrupted response. The runtime preflights the
+resulting bounded organization view before commit, conflicting identifiers fail
+closed, and the authenticated user
 is retained as provenance in runtime-owned Event Contracts. Creating direction
 does not grant effect, approval, capability, policy, or completion authority.
 A2A Agents cannot use this boundary.

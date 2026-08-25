@@ -16,6 +16,10 @@ import (
 	"github.com/dominicnunez/agentos/internal/trustconfig"
 )
 
+// MaximumStrategyRequestBytes covers the worst-case JSON escaping of every
+// semantically valid strategy field while retaining a closed wire bound.
+const MaximumStrategyRequestBytes = 640 << 10
+
 type Human struct {
 	service   *intake.Service
 	owner     LocalHuman
@@ -405,7 +409,7 @@ func (h *Human) handleStrategyBootstrap(w http.ResponseWriter, r *http.Request, 
 	}
 	defer func() { _ = r.Body.Close() }()
 	var request userStrategyBootstrapRequest
-	reader := http.MaxBytesReader(w, r.Body, 128<<10)
+	reader := http.MaxBytesReader(w, r.Body, MaximumStrategyRequestBytes)
 	if err := trustconfig.DecodeObject(reader, "strategy setup", &request); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

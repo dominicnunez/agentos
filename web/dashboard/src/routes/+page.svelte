@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { APIError, api, connect, emptyJSONPost, identifier } from '$lib/api';
-  import { approvalRetryBinding, completionReviewFeedback, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, loadAllCompletionReviews, matchesConfirmationRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
-  import type { ApprovalRetryBinding, ReviewRetryBinding } from '$lib/governance';
+  import { approvalRetryBinding, completionReviewFeedback, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, loadAllCompletionReviews, matchesConfirmationRetry, matchesStrategyRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, parseStrategyRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, strategyRetryBinding, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
+  import type { ApprovalRetryBinding, ReviewRetryBinding, StrategyRetryBinding } from '$lib/governance';
   import '$lib/app.css';
   import type { Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, IntentDraft, OrganizationSnapshot, TaskView } from '$lib/types';
 
@@ -21,6 +21,7 @@
   const pendingConfirmationKey = 'agentos.dashboard.pending-confirmation';
   const pendingApprovalKey = 'agentos.dashboard.pending-approval';
   const pendingReviewKey = 'agentos.dashboard.pending-review';
+  const pendingStrategyStorageKey = 'agentos.dashboard.pending-strategy';
 
   let section: Section = 'overview';
   let identity: DashboardIdentity | null = null;
@@ -38,12 +39,9 @@
   let selectedGoalID = '';
   let missionStatement = '';
   let goalObjective = '';
-  let goalMode = 'TARGET';
+  let goalMode: 'TARGET' | 'CONTINUOUS' = 'TARGET';
   let goalCriteria = '';
-  let pendingStrategyKey = '';
-  let pendingStrategyRequestID = '';
-  let pendingMissionID = '';
-  let pendingGoalID = '';
+  let pendingStrategy: StrategyRetryBinding | null = null;
   let conversationID = '';
   let busy = false;
   let error = '';
@@ -82,6 +80,16 @@
         recoveryFailures.push(message(cause));
       }
       try {
+        const recovered = await recoverPendingStrategy();
+        if (recovered) {
+          refreshGeneration += 1;
+          setOrganization(recovered);
+          notice = 'Recovered durable Mission and Goal creation after an interrupted response.';
+        }
+      } catch (cause) {
+        recoveryFailures.push(message(cause));
+      }
+      try {
         const recovered = await recoverPendingConfirmation();
         if (recovered) {
           task = recovered;
@@ -100,7 +108,7 @@
         }
       }
       await refresh();
-      if (recoveryFailures.length) error = `Pending decision recovery failed. ${recoveryFailures.join(' ')}${error ? ` ${error}` : ''}`;
+      if (recoveryFailures.length) error = `Pending operation recovery failed. ${recoveryFailures.join(' ')}${error ? ` ${error}` : ''}`;
     } catch (cause) {
       error = message(cause);
     }
@@ -352,38 +360,73 @@
     const objective = goalObjective.trim();
     const criteria = strategyCriteria();
     if (!statement || !objective || !criteria.length) return;
-    const requestKey = JSON.stringify([statement, objective, goalMode, criteria]);
-    if (!pendingStrategyRequestID || pendingStrategyKey !== requestKey) {
-      pendingStrategyKey = requestKey;
-      pendingStrategyRequestID = identifier('strategy');
-      pendingMissionID = identifier('mission');
-      pendingGoalID = identifier('goal');
+    if (pendingStrategy && !matchesStrategyRetry(pendingStrategy, statement, objective, goalMode, criteria)) {
+      error = 'The interrupted Mission and Goal creation must be recovered before different direction can be submitted.';
+      return;
     }
     await action(async () => {
-      const updated = await api<OrganizationSnapshot>('/api/v1/user/strategy/bootstrap', {
-        method: 'POST',
-        body: JSON.stringify({
-          request_id: pendingStrategyRequestID,
-          mission_id: pendingMissionID,
-          mission_statement: statement,
-          goal_id: pendingGoalID,
-          goal_objective: objective,
-          goal_mode: goalMode,
-          success_criteria: criteria
-        })
-      });
+      const binding = pendingStrategy ?? strategyRetryBinding(
+        identifier('strategy'), identifier('mission'), statement, identifier('goal'), objective, goalMode, criteria
+      );
+      pendingStrategy = binding;
+      sessionStorage.setItem(pendingStrategyStorageKey, JSON.stringify(binding));
+      let updated: OrganizationSnapshot;
+      try {
+        updated = await sendStrategy(binding);
+      } catch (cause) {
+        if (cause instanceof APIError && (cause.status === 400 || cause.status === 409)) clearPendingStrategy();
+        throw cause;
+      }
       refreshGeneration += 1;
       setOrganization(updated);
       missionStatement = '';
       goalObjective = '';
       goalMode = 'TARGET';
       goalCriteria = '';
-      pendingStrategyKey = '';
-      pendingStrategyRequestID = '';
-      pendingMissionID = '';
-      pendingGoalID = '';
+      clearPendingStrategy();
       notice = 'The Mission and Goal are now durable organizational direction.';
     });
+  }
+
+  function sendStrategy(binding: StrategyRetryBinding): Promise<OrganizationSnapshot> {
+    return api<OrganizationSnapshot>('/api/v1/user/strategy/bootstrap', {
+      method: 'POST',
+      body: JSON.stringify(binding)
+    });
+  }
+
+  async function recoverPendingStrategy(): Promise<OrganizationSnapshot | null> {
+    let binding: StrategyRetryBinding | null;
+    try {
+      binding = parseStrategyRetryBinding(sessionStorage.getItem(pendingStrategyStorageKey));
+    } catch (cause) {
+      sessionStorage.removeItem(pendingStrategyStorageKey);
+      pendingStrategy = null;
+      throw cause;
+    }
+    if (!binding) return null;
+    pendingStrategy = binding;
+    missionStatement = binding.mission_statement;
+    goalObjective = binding.goal_objective;
+    goalMode = binding.goal_mode;
+    goalCriteria = binding.success_criteria.join('\n');
+    try {
+      const updated = await sendStrategy(binding);
+      clearPendingStrategy();
+      missionStatement = '';
+      goalObjective = '';
+      goalMode = 'TARGET';
+      goalCriteria = '';
+      return updated;
+    } catch (cause) {
+      if (cause instanceof APIError && (cause.status === 400 || cause.status === 409)) clearPendingStrategy();
+      throw cause;
+    }
+  }
+
+  function clearPendingStrategy(): void {
+    pendingStrategy = null;
+    sessionStorage.removeItem(pendingStrategyStorageKey);
   }
 
   async function recoverPendingConfirmation(): Promise<TaskView | null> {

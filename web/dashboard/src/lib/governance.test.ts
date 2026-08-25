@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { APIError, emptyJSONPost, isDashboardSessionRejection } from './api.ts';
-import { approvalRetryBinding, completionReviewFeedback, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, hasRetryableIntentConfirmation, loadAllCompletionReviews, matchesConfirmationRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from './governance.ts';
+import { approvalRetryBinding, completionReviewFeedback, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, hasRetryableIntentConfirmation, loadAllCompletionReviews, matchesConfirmationRetry, matchesStrategyRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, parseStrategyRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, strategyRetryBinding, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from './governance.ts';
 import type { Approval, CompletionReview } from './types';
 
 function review(id: string): CompletionReview {
@@ -175,4 +175,21 @@ test('rejects authority-shaped and internally inconsistent decision retries', ()
   assert.throws(() => parseApprovalRetryBinding(JSON.stringify({ approval_id: 'approval-1', fingerprint: 'a'.repeat(64), decision: 'APPROVE', role: 'owner' })), /invalid/);
   assert.throws(() => parseReviewRetryBinding(JSON.stringify({ task_id: 'task-1', review_id: 'review-1', fingerprint: 'b'.repeat(64), decision: 'APPROVE', feedback: 'hidden' })), /invalid/);
   assert.throws(() => parseReviewRetryBinding(JSON.stringify({ task_id: 'task-1', review_id: 'review-1', fingerprint: 'b'.repeat(64), decision: 'REVISE', feedback: '   ' })), /invalid/);
+});
+
+test('round-trips a strict strategy mutation retry', () => {
+  const binding = strategyRetryBinding(
+    'strategy-1', 'mission-1', 'Build a governed organization', 'goal-1', 'Complete one verified workflow', 'TARGET', ['Evidence is durable']
+  );
+  assert.deepEqual(parseStrategyRetryBinding(JSON.stringify(binding)), binding);
+  assert.equal(matchesStrategyRetry(binding, binding.mission_statement, binding.goal_objective, binding.goal_mode, binding.success_criteria), true);
+  assert.equal(matchesStrategyRetry(binding, binding.mission_statement, 'different', binding.goal_mode, binding.success_criteria), false);
+});
+
+test('rejects tampered or noncanonical strategy retries', () => {
+  const binding = strategyRetryBinding('strategy-1', 'mission-1', 'Mission', 'goal-1', 'Goal', 'CONTINUOUS', ['Measured']);
+  assert.throws(() => parseStrategyRetryBinding(JSON.stringify({ ...binding, approval_authority: true })), /invalid/);
+  assert.throws(() => parseStrategyRetryBinding(JSON.stringify({ ...binding, success_criteria: ['Measured', 'Measured'] })), /invalid/);
+  assert.throws(() => strategyRetryBinding('strategy-1', 'mission-1', ' Mission ', 'goal-1', 'Goal', 'TARGET', ['Measured']), /invalid/);
+  assert.throws(() => strategyRetryBinding('strategy-1', 'mission-1', 'Mission', 'goal-1', 'Goal', 'TARGET', ['x'.repeat((4 * 1024) + 1)]), /invalid/);
 });

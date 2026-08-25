@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/bootstrap"
+	"github.com/dominicnunez/agentos/internal/gateway"
 )
 
 type dashboardRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -181,6 +182,18 @@ func TestAllowedDashboardRoute(t *testing.T) {
 		if got := allowedDashboardRoute(test.method, test.path, test.query); got != test.want {
 			t.Errorf("%s %s?%s=%t want %t", test.method, test.path, test.query, got, test.want)
 		}
+	}
+}
+
+func TestDashboardRequestBodyLimitsPreserveStrategyContract(t *testing.T) {
+	if got := dashboardRequestBodyLimit(http.MethodPost, "/v1/user/strategy/bootstrap"); got != gateway.MaximumStrategyRequestBytes {
+		t.Fatalf("strategy request limit=%d", got)
+	}
+	if got := dashboardRequestBodyLimit(http.MethodPost, "/v1/user/messages"); got != 256<<10 {
+		t.Fatalf("ordinary request limit=%d", got)
+	}
+	if got := dashboardRequestBodyLimit(http.MethodPost, "/v1/user/tasks/task-1/completion"); got != 48<<20 {
+		t.Fatalf("completion request limit=%d", got)
 	}
 }
 
