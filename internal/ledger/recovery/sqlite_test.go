@@ -1072,6 +1072,93 @@ func TestRecoveryRejectsOrphanGoalBoundConfirmation(t *testing.T) {
 	}
 }
 
+func TestRecoveryRevalidatesIntakeAbandonmentBoundaries(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "abandoned-intake.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	application := app.New(events.NewGateway(store))
+	if _, err := application.RecordIntakeMessage(ctx, app.IntakeMessage{
+		RequestID: "request-1", OrganizationID: "org-1", MessageID: "message-1", Text: "Prepare bounded work.",
+		SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT",
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, err := application.AbandonIntake(ctx, app.IntakeAbandonment{
+		RequestID: "request-1", OrganizationID: "org-1", MessageID: "abandon-1",
+		SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT",
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err != nil {
+		t.Fatalf("valid abandoned intake failed recovery: %v", err)
+	}
+	pristine, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name   string
+		want   string
+		tamper func(*testing.T, *sql.DB)
+	}{
+		{name: "malformed payload", want: "abandonment event contract is invalid", tamper: func(t *testing.T, db *sql.DB) {
+			if _, err := db.ExecContext(ctx, `UPDATE events SET payload='{}' WHERE event_type='INTAKE_ABANDONED'`); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "wrong actor", want: "abandonment event contract is invalid", tamper: func(t *testing.T, db *sql.DB) {
+			if _, err := db.ExecContext(ctx, `UPDATE events SET source_actor_id='user-2' WHERE event_type='INTAKE_ABANDONED'`); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "duplicate", want: "multiple durable abandonments", tamper: func(t *testing.T, db *sql.DB) {
+			if _, err := db.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version)
+SELECT 'duplicate-abandonment',organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_type='INTAKE_ABANDONED'`); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "after confirmation", want: "confirmed intent cannot be abandoned", tamper: func(t *testing.T, db *sql.DB) {
+			var sequence int64
+			if err := db.QueryRowContext(ctx, `SELECT sequence FROM events WHERE event_type='INTAKE_ABANDONED'`).Scan(&sequence); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.ExecContext(ctx, `UPDATE events SET sequence=? WHERE event_type='INTAKE_ABANDONED'`, sequence+2); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.ExecContext(ctx, `INSERT INTO events(sequence,event_id,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version)
+SELECT ?,'prior-confirmation',organization_id,'INTENT_CONFIRMED',source_actor_id,'','','',task_id,'[]','[]','{}',correlation_id,created_at,schema_version FROM events WHERE event_type='INTAKE_ABANDONED'`, sequence+1); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tampered := filepath.Join(t.TempDir(), "ledger.db")
+			if err := os.WriteFile(tampered, pristine, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", tampered)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.tamper(t, db)
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Verify(ctx, tampered); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("recovery error=%v want=%q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestRecoveryRejectsTaskBeforeWorkAdmission(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.db")

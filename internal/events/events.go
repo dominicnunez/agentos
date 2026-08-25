@@ -38,7 +38,7 @@ func IndexReviewedIntentEvidence(stream []Event) ReviewedIntentEvidenceIndex {
 	index := make(ReviewedIntentEvidenceIndex)
 	for _, event := range stream {
 		switch event.EventType {
-		case "INTAKE_MESSAGE_RECORDED", "INTENT_DRAFTED", "INTENT_CONFIRMED":
+		case "INTAKE_MESSAGE_RECORDED", "INTENT_DRAFTED", "INTAKE_ABANDONED", "INTENT_CONFIRMED":
 			index[event.CorrelationID] = append(index[event.CorrelationID], event)
 		}
 	}
@@ -181,12 +181,20 @@ type IntakeMessageRecordedPayload struct {
 	SourcePrincipalKind    string             `json:"source_principal_kind"`
 	SourceChannel          string             `json:"source_channel"`
 	RequestedExecutionKind core.ExecutionKind `json:"requested_execution_kind,omitempty"`
+	SelectedGoalID         string             `json:"selected_goal_id,omitempty"`
 }
 
 type IntentDraftedPayload struct {
 	SourceMessageID string           `json:"source_message_id"`
 	Draft           core.IntentDraft `json:"draft"`
 	Reply           string           `json:"reply"`
+}
+
+type IntakeAbandonedPayload struct {
+	MessageID           string `json:"message_id"`
+	SourcePrincipalID   string `json:"source_principal_id"`
+	SourcePrincipalKind string `json:"source_principal_kind"`
+	SourceChannel       string `json:"source_channel"`
 }
 
 type IntentNormalizationContextPayload struct {
@@ -304,6 +312,8 @@ func validateReviewedIntent(stream []Event, confirmationEvent Event, confirmatio
 	var latestDraftEvent Event
 	var latestDraft IntentDraftedPayload
 	draftCount := 0
+	var selectedGoalID string
+	selectedGoalBound := false
 	for _, event := range stream {
 		switch event.EventType {
 		case "INTAKE_MESSAGE_RECORDED":
@@ -313,6 +323,12 @@ func validateReviewedIntent(stream []Event, confirmationEvent Event, confirmatio
 			}
 			if _, exists := intakeMessages[payload.MessageID]; exists {
 				return fmt.Errorf("intent source message is not unique")
+			}
+			if !selectedGoalBound {
+				selectedGoalID = payload.SelectedGoalID
+				selectedGoalBound = true
+			} else if payload.SelectedGoalID != selectedGoalID {
+				return fmt.Errorf("intent selected Goal changed during review")
 			}
 			intakeMessages[payload.MessageID] = payload
 			intakeSequences[payload.MessageID] = event.Sequence
@@ -326,6 +342,8 @@ func validateReviewedIntent(stream []Event, confirmationEvent Event, confirmatio
 			draftCount++
 			latestDraftEvent = event
 			latestDraft = payload
+		case "INTAKE_ABANDONED":
+			return fmt.Errorf("abandoned intake cannot be confirmed")
 		}
 	}
 	if latestDraftEvent.EventID == "" || latestIntakeMessageID == "" || latestDraftEvent.Sequence <= latestIntakeSequence || latestDraft.SourceMessageID != latestIntakeMessageID || latestDraft.Draft.CreatedAt.IsZero() || strings.TrimSpace(latestDraft.Reply) == "" {
@@ -349,6 +367,9 @@ func validateReviewedIntent(stream []Event, confirmationEvent Event, confirmatio
 	if err != nil || reviewedGoalID != goalID {
 		return fmt.Errorf("intent reviewed Goal provenance is invalid")
 	}
+	if selectedGoalID != "" && selectedGoalID != string(goalID) {
+		return fmt.Errorf("intent reviewed Goal does not match its durable user selection")
+	}
 	replacesWorkID, err := core.AcceptedIntentReplacesWorkID(reviewed)
 	if err != nil || string(replacesWorkID) != confirmation.ReplacesWorkID {
 		return fmt.Errorf("intent reviewed replacement Work provenance is invalid")
@@ -364,7 +385,8 @@ func validateReviewedIntent(stream []Event, confirmationEvent Event, confirmatio
 		switch reviewed.Goal.Origin {
 		case "EXPLICIT", "CONFIRMED":
 			goalMessage, found := intakeMessages[reviewed.Goal.SourceMessageID]
-			if !found || intakeSequences[reviewed.Goal.SourceMessageID] >= latestDraftEvent.Sequence || !core.ContainsExactGoalReference(goalMessage.Text, string(goalID)) {
+			if !found || intakeSequences[reviewed.Goal.SourceMessageID] >= latestDraftEvent.Sequence ||
+				goalMessage.SelectedGoalID != string(goalID) && !core.ContainsExactGoalReference(goalMessage.Text, string(goalID)) {
 				return fmt.Errorf("goal-bound intent Goal is not present in its attributed source message")
 			}
 		case "POLICY":
@@ -397,6 +419,9 @@ func validReviewedIntakeMessage(event Event, payload IntakeMessageRecordedPayloa
 	if !validReviewedOperatorIdentity(payload.SourcePrincipalID, payload.SourcePrincipalKind, payload.SourceChannel) {
 		return false
 	}
+	if payload.SelectedGoalID != "" && (payload.SourcePrincipalKind != string(core.PrincipalHuman) || payload.SourceChannel != "HUMAN_DIRECT" || !core.ValidGoalReferenceID(payload.SelectedGoalID)) {
+		return false
+	}
 	switch payload.RequestedExecutionKind {
 	case "", core.ExecutionDeterministic, core.ExecutionAgent, core.ExecutionHuman:
 		return true
@@ -410,6 +435,78 @@ func validReviewedIntakeMessage(event Event, payload IntakeMessageRecordedPayloa
 func validReviewedOperatorIdentity(id, kind, channel string) bool {
 	principalKind := core.PrincipalKind(kind)
 	return principalKind != core.PrincipalRuntime && core.ValidIntentSourceIdentity(core.ID(id), principalKind, channel)
+}
+
+// ValidateIntakeAbandonment replays the bounded intake evidence that permits a
+// local user to terminalize one unconfirmed intake without deleting history.
+func ValidateIntakeAbandonment(stream []Event, abandonmentEvent Event) error {
+	return ValidateIndexedIntakeAbandonment(IndexReviewedIntentEvidence(stream).At(abandonmentEvent), abandonmentEvent)
+}
+
+// ValidateIndexedIntakeAbandonment validates a pre-indexed, time-bounded
+// abandonment boundary. It rejects malformed, duplicated, externally sourced,
+// or post-confirmation terminal events recovered from durable storage.
+func ValidateIndexedIntakeAbandonment(stream []Event, abandonmentEvent Event) error {
+	if len(stream) > ReviewedIntentEvidenceLimit {
+		return fmt.Errorf("intake evidence exceeds its admission bound")
+	}
+	var abandonment IntakeAbandonedPayload
+	if decodeExactEventJSON(abandonmentEvent.Payload, &abandonment) != nil || !validIntakeAbandonmentEvent(abandonmentEvent, abandonment) {
+		return fmt.Errorf("intake abandonment event contract is invalid")
+	}
+	var initial IntakeMessageRecordedPayload
+	var initialSequence int64
+	foundInitial := false
+	foundBoundary := false
+	messageIDs := make(map[string]struct{})
+	for _, event := range stream {
+		if event.CorrelationID != abandonmentEvent.CorrelationID || abandonmentEvent.Sequence > 0 && event.Sequence > abandonmentEvent.Sequence {
+			continue
+		}
+		switch event.EventType {
+		case "INTAKE_MESSAGE_RECORDED":
+			var payload IntakeMessageRecordedPayload
+			if decodeExactEventJSON(event.Payload, &payload) != nil || !validReviewedIntakeMessage(event, payload, abandonmentEvent) {
+				return fmt.Errorf("intake abandonment has invalid durable intake evidence")
+			}
+			if _, duplicate := messageIDs[payload.MessageID]; duplicate {
+				return fmt.Errorf("intake abandonment has duplicate durable message identity")
+			}
+			messageIDs[payload.MessageID] = struct{}{}
+			if !foundInitial || event.Sequence < initialSequence {
+				initial = payload
+				initialSequence = event.Sequence
+				foundInitial = true
+			} else if payload.SourcePrincipalID != initial.SourcePrincipalID || payload.SourcePrincipalKind != initial.SourcePrincipalKind || payload.SourceChannel != initial.SourceChannel {
+				return fmt.Errorf("intake abandonment contains a message from a different principal")
+			}
+		case "INTENT_CONFIRMED":
+			return fmt.Errorf("confirmed intent cannot be abandoned")
+		case "INTAKE_ABANDONED":
+			var payload IntakeAbandonedPayload
+			if decodeExactEventJSON(event.Payload, &payload) != nil || !validIntakeAbandonmentEvent(event, payload) {
+				return fmt.Errorf("intake abandonment event contract is invalid")
+			}
+			if foundBoundary || event.EventID != abandonmentEvent.EventID || event.Sequence != abandonmentEvent.Sequence || !reflect.DeepEqual(payload, abandonment) {
+				return fmt.Errorf("intake has multiple durable abandonments")
+			}
+			foundBoundary = true
+		}
+	}
+	if !foundBoundary || !foundInitial || initialSequence >= abandonmentEvent.Sequence ||
+		initial.SourcePrincipalID != abandonment.SourcePrincipalID || initial.SourcePrincipalKind != abandonment.SourcePrincipalKind || initial.SourceChannel != abandonment.SourceChannel {
+		return fmt.Errorf("intake abandonment is not owned by its original local user")
+	}
+	return nil
+}
+
+func validIntakeAbandonmentEvent(event Event, abandonment IntakeAbandonedPayload) bool {
+	return event.EventID != "" && event.Sequence > 0 && !event.CreatedAt.IsZero() && event.SchemaVersion == SchemaVersion &&
+		event.EventType == "INTAKE_ABANDONED" && event.OrganizationID != "" && event.SourceActorID != "" && event.SourceActorID == abandonment.SourcePrincipalID &&
+		event.SourceExecutionID == "" && event.RecipientScope == "" && event.RecipientID == "" && event.TaskID == "task-"+event.CorrelationID &&
+		len(event.AuthorizationRefs) == 0 && len(event.ArtifactRefs) == 0 && event.CorrelationID != "" && abandonment.MessageID != "" &&
+		abandonment.SourcePrincipalKind == string(core.PrincipalHuman) && abandonment.SourceChannel == "HUMAN_DIRECT" &&
+		core.ValidIntentSourceIdentity(core.ID(abandonment.SourcePrincipalID), core.PrincipalHuman, abandonment.SourceChannel)
 }
 
 type WorkCompletionTransitionPayload struct {
@@ -3205,6 +3302,9 @@ type ProjectionReader interface {
 type IntentConfirmer interface {
 	AppendIntentConfirmation(context.Context, TrustedDraft, core.ID, core.ID) (Event, error)
 }
+type IntakeAbandoner interface {
+	AppendIntakeAbandonment(context.Context, TrustedDraft) (Event, error)
+}
 type ExternalWorkResolver interface {
 	ResolveExternalWork(context.Context, string, string) (string, bool, error)
 	ResolveExternalRequest(context.Context, string, string) (string, bool, error)
@@ -3346,8 +3446,8 @@ func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event
 	case "WORK_COMPLETION_EVALUATED", "WORK_COMPLETED", "GOAL_PROGRESS_EVALUATED", "GOAL_ACHIEVED":
 		return Event{}, fmt.Errorf("terminal evidence requires its typed admission")
 	}
-	if draft.EventType == "INTENT_CONFIRMED" {
-		return Event{}, fmt.Errorf("intent confirmation requires typed review admission")
+	if draft.EventType == "INTENT_CONFIRMED" || draft.EventType == "INTAKE_ABANDONED" {
+		return Event{}, fmt.Errorf("intent terminal event requires typed admission")
 	}
 	if err := g.validateAddressed(ctx, draft, false); err != nil {
 		return Event{}, err
@@ -3390,6 +3490,29 @@ func (g *Gateway) PublishIntentConfirmation(ctx context.Context, draft TrustedDr
 		return Event{}, fmt.Errorf("ledger does not support typed intent confirmation")
 	}
 	return confirmer.AppendIntentConfirmation(ctx, draft, goalID, replacesWorkID)
+}
+
+// PublishIntakeAbandonment atomically terminalizes an unconfirmed intake
+// without deleting its evidence or granting authority over any Work.
+func (g *Gateway) PublishIntakeAbandonment(ctx context.Context, draft TrustedDraft) (Event, error) {
+	var abandonment IntakeAbandonedPayload
+	if draft.EventType != "INTAKE_ABANDONED" || decodePayload(draft.Payload, &abandonment) != nil ||
+		draft.OrganizationID == "" || draft.SourceActorID == "" || draft.SourceActorID != abandonment.SourcePrincipalID ||
+		draft.SourceExecutionID != "" || draft.RecipientScope != "" || draft.RecipientID != "" ||
+		draft.TaskID != "task-"+draft.CorrelationID || draft.CorrelationID == "" ||
+		len(draft.AuthorizationRefs) != 0 || len(draft.ArtifactRefs) != 0 || abandonment.MessageID == "" ||
+		abandonment.SourcePrincipalKind != string(core.PrincipalHuman) || abandonment.SourceChannel != "HUMAN_DIRECT" ||
+		!validReviewedOperatorIdentity(abandonment.SourcePrincipalID, abandonment.SourcePrincipalKind, abandonment.SourceChannel) {
+		return Event{}, fmt.Errorf("intake abandonment requires complete operator identity")
+	}
+	if err := g.validateAddressed(ctx, draft, false); err != nil {
+		return Event{}, err
+	}
+	abandoner, ok := g.ledger.(IntakeAbandoner)
+	if !ok {
+		return Event{}, fmt.Errorf("ledger does not support typed intake abandonment")
+	}
+	return abandoner.AppendIntakeAbandonment(ctx, draft)
 }
 func (g *Gateway) PublishProjection(ctx context.Context, draft ProjectionDraft) (Event, error) {
 	if draft.Event.EventType == "" || draft.ProjectionKind == "" || draft.RecordID == "" || draft.Version < 1 {

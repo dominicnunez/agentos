@@ -21,6 +21,7 @@ type IntakeMessage struct {
 	SourcePrincipalKind core.PrincipalKind
 	SourceChannel       string
 	RequestedKind       core.ExecutionKind
+	SelectedGoalID      core.ID
 }
 
 type IntentConfirmation struct {
@@ -32,6 +33,15 @@ type IntentConfirmation struct {
 	SourcePrincipalKind core.PrincipalKind
 	SourceChannel       string
 	Kind                core.ExecutionKind
+}
+
+type IntakeAbandonment struct {
+	RequestID           string
+	OrganizationID      string
+	MessageID           string
+	SourcePrincipalID   core.ID
+	SourcePrincipalKind core.PrincipalKind
+	SourceChannel       string
 }
 
 type IntentNormalizationContext struct {
@@ -125,6 +135,9 @@ func (s *Service) RecordIntakeMessage(ctx context.Context, in IntakeMessage) ([]
 	if ctx == nil || in.RequestID == "" || in.OrganizationID == "" || in.MessageID == "" || in.Text == "" || in.SourcePrincipalID == "" || in.SourcePrincipalKind == "" || in.SourceChannel == "" {
 		return nil, fmt.Errorf("complete intake message identity and content are required")
 	}
+	if in.SelectedGoalID != "" && (in.SourcePrincipalKind != core.PrincipalHuman || in.SourceChannel != "HUMAN_DIRECT" || !core.ValidGoalReferenceID(string(in.SelectedGoalID))) {
+		return nil, fmt.Errorf("selected Goal requires valid local user intake")
+	}
 	correlationID, err := s.gateway.ReserveExternalWork(ctx, in.OrganizationID, in.RequestID)
 	if err != nil {
 		return nil, err
@@ -133,10 +146,15 @@ func (s *Service) RecordIntakeMessage(ctx context.Context, in IntakeMessage) ([]
 	if err != nil {
 		return nil, err
 	}
-	payload := events.IntakeMessageRecordedPayload{MessageID: in.MessageID, Text: in.Text, SourcePrincipalID: string(in.SourcePrincipalID), SourcePrincipalKind: string(in.SourcePrincipalKind), SourceChannel: in.SourceChannel, RequestedExecutionKind: in.RequestedKind}
+	payload := events.IntakeMessageRecordedPayload{MessageID: in.MessageID, Text: in.Text, SourcePrincipalID: string(in.SourcePrincipalID), SourcePrincipalKind: string(in.SourcePrincipalKind), SourceChannel: in.SourceChannel, RequestedExecutionKind: in.RequestedKind, SelectedGoalID: string(in.SelectedGoalID)}
+	var durableSelectedGoalID string
+	hasDurableSelectedGoal := false
 	for _, event := range stream {
 		if event.EventType == "INTENT_CONFIRMED" {
 			return nil, fmt.Errorf("confirmed intent cannot accept more intake messages")
+		}
+		if event.EventType == "INTAKE_ABANDONED" {
+			return nil, fmt.Errorf("abandoned intake cannot accept more messages")
 		}
 		if event.EventType != "INTAKE_MESSAGE_RECORDED" {
 			continue
@@ -144,6 +162,12 @@ func (s *Service) RecordIntakeMessage(ctx context.Context, in IntakeMessage) ([]
 		var recorded events.IntakeMessageRecordedPayload
 		if json.Unmarshal(event.Payload, &recorded) != nil {
 			return nil, fmt.Errorf("durable intake message is invalid")
+		}
+		if !hasDurableSelectedGoal {
+			durableSelectedGoalID = recorded.SelectedGoalID
+			hasDurableSelectedGoal = true
+		} else if recorded.SelectedGoalID != durableSelectedGoalID {
+			return nil, fmt.Errorf("durable intake selected Goal changed")
 		}
 		if recorded.MessageID != in.MessageID {
 			continue
@@ -153,6 +177,9 @@ func (s *Service) RecordIntakeMessage(ctx context.Context, in IntakeMessage) ([]
 		}
 		return stream, nil
 	}
+	if hasDurableSelectedGoal && payload.SelectedGoalID != durableSelectedGoalID {
+		return nil, fmt.Errorf("intake conversation is bound to a different Goal")
+	}
 	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
 		OrganizationID: in.OrganizationID, EventType: "INTAKE_MESSAGE_RECORDED",
 		SourceActorID: string(in.SourcePrincipalID), TaskID: "task-" + correlationID,
@@ -161,6 +188,28 @@ func (s *Service) RecordIntakeMessage(ctx context.Context, in IntakeMessage) ([]
 		return nil, fmt.Errorf("persist intake message: %w", err)
 	}
 	return s.gateway.Events(ctx, correlationID)
+}
+
+// ValidateSelectedGoal rechecks the runtime-owned strategic projection before
+// local user intake can bind Work to a Goal. Selection conveys no authority to
+// revise the Goal or its Mission and both must still be active.
+func (s *Service) ValidateSelectedGoal(ctx context.Context, organizationID, goalID core.ID) error {
+	if ctx == nil || organizationID == "" || goalID == "" || !core.ValidGoalReferenceID(string(goalID)) {
+		return fmt.Errorf("valid organization and selected Goal are required")
+	}
+	snapshot, err := s.state.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("load selected Goal state: %w", err)
+	}
+	goal, found := snapshot.Goals[goalID]
+	if !found || goal.Value.ID != goalID || goal.Value.OrganizationID != organizationID || goal.Value.Status != core.GoalActive {
+		return fmt.Errorf("selected Goal is not active in this organization")
+	}
+	mission, found := snapshot.Missions[goal.Value.MissionID]
+	if !found || mission.Value.ID != goal.Value.MissionID || mission.Value.OrganizationID != organizationID || mission.Value.Status != core.MissionActive {
+		return fmt.Errorf("selected Goal does not belong to an active Mission")
+	}
+	return nil
 }
 
 func (s *Service) RecordIntentNormalizationContext(ctx context.Context, organizationID, requestID string, in IntentNormalizationContext) ([]events.Event, error) {
@@ -181,7 +230,7 @@ func (s *Service) RecordIntentNormalizationContext(ctx context.Context, organiza
 	}
 	refs := make([]string, 0)
 	for _, event := range stream {
-		if event.EventType == "INTENT_CONFIRMED" {
+		if event.EventType == "INTENT_CONFIRMED" || event.EventType == "INTAKE_ABANDONED" {
 			return nil, fmt.Errorf("confirmed intent cannot be normalized")
 		}
 		if event.EventType == "INTAKE_MESSAGE_RECORDED" {
@@ -224,6 +273,9 @@ func (s *Service) RecordIntentNormalizationUsage(ctx context.Context, organizati
 	stream, err := s.gateway.Events(ctx, correlationID)
 	if err != nil {
 		return nil, err
+	}
+	if streamHasIntakeEvent(stream, "INTAKE_ABANDONED") || streamHasIntakeEvent(stream, "INTENT_CONFIRMED") {
+		return nil, fmt.Errorf("closed intent cannot record normalization usage")
 	}
 	manifested := false
 	for _, event := range stream {
@@ -275,7 +327,7 @@ func (s *Service) RecordIntentDraft(ctx context.Context, organizationID, request
 		return nil, fmt.Errorf("intent draft must reference the latest durable intake message")
 	}
 	for _, event := range stream {
-		if event.EventType == "INTENT_CONFIRMED" {
+		if event.EventType == "INTENT_CONFIRMED" || event.EventType == "INTAKE_ABANDONED" {
 			return nil, fmt.Errorf("confirmed intent cannot be revised")
 		}
 		if event.EventType == "INTENT_DRAFTED" {
@@ -309,6 +361,9 @@ func (s *Service) ConfirmIntent(ctx context.Context, in IntentConfirmation) (Res
 	stream, err := s.gateway.Events(ctx, correlationID)
 	if err != nil {
 		return Result{}, err
+	}
+	if streamHasIntakeEvent(stream, "INTAKE_ABANDONED") {
+		return Result{}, fmt.Errorf("abandoned intake cannot be confirmed")
 	}
 	draft, found, err := latestIntentDraft(stream)
 	if err != nil || !found || draft.Status != core.IntentStatusReadyForReview || len(draft.MissingUserInputs) != 0 || draft.Objective == "" || len(draft.Deliverables) == 0 || len(draft.CompletionCriteria) == 0 {
@@ -354,6 +409,30 @@ func (s *Service) ConfirmIntent(ctx context.Context, in IntentConfirmation) (Res
 		return Result{}, fmt.Errorf("persist intent confirmation: %w", err)
 	}
 	return s.submitConfirmedIntent(ctx, submitFromIntent(in, draft, original, correlationID), draft.Mode)
+}
+
+// AbandonIntake terminalizes only an unconfirmed intake stream. The durable
+// messages and drafts remain available for audit and cannot be rebound.
+func (s *Service) AbandonIntake(ctx context.Context, in IntakeAbandonment) ([]events.Event, error) {
+	if ctx == nil || in.RequestID == "" || in.OrganizationID == "" || in.MessageID == "" ||
+		in.SourcePrincipalID == "" || in.SourcePrincipalKind == "" || in.SourceChannel == "" {
+		return nil, fmt.Errorf("complete intake abandonment identity is required")
+	}
+	correlationID, found, err := s.gateway.ResolveExternalWork(ctx, in.OrganizationID, in.RequestID)
+	if err != nil || !found {
+		return nil, fmt.Errorf("resolve intake work")
+	}
+	payload := events.IntakeAbandonedPayload{
+		MessageID: in.MessageID, SourcePrincipalID: string(in.SourcePrincipalID),
+		SourcePrincipalKind: string(in.SourcePrincipalKind), SourceChannel: in.SourceChannel,
+	}
+	if _, err := s.gateway.PublishIntakeAbandonment(ctx, events.TrustedDraft{
+		OrganizationID: in.OrganizationID, EventType: "INTAKE_ABANDONED", SourceActorID: string(in.SourcePrincipalID),
+		TaskID: "task-" + correlationID, CorrelationID: correlationID, Payload: payload,
+	}); err != nil {
+		return nil, fmt.Errorf("persist intake abandonment: %w", err)
+	}
+	return s.gateway.Events(ctx, correlationID)
 }
 
 // ValidateReviewedIntentExecution applies runtime routability checks before a
@@ -433,4 +512,13 @@ func sameInferenceUsage(left, right events.InferenceUsageRecordedPayload) bool {
 		return left.CostUSD == nil && right.CostUSD == nil
 	}
 	return *left.CostUSD == *right.CostUSD
+}
+
+func streamHasIntakeEvent(stream []events.Event, eventType string) bool {
+	for _, event := range stream {
+		if event.EventType == eventType {
+			return true
+		}
+	}
+	return false
 }

@@ -825,6 +825,126 @@ func TestTerminalEvidenceCannotUseGenericTrustedAdmission(t *testing.T) {
 	}
 }
 
+func TestIntakeAbandonmentCannotUseGenericTrustedAdmission(t *testing.T) {
+	ledger := &memoryLedger{}
+	gateway := NewGateway(ledger)
+	_, err := gateway.PublishTrusted(context.Background(), TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTAKE_ABANDONED", SourceActorID: "user-1",
+		TaskID: "task-run-1", CorrelationID: "run-1",
+		Payload: IntakeAbandonedPayload{
+			MessageID: "abandon-1", SourcePrincipalID: "user-1",
+			SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT",
+		},
+	})
+	if err == nil || len(ledger.events) != 0 {
+		t.Fatalf("generic trusted admission persisted intake abandonment: events=%+v err=%v", ledger.events, err)
+	}
+}
+
+func TestIntakeAbandonmentRequiresOneOwnedLocalUserBoundary(t *testing.T) {
+	now := time.Now().UTC()
+	intakePayload := IntakeMessageRecordedPayload{
+		MessageID: "message-1", Text: "Prepare bounded work.", SourcePrincipalID: "user-1",
+		SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT",
+	}
+	intakeBody, err := json.Marshal(intakePayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abandonmentPayload := IntakeAbandonedPayload{
+		MessageID: "abandon-1", SourcePrincipalID: "user-1",
+		SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT",
+	}
+	abandonmentBody, err := json.Marshal(abandonmentPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intake := Event{
+		EventID: "event-1", Sequence: 1, OrganizationID: "org-1", EventType: "INTAKE_MESSAGE_RECORDED",
+		SourceActorID: "user-1", TaskID: "task-intake-1", Payload: intakeBody, CorrelationID: "intake-1",
+		CreatedAt: now, SchemaVersion: SchemaVersion,
+	}
+	abandonment := Event{
+		EventID: "event-2", Sequence: 2, OrganizationID: "org-1", EventType: "INTAKE_ABANDONED",
+		SourceActorID: "user-1", TaskID: "task-intake-1", Payload: abandonmentBody, CorrelationID: "intake-1",
+		CreatedAt: now, SchemaVersion: SchemaVersion,
+	}
+	if err := ValidateIntakeAbandonment([]Event{intake, abandonment}, abandonment); err != nil {
+		t.Fatalf("valid intake abandonment: %v", err)
+	}
+	for name, evidence := range map[string][]Event{
+		"wrong actor": func() []Event {
+			changed := abandonment
+			changed.SourceActorID = "user-2"
+			return []Event{intake, changed}
+		}(),
+		"external agent": func() []Event {
+			changed := abandonment
+			payload := abandonmentPayload
+			payload.SourcePrincipalID = "agent-1"
+			payload.SourcePrincipalKind = string(core.PrincipalExternalAgent)
+			payload.SourceChannel = "A2A"
+			changed.SourceActorID = "agent-1"
+			changed.Payload, _ = json.Marshal(payload)
+			return []Event{intake, changed}
+		}(),
+		"mixed continuation principal": func() []Event {
+			continuationPayload := intakePayload
+			continuationPayload.MessageID = "message-2"
+			continuationPayload.SourcePrincipalID = "agent-1"
+			continuationPayload.SourcePrincipalKind = string(core.PrincipalExternalAgent)
+			continuationPayload.SourceChannel = "A2A"
+			continuationBody, _ := json.Marshal(continuationPayload)
+			continuation := intake
+			continuation.EventID = "event-continuation"
+			continuation.Sequence = 2
+			continuation.SourceActorID = "agent-1"
+			continuation.Payload = continuationBody
+			changed := abandonment
+			changed.Sequence = 3
+			return []Event{intake, continuation, changed}
+		}(),
+		"after confirmation": {
+			intake,
+			{EventID: "event-confirmed", Sequence: 2, OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-intake-1", CorrelationID: "intake-1", CreatedAt: now, SchemaVersion: SchemaVersion},
+			func() Event { changed := abandonment; changed.Sequence = 3; return changed }(),
+		},
+		"duplicate": {
+			intake,
+			abandonment,
+			func() Event {
+				changed := abandonment
+				changed.EventID = "event-3"
+				changed.Sequence = 3
+				return changed
+			}(),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := evidence[len(evidence)-1]
+			if err := ValidateIntakeAbandonment(evidence, candidate); err == nil {
+				t.Fatal("invalid intake abandonment was accepted")
+			}
+		})
+	}
+}
+
+func TestGatewayRejectsExternalAgentIntakeAbandonment(t *testing.T) {
+	ledger := &memoryLedger{}
+	gateway := NewGateway(ledger)
+	_, err := gateway.PublishIntakeAbandonment(context.Background(), TrustedDraft{
+		OrganizationID: "org-1", EventType: "INTAKE_ABANDONED", SourceActorID: "agent-1",
+		TaskID: "task-run-1", CorrelationID: "run-1",
+		Payload: IntakeAbandonedPayload{
+			MessageID: "abandon-1", SourcePrincipalID: "agent-1",
+			SourcePrincipalKind: string(core.PrincipalExternalAgent), SourceChannel: "A2A",
+		},
+	})
+	if err == nil || len(ledger.events) != 0 {
+		t.Fatalf("external agent abandonment reached the ledger: events=%+v err=%v", ledger.events, err)
+	}
+}
+
 func TestInboxObservationCannotBypassAtomicAdmission(t *testing.T) {
 	ledger := &memoryLedger{}
 	gateway := NewGateway(ledger)
@@ -1034,5 +1154,58 @@ func TestReviewedIntentEvidenceIndexUsesConfirmationBoundary(t *testing.T) {
 	evidence := IndexReviewedIntentEvidence(stream).At(stream[3])
 	if len(evidence) != 2 || evidence[0].Sequence != 1 || evidence[1].Sequence != 3 {
 		t.Fatalf("bounded evidence=%+v", evidence)
+	}
+}
+
+func TestReviewedIntentAdmissionRequiresDurableSelectedGoalMatch(t *testing.T) {
+	now := time.Now().UTC()
+	for name, goalID := range map[string]core.ID{"unbound": "", "different": "goal-2"} {
+		t.Run(name, func(t *testing.T) {
+			const correlationID = "selected-goal-admission"
+			const sourceMessageID = "message-1"
+			draft := core.IntentDraft{
+				ID: "intent-" + correlationID, OrganizationID: "org-1", Version: 1,
+				Status: core.IntentStatusReadyForReview, Mode: core.IntentModeStandard,
+				RequestedExecutionKind: core.ExecutionAgent, Objective: "bounded work",
+				Context:            []core.IntentValue{},
+				Deliverables:       []core.IntentValue{{Value: "bounded result", Origin: "EXPLICIT", SourceMessageID: sourceMessageID}},
+				CompletionCriteria: []core.IntentValue{{Value: "result is verified", Origin: "EXPLICIT", SourceMessageID: sourceMessageID}},
+				Constraints:        []core.IntentValue{}, ResolvedDecisions: []core.IntentDecision{},
+				ConsequenceCandidates: []string{}, MissingUserInputs: []core.IntentValue{}, CreatedAt: now,
+			}
+			if goalID != "" {
+				draft.Goal = &core.IntentValue{Value: string(goalID), Origin: "EXPLICIT", SourceMessageID: sourceMessageID}
+			}
+			var err error
+			draft.Fingerprint, err = core.FingerprintIntentDraft(draft)
+			if err != nil {
+				t.Fatal(err)
+			}
+			intakeBody, _ := json.Marshal(IntakeMessageRecordedPayload{
+				MessageID: sourceMessageID, Text: "Perform bounded work for goal-2.", SourcePrincipalID: "user-1",
+				SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT",
+				RequestedExecutionKind: core.ExecutionAgent, SelectedGoalID: "goal-1",
+			})
+			draftBody, _ := json.Marshal(IntentDraftedPayload{SourceMessageID: sourceMessageID, Draft: draft, Reply: "Review the proposed intent."})
+			confirmationBody, _ := json.Marshal(IntentConfirmedPayload{
+				IntentID: string(draft.ID), GoalID: string(goalID), Version: 1, Fingerprint: draft.Fingerprint,
+				ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirmation-1",
+			})
+			stream := []Event{
+				{EventID: "event-1", Sequence: 1, OrganizationID: "org-1", EventType: "INTAKE_MESSAGE_RECORDED", SourceActorID: "user-1", TaskID: "task-" + correlationID, Payload: intakeBody, CorrelationID: correlationID, CreatedAt: now, SchemaVersion: SchemaVersion},
+				{EventID: "event-2", Sequence: 2, OrganizationID: "org-1", EventType: "INTENT_DRAFTED", SourceActorID: "runtime", TaskID: "task-" + correlationID, Payload: draftBody, CorrelationID: correlationID, CreatedAt: now, SchemaVersion: SchemaVersion},
+				{EventID: "event-3", Sequence: 3, OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-" + correlationID, Payload: confirmationBody, CorrelationID: correlationID, CreatedAt: now, SchemaVersion: SchemaVersion},
+			}
+			if goalID == "" {
+				if err := ValidateReviewedIntentAdmission(stream, stream[2]); err == nil {
+					t.Fatal("durably selected Goal was admitted as unbound")
+				}
+				return
+			}
+			goal := core.Goal{ID: goalID, OrganizationID: "org-1", MissionID: "mission-1", Objective: "different goal", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "verified", Origin: "TEST"}}, Status: core.GoalActive, CreatedAt: now}
+			if err := ValidateReviewedGoalIntentAdmission(stream, stream[2], goal); err == nil {
+				t.Fatal("durably selected Goal was admitted under a different Goal")
+			}
+		})
 	}
 }

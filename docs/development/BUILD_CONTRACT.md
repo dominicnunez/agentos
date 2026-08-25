@@ -234,11 +234,19 @@ When Work belongs to a Goal, that Goal identity is also part of the completion
 evidence fingerprint. This makes the bounded result usable by later Goal
 progress evaluation without allowing completion to rebind or achieve the Goal.
 The accepted Intent fingerprint also binds an explicit, source-attributed Goal
-reference. Creation rejects missing, inactive, or cross-organization Goals,
-and a retry cannot add, remove, or change the binding. Goal admission and
+reference. The authenticated local-user dashboard may bind that reference by
+selecting an existing active Goal before the first intake message; the event
+ledger carries the immutable selection through every clarification turn. A2A
+intake has no equivalent field, and model output cannot invent the binding.
+Creation rejects missing, inactive, inactive-Mission, or cross-organization
+Goals, and a retry cannot add, remove, or change the binding. A non-empty
+durable selection must equal the Goal admitted from the reviewed Intent, and
+confirmed initial-message replay includes that exact selection. Goal admission and
 Intent confirmation share one SQLite transaction. Subsequent Goal pause or
 retirement blocks new Work admission without stranding a previously confirmed
-Work retry or recovery.
+Work retry or recovery. A typed local-user abandonment event may terminalize a
+stale unconfirmed intake without deletion or rebinding; the ledger serializes
+it against confirmation and active-intake recovery excludes the closed stream.
 
 Work is the terminalizable layer in the `Mission > Goal > Work > Task`
 hierarchy. Work completion does not itself achieve a Goal or revise

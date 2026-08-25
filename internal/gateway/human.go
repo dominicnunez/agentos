@@ -67,12 +67,14 @@ type humanMessageRequest struct {
 	MessageID      string             `json:"message_id"`
 	Text           string             `json:"text"`
 	ExecutionKind  core.ExecutionKind `json:"execution_kind,omitempty"`
+	GoalID         core.ID            `json:"goal_id,omitempty"`
 }
 
 type humanTaskResponse struct {
 	TaskID                     string                   `json:"task_id"`
 	WorkID                     string                   `json:"work_id,omitempty"`
 	ConversationID             string                   `json:"conversation_id"`
+	SelectedGoalID             core.ID                  `json:"selected_goal_id,omitempty"`
 	State                      string                   `json:"state"`
 	Prompt                     string                   `json:"prompt,omitempty"`
 	Result                     string                   `json:"result,omitempty"`
@@ -90,6 +92,10 @@ type humanTaskResponse struct {
 type humanIntentConfirmationRequest struct {
 	MessageID   string `json:"message_id"`
 	Fingerprint string `json:"fingerprint"`
+}
+
+type humanIntentAbandonmentRequest struct {
+	MessageID string `json:"message_id"`
 }
 
 type humanCompletionRequest struct {
@@ -136,12 +142,11 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	const intentPrefix = "/v1/user/intents/"
-	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, intentPrefix) && strings.HasSuffix(r.URL.Path, "/confirm") {
-		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, intentPrefix), "/confirm")
-		if conversationID == "" || strings.Contains(conversationID, "/") {
-			http.NotFound(w, r)
-			return
-		}
+	if conversationID, ok := userIntentOperation(r, intentPrefix, "abandon"); ok {
+		h.handleIntentAbandonment(w, r, principal, conversationID)
+		return
+	}
+	if conversationID, ok := userIntentOperation(r, intentPrefix, "confirm"); ok {
 		h.handleIntentConfirmation(w, r, principal, conversationID)
 		return
 	}
@@ -212,6 +217,15 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+func userIntentOperation(r *http.Request, prefix, operation string) (string, bool) {
+	suffix := "/" + operation
+	if r.Method != http.MethodPost || r.URL.RawQuery != "" || !strings.HasPrefix(r.URL.Path, prefix) || !strings.HasSuffix(r.URL.Path, suffix) {
+		return "", false
+	}
+	conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, prefix), suffix)
+	return conversationID, conversationID != "" && !strings.Contains(conversationID, "/")
+}
+
 func (h *Human) handleTaskCompletionRecovery(w http.ResponseWriter, r *http.Request, principal intake.Principal, taskID string) {
 	defer func() { _ = r.Body.Close() }()
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1))
@@ -235,19 +249,34 @@ func (h *Human) handleTaskInputRecovery(w http.ResponseWriter, r *http.Request, 
 }
 
 func (h *Human) handleIntentConfirmation(w http.ResponseWriter, r *http.Request, principal intake.Principal, conversationID string) {
-	if !hasJSONContentType(r.Header.Get("Content-Type")) {
-		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "intent confirmation requires application/json"})
-		return
-	}
-	defer func() { _ = r.Body.Close() }()
-	reader := http.MaxBytesReader(w, r.Body, 4096)
 	var request humanIntentConfirmationRequest
-	if err := trustconfig.DecodeObject(reader, "intent confirmation", &request); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	if !decodeHumanIntentRequest(w, r, "intent confirmation", &request) {
 		return
 	}
 	view, err := h.service.ConfirmIntent(r.Context(), principal, intake.IntentConfirmation{ConversationID: conversationID, MessageID: request.MessageID, Fingerprint: request.Fingerprint})
 	h.writeView(w, view, err)
+}
+
+func (h *Human) handleIntentAbandonment(w http.ResponseWriter, r *http.Request, principal intake.Principal, conversationID string) {
+	var request humanIntentAbandonmentRequest
+	if !decodeHumanIntentRequest(w, r, "intent abandonment", &request) {
+		return
+	}
+	view, err := h.service.AbandonIntent(r.Context(), principal, intake.IntentAbandonment{ConversationID: conversationID, MessageID: request.MessageID})
+	h.writeView(w, view, err)
+}
+
+func decodeHumanIntentRequest(w http.ResponseWriter, r *http.Request, label string, target any) bool {
+	if !hasJSONContentType(r.Header.Get("Content-Type")) {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": label + " requires application/json"})
+		return false
+	}
+	defer func() { _ = r.Body.Close() }()
+	if err := trustconfig.DecodeObject(http.MaxBytesReader(w, r.Body, 4096), label, target); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return false
+	}
+	return true
 }
 
 func (h *Human) handleTaskCompletion(w http.ResponseWriter, r *http.Request, principal intake.Principal, taskID string) {
@@ -350,7 +379,7 @@ func validateHumanCompletion(contract core.CompletionContract, request humanComp
 
 func (h *Human) principal() intake.Principal {
 	return operatorPrincipal(string(h.owner.ID), core.PrincipalHuman, string(h.owner.OrganizationID), intake.ChannelHumanDirect, []string{
-		intake.CapabilitySubmitWork, intake.CapabilityConfirmIntent, intake.CapabilityReadStatus, intake.CapabilityReadResult,
+		intake.CapabilitySubmitWork, intake.CapabilityConfirmIntent, intake.CapabilityAbandonIntent, intake.CapabilityReadStatus, intake.CapabilityReadResult,
 		intake.CapabilityProvideInput, intake.CapabilityReviewCompletion,
 	}, intake.WorkScopeOrganization)
 }
@@ -370,7 +399,7 @@ func (h *Human) handleMessage(w http.ResponseWriter, r *http.Request, principal 
 	}
 	view, err := h.service.Handle(r.Context(), principal, intake.Message{
 		ConversationID: request.ConversationID, MessageID: request.MessageID,
-		Text: request.Text, RequestedKind: request.ExecutionKind,
+		Text: request.Text, RequestedKind: request.ExecutionKind, SelectedGoalID: request.GoalID,
 	})
 	h.writeView(w, view, err)
 }
@@ -482,7 +511,8 @@ func (h *Human) writeIntakeError(w http.ResponseWriter, err error) {
 func humanResponse(view intake.View) humanTaskResponse {
 	response := humanTaskResponse{
 		TaskID: view.TaskID, WorkID: view.WorkID, ConversationID: view.ConversationID,
-		State: view.State, Prompt: view.Prompt, Result: view.Result, Mode: view.Mode, TrustLabel: view.TrustLabel,
+		SelectedGoalID: view.SelectedGoalID,
+		State:          view.State, Prompt: view.Prompt, Result: view.Result, Mode: view.Mode, TrustLabel: view.TrustLabel,
 		ReviewRequired: view.ReviewRequired, UserInputAllowed: view.UserInputAllowed, InputRecoveryRequired: view.InputRecoveryRequired,
 		CompletionRecoveryRequired: view.CompletionRecoveryRequired,
 	}
