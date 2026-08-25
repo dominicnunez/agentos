@@ -111,12 +111,22 @@ and Linux `SO_PEERCRED` re-establishes the configured owner.
 The initial views are:
 
 - Overview: current intake and governance queues.
+- Organization: create durable Mission/Goal direction and inspect the complete
+  tenant-scoped hierarchy.
 - Work: optionally select an active Goal, submit natural-language work, and
   inspect its narrow Task view.
 - Approvals: inspect the exact prepared effect and approve or deny it.
 - Reviews: judge exact candidate results and completion evidence.
 - System: inspect the dashboard session and use the read-only `agentos doctor`
   report.
+
+On a fresh installation, the Organization view creates a Mission and one
+measurable Goal in a single SQLite transaction. The request is accepted only
+from the configured local user through the private Unix socket. Exact retries
+are idempotent, conflicting identifiers fail closed, and the authenticated user
+is retained as provenance in runtime-owned Event Contracts. Creating direction
+does not grant effect, approval, capability, policy, or completion authority.
+A2A Agents cannot use this boundary.
 
 Natural-language input first enters a durable, resumable intake conversation.
 The configured model may propose a structured Intent, but its output is
@@ -199,6 +209,7 @@ ephemeral browser origin can recover the authoritative decision.
 The local HTTP-shaped routes are private implementation boundaries carried over
 the Unix socket:
 
+- `POST /v1/user/strategy/bootstrap`
 - `POST /v1/user/messages`
 - `GET /v1/user/intents/active`
 - `POST /v1/user/intents/{conversation-id}/confirm`

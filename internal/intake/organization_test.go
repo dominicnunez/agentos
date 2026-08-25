@@ -29,3 +29,33 @@ func TestOrganizationStateRejectsA2AAndUnprivilegedPrincipals(t *testing.T) {
 		}
 	}
 }
+
+func TestStrategyBootstrapRequiresAuthenticatedLocalStrategyCapability(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := New(app.New(events.NewGateway(store)))
+	request := StrategyBootstrap{
+		RequestID: "strategy-1", MissionID: "mission-1", MissionStatement: "Durable direction",
+		GoalID: "goal-1", GoalObjective: "Verified outcome", GoalMode: core.GoalTarget,
+		SuccessCriteria: []string{"Evidence is durable"},
+	}
+	local := Principal{
+		ID: "local-uid-1000", Kind: core.PrincipalHuman, OrganizationID: "org-1", Channel: ChannelHumanDirect,
+		Capabilities: []string{CapabilityManageStrategy, CapabilityReadStatus}, WorkScope: WorkScopeOrganization,
+	}
+	view, err := service.BootstrapStrategy(context.Background(), local, request)
+	if err != nil || len(view.Missions) != 1 || len(view.Goals) != 1 {
+		t.Fatalf("local strategy view=%+v err=%v", view, err)
+	}
+	for _, principal := range []Principal{
+		{ID: "local-uid-1001", Kind: core.PrincipalHuman, OrganizationID: "org-1", Channel: ChannelHumanDirect, WorkScope: WorkScopeOrganization},
+		{ID: "external-agent-1", Kind: core.PrincipalExternalAgent, OrganizationID: "org-1", Channel: ChannelA2A, Capabilities: []string{CapabilityManageStrategy}, WorkScope: WorkScopeOrganization},
+	} {
+		if _, err := service.BootstrapStrategy(context.Background(), principal, request); !errors.Is(err, ErrForbidden) {
+			t.Fatalf("principal %s strategy error=%v", principal.ID, err)
+		}
+	}
+}

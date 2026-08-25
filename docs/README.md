@@ -10,6 +10,7 @@
 - [Governed Lab](LAB.md) - contained experiments, unverified results, and nomination-only promotion candidates.
 - [SQLite recovery](SQLITE_RECOVERY.md) - backup, verification, restore, and rollback.
 - [Effect reconciliation](EFFECT_RECONCILIATION.md) - evidence-based recovery of uncertain external effects.
+- [AI management system](AI_MANAGEMENT_SYSTEM.md) - ISO/IEC 42001 readiness and the boundary between product controls and organizational conformity.
 
 ## Connect Agents and providers
 

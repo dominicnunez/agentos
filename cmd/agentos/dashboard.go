@@ -252,6 +252,8 @@ func (b *dashboardBridge) proxy(w http.ResponseWriter, incoming *http.Request) {
 func allowedDashboardRoute(method, requestPath, rawQuery string) bool {
 	segments := strings.Split(strings.TrimPrefix(requestPath, "/"), "/")
 	switch {
+	case method == http.MethodPost && requestPath == "/v1/user/strategy/bootstrap" && rawQuery == "":
+		return true
 	case method == http.MethodPost && requestPath == "/v1/user/messages" && rawQuery == "":
 		return true
 	case method == http.MethodGet && requestPath == "/v1/user/intents/active" && rawQuery == "":

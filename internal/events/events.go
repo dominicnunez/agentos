@@ -2433,6 +2433,21 @@ type ProjectionDraft struct {
 	Value          any
 }
 
+// StrategyBootstrapDetail records the authenticated local user whose request
+// caused the runtime to create initial organizational direction. It is audit
+// provenance, not authority that downstream consumers may inherit.
+type StrategyBootstrapDetail struct {
+	RequestID       string             `json:"request_id"`
+	RequestedByID   core.ID            `json:"requested_by_id"`
+	RequestedByKind core.PrincipalKind `json:"requested_by_kind"`
+	SourceChannel   string             `json:"source_channel"`
+}
+
+func (d StrategyBootstrapDetail) Valid() bool {
+	return core.ValidGoalReferenceID(d.RequestID) && core.ValidGoalReferenceID(string(d.RequestedByID)) &&
+		d.RequestedByKind == core.PrincipalHuman && d.SourceChannel == "HUMAN_DIRECT"
+}
+
 // ProjectionRecord is the canonical event/record representation used to
 // rebuild current state. Value remains raw until a bounded projection module
 // decodes it into its domain type.

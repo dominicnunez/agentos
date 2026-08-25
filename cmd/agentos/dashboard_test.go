@@ -150,6 +150,7 @@ func TestAllowedDashboardRoute(t *testing.T) {
 		want                bool
 	}{
 		{http.MethodPost, "/v1/user/messages", "", true},
+		{http.MethodPost, "/v1/user/strategy/bootstrap", "", true},
 		{http.MethodGet, "/v1/user/organization", "", true},
 		{http.MethodPost, "/v1/user/intents/conversation-1/confirm", "", true},
 		{http.MethodPost, "/v1/user/intents/conversation-1/abandon", "", true},
@@ -168,6 +169,8 @@ func TestAllowedDashboardRoute(t *testing.T) {
 		{http.MethodPost, "/v1/control/approvals/approval-1/approve", "", false},
 		{http.MethodGet, "/v1/user/organization", "scope=all", false},
 		{http.MethodPost, "/v1/user/organization", "", false},
+		{http.MethodGet, "/v1/user/strategy/bootstrap", "", false},
+		{http.MethodPost, "/v1/user/strategy/bootstrap", "scope=all", false},
 		{http.MethodGet, "/v1/user/reviews", "limit=10&limit=20", false},
 		{http.MethodGet, "/v1/user/reviews", "after=../../events&limit=10", false},
 		{http.MethodGet, "/v1/user/reviews", "limit=101", false},

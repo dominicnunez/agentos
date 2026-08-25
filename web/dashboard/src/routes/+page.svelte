@@ -36,6 +36,14 @@
   let workText = '';
   let executionKind = '';
   let selectedGoalID = '';
+  let missionStatement = '';
+  let goalObjective = '';
+  let goalMode = 'TARGET';
+  let goalCriteria = '';
+  let pendingStrategyKey = '';
+  let pendingStrategyRequestID = '';
+  let pendingMissionID = '';
+  let pendingGoalID = '';
   let conversationID = '';
   let busy = false;
   let error = '';
@@ -115,7 +123,13 @@
     const failures = [organizationResult, activeResult, approvalResult, reviewResult, taskResult]
       .filter((result) => result.status === 'rejected')
       .map((result) => message((result as PromiseRejectedResult).reason));
-    if (organizationResult.status === 'fulfilled') setOrganization(organizationResult.value);
+    if (organizationResult.status === 'fulfilled') {
+      if (organizationResult.value) setOrganization(organizationResult.value);
+      else {
+        organization = null;
+        organizationIndex = emptyOrganizationIndex();
+      }
+    }
     if (activeResult.status === 'fulfilled') {
       if (activeResult.value) {
         active = activeResult.value;
@@ -162,8 +176,13 @@
     selectedReview = reviews.find((item) => item.review_id === selectedReview?.review_id) ?? (selectedReview && (terminalCompletionReview(selectedReview) || pendingReviewDecision) ? selectedReview : null);
   }
 
-  function loadOrganization(): Promise<OrganizationSnapshot> {
-    return api<OrganizationSnapshot>('/api/v1/user/organization');
+  async function loadOrganization(): Promise<OrganizationSnapshot | null> {
+    try {
+      return await api<OrganizationSnapshot>('/api/v1/user/organization');
+    } catch (cause) {
+      if (cause instanceof APIError && cause.status === 404) return null;
+      throw cause;
+    }
   }
 
   async function loadActiveIntent(): Promise<TaskView | null> {
@@ -318,6 +337,53 @@
     if (!organization) return [];
     const activeMissions = new Set(organization.missions.filter((mission) => mission.status === 'ACTIVE').map((mission) => mission.id));
     return organization.goals.filter((goal) => goal.status === 'ACTIVE' && activeMissions.has(goal.mission_id));
+  }
+
+  function strategyCriteria(): string[] {
+    return goalCriteria.split(/\r?\n/).map((criterion) => criterion.trim()).filter(Boolean);
+  }
+
+  function canBootstrapStrategy(): boolean {
+    return Boolean(identity && missionStatement.trim() && goalObjective.trim() && strategyCriteria().length);
+  }
+
+  async function bootstrapStrategy(): Promise<void> {
+    const statement = missionStatement.trim();
+    const objective = goalObjective.trim();
+    const criteria = strategyCriteria();
+    if (!statement || !objective || !criteria.length) return;
+    const requestKey = JSON.stringify([statement, objective, goalMode, criteria]);
+    if (!pendingStrategyRequestID || pendingStrategyKey !== requestKey) {
+      pendingStrategyKey = requestKey;
+      pendingStrategyRequestID = identifier('strategy');
+      pendingMissionID = identifier('mission');
+      pendingGoalID = identifier('goal');
+    }
+    await action(async () => {
+      const updated = await api<OrganizationSnapshot>('/api/v1/user/strategy/bootstrap', {
+        method: 'POST',
+        body: JSON.stringify({
+          request_id: pendingStrategyRequestID,
+          mission_id: pendingMissionID,
+          mission_statement: statement,
+          goal_id: pendingGoalID,
+          goal_objective: objective,
+          goal_mode: goalMode,
+          success_criteria: criteria
+        })
+      });
+      refreshGeneration += 1;
+      setOrganization(updated);
+      missionStatement = '';
+      goalObjective = '';
+      goalMode = 'TARGET';
+      goalCriteria = '';
+      pendingStrategyKey = '';
+      pendingStrategyRequestID = '';
+      pendingMissionID = '';
+      pendingGoalID = '';
+      notice = 'The Mission and Goal are now durable organizational direction.';
+    });
   }
 
   async function recoverPendingConfirmation(): Promise<TaskView | null> {
@@ -632,6 +698,17 @@
         <div class="panel"><div class="panel-title"><h2>Governance queue</h2></div><div class="queue"><div><strong>{pendingApprovalCount()}</strong><span>effect decisions</span></div><div><strong>{pendingReviewCount()}</strong><span>evidence reviews</span></div></div></div>
       </section>
     {:else if section === 'organization'}
+      <section class="panel strategy-setup">
+        <div><p class="eyebrow">Set durable direction</p><h2>Create a Mission and measurable Goal</h2><p>Mission is enduring direction. Goal is a target or continuous outcome that Work can be bound to.</p></div>
+        <div class="strategy-fields">
+          <label>Mission<textarea bind:value={missionStatement} disabled={busy} rows="3" placeholder="The enduring purpose this organization should pursue."></textarea></label>
+          <label>Goal<input bind:value={goalObjective} disabled={busy} placeholder="A measurable outcome under this Mission." /></label>
+          <label>Mode<select bind:value={goalMode} disabled={busy}><option value="TARGET">Target</option><option value="CONTINUOUS">Continuous</option></select></label>
+          <label>Success criteria<textarea bind:value={goalCriteria} disabled={busy} rows="4" placeholder="One required result per line."></textarea><small>Every line is required. Work cannot mark a target achieved without durable completion evidence.</small></label>
+          <button class="primary" onclick={bootstrapStrategy} disabled={busy || !canBootstrapStrategy()}>Create Mission and Goal</button>
+          <p class="boundary-note">This sets organizational direction. It grants no effect permission, approval, capability, policy, or completion authority.</p>
+        </div>
+      </section>
       {#if organization}
         <section class="organization-layout">
           <div class="panel organization-tree">
