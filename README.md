@@ -57,7 +57,9 @@ private user gateway, and SQLite ledger integrity. In system mode, run
 
 ## Documentation
 
-Operator, integration, security, recovery, provider, release, and development documentation is indexed in [`docs/`](docs/README.md).
+Start with the [five-minute governed workflow](docs/QUICKSTART.md). Operator,
+integration, security, recovery, provider, release, and development
+documentation is indexed in [`docs/`](docs/README.md).
 
 ## Contributions
 

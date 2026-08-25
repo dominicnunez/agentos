@@ -6,7 +6,7 @@ checklist does not authorize deployment or publication.
 
 | Gate | Status | Evidence or next action |
 |---|---|---|
-| Architecture acceptance | PASS | All 25 current V1 requirements have linked automated evidence. |
+| Architecture acceptance | PASS | All 26 current V1 requirements have linked automated evidence. |
 | Required CI | PASS | Build, vet, lint, race tests, vulnerability scanning, architecture checks, interoperability, and advisory dead-code analysis run on pushes and pull requests. |
 | Resumable initialization | PARTIAL | System-default and current-account user modes, stable paths, setup checkpoints, provider discovery, and service installation are implemented. Complete a clean Linux VM installation test before a release candidate. |
 | Controlled startup | PASS | The runtime refuses incomplete configuration and requires exactly one validated real provider. A2A remains disabled without a reviewed Agent registry. |
@@ -24,6 +24,7 @@ checklist does not authorize deployment or publication.
 | Release artifact pipeline | READY | A read-only workflow builds Linux amd64 and arm64 artifacts twice, checks reproducibility, embeds license/source/dependency evidence, tests corresponding source offline, and emits checksums, SBOMs, and provenance. Nothing is published. |
 | Distribution license | PASS | Agent OS is `AGPL-3.0-only`, with Dominic Nunez as the initial copyright holder. |
 | Packaged Linux smoke test | PASS | CI unpacks the Linux amd64 archive, verifies both binary versions, and confirms diagnostics reject an uninitialized machine. |
+| Five-minute governed workflow | PARTIAL | The user-facing [quickstart](../QUICKSTART.md) and Linux dashboard-loop test cover durable direction, reviewed work, bounded execution, result recovery, and organization projection. Validate the released binary on a clean user-mode Linux installation after provider live-test approval. |
 | Full installed Linux test | TODO | Exercise system and user setup, restart, private UID access, provider replacement, diagnostics, backup/restore, and service persistence on a disposable Linux host. |
 | Full real-provider live test | BLOCKED | Wait for requirements to be met and a bounded test plan with the required financial and sensitive-data-boundary approvals. |
 | Published release artifacts | BLOCKED | Requires final software-licensing review, public-release approval, immutable tag, signed attestations, and checksummed asset upload. |

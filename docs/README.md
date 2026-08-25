@@ -2,6 +2,7 @@
 
 ## Use Agent OS
 
+- [Five-minute governed workflow](QUICKSTART.md) - install, create durable direction, review work, and verify a completed Task.
 - [User and Agent intake](OPERATOR_INTAKE.md) - setup, private local access, the organization dashboard, structured user tasks, and A2A intake.
 - [User approval policy](APPROVAL_POLICY.md) - actions that require approval and the fail-closed baseline.
 - [Approval control](APPROVAL_CONTROL.md) - the owner-only exact-effect decision boundary.

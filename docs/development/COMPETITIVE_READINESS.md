@@ -17,7 +17,7 @@ Agent OS is a different implementation shape: one governed runtime owns durable 
 | A2A boundary | Shipped using official SDK | MCP blackboard is the advertised coordination path | Defend |
 | User-level Linux installation | Shipped setup path; release still gated | Cloud image is the primary path | High |
 | Browser control surface | Embedded governed dashboard | Browser VS Code | High |
-| Five-minute governed example | Incomplete | Three-step cloud positioning; real deployment verification remains pending | Critical |
+| Five-minute governed example | Documented and CI-proven; clean installed Linux validation pending | Three-step cloud positioning; real deployment verification remains pending | High |
 | AWS/Azure marketplace image | Not planned for current V1 | Core product form | Medium |
 | Keyless cloud model access | Not shipped | AWS Bedrock instance-role path | High |
 | Managed cloud secrets | Local protected credential stores | KMS-file, SSM, and Secrets Manager scripts; env fallback | High |
@@ -34,7 +34,7 @@ Agent OS is a different implementation shape: one governed runtime owns durable 
 
 ## Near-term competitive path
 
-1. Publish a five-minute governed workflow using the user-level Linux install and fake provider until real-provider gates are approved.
+1. Validate the five-minute governed workflow on a clean user-mode Linux installation after the provider live-test approvals are satisfied.
 2. Add AIMS inventory/evidence export and operator-owned management records.
 3. Add keyless/managed-secret provider adapters behind current credential and policy boundaries.
 4. Validate the installed Linux binary, quickstart, backup/restore, and full dashboard workflow before any Agent OS release decision.
