@@ -8,6 +8,11 @@ runtime does invoke its internal `builtin.echo` handler and records the result
 as a structured `ToolOutcome`. The configured provider remains required for
 ordinary natural-language work.
 
+Use a clean machine or account with no existing Agent OS installation. The
+runtime intentionally discovers a system installation before a user
+installation, so this walkthrough must not be used to alter or operate an
+existing system deployment.
+
 Agent OS releases are Linux-only. This user-mode walkthrough requires systemd
 256 or newer for encrypted service credentials. Check before setup:
 

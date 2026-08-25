@@ -134,8 +134,9 @@ func (n *ModelNormalizer) complete(ctx context.Context, prompt string) (TextComp
 	return response, nil
 }
 
-// literalNormalizer keeps package-level unit tests deterministic. The running
-// service always installs ModelNormalizer with the configured provider.
+// literalNormalizer preserves an already-bounded instruction without model
+// inference. Production intake uses it only for the registered single-turn
+// echo grammar; tests also use it to keep unrelated fixtures deterministic.
 type literalNormalizer struct{}
 
 func (literalNormalizer) Descriptor() (NormalizerDescriptor, bool) {
