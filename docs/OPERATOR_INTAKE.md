@@ -111,12 +111,29 @@ and Linux `SO_PEERCRED` re-establishes the configured owner.
 The initial views are:
 
 - Overview: current intake and governance queues.
+- Organization: create durable Mission/Goal direction and inspect the complete
+  tenant-scoped hierarchy.
 - Work: optionally select an active Goal, submit natural-language work, and
   inspect its narrow Task view.
 - Approvals: inspect the exact prepared effect and approve or deny it.
 - Reviews: judge exact candidate results and completion evidence.
 - System: inspect the dashboard session and use the read-only `agentos doctor`
   report.
+
+On a fresh installation, the Organization view creates a Mission and one
+measurable Goal in a single SQLite transaction. The request is accepted only
+from the configured local user through the private Unix socket. Exact retries
+resolve against the immutable creation admission even after later Mission or
+Goal revisions. The dashboard retains the exact mutation binding before send
+and reconciles it after an interrupted response. The runtime preflights the
+resulting bounded organization view before commit, conflicting identifiers fail
+closed, and capacity rejection is a terminal `422` that permits revised input.
+Retry resolution reads at most four tenant- and correlation-scoped creation
+events; cumulative Goal-progress history is never loaded for this check. The
+authenticated user
+is retained as provenance in runtime-owned Event Contracts. Creating direction
+does not grant effect, approval, capability, policy, or completion authority.
+A2A Agents cannot use this boundary.
 
 Natural-language input first enters a durable, resumable intake conversation.
 The configured model may propose a structured Intent, but its output is
@@ -199,6 +216,7 @@ ephemeral browser origin can recover the authoritative decision.
 The local HTTP-shaped routes are private implementation boundaries carried over
 the Unix socket:
 
+- `POST /v1/user/strategy/bootstrap`
 - `POST /v1/user/messages`
 - `GET /v1/user/intents/active`
 - `POST /v1/user/intents/{conversation-id}/confirm`
@@ -215,6 +233,13 @@ the Unix socket:
 - `GET /v1/control/approvals`
 - `GET /v1/control/approvals/recent?limit=20`
 - exact-effect approval operations beneath `/v1/control/approvals/{id}`
+
+Strategy bootstrap is a one-time operation for an Organization. Its exact
+request remains replayable from immutable creation events after a process
+restart, while a new request ID is rejected once any durable Mission or Goal
+exists. This makes the ledger—not a browser origin—the authority for whether
+initial direction was created. Later Mission and Goal changes require separate
+reviewed lifecycle operations rather than reopening bootstrap.
 
 The recent-Task read is bound to the authenticated principal's latest confirmed
 intake and exists only to recover every missing runtime-owned phase after an

@@ -16,6 +16,10 @@ import (
 	"github.com/dominicnunez/agentos/internal/trustconfig"
 )
 
+// MaximumStrategyRequestBytes covers the worst-case JSON escaping of every
+// semantically valid strategy field while retaining a closed wire bound.
+const MaximumStrategyRequestBytes = 640 << 10
+
 type Human struct {
 	service   *intake.Service
 	owner     LocalHuman
@@ -111,6 +115,16 @@ type humanReviewDecisionRequest struct {
 	Feedback    string                        `json:"feedback,omitempty"`
 }
 
+type userStrategyBootstrapRequest struct {
+	RequestID        string        `json:"request_id"`
+	MissionID        core.ID       `json:"mission_id"`
+	MissionStatement string        `json:"mission_statement"`
+	GoalID           core.ID       `json:"goal_id"`
+	GoalObjective    string        `json:"goal_objective"`
+	GoalMode         core.GoalMode `json:"goal_mode"`
+	SuccessCriteria  []string      `json:"success_criteria"`
+}
+
 func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	release, ok := acquireLocalUserRequest(w, r, h.access, "user request limit reached")
 	if !ok {
@@ -118,6 +132,10 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 	principal := h.principal()
+	if r.Method == http.MethodPost && r.URL.Path == "/v1/user/strategy/bootstrap" && r.URL.RawQuery == "" {
+		h.handleStrategyBootstrap(w, r, principal)
+		return
+	}
 	if r.Method == http.MethodPost && r.URL.Path == "/v1/user/messages" {
 		h.handleMessage(w, r, principal)
 		return
@@ -380,8 +398,33 @@ func validateHumanCompletion(contract core.CompletionContract, request humanComp
 func (h *Human) principal() intake.Principal {
 	return operatorPrincipal(string(h.owner.ID), core.PrincipalHuman, string(h.owner.OrganizationID), intake.ChannelHumanDirect, []string{
 		intake.CapabilitySubmitWork, intake.CapabilityConfirmIntent, intake.CapabilityAbandonIntent, intake.CapabilityReadStatus, intake.CapabilityReadResult,
-		intake.CapabilityProvideInput, intake.CapabilityReviewCompletion,
+		intake.CapabilityProvideInput, intake.CapabilityReviewCompletion, intake.CapabilityManageStrategy,
 	}, intake.WorkScopeOrganization)
+}
+
+func (h *Human) handleStrategyBootstrap(w http.ResponseWriter, r *http.Request, principal intake.Principal) {
+	if !hasJSONContentType(r.Header.Get("Content-Type")) {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "strategy setup requires application/json"})
+		return
+	}
+	defer func() { _ = r.Body.Close() }()
+	var request userStrategyBootstrapRequest
+	reader := http.MaxBytesReader(w, r.Body, MaximumStrategyRequestBytes)
+	if err := trustconfig.DecodeObject(reader, "strategy setup", &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	view, err := h.service.BootstrapStrategy(r.Context(), principal, intake.StrategyBootstrap{
+		RequestID: request.RequestID, MissionID: request.MissionID, MissionStatement: request.MissionStatement,
+		GoalID: request.GoalID, GoalObjective: request.GoalObjective, GoalMode: request.GoalMode,
+		SuccessCriteria: append([]string(nil), request.SuccessCriteria...),
+	})
+	w.Header().Set("Cache-Control", "no-store")
+	if err != nil {
+		h.writeIntakeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (h *Human) handleMessage(w http.ResponseWriter, r *http.Request, principal intake.Principal) {
@@ -501,6 +544,8 @@ func (h *Human) writeIntakeError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "operator message is invalid"})
 	case errors.Is(err, intake.ErrConflict):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator message conflicts with durable work"})
+	case errors.Is(err, intake.ErrCapacity):
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "operator request exceeds the bounded organization view"})
 	case errors.Is(err, intake.ErrConfirmationMismatch):
 		writeJSON(w, http.StatusPreconditionFailed, map[string]string{"error": "intent confirmation differs from durable state"})
 	default:

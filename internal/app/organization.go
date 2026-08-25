@@ -3,17 +3,21 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/core"
+	"github.com/dominicnunez/agentos/internal/projections"
 )
 
 const (
 	maximumOrganizationSnapshotRecords = 10_000
 	maximumOrganizationSnapshotBytes   = 8 << 20
 )
+
+var errOrganizationSnapshotLimit = errors.New("organization snapshot limit exceeded")
 
 // OrganizationSnapshot is a bounded, read-only projection of one durable
 // organization. It deliberately excludes instructions, credentials, tool
@@ -115,6 +119,10 @@ func (s *Service) OrganizationState(ctx context.Context, organizationID core.ID)
 	if err != nil {
 		return OrganizationSnapshot{}, false, err
 	}
+	return organizationSnapshot(snapshot, organizationID)
+}
+
+func organizationSnapshot(snapshot projections.Snapshot, organizationID core.ID) (OrganizationSnapshot, bool, error) {
 	organization, found := snapshot.Organizations[organizationID]
 	if !found {
 		return OrganizationSnapshot{}, false, nil
@@ -214,19 +222,23 @@ func (s *Service) OrganizationState(ctx context.Context, organizationID core.ID)
 			ModelProvider:  profile.Value.ModelProvider, Model: profile.Value.Model, Version: state.Version,
 		})
 	}
-	if len(view.Missions)+len(view.Goals)+len(view.Works)+len(view.Tasks)+len(view.Teams)+len(view.Agents) > maximumOrganizationSnapshotRecords {
-		return OrganizationSnapshot{}, false, fmt.Errorf("organization state exceeds the bounded dashboard view")
-	}
 	sort.Slice(view.Missions, func(i, j int) bool { return view.Missions[i].ID < view.Missions[j].ID })
 	sort.Slice(view.Goals, func(i, j int) bool { return view.Goals[i].ID < view.Goals[j].ID })
 	sort.Slice(view.Works, func(i, j int) bool { return view.Works[i].ID < view.Works[j].ID })
 	sort.Slice(view.Tasks, func(i, j int) bool { return view.Tasks[i].ID < view.Tasks[j].ID })
 	sort.Slice(view.Teams, func(i, j int) bool { return view.Teams[i].ID < view.Teams[j].ID })
 	sort.Slice(view.Agents, func(i, j int) bool { return view.Agents[i].ID < view.Agents[j].ID })
-	if err := validateOrganizationSnapshotSize(view); err != nil {
+	if err := validateOrganizationSnapshotBounds(view); err != nil {
 		return OrganizationSnapshot{}, false, err
 	}
 	return view, true, nil
+}
+
+func validateOrganizationSnapshotBounds(view OrganizationSnapshot) error {
+	if len(view.Missions)+len(view.Goals)+len(view.Works)+len(view.Tasks)+len(view.Teams)+len(view.Agents) > maximumOrganizationSnapshotRecords {
+		return fmt.Errorf("%w: record count", errOrganizationSnapshotLimit)
+	}
+	return validateOrganizationSnapshotSize(view)
 }
 
 func validateOrganizationSnapshotSize(view OrganizationSnapshot) error {
@@ -235,7 +247,7 @@ func validateOrganizationSnapshotSize(view OrganizationSnapshot) error {
 		return fmt.Errorf("encode bounded organization state: %w", err)
 	}
 	if len(encoded) > maximumOrganizationSnapshotBytes {
-		return fmt.Errorf("organization state exceeds the bounded dashboard response")
+		return fmt.Errorf("%w: encoded response bytes", errOrganizationSnapshotLimit)
 	}
 	return nil
 }

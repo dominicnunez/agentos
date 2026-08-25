@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/bootstrap"
+	"github.com/dominicnunez/agentos/internal/gateway"
 )
 
 type dashboardRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -150,6 +151,7 @@ func TestAllowedDashboardRoute(t *testing.T) {
 		want                bool
 	}{
 		{http.MethodPost, "/v1/user/messages", "", true},
+		{http.MethodPost, "/v1/user/strategy/bootstrap", "", true},
 		{http.MethodGet, "/v1/user/organization", "", true},
 		{http.MethodPost, "/v1/user/intents/conversation-1/confirm", "", true},
 		{http.MethodPost, "/v1/user/intents/conversation-1/abandon", "", true},
@@ -168,6 +170,8 @@ func TestAllowedDashboardRoute(t *testing.T) {
 		{http.MethodPost, "/v1/control/approvals/approval-1/approve", "", false},
 		{http.MethodGet, "/v1/user/organization", "scope=all", false},
 		{http.MethodPost, "/v1/user/organization", "", false},
+		{http.MethodGet, "/v1/user/strategy/bootstrap", "", false},
+		{http.MethodPost, "/v1/user/strategy/bootstrap", "scope=all", false},
 		{http.MethodGet, "/v1/user/reviews", "limit=10&limit=20", false},
 		{http.MethodGet, "/v1/user/reviews", "after=../../events&limit=10", false},
 		{http.MethodGet, "/v1/user/reviews", "limit=101", false},
@@ -178,6 +182,18 @@ func TestAllowedDashboardRoute(t *testing.T) {
 		if got := allowedDashboardRoute(test.method, test.path, test.query); got != test.want {
 			t.Errorf("%s %s?%s=%t want %t", test.method, test.path, test.query, got, test.want)
 		}
+	}
+}
+
+func TestDashboardRequestBodyLimitsPreserveStrategyContract(t *testing.T) {
+	if got := dashboardRequestBodyLimit(http.MethodPost, "/v1/user/strategy/bootstrap"); got != gateway.MaximumStrategyRequestBytes {
+		t.Fatalf("strategy request limit=%d", got)
+	}
+	if got := dashboardRequestBodyLimit(http.MethodPost, "/v1/user/messages"); got != 256<<10 {
+		t.Fatalf("ordinary request limit=%d", got)
+	}
+	if got := dashboardRequestBodyLimit(http.MethodPost, "/v1/user/tasks/task-1/completion"); got != 48<<20 {
+		t.Fatalf("completion request limit=%d", got)
 	}
 }
 

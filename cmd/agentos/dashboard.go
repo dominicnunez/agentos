@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/bootstrap"
+	"github.com/dominicnunez/agentos/internal/gateway"
 	"github.com/dominicnunez/agentos/internal/intake"
 )
 
@@ -204,10 +205,7 @@ func (b *dashboardBridge) proxy(w http.ResponseWriter, incoming *http.Request) {
 		http.NotFound(w, incoming)
 		return
 	}
-	bodyLimit := int64(256 << 10)
-	if incoming.Method == http.MethodPost && strings.HasPrefix(upstreamPath, "/v1/user/tasks/") && strings.HasSuffix(upstreamPath, "/completion") {
-		bodyLimit = 48 << 20
-	}
+	bodyLimit := dashboardRequestBodyLimit(incoming.Method, upstreamPath)
 	var body io.Reader
 	if incoming.Body != nil {
 		defer func() { _ = incoming.Body.Close() }()
@@ -249,9 +247,21 @@ func (b *dashboardBridge) proxy(w http.ResponseWriter, incoming *http.Request) {
 	_, _ = w.Write(payload)
 }
 
+func dashboardRequestBodyLimit(method, requestPath string) int64 {
+	if method == http.MethodPost && requestPath == "/v1/user/strategy/bootstrap" {
+		return gateway.MaximumStrategyRequestBytes
+	}
+	if method == http.MethodPost && strings.HasPrefix(requestPath, "/v1/user/tasks/") && strings.HasSuffix(requestPath, "/completion") {
+		return 48 << 20
+	}
+	return 256 << 10
+}
+
 func allowedDashboardRoute(method, requestPath, rawQuery string) bool {
 	segments := strings.Split(strings.TrimPrefix(requestPath, "/"), "/")
 	switch {
+	case method == http.MethodPost && requestPath == "/v1/user/strategy/bootstrap" && rawQuery == "":
+		return true
 	case method == http.MethodPost && requestPath == "/v1/user/messages" && rawQuery == "":
 		return true
 	case method == http.MethodGet && requestPath == "/v1/user/intents/active" && rawQuery == "":

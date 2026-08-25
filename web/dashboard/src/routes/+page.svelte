@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { APIError, api, connect, emptyJSONPost, identifier } from '$lib/api';
-  import { approvalRetryBinding, completionReviewFeedback, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, loadAllCompletionReviews, matchesConfirmationRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
-  import type { ApprovalRetryBinding, ReviewRetryBinding } from '$lib/governance';
+  import { approvalRetryBinding, completionReviewFeedback, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, discardStrategyRetry, loadAllCompletionReviews, matchesConfirmationRetry, matchesStrategyRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, parseStrategyRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, strategyRetryBinding, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
+  import type { ApprovalRetryBinding, ReviewRetryBinding, StrategyRetryBinding } from '$lib/governance';
   import '$lib/app.css';
   import type { Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, IntentDraft, OrganizationSnapshot, TaskView } from '$lib/types';
 
@@ -21,6 +21,7 @@
   const pendingConfirmationKey = 'agentos.dashboard.pending-confirmation';
   const pendingApprovalKey = 'agentos.dashboard.pending-approval';
   const pendingReviewKey = 'agentos.dashboard.pending-review';
+  const pendingStrategyStorageKey = 'agentos.dashboard.pending-strategy';
 
   let section: Section = 'overview';
   let identity: DashboardIdentity | null = null;
@@ -36,6 +37,11 @@
   let workText = '';
   let executionKind = '';
   let selectedGoalID = '';
+  let missionStatement = '';
+  let goalObjective = '';
+  let goalMode: 'TARGET' | 'CONTINUOUS' = 'TARGET';
+  let goalCriteria = '';
+  let pendingStrategy: StrategyRetryBinding | null = null;
   let conversationID = '';
   let busy = false;
   let error = '';
@@ -74,6 +80,16 @@
         recoveryFailures.push(message(cause));
       }
       try {
+        const recovered = await recoverPendingStrategy();
+        if (recovered) {
+          refreshGeneration += 1;
+          setOrganization(recovered);
+          notice = 'Recovered durable Mission and Goal creation after an interrupted response.';
+        }
+      } catch (cause) {
+        recoveryFailures.push(message(cause));
+      }
+      try {
         const recovered = await recoverPendingConfirmation();
         if (recovered) {
           task = recovered;
@@ -92,7 +108,7 @@
         }
       }
       await refresh();
-      if (recoveryFailures.length) error = `Pending decision recovery failed. ${recoveryFailures.join(' ')}${error ? ` ${error}` : ''}`;
+      if (recoveryFailures.length) error = `Pending operation recovery failed. ${recoveryFailures.join(' ')}${error ? ` ${error}` : ''}`;
     } catch (cause) {
       error = message(cause);
     }
@@ -115,7 +131,13 @@
     const failures = [organizationResult, activeResult, approvalResult, reviewResult, taskResult]
       .filter((result) => result.status === 'rejected')
       .map((result) => message((result as PromiseRejectedResult).reason));
-    if (organizationResult.status === 'fulfilled') setOrganization(organizationResult.value);
+    if (organizationResult.status === 'fulfilled') {
+      if (organizationResult.value) setOrganization(organizationResult.value);
+      else {
+        organization = null;
+        organizationIndex = emptyOrganizationIndex();
+      }
+    }
     if (activeResult.status === 'fulfilled') {
       if (activeResult.value) {
         active = activeResult.value;
@@ -162,8 +184,13 @@
     selectedReview = reviews.find((item) => item.review_id === selectedReview?.review_id) ?? (selectedReview && (terminalCompletionReview(selectedReview) || pendingReviewDecision) ? selectedReview : null);
   }
 
-  function loadOrganization(): Promise<OrganizationSnapshot> {
-    return api<OrganizationSnapshot>('/api/v1/user/organization');
+  async function loadOrganization(): Promise<OrganizationSnapshot | null> {
+    try {
+      return await api<OrganizationSnapshot>('/api/v1/user/organization');
+    } catch (cause) {
+      if (cause instanceof APIError && cause.status === 404) return null;
+      throw cause;
+    }
   }
 
   async function loadActiveIntent(): Promise<TaskView | null> {
@@ -318,6 +345,92 @@
     if (!organization) return [];
     const activeMissions = new Set(organization.missions.filter((mission) => mission.status === 'ACTIVE').map((mission) => mission.id));
     return organization.goals.filter((goal) => goal.status === 'ACTIVE' && activeMissions.has(goal.mission_id));
+  }
+
+  function strategyCriteria(): string[] {
+    return goalCriteria.split(/\r?\n/).map((criterion) => criterion.trim()).filter(Boolean);
+  }
+
+  function canBootstrapStrategy(): boolean {
+    return Boolean(identity && canCreateInitialStrategy() && missionStatement.trim() && goalObjective.trim() && strategyCriteria().length);
+  }
+
+  function canCreateInitialStrategy(): boolean {
+    return !organization || (organization.missions.length === 0 && organization.goals.length === 0);
+  }
+
+  async function bootstrapStrategy(): Promise<void> {
+    const statement = missionStatement.trim();
+    const objective = goalObjective.trim();
+    const criteria = strategyCriteria();
+    if (!statement || !objective || !criteria.length) return;
+    if (pendingStrategy && !matchesStrategyRetry(pendingStrategy, statement, objective, goalMode, criteria)) {
+      error = 'The interrupted Mission and Goal creation must be recovered before different direction can be submitted.';
+      return;
+    }
+    await action(async () => {
+      const binding = pendingStrategy ?? strategyRetryBinding(
+        identifier('strategy'), identifier('mission'), statement, identifier('goal'), objective, goalMode, criteria
+      );
+      pendingStrategy = binding;
+      sessionStorage.setItem(pendingStrategyStorageKey, JSON.stringify(binding));
+      let updated: OrganizationSnapshot;
+      try {
+        updated = await sendStrategy(binding);
+      } catch (cause) {
+        if (cause instanceof APIError && discardStrategyRetry(cause.status)) clearPendingStrategy();
+        throw cause;
+      }
+      refreshGeneration += 1;
+      setOrganization(updated);
+      missionStatement = '';
+      goalObjective = '';
+      goalMode = 'TARGET';
+      goalCriteria = '';
+      clearPendingStrategy();
+      notice = 'The Mission and Goal are now durable organizational direction.';
+    });
+  }
+
+  function sendStrategy(binding: StrategyRetryBinding): Promise<OrganizationSnapshot> {
+    return api<OrganizationSnapshot>('/api/v1/user/strategy/bootstrap', {
+      method: 'POST',
+      body: JSON.stringify(binding)
+    });
+  }
+
+  async function recoverPendingStrategy(): Promise<OrganizationSnapshot | null> {
+    let binding: StrategyRetryBinding | null;
+    try {
+      binding = parseStrategyRetryBinding(sessionStorage.getItem(pendingStrategyStorageKey));
+    } catch (cause) {
+      sessionStorage.removeItem(pendingStrategyStorageKey);
+      pendingStrategy = null;
+      throw cause;
+    }
+    if (!binding) return null;
+    pendingStrategy = binding;
+    missionStatement = binding.mission_statement;
+    goalObjective = binding.goal_objective;
+    goalMode = binding.goal_mode;
+    goalCriteria = binding.success_criteria.join('\n');
+    try {
+      const updated = await sendStrategy(binding);
+      clearPendingStrategy();
+      missionStatement = '';
+      goalObjective = '';
+      goalMode = 'TARGET';
+      goalCriteria = '';
+      return updated;
+    } catch (cause) {
+      if (cause instanceof APIError && discardStrategyRetry(cause.status)) clearPendingStrategy();
+      throw cause;
+    }
+  }
+
+  function clearPendingStrategy(): void {
+    pendingStrategy = null;
+    sessionStorage.removeItem(pendingStrategyStorageKey);
   }
 
   async function recoverPendingConfirmation(): Promise<TaskView | null> {
@@ -632,6 +745,19 @@
         <div class="panel"><div class="panel-title"><h2>Governance queue</h2></div><div class="queue"><div><strong>{pendingApprovalCount()}</strong><span>effect decisions</span></div><div><strong>{pendingReviewCount()}</strong><span>evidence reviews</span></div></div></div>
       </section>
     {:else if section === 'organization'}
+      {#if canCreateInitialStrategy()}
+        <section class="panel strategy-setup">
+          <div><p class="eyebrow">Set durable direction</p><h2>Create a Mission and measurable Goal</h2><p>Mission is enduring direction. Goal is a target or continuous outcome that Work can be bound to.</p></div>
+          <div class="strategy-fields">
+            <label>Mission<textarea bind:value={missionStatement} disabled={busy} rows="3" placeholder="The enduring purpose this organization should pursue."></textarea></label>
+            <label>Goal<input bind:value={goalObjective} disabled={busy} placeholder="A measurable outcome under this Mission." /></label>
+            <label>Mode<select bind:value={goalMode} disabled={busy}><option value="TARGET">Target</option><option value="CONTINUOUS">Continuous</option></select></label>
+            <label>Success criteria<textarea bind:value={goalCriteria} disabled={busy} rows="4" placeholder="One required result per line."></textarea><small>Every line is required. Work cannot mark a target achieved without durable completion evidence.</small></label>
+            <button class="primary" onclick={bootstrapStrategy} disabled={busy || !canBootstrapStrategy()}>Create Mission and Goal</button>
+            <p class="boundary-note">This sets organizational direction. It grants no effect permission, approval, capability, policy, or completion authority.</p>
+          </div>
+        </section>
+      {/if}
       {#if organization}
         <section class="organization-layout">
           <div class="panel organization-tree">

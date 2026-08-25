@@ -79,6 +79,87 @@ func TestHumanOrganizationViewIsReadOnlyAndTenantScoped(t *testing.T) {
 	}
 }
 
+func TestHumanGatewayBootstrapsStrategyWithoutCreatingAuthority(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	handler := testHumanHandler(t, intake.New(app.New(events.NewGateway(store))))
+	request := userStrategyBootstrapRequest{
+		RequestID: "strategy-1", MissionID: "mission-1", MissionStatement: "Build a governed artificial organization",
+		GoalID: "goal-1", GoalObjective: "Complete a verified workflow", GoalMode: core.GoalTarget,
+		SuccessCriteria: []string{"The Work is complete", "Completion evidence is durable"},
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := serveHuman(handler, http.MethodPost, "/v1/user/strategy/bootstrap", "wrong-owner", string(body)); response.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong-owner strategy=%d %s", response.Code, response.Body.String())
+	}
+	response := serveHuman(handler, http.MethodPost, "/v1/user/strategy/bootstrap", testOwnerMarker, string(body))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"id":"mission-1"`) || !strings.Contains(response.Body.String(), `"id":"goal-1"`) {
+		t.Fatalf("strategy bootstrap=%d %s", response.Code, response.Body.String())
+	}
+	if replay := serveHuman(handler, http.MethodPost, "/v1/user/strategy/bootstrap", testOwnerMarker, string(body)); replay.Code != http.StatusOK {
+		t.Fatalf("strategy replay=%d %s", replay.Code, replay.Body.String())
+	}
+	if response := serveHuman(handler, http.MethodGet, "/v1/user/strategy/bootstrap", testOwnerMarker, ""); response.Code != http.StatusNotFound {
+		t.Fatalf("strategy GET=%d %s", response.Code, response.Body.String())
+	}
+	unknown := strings.TrimSuffix(string(body), "}") + `,"approval_authority":true}`
+	if response := serveHuman(handler, http.MethodPost, "/v1/user/strategy/bootstrap", testOwnerMarker, unknown); response.Code != http.StatusBadRequest {
+		t.Fatalf("authority-shaped strategy=%d %s", response.Code, response.Body.String())
+	}
+	stream, err := store.Events(t.Context(), request.RequestID)
+	if err != nil || len(stream) != 3 {
+		t.Fatalf("strategy stream=%+v err=%v", stream, err)
+	}
+	for _, event := range stream {
+		if strings.HasPrefix(event.EventType, "APPROVAL_") || strings.HasPrefix(event.EventType, "CAPABILITY_") || strings.HasPrefix(event.EventType, "EFFECT_") {
+			t.Fatalf("strategy created authority: %+v", event)
+		}
+	}
+}
+
+func TestHumanGatewayAcceptsWorstCaseEncodedValidStrategy(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	handler := testHumanHandler(t, intake.New(app.New(events.NewGateway(store))))
+	criteria := make([]string, 0, 16)
+	for index := 0; index < 16; index++ {
+		criteria = append(criteria, strings.Repeat("\"", (4<<10)-1)+string(rune('A'+index)))
+	}
+	body, err := json.Marshal(userStrategyBootstrapRequest{
+		RequestID: "strategy-escaped", MissionID: "mission-escaped", MissionStatement: strings.Repeat("<", 16<<10),
+		GoalID: "goal-escaped", GoalObjective: strings.Repeat("<", 16<<10), GoalMode: core.GoalTarget,
+		SuccessCriteria: criteria,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) <= 256<<10 || len(body) > MaximumStrategyRequestBytes {
+		t.Fatalf("encoded valid strategy bytes=%d", len(body))
+	}
+	response := serveHuman(handler, http.MethodPost, "/v1/user/strategy/bootstrap", testOwnerMarker, string(body))
+	if response.Code != http.StatusOK {
+		t.Fatalf("encoded valid strategy status=%d", response.Code)
+	}
+}
+
+func TestHumanGatewayReportsStrategyCapacityAsTerminal(t *testing.T) {
+	handler := &Human{}
+	response := httptest.NewRecorder()
+	handler.writeIntakeError(response, intake.ErrCapacity)
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("strategy capacity status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 type reviewerModel struct{}
 
 func (reviewerModel) Name() string { return "review-provider/test-model" }

@@ -85,6 +85,48 @@ func (r *Repository) SaveGoal(ctx context.Context, eventType, actorID, correlati
 	return r.save(ctx, string(value.OrganizationID), eventType, actorID, "", correlationID, KindGoal, value.ID, version, value, detail)
 }
 
+// SaveStrategyBootstrap atomically creates an optional Organization and its
+// first Mission/Goal pair. The authenticated requester is retained only as
+// provenance inside runtime-owned projection events.
+func (r *Repository) SaveStrategyBootstrap(ctx context.Context, organization *core.Organization, mission core.Mission, goal core.Goal, correlationID string, detail events.StrategyBootstrapDetail) error {
+	if r == nil || r.gateway == nil || correlationID == "" || !detail.Valid() || detail.RequestID != correlationID ||
+		!core.ValidMission(mission) || mission.Status != core.MissionActive || !core.ValidGoal(goal) || goal.Status != core.GoalActive ||
+		mission.OrganizationID != goal.OrganizationID || mission.ID != goal.MissionID {
+		return fmt.Errorf("complete strategy bootstrap admission is required")
+	}
+	drafts := make([]events.ProjectionDraft, 0, 3)
+	if organization != nil {
+		if organization.ID == "" || organization.ID != mission.OrganizationID || organization.Name == "" || organization.PolicyVersion == "" {
+			return fmt.Errorf("strategy bootstrap organization is invalid")
+		}
+		drafts = append(drafts, events.ProjectionDraft{
+			Event: events.TrustedDraft{
+				OrganizationID: string(organization.ID), EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime",
+				CorrelationID: correlationID, Payload: detail,
+			},
+			ProjectionKind: KindOrganization, RecordID: string(organization.ID), Version: 1, Value: *organization,
+		})
+	}
+	drafts = append(drafts,
+		events.ProjectionDraft{
+			Event: events.TrustedDraft{
+				OrganizationID: string(mission.OrganizationID), EventType: "MISSION_CREATED", SourceActorID: "runtime",
+				CorrelationID: correlationID, Payload: detail,
+			},
+			ProjectionKind: KindMission, RecordID: string(mission.ID), Version: 1, Value: mission,
+		},
+		events.ProjectionDraft{
+			Event: events.TrustedDraft{
+				OrganizationID: string(goal.OrganizationID), EventType: "GOAL_CREATED", SourceActorID: "runtime",
+				CorrelationID: correlationID, Payload: detail,
+			},
+			ProjectionKind: KindGoal, RecordID: string(goal.ID), Version: 1, Value: goal,
+		},
+	)
+	_, err := r.gateway.PublishProjections(ctx, drafts)
+	return err
+}
+
 func (r *Repository) EvaluateGoalProgress(ctx context.Context, organizationID core.ID, goalID core.ID) (events.GoalProgressAdmission, error) {
 	if r == nil || r.gateway == nil || organizationID == "" || goalID == "" {
 		return events.GoalProgressAdmission{}, fmt.Errorf("durable Goal progress gateway is required")

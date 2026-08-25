@@ -2433,6 +2433,21 @@ type ProjectionDraft struct {
 	Value          any
 }
 
+// StrategyBootstrapDetail records the authenticated local user whose request
+// caused the runtime to create initial organizational direction. It is audit
+// provenance, not authority that downstream consumers may inherit.
+type StrategyBootstrapDetail struct {
+	RequestID       string             `json:"request_id"`
+	RequestedByID   core.ID            `json:"requested_by_id"`
+	RequestedByKind core.PrincipalKind `json:"requested_by_kind"`
+	SourceChannel   string             `json:"source_channel"`
+}
+
+func (d StrategyBootstrapDetail) Valid() bool {
+	return core.ValidGoalReferenceID(d.RequestID) && core.ValidGoalReferenceID(string(d.RequestedByID)) &&
+		d.RequestedByKind == core.PrincipalHuman && d.SourceChannel == "HUMAN_DIRECT"
+}
+
 // ProjectionRecord is the canonical event/record representation used to
 // rebuild current state. Value remains raw until a bounded projection module
 // decodes it into its domain type.
@@ -3267,6 +3282,9 @@ type Reader interface {
 type RecentEventReader interface {
 	RecentEvents(context.Context, string, string, int) ([]Event, error)
 }
+type StrategyCreationEventReader interface {
+	StrategyCreationEvents(context.Context, string, string) ([]Event, error)
+}
 type PendingCompletionReviewReader interface {
 	PendingCompletionReviewEvents(context.Context, string, string, int) ([]Event, error)
 }
@@ -3668,6 +3686,20 @@ func (g *Gateway) ProjectionRecords(ctx context.Context, kind, id string) ([][]b
 }
 func (g *Gateway) Events(ctx context.Context, correlationID string) ([]Event, error) {
 	return g.ledger.Events(ctx, correlationID)
+}
+
+// StrategyCreationEvents returns only the bounded immutable creation
+// admissions needed to resolve one strategy retry. Cumulative Goal progress is
+// deliberately excluded from this read path.
+func (g *Gateway) StrategyCreationEvents(ctx context.Context, organizationID, correlationID string) ([]Event, error) {
+	if organizationID == "" || correlationID == "" {
+		return nil, fmt.Errorf("strategy creation organization and correlation are required")
+	}
+	reader, ok := g.ledger.(StrategyCreationEventReader)
+	if !ok {
+		return nil, fmt.Errorf("event ledger does not support bounded strategy creation reads")
+	}
+	return reader.StrategyCreationEvents(ctx, organizationID, correlationID)
 }
 
 // RecentEvents returns a bounded, newest-first ledger slice for one tenant and

@@ -29,6 +29,7 @@ const (
 	CapabilityReadResult           = "read_result"
 	CapabilityProvideInput         = "provide_input"
 	CapabilityReviewCompletion     = "review_completion"
+	CapabilityManageStrategy       = "manage_strategy"
 	MaximumReviewFeedbackBytes     = 64 << 10
 	MaximumIntentTurns             = 32
 	MaximumIntentConversationBytes = 128 << 10
@@ -51,6 +52,7 @@ var (
 	ErrForbidden            = errors.New("operator capability denied")
 	ErrNotFound             = errors.New("operator work not found")
 	ErrConflict             = errors.New("operator conversation conflict")
+	ErrCapacity             = errors.New("operator request exceeds durable view capacity")
 	ErrConfirmationMismatch = errors.New("intent confirmation conflicts with durable state")
 	ErrUnavailable          = errors.New("operator work unavailable")
 )
@@ -127,6 +129,16 @@ type CompletionReviewDecision struct {
 	Fingerprint string
 	Decision    core.CompletionReviewDecision
 	Feedback    string
+}
+
+type StrategyBootstrap struct {
+	RequestID        string
+	MissionID        core.ID
+	MissionStatement string
+	GoalID           core.ID
+	GoalObjective    string
+	GoalMode         core.GoalMode
+	SuccessCriteria  []string
 }
 
 type Router struct{}
@@ -475,6 +487,45 @@ func (s *Service) OrganizationState(ctx context.Context, principal Principal) (a
 		return app.OrganizationSnapshot{}, ErrNotFound
 	}
 	return view, nil
+}
+
+// BootstrapStrategy admits initial organizational direction only for the
+// authenticated local installation owner. A2A actors cannot use this boundary,
+// and the request grants no approval, effect, policy, or capability authority.
+func (s *Service) BootstrapStrategy(ctx context.Context, principal Principal, request StrategyBootstrap) (app.OrganizationSnapshot, error) {
+	if err := validatePrincipal(principal); err != nil {
+		return app.OrganizationSnapshot{}, err
+	}
+	if principal.Kind != core.PrincipalHuman || principal.Channel != ChannelHumanDirect || principal.WorkScope != WorkScopeOrganization || !principal.Allowed(CapabilityManageStrategy) {
+		return app.OrganizationSnapshot{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityManageStrategy)
+	}
+	if ValidateIdentifier("strategy request", request.RequestID) != nil || ValidateIdentifier("Mission", string(request.MissionID)) != nil || ValidateIdentifier("Goal", string(request.GoalID)) != nil {
+		return app.OrganizationSnapshot{}, ErrInvalid
+	}
+	view, err := s.app.BootstrapStrategy(ctx, app.StrategyBootstrapInput{
+		OrganizationID: core.ID(principal.OrganizationID), RequestID: request.RequestID,
+		RequestedByID: core.ID(principal.ID), RequestedByKind: principal.Kind, SourceChannel: principal.Channel,
+		MissionID: request.MissionID, MissionStatement: request.MissionStatement,
+		GoalID: request.GoalID, GoalObjective: request.GoalObjective, GoalMode: request.GoalMode,
+		SuccessCriteria: append([]string(nil), request.SuccessCriteria...),
+	})
+	if err != nil {
+		return app.OrganizationSnapshot{}, strategyIntakeError(err)
+	}
+	return view, nil
+}
+
+func strategyIntakeError(err error) error {
+	switch {
+	case errors.Is(err, app.ErrStrategyInvalid):
+		return ErrInvalid
+	case errors.Is(err, app.ErrStrategyConflict):
+		return ErrConflict
+	case errors.Is(err, app.ErrStrategyCapacity):
+		return ErrCapacity
+	default:
+		return ErrUnavailable
+	}
 }
 
 func (s *Service) handleIntentConversation(ctx context.Context, principal Principal, message Message, stream []events.Event) (View, error) {
