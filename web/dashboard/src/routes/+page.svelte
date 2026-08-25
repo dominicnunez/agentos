@@ -352,7 +352,11 @@
   }
 
   function canBootstrapStrategy(): boolean {
-    return Boolean(identity && missionStatement.trim() && goalObjective.trim() && strategyCriteria().length);
+    return Boolean(identity && canCreateInitialStrategy() && missionStatement.trim() && goalObjective.trim() && strategyCriteria().length);
+  }
+
+  function canCreateInitialStrategy(): boolean {
+    return !organization || (organization.missions.length === 0 && organization.goals.length === 0);
   }
 
   async function bootstrapStrategy(): Promise<void> {
@@ -741,17 +745,19 @@
         <div class="panel"><div class="panel-title"><h2>Governance queue</h2></div><div class="queue"><div><strong>{pendingApprovalCount()}</strong><span>effect decisions</span></div><div><strong>{pendingReviewCount()}</strong><span>evidence reviews</span></div></div></div>
       </section>
     {:else if section === 'organization'}
-      <section class="panel strategy-setup">
-        <div><p class="eyebrow">Set durable direction</p><h2>Create a Mission and measurable Goal</h2><p>Mission is enduring direction. Goal is a target or continuous outcome that Work can be bound to.</p></div>
-        <div class="strategy-fields">
-          <label>Mission<textarea bind:value={missionStatement} disabled={busy} rows="3" placeholder="The enduring purpose this organization should pursue."></textarea></label>
-          <label>Goal<input bind:value={goalObjective} disabled={busy} placeholder="A measurable outcome under this Mission." /></label>
-          <label>Mode<select bind:value={goalMode} disabled={busy}><option value="TARGET">Target</option><option value="CONTINUOUS">Continuous</option></select></label>
-          <label>Success criteria<textarea bind:value={goalCriteria} disabled={busy} rows="4" placeholder="One required result per line."></textarea><small>Every line is required. Work cannot mark a target achieved without durable completion evidence.</small></label>
-          <button class="primary" onclick={bootstrapStrategy} disabled={busy || !canBootstrapStrategy()}>Create Mission and Goal</button>
-          <p class="boundary-note">This sets organizational direction. It grants no effect permission, approval, capability, policy, or completion authority.</p>
-        </div>
-      </section>
+      {#if canCreateInitialStrategy()}
+        <section class="panel strategy-setup">
+          <div><p class="eyebrow">Set durable direction</p><h2>Create a Mission and measurable Goal</h2><p>Mission is enduring direction. Goal is a target or continuous outcome that Work can be bound to.</p></div>
+          <div class="strategy-fields">
+            <label>Mission<textarea bind:value={missionStatement} disabled={busy} rows="3" placeholder="The enduring purpose this organization should pursue."></textarea></label>
+            <label>Goal<input bind:value={goalObjective} disabled={busy} placeholder="A measurable outcome under this Mission." /></label>
+            <label>Mode<select bind:value={goalMode} disabled={busy}><option value="TARGET">Target</option><option value="CONTINUOUS">Continuous</option></select></label>
+            <label>Success criteria<textarea bind:value={goalCriteria} disabled={busy} rows="4" placeholder="One required result per line."></textarea><small>Every line is required. Work cannot mark a target achieved without durable completion evidence.</small></label>
+            <button class="primary" onclick={bootstrapStrategy} disabled={busy || !canBootstrapStrategy()}>Create Mission and Goal</button>
+            <p class="boundary-note">This sets organizational direction. It grants no effect permission, approval, capability, policy, or completion authority.</p>
+          </div>
+        </section>
+      {/if}
       {#if organization}
         <section class="organization-layout">
           <div class="panel organization-tree">

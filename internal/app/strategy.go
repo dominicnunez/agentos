@@ -47,9 +47,10 @@ type StrategyBootstrapInput struct {
 	SuccessCriteria  []string
 }
 
-// BootstrapStrategy atomically creates a Mission and measurable Goal, and
-// creates the Organization projection when this is the installation's first
-// durable organizational action. Exact retries are idempotent.
+// BootstrapStrategy atomically creates the Organization's initial Mission and
+// measurable Goal, and creates the Organization projection when this is the
+// installation's first durable organizational action. Exact retries are
+// idempotent; later direction uses separate reviewed lifecycle operations.
 func (s *Service) BootstrapStrategy(ctx context.Context, input StrategyBootstrapInput) (OrganizationSnapshot, error) {
 	input.MissionStatement = strings.TrimSpace(input.MissionStatement)
 	input.GoalObjective = strings.TrimSpace(input.GoalObjective)
@@ -307,12 +308,12 @@ func strategyBootstrapCollides(snapshot projections.Snapshot, input StrategyBoot
 		return true
 	}
 	for _, state := range snapshot.Missions {
-		if state.CorrelationID == input.RequestID {
+		if state.Value.OrganizationID == input.OrganizationID {
 			return true
 		}
 	}
 	for _, state := range snapshot.Goals {
-		if state.CorrelationID == input.RequestID {
+		if state.Value.OrganizationID == input.OrganizationID {
 			return true
 		}
 	}

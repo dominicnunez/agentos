@@ -11,7 +11,7 @@ Agent OS is a different implementation shape: one governed runtime owns durable 
 | Capability | Agent OS | Octopus AgentOS repository | Priority |
 |---|---|---|---:|
 | Integrated governed organization kernel | Shipped and tested | Separate modules; users wire them | Defend |
-| Durable Mission → Goal → Work → Task model | Shipped; dashboard strategy creation in progress | Shared blackboard and runtime modules, not this integrated hierarchy | Critical |
+| Durable Mission → Goal → Work → Task model | Shipped and tested, including initial dashboard strategy creation | Shared blackboard and runtime modules, not this integrated hierarchy | Defend |
 | Reviewed natural-language intake | Shipped | AI CLIs are directly available | Defend |
 | Explicit approval/effect/completion boundaries | Shipped | Policy/evidence modules are bundled; image also grants passwordless sudo | Defend |
 | A2A boundary | Shipped using official SDK | MCP blackboard is the advertised coordination path | Defend |
@@ -34,8 +34,7 @@ Agent OS is a different implementation shape: one governed runtime owns durable 
 
 ## Near-term competitive path
 
-1. Finish self-starting organizational direction in the dashboard.
-2. Publish a five-minute governed workflow using the user-level Linux install and fake provider until real-provider gates are approved.
-3. Add AIMS inventory/evidence export and operator-owned management records.
-4. Add keyless/managed-secret provider adapters behind current credential and policy boundaries.
-5. Validate the installed Linux binary, quickstart, backup/restore, and full dashboard workflow before any Agent OS release decision.
+1. Publish a five-minute governed workflow using the user-level Linux install and fake provider until real-provider gates are approved.
+2. Add AIMS inventory/evidence export and operator-owned management records.
+3. Add keyless/managed-secret provider adapters behind current credential and policy boundaries.
+4. Validate the installed Linux binary, quickstart, backup/restore, and full dashboard workflow before any Agent OS release decision.

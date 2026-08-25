@@ -71,6 +71,21 @@ func TestBootstrapStrategyCreatesDurableDirectionAndReplaysExactly(t *testing.T)
 	if err != nil || len(replayed) != len(stream) {
 		t.Fatalf("strategy replay appended events=%d err=%v", len(replayed), err)
 	}
+	restarted := New(events.NewGateway(store))
+	if _, err := restarted.BootstrapStrategy(ctx, input); err != nil {
+		t.Fatalf("exact strategy replay after process restart: %v", err)
+	}
+	duplicate := input
+	duplicate.RequestID = "strategy-2"
+	duplicate.MissionID = "mission-2"
+	duplicate.GoalID = "goal-2"
+	if _, err := restarted.BootstrapStrategy(ctx, duplicate); !errors.Is(err, ErrStrategyConflict) {
+		t.Fatalf("second initial strategy after process restart error=%v", err)
+	}
+	duplicateEvents, err := store.StrategyCreationEvents(ctx, string(input.OrganizationID), duplicate.RequestID)
+	if err != nil || len(duplicateEvents) != 0 {
+		t.Fatalf("second initial strategy events=%+v err=%v", duplicateEvents, err)
+	}
 	for index := 0; index < 256; index++ {
 		if _, err := store.Append(ctx, events.TrustedDraft{
 			OrganizationID: string(input.OrganizationID), EventType: "STRATEGY_PROGRESS_OBSERVED", SourceActorID: "runtime",
@@ -142,6 +157,43 @@ func TestPreflightStrategySnapshotRejectsRecordOverflow(t *testing.T) {
 	}
 	if _, err := preflightStrategySnapshot(snapshot, nil, mission, goal); !errors.Is(err, errOrganizationSnapshotLimit) {
 		t.Fatalf("strategy record overflow error=%v", err)
+	}
+}
+
+func TestBootstrapStrategyAdmissionIsTenantScoped(t *testing.T) {
+	ctx := context.Background()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := New(events.NewGateway(store))
+	first := StrategyBootstrapInput{
+		OrganizationID: "org-1", RequestID: "strategy-shared", RequestedByID: "local-uid-1000",
+		RequestedByKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT",
+		MissionID: "mission-org-1", MissionStatement: "First tenant direction",
+		GoalID: "goal-org-1", GoalObjective: "First tenant outcome", GoalMode: core.GoalTarget,
+		SuccessCriteria: []string{"First tenant evidence is durable"},
+	}
+	second := first
+	second.OrganizationID = "org-2"
+	second.RequestedByID = "local-uid-2000"
+	second.MissionID = "mission-org-2"
+	second.MissionStatement = "Second tenant direction"
+	second.GoalID = "goal-org-2"
+	second.GoalObjective = "Second tenant outcome"
+	second.SuccessCriteria = []string{"Second tenant evidence is durable"}
+	if _, err := service.BootstrapStrategy(ctx, first); err != nil {
+		t.Fatalf("first tenant strategy: %v", err)
+	}
+	if _, err := service.BootstrapStrategy(ctx, second); err != nil {
+		t.Fatalf("second tenant strategy with shared request ID: %v", err)
+	}
+	for _, input := range []StrategyBootstrapInput{first, second} {
+		stream, err := store.StrategyCreationEvents(ctx, string(input.OrganizationID), input.RequestID)
+		if err != nil || len(stream) != 3 {
+			t.Fatalf("tenant %s strategy events=%+v err=%v", input.OrganizationID, stream, err)
+		}
 	}
 }
 

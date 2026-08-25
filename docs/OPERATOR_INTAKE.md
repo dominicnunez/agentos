@@ -234,6 +234,13 @@ the Unix socket:
 - `GET /v1/control/approvals/recent?limit=20`
 - exact-effect approval operations beneath `/v1/control/approvals/{id}`
 
+Strategy bootstrap is a one-time operation for an Organization. Its exact
+request remains replayable from immutable creation events after a process
+restart, while a new request ID is rejected once any durable Mission or Goal
+exists. This makes the ledger—not a browser origin—the authority for whether
+initial direction was created. Later Mission and Goal changes require separate
+reviewed lifecycle operations rather than reopening bootstrap.
+
 The recent-Task read is bound to the authenticated principal's latest confirmed
 intake and exists only to recover every missing runtime-owned phase after an
 interrupted durable confirmation across dashboard processes. Exact approval and completion-review reads plus their bounded
