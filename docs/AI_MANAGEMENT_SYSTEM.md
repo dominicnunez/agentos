@@ -8,7 +8,7 @@ Agent OS contributes technical controls and reviewable evidence:
 - tenant-scoped durable Missions, Goals, Work, Tasks, Teams, and Agents;
 - explicit authority, approval, capability, effect, and completion boundaries;
 - bounded planning and execution context;
-- append-only event contracts, recovery validation, and SQLite-backed state;
+- cryptographically chained Event Contracts, recovery validation, and SQLite-backed state;
 - provider and inference policy records;
 - governed Lab experiments and promotion evidence;
 - telemetry, completion evidence, and independent completion review.
@@ -29,6 +29,13 @@ dashboard verifies the response before saving one
 `sha256sum -c agentos-aims-evidence.json.sha256` to verify the JSON artifact
 again. The checksum is not a cryptographic attestation of
 the SQLite ledger and does not convert readiness evidence into certification.
+
+Separately, Agent OS verifies a cryptographic stored-byte chain across the
+durable SQLite event stream at startup and during recovery operations. The
+verified head helps detect partial ledger modification but is not included as
+a signed claim in the tenant-scoped AIMS export. It is not externally anchored
+and does not prove the truth of event content, control effectiveness,
+conformity, or certification. See [Event ledger integrity](EVENT_LEDGER_INTEGRITY.md).
 
 The operating organization remains responsible for its AIMS scope, AI policy, accountable roles, legal and stakeholder obligations, risk criteria, impact assessments, competence, supplier decisions, incident handling, internal audits, management reviews, corrective actions, document retention, and selected controls. Agent OS must fail closed where one of those decisions is required but has not been supplied.
 

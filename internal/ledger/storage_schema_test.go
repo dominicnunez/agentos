@@ -124,6 +124,10 @@ func TestOpenMigratesStorageV1FixtureAndResealsProjectionAdmissions(t *testing.T
 	if _, present, err := events.AdmittedProjection(stream[0]); err != nil || !present {
 		t.Fatalf("migrated projection admission: present=%t err=%v", present, err)
 	}
+	integrity, err := restarted.Integrity(ctx)
+	if err != nil || integrity.EventCount != 1 || integrity.Sequence != 1 || integrity.EventID != stream[0].EventID || integrity.SHA256 == "" {
+		t.Fatalf("migrated event integrity=%+v err=%v", integrity, err)
+	}
 }
 
 func TestOpenMigratesStorageV2WithoutIntentReviewEvidence(t *testing.T) {
@@ -195,7 +199,7 @@ func TestStorageV2MigrationPreservesReviewedIntentEvidence(t *testing.T) {
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE event_integrity; DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -277,7 +281,7 @@ func TestStorageV4MigrationRebuildsBoundedGovernanceQueues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE event_integrity; DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}

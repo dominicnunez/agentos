@@ -25,7 +25,7 @@ const (
 	// not identify or publish an Agent OS release.
 	OldestSupportedStorageVersion = 1
 	// CurrentStorageVersion is the only layout accepted after runtime startup.
-	CurrentStorageVersion = 5
+	CurrentStorageVersion = 6
 	// LegacyEventSchemaVersion identifies the immediately preceding Event
 	// Contract. Its payload semantics already included Intent mode; migration
 	// validates review evidence and reseals schema-bound projection admissions.
@@ -58,6 +58,10 @@ var storageColumnsV4 = map[string][]string{
 
 var storageColumnsV5 = map[string][]string{
 	"pending_completion_reviews": {"organization_id", "task_id", "correlation_id", "request_event_id", "request_sequence", "updated_at"},
+}
+
+var storageColumnsV6 = map[string][]string{
+	"event_integrity": {"sequence", "event_id", "algorithm", "previous_hash", "event_hash"},
 }
 
 var storageIndexes = map[string]string{
@@ -148,6 +152,10 @@ updated_at TEXT NOT NULL,
 PRIMARY KEY(organization_id,task_id,correlation_id));
 CREATE INDEX pending_completion_reviews_sequence_idx
 ON pending_completion_reviews(organization_id,request_sequence);`
+
+const storageSchemaV6SQL = `CREATE TABLE event_integrity (
+sequence INTEGER PRIMARY KEY, event_id TEXT NOT NULL UNIQUE,
+algorithm TEXT NOT NULL, previous_hash TEXT NOT NULL, event_hash TEXT NOT NULL UNIQUE);`
 
 func migrateStorage(ctx context.Context, db *sql.DB) error {
 	if ctx == nil || db == nil {
@@ -260,6 +268,14 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 			return err
 		}
 		return advanceProjectionStorageContract(ctx, tx, from, to, "governance-queue")
+	case from == 5 && to == 6:
+		if _, err := tx.ExecContext(ctx, storageSchemaV6SQL); err != nil {
+			return err
+		}
+		if err := rebuildEventIntegrity(ctx, tx); err != nil {
+			return err
+		}
+		return advanceProjectionStorageContract(ctx, tx, from, to, "event-integrity")
 	default:
 		return fmt.Errorf("no reviewed storage migration exists")
 	}
@@ -454,6 +470,11 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 	}
 	if version >= 5 {
 		for table, columns := range storageColumnsV5 {
+			expected[table] = columns
+		}
+	}
+	if version >= 6 {
+		for table, columns := range storageColumnsV6 {
 			expected[table] = columns
 		}
 	}

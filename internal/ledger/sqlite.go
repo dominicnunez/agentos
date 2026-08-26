@@ -45,6 +45,9 @@ func (l *SQLite) migrate(ctx context.Context) error {
 	if err := migrateStorage(ctx, l.db); err != nil {
 		return err
 	}
+	if _, err := ValidateEventIntegrity(ctx, l.db); err != nil {
+		return fmt.Errorf("validate event integrity at startup: %w", err)
+	}
 	return l.rebuildExternalWorkIndex(ctx)
 }
 
@@ -3345,6 +3348,7 @@ func (l *SQLite) appendWithProjection(ctx context.Context, draft events.TrustedD
 
 type sqlExecutor interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 func appendEvent(ctx context.Context, db sqlExecutor, d events.TrustedDraft) (events.Event, error) {
@@ -3374,7 +3378,7 @@ func appendEventWithID(ctx context.Context, db sqlExecutor, d events.TrustedDraf
 	if err != nil {
 		return events.Event{}, fmt.Errorf("encode event: %w", err)
 	}
-	return insertEvent(ctx, db, d, id, data, time.Now().UTC())
+	return insertEvent(ctx, db, d, id, data, time.Now().UTC(), true)
 }
 
 func appendProjectionEvent(ctx context.Context, db sqlExecutor, draft events.TrustedDraft, record events.ProjectionRecord, detail json.RawMessage) (events.Event, events.ProjectionEventPayload, error) {
@@ -3382,7 +3386,7 @@ func appendProjectionEvent(ctx context.Context, db sqlExecutor, draft events.Tru
 	if err != nil {
 		return events.Event{}, events.ProjectionEventPayload{}, err
 	}
-	event, err := insertEvent(ctx, db, draft, id, []byte(`{}`), time.Now().UTC())
+	event, err := insertEvent(ctx, db, draft, id, []byte(`{}`), time.Now().UTC(), false)
 	if err != nil {
 		return events.Event{}, events.ProjectionEventPayload{}, err
 	}
@@ -3413,10 +3417,13 @@ func appendProjectionEvent(ctx context.Context, db sqlExecutor, draft events.Tru
 	if err != nil || updated != 1 {
 		return events.Event{}, events.ProjectionEventPayload{}, fmt.Errorf("seal projection event boundary")
 	}
+	if err := sealEventIntegrity(ctx, db, event.Sequence); err != nil {
+		return events.Event{}, events.ProjectionEventPayload{}, err
+	}
 	return event, payload, nil
 }
 
-func insertEvent(ctx context.Context, db sqlExecutor, d events.TrustedDraft, id string, data []byte, now time.Time) (events.Event, error) {
+func insertEvent(ctx context.Context, db sqlExecutor, d events.TrustedDraft, id string, data []byte, now time.Time, sealIntegrity bool) (events.Event, error) {
 	auth, _ := json.Marshal(d.AuthorizationRefs)
 	artifacts, _ := json.Marshal(d.ArtifactRefs)
 	r, err := db.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, d.OrganizationID, d.EventType, d.SourceActorID, d.SourceExecutionID, d.RecipientScope, d.RecipientID, d.TaskID, auth, artifacts, data, d.CorrelationID, now.Format(time.RFC3339Nano), events.SchemaVersion)
@@ -3430,6 +3437,11 @@ func insertEvent(ctx context.Context, db sqlExecutor, d events.TrustedDraft, id 
 	event := events.Event{EventID: id, Sequence: seq, OrganizationID: d.OrganizationID, EventType: d.EventType, SourceActorID: d.SourceActorID, SourceExecutionID: d.SourceExecutionID, RecipientScope: d.RecipientScope, RecipientID: d.RecipientID, TaskID: d.TaskID, AuthorizationRefs: d.AuthorizationRefs, ArtifactRefs: d.ArtifactRefs, CreatedAt: now, SchemaVersion: events.SchemaVersion, Payload: data, CorrelationID: d.CorrelationID}
 	if err := syncPendingCompletionReview(ctx, db, event); err != nil {
 		return events.Event{}, err
+	}
+	if sealIntegrity {
+		if err := sealEventIntegrity(ctx, db, event.Sequence); err != nil {
+			return events.Event{}, err
+		}
 	}
 	return event, nil
 }

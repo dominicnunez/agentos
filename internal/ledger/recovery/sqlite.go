@@ -26,13 +26,15 @@ import (
 )
 
 type Result struct {
-	Path               string `json:"path"`
-	SHA256             string `json:"sha256"`
-	SizeBytes          int64  `json:"size_bytes"`
-	EventCount         int64  `json:"event_count"`
-	MaxSequence        int64  `json:"max_sequence"`
-	StorageVersion     int    `json:"storage_version"`
-	EventSchemaVersion int    `json:"event_schema_version"`
+	Path                string `json:"path"`
+	SHA256              string `json:"sha256"`
+	EventChainSHA256    string `json:"event_chain_sha256,omitempty"`
+	EventChainAlgorithm string `json:"event_chain_algorithm,omitempty"`
+	SizeBytes           int64  `json:"size_bytes"`
+	EventCount          int64  `json:"event_count"`
+	MaxSequence         int64  `json:"max_sequence"`
+	StorageVersion      int    `json:"storage_version"`
+	EventSchemaVersion  int    `json:"event_schema_version"`
 }
 
 type backuper interface {
@@ -132,6 +134,14 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 		if err := ledgerstore.ValidateInferenceAdmissions(ctx, db); err != nil {
 			return Result{}, err
 		}
+		if contract.StorageVersion >= ledgerstore.EventIntegrityStorageVersion {
+			integrity, err := ledgerstore.ValidateEventIntegrity(ctx, db)
+			if err != nil {
+				return Result{}, fmt.Errorf("verify event integrity chain: %w", err)
+			}
+			result.EventChainSHA256 = integrity.SHA256
+			result.EventChainAlgorithm = integrity.Algorithm
+		}
 	} else {
 		if err := verifyLegacyAdmissionsAfterMigration(ctx, db); err != nil {
 			return Result{}, err
@@ -147,6 +157,8 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	verified, err := fileResult(resolved, result.EventCount, result.MaxSequence)
 	verified.StorageVersion = result.StorageVersion
 	verified.EventSchemaVersion = result.EventSchemaVersion
+	verified.EventChainSHA256 = result.EventChainSHA256
+	verified.EventChainAlgorithm = result.EventChainAlgorithm
 	return verified, err
 }
 

@@ -28,12 +28,23 @@ func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	ctx := context.Background()
 	directory := t.TempDir()
 	source := filepath.Join(directory, "live.db")
-	live := createTestLedger(t, source)
-	t.Cleanup(func() { _ = live.Close() })
-	if _, err := live.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
+	store, err := ledger.Open(source)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := live.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,authorization_refs,artifact_refs,payload,created_at,schema_version) VALUES('event-1','org-1','MESSAGE','agent-1','[]','[]','{}','2026-08-13T12:00:00Z',?)`, events.SchemaVersion); err != nil {
+	if _, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "agent-1", Payload: map[string]string{}}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	live, err := sql.Open("sqlite", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+	if _, err := live.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -42,7 +53,7 @@ func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if backup.Path != backupPath || backup.EventCount != 1 || backup.MaxSequence != 1 || backup.StorageVersion != ledger.CurrentStorageVersion || backup.EventSchemaVersion != events.SchemaVersion || backup.SHA256 == "" || backup.SizeBytes == 0 {
+	if backup.Path != backupPath || backup.EventCount != 1 || backup.MaxSequence != 1 || backup.StorageVersion != ledger.CurrentStorageVersion || backup.EventSchemaVersion != events.SchemaVersion || backup.SHA256 == "" || backup.EventChainSHA256 == "" || backup.EventChainAlgorithm != ledger.EventIntegrityAlgorithm || backup.SizeBytes == 0 {
 		t.Fatalf("backup=%+v", backup)
 	}
 	if _, err := live.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,authorization_refs,artifact_refs,payload,created_at,schema_version) VALUES('event-2','org-1','MESSAGE','agent-1','[]','[]','{}','2026-08-13T12:01:00Z',?)`, events.SchemaVersion); err != nil {
@@ -79,12 +90,46 @@ func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	}
 	defer func() { _ = restoredDB.Close() }()
 	var payload string
-	if err := restoredDB.QueryRowContext(ctx, `SELECT payload FROM events WHERE event_id='event-1'`).Scan(&payload); err != nil || payload != "{}" {
+	if err := restoredDB.QueryRowContext(ctx, `SELECT payload FROM events WHERE sequence=1`).Scan(&payload); err != nil || payload != "{}" {
 		t.Fatalf("restored payload=%q err=%v", payload, err)
 	}
 	var eventCount int
 	if err := restoredDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events`).Scan(&eventCount); err != nil || eventCount != 1 {
 		t.Fatalf("restored event count=%d err=%v", eventCount, err)
+	}
+}
+
+func TestVerifyRejectsSemanticallyValidEventPayloadTampering(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "tampered.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := store.Append(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime",
+		CorrelationID: "work-1", Payload: map[string]string{"state": "original"},
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE events SET payload=? WHERE event_id=?`, `{"state":"changed"}`, event.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "integrity hash does not match") {
+		t.Fatalf("tampered event verification error=%v", err)
 	}
 }
 
@@ -200,7 +245,7 @@ func TestLegacyVerificationRejectsTamperedAdmissionsAfterMigration(t *testing.T)
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE event_integrity; DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -224,7 +269,7 @@ func TestLegacyVerificationRejectsTamperedAdmissionsAfterMigration(t *testing.T)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "durable parent Organization") {
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "contiguous complete stream") {
 		t.Fatalf("legacy tampered-admission verification error=%v", err)
 	}
 }
