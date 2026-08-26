@@ -385,7 +385,62 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("projection admission event %s has no materialized record", eventID)
 		}
 	}
-	return validateProjectionOrganizationBindings(orderedAdmissions, stream)
+	if err := validateProjectionOrganizationBindings(orderedAdmissions, stream); err != nil {
+		return err
+	}
+	return validateRecoveryAgentEvidence(stream)
+}
+
+func validateRecoveryAgentEvidence(stream []events.Event) error {
+	for evidenceIndex, evidence := range stream {
+		if evidence.EventType != "EVIDENCE_PUBLISHED" {
+			continue
+		}
+		var task core.Task
+		var taskRecord events.ProjectionRecord
+		var taskVersion int
+		for _, candidate := range stream[:evidenceIndex] {
+			if candidate.OrganizationID != evidence.OrganizationID || candidate.CorrelationID != evidence.CorrelationID {
+				continue
+			}
+			payload, present, err := events.AdmittedProjection(candidate)
+			if err != nil {
+				return fmt.Errorf("event %s: inspect Agent evidence Task admission: %w", evidence.EventID, err)
+			}
+			if !present || payload.Projection.ProjectionKind != "task" || payload.Projection.RecordID != evidence.TaskID {
+				continue
+			}
+			var candidateTask core.Task
+			if decodeExactJSON(payload.Projection.Value, &candidateTask) != nil {
+				return fmt.Errorf("event %s has an invalid Agent evidence Task projection", evidence.EventID)
+			}
+			task = candidateTask
+			taskRecord = payload.Projection
+			taskVersion = payload.Projection.Version
+		}
+		var start events.Event
+		for _, candidate := range stream[:evidenceIndex] {
+			if candidate.EventType != "EXECUTION_STARTED" || candidate.OrganizationID != evidence.OrganizationID ||
+				candidate.TaskID != evidence.TaskID || candidate.CorrelationID != evidence.CorrelationID {
+				continue
+			}
+			payload, present, err := events.AdmittedProjection(candidate)
+			if err != nil {
+				return fmt.Errorf("event %s: inspect Agent evidence execution admission: %w", evidence.EventID, err)
+			}
+			if !present || !reflect.DeepEqual(payload.Projection, taskRecord) {
+				continue
+			}
+			if start.EventID != "" {
+				return fmt.Errorf("event %s has multiple exact Agent execution starts", evidence.EventID)
+			}
+			start = candidate
+		}
+		if err := events.ValidateAgentEvidencePublished(evidence, task, taskVersion, start, stream[:evidenceIndex+1]); err != nil {
+			return fmt.Errorf("event %s: %w", evidence.EventID, err)
+		}
+	}
+	return nil
 }
 
 func validateRecoveryIntentConfirmations(stream []events.Event) error {

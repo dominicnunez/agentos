@@ -2948,6 +2948,9 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 	if events.RequiresProjectionAdmission(d.EventType, d.SourceActorID) {
 		return events.Event{}, fmt.Errorf("projection lifecycle events require typed admission")
 	}
+	if d.EventType == "EVIDENCE_PUBLISHED" {
+		return events.Event{}, fmt.Errorf("agent evidence requires typed execution-bound admission")
+	}
 	if d.EventType == "INBOX_EVENTS_OBSERVED" {
 		return events.Event{}, fmt.Errorf("inbox observations require atomic inbox admission")
 	}
@@ -2966,6 +2969,38 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 		var err error
 		appended, err = appendEvent(ctx, tx, d)
 		return err
+	})
+	return appended, err
+}
+
+// AppendAgentEvidence binds one model-authored claim to the exact admitted
+// Agent Task revision and execution start in the same transaction that appends
+// it. The claim remains untrusted and cannot grant authority or completion.
+func (l *SQLite) AppendAgentEvidence(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {
+	body, err := json.Marshal(draft.Payload)
+	if err != nil {
+		return events.Event{}, fmt.Errorf("encode Agent evidence: %w", err)
+	}
+	var payload events.EvidencePublishedPayload
+	if draft.OrganizationID == "" || draft.EventType != "EVIDENCE_PUBLISHED" || draft.SourceActorID == "" ||
+		draft.SourceExecutionID == "" || draft.RecipientScope != "" || draft.RecipientID != "" || draft.TaskID == "" ||
+		len(draft.AuthorizationRefs) != 0 || draft.CorrelationID == "" || decodeExactJSONBytes(body, &payload) != nil ||
+		!payload.ValidFor(draft.ArtifactRefs) {
+		return events.Event{}, fmt.Errorf("agent evidence requires a closed execution-bound contract")
+	}
+	draft.Payload = json.RawMessage(append([]byte(nil), body...))
+	var appended events.Event
+	err = l.withTx(ctx, func(tx *sql.Tx) error {
+		start, task, taskVersion, stream, err := resolveAgentExecutionBoundary(ctx, tx, draft)
+		if err != nil {
+			return err
+		}
+		appended, err = appendEvent(ctx, tx, draft)
+		if err != nil {
+			return err
+		}
+		stream = append(stream, appended)
+		return events.ValidateAgentEvidencePublished(appended, task, taskVersion, start, stream)
 	})
 	return appended, err
 }
@@ -3277,41 +3312,9 @@ func (l *SQLite) ObserveInbox(ctx context.Context, draft events.TrustedDraft, re
 }
 
 func resolveInboxObservationExecution(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft, recipientScope, recipientID string) (events.Event, error) {
-	body, found, err := latestRecordBody(ctx, tx, "task", draft.TaskID)
+	startEvent, task, _, stream, err := resolveAgentExecutionBoundary(ctx, tx, draft)
 	if err != nil {
-		return events.Event{}, fmt.Errorf("read inbox observation task: %w", err)
-	}
-	var record events.ProjectionRecord
-	var task core.Task
-	if !found || json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &task) != nil || record.ProjectionKind != "task" || record.RecordID != draft.TaskID || record.Version < 1 || record.CorrelationID != draft.CorrelationID || task.ID != core.ID(draft.TaskID) || task.ExecutionKind != core.ExecutionAgent || task.Status != core.TaskRunning || task.AssigneeID == "" || draft.SourceActorID != string(task.AssigneeID) || draft.SourceExecutionID != fmt.Sprintf("execution-%s-v%d", task.ID, record.Version) {
-		return events.Event{}, fmt.Errorf("inbox observation is not bound to a running Agent execution")
-	}
-	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? ORDER BY sequence`, draft.OrganizationID))
-	if err != nil {
-		return events.Event{}, fmt.Errorf("read inbox observation execution boundary: %w", err)
-	}
-	var startEvent events.Event
-	for _, event := range stream {
-		if event.EventType != "EXECUTION_STARTED" || event.OrganizationID != draft.OrganizationID || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != draft.TaskID || event.CorrelationID != draft.CorrelationID {
-			continue
-		}
-		payload, present, admissionErr := events.AdmittedProjection(event)
-		if admissionErr != nil {
-			return events.Event{}, admissionErr
-		}
-		if !present || !reflect.DeepEqual(payload.Projection, record) {
-			continue
-		}
-		if startEvent.EventID != "" {
-			return events.Event{}, fmt.Errorf("running Agent execution has multiple start transitions")
-		}
-		startEvent = event
-	}
-	if startEvent.EventID == "" {
-		return events.Event{}, fmt.Errorf("running Agent execution lacks its exact start transition")
-	}
-	if err := events.ValidateAgentDispatchStart(startEvent, task, record.Version, stream); err != nil {
-		return events.Event{}, fmt.Errorf("running Agent execution lacks valid dispatch admission: %w", err)
+		return events.Event{}, err
 	}
 	var teamRevisions map[core.ID][]events.TeamRevisionBinding
 	if recipientScope == events.RecipientTeam {
@@ -3328,6 +3331,46 @@ func resolveInboxObservationExecution(ctx context.Context, tx *sql.Tx, draft eve
 		return events.Event{}, fmt.Errorf("inbox observation recipient is outside its running Agent execution")
 	}
 	return startEvent, nil
+}
+
+func resolveAgentExecutionBoundary(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft) (events.Event, core.Task, int, []events.Event, error) {
+	body, found, err := latestRecordBody(ctx, tx, "task", draft.TaskID)
+	if err != nil {
+		return events.Event{}, core.Task{}, 0, nil, fmt.Errorf("read Agent evidence task: %w", err)
+	}
+	var record events.ProjectionRecord
+	var task core.Task
+	if !found || json.Unmarshal(body, &record) != nil || json.Unmarshal(record.Value, &task) != nil || record.ProjectionKind != "task" || record.RecordID != draft.TaskID || record.Version < 1 || record.CorrelationID != draft.CorrelationID || task.ID != core.ID(draft.TaskID) || task.ExecutionKind != core.ExecutionAgent || task.Status != core.TaskRunning || task.AssigneeID == "" || draft.SourceActorID != string(task.AssigneeID) || draft.SourceExecutionID != fmt.Sprintf("execution-%s-v%d", task.ID, record.Version) {
+		return events.Event{}, core.Task{}, 0, nil, fmt.Errorf("event is not bound to a running Agent execution")
+	}
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? ORDER BY sequence`, draft.OrganizationID))
+	if err != nil {
+		return events.Event{}, core.Task{}, 0, nil, fmt.Errorf("read Agent execution boundary: %w", err)
+	}
+	var startEvent events.Event
+	for _, event := range stream {
+		if event.EventType != "EXECUTION_STARTED" || event.OrganizationID != draft.OrganizationID || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != draft.TaskID || event.CorrelationID != draft.CorrelationID {
+			continue
+		}
+		payload, present, admissionErr := events.AdmittedProjection(event)
+		if admissionErr != nil {
+			return events.Event{}, core.Task{}, 0, nil, admissionErr
+		}
+		if !present || !reflect.DeepEqual(payload.Projection, record) {
+			continue
+		}
+		if startEvent.EventID != "" {
+			return events.Event{}, core.Task{}, 0, nil, fmt.Errorf("running Agent execution has multiple start transitions")
+		}
+		startEvent = event
+	}
+	if startEvent.EventID == "" {
+		return events.Event{}, core.Task{}, 0, nil, fmt.Errorf("running Agent execution lacks its exact start transition")
+	}
+	if err := events.ValidateAgentDispatchStart(startEvent, task, record.Version, stream); err != nil {
+		return events.Event{}, core.Task{}, 0, nil, fmt.Errorf("running Agent execution lacks valid dispatch admission: %w", err)
+	}
+	return startEvent, task, record.Version, stream, nil
 }
 
 // appendWithProjection commits the authoritative event before its derived
