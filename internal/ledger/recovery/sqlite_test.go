@@ -99,6 +99,65 @@ func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	}
 }
 
+func TestVerifyReplaysEventAdmittedKnowledge(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "knowledge.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := events.NewGateway(store)
+	now := time.Now().UTC().Add(-time.Minute)
+	organization := core.Organization{ID: "org-1", Name: "Knowledge Recovery", PolicyVersion: "v1", CreatedAt: now}
+	organizationEvent, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"},
+		ProjectionKind: "organization", RecordID: "org-1", Version: 1, Value: organization,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	candidate := core.KnowledgeRecord{
+		KnowledgeID: "knowledge-1", OrganizationID: "org-1", Version: 1,
+		Type: core.KnowledgeLesson, Scope: core.KnowledgeScopeOrganization, ScopeID: "org-1",
+		Status: core.KnowledgeCandidate, Title: "Recoverable knowledge", Content: "Offline verification replays this admission.",
+		Basis: core.KnowledgeBasisHumanInput, ProvenanceEventRefs: []string{organizationEvent.EventID},
+		CreatedBy: "runtime", CreatedByKind: core.PrincipalRuntime, CreatedAt: now,
+		ValidationMethod: core.KnowledgeValidationUnvalidated,
+	}
+	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_PROPOSED", SourceActorID: "runtime", CorrelationID: "knowledge-knowledge-1"},
+		ProjectionKind: "knowledge", RecordID: "knowledge-1", Version: 1, Value: candidate,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	active := candidate
+	active.Version = 2
+	active.Status = core.KnowledgeActive
+	active.ValidationMethod = core.KnowledgeValidationDeterministic
+	active.ValidationRefs = []string{organizationEvent.EventID}
+	active.ValidatedBy = "runtime"
+	active.ValidatedByKind = core.PrincipalRuntime
+	active.LastVerifiedAt = &now
+	active.SupersedesVersion = recoveryIntPointer(1)
+	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_ACTIVATED", SourceActorID: "runtime", CorrelationID: "knowledge-knowledge-1"},
+		ProjectionKind: "knowledge", RecordID: "knowledge-1", Version: 2, Value: active,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err != nil {
+		t.Fatalf("verify event-admitted knowledge: %v", err)
+	}
+}
+
+func recoveryIntPointer(value int) *int { return &value }
+
 func TestVerifyRejectsSemanticallyValidEventPayloadTampering(t *testing.T) {
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "tampered.db")

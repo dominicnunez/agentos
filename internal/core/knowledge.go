@@ -39,6 +39,9 @@ func ValidKnowledgeRecord(record KnowledgeRecord) bool {
 	if record.Basis == KnowledgeBasisRepeatedPattern && len(record.OccurrenceEventRefs) < 3 {
 		return false
 	}
+	if record.Basis == KnowledgeBasisDerived && len(record.DerivedKnowledgeRefs) == 0 {
+		return false
+	}
 	_, createdOffset := record.CreatedAt.Zone()
 	if createdOffset != 0 {
 		return false
@@ -108,7 +111,7 @@ func ValidateKnowledgeTransition(eventType string, prior, next KnowledgeRecord) 
 		if prior.Status != KnowledgeCandidate || next.Status != KnowledgeActive || !sameKnowledgeCandidate(prior, next) {
 			return fmt.Errorf("only a candidate may be activated")
 		}
-		if prior.CreatedByKind == PrincipalExternalAgent && next.ValidatedByKind == PrincipalExternalAgent && prior.CreatedBy == next.ValidatedBy {
+		if knowledgeAgentPrincipal(prior.CreatedByKind) && knowledgeAgentPrincipal(next.ValidatedByKind) && prior.CreatedBy == next.ValidatedBy {
 			return fmt.Errorf("an Agent cannot activate its own proposed knowledge")
 		}
 	case "KNOWLEDGE_SUPERSEDED":
@@ -157,7 +160,7 @@ func validKnowledgeVerification(record KnowledgeRecord) bool {
 	case KnowledgeValidationHuman:
 		return record.ValidatedByKind == PrincipalHuman
 	case KnowledgeValidationIndependentAgent:
-		return record.ValidatedByKind == PrincipalExternalAgent
+		return knowledgeAgentPrincipal(record.ValidatedByKind)
 	case KnowledgeValidationRepeatedObservation:
 		return len(record.ValidationRefs) >= 3
 	case KnowledgeValidationDeterministic, KnowledgeValidationExperimental, KnowledgeValidationMixed:
@@ -218,7 +221,35 @@ func validKnowledgePrincipal(id ID, kind PrincipalKind) bool {
 	if !ValidGoalReferenceID(string(id)) {
 		return false
 	}
-	return kind == PrincipalHuman || kind == PrincipalExternalAgent || kind == PrincipalRuntime
+	if kind == PrincipalRuntime {
+		return id == "runtime"
+	}
+	return kind == PrincipalHuman || kind == PrincipalAgent || kind == PrincipalExternalAgent || kind == PrincipalRuntime
+}
+
+func knowledgeAgentPrincipal(kind PrincipalKind) bool {
+	return kind == PrincipalAgent || kind == PrincipalExternalAgent
+}
+
+// ValidKnowledgeRevision applies the same lifecycle transition used by online
+// materialization and offline recovery without weakening stable identity.
+func ValidKnowledgeRevision(previous, next KnowledgeRecord) bool {
+	eventType := ""
+	switch next.Status {
+	case KnowledgeCandidate:
+		eventType = "KNOWLEDGE_PROPOSED"
+	case KnowledgeActive:
+		eventType = "KNOWLEDGE_ACTIVATED"
+	case KnowledgeSuperseded:
+		eventType = "KNOWLEDGE_SUPERSEDED"
+	case KnowledgeStale:
+		eventType = "KNOWLEDGE_MARKED_STALE"
+	case KnowledgeQuarantined:
+		eventType = "KNOWLEDGE_QUARANTINED"
+	default:
+		return false
+	}
+	return ValidateKnowledgeTransition(eventType, previous, next) == nil
 }
 
 func boundedRequiredKnowledgeText(value string, maximum int) bool {

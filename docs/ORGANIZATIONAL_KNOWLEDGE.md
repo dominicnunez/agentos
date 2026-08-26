@@ -32,20 +32,28 @@ provenance events, optional occurrence events, derived knowledge versions, and
 artifact evidence. Repeated observations require at least three distinct event
 references to create a candidate, but frequency never activates it.
 
-Activation records a closed validation method, validator identity, validation
-event references, and verification time. Repeated-pattern activation requires
-validation evidence admitted after the candidate proposal. An external Agent
-cannot activate its own proposal. Later terminal revisions preserve the prior
-validation record.
+Activation records a closed validation method, validator identity and kind,
+validation event references, and verification time. `AGENT` identifies a
+durable internal Agent; `EXTERNAL_AGENT` identifies an authenticated A2A actor.
+Those identities are never interchangeable. Internal-Agent authorship must
+reference that Agent's execution-bound proposal event. User and external-Agent
+authorship must reference an authenticated gateway event. Repeated-pattern
+activation requires validation evidence admitted after the candidate proposal.
+No Agent may activate its own proposal. Later terminal revisions preserve the
+prior validation record.
 
 ## Security boundary
 
 All referenced events must already exist in the same Organization when a
 transition is committed. Agent- and Team-scoped knowledge must bind to a
-durable same-Organization roster record. Derived knowledge must reference an
-exact earlier `ACTIVE` version in the same Organization. Startup reconstruction
-rechecks evidence timing, tenant ownership, scope, lifecycle order, and derived
-lineage from the event stream.
+durable same-Organization roster record. Derived knowledge must contain at
+least one lineage reference and every reference must identify an exact earlier
+`ACTIVE` version in the same Organization. User or Agent judgments require an
+exact `knowledge.validate` capability admission whose authenticated principal
+kind matches the claimed validator; revocation and expiry are rechecked in the
+activation transaction. Startup reconstruction and offline backup verification
+use the same Event-Contract admission validator to recheck evidence timing,
+tenant ownership, scope, lifecycle order, validator attribution, and lineage.
 
 Retrieval accepts one exact Organization and scope, reads only current
 `ACTIVE` records, and uses deterministic bounded text matching. Candidate,

@@ -11,7 +11,6 @@ import (
 	"reflect"
 	"slices"
 	"sort"
-	"strconv"
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
@@ -506,9 +505,7 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 	goals := make(map[core.ID]Versioned[core.Goal])
 	works := make(map[core.ID]Versioned[core.Work])
 	experiments := make(map[core.ID]Versioned[core.Experiment])
-	knowledgeHistory := make(map[core.ID]Versioned[core.KnowledgeRecord])
-	knowledgeRevisions := make(map[core.ID]map[int]core.KnowledgeRecord)
-	knowledgeAdmissionSequences := make(map[core.ID]int64)
+	knowledgeAdmissions := events.NewKnowledgeAdmissionValidator(ordered)
 	graph := core.DurableGraph{
 		Organizations: map[core.ID]core.DurableState[core.Organization]{}, Missions: map[core.ID]core.DurableState[core.Mission]{},
 		Goals: map[core.ID]core.DurableState[core.Goal]{}, Teams: map[core.ID]core.DurableState[core.Team]{},
@@ -703,10 +700,10 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 				!core.ValidKnowledgeRecord(value) || value.Version != record.Version {
 				err = fmt.Errorf("contains an invalid knowledge projection")
 			} else {
-				err = validateKnowledgeProjectionAtAdmission(value, event, record, graph, knowledgeHistory, knowledgeRevisions, knowledgeAdmissionSequences, eventIndex)
+				err = knowledgeAdmissions.Validate(value, event, record, graph)
 			}
 			if err == nil {
-				err = core.AdmitDurableRevision(graph.Knowledge, value.KnowledgeID, record.Version, record.CorrelationID, value, true, validKnowledgeRevision)
+				err = core.AdmitDurableRevision(graph.Knowledge, value.KnowledgeID, record.Version, record.CorrelationID, value, true, core.ValidKnowledgeRevision)
 			}
 		default:
 			err = fmt.Errorf("contains unsupported projection kind %s", record.ProjectionKind)
@@ -724,147 +721,6 @@ func validateProjectionOrganizationAtAdmission(organizationID core.ID, event eve
 		return fmt.Errorf("requires its durable parent Organization at admission")
 	}
 	return nil
-}
-
-func validateKnowledgeProjectionAtAdmission(value core.KnowledgeRecord, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, history map[core.ID]Versioned[core.KnowledgeRecord], revisions map[core.ID]map[int]core.KnowledgeRecord, admissionSequences map[core.ID]int64, eventIndex map[string]events.Event) error {
-	if err := validateProjectionOrganizationAtAdmission(value.OrganizationID, event, graph); err != nil {
-		return err
-	}
-	if record.CorrelationID != "knowledge-"+record.RecordID {
-		return fmt.Errorf("knowledge correlation is not deterministic")
-	}
-	switch value.Scope {
-	case core.KnowledgeScopeOrganization:
-		if value.ScopeID != value.OrganizationID {
-			return fmt.Errorf("knowledge crosses its Organization scope")
-		}
-	case core.KnowledgeScopeAgent:
-		agent, found := graph.Agents[value.ScopeID]
-		if !found || agent.Value.OrganizationID != value.OrganizationID {
-			return fmt.Errorf("knowledge references an invalid Agent scope")
-		}
-	case core.KnowledgeScopeTeam:
-		team, found := graph.Teams[value.ScopeID]
-		if !found || team.Value.OrganizationID != value.OrganizationID {
-			return fmt.Errorf("knowledge references an invalid Team scope")
-		}
-	default:
-		return fmt.Errorf("knowledge has an unsupported scope")
-	}
-	evidenceArtifacts := make(map[string]struct{})
-	for _, refs := range [][]string{value.ProvenanceEventRefs, value.OccurrenceEventRefs, value.ValidationRefs} {
-		for _, ref := range refs {
-			evidence, found := eventIndex[ref]
-			if !found || evidence.Sequence >= event.Sequence || evidence.OrganizationID != event.OrganizationID {
-				return fmt.Errorf("knowledge references unavailable, future, or cross-organization evidence")
-			}
-			for _, artifactRef := range evidence.ArtifactRefs {
-				evidenceArtifacts[artifactRef] = struct{}{}
-			}
-		}
-	}
-	for _, artifactRef := range value.EvidenceArtifactRefs {
-		if _, evidenced := evidenceArtifacts[artifactRef]; !evidenced {
-			return fmt.Errorf("knowledge artifact is absent from its referenced evidence events")
-		}
-	}
-	for _, ref := range value.DerivedKnowledgeRefs {
-		version, err := strconv.Atoi(ref.Version)
-		derived, found := revisions[core.ID(ref.ID)][version]
-		current, currentFound := history[core.ID(ref.ID)]
-		if err != nil || version < 1 || strconv.Itoa(version) != ref.Version || ref.ID == record.RecordID || !found ||
-			derived.OrganizationID != value.OrganizationID || derived.Status != core.KnowledgeActive || !currentFound ||
-			current.Version != version || current.Value.Status != core.KnowledgeActive {
-			return fmt.Errorf("knowledge derived reference lacks an exact prior active revision")
-		}
-	}
-	if value.CreatedAt.After(event.CreatedAt) || value.LastVerifiedAt != nil && value.LastVerifiedAt.After(event.CreatedAt) {
-		return fmt.Errorf("knowledge timestamps postdate their admitting event")
-	}
-	previous, found := history[value.KnowledgeID]
-	if found {
-		if record.Version != previous.Version+1 || record.CorrelationID != previous.CorrelationID {
-			return fmt.Errorf("knowledge history is noncontiguous")
-		}
-		if err := core.ValidateKnowledgeTransition(event.EventType, previous.Value, value); err != nil {
-			return err
-		}
-	} else if record.Version != 1 || value.Status != core.KnowledgeCandidate {
-		return fmt.Errorf("knowledge history does not begin with a candidate")
-	}
-	if event.EventType == "KNOWLEDGE_ACTIVATED" && (value.ValidatedByKind == core.PrincipalHuman || value.ValidatedByKind == core.PrincipalExternalAgent) {
-		proposalSequence := admissionSequences[value.KnowledgeID]
-		if proposalSequence < 1 || !knowledgeHasAuthorizedJudgment(value, proposalSequence, eventIndex) {
-			return fmt.Errorf("knowledge activation lacks an authenticated validator admission")
-		}
-	}
-	if event.EventType == "KNOWLEDGE_ACTIVATED" && value.Basis == core.KnowledgeBasisRepeatedPattern {
-		proposalSequence := admissionSequences[value.KnowledgeID]
-		if proposalSequence < 1 || !knowledgeHasSubsequentValidation(value.OccurrenceEventRefs, value.ValidationRefs, proposalSequence, eventIndex) {
-			return fmt.Errorf("repeated-pattern activation lacks validation evidence admitted after the proposal")
-		}
-	}
-	history[value.KnowledgeID] = Versioned[core.KnowledgeRecord]{Version: record.Version, CorrelationID: record.CorrelationID, Value: value}
-	admissionSequences[value.KnowledgeID] = event.Sequence
-	if revisions[value.KnowledgeID] == nil {
-		revisions[value.KnowledgeID] = make(map[int]core.KnowledgeRecord)
-	}
-	revisions[value.KnowledgeID][record.Version] = value
-	return nil
-}
-
-func knowledgeHasAuthorizedJudgment(value core.KnowledgeRecord, proposalSequence int64, eventIndex map[string]events.Event) bool {
-	for _, ref := range value.ValidationRefs {
-		judgment, found := eventIndex[ref]
-		if !found || judgment.Sequence <= proposalSequence || judgment.EventType != "CAPABILITY_CHECKED" ||
-			judgment.OrganizationID != string(value.OrganizationID) || judgment.SourceActorID != string(value.ValidatedBy) ||
-			judgment.RecipientScope != "" || judgment.RecipientID != "" || judgment.TaskID == "" ||
-			len(judgment.AuthorizationRefs) == 0 || len(judgment.ArtifactRefs) != 0 || judgment.SchemaVersion != events.SchemaVersion {
-			continue
-		}
-		var trace core.AuthorizationTrace
-		if decodeExactProjectionJSON(judgment.Payload, &trace) != nil || !trace.Allowed || trace.LeaseID == "" ||
-			trace.ActorID != value.ValidatedBy || trace.TaskID != core.ID(judgment.TaskID) || trace.Action != "knowledge.validate" ||
-			trace.Resource != string(value.KnowledgeID) || trace.Scope != string(value.OrganizationID) ||
-			!slices.Contains(judgment.AuthorizationRefs, string(trace.LeaseID)) {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
-func knowledgeHasSubsequentValidation(occurrences, validation []string, proposalSequence int64, eventIndex map[string]events.Event) bool {
-	seen := make(map[string]struct{}, len(occurrences))
-	for _, ref := range occurrences {
-		seen[ref] = struct{}{}
-	}
-	for _, ref := range validation {
-		evidence, found := eventIndex[ref]
-		if _, repeated := seen[ref]; !repeated && found && evidence.Sequence > proposalSequence {
-			return true
-		}
-	}
-	return false
-}
-
-func validKnowledgeRevision(previous, next core.KnowledgeRecord) bool {
-	eventType := ""
-	switch next.Status {
-	case core.KnowledgeCandidate:
-		eventType = "KNOWLEDGE_PROPOSED"
-	case core.KnowledgeActive:
-		eventType = "KNOWLEDGE_ACTIVATED"
-	case core.KnowledgeSuperseded:
-		eventType = "KNOWLEDGE_SUPERSEDED"
-	case core.KnowledgeStale:
-		eventType = "KNOWLEDGE_MARKED_STALE"
-	case core.KnowledgeQuarantined:
-		eventType = "KNOWLEDGE_QUARANTINED"
-	default:
-		return false
-	}
-	return core.ValidateKnowledgeTransition(eventType, previous, next) == nil
 }
 
 func validateProjectionTeamAtAdmission(team core.Team, event events.Event, graph core.DurableGraph) error {
@@ -1685,7 +1541,7 @@ func decodeKnowledgeKind(bodies [][]byte, target map[core.ID]Versioned[core.Know
 			record.Version != value.Version || !core.ValidKnowledgeRecord(value) {
 			return fmt.Errorf("knowledge record is invalid")
 		}
-		if err := core.AdmitDurableRevision(target, value.KnowledgeID, record.Version, record.CorrelationID, value, true, validKnowledgeRevision); err != nil {
+		if err := core.AdmitDurableRevision(target, value.KnowledgeID, record.Version, record.CorrelationID, value, true, core.ValidKnowledgeRevision); err != nil {
 			return err
 		}
 	}

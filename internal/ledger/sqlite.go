@@ -2069,6 +2069,9 @@ func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedPro
 			return fmt.Errorf("knowledge artifact is absent from its referenced evidence events")
 		}
 	}
+	if err := validateKnowledgeCreatorEvidence(ctx, tx, knowledge); err != nil {
+		return err
+	}
 	for _, ref := range knowledge.DerivedKnowledgeRefs {
 		version, err := strconv.Atoi(ref.Version)
 		if err != nil || version < 1 || strconv.Itoa(version) != ref.Version || ref.ID == item.draft.RecordID {
@@ -2111,7 +2114,7 @@ func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedPro
 		if err != nil {
 			return err
 		}
-		if knowledge.ValidatedByKind == core.PrincipalHuman || knowledge.ValidatedByKind == core.PrincipalExternalAgent {
+		if knowledge.ValidatedByKind == core.PrincipalHuman || knowledge.ValidatedByKind == core.PrincipalAgent || knowledge.ValidatedByKind == core.PrincipalExternalAgent {
 			if err := validateKnowledgeJudgmentAuthorization(ctx, tx, knowledge, proposalSequence); err != nil {
 				return err
 			}
@@ -2129,6 +2132,25 @@ func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedPro
 	return nil
 }
 
+func validateKnowledgeCreatorEvidence(ctx context.Context, tx *sql.Tx, knowledge core.KnowledgeRecord) error {
+	if knowledge.CreatedByKind == core.PrincipalRuntime {
+		if knowledge.CreatedBy == "runtime" {
+			return nil
+		}
+		return fmt.Errorf("runtime knowledge creator identity is invalid")
+	}
+	for _, ref := range knowledge.ProvenanceEventRefs {
+		evidence, found, err := eventByID(ctx, tx, ref)
+		if err != nil {
+			return fmt.Errorf("read knowledge creator evidence: %w", err)
+		}
+		if found && events.ValidKnowledgeCreatorEvidence(evidence, knowledge) {
+			return nil
+		}
+	}
+	return fmt.Errorf("knowledge creator kind is not bound to authenticated provenance")
+}
+
 func validateKnowledgeJudgmentAuthorization(ctx context.Context, tx *sql.Tx, knowledge core.KnowledgeRecord, proposalSequence int64) error {
 	for _, ref := range knowledge.ValidationRefs {
 		judgment, found, err := eventByID(ctx, tx, ref)
@@ -2143,7 +2165,7 @@ func validateKnowledgeJudgmentAuthorization(ctx context.Context, tx *sql.Tx, kno
 		}
 		var recorded core.AuthorizationTrace
 		if decodeExactJSONBytes(judgment.Payload, &recorded) != nil || !recorded.Allowed || recorded.LeaseID == "" ||
-			recorded.ActorID != knowledge.ValidatedBy || recorded.TaskID != core.ID(judgment.TaskID) || recorded.Action != "knowledge.validate" ||
+			recorded.ActorID != knowledge.ValidatedBy || recorded.ActorKind != knowledge.ValidatedByKind || recorded.TaskID != core.ID(judgment.TaskID) || recorded.Action != "knowledge.validate" ||
 			recorded.Resource != string(knowledge.KnowledgeID) || recorded.Scope != string(knowledge.OrganizationID) ||
 			!slices.Contains(judgment.AuthorizationRefs, string(recorded.LeaseID)) {
 			continue
@@ -2152,7 +2174,7 @@ func validateKnowledgeJudgmentAuthorization(ctx context.Context, tx *sql.Tx, kno
 		if err != nil {
 			return err
 		}
-		if current.Allowed && current.LeaseID == recorded.LeaseID {
+		if current.Allowed && current.LeaseID == recorded.LeaseID && current.ActorKind == recorded.ActorKind {
 			return nil
 		}
 	}

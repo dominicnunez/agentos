@@ -438,18 +438,22 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, 
 		return admitted[left].event.Sequence < admitted[right].event.Sequence
 	})
 	snapshot := core.DurableGraph{
-		Organizations:     map[core.ID]core.DurableState[core.Organization]{},
-		Missions:          map[core.ID]core.DurableState[core.Mission]{},
-		Goals:             map[core.ID]core.DurableState[core.Goal]{},
-		Teams:             map[core.ID]core.DurableState[core.Team]{},
-		AgentBlueprints:   map[core.ID]core.DurableState[core.AgentBlueprint]{},
-		ExecutionProfiles: map[core.ID]core.DurableState[core.ExecutionProfile]{},
-		Agents:            map[core.ID]core.DurableState[core.Agent]{},
-		Intents:           map[core.ID]core.DurableState[core.Intent]{},
-		Works:             map[core.ID]core.DurableState[core.Work]{},
-		Tasks:             map[core.ID]core.DurableState[core.Task]{},
+		Organizations:       map[core.ID]core.DurableState[core.Organization]{},
+		Missions:            map[core.ID]core.DurableState[core.Mission]{},
+		Goals:               map[core.ID]core.DurableState[core.Goal]{},
+		Teams:               map[core.ID]core.DurableState[core.Team]{},
+		AgentBlueprints:     map[core.ID]core.DurableState[core.AgentBlueprint]{},
+		ExecutionProfiles:   map[core.ID]core.DurableState[core.ExecutionProfile]{},
+		Agents:              map[core.ID]core.DurableState[core.Agent]{},
+		Intents:             map[core.ID]core.DurableState[core.Intent]{},
+		Works:               map[core.ID]core.DurableState[core.Work]{},
+		Tasks:               map[core.ID]core.DurableState[core.Task]{},
+		Experiments:         map[core.ID]core.DurableState[core.Experiment]{},
+		PromotionCandidates: map[core.ID]core.DurableState[core.PromotionCandidate]{},
+		Knowledge:           map[core.ID]core.DurableState[core.KnowledgeRecord]{},
 	}
 	reviewEvidence := events.IndexReviewedIntentEvidence(stream)
+	knowledgeAdmissions := events.NewKnowledgeAdmissionValidator(stream)
 	for _, admission := range admitted {
 		event, record := admission.event, admission.payload.Projection
 		var organizationID core.ID
@@ -590,6 +594,18 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, 
 				return fmt.Errorf("event %s contains invalid Task history: %w", event.EventID, err)
 			}
 			continue
+		case "knowledge":
+			var value core.KnowledgeRecord
+			if decodeExactJSON(record.Value, &value) != nil || value.KnowledgeID != core.ID(record.RecordID) {
+				return fmt.Errorf("event %s contains an invalid knowledge projection", event.EventID)
+			}
+			organizationID = value.OrganizationID
+			if err := knowledgeAdmissions.Validate(value, event, record, snapshot); err != nil {
+				return fmt.Errorf("event %s contains invalid knowledge admission: %w", event.EventID, err)
+			}
+			if err := setRecoveryProjection(snapshot.Knowledge, record, value, true, core.ValidKnowledgeRevision); err != nil {
+				return fmt.Errorf("event %s contains invalid knowledge history: %w", event.EventID, err)
+			}
 		default:
 			return fmt.Errorf("event %s contains unsupported projection kind %s", event.EventID, record.ProjectionKind)
 		}

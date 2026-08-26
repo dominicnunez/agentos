@@ -44,6 +44,7 @@ func TestStoreAdmitsValidatedKnowledgeAndRetrievesOnlyActiveTenantScope(t *testi
 	lease := core.CapabilityLease{
 		ID:           "lease-knowledge-validation",
 		ActorID:      active.ValidatedBy,
+		ActorKind:    active.ValidatedByKind,
 		Action:       "knowledge.validate",
 		Resource:     string(candidate.KnowledgeID),
 		Scope:        string(candidate.OrganizationID),
@@ -65,6 +66,12 @@ func TestStoreAdmitsValidatedKnowledgeAndRetrievesOnlyActiveTenantScope(t *testi
 		t.Fatalf("admit validator judgment: %v", err)
 	}
 	active.ValidationRefs = []string{judgment.EventID}
+	misclassified := active
+	misclassified.ValidationMethod = core.KnowledgeValidationIndependentAgent
+	misclassified.ValidatedByKind = core.PrincipalExternalAgent
+	if _, err := service.Activate(ctx, misclassified); err == nil {
+		t.Fatal("human validator authority was relabeled as external Agent judgment")
+	}
 	if _, err := service.Activate(ctx, active); err != nil {
 		t.Fatalf("activate knowledge: %v", err)
 	}
@@ -109,6 +116,7 @@ func TestStoreRejectsRevokedValidatorAuthorityAfterJudgmentAdmission(t *testing.
 	lease := core.CapabilityLease{
 		ID:           "lease-revoked-validator",
 		ActorID:      "reviewer-revoked",
+		ActorKind:    core.PrincipalHuman,
 		Action:       "knowledge.validate",
 		Resource:     string(candidate.KnowledgeID),
 		Scope:        string(candidate.OrganizationID),
@@ -149,16 +157,43 @@ func TestStoreRejectsRevokedValidatorAuthorityAfterJudgmentAdmission(t *testing.
 	}
 }
 
+func TestStoreBindsInternalAgentCreatorKindToAgentDraft(t *testing.T) {
+	ctx := context.Background()
+	_, gateway := newKnowledgeTestStore(t)
+	seedKnowledgeOrganization(t, ctx, gateway, "org-1")
+	proposal, err := gateway.PublishAgentDraft(ctx, "org-1", "agent-1", "execution-1", "agent-proposal-1", events.Draft{
+		EventType: "KNOWLEDGE_PROPOSED",
+		Payload:   map[string]string{"summary": "bounded internal Agent proposal"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := knowledgeCandidate("k-agent", "org-1", proposal.EventID)
+	candidate.CreatedBy = "agent-1"
+	candidate.CreatedByKind = core.PrincipalAgent
+	service := New(gateway)
+	if _, err := service.Propose(ctx, candidate); err != nil {
+		t.Fatalf("internal Agent proposal was not attributable: %v", err)
+	}
+	misclassified := knowledgeCandidate("k-agent-misclassified", "org-1", proposal.EventID)
+	misclassified.CreatedBy = "agent-1"
+	misclassified.CreatedByKind = core.PrincipalExternalAgent
+	if _, err := service.Propose(ctx, misclassified); err == nil {
+		t.Fatal("internal Agent proposal was relabeled as an external A2A actor")
+	}
+}
+
 func authorizedKnowledgeValidationTrace(lease core.CapabilityLease) core.AuthorizationTrace {
 	return core.AuthorizationTrace{
-		Allowed:  true,
-		LeaseID:  lease.ID,
-		ActorID:  lease.ActorID,
-		TaskID:   lease.OriginTaskID,
-		Action:   lease.Action,
-		Resource: lease.Resource,
-		Scope:    lease.Scope,
-		Reason:   "exact capability lease matched",
+		Allowed:   true,
+		LeaseID:   lease.ID,
+		ActorID:   lease.ActorID,
+		ActorKind: lease.ActorKind,
+		TaskID:    lease.OriginTaskID,
+		Action:    lease.Action,
+		Resource:  lease.Resource,
+		Scope:     lease.Scope,
+		Reason:    "exact capability lease matched",
 	}
 }
 
@@ -239,8 +274,8 @@ func TestStoreRevisesActiveKnowledgeThroughCandidateReview(t *testing.T) {
 	corrected.Title = "Corrected rollback procedure"
 	corrected.Content = "Verify the corrected rollback before applying it."
 	corrected.ProvenanceEventRefs = []string{correctionEvidence.EventID}
-	corrected.CreatedBy = "agent-2"
-	corrected.CreatedByKind = core.PrincipalExternalAgent
+	corrected.CreatedBy = "runtime"
+	corrected.CreatedByKind = core.PrincipalRuntime
 	corrected.CreatedAt = time.Now().UTC()
 	corrected.ValidationMethod = core.KnowledgeValidationUnvalidated
 	corrected.ValidationRefs = nil
@@ -463,8 +498,8 @@ func knowledgeCandidate(id, organizationID core.ID, evidenceRef string) core.Kno
 		Content:             "Verify the rollback before applying it.",
 		Basis:               core.KnowledgeBasisHumanInput,
 		ProvenanceEventRefs: []string{evidenceRef},
-		CreatedBy:           "operator-1",
-		CreatedByKind:       core.PrincipalHuman,
+		CreatedBy:           "runtime",
+		CreatedByKind:       core.PrincipalRuntime,
 		CreatedAt:           time.Date(2026, time.August, 26, 0, 1, 0, 0, time.UTC),
 		ValidationMethod:    core.KnowledgeValidationUnvalidated,
 	}

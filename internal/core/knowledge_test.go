@@ -85,6 +85,13 @@ func TestValidKnowledgeRecordRequiresCautiousPatternAndDerivedProvenance(t *test
 	if ValidKnowledgeRecord(record) {
 		t.Fatal("noncanonical derived knowledge lineage was accepted")
 	}
+	derived := record
+	derived.Basis = KnowledgeBasisDerived
+	derived.OccurrenceEventRefs = nil
+	derived.DerivedKnowledgeRefs = nil
+	if ValidKnowledgeRecord(derived) {
+		t.Fatal("derived knowledge without exact lineage was accepted")
+	}
 }
 
 func TestKnowledgeActivationRejectsAgentSelfValidation(t *testing.T) {
@@ -94,7 +101,7 @@ func TestKnowledgeActivationRejectsAgentSelfValidation(t *testing.T) {
 		Type: KnowledgeLesson, Scope: KnowledgeScopeOrganization, ScopeID: "org-1",
 		Status: KnowledgeCandidate, Title: "Observed pattern", Content: "An Agent observed a pattern.",
 		Basis: KnowledgeBasisSingleExperience, ProvenanceEventRefs: []string{"event-1"},
-		CreatedBy: "agent-1", CreatedByKind: PrincipalExternalAgent, CreatedAt: now,
+		CreatedBy: "agent-1", CreatedByKind: PrincipalAgent, CreatedAt: now,
 		ValidationMethod: KnowledgeValidationUnvalidated,
 	}
 	next := prior
@@ -103,7 +110,7 @@ func TestKnowledgeActivationRejectsAgentSelfValidation(t *testing.T) {
 	next.ValidationMethod = KnowledgeValidationIndependentAgent
 	next.ValidationRefs = []string{"event-2"}
 	next.ValidatedBy = "agent-1"
-	next.ValidatedByKind = PrincipalExternalAgent
+	next.ValidatedByKind = PrincipalAgent
 	verifiedAt := now.Add(time.Minute)
 	next.LastVerifiedAt = &verifiedAt
 	supersedes := 1
@@ -114,6 +121,21 @@ func TestKnowledgeActivationRejectsAgentSelfValidation(t *testing.T) {
 	next.ValidatedBy = "agent-2"
 	if err := ValidateKnowledgeTransition("KNOWLEDGE_ACTIVATED", prior, next); err != nil {
 		t.Fatalf("independent Agent validation rejected: %v", err)
+	}
+}
+
+func TestKnowledgeDistinguishesInternalAndExternalAgentPrincipals(t *testing.T) {
+	for _, kind := range []PrincipalKind{PrincipalAgent, PrincipalExternalAgent} {
+		record := KnowledgeRecord{
+			KnowledgeID: "knowledge-agent", OrganizationID: "org-1", Version: 1,
+			Type: KnowledgeLesson, Scope: KnowledgeScopeOrganization, ScopeID: "org-1",
+			Status: KnowledgeCandidate, Title: "Agent observation", Content: "An attributable Agent observation.",
+			Basis: KnowledgeBasisSingleExperience, ProvenanceEventRefs: []string{"event-1"},
+			CreatedBy: "agent-1", CreatedByKind: kind, CreatedAt: time.Now().UTC(), ValidationMethod: KnowledgeValidationUnvalidated,
+		}
+		if !ValidKnowledgeRecord(record) {
+			t.Fatalf("valid %s knowledge author rejected", kind)
+		}
 	}
 }
 

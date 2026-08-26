@@ -9,6 +9,7 @@ type PrincipalKind string
 const (
 	PrincipalRuntime       PrincipalKind = "RUNTIME"
 	PrincipalHuman         PrincipalKind = "HUMAN"
+	PrincipalAgent         PrincipalKind = "AGENT"
 	PrincipalExternalAgent PrincipalKind = "EXTERNAL_AGENT"
 )
 
@@ -427,25 +428,27 @@ type ExecutionContextManifest struct {
 }
 
 type CapabilityLease struct {
-	ID           ID         `json:"id"`
-	ActorID      ID         `json:"actor_id"`
-	Action       string     `json:"action"`
-	Resource     string     `json:"resource"`
-	Scope        string     `json:"scope"`
-	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
-	OriginTaskID ID         `json:"origin_task_id"`
-	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
+	ID           ID            `json:"id"`
+	ActorID      ID            `json:"actor_id"`
+	ActorKind    PrincipalKind `json:"actor_kind,omitempty"`
+	Action       string        `json:"action"`
+	Resource     string        `json:"resource"`
+	Scope        string        `json:"scope"`
+	ExpiresAt    *time.Time    `json:"expires_at,omitempty"`
+	OriginTaskID ID            `json:"origin_task_id"`
+	RevokedAt    *time.Time    `json:"revoked_at,omitempty"`
 }
 
 type AuthorizationTrace struct {
-	Allowed  bool   `json:"allowed"`
-	LeaseID  ID     `json:"lease_id,omitempty"`
-	ActorID  ID     `json:"actor_id"`
-	TaskID   ID     `json:"task_id"`
-	Action   string `json:"action"`
-	Resource string `json:"resource"`
-	Scope    string `json:"scope"`
-	Reason   string `json:"reason"`
+	Allowed   bool          `json:"allowed"`
+	LeaseID   ID            `json:"lease_id,omitempty"`
+	ActorID   ID            `json:"actor_id"`
+	ActorKind PrincipalKind `json:"actor_kind,omitempty"`
+	TaskID    ID            `json:"task_id"`
+	Action    string        `json:"action"`
+	Resource  string        `json:"resource"`
+	Scope     string        `json:"scope"`
+	Reason    string        `json:"reason"`
 }
 
 type KnowledgeStatus string
