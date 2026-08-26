@@ -283,7 +283,11 @@ func runDoctor(ctx context.Context, args []string, output io.Writer) error {
 	} else if result, verifyErr := ledgerrecovery.Verify(ctx, config.Paths.Database); verifyErr != nil {
 		checks = append(checks, doctorCheck{Name: "event ledger", Status: "BLOCKED", Detail: verifyErr.Error()})
 	} else {
-		checks = append(checks, doctorCheck{Name: "event ledger", Status: "PASS", Detail: fmt.Sprintf("storage v%d; events v%d; %d events; sha256 %s", result.StorageVersion, result.EventSchemaVersion, result.EventCount, result.SHA256[:12])})
+		chain := "empty"
+		if result.EventChainSHA256 != "" {
+			chain = result.EventChainSHA256[:12]
+		}
+		checks = append(checks, doctorCheck{Name: "event ledger", Status: "PASS", Detail: fmt.Sprintf("storage v%d; events v%d; %d events; file sha256 %s; chain sha256 %s", result.StorageVersion, result.EventSchemaVersion, result.EventCount, result.SHA256[:12], chain)})
 	}
 	credentialErr := error(nil)
 	if config.Mode == bootstrap.ModeSystem && effectiveUID() != 0 {

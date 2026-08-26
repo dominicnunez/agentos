@@ -1,8 +1,9 @@
 # SQLite recovery
 
-Agent OS V1 includes a local, operator-controlled recovery utility. This is a
-small operational safeguard, not the deferred signed-checkpoint, scheduled
-off-site backup, or tamper-evident ledger system.
+Agent OS V1 includes a local, operator-controlled recovery utility. Every
+current event is covered by the [cryptographic event chain](EVENT_LEDGER_INTEGRITY.md),
+but the utility is not a signed checkpoint, trusted timestamp, scheduled
+off-site backup, or externally anchored ledger system.
 
 ## Backup
 
@@ -25,8 +26,9 @@ copied, malformed, cross-organization, or otherwise mismatched state is
 rejected. Existing SQLite journal,
 WAL, or shared-memory sidecars at the destination are rejected so stale state
 cannot be applied to a recovered ledger. The utility returns JSON containing
-the resolved path, SHA-256 checksum, size, event count, maximum sequence,
-storage-schema version, and Event Contract schema version.
+the resolved path, file SHA-256 checksum, size, event count, maximum sequence,
+storage-schema version, Event Contract schema version, and verified event-chain
+algorithm and head hash.
 
 Backups contain the full event ledger and may contain sensitive organizational
 data. Moving one to a new storage or trust boundary requires the established
@@ -115,7 +117,8 @@ swap paths while Agent OS is running.
 ## Evidence
 
 Unit and race tests cover fresh initialization, exact storage headers, atomic
-v1-to-v2 migration, unsupported and corrupt-layout rejection, Event Contract
+ordered migration through the current layout, unsupported and corrupt-layout
+rejection, complete stored-byte event-chain validation, Event Contract
 binding, online WAL backup, oldest-supported verify/backup/restore/migrate,
 schema and projection admission rejection, cancellation, destination
 no-overwrite behavior, restore continuity, checksum output, restart recovery,
