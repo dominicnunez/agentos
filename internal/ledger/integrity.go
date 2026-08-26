@@ -242,4 +242,3 @@ func rebuildEventIntegrity(ctx context.Context, tx *sql.Tx) error {
 func (l *SQLite) Integrity(ctx context.Context) (EventIntegrityHead, error) {
 	return ValidateEventIntegrity(ctx, l.db)
 }
-
