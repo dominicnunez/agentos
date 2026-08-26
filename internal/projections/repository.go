@@ -748,12 +748,21 @@ func validateKnowledgeProjectionAtAdmission(value core.KnowledgeRecord, event ev
 	default:
 		return fmt.Errorf("knowledge has an unsupported scope")
 	}
+	evidenceArtifacts := make(map[string]struct{})
 	for _, refs := range [][]string{value.ProvenanceEventRefs, value.OccurrenceEventRefs, value.ValidationRefs} {
 		for _, ref := range refs {
 			evidence, found := eventByID(stream, ref)
 			if !found || evidence.Sequence >= event.Sequence || evidence.OrganizationID != event.OrganizationID {
 				return fmt.Errorf("knowledge references unavailable, future, or cross-organization evidence")
 			}
+			for _, artifactRef := range evidence.ArtifactRefs {
+				evidenceArtifacts[artifactRef] = struct{}{}
+			}
+		}
+	}
+	for _, artifactRef := range value.EvidenceArtifactRefs {
+		if _, evidenced := evidenceArtifacts[artifactRef]; !evidenced {
+			return fmt.Errorf("knowledge artifact is absent from its referenced evidence events")
 		}
 	}
 	for _, ref := range value.DerivedKnowledgeRefs {

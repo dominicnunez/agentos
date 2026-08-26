@@ -2052,11 +2052,21 @@ func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedPro
 	if err := validateKnowledgeScopeBinding(ctx, tx, knowledge); err != nil {
 		return err
 	}
+	evidenceArtifacts := make(map[string]struct{})
 	for _, refs := range [][]string{knowledge.ProvenanceEventRefs, knowledge.OccurrenceEventRefs, knowledge.ValidationRefs} {
 		for _, eventRef := range refs {
-			if err := validateKnowledgeEventReference(ctx, tx, knowledge.OrganizationID, eventRef); err != nil {
+			artifactRefs, err := validateKnowledgeEventReference(ctx, tx, knowledge.OrganizationID, eventRef)
+			if err != nil {
 				return err
 			}
+			for _, artifactRef := range artifactRefs {
+				evidenceArtifacts[artifactRef] = struct{}{}
+			}
+		}
+	}
+	for _, artifactRef := range knowledge.EvidenceArtifactRefs {
+		if _, evidenced := evidenceArtifacts[artifactRef]; !evidenced {
+			return fmt.Errorf("knowledge artifact is absent from its referenced evidence events")
 		}
 	}
 	for _, ref := range knowledge.DerivedKnowledgeRefs {
@@ -2142,18 +2152,23 @@ func validateKnowledgeScopeBinding(ctx context.Context, tx *sql.Tx, knowledge co
 	return nil
 }
 
-func validateKnowledgeEventReference(ctx context.Context, tx *sql.Tx, organizationID core.ID, eventRef string) error {
+func validateKnowledgeEventReference(ctx context.Context, tx *sql.Tx, organizationID core.ID, eventRef string) ([]string, error) {
 	var actualOrganization string
-	if err := tx.QueryRowContext(ctx, `SELECT organization_id FROM events WHERE event_id=?`, eventRef).Scan(&actualOrganization); err != nil {
+	var encodedArtifactRefs []byte
+	if err := tx.QueryRowContext(ctx, `SELECT organization_id,artifact_refs FROM events WHERE event_id=?`, eventRef).Scan(&actualOrganization, &encodedArtifactRefs); err != nil {
 		if err == sql.ErrNoRows {
-			return fmt.Errorf("knowledge references an unavailable event")
+			return nil, fmt.Errorf("knowledge references an unavailable event")
 		}
-		return fmt.Errorf("read knowledge event reference: %w", err)
+		return nil, fmt.Errorf("read knowledge event reference: %w", err)
 	}
 	if actualOrganization != string(organizationID) {
-		return fmt.Errorf("knowledge event reference crosses its organization boundary")
+		return nil, fmt.Errorf("knowledge event reference crosses its organization boundary")
 	}
-	return nil
+	var artifactRefs []string
+	if decodeExactJSONBytes(encodedArtifactRefs, &artifactRefs) != nil {
+		return nil, fmt.Errorf("knowledge evidence event artifact references are invalid")
+	}
+	return artifactRefs, nil
 }
 
 func containsNovelKnowledgeValidationRef(occurrences, validation []string) bool {

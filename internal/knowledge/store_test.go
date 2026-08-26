@@ -57,6 +57,11 @@ func TestStoreAdmitsValidatedKnowledgeAndRetrievesOnlyActiveTenantScope(t *testi
 	if _, err := service.Propose(ctx, future); err == nil {
 		t.Fatal("knowledge timestamp after its admission was accepted")
 	}
+	forgedArtifact := knowledgeCandidate("k-artifact", "org-1", orgOneEvent.EventID)
+	forgedArtifact.EvidenceArtifactRefs = []string{"artifact-not-on-evidence-event"}
+	if _, err := service.Propose(ctx, forgedArtifact); err == nil {
+		t.Fatal("unbound knowledge artifact evidence was accepted")
+	}
 	if err := store.AppendRecord(ctx, "org-1", "KNOWLEDGE_PROPOSED", "runtime", "", nil, nil, "knowledge", "legacy", 1, candidate); err == nil {
 		t.Fatal("generic knowledge writer remained available")
 	}
