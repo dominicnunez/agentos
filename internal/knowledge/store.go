@@ -173,4 +173,3 @@ func PatternCandidate(refs []string) error {
 	}
 	return nil
 }
-

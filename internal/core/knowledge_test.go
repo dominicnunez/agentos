@@ -156,4 +156,3 @@ func TestKnowledgeCorrectionPreservesIdentityButAllowsNewEvidenceAndContent(t *t
 }
 
 func integerPointerForKnowledgeTest(value int) *int { return &value }
-

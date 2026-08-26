@@ -269,4 +269,3 @@ func validKnowledgeVersionedRefs(values []VersionedRef) bool {
 	}
 	return true
 }
-

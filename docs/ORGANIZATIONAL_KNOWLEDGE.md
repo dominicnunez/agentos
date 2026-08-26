@@ -68,4 +68,3 @@ inputs. Enabling that requires selection and current-state validation inside
 the same SQLite transaction that admits execution start, plus exact
 completion-time replay of every manifested knowledge version. Until those
 checks exist, execution manifests continue to contain no knowledge references.
-

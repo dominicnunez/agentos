@@ -1739,4 +1739,3 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		Knowledge:           snapshot.Knowledge,
 	})
 }
-

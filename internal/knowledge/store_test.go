@@ -377,4 +377,3 @@ func knowledgeCandidate(id, organizationID core.ID, evidenceRef string) core.Kno
 }
 
 func integerPointer(value int) *int { return &value }
-
