@@ -92,54 +92,6 @@ type ResultPublishedPayload struct {
 	ArtifactRefs []string `json:"artifact_refs,omitempty"`
 }
 
-// EvidencePublishedPayload is the closed Agent-authored evidence contract.
-// Its summary is an untrusted claim; artifact references only identify
-// separately governed evidence and grant no authority.
-type EvidencePublishedPayload struct {
-	Summary      string   `json:"summary"`
-	ArtifactRefs []string `json:"artifact_refs"`
-}
-
-const KnowledgeJudgmentValidated = "VALIDATED"
-
-// KnowledgeJudgmentPayload is the closed statement contract for one exact
-// candidate revision. CapabilityCheckEventID authorizes this statement but is
-// not itself the judgment.
-type KnowledgeJudgmentPayload struct {
-	KnowledgeID            core.ID  `json:"knowledge_id"`
-	CandidateVersion       int      `json:"candidate_version"`
-	Decision               string   `json:"decision"`
-	Statement              string   `json:"statement"`
-	CapabilityCheckEventID string   `json:"capability_check_event_id"`
-	SourcePrincipalID      string   `json:"source_principal_id"`
-	SourcePrincipalKind    string   `json:"source_principal_kind"`
-	SourceChannel          string   `json:"source_channel"`
-	ArtifactRefs           []string `json:"artifact_refs"`
-}
-
-// KnowledgeDeterministicValidationPayload binds a registered deterministic
-// outcome from an admitted execution to one exact candidate revision.
-type KnowledgeDeterministicValidationPayload struct {
-	KnowledgeID      core.ID  `json:"knowledge_id"`
-	CandidateVersion int      `json:"candidate_version"`
-	OutcomeEventRef  string   `json:"outcome_event_ref"`
-	ArtifactRefs     []string `json:"artifact_refs"`
-}
-
-// KnowledgeProposedPayload is the closed Agent-authored proposal contract.
-// Optional fields remain optional at publication, but creator attribution may
-// require them to bind the proposal to an exact curated candidate.
-type KnowledgeProposedPayload struct {
-	KnowledgeID          *core.ID             `json:"knowledge_id,omitempty"`
-	KnowledgeType        core.KnowledgeType   `json:"knowledge_type"`
-	Title                *string              `json:"title,omitempty"`
-	Content              string               `json:"content"`
-	BasisType            *core.KnowledgeBasis `json:"basis_type,omitempty"`
-	OccurrenceEventRefs  []string             `json:"occurrence_event_refs,omitempty"`
-	EvidenceArtifactRefs []string             `json:"evidence_artifact_refs,omitempty"`
-	Applicability        *string              `json:"applicability,omitempty"`
-}
-
 type CandidateCompletePayload struct {
 	ToolInvocationID string   `json:"tool_invocation_id"`
 	ResultEventID    string   `json:"result_event_id"`
@@ -2399,101 +2351,6 @@ func (p ResultPublishedPayload) ValidFor(artifactRefs []string) bool {
 	return p.Summary != "" && sameStrings(p.ArtifactRefs, artifactRefs)
 }
 
-func (p EvidencePublishedPayload) ValidFor(artifactRefs []string) bool {
-	return strings.TrimSpace(p.Summary) != "" && utf8.ValidString(p.Summary) && len(p.ArtifactRefs) > 0 &&
-		sameStrings(p.ArtifactRefs, artifactRefs)
-}
-
-func (p KnowledgeJudgmentPayload) ValidFor(event Event, knowledgeID core.ID, candidateVersion int, capabilityCheckEventID string, artifactRefs []string) bool {
-	if p.KnowledgeID != knowledgeID || p.CandidateVersion != candidateVersion || p.Decision != KnowledgeJudgmentValidated ||
-		strings.TrimSpace(p.Statement) == "" || !utf8.ValidString(p.Statement) || len(p.Statement) > 16<<10 ||
-		p.CapabilityCheckEventID == "" || p.CapabilityCheckEventID != capabilityCheckEventID ||
-		p.SourcePrincipalID == "" || p.SourcePrincipalID != event.SourceActorID || !sameStrings(p.ArtifactRefs, artifactRefs) {
-		return false
-	}
-	switch event.EventType {
-	case "HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED":
-		return p.SourcePrincipalKind == string(core.PrincipalHuman) && p.SourceChannel == "HUMAN_DIRECT"
-	case "A2A_KNOWLEDGE_JUDGMENT_RECEIVED":
-		return p.SourcePrincipalKind == string(core.PrincipalExternalAgent) && p.SourceChannel == "A2A"
-	case "KNOWLEDGE_JUDGMENT_PUBLISHED":
-		return p.SourcePrincipalKind == string(core.PrincipalAgent) && p.SourceChannel == "INTERNAL_AGENT"
-	default:
-		return false
-	}
-}
-
-func (p KnowledgeDeterministicValidationPayload) ValidFor(knowledgeID core.ID, candidateVersion int, artifactRefs []string) bool {
-	return p.KnowledgeID == knowledgeID && p.CandidateVersion == candidateVersion && p.OutcomeEventRef != "" &&
-		sameStrings(p.ArtifactRefs, artifactRefs)
-}
-
-func (p KnowledgeProposedPayload) ValidFor(artifactRefs []string) bool {
-	if strings.TrimSpace(p.Content) == "" || !utf8.ValidString(p.Content) || len(p.Content) > core.MaximumKnowledgeContentBytes ||
-		!validKnowledgeProposalType(p.KnowledgeType) || !sameStrings(p.EvidenceArtifactRefs, artifactRefs) ||
-		len(p.OccurrenceEventRefs) > core.MaximumKnowledgeReferences || len(p.EvidenceArtifactRefs) > core.MaximumKnowledgeReferences {
-		return false
-	}
-	if p.KnowledgeID != nil && !core.ValidGoalReferenceID(string(*p.KnowledgeID)) {
-		return false
-	}
-	if p.Title != nil && (strings.TrimSpace(*p.Title) == "" || !utf8.ValidString(*p.Title) || len(*p.Title) > core.MaximumKnowledgeTitleBytes) {
-		return false
-	}
-	if p.BasisType != nil && !validKnowledgeProposalBasis(*p.BasisType) {
-		return false
-	}
-	if p.Applicability != nil && (len(*p.Applicability) > core.MaximumKnowledgeApplicabilityBytes || !utf8.ValidString(*p.Applicability)) {
-		return false
-	}
-	return validUniqueEventRefs(p.OccurrenceEventRefs) && validUniqueEventRefs(p.EvidenceArtifactRefs) &&
-		(p.BasisType == nil || *p.BasisType != core.KnowledgeBasisRepeatedPattern || len(p.OccurrenceEventRefs) >= 3)
-}
-
-func decodeKnowledgeProposedPayload(payload any, target *KnowledgeProposedPayload) error {
-	if decodeExactPayload(payload, target) != nil {
-		return fmt.Errorf("knowledge proposal payload is not exact")
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(body, &fields); err != nil {
-		return err
-	}
-	for _, name := range []string{"occurrence_event_refs", "evidence_artifact_refs"} {
-		if value, present := fields[name]; present && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-			return fmt.Errorf("knowledge proposal %s must be an array when present", name)
-		}
-	}
-	return nil
-}
-
-func validKnowledgeProposalType(value core.KnowledgeType) bool {
-	return value == core.KnowledgeExperience || value == core.KnowledgeLesson || value == core.KnowledgeClaim || value == core.KnowledgeProcedure
-}
-
-func validKnowledgeProposalBasis(value core.KnowledgeBasis) bool {
-	return value == core.KnowledgeBasisSingleExperience || value == core.KnowledgeBasisRepeatedPattern ||
-		value == core.KnowledgeBasisExperiment || value == core.KnowledgeBasisHumanInput ||
-		value == core.KnowledgeBasisExternalEvidence || value == core.KnowledgeBasisDerived || value == core.KnowledgeBasisMixed
-}
-
-func validUniqueEventRefs(values []string) bool {
-	seen := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		if value == "" || strings.TrimSpace(value) != value || len(value) > core.MaximumKnowledgeReferenceBytes || !utf8.ValidString(value) {
-			return false
-		}
-		if _, duplicate := seen[value]; duplicate {
-			return false
-		}
-		seen[value] = struct{}{}
-	}
-	return true
-}
-
 type InferenceUsageRecordedPayload struct {
 	Source       string   `json:"source"`
 	Provider     string   `json:"provider"`
@@ -2788,7 +2645,6 @@ var projectionLifecycleContracts = map[string]projectionLifecycleContract{
 	"work":                    {initial: []string{"WORK_CREATED"}, revision: []string{"WORK_COMPLETED", "WORK_FAILED", "WORK_PLANNING_FAILED"}},
 	"lab_experiment":          {initial: []string{"LAB_EXPERIMENT_STARTED"}, revision: []string{"LAB_EXPERIMENT_COMPLETED", "LAB_EXPERIMENT_FAILED"}},
 	"lab_promotion_candidate": {initial: []string{"LAB_PROMOTION_CANDIDATE_CREATED"}},
-	"knowledge":               {initial: []string{"KNOWLEDGE_PROPOSED"}, revision: []string{"KNOWLEDGE_PROPOSED", "KNOWLEDGE_ACTIVATED", "KNOWLEDGE_SUPERSEDED", "KNOWLEDGE_STALE", "KNOWLEDGE_QUARANTINED"}},
 	"task": {
 		initial:  []string{"TASK_CREATED", "TASK_BLOCKED"},
 		revision: []string{"TASK_ASSIGNMENT_REVALIDATED", "TASK_BLOCKED", "TASK_RECOVERED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED"},
@@ -2817,7 +2673,7 @@ func ProjectionLifecycleEventTypes(kind string) []string {
 // the authenticated source is an Agent execution, but runtime lifecycle state
 // always requires the sealed event/record transaction.
 func RequiresProjectionAdmission(eventType, sourceActorID string) bool {
-	if (eventType == "TASK_BLOCKED" || eventType == "KNOWLEDGE_PROPOSED") && sourceActorID != "runtime" {
+	if eventType == "TASK_BLOCKED" && sourceActorID != "runtime" {
 		return false
 	}
 	for _, contract := range projectionLifecycleContracts {
@@ -2839,8 +2695,7 @@ func ProjectionKindRequiresAdmission(kind string) bool {
 // runtime-owned label and routing envelope reserved for its kind and version.
 func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload) error {
 	record := payload.Projection
-	if event.OrganizationID == "" || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || len(event.AuthorizationRefs) != 0 ||
-		(record.ProjectionKind != "knowledge" && len(event.ArtifactRefs) != 0) || event.SchemaVersion != SchemaVersion {
+	if event.OrganizationID == "" || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("projection event crosses its runtime-owned envelope")
 	}
 	if !validProjectionEventType(record.ProjectionKind, record.Version, event.EventType) {
@@ -2909,18 +2764,6 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 			return fmt.Errorf("lab promotion-candidate projection value is invalid or lacks its correlation boundary")
 		}
 		if err := ValidatePromotionCandidateProjectionTarget(event.EventType, record.Version, candidate); err != nil {
-			return err
-		}
-	}
-	if record.ProjectionKind == "knowledge" {
-		var knowledge core.KnowledgeRecord
-		if decodeExactEventJSON(record.Value, &knowledge) != nil || knowledge.KnowledgeID != core.ID(record.RecordID) || string(knowledge.OrganizationID) != event.OrganizationID || record.CorrelationID == "" || record.CorrelationID != event.CorrelationID {
-			return fmt.Errorf("knowledge projection value is invalid or lacks its correlation boundary")
-		}
-		if !slices.Equal(event.ArtifactRefs, knowledge.EvidenceArtifactRefs) {
-			return fmt.Errorf("knowledge projection evidence does not match its event envelope")
-		}
-		if err := core.ValidateKnowledgeProjectionTarget(event.EventType, record.Version, knowledge); err != nil {
 			return err
 		}
 	}
@@ -3494,12 +3337,6 @@ type ExecutionStartAppender interface {
 type ProjectionReader interface {
 	Records(context.Context, string, string) ([][]byte, error)
 }
-type ActiveKnowledgeReader interface {
-	ActiveKnowledgeRecords(context.Context, string, string, string, int) ([][]byte, error)
-}
-type KnowledgeAuthorityAdmissionReader interface {
-	KnowledgeAuthorityAdmissions(context.Context) ([]CapabilityLeaseAdmission, []OrganizationFreezeAdmission, error)
-}
 type IntentConfirmer interface {
 	AppendIntentConfirmation(context.Context, TrustedDraft, core.ID, core.ID) (Event, error)
 }
@@ -3612,7 +3449,7 @@ func (g *Gateway) ReserveExternalWork(ctx context.Context, organizationID, reque
 	return allocator.ReserveExternalWork(ctx, organizationID, requestID)
 }
 
-var agentTypes = map[string]bool{"MESSAGE": true, "TASK_BLOCKED": true, "EVIDENCE_PUBLISHED": true, "RESULT_PUBLISHED": true, "CANDIDATE_COMPLETE": true, "KNOWLEDGE_PROPOSED": true, "KNOWLEDGE_JUDGMENT_PUBLISHED": true, "SKILL_PROPOSED": true}
+var agentTypes = map[string]bool{"MESSAGE": true, "TASK_BLOCKED": true, "EVIDENCE_PUBLISHED": true, "RESULT_PUBLISHED": true, "CANDIDATE_COMPLETE": true, "KNOWLEDGE_PROPOSED": true, "SKILL_PROPOSED": true}
 
 func (g *Gateway) PublishAgentDraft(ctx context.Context, organizationID, actorID, executionID, correlationID string, draft Draft) (Event, error) {
 	if !agentTypes[draft.EventType] {
@@ -3625,26 +3462,6 @@ func (g *Gateway) PublishAgentDraft(ctx context.Context, organizationID, actorID
 		var result ResultPublishedPayload
 		if draft.TaskID == "" || decodePayload(draft.Payload, &result) != nil || !result.ValidFor(draft.ArtifactRefs) {
 			return Event{}, fmt.Errorf("result published draft requires a task, summary, and matching artifact refs")
-		}
-	}
-	if draft.EventType == "EVIDENCE_PUBLISHED" {
-		var evidence EvidencePublishedPayload
-		if draft.TaskID == "" || decodeExactPayload(draft.Payload, &evidence) != nil || !evidence.ValidFor(draft.ArtifactRefs) {
-			return Event{}, fmt.Errorf("evidence published draft requires a task, summary, and matching nonempty artifact refs")
-		}
-	}
-	if draft.EventType == "KNOWLEDGE_PROPOSED" {
-		var proposal KnowledgeProposedPayload
-		if draft.TaskID == "" || decodeKnowledgeProposedPayload(draft.Payload, &proposal) != nil || !proposal.ValidFor(draft.ArtifactRefs) {
-			return Event{}, fmt.Errorf("knowledge proposal draft requires a canonical bounded payload and matching artifact refs")
-		}
-	}
-	if draft.EventType == "KNOWLEDGE_JUDGMENT_PUBLISHED" {
-		var judgment KnowledgeJudgmentPayload
-		judgmentEvent := Event{EventType: draft.EventType, SourceActorID: actorID}
-		if draft.TaskID == "" || decodeExactPayload(draft.Payload, &judgment) != nil || judgment.KnowledgeID == "" || judgment.CandidateVersion < 1 ||
-			!judgment.ValidFor(judgmentEvent, judgment.KnowledgeID, judgment.CandidateVersion, judgment.CapabilityCheckEventID, draft.ArtifactRefs) {
-			return Event{}, fmt.Errorf("knowledge judgment draft requires an exact candidate, authorization, statement, and matching artifact refs")
 		}
 	}
 	trusted := TrustedDraft{OrganizationID: organizationID, EventType: draft.EventType, SourceActorID: actorID, SourceExecutionID: executionID, RecipientScope: draft.RecipientScope, RecipientID: draft.RecipientID, TaskID: draft.TaskID, ArtifactRefs: draft.ArtifactRefs, Payload: draft.Payload, CorrelationID: correlationID}
@@ -3660,9 +3477,6 @@ func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event
 	if RequiresProjectionAdmission(draft.EventType, draft.SourceActorID) {
 		return Event{}, fmt.Errorf("projection lifecycle events require typed admission")
 	}
-	if RequiresRecordAdmission(draft.EventType) {
-		return Event{}, fmt.Errorf("authority lifecycle events require atomic record admission")
-	}
 	if draft.EventType == "INBOX_EVENTS_OBSERVED" {
 		return Event{}, fmt.Errorf("inbox observations require atomic inbox admission")
 	}
@@ -3671,22 +3485,6 @@ func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event
 		var outcome core.ToolOutcome
 		if draft.TaskID == "" || draft.SourceActorID != "runtime" || draft.SourceExecutionID == "" || decodeExactPayload(draft.Payload, &outcome) != nil || !outcome.Valid() || !slices.Equal(draft.ArtifactRefs, outcome.ArtifactRefs) {
 			return Event{}, fmt.Errorf("tool outcome requires a valid runtime execution, task, and matching artifact refs")
-		}
-	case "KNOWLEDGE_VALIDATION_RECORDED":
-		var validation KnowledgeDeterministicValidationPayload
-		if draft.TaskID == "" || draft.CorrelationID == "" || draft.SourceActorID != "runtime" || draft.SourceExecutionID == "" ||
-			decodeExactPayload(draft.Payload, &validation) != nil || validation.KnowledgeID == "" || validation.CandidateVersion < 1 ||
-			validation.OutcomeEventRef == "" || !sameStrings(validation.ArtifactRefs, draft.ArtifactRefs) {
-			return Event{}, fmt.Errorf("knowledge validation requires an exact candidate and deterministic outcome reference")
-		}
-	case "HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED", "A2A_KNOWLEDGE_JUDGMENT_RECEIVED":
-		var judgment KnowledgeJudgmentPayload
-		judgmentEvent := Event{EventType: draft.EventType, SourceActorID: draft.SourceActorID}
-		if draft.TaskID == "" || draft.CorrelationID == "" || draft.SourceActorID == "" || draft.SourceExecutionID != "" ||
-			len(draft.AuthorizationRefs) != 0 || decodeExactPayload(draft.Payload, &judgment) != nil ||
-			judgment.KnowledgeID == "" || judgment.CandidateVersion < 1 ||
-			!judgment.ValidFor(judgmentEvent, judgment.KnowledgeID, judgment.CandidateVersion, judgment.CapabilityCheckEventID, draft.ArtifactRefs) {
-			return Event{}, fmt.Errorf("knowledge judgment requires an exact authenticated candidate statement")
 		}
 	case "WORK_COMPLETION_EVALUATED", "WORK_COMPLETED", "GOAL_PROGRESS_EVALUATED", "GOAL_ACHIEVED":
 		return Event{}, fmt.Errorf("terminal evidence requires its typed admission")
@@ -3698,17 +3496,6 @@ func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event
 		return Event{}, err
 	}
 	return g.ledger.Append(ctx, draft)
-}
-
-// RequiresRecordAdmission reserves authority-bearing lifecycle contracts for
-// the transaction that atomically appends their corresponding durable record.
-func RequiresRecordAdmission(eventType string) bool {
-	switch eventType {
-	case "CAPABILITY_GRANTED", "CAPABILITY_REVOKED", "FREEZE_SET":
-		return true
-	default:
-		return false
-	}
 }
 
 // PublishWorkCompletionEvidence admits the aggregate evidence only through a
@@ -3921,21 +3708,6 @@ func (g *Gateway) ProjectionRecords(ctx context.Context, kind, id string) ([][]b
 		return nil, fmt.Errorf("event ledger does not support durable projections")
 	}
 	return store.Records(ctx, kind, id)
-}
-func (g *Gateway) ActiveKnowledgeRecords(ctx context.Context, organizationID, scope, scopeID string, limit int) ([][]byte, error) {
-	store, ok := g.ledger.(ActiveKnowledgeReader)
-	if !ok {
-		return nil, fmt.Errorf("event ledger does not support bounded active knowledge reads")
-	}
-	return store.ActiveKnowledgeRecords(ctx, organizationID, scope, scopeID, limit)
-}
-
-func (g *Gateway) KnowledgeAuthorityAdmissions(ctx context.Context) ([]CapabilityLeaseAdmission, []OrganizationFreezeAdmission, error) {
-	reader, ok := g.ledger.(KnowledgeAuthorityAdmissionReader)
-	if !ok {
-		return nil, nil, fmt.Errorf("record-backed knowledge authority admission reader is unavailable")
-	}
-	return reader.KnowledgeAuthorityAdmissions(ctx)
 }
 func (g *Gateway) Events(ctx context.Context, correlationID string) ([]Event, error) {
 	return g.ledger.Events(ctx, correlationID)

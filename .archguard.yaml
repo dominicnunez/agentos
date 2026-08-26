@@ -100,11 +100,11 @@ policy:
       to:
         modules: [core, events]
 
-    - name: audit-domain
+    - name: audit-events
       from:
         module: audit
       to:
-        modules: [core, events]
+        module: events
 
     - name: authority-domain
       from:
@@ -170,7 +170,7 @@ policy:
       from:
         module: knowledge
       to:
-        modules: [core, events]
+        module: core
 
     - name: lab-composition
       from:

@@ -30,7 +30,6 @@ func Check(now time.Time, actorID, taskID core.ID, action, resource, scope strin
 			continue
 		}
 		trace.Allowed, trace.LeaseID, trace.Reason = true, lease.ID, "exact capability lease matched"
-		trace.ActorKind = lease.ActorKind
 		return trace
 	}
 	trace.Reason = "no exact active capability lease"
