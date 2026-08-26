@@ -310,6 +310,10 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	lastMissions := map[core.ID]core.Mission{}
 	lastGoals := map[core.ID]core.Goal{}
 	lastWorks := map[core.ID]core.Work{}
+	lastCapabilityVersions := map[core.ID]int{}
+	lastCapabilitySequences := map[core.ID]int64{}
+	usedCapabilityEvents := map[string]struct{}{}
+	capabilityAdmissions := make([]events.CapabilityLeaseAdmission, 0)
 	for recordRows.Next() {
 		var kind, recordID, admissionEventID, admissionFingerprint string
 		var version int
@@ -327,6 +331,17 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			if admissionEventID != "" || admissionFingerprint != "" {
 				_ = recordRows.Close()
 				return fmt.Errorf("generic record %s/%s/%d carries projection authority", kind, recordID, version)
+			}
+			if kind == "capability_lease" {
+				admission, eventID, err := recoveryCapabilityLeaseAdmission(stream, body, recordID, version, lastCapabilityVersions, lastCapabilitySequences, usedCapabilityEvents)
+				if err != nil {
+					_ = recordRows.Close()
+					return err
+				}
+				lastCapabilityVersions[admission.Lease.ID] = version
+				lastCapabilitySequences[admission.Lease.ID] = admission.Sequence
+				usedCapabilityEvents[eventID] = struct{}{}
+				capabilityAdmissions = append(capabilityAdmissions, admission)
 			}
 			continue
 		}
@@ -385,7 +400,41 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("projection admission event %s has no materialized record", eventID)
 		}
 	}
-	return validateProjectionOrganizationBindings(orderedAdmissions, stream)
+	return validateProjectionOrganizationBindings(orderedAdmissions, stream, capabilityAdmissions)
+}
+
+func recoveryCapabilityLeaseAdmission(stream []events.Event, body []byte, recordID string, version int, versions map[core.ID]int, sequences map[core.ID]int64, used map[string]struct{}) (events.CapabilityLeaseAdmission, string, error) {
+	var lease core.CapabilityLease
+	if decodeExactJSON(body, &lease) != nil || lease.ID == "" || string(lease.ID) != recordID || version != versions[lease.ID]+1 {
+		return events.CapabilityLeaseAdmission{}, "", fmt.Errorf("capability lease %s/%d has invalid or noncontiguous state", recordID, version)
+	}
+	expectedType := "CAPABILITY_LEASED"
+	if version == 1 && lease.RevokedAt != nil {
+		return events.CapabilityLeaseAdmission{}, "", fmt.Errorf("capability lease %s starts revoked", recordID)
+	}
+	if version > 1 {
+		expectedType = "CAPABILITY_REVOKED"
+		if lease.RevokedAt == nil {
+			return events.CapabilityLeaseAdmission{}, "", fmt.Errorf("capability lease %s/%d lacks revocation time", recordID, version)
+		}
+	}
+	var matched events.Event
+	for _, event := range stream {
+		_, alreadyUsed := used[event.EventID]
+		if alreadyUsed || event.EventType != expectedType || event.OrganizationID != lease.Scope || event.TaskID != string(lease.OriginTaskID) ||
+			event.Sequence <= sequences[lease.ID] || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" ||
+			len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.SchemaVersion != events.SchemaVersion || !bytes.Equal(event.Payload, body) {
+			continue
+		}
+		if matched.EventID != "" {
+			return events.CapabilityLeaseAdmission{}, "", fmt.Errorf("capability lease %s/%d has ambiguous Event Contract admission", recordID, version)
+		}
+		matched = event
+	}
+	if matched.EventID == "" {
+		return events.CapabilityLeaseAdmission{}, "", fmt.Errorf("capability lease %s/%d lacks exact Event Contract admission", recordID, version)
+	}
+	return events.CapabilityLeaseAdmission{Lease: lease, OrganizationID: core.ID(matched.OrganizationID), Sequence: matched.Sequence}, matched.EventID, nil
 }
 
 func validateRecoveryIntentConfirmations(stream []events.Event) error {
@@ -433,7 +482,7 @@ func validateRecoveryIntentConfirmations(stream []events.Event) error {
 	return nil
 }
 
-func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, stream []events.Event) error {
+func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, stream []events.Event, capabilityAdmissions []events.CapabilityLeaseAdmission) error {
 	sort.Slice(admitted, func(left, right int) bool {
 		return admitted[left].event.Sequence < admitted[right].event.Sequence
 	})
@@ -454,6 +503,7 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, 
 	}
 	reviewEvidence := events.IndexReviewedIntentEvidence(stream)
 	knowledgeAdmissions := events.NewKnowledgeAdmissionValidator(stream)
+	knowledgeAdmissions.UseCapabilityLeaseAdmissions(capabilityAdmissions)
 	for _, admission := range admitted {
 		event, record := admission.event, admission.payload.Projection
 		var organizationID core.ID

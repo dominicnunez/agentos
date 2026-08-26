@@ -156,6 +156,87 @@ func TestVerifyReplaysEventAdmittedKnowledge(t *testing.T) {
 	}
 }
 
+func TestVerifyRejectsKnowledgeWhenValidatorLeaseRecordIsMissing(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "missing-validator-lease.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := events.NewGateway(store)
+	now := time.Now().UTC().Add(-time.Minute)
+	organization := core.Organization{ID: "org-1", Name: "Lease Recovery", PolicyVersion: "v1", CreatedAt: now}
+	organizationEvent, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"},
+		ProjectionKind: "organization", RecordID: "org-1", Version: 1, Value: organization,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	candidate := core.KnowledgeRecord{
+		KnowledgeID: "knowledge-human", OrganizationID: "org-1", Version: 1,
+		Type: core.KnowledgeLesson, Scope: core.KnowledgeScopeOrganization, ScopeID: "org-1",
+		Status: core.KnowledgeCandidate, Title: "Reviewed knowledge", Content: "This requires exact validator authority.",
+		Basis: core.KnowledgeBasisHumanInput, ProvenanceEventRefs: []string{organizationEvent.EventID},
+		CreatedBy: "runtime", CreatedByKind: core.PrincipalRuntime, CreatedAt: now, ValidationMethod: core.KnowledgeValidationUnvalidated,
+	}
+	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_PROPOSED", SourceActorID: "runtime", CorrelationID: "knowledge-knowledge-human"},
+		ProjectionKind: "knowledge", RecordID: "knowledge-human", Version: 1, Value: candidate,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	lease := core.CapabilityLease{ID: "lease-human", ActorID: "user-1", ActorKind: core.PrincipalHuman, Action: "knowledge.validate", Resource: "knowledge-human", Scope: "org-1", OriginTaskID: "task-validation"}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_LEASED", "runtime", "task-validation", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	trace := core.AuthorizationTrace{Allowed: true, LeaseID: lease.ID, ActorID: lease.ActorID, ActorKind: lease.ActorKind, TaskID: lease.OriginTaskID, Action: lease.Action, Resource: lease.Resource, Scope: lease.Scope, Reason: "exact capability lease matched"}
+	judgment, err := gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "CAPABILITY_CHECKED", SourceActorID: "user-1", TaskID: "task-validation", AuthorizationRefs: []string{"lease-human"}, Payload: trace})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	active := candidate
+	active.Version = 2
+	active.Status = core.KnowledgeActive
+	active.ValidationMethod = core.KnowledgeValidationHuman
+	active.ValidationRefs = []string{judgment.EventID}
+	active.ValidatedBy = "user-1"
+	active.ValidatedByKind = core.PrincipalHuman
+	active.LastVerifiedAt = &now
+	active.SupersedesVersion = recoveryIntPointer(1)
+	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_ACTIVATED", SourceActorID: "runtime", CorrelationID: "knowledge-knowledge-human"},
+		ProjectionKind: "knowledge", RecordID: "knowledge-human", Version: 2, Value: active,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err != nil {
+		t.Fatalf("verify complete validator lease: %v", err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM records WHERE kind='capability_lease'`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "authenticated validator admission") {
+		t.Fatalf("missing validator lease record was certified: %v", err)
+	}
+}
+
 func recoveryIntPointer(value int) *int { return &value }
 
 func TestVerifyRejectsSemanticallyValidEventPayloadTampering(t *testing.T) {

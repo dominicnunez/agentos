@@ -101,6 +101,23 @@ func TestStoreAdmitsValidatedKnowledgeAndRetrievesOnlyActiveTenantScope(t *testi
 	if err := store.AppendRecord(ctx, "org-1", "KNOWLEDGE_PROPOSED", "runtime", "", nil, nil, "knowledge", "legacy", 1, candidate); err == nil {
 		t.Fatal("generic knowledge writer remained available")
 	}
+	lateStart := knowledgeCandidate("k-late-start", "org-1", orgOneEvent.EventID)
+	lateStart.Version = 5
+	if _, err := service.Propose(ctx, lateStart); err == nil {
+		t.Fatal("knowledge history started above version 1")
+	}
+	orphanActive := knowledgeCandidate("k-orphan-active", "org-1", orgOneEvent.EventID)
+	orphanActive.Version = 2
+	orphanActive.Status = core.KnowledgeActive
+	orphanActive.ValidationMethod = core.KnowledgeValidationDeterministic
+	orphanActive.ValidationRefs = []string{orgOneEvent.EventID}
+	orphanActive.ValidatedBy = "runtime"
+	orphanActive.ValidatedByKind = core.PrincipalRuntime
+	orphanActive.LastVerifiedAt = &verifiedAt
+	orphanActive.SupersedesVersion = integerPointer(1)
+	if _, err := service.Activate(ctx, orphanActive); err == nil {
+		t.Fatal("active knowledge started without a candidate")
+	}
 }
 
 func TestStoreRejectsRevokedValidatorAuthorityAfterJudgmentAdmission(t *testing.T) {
@@ -157,7 +174,7 @@ func TestStoreRejectsRevokedValidatorAuthorityAfterJudgmentAdmission(t *testing.
 	}
 }
 
-func TestStoreBindsInternalAgentCreatorKindToAgentDraft(t *testing.T) {
+func TestStoreRejectsAgentCreatorWithoutDurableExecutionBinding(t *testing.T) {
 	ctx := context.Background()
 	_, gateway := newKnowledgeTestStore(t)
 	seedKnowledgeOrganization(t, ctx, gateway, "org-1")
@@ -172,8 +189,8 @@ func TestStoreBindsInternalAgentCreatorKindToAgentDraft(t *testing.T) {
 	candidate.CreatedBy = "agent-1"
 	candidate.CreatedByKind = core.PrincipalAgent
 	service := New(gateway)
-	if _, err := service.Propose(ctx, candidate); err != nil {
-		t.Fatalf("internal Agent proposal was not attributable: %v", err)
+	if _, err := service.Propose(ctx, candidate); err == nil {
+		t.Fatal("internal Agent proposal without a durable execution was accepted")
 	}
 	misclassified := knowledgeCandidate("k-agent-misclassified", "org-1", proposal.EventID)
 	misclassified.CreatedBy = "agent-1"

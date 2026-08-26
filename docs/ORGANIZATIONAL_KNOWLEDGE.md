@@ -36,7 +36,7 @@ Activation records a closed validation method, validator identity and kind,
 validation event references, and verification time. `AGENT` identifies a
 durable internal Agent; `EXTERNAL_AGENT` identifies an authenticated A2A actor.
 Those identities are never interchangeable. Internal-Agent authorship must
-reference that Agent's execution-bound proposal event. User and external-Agent
+reference a proposal bound to that Agent's exact admitted task execution. User and external-Agent
 authorship must reference an authenticated gateway event. Repeated-pattern
 activation requires validation evidence admitted after the candidate proposal.
 No Agent may activate its own proposal. Later terminal revisions preserve the
@@ -52,11 +52,12 @@ least one lineage reference and every reference must identify an exact earlier
 exact `knowledge.validate` capability admission whose authenticated principal
 kind matches the claimed validator; revocation and expiry are rechecked in the
 activation transaction. Startup reconstruction and offline backup verification
-use the same Event-Contract admission validator to recheck evidence timing,
-tenant ownership, scope, lifecycle order, validator attribution, and lineage.
+use the same Event-Contract admission validator and verified capability-lease
+history to recheck evidence timing, tenant ownership, scope, lifecycle order,
+validator attribution, lease expiry or revocation, and lineage.
 
-Retrieval accepts one exact Organization and scope, reads only current
-`ACTIVE` records, and uses deterministic bounded text matching. Candidate,
+Retrieval accepts one exact Organization and scope, reads one bounded SQLite
+snapshot of current `ACTIVE` records, and uses deterministic text matching. Candidate,
 superseded, stale, quarantined, cross-tenant, malformed, and unadmitted records
 are excluded.
 

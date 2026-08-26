@@ -1642,6 +1642,28 @@ func TestMessageInboxSurvivesReopenAndObservation(t *testing.T) {
 		_ = l.Close()
 		t.Fatalf("atomic execution inbox selections=%+v", selections)
 	}
+	agentGateway := events.NewGateway(l)
+	agentProposal, err := agentGateway.PublishAgentDraft(ctx, "org-1", string(agent.ID), "execution-task-2-v2", "work-1", events.Draft{
+		EventType: "KNOWLEDGE_PROPOSED", TaskID: string(task.ID), Payload: map[string]string{"summary": "execution-bound observation"},
+	})
+	if err != nil {
+		_ = l.Close()
+		t.Fatal(err)
+	}
+	knowledge := core.KnowledgeRecord{
+		KnowledgeID: "knowledge-agent-2", OrganizationID: "org-1", Version: 1,
+		Type: core.KnowledgeLesson, Scope: core.KnowledgeScopeOrganization, ScopeID: "org-1",
+		Status: core.KnowledgeCandidate, Title: "Execution-bound observation", Content: "This proposal came from the admitted Agent execution.",
+		Basis: core.KnowledgeBasisSingleExperience, ProvenanceEventRefs: []string{agentProposal.EventID},
+		CreatedBy: agent.ID, CreatedByKind: core.PrincipalAgent, CreatedAt: time.Now().UTC(), ValidationMethod: core.KnowledgeValidationUnvalidated,
+	}
+	if _, err := l.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_PROPOSED", SourceActorID: "runtime", CorrelationID: "knowledge-knowledge-agent-2"},
+		ProjectionKind: "knowledge", RecordID: string(knowledge.KnowledgeID), Version: 1, Value: knowledge,
+	}); err != nil {
+		_ = l.Close()
+		t.Fatalf("admit execution-bound Agent knowledge: %v", err)
+	}
 	lateMessage, err := l.Append(ctx, events.TrustedDraft{
 		OrganizationID: "org-1", EventType: "MESSAGE", SourceActorID: "agent-1",
 		RecipientScope: events.RecipientAgent, RecipientID: "agent-2", TaskID: "task-1",
@@ -1727,7 +1749,7 @@ func TestMessageInboxSurvivesReopenAndObservation(t *testing.T) {
 		t.Fatalf("observed inbox after reopen=%+v err=%v", available, err)
 	}
 	stream, err := l.Events(ctx, "")
-	if err != nil || len(stream) != 11 || stream[len(stream)-1].EventID != observation.EventID {
+	if err != nil || len(stream) != 13 || stream[len(stream)-1].EventID != observation.EventID {
 		t.Fatalf("durable message/observation stream=%+v err=%v", stream, err)
 	}
 }

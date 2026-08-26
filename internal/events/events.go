@@ -3352,7 +3352,7 @@ type ProjectionReader interface {
 	Records(context.Context, string, string) ([][]byte, error)
 }
 type ActiveKnowledgeReader interface {
-	ActiveKnowledgeRecords(context.Context, string, string, string, string, int) ([][]byte, error)
+	ActiveKnowledgeRecords(context.Context, string, string, string, int) ([][]byte, error)
 }
 type IntentConfirmer interface {
 	AppendIntentConfirmation(context.Context, TrustedDraft, core.ID, core.ID) (Event, error)
@@ -3726,12 +3726,12 @@ func (g *Gateway) ProjectionRecords(ctx context.Context, kind, id string) ([][]b
 	}
 	return store.Records(ctx, kind, id)
 }
-func (g *Gateway) ActiveKnowledgeRecords(ctx context.Context, organizationID, scope, scopeID, afterRecordID string, limit int) ([][]byte, error) {
+func (g *Gateway) ActiveKnowledgeRecords(ctx context.Context, organizationID, scope, scopeID string, limit int) ([][]byte, error) {
 	store, ok := g.ledger.(ActiveKnowledgeReader)
 	if !ok {
 		return nil, fmt.Errorf("event ledger does not support bounded active knowledge reads")
 	}
-	return store.ActiveKnowledgeRecords(ctx, organizationID, scope, scopeID, afterRecordID, limit)
+	return store.ActiveKnowledgeRecords(ctx, organizationID, scope, scopeID, limit)
 }
 func (g *Gateway) Events(ctx context.Context, correlationID string) ([]Event, error) {
 	return g.ledger.Events(ctx, correlationID)

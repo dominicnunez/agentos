@@ -17,7 +17,6 @@ const (
 	maximumSearchBytes      = 4096
 	maximumSearchResults    = 64
 	maximumSearchScan       = 4096
-	maximumSearchPage       = 128
 	knowledgeCorrelationKey = "knowledge-"
 )
 
@@ -100,43 +99,31 @@ func (s *Store) Search(ctx context.Context, organizationID core.ID, scope core.K
 		return nil, fmt.Errorf("organization knowledge scope crosses its tenant boundary")
 	}
 	needle := strings.ToLower(text)
-	results := make([]core.KnowledgeRecord, 0, limit)
-	afterRecordID := ""
-	examined := 0
-	for examined < maximumSearchScan {
-		pageLimit := min(maximumSearchPage, maximumSearchScan-examined)
-		rows, err := s.gateway.ActiveKnowledgeRecords(ctx, string(organizationID), string(scope), string(scopeID), afterRecordID, pageLimit)
-		if err != nil {
-			return nil, err
-		}
-		for _, body := range rows {
-			var projection events.ProjectionRecord
-			var record core.KnowledgeRecord
-			if json.Unmarshal(body, &projection) != nil || json.Unmarshal(projection.Value, &record) != nil ||
-				projection.ProjectionKind != "knowledge" || projection.RecordID != string(record.KnowledgeID) || projection.RecordID <= afterRecordID || projection.Version != record.Version ||
-				record.OrganizationID != organizationID || record.Scope != scope || record.ScopeID != scopeID || record.Status != core.KnowledgeActive ||
-				!core.ValidKnowledgeRecord(record) {
-				return nil, fmt.Errorf("active knowledge projection is invalid")
-			}
-			afterRecordID = projection.RecordID
-			examined++
-			if knowledgeContains(record, needle) {
-				results = append(results, record)
-				if len(results) == limit {
-					return results, nil
-				}
-			}
-		}
-		if len(rows) < pageLimit {
-			return results, nil
-		}
-	}
-	remaining, err := s.gateway.ActiveKnowledgeRecords(ctx, string(organizationID), string(scope), string(scopeID), afterRecordID, 1)
+	rows, err := s.gateway.ActiveKnowledgeRecords(ctx, string(organizationID), string(scope), string(scopeID), maximumSearchScan+1)
 	if err != nil {
 		return nil, err
 	}
-	if len(remaining) != 0 {
+	if len(rows) > maximumSearchScan {
 		return nil, fmt.Errorf("active knowledge scope exceeds the deterministic search bound")
+	}
+	results := make([]core.KnowledgeRecord, 0, limit)
+	previousRecordID := ""
+	for _, body := range rows {
+		var projection events.ProjectionRecord
+		var record core.KnowledgeRecord
+		if json.Unmarshal(body, &projection) != nil || json.Unmarshal(projection.Value, &record) != nil ||
+			projection.ProjectionKind != "knowledge" || projection.RecordID != string(record.KnowledgeID) || projection.RecordID <= previousRecordID || projection.Version != record.Version ||
+			record.OrganizationID != organizationID || record.Scope != scope || record.ScopeID != scopeID || record.Status != core.KnowledgeActive ||
+			!core.ValidKnowledgeRecord(record) {
+			return nil, fmt.Errorf("active knowledge projection is invalid")
+		}
+		previousRecordID = projection.RecordID
+		if knowledgeContains(record, needle) {
+			results = append(results, record)
+			if len(results) == limit {
+				return results, nil
+			}
+		}
 	}
 	return results, nil
 }

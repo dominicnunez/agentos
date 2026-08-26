@@ -2098,8 +2098,9 @@ func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedPro
 		return err
 	}
 	if !found {
-		if item.draft.Event.CorrelationID != "knowledge-"+item.draft.RecordID {
-			return fmt.Errorf("knowledge proposal correlation is not deterministic")
+		if item.draft.Event.EventType != "KNOWLEDGE_PROPOSED" || item.draft.Version != 1 || knowledge.Status != core.KnowledgeCandidate ||
+			item.draft.Event.CorrelationID != "knowledge-"+item.draft.RecordID {
+			return fmt.Errorf("knowledge history must begin with a deterministic version-1 candidate proposal")
 		}
 		return nil
 	}
@@ -2144,11 +2145,63 @@ func validateKnowledgeCreatorEvidence(ctx context.Context, tx *sql.Tx, knowledge
 		if err != nil {
 			return fmt.Errorf("read knowledge creator evidence: %w", err)
 		}
-		if found && events.ValidKnowledgeCreatorEvidence(evidence, knowledge) {
+		if !found {
+			continue
+		}
+		if knowledge.CreatedByKind == core.PrincipalAgent {
+			valid, err := validateAgentKnowledgeCreatorExecution(ctx, tx, evidence, knowledge)
+			if err != nil {
+				return err
+			}
+			if valid {
+				return nil
+			}
+		} else if events.ValidKnowledgeCreatorEvidence(evidence, knowledge) {
 			return nil
 		}
 	}
 	return fmt.Errorf("knowledge creator kind is not bound to authenticated provenance")
+}
+
+func validateAgentKnowledgeCreatorExecution(ctx context.Context, tx *sql.Tx, proposal events.Event, knowledge core.KnowledgeRecord) (bool, error) {
+	if proposal.TaskID == "" || proposal.CorrelationID == "" {
+		return false, nil
+	}
+	starts, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND event_type='EXECUTION_STARTED' AND sequence<? ORDER BY sequence DESC LIMIT 17`,
+		proposal.OrganizationID, proposal.TaskID, proposal.CorrelationID, proposal.Sequence))
+	if err != nil {
+		return false, fmt.Errorf("read Agent knowledge execution starts: %w", err)
+	}
+	if len(starts) > 16 {
+		return false, fmt.Errorf("Agent knowledge execution history exceeds its bound")
+	}
+	for _, start := range starts {
+		payload, present, err := events.AdmittedProjection(start)
+		if err != nil || !present {
+			continue
+		}
+		var detail events.ExecutionStartDetail
+		if decodeExactJSONBytes(payload.Detail, &detail) != nil || detail.DispatchBinding == nil {
+			continue
+		}
+		stream := []events.Event{start}
+		for _, ref := range []string{detail.DispatchBinding.AgentEventRef, detail.DispatchBinding.BlueprintEventRef, detail.DispatchBinding.ExecutionProfileEventRef} {
+			bound, found, err := eventByID(ctx, tx, ref)
+			if err != nil {
+				return false, fmt.Errorf("read Agent knowledge dispatch binding: %w", err)
+			}
+			if !found {
+				stream = nil
+				break
+			}
+			stream = append(stream, bound)
+		}
+		if stream != nil && events.ValidAgentKnowledgeCreatorEvidence(proposal, knowledge, stream) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func validateKnowledgeJudgmentAuthorization(ctx context.Context, tx *sql.Tx, knowledge core.KnowledgeRecord, proposalSequence int64) error {
@@ -3078,13 +3131,12 @@ func (l *SQLite) Records(ctx context.Context, kind, id string) ([][]byte, error)
 	return collectRecordBodies(l.db.QueryContext(ctx, `SELECT body FROM records WHERE kind=? AND (?='' OR record_id=?) ORDER BY record_id,version`, kind, id, id))
 }
 
-// ActiveKnowledgeRecords returns one deterministic page of current,
-// event-admitted knowledge in one exact tenant and scope. The caller advances
-// the exclusive record-ID cursor and applies Unicode-aware text matching.
-func (l *SQLite) ActiveKnowledgeRecords(ctx context.Context, organizationID, scope, scopeID, afterRecordID string, limit int) ([][]byte, error) {
-	if organizationID == "" || scopeID == "" || len(afterRecordID) > 4096 || strings.TrimSpace(afterRecordID) != afterRecordID || limit < 1 || limit > 128 ||
+// ActiveKnowledgeRecords returns one deterministic, transactionally consistent
+// snapshot of current event-admitted knowledge in one exact tenant and scope.
+func (l *SQLite) ActiveKnowledgeRecords(ctx context.Context, organizationID, scope, scopeID string, limit int) ([][]byte, error) {
+	if organizationID == "" || scopeID == "" || limit < 1 || limit > 4097 ||
 		(scope != string(core.KnowledgeScopeAgent) && scope != string(core.KnowledgeScopeTeam) && scope != string(core.KnowledgeScopeOrganization)) {
-		return nil, fmt.Errorf("organization, closed knowledge scope, scope identity, canonical cursor, and limit from 1 through 128 are required")
+		return nil, fmt.Errorf("organization, closed knowledge scope, scope identity, and limit from 1 through 4097 are required")
 	}
 	bodies, err := admittedProjectionRecordBodies(ctx, l.db, `JOIN (
 	SELECT record_id, MAX(version) AS version
@@ -3094,9 +3146,8 @@ func (l *SQLite) ActiveKnowledgeRecords(ctx context.Context, organizationID, sco
 ) AS latest ON latest.record_id=r.record_id AND latest.version=r.version
 WHERE r.kind='knowledge' AND e.organization_id=? AND json_extract(r.body,'$.value.status')=?
 AND json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scope_id')=?
-AND r.record_id>?
 ORDER BY r.record_id
-LIMIT ?`, organizationID, string(core.KnowledgeActive), scope, scopeID, afterRecordID, limit)
+LIMIT ?`, organizationID, string(core.KnowledgeActive), scope, scopeID, limit)
 	if err != nil {
 		return nil, err
 	}

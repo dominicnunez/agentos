@@ -18,22 +18,51 @@ type knowledgeAdmissionVersion struct {
 // materialization and offline recovery. Knowledge remains context, never
 // authority; every lifecycle revision must be reconstructable from events.
 type KnowledgeAdmissionValidator struct {
+	stream             []Event
 	events             map[string]Event
 	history            map[core.ID]knowledgeAdmissionVersion
 	revisions          map[core.ID]map[int]core.KnowledgeRecord
 	admissionSequences map[core.ID]int64
+	leaseAdmissions    map[core.ID][]CapabilityLeaseAdmission
+}
+
+type CapabilityLeaseAdmission struct {
+	Lease          core.CapabilityLease
+	OrganizationID core.ID
+	Sequence       int64
 }
 
 func NewKnowledgeAdmissionValidator(stream []Event) *KnowledgeAdmissionValidator {
 	index := make(map[string]Event, len(stream))
+	leaseAdmissions := make(map[core.ID][]CapabilityLeaseAdmission)
 	for _, event := range stream {
 		index[event.EventID] = event
+		if event.EventType == "CAPABILITY_LEASED" || event.EventType == "CAPABILITY_REVOKED" {
+			var lease core.CapabilityLease
+			if decodeExactPayload(event.Payload, &lease) == nil && lease.ID != "" {
+				leaseAdmissions[lease.ID] = append(leaseAdmissions[lease.ID], CapabilityLeaseAdmission{Lease: lease, OrganizationID: core.ID(event.OrganizationID), Sequence: event.Sequence})
+			}
+		}
 	}
 	return &KnowledgeAdmissionValidator{
+		stream:             append([]Event(nil), stream...),
 		events:             index,
 		history:            make(map[core.ID]knowledgeAdmissionVersion),
 		revisions:          make(map[core.ID]map[int]core.KnowledgeRecord),
 		admissionSequences: make(map[core.ID]int64),
+		leaseAdmissions:    leaseAdmissions,
+	}
+}
+
+// UseCapabilityLeaseAdmissions replaces event-derived lease history with the
+// exact record-backed admissions verified by offline recovery.
+func (v *KnowledgeAdmissionValidator) UseCapabilityLeaseAdmissions(admissions []CapabilityLeaseAdmission) {
+	if v == nil {
+		return
+	}
+	v.leaseAdmissions = make(map[core.ID][]CapabilityLeaseAdmission)
+	for _, admission := range admissions {
+		v.leaseAdmissions[admission.Lease.ID] = append(v.leaseAdmissions[admission.Lease.ID], admission)
 	}
 }
 
@@ -112,7 +141,7 @@ func (v *KnowledgeAdmissionValidator) Validate(value core.KnowledgeRecord, event
 	}
 	if event.EventType == "KNOWLEDGE_ACTIVATED" && governedKnowledgeValidator(value.ValidatedByKind) {
 		proposalSequence := v.admissionSequences[value.KnowledgeID]
-		if proposalSequence < 1 || !v.hasAuthorizedJudgment(value, proposalSequence) {
+		if proposalSequence < 1 || !v.hasAuthorizedJudgment(value, proposalSequence, event) {
 			return fmt.Errorf("knowledge activation lacks an authenticated validator admission")
 		}
 	}
@@ -137,7 +166,8 @@ func (v *KnowledgeAdmissionValidator) hasAuthenticatedCreator(value core.Knowled
 	}
 	for _, ref := range value.ProvenanceEventRefs {
 		evidence, found := v.events[ref]
-		if found && ValidKnowledgeCreatorEvidence(evidence, value) {
+		if found && (value.CreatedByKind == core.PrincipalAgent && ValidAgentKnowledgeCreatorEvidence(evidence, value, v.stream) ||
+			value.CreatedByKind != core.PrincipalAgent && ValidKnowledgeCreatorEvidence(evidence, value)) {
 			return true
 		}
 	}
@@ -149,9 +179,6 @@ func (v *KnowledgeAdmissionValidator) hasAuthenticatedCreator(value core.Knowled
 func ValidKnowledgeCreatorEvidence(event Event, value core.KnowledgeRecord) bool {
 	if event.OrganizationID != string(value.OrganizationID) || event.SourceActorID != string(value.CreatedBy) {
 		return false
-	}
-	if value.CreatedByKind == core.PrincipalAgent {
-		return event.EventType == "KNOWLEDGE_PROPOSED" && event.SourceExecutionID != ""
 	}
 	expectedChannel := "HUMAN_DIRECT"
 	if value.CreatedByKind == core.PrincipalExternalAgent {
@@ -173,11 +200,45 @@ func ValidKnowledgeCreatorEvidence(event Event, value core.KnowledgeRecord) bool
 	}
 }
 
+// ValidAgentKnowledgeCreatorEvidence proves that an internal Agent proposal
+// came from the exact durable Agent execution admitted for its Task.
+func ValidAgentKnowledgeCreatorEvidence(proposal Event, value core.KnowledgeRecord, stream []Event) bool {
+	if value.CreatedByKind != core.PrincipalAgent || proposal.EventType != "KNOWLEDGE_PROPOSED" ||
+		proposal.OrganizationID != string(value.OrganizationID) || proposal.SourceActorID != string(value.CreatedBy) ||
+		proposal.SourceExecutionID == "" || proposal.TaskID == "" || proposal.RecipientScope != "" || proposal.RecipientID != "" ||
+		proposal.SchemaVersion != SchemaVersion {
+		return false
+	}
+	for _, start := range stream {
+		if start.EventType != "EXECUTION_STARTED" || start.Sequence >= proposal.Sequence || start.OrganizationID != proposal.OrganizationID ||
+			start.TaskID != proposal.TaskID || start.CorrelationID != proposal.CorrelationID {
+			continue
+		}
+		payload, present, err := AdmittedProjection(start)
+		if err != nil || !present || payload.Projection.ProjectionKind != "task" {
+			continue
+		}
+		var task core.Task
+		if decodeExactPayload(payload.Projection.Value, &task) != nil || task.ID != core.ID(proposal.TaskID) ||
+			task.AssigneeID != value.CreatedBy || task.AssigneeType != "AGENT" || task.ExecutionKind != core.ExecutionAgent {
+			continue
+		}
+		detail, err := executionStartDetail(start)
+		if err != nil || detail.DispatchBinding.DispatchID != core.ID(proposal.SourceExecutionID) || detail.DispatchBinding.AgentID != value.CreatedBy {
+			continue
+		}
+		if ValidateAgentDispatchStart(start, task, payload.Projection.Version, stream) == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func governedKnowledgeValidator(kind core.PrincipalKind) bool {
 	return kind == core.PrincipalHuman || kind == core.PrincipalAgent || kind == core.PrincipalExternalAgent
 }
 
-func (v *KnowledgeAdmissionValidator) hasAuthorizedJudgment(value core.KnowledgeRecord, proposalSequence int64) bool {
+func (v *KnowledgeAdmissionValidator) hasAuthorizedJudgment(value core.KnowledgeRecord, proposalSequence int64, activation Event) bool {
 	for _, ref := range value.ValidationRefs {
 		judgment, found := v.events[ref]
 		if !found || judgment.Sequence <= proposalSequence || judgment.EventType != "CAPABILITY_CHECKED" ||
@@ -193,9 +254,29 @@ func (v *KnowledgeAdmissionValidator) hasAuthorizedJudgment(value core.Knowledge
 			!slices.Contains(judgment.AuthorizationRefs, string(trace.LeaseID)) {
 			continue
 		}
-		return true
+		if v.leaseAllowsAt(trace, value, judgment, activation) {
+			return true
+		}
 	}
 	return false
+}
+
+func (v *KnowledgeAdmissionValidator) leaseAllowsAt(trace core.AuthorizationTrace, value core.KnowledgeRecord, judgment, activation Event) bool {
+	var atJudgment, atActivation CapabilityLeaseAdmission
+	for _, admission := range v.leaseAdmissions[trace.LeaseID] {
+		if admission.Sequence < judgment.Sequence && admission.Sequence > atJudgment.Sequence {
+			atJudgment = admission
+		}
+		if admission.Sequence < activation.Sequence && admission.Sequence > atActivation.Sequence {
+			atActivation = admission
+		}
+	}
+	lease := atActivation.Lease
+	return atJudgment.Sequence > 0 && atJudgment.Sequence == atActivation.Sequence &&
+		atActivation.OrganizationID == value.OrganizationID && lease.ID == trace.LeaseID &&
+		lease.ActorID == trace.ActorID && lease.ActorKind == trace.ActorKind && lease.OriginTaskID == trace.TaskID &&
+		lease.Action == trace.Action && lease.Resource == trace.Resource && lease.Scope == trace.Scope && lease.RevokedAt == nil &&
+		(lease.ExpiresAt == nil || (judgment.CreatedAt.Before(*lease.ExpiresAt) && activation.CreatedAt.Before(*lease.ExpiresAt)))
 }
 
 func (v *KnowledgeAdmissionValidator) hasSubsequentValidation(occurrences, validation []string, proposalSequence int64) bool {
