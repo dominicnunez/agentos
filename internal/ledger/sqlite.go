@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"slices"
 	"sort"
@@ -48,6 +49,13 @@ func Open(path string) (*SQLite, error) {
 // an older database before its exact checkpoint has been verified through a
 // separately reviewed migration procedure.
 func OpenCurrent(path string) (*SQLite, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect current runtime ledger: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("current runtime ledger must be a regular file, not a link")
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err

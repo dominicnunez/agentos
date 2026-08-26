@@ -52,6 +52,33 @@ func TestOpenCurrentRejectsLegacyStorageWithoutMigration(t *testing.T) {
 	}
 }
 
+func TestOpenCurrentDoesNotCreateOrFollowRuntimeLedger(t *testing.T) {
+	directory := t.TempDir()
+	missing := filepath.Join(directory, "missing.db")
+	if store, err := OpenCurrent(missing); err == nil {
+		_ = store.Close()
+		t.Fatal("runtime open created a missing anchored ledger")
+	}
+	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+		t.Fatalf("missing runtime ledger was created: %v", err)
+	}
+	target := filepath.Join(directory, "target.db")
+	store, err := Open(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(directory, "redirect.db")
+	if err := os.Symlink(target, link); err == nil {
+		if store, err := OpenCurrent(link); err == nil {
+			_ = store.Close()
+			t.Fatal("runtime open followed a ledger symlink")
+		}
+	}
+}
+
 func TestStorageV1FixtureMatchesFrozenFingerprint(t *testing.T) {
 	db := createStorageV1Fixture(t, filepath.Join(t.TempDir(), "storage-v1.db"))
 	defer func() { _ = db.Close() }()
