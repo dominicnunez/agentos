@@ -39,6 +39,10 @@ func ValidKnowledgeRecord(record KnowledgeRecord) bool {
 	if record.Basis == KnowledgeBasisRepeatedPattern && len(record.OccurrenceEventRefs) < 3 {
 		return false
 	}
+	_, createdOffset := record.CreatedAt.Zone()
+	if createdOffset != 0 {
+		return false
+	}
 	if record.SupersedesVersion != nil && (*record.SupersedesVersion < 1 || *record.SupersedesVersion >= record.Version) {
 		return false
 	}
@@ -49,7 +53,7 @@ func ValidKnowledgeRecord(record KnowledgeRecord) bool {
 	case KnowledgeActive:
 		return validKnowledgeValidation(record.ValidationMethod) && record.ValidationMethod != KnowledgeValidationUnvalidated &&
 			len(record.ValidationRefs) > 0 && validKnowledgePrincipal(record.ValidatedBy, record.ValidatedByKind) &&
-			record.LastVerifiedAt != nil && !record.LastVerifiedAt.IsZero() && !record.LastVerifiedAt.Before(record.CreatedAt)
+			record.LastVerifiedAt != nil && validKnowledgeVerification(record)
 	case KnowledgeSuperseded, KnowledgeStale, KnowledgeQuarantined:
 		return record.Version > 1 && validTerminalKnowledgeValidation(record)
 	default:
@@ -131,7 +135,24 @@ func validTerminalKnowledgeValidation(record KnowledgeRecord) bool {
 	}
 	return validKnowledgeValidation(record.ValidationMethod) && len(record.ValidationRefs) > 0 &&
 		validKnowledgePrincipal(record.ValidatedBy, record.ValidatedByKind) && record.LastVerifiedAt != nil &&
-		!record.LastVerifiedAt.IsZero() && !record.LastVerifiedAt.Before(record.CreatedAt)
+		validKnowledgeVerification(record)
+}
+
+func validKnowledgeVerification(record KnowledgeRecord) bool {
+	_, offset := record.LastVerifiedAt.Zone()
+	if record.LastVerifiedAt.IsZero() || offset != 0 || record.LastVerifiedAt.Before(record.CreatedAt) {
+		return false
+	}
+	switch record.ValidationMethod {
+	case KnowledgeValidationHuman:
+		return record.ValidatedByKind == PrincipalHuman
+	case KnowledgeValidationIndependentAgent:
+		return record.ValidatedByKind == PrincipalExternalAgent
+	case KnowledgeValidationRepeatedObservation:
+		return len(record.ValidationRefs) >= 3
+	default:
+		return true
+	}
 }
 
 func sameKnowledgeValidation(prior, next KnowledgeRecord) bool {

@@ -49,6 +49,14 @@ func TestValidKnowledgeRecordSeparatesCandidateFromValidatedKnowledge(t *testing
 	if !ValidKnowledgeRecord(active) {
 		t.Fatalf("valid active knowledge rejected: %+v", active)
 	}
+	active.ValidationMethod = KnowledgeValidationHuman
+	if ValidKnowledgeRecord(active) {
+		t.Fatal("runtime identity was mislabeled as user judgment")
+	}
+	active.ValidationMethod = KnowledgeValidationRepeatedObservation
+	if ValidKnowledgeRecord(active) {
+		t.Fatal("one event was accepted as repeated-observation validation")
+	}
 }
 
 func TestValidKnowledgeRecordRequiresCautiousPatternAndDerivedProvenance(t *testing.T) {
