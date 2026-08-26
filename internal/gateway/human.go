@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -167,6 +168,22 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition", `attachment; filename="agentos-aims-evidence.json"`)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		writeAIMSEvidence(w, export)
+		return
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/user/incidents/replay" {
+		query, err := url.ParseQuery(r.URL.RawQuery)
+		conversations := query["conversation_id"]
+		if err != nil || len(query) != 1 || len(conversations) != 1 || conversations[0] == "" {
+			http.NotFound(w, r)
+			return
+		}
+		report, err := h.service.IncidentReplay(r.Context(), principal, conversations[0])
+		if err != nil {
+			h.writeIntakeError(w, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, report)
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/user/tasks/recent" {

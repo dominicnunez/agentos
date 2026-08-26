@@ -37,6 +37,12 @@ a signed claim in the tenant-scoped AIMS export. It is not externally anchored
 and does not prove the truth of event content, control effectiveness,
 conformity, or certification. See [Event ledger integrity](EVENT_LEDGER_INTEGRITY.md).
 
+The authenticated local user can also produce a bounded, payload-free
+[deterministic incident replay](INCIDENT_REPLAY.md) for one durable Work
+conversation. It reconstructs recorded order from a chain-verified snapshot;
+it does not determine root cause, containment, corrective action, control
+effectiveness, conformity, or certification.
+
 The operating organization remains responsible for its AIMS scope, AI policy, accountable roles, legal and stakeholder obligations, risk criteria, impact assessments, competence, supplier decisions, incident handling, internal audits, management reviews, corrective actions, document retention, and selected controls. Agent OS must fail closed where one of those decisions is required but has not been supplied.
 
 The project must not describe itself or an operator as ISO/IEC 42001 certified until an appropriately qualified certification body has completed the applicable audit. [ISO/IEC 42006:2025](https://www.iso.org/standard/42006) defines additional requirements for bodies that audit and certify an AIMS.

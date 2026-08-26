@@ -32,11 +32,11 @@ Operator deployments have their own scope and evidence. Product features may sup
 | Data and information | Input limits, untrusted-content treatment, artifact inspection, tenant isolation | PARTIAL | Data inventory, provenance, quality, access, retention, deletion, and privacy-impact procedures |
 | Suppliers and third parties | Pinned Go modules, license bundle, provider policy, dependency and security CI | PARTIAL | Supplier evaluation, service-risk review, contract requirements, monitoring, and exit plans |
 | Transparency and stakeholder information | README, operator docs, task/result views, completion and approval records | PARTIAL | Approved disclosure rules, user notices, limitations, escalation, and external reporting process |
-| Security and resilience | Threat model, authentication/authorization, private user socket, A2A isolation, backup/recovery tests | PARTIAL | Operational security baselines, incident exercises, recovery objectives, and deployment evidence |
+| Security and resilience | Threat model, authentication/authorization, private user socket, A2A isolation, backup/recovery tests, and bounded deterministic incident replay from a verified snapshot | PARTIAL | Operational security baselines, incident exercises, recovery objectives, and deployment evidence |
 | Monitoring and measurement | Run telemetry, inference usage, durable outcomes, CI, acceptance status | PARTIAL | Approved metrics, thresholds, monitoring ownership, evaluation schedule, and effectiveness records |
 | Internal audit | Independent PR review and security-first final review | PARTIAL | AIMS audit program, auditor independence/competence, findings, evidence samples, and closure tracking |
 | Management review | No formal record | NOT STARTED | Scheduled review inputs, decisions, actions, owners, and follow-up evidence |
-| Incident and corrective action | Fail-closed runtime behavior and issue tracking | PARTIAL | AI incident/nonconformity record, containment, root cause, corrective action, effectiveness review, and lessons learned |
+| Incident and corrective action | Fail-closed runtime behavior, issue tracking, tamper-evident event evidence, and payload-free deterministic Work replay | PARTIAL | Operator-owned AI incident/nonconformity record, containment, root cause, corrective action, effectiveness review, and lessons learned |
 | Control applicability | Architecture and governance controls exist | NOT STARTED | Approved Statement of Applicability with inclusion/exclusion rationale and evidence links |
 | Certification | None | EXTERNAL | Readiness assessment, internal audit, management review, corrective-action closure, then independent certification audit |
 

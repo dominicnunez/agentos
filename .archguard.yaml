@@ -56,6 +56,8 @@ modules:
     path: internal/ledger
   - name: projections
     path: internal/projections
+  - name: replay
+    path: internal/replay
   - name: secrets
     path: internal/secrets
   - name: telemetry
@@ -78,7 +80,7 @@ policy:
       from:
         module: app
       to:
-        modules: [assignment, completion, core, events, execution, inference, lab, planning, projections, telemetry, workflow]
+        modules: [assignment, completion, core, events, execution, inference, lab, planning, projections, replay, telemetry, workflow]
 
     - name: assignment-domain
       from:
@@ -162,7 +164,7 @@ policy:
       from:
         module: intake
       to:
-        modules: [app, core, events, inference, modeloutput]
+        modules: [app, core, events, inference, modeloutput, replay]
 
     - name: knowledge-domain
       from:
@@ -206,6 +208,12 @@ policy:
         module: projections
       to:
         modules: [core, events]
+
+    - name: deterministic-incident-replay
+      from:
+        module: replay
+      to:
+        module: events
 
     - name: planning-domain
       from:

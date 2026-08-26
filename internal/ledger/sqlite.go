@@ -3489,6 +3489,46 @@ func (l *SQLite) Events(ctx context.Context, correlationID string) ([]events.Eve
 	return collectEvents(l.db.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE (?='' OR correlation_id=?) ORDER BY sequence`, correlationID, correlationID))
 }
 
+// VerifiedReplayEvents returns a bounded tenant/correlation slice and the
+// verified complete-ledger head from one read transaction. The transaction is
+// never promoted to a writer and the selected events are not republished.
+func (l *SQLite) VerifiedReplayEvents(ctx context.Context, organizationID, correlationID string, limit int) (events.VerifiedEventSnapshot, error) {
+	if organizationID == "" || correlationID == "" || limit < 1 || limit > 256 {
+		return events.VerifiedEventSnapshot{}, fmt.Errorf("verified replay requires organization, correlation, and a limit from 1 to 256")
+	}
+	tx, err := l.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return events.VerifiedEventSnapshot{}, fmt.Errorf("begin verified replay snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	head, err := ValidateEventIntegrity(ctx, tx)
+	if err != nil {
+		return events.VerifiedEventSnapshot{}, fmt.Errorf("verify replay ledger snapshot: %w", err)
+	}
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? AND correlation_id=? ORDER BY sequence LIMIT ?`, organizationID, correlationID, limit+1))
+	if err != nil {
+		return events.VerifiedEventSnapshot{}, fmt.Errorf("read verified replay stream: %w", err)
+	}
+	if len(stream) > limit {
+		return events.VerifiedEventSnapshot{}, fmt.Errorf("verified replay stream exceeds its %d event limit", limit)
+	}
+	if err := tx.Commit(); err != nil {
+		return events.VerifiedEventSnapshot{}, fmt.Errorf("finish verified replay snapshot: %w", err)
+	}
+	return events.VerifiedEventSnapshot{
+		OrganizationID: organizationID,
+		CorrelationID:  correlationID,
+		Algorithm:      head.Algorithm,
+		LedgerEvents:   head.EventCount,
+		LedgerSequence: head.Sequence,
+		LedgerEventID:  head.EventID,
+		LedgerSHA256:   head.SHA256,
+		Events:         stream,
+	}, nil
+}
+
 func (l *SQLite) StrategyCreationEvents(ctx context.Context, organizationID, correlationID string) ([]events.Event, error) {
 	if organizationID == "" || correlationID == "" {
 		return nil, fmt.Errorf("strategy creation organization and correlation are required")

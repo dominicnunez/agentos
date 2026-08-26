@@ -103,6 +103,54 @@ func TestHumanOrganizationViewIsReadOnlyAndTenantScoped(t *testing.T) {
 	}
 }
 
+func TestHumanIncidentReplayIsVerifiedPayloadFreeAndTenantScoped(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	operator := intake.New(app.New(events.NewGateway(store)))
+	first := testHumanHandler(t, operator)
+	second, err := NewHuman(operator, LocalHuman{UID: 1000, ID: "local-uid-1000", OrganizationID: "org-2", MaxConcurrent: 4, RequestsPerMinute: 100}, artifacts.Store{Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateText := "echo private incident content"
+	if response := submitAndConfirmHuman(t, first, humanMessageRequest{ConversationID: "incident-first", MessageID: "message-first", Text: privateText}); response.Code != http.StatusOK {
+		t.Fatalf("seed first incident=%d %s", response.Code, response.Body.String())
+	}
+	if response := submitAndConfirmHuman(t, second, humanMessageRequest{ConversationID: "incident-second", MessageID: "message-second", Text: "echo other tenant secret"}); response.Code != http.StatusOK {
+		t.Fatalf("seed second incident=%d %s", response.Code, response.Body.String())
+	}
+
+	response := serveHuman(first, http.MethodGet, "/v1/user/incidents/replay?conversation_id=incident-first", testOwnerMarker, "")
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" ||
+		!strings.Contains(response.Body.String(), `"conversation_id":"incident-first"`) ||
+		!strings.Contains(response.Body.String(), `"algorithm":"SHA-256"`) ||
+		!strings.Contains(response.Body.String(), `"verification":"COMPLETE_LEDGER_CHAIN"`) ||
+		!strings.Contains(response.Body.String(), `"payload_sha256"`) ||
+		!strings.Contains(response.Body.String(), `"kind":"STREAM_PREDECESSOR"`) {
+		t.Fatalf("incident replay=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+	for _, forbidden := range []string{privateText, "other tenant secret", `"payload":`, `"organization_id":"org-2"`, `"ledger_events":`, `"ledger_event_id":`, `"ledger_sha256":`, `"sequence":`} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("incident replay leaked %q: %s", forbidden, response.Body.String())
+		}
+	}
+	if response := serveHuman(first, http.MethodGet, "/v1/user/incidents/replay?conversation_id=incident-second", testOwnerMarker, ""); response.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant incident replay=%d %s", response.Code, response.Body.String())
+	}
+	if response := serveHuman(first, http.MethodGet, "/v1/user/incidents/replay?conversation_id=incident-first&scope=all", testOwnerMarker, ""); response.Code != http.StatusNotFound {
+		t.Fatalf("incident query expansion=%d %s", response.Code, response.Body.String())
+	}
+	if response := serveHuman(first, http.MethodGet, "/v1/user/incidents/replay?conversation_id=incident-first&conversation_id=incident-second", testOwnerMarker, ""); response.Code != http.StatusNotFound {
+		t.Fatalf("duplicate incident query=%d %s", response.Code, response.Body.String())
+	}
+	if response := serveHuman(first, http.MethodPost, "/v1/user/incidents/replay?conversation_id=incident-first", testOwnerMarker, `{}`); response.Code != http.StatusNotFound {
+		t.Fatalf("incident replay mutation=%d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestHumanGatewayBootstrapsStrategyWithoutCreatingAuthority(t *testing.T) {
 	store, err := ledger.Open(":memory:")
 	if err != nil {
