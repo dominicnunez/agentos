@@ -3,6 +3,7 @@ package knowledge
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -94,7 +95,8 @@ func TestStoreAdmitsValidatedKnowledgeAndRetrievesOnlyActiveTenantScope(t *testi
 	if err != nil {
 		t.Fatalf("admit validator judgment: %v", err)
 	}
-	active.ValidationRefs = []string{judgment.EventID}
+	statement := publishKnowledgeHumanStatement(t, ctx, gateway, "org-1", candidate.KnowledgeID, lease.ActorID, taskID, judgment.EventID, "work-knowledge-validation")
+	active.ValidationRefs = []string{judgment.EventID, statement.EventID}
 	verifiedBeforeEvidence := judgment.CreatedAt.Add(-time.Nanosecond)
 	active.LastVerifiedAt = &verifiedBeforeEvidence
 	if _, err := service.Activate(ctx, active); err == nil {
@@ -190,6 +192,7 @@ func TestStoreRejectsRevokedValidatorAuthorityAfterJudgmentAdmission(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	statement := publishKnowledgeHumanStatement(t, ctx, gateway, "org-1", candidate.KnowledgeID, lease.ActorID, taskID, judgment.EventID, "work-revoked-validation")
 	revokedAt := time.Now().UTC()
 	lease.RevokedAt = &revokedAt
 	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_REVOKED", "runtime", string(taskID), nil, nil, "capability_lease", string(lease.ID), 2, lease); err != nil {
@@ -199,7 +202,7 @@ func TestStoreRejectsRevokedValidatorAuthorityAfterJudgmentAdmission(t *testing.
 	active.Version = 2
 	active.Status = core.KnowledgeActive
 	active.ValidationMethod = core.KnowledgeValidationHuman
-	active.ValidationRefs = []string{judgment.EventID}
+	active.ValidationRefs = []string{judgment.EventID, statement.EventID}
 	active.ValidatedBy = lease.ActorID
 	active.ValidatedByKind = core.PrincipalHuman
 	verifiedAt := time.Now().UTC()
@@ -253,9 +256,13 @@ func TestStoreBindsJudgmentToPriorLeaseAndFreezeState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	active.ValidationRefs = []string{judgment.EventID}
+	wrongTaskStatement := publishKnowledgeHumanStatement(t, ctx, gateway, "org-1", candidate.KnowledgeID, lease.ActorID, "task-other", judgment.EventID, "work-other")
+	active.ValidationRefs = []string{judgment.EventID, wrongTaskStatement.EventID}
 	verifiedAt = time.Now().UTC()
 	active.LastVerifiedAt = &verifiedAt
+	if _, err := service.Activate(ctx, active); err == nil {
+		t.Fatal("knowledge judgment from a different task used task-scoped authorization")
+	}
 	frozenAt := time.Now().UTC()
 	freeze := struct {
 		OrganizationID core.ID   `json:"organization_id"`
@@ -266,6 +273,10 @@ func TestStoreBindsJudgmentToPriorLeaseAndFreezeState(t *testing.T) {
 	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", string(lease.OriginTaskID), nil, nil, "organization_freeze", "org-1", 1, freeze); err != nil {
 		t.Fatal(err)
 	}
+	frozenStatement := publishKnowledgeHumanStatement(t, ctx, gateway, "org-1", candidate.KnowledgeID, lease.ActorID, lease.OriginTaskID, judgment.EventID, "work-judgment-order")
+	active.ValidationRefs = []string{judgment.EventID, frozenStatement.EventID}
+	verifiedAt = time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
 	if _, err := service.Activate(ctx, active); err == nil {
 		t.Fatal("knowledge activation while the organization was frozen was accepted")
 	}
@@ -274,6 +285,13 @@ func TestStoreBindsJudgmentToPriorLeaseAndFreezeState(t *testing.T) {
 	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", string(lease.OriginTaskID), nil, nil, "organization_freeze", "org-1", 2, freeze); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := service.Activate(ctx, active); err == nil {
+		t.Fatal("judgment emitted during a temporary freeze was accepted after unfreeze")
+	}
+	statement := publishKnowledgeHumanStatement(t, ctx, gateway, "org-1", candidate.KnowledgeID, lease.ActorID, lease.OriginTaskID, judgment.EventID, "work-judgment-order")
+	active.ValidationRefs = []string{judgment.EventID, statement.EventID}
+	verifiedAt = time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
 	if _, err := service.Activate(ctx, active); err != nil {
 		t.Fatalf("activation after an admitted unfreeze was rejected: %v", err)
 	}
@@ -283,14 +301,22 @@ func TestStoreRejectsAgentCreatorWithoutDurableExecutionBinding(t *testing.T) {
 	ctx := context.Background()
 	_, gateway := newKnowledgeTestStore(t)
 	seedKnowledgeOrganization(t, ctx, gateway, "org-1")
+	knowledgeID := core.ID("k-agent")
+	title := "Rollback procedure"
+	basis := core.KnowledgeBasisHumanInput
+	applicability := ""
 	proposal, err := gateway.PublishAgentDraft(ctx, "org-1", "agent-1", "execution-1", "agent-proposal-1", events.Draft{
 		EventType: "KNOWLEDGE_PROPOSED",
-		Payload:   map[string]string{"summary": "bounded internal Agent proposal"},
+		TaskID:    "task-1",
+		Payload: events.KnowledgeProposedPayload{
+			KnowledgeID: &knowledgeID, KnowledgeType: core.KnowledgeProcedure, Title: &title,
+			Content: "Verify the rollback before applying it.", BasisType: &basis, Applicability: &applicability,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidate := knowledgeCandidate("k-agent", "org-1", proposal.EventID)
+	candidate := knowledgeCandidate(knowledgeID, "org-1", proposal.EventID)
 	candidate.CreatedBy = "agent-1"
 	candidate.CreatedByKind = core.PrincipalAgent
 	service := New(gateway)
@@ -321,7 +347,7 @@ func authorizedKnowledgeValidationTrace(lease core.CapabilityLease) core.Authori
 
 func TestStoreTerminalRevisionRemovesKnowledgeFromRetrieval(t *testing.T) {
 	ctx := context.Background()
-	_, gateway := newKnowledgeTestStore(t)
+	store, gateway := newKnowledgeTestStore(t)
 	evidence := seedKnowledgeOrganization(t, ctx, gateway, "org-1")
 	service := New(gateway)
 	candidate := knowledgeCandidate("k-1", "org-1", evidence.EventID)
@@ -332,7 +358,7 @@ func TestStoreTerminalRevisionRemovesKnowledgeFromRetrieval(t *testing.T) {
 	active.Version = 2
 	active.Status = core.KnowledgeActive
 	active.ValidationMethod = core.KnowledgeValidationDeterministic
-	active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, gateway, candidate.KnowledgeID, "terminal activation").EventID}
+	active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, store, gateway, candidate.KnowledgeID, 1).EventID}
 	active.ValidatedBy = "runtime"
 	active.ValidatedByKind = core.PrincipalRuntime
 	verifiedAt := time.Now().UTC()
@@ -364,7 +390,7 @@ func TestStoreTerminalRevisionRemovesKnowledgeFromRetrieval(t *testing.T) {
 
 func TestStoreCanInvalidateDerivedKnowledgeAfterItsSourceBecomesStale(t *testing.T) {
 	ctx := context.Background()
-	_, gateway := newKnowledgeTestStore(t)
+	store, gateway := newKnowledgeTestStore(t)
 	evidence := seedKnowledgeOrganization(t, ctx, gateway, "org-1")
 	service := New(gateway)
 	activate := func(candidate core.KnowledgeRecord) core.KnowledgeRecord {
@@ -376,7 +402,7 @@ func TestStoreCanInvalidateDerivedKnowledgeAfterItsSourceBecomesStale(t *testing
 		active.Version = 2
 		active.Status = core.KnowledgeActive
 		active.ValidationMethod = core.KnowledgeValidationDeterministic
-		active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, gateway, candidate.KnowledgeID, "derived activation").EventID}
+		active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, store, gateway, candidate.KnowledgeID, 1).EventID}
 		active.ValidatedBy = "runtime"
 		active.ValidatedByKind = core.PrincipalRuntime
 		verifiedAt := time.Now().UTC()
@@ -394,6 +420,12 @@ func TestStoreCanInvalidateDerivedKnowledgeAfterItsSourceBecomesStale(t *testing
 	dependentCandidate.DerivedKnowledgeRefs = []core.VersionedRef{{
 		ID: string(source.KnowledgeID), Version: "2", MaterializationState: core.MaterializedFull,
 	}}
+	predated := dependentCandidate
+	predated.KnowledgeID = "k-dependent-predated"
+	predated.CreatedAt = source.CreatedAt
+	if _, err := service.Propose(ctx, predated); err == nil {
+		t.Fatal("derived knowledge claimed creation before its source activation")
+	}
 	dependent := activate(dependentCandidate)
 
 	staleSource := source
@@ -414,7 +446,7 @@ func TestStoreCanInvalidateDerivedKnowledgeAfterItsSourceBecomesStale(t *testing
 
 func TestStoreRevisesActiveKnowledgeThroughCandidateReview(t *testing.T) {
 	ctx := context.Background()
-	_, gateway := newKnowledgeTestStore(t)
+	store, gateway := newKnowledgeTestStore(t)
 	evidence := seedKnowledgeOrganization(t, ctx, gateway, "org-1")
 	service := New(gateway)
 	candidate := knowledgeCandidate("k-1", "org-1", evidence.EventID)
@@ -425,7 +457,7 @@ func TestStoreRevisesActiveKnowledgeThroughCandidateReview(t *testing.T) {
 	active.Version = 2
 	active.Status = core.KnowledgeActive
 	active.ValidationMethod = core.KnowledgeValidationDeterministic
-	active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, gateway, candidate.KnowledgeID, "initial activation").EventID}
+	active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, store, gateway, candidate.KnowledgeID, 1).EventID}
 	active.ValidatedBy = "runtime"
 	active.ValidatedByKind = core.PrincipalRuntime
 	verifiedAt := time.Now().UTC()
@@ -461,7 +493,7 @@ func TestStoreRevisesActiveKnowledgeThroughCandidateReview(t *testing.T) {
 	if rows, err := service.Search(ctx, "org-1", core.KnowledgeScopeOrganization, "org-1", "corrected", 10); err != nil || len(rows) != 0 {
 		t.Fatalf("unvalidated correction entered active retrieval: rows=%+v err=%v", rows, err)
 	}
-	validation := appendKnowledgeValidation(t, ctx, gateway, corrected.KnowledgeID, "corrected activation")
+	validation := appendKnowledgeValidation(t, ctx, store, gateway, corrected.KnowledgeID, 3)
 	reactivated := corrected
 	reactivated.Version = 4
 	reactivated.Status = core.KnowledgeActive
@@ -490,7 +522,7 @@ func TestStoreSupportsFailClosedStaleAndQuarantineTransitions(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
-			_, gateway := newKnowledgeTestStore(t)
+			store, gateway := newKnowledgeTestStore(t)
 			evidence := seedKnowledgeOrganization(t, ctx, gateway, "org-1")
 			service := New(gateway)
 			candidate := knowledgeCandidate("k-1", "org-1", evidence.EventID)
@@ -502,7 +534,7 @@ func TestStoreSupportsFailClosedStaleAndQuarantineTransitions(t *testing.T) {
 				prior.Version = 2
 				prior.Status = core.KnowledgeActive
 				prior.ValidationMethod = core.KnowledgeValidationDeterministic
-				prior.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, gateway, candidate.KnowledgeID, "terminal transition activation").EventID}
+				prior.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, store, gateway, candidate.KnowledgeID, 1).EventID}
 				prior.ValidatedBy = "runtime"
 				prior.ValidatedByKind = core.PrincipalRuntime
 				verifiedAt := time.Now().UTC()
@@ -519,7 +551,7 @@ func TestStoreSupportsFailClosedStaleAndQuarantineTransitions(t *testing.T) {
 			if !test.fromActive {
 				mutated := next
 				mutated.ValidationMethod = core.KnowledgeValidationDeterministic
-				mutated.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, gateway, candidate.KnowledgeID, "forged quarantine validation").EventID}
+				mutated.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, store, gateway, candidate.KnowledgeID, 1).EventID}
 				mutated.ValidatedBy = "runtime"
 				mutated.ValidatedByKind = core.PrincipalRuntime
 				verifiedAt := time.Now().UTC()
@@ -552,7 +584,7 @@ func TestPatternCandidateRequiresDistinctConcreteEvents(t *testing.T) {
 
 func TestRepeatedPatternActivationRequiresEvidenceAfterProposal(t *testing.T) {
 	ctx := context.Background()
-	_, gateway := newKnowledgeTestStore(t)
+	store, gateway := newKnowledgeTestStore(t)
 	seedKnowledgeOrganization(t, ctx, gateway, "org-1")
 	appendEvidence := func(label string) events.Event {
 		t.Helper()
@@ -594,7 +626,7 @@ func TestRepeatedPatternActivationRequiresEvidenceAfterProposal(t *testing.T) {
 	if _, err := service.Activate(ctx, active); err == nil {
 		t.Fatal("evidence admitted before the proposal activated repeated-pattern knowledge")
 	}
-	active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, gateway, candidate.KnowledgeID, "subsequent validation").EventID}
+	active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, store, gateway, candidate.KnowledgeID, 1).EventID}
 	verifiedAt = time.Now().UTC()
 	active.LastVerifiedAt = &verifiedAt
 	if _, err := service.Activate(ctx, active); err != nil {
@@ -604,7 +636,7 @@ func TestRepeatedPatternActivationRequiresEvidenceAfterProposal(t *testing.T) {
 
 func TestDeterministicActivationRequiresEvidenceAfterProposal(t *testing.T) {
 	ctx := context.Background()
-	_, gateway := newKnowledgeTestStore(t)
+	store, gateway := newKnowledgeTestStore(t)
 	evidence := seedKnowledgeOrganization(t, ctx, gateway, "org-1")
 	candidate := knowledgeCandidate("k-deterministic-order", "org-1", evidence.EventID)
 	service := New(gateway)
@@ -636,7 +668,79 @@ func TestDeterministicActivationRequiresEvidenceAfterProposal(t *testing.T) {
 	if _, err := service.Activate(ctx, active); err == nil {
 		t.Fatal("unrelated post-proposal event activated deterministic knowledge")
 	}
-	active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, gateway, candidate.KnowledgeID, "post-proposal deterministic validation").EventID}
+
+	missingOutcome, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "KNOWLEDGE_VALIDATION_RECORDED", SourceActorID: "runtime",
+		SourceExecutionID: "execution-missing", TaskID: "task-missing", CorrelationID: "work-missing",
+		Payload: events.KnowledgeDeterministicValidationPayload{
+			KnowledgeID: candidate.KnowledgeID, CandidateVersion: 1, OutcomeEventRef: "outcome-missing", ArtifactRefs: []string{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	active.ValidationRefs = []string{missingOutcome.EventID}
+	verifiedAt = time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
+	if _, err := service.Activate(ctx, active); err == nil {
+		t.Fatal("deterministic validation referencing a nonexistent outcome was accepted")
+	}
+
+	startedAt := time.Now().UTC()
+	syntheticOutcome, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime",
+		SourceExecutionID: "execution-synthetic", TaskID: "task-synthetic", CorrelationID: "work-synthetic",
+		Payload: core.ToolOutcome{
+			ToolInvocationID: "synthetic-validation", ToolID: "builtin.echo", ToolVersion: "1", Status: core.OutcomeSucceeded,
+			ObservedEffect: "validated", PostconditionStatus: core.PostconditionVerified, Retryability: core.NotRetryable,
+			StartedAt: startedAt, FinishedAt: startedAt,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	syntheticBinding, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "KNOWLEDGE_VALIDATION_RECORDED", SourceActorID: "runtime",
+		SourceExecutionID: "execution-synthetic", TaskID: "task-synthetic", CorrelationID: "work-synthetic",
+		Payload: events.KnowledgeDeterministicValidationPayload{
+			KnowledgeID: candidate.KnowledgeID, CandidateVersion: 1, OutcomeEventRef: syntheticOutcome.EventID, ArtifactRefs: []string{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	active.ValidationRefs = []string{syntheticBinding.EventID}
+	verifiedAt = time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
+	if _, err := service.Activate(ctx, active); err == nil {
+		t.Fatal("synthetic tool outcome without an admitted deterministic execution activated knowledge")
+	}
+
+	wrongCandidate, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "KNOWLEDGE_VALIDATION_RECORDED", SourceActorID: "runtime",
+		SourceExecutionID: "execution-synthetic", TaskID: "task-synthetic", CorrelationID: "work-synthetic",
+		Payload: events.KnowledgeDeterministicValidationPayload{
+			KnowledgeID: "knowledge-other", CandidateVersion: 2, OutcomeEventRef: syntheticOutcome.EventID, ArtifactRefs: []string{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	active.ValidationRefs = []string{wrongCandidate.EventID}
+	verifiedAt = time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
+	if _, err := service.Activate(ctx, active); err == nil {
+		t.Fatal("deterministic validation for a different candidate and version was accepted")
+	}
+
+	active.ValidationRefs = []string{appendClosedKnowledgeValidation(t, ctx, store, gateway, candidate.KnowledgeID, 1).EventID}
+	verifiedAt = time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
+	if _, err := service.Activate(ctx, active); err == nil {
+		t.Fatal("deterministic validation recorded after its execution closed was accepted")
+	}
+
+	active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, store, gateway, candidate.KnowledgeID, 1).EventID}
 	verifiedAt = time.Now().UTC()
 	active.LastVerifiedAt = &verifiedAt
 	if _, err := service.Activate(ctx, active); err != nil {
@@ -646,7 +750,7 @@ func TestDeterministicActivationRequiresEvidenceAfterProposal(t *testing.T) {
 
 func TestSearchFiltersBeforeApplyingResultLimit(t *testing.T) {
 	ctx := context.Background()
-	_, gateway := newKnowledgeTestStore(t)
+	store, gateway := newKnowledgeTestStore(t)
 	evidence := seedKnowledgeOrganization(t, ctx, gateway, "org-1")
 	service := New(gateway)
 	for index := 0; index < 257; index++ {
@@ -661,7 +765,7 @@ func TestSearchFiltersBeforeApplyingResultLimit(t *testing.T) {
 		active.Version = 2
 		active.Status = core.KnowledgeActive
 		active.ValidationMethod = core.KnowledgeValidationDeterministic
-		active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, gateway, candidate.KnowledgeID, fmt.Sprintf("bulk activation %d", index)).EventID}
+		active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, store, gateway, candidate.KnowledgeID, 1).EventID}
 		active.ValidatedBy = "runtime"
 		active.ValidatedByKind = core.PrincipalRuntime
 		verifiedAt := time.Now().UTC()
@@ -679,7 +783,7 @@ func TestSearchFiltersBeforeApplyingResultLimit(t *testing.T) {
 
 func TestSearchRanksNewestActivationFirst(t *testing.T) {
 	ctx := context.Background()
-	_, gateway := newKnowledgeTestStore(t)
+	store, gateway := newKnowledgeTestStore(t)
 	evidence := seedKnowledgeOrganization(t, ctx, gateway, "org-1")
 	service := New(gateway)
 	for _, id := range []core.ID{"older", "newer"} {
@@ -692,7 +796,7 @@ func TestSearchRanksNewestActivationFirst(t *testing.T) {
 		active.Version = 2
 		active.Status = core.KnowledgeActive
 		active.ValidationMethod = core.KnowledgeValidationDeterministic
-		active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, gateway, candidate.KnowledgeID, "rank "+string(id)).EventID}
+		active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, store, gateway, candidate.KnowledgeID, 1).EventID}
 		active.ValidatedBy = "runtime"
 		active.ValidatedByKind = core.PrincipalRuntime
 		verifiedAt := time.Now().UTC()
@@ -748,20 +852,89 @@ func seedKnowledgeOrganization(t *testing.T, ctx context.Context, gateway *event
 	return event
 }
 
-func appendKnowledgeValidation(t *testing.T, ctx context.Context, gateway *events.Gateway, knowledgeID core.ID, label string) events.Event {
+var knowledgeValidationSequence atomic.Uint64
+
+func appendKnowledgeValidation(t *testing.T, ctx context.Context, store *ledger.SQLite, gateway *events.Gateway, knowledgeID core.ID, candidateVersion int) events.Event {
+	return appendKnowledgeValidationLifecycle(t, ctx, store, gateway, knowledgeID, candidateVersion, false)
+}
+
+func appendClosedKnowledgeValidation(t *testing.T, ctx context.Context, store *ledger.SQLite, gateway *events.Gateway, knowledgeID core.ID, candidateVersion int) events.Event {
+	return appendKnowledgeValidationLifecycle(t, ctx, store, gateway, knowledgeID, candidateVersion, true)
+}
+
+func appendKnowledgeValidationLifecycle(t *testing.T, ctx context.Context, store *ledger.SQLite, gateway *events.Gateway, knowledgeID core.ID, candidateVersion int, closeBeforeValidation bool) events.Event {
 	t.Helper()
+	suffix := fmt.Sprintf("%s-%d", knowledgeID, knowledgeValidationSequence.Add(1))
+	correlationID := "work-validation-" + suffix
 	now := time.Now().UTC()
+	intent := core.Intent{ID: core.ID("intent-validation-" + suffix), OrganizationID: "org-1", OriginalInstruction: "echo validated", NormalizedObjective: "echo validated", CreatedAt: now}
+	work := core.Work{ID: core.ID("work-validation-" + suffix), IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	task := core.Task{
+		ID: core.ID("task-validation-" + suffix), WorkID: work.ID, Description: "echo validated", ExecutionKind: core.ExecutionDeterministic,
+		ModelInferencePolicy: core.InferenceForbidden, RuntimeHandlerRef: "builtin.echo", TaskContractVersion: "1", Status: core.TaskPending,
+	}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: correlationID}, ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: correlationID}, ProjectionKind: "work", RecordID: string(work.ID), Version: 1, Value: work},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: correlationID}, ProjectionKind: "task", RecordID: string(task.ID), Version: 1, Value: task},
+	} {
+		if _, err := gateway.PublishProjection(ctx, draft); err != nil {
+			t.Fatalf("append deterministic validation parent: %v", err)
+		}
+	}
+	running := task
+	running.Status = core.TaskRunning
+	if _, _, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: correlationID, Payload: events.ExecutionStartDetail{InboxCutoffSequence: 0}},
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: running,
+	}, nil, nil); err != nil {
+		t.Fatalf("start deterministic knowledge validation: %v", err)
+	}
+	executionID := core.ID(fmt.Sprintf("execution-%s-v2", task.ID))
 	outcome := core.ToolOutcome{
-		ToolInvocationID: core.ID("validation-" + string(knowledgeID)), ToolID: "knowledge-validator", ToolVersion: "1",
+		ToolInvocationID: core.ID("validation-" + suffix), ToolID: "builtin.echo", ToolVersion: "1", ObservedEffect: "validated",
 		Status: core.OutcomeSucceeded, PostconditionStatus: core.PostconditionVerified, Retryability: core.NotRetryable,
 		StartedAt: now, FinishedAt: now,
 	}
-	event, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
-		OrganizationID: "org-1", EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: "validation-" + label,
-		TaskID: "task-validation-" + string(knowledgeID), CorrelationID: "knowledge-" + string(knowledgeID), Payload: outcome,
+	outcomeEvent, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID),
+		TaskID: string(task.ID), CorrelationID: correlationID, Payload: outcome,
 	})
 	if err != nil {
 		t.Fatalf("append validation evidence: %v", err)
+	}
+	if closeBeforeValidation {
+		if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+			OrganizationID: "org-1", EventType: "EXECUTION_FINISHED", SourceActorID: "runtime", SourceExecutionID: string(executionID),
+			TaskID: string(task.ID), CorrelationID: correlationID, Payload: map[string]string{"status": "finished"},
+		}); err != nil {
+			t.Fatalf("close deterministic knowledge validation execution: %v", err)
+		}
+	}
+	validation, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "KNOWLEDGE_VALIDATION_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID),
+		TaskID: string(task.ID), CorrelationID: correlationID,
+		Payload: events.KnowledgeDeterministicValidationPayload{KnowledgeID: knowledgeID, CandidateVersion: candidateVersion, OutcomeEventRef: outcomeEvent.EventID, ArtifactRefs: []string{}},
+	})
+	if err != nil {
+		t.Fatalf("bind deterministic validation to knowledge: %v", err)
+	}
+	return validation
+}
+
+func publishKnowledgeHumanStatement(t *testing.T, ctx context.Context, gateway *events.Gateway, organizationID, knowledgeID, actorID, taskID core.ID, capabilityCheckEventID, correlationID string) events.Event {
+	t.Helper()
+	event, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: string(organizationID), EventType: "HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED", SourceActorID: string(actorID),
+		TaskID: string(taskID), CorrelationID: correlationID,
+		Payload: events.KnowledgeJudgmentPayload{
+			KnowledgeID: knowledgeID, CandidateVersion: 1, Decision: events.KnowledgeJudgmentValidated,
+			Statement: "I independently validate this knowledge candidate.", CapabilityCheckEventID: capabilityCheckEventID,
+			SourcePrincipalID: string(actorID), SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", ArtifactRefs: []string{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("publish knowledge judgment statement: %v", err)
 	}
 	return event
 }

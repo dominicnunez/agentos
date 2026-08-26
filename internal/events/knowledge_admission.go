@@ -25,6 +25,7 @@ type KnowledgeAdmissionValidator struct {
 	events             map[string]Event
 	history            map[core.ID]knowledgeAdmissionVersion
 	revisions          map[core.ID]map[int]core.KnowledgeRecord
+	revisionAdmittedAt map[core.ID]map[int]time.Time
 	admissionSequences map[core.ID]int64
 	leaseAdmissions    map[core.ID][]CapabilityLeaseAdmission
 	freezeAdmissions   map[core.ID][]OrganizationFreezeAdmission
@@ -59,6 +60,7 @@ func NewKnowledgeAdmissionValidator(stream []Event) *KnowledgeAdmissionValidator
 		events:             index,
 		history:            make(map[core.ID]knowledgeAdmissionVersion),
 		revisions:          make(map[core.ID]map[int]core.KnowledgeRecord),
+		revisionAdmittedAt: make(map[core.ID]map[int]time.Time),
 		admissionSequences: make(map[core.ID]int64),
 		leaseAdmissions:    make(map[core.ID][]CapabilityLeaseAdmission),
 		freezeAdmissions:   make(map[core.ID][]OrganizationFreezeAdmission),
@@ -148,18 +150,22 @@ func (v *KnowledgeAdmissionValidator) Validate(value core.KnowledgeRecord, event
 	for _, ref := range value.DerivedKnowledgeRefs {
 		version, err := strconv.Atoi(ref.Version)
 		derived, found := v.revisions[core.ID(ref.ID)][version]
+		derivedAdmittedAt := v.revisionAdmittedAt[core.ID(ref.ID)][version]
 		current, currentFound := v.history[core.ID(ref.ID)]
 		if err != nil || version < 1 || strconv.Itoa(version) != ref.Version || ref.ID == record.RecordID || !found ||
-			derived.OrganizationID != value.OrganizationID || derived.Status != core.KnowledgeActive ||
+			derivedAdmittedAt.IsZero() || derived.OrganizationID != value.OrganizationID || derived.Status != core.KnowledgeActive ||
 			requiresCurrentLineage && (!currentFound || current.version != version || current.value.Status != core.KnowledgeActive) {
 			return fmt.Errorf("knowledge derived reference lacks an exact prior active revision")
+		}
+		if derivedAdmittedAt.After(latestSourceAt) {
+			latestSourceAt = derivedAdmittedAt
 		}
 	}
 	if value.CreatedAt.After(event.CreatedAt) || value.LastVerifiedAt != nil && value.LastVerifiedAt.After(event.CreatedAt) {
 		return fmt.Errorf("knowledge timestamps postdate their admitting event")
 	}
 	if value.CreatedAt.Before(latestSourceAt) {
-		return fmt.Errorf("knowledge creation predates its provenance or occurrence evidence")
+		return fmt.Errorf("knowledge creation predates its provenance, occurrence, or derived source evidence")
 	}
 	if value.LastVerifiedAt != nil && value.LastVerifiedAt.Before(latestValidationAt) {
 		return fmt.Errorf("knowledge verification predates its validation evidence")
@@ -188,8 +194,10 @@ func (v *KnowledgeAdmissionValidator) Validate(value core.KnowledgeRecord, event
 	v.admissionSequences[value.KnowledgeID] = event.Sequence
 	if v.revisions[value.KnowledgeID] == nil {
 		v.revisions[value.KnowledgeID] = make(map[int]core.KnowledgeRecord)
+		v.revisionAdmittedAt[value.KnowledgeID] = make(map[int]time.Time)
 	}
 	v.revisions[value.KnowledgeID][record.Version] = value
+	v.revisionAdmittedAt[value.KnowledgeID][record.Version] = event.CreatedAt
 	return nil
 }
 
@@ -248,13 +256,33 @@ func validKnowledgeIntakeCreatorEnvelope(event Event, payload *IntakeMessageReco
 func ValidAgentKnowledgeCreatorEvidence(proposal Event, value core.KnowledgeRecord, stream []Event) bool {
 	if value.CreatedByKind != core.PrincipalAgent || proposal.EventType != "KNOWLEDGE_PROPOSED" ||
 		proposal.OrganizationID != string(value.OrganizationID) || proposal.SourceActorID != string(value.CreatedBy) ||
-		proposal.SourceExecutionID == "" || proposal.TaskID == "" || proposal.RecipientScope != "" || proposal.RecipientID != "" ||
-		proposal.SchemaVersion != SchemaVersion {
+		!validAgentKnowledgeProposalPayload(proposal, value) || !ValidAgentExecutionEvidence(proposal, value.CreatedBy, stream) {
+		return false
+	}
+	return true
+}
+
+func validAgentKnowledgeProposalPayload(proposal Event, value core.KnowledgeRecord) bool {
+	var payload KnowledgeProposedPayload
+	return decodeKnowledgeProposedPayload(proposal.Payload, &payload) == nil && payload.ValidFor(proposal.ArtifactRefs) &&
+		payload.KnowledgeID != nil && *payload.KnowledgeID == value.KnowledgeID && payload.KnowledgeType == value.Type &&
+		payload.Title != nil && *payload.Title == value.Title && payload.Content == value.Content &&
+		payload.BasisType != nil && *payload.BasisType == value.Basis && payload.Applicability != nil && *payload.Applicability == value.Applicability &&
+		slices.Equal(payload.OccurrenceEventRefs, value.OccurrenceEventRefs) && slices.Equal(payload.EvidenceArtifactRefs, value.EvidenceArtifactRefs)
+}
+
+// ValidAgentExecutionEvidence proves that an Agent-authored event came from
+// the exact durable Agent execution admitted for its Task while that
+// execution was live. The event payload remains untrusted.
+func ValidAgentExecutionEvidence(emitted Event, actorID core.ID, stream []Event) bool {
+	if actorID == "" || emitted.OrganizationID == "" || emitted.SourceActorID != string(actorID) ||
+		emitted.SourceExecutionID == "" || emitted.TaskID == "" || emitted.RecipientScope != "" || emitted.RecipientID != "" ||
+		len(emitted.AuthorizationRefs) != 0 || emitted.SchemaVersion != SchemaVersion || emitted.EventID == "" || emitted.Sequence < 1 || emitted.CreatedAt.IsZero() {
 		return false
 	}
 	for _, start := range stream {
-		if start.EventType != "EXECUTION_STARTED" || start.Sequence >= proposal.Sequence || start.OrganizationID != proposal.OrganizationID ||
-			start.TaskID != proposal.TaskID || start.CorrelationID != proposal.CorrelationID {
+		if start.EventType != "EXECUTION_STARTED" || start.Sequence >= emitted.Sequence || start.OrganizationID != emitted.OrganizationID || emitted.CreatedAt.Before(start.CreatedAt) ||
+			start.TaskID != emitted.TaskID || start.CorrelationID != emitted.CorrelationID {
 			continue
 		}
 		payload, present, err := AdmittedProjection(start)
@@ -262,16 +290,16 @@ func ValidAgentKnowledgeCreatorEvidence(proposal Event, value core.KnowledgeReco
 			continue
 		}
 		var task core.Task
-		if decodeExactEventJSON(payload.Projection.Value, &task) != nil || task.ID != core.ID(proposal.TaskID) ||
-			task.AssigneeID != value.CreatedBy || task.AssigneeType != "AGENT" || task.ExecutionKind != core.ExecutionAgent {
+		if decodeExactEventJSON(payload.Projection.Value, &task) != nil || task.ID != core.ID(emitted.TaskID) ||
+			task.AssigneeID != actorID || task.AssigneeType != "AGENT" || task.ExecutionKind != core.ExecutionAgent {
 			continue
 		}
 		detail, err := executionStartDetail(start)
-		if err != nil || detail.DispatchBinding.DispatchID != core.ID(proposal.SourceExecutionID) || detail.DispatchBinding.AgentID != value.CreatedBy {
+		if err != nil || detail.DispatchBinding.DispatchID != core.ID(emitted.SourceExecutionID) || detail.DispatchBinding.AgentID != actorID {
 			continue
 		}
 		if ValidateAgentDispatchStart(start, task, payload.Projection.Version, stream) == nil &&
-			agentExecutionOpenAtProposal(start, payload.Projection.Version, proposal, stream) {
+			agentExecutionOpenAtProposal(start, payload.Projection.Version, emitted, stream) {
 			return true
 		}
 	}
@@ -316,7 +344,19 @@ func (v *KnowledgeAdmissionValidator) hasAuthorizedJudgment(value core.Knowledge
 			!slices.Contains(judgment.AuthorizationRefs, string(trace.LeaseID)) {
 			continue
 		}
-		if v.leaseAllowsAt(trace, value, judgment, activation) {
+		if v.leaseAllowsAt(trace, value, judgment, activation) && v.hasJudgmentStatementAfter(value, proposalSequence, judgment) {
+			return true
+		}
+	}
+	return false
+}
+
+func (v *KnowledgeAdmissionValidator) hasJudgmentStatementAfter(value core.KnowledgeRecord, proposalSequence int64, authorization Event) bool {
+	for _, ref := range value.ValidationRefs {
+		statement, found := v.events[ref]
+		if found && statement.EventType != "CAPABILITY_CHECKED" && statement.Sequence > authorization.Sequence &&
+			statement.TaskID == authorization.TaskID && !v.organizationFrozenAt(value.OrganizationID, statement.Sequence) &&
+			ValidKnowledgeJudgmentStatement(statement, value, authorization.EventID, v.stream) {
 			return true
 		}
 	}
@@ -357,12 +397,13 @@ func (v *KnowledgeAdmissionValidator) organizationFrozenAt(organizationID core.I
 func (v *KnowledgeAdmissionValidator) hasPostProposalValidation(value core.KnowledgeRecord, proposalSequence int64) bool {
 	occurrences := make(map[string]struct{}, len(value.OccurrenceEventRefs))
 	executions := make(map[string]struct{}, len(value.ValidationRefs))
+	hasStatement := false
 	for _, ref := range value.OccurrenceEventRefs {
 		occurrences[ref] = struct{}{}
 	}
 	for _, ref := range value.ValidationRefs {
 		evidence, found := v.events[ref]
-		if !found || !ValidKnowledgeValidationEvidence(evidence, value, proposalSequence) {
+		if !found || !ValidKnowledgeValidationEvidence(evidence, value, proposalSequence, v.stream) {
 			return false
 		}
 		if value.Basis == core.KnowledgeBasisRepeatedPattern {
@@ -376,33 +417,37 @@ func (v *KnowledgeAdmissionValidator) hasPostProposalValidation(value core.Knowl
 			}
 			executions[evidence.SourceExecutionID] = struct{}{}
 		}
+		if knowledgeJudgmentMethod(value.ValidationMethod) && evidence.EventType != "CAPABILITY_CHECKED" {
+			hasStatement = true
+		}
 	}
-	return len(value.ValidationRefs) > 0
+	return len(value.ValidationRefs) > 0 && (!knowledgeJudgmentMethod(value.ValidationMethod) || hasStatement)
 }
 
 // ValidKnowledgeValidationEvidence binds each supported validation method to a
 // concrete Event Contract and the exact candidate identity. Unsupported
 // methods fail closed until they have an equally specific contract.
-func ValidKnowledgeValidationEvidence(evidence Event, value core.KnowledgeRecord, proposalSequence int64) bool {
+func ValidKnowledgeValidationEvidence(evidence Event, value core.KnowledgeRecord, proposalSequence int64, stream []Event) bool {
 	if evidence.EventID == "" || evidence.Sequence <= proposalSequence || evidence.OrganizationID != string(value.OrganizationID) || evidence.SchemaVersion != SchemaVersion {
 		return false
 	}
 	switch value.ValidationMethod {
 	case core.KnowledgeValidationDeterministic:
-		var outcome core.ToolOutcome
-		return evidence.CorrelationID == "knowledge-"+string(value.KnowledgeID) && evidence.EventType == "TOOL_OUTCOME_RECORDED" && evidence.SourceActorID == "runtime" && evidence.SourceExecutionID != "" && evidence.TaskID != "" &&
-			evidence.RecipientScope == "" && evidence.RecipientID == "" && len(evidence.AuthorizationRefs) == 0 &&
-			decodeExactEventJSON(evidence.Payload, &outcome) == nil && outcome.Valid() && outcome.Status == core.OutcomeSucceeded &&
-			outcome.PostconditionStatus == core.PostconditionVerified && !outcome.StartedAt.Before(value.CreatedAt) && !outcome.FinishedAt.After(evidence.CreatedAt) &&
-			slices.Equal(evidence.ArtifactRefs, outcome.ArtifactRefs)
+		return validDeterministicKnowledgeValidation(evidence, value, stream)
 	case core.KnowledgeValidationRepeatedObservation:
-		var observation KnowledgeObservationPayload
-		return evidence.CorrelationID == "knowledge-"+string(value.KnowledgeID) && evidence.EventType == "EVIDENCE_PUBLISHED" && evidence.SourceActorID != "" && evidence.SourceExecutionID != "" && evidence.TaskID != "" &&
+		var observation EvidencePublishedPayload
+		return evidence.EventType == "EVIDENCE_PUBLISHED" && evidence.SourceActorID != "" && evidence.SourceExecutionID != "" && evidence.TaskID != "" &&
 			evidence.RecipientScope == "" && evidence.RecipientID == "" && len(evidence.AuthorizationRefs) == 0 &&
-			decodeExactEventJSON(evidence.Payload, &observation) == nil && observation.KnowledgeID == value.KnowledgeID &&
-			observation.CandidateVersion == value.Version-1 && strings.TrimSpace(observation.Observation) != "" && utf8.ValidString(observation.Observation)
-	case core.KnowledgeValidationHuman, core.KnowledgeValidationIndependentAgent:
-		return evidence.EventType == "CAPABILITY_CHECKED"
+			decodeExactEventJSON(evidence.Payload, &observation) == nil && observation.ValidFor(evidence.ArtifactRefs) &&
+			knowledgeEvidenceArtifactsBound(evidence.ArtifactRefs, value.EvidenceArtifactRefs) &&
+			ValidAgentExecutionEvidence(evidence, core.ID(evidence.SourceActorID), stream)
+	case core.KnowledgeValidationHuman:
+		return evidence.EventType == "CAPABILITY_CHECKED" || ValidKnowledgeJudgmentStatement(evidence, value, evidenceJudgmentAuthorizationRef(evidence), stream)
+	case core.KnowledgeValidationIndependentAgent:
+		if evidence.EventType == "CAPABILITY_CHECKED" {
+			return true
+		}
+		return ValidKnowledgeJudgmentStatement(evidence, value, evidenceJudgmentAuthorizationRef(evidence), stream)
 	case core.KnowledgeValidationExperimental, core.KnowledgeValidationMixed, core.KnowledgeValidationUnvalidated:
 		return false
 	default:
@@ -410,8 +455,116 @@ func ValidKnowledgeValidationEvidence(evidence Event, value core.KnowledgeRecord
 	}
 }
 
-type KnowledgeObservationPayload struct {
-	KnowledgeID      core.ID `json:"knowledge_id"`
-	CandidateVersion int     `json:"candidate_version"`
-	Observation      string  `json:"observation"`
+func knowledgeJudgmentMethod(method core.KnowledgeValidationMethod) bool {
+	return method == core.KnowledgeValidationHuman || method == core.KnowledgeValidationIndependentAgent
+}
+
+// ValidKnowledgeJudgmentStatement binds a typed statement to the exact
+// candidate, authorizing capability check, principal, and Agent execution.
+func ValidKnowledgeJudgmentStatement(evidence Event, value core.KnowledgeRecord, authorizationEventID string, stream []Event) bool {
+	if evidence.EventID == "" || evidence.Sequence < 1 || evidence.CreatedAt.IsZero() || evidence.SchemaVersion != SchemaVersion ||
+		evidence.OrganizationID != string(value.OrganizationID) || evidence.SourceActorID != string(value.ValidatedBy) ||
+		evidence.TaskID == "" || evidence.CorrelationID == "" || evidence.RecipientScope != "" || evidence.RecipientID != "" ||
+		len(evidence.AuthorizationRefs) != 0 || authorizationEventID == "" {
+		return false
+	}
+	var judgment KnowledgeJudgmentPayload
+	if decodeExactEventJSON(evidence.Payload, &judgment) != nil ||
+		!judgment.ValidFor(evidence, value.KnowledgeID, knowledgeCandidateVersion(value), authorizationEventID, evidence.ArtifactRefs) ||
+		!knowledgeEvidenceArtifactsBound(evidence.ArtifactRefs, value.EvidenceArtifactRefs) {
+		return false
+	}
+	switch value.ValidatedByKind {
+	case core.PrincipalHuman:
+		return evidence.EventType == "HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED" && evidence.SourceExecutionID == ""
+	case core.PrincipalExternalAgent:
+		return evidence.EventType == "A2A_KNOWLEDGE_JUDGMENT_RECEIVED" && evidence.SourceExecutionID == ""
+	case core.PrincipalAgent:
+		return evidence.EventType == "KNOWLEDGE_JUDGMENT_PUBLISHED" && evidence.SourceExecutionID != "" &&
+			ValidAgentExecutionEvidence(evidence, value.ValidatedBy, stream)
+	case core.PrincipalRuntime:
+		return false
+	default:
+		return false
+	}
+}
+
+func evidenceJudgmentAuthorizationRef(evidence Event) string {
+	var judgment KnowledgeJudgmentPayload
+	if decodeExactEventJSON(evidence.Payload, &judgment) != nil {
+		return ""
+	}
+	return judgment.CapabilityCheckEventID
+}
+
+func knowledgeCandidateVersion(value core.KnowledgeRecord) int {
+	if value.SupersedesVersion != nil {
+		return *value.SupersedesVersion
+	}
+	return value.Version - 1
+}
+
+func validDeterministicKnowledgeValidation(validation Event, value core.KnowledgeRecord, stream []Event) bool {
+	if validation.EventType != "KNOWLEDGE_VALIDATION_RECORDED" || validation.SourceActorID != "runtime" || validation.SourceExecutionID == "" || validation.TaskID == "" ||
+		validation.CorrelationID == "" || validation.RecipientScope != "" || validation.RecipientID != "" || len(validation.AuthorizationRefs) != 0 {
+		return false
+	}
+	var binding KnowledgeDeterministicValidationPayload
+	if decodeExactEventJSON(validation.Payload, &binding) != nil ||
+		!binding.ValidFor(value.KnowledgeID, knowledgeCandidateVersion(value), validation.ArtifactRefs) ||
+		!knowledgeEvidenceArtifactsBound(validation.ArtifactRefs, value.EvidenceArtifactRefs) {
+		return false
+	}
+	outcomeEvent, found := eventWithID(stream, binding.OutcomeEventRef)
+	var outcome core.ToolOutcome
+	if !found || outcomeEvent.Sequence <= 0 || outcomeEvent.Sequence >= validation.Sequence || outcomeEvent.EventType != "TOOL_OUTCOME_RECORDED" ||
+		outcomeEvent.OrganizationID != validation.OrganizationID || outcomeEvent.SourceActorID != "runtime" ||
+		outcomeEvent.SourceExecutionID != validation.SourceExecutionID || outcomeEvent.TaskID != validation.TaskID || outcomeEvent.CorrelationID != validation.CorrelationID ||
+		outcomeEvent.RecipientScope != "" || outcomeEvent.RecipientID != "" || len(outcomeEvent.AuthorizationRefs) != 0 ||
+		decodeExactEventJSON(outcomeEvent.Payload, &outcome) != nil || !outcome.Valid() || outcome.Status != core.OutcomeSucceeded ||
+		!slices.Equal(outcomeEvent.ArtifactRefs, outcome.ArtifactRefs) || !slices.Equal(validation.ArtifactRefs, outcome.ArtifactRefs) ||
+		outcome.StartedAt.Before(value.CreatedAt) || outcome.FinishedAt.After(outcomeEvent.CreatedAt) {
+		return false
+	}
+	var start Event
+	var task core.Task
+	var taskVersion int
+	for _, candidate := range stream {
+		if candidate.EventType != "EXECUTION_STARTED" || candidate.Sequence >= outcomeEvent.Sequence || candidate.OrganizationID != validation.OrganizationID ||
+			candidate.TaskID != validation.TaskID || candidate.CorrelationID != validation.CorrelationID {
+			continue
+		}
+		projection, present, err := AdmittedProjection(candidate)
+		if err != nil || !present || projection.Projection.ProjectionKind != "task" || projection.Projection.RecordID != validation.TaskID {
+			continue
+		}
+		var projected core.Task
+		if decodeExactEventJSON(projection.Projection.Value, &projected) != nil || projected.ID != core.ID(validation.TaskID) ||
+			projected.Status != core.TaskRunning || projected.ExecutionKind != core.ExecutionDeterministic ||
+			fmt.Sprintf("execution-%s-v%d", projected.ID, projection.Projection.Version) != validation.SourceExecutionID {
+			continue
+		}
+		if _, err := nonAgentExecutionStartDetail(candidate, core.ExecutionDeterministic); err != nil || start.EventID != "" {
+			return false
+		}
+		start, task, taskVersion = candidate, projected, projection.Projection.Version
+	}
+	if start.EventID == "" || !agentExecutionOpenAtProposal(start, taskVersion, validation, stream) {
+		return false
+	}
+	verified, available := core.VerifyPersistedPostcondition(task, outcome, "")
+	return available && verified.PostconditionStatus == core.PostconditionVerified
+}
+
+func knowledgeEvidenceArtifactsBound(evidenceRefs, knowledgeRefs []string) bool {
+	allowed := make(map[string]struct{}, len(knowledgeRefs))
+	for _, ref := range knowledgeRefs {
+		allowed[ref] = struct{}{}
+	}
+	for _, ref := range evidenceRefs {
+		if _, found := allowed[ref]; !found {
+			return false
+		}
+	}
+	return true
 }

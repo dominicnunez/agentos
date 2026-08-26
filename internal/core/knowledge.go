@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"slices"
@@ -8,6 +9,17 @@ import (
 	"time"
 	"unicode/utf8"
 )
+
+// MarshalJSON preserves the closed KnowledgeRecord schema's required array
+// shape. An empty evidence-artifact set is [] rather than JSON null.
+func (record KnowledgeRecord) MarshalJSON() ([]byte, error) {
+	type wireKnowledgeRecord KnowledgeRecord
+	wire := wireKnowledgeRecord(record)
+	if wire.EvidenceArtifactRefs == nil {
+		wire.EvidenceArtifactRefs = []string{}
+	}
+	return json.Marshal(wire)
+}
 
 const (
 	MaximumKnowledgeContentBytes       = 64 << 10

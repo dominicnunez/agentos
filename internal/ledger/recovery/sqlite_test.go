@@ -133,14 +133,45 @@ func TestVerifyReplaysEventAdmittedKnowledge(t *testing.T) {
 		t.Fatal(err)
 	}
 	validationAt := time.Now().UTC()
+	intent := core.Intent{ID: "intent-knowledge-validation", OrganizationID: "org-1", OriginalInstruction: "echo validated", NormalizedObjective: "echo validated", CreatedAt: validationAt}
+	work := core.Work{ID: "work-knowledge-validation", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: validationAt}
+	task := core.Task{ID: "task-knowledge-validation", WorkID: work.ID, Description: "echo validated", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, RuntimeHandlerRef: "builtin.echo", TaskContractVersion: "1", Status: core.TaskPending}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "work-knowledge-validation"}, ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "work-knowledge-validation"}, ProjectionKind: "work", RecordID: string(work.ID), Version: 1, Value: work},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-knowledge-validation"}, ProjectionKind: "task", RecordID: string(task.ID), Version: 1, Value: task},
+	} {
+		if _, err := gateway.PublishProjection(ctx, draft); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	running := task
+	running.Status = core.TaskRunning
+	if _, _, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-knowledge-validation", Payload: events.ExecutionStartDetail{InboxCutoffSequence: 0}},
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: running,
+	}, nil, nil); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
 	validationOutcome := core.ToolOutcome{
-		ToolInvocationID: "knowledge-validation-1", ToolID: "knowledge-validator", ToolVersion: "1",
+		ToolInvocationID: "knowledge-validation-1", ToolID: "builtin.echo", ToolVersion: "1", ObservedEffect: "validated",
 		Status: core.OutcomeSucceeded, PostconditionStatus: core.PostconditionVerified, Retryability: core.NotRetryable,
 		StartedAt: validationAt, FinishedAt: validationAt,
 	}
+	outcomeEvent, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: "execution-task-knowledge-validation-v2",
+		TaskID: "task-knowledge-validation", CorrelationID: "work-knowledge-validation", Payload: validationOutcome,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
 	validationEvent, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
-		OrganizationID: "org-1", EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: "validation-1",
-		TaskID: "task-knowledge-validation", CorrelationID: "knowledge-knowledge-1", Payload: validationOutcome,
+		OrganizationID: "org-1", EventType: "KNOWLEDGE_VALIDATION_RECORDED", SourceActorID: "runtime", SourceExecutionID: "execution-task-knowledge-validation-v2",
+		TaskID: "task-knowledge-validation", CorrelationID: "work-knowledge-validation",
+		Payload: events.KnowledgeDeterministicValidationPayload{KnowledgeID: candidate.KnowledgeID, CandidateVersion: 1, OutcomeEventRef: outcomeEvent.EventID, ArtifactRefs: []string{}},
 	})
 	if err != nil {
 		_ = store.Close()
@@ -214,6 +245,14 @@ func TestVerifyRejectsKnowledgeWhenValidatorLeaseRecordIsMissing(t *testing.T) {
 		_ = store.Close()
 		t.Fatal(err)
 	}
+	statement, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED", SourceActorID: "user-1", TaskID: "task-validation", CorrelationID: "knowledge-human-validation",
+		Payload: events.KnowledgeJudgmentPayload{KnowledgeID: "knowledge-human", CandidateVersion: 1, Decision: events.KnowledgeJudgmentValidated, Statement: "I independently validate this knowledge candidate.", CapabilityCheckEventID: judgment.EventID, SourcePrincipalID: "user-1", SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", ArtifactRefs: []string{}},
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
 	freeze := recoveryFreezeState("org-1", true, "incident")
 	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", "task-validation", nil, nil, "organization_freeze", "org-1", 1, freeze); err != nil {
 		_ = store.Close()
@@ -229,7 +268,7 @@ func TestVerifyRejectsKnowledgeWhenValidatorLeaseRecordIsMissing(t *testing.T) {
 	active.Version = 2
 	active.Status = core.KnowledgeActive
 	active.ValidationMethod = core.KnowledgeValidationHuman
-	active.ValidationRefs = []string{judgment.EventID}
+	active.ValidationRefs = []string{judgment.EventID, statement.EventID}
 	active.ValidatedBy = "user-1"
 	active.ValidatedByKind = core.PrincipalHuman
 	verifiedAt := time.Now().UTC()

@@ -1643,17 +1643,25 @@ func TestMessageInboxSurvivesReopenAndObservation(t *testing.T) {
 		t.Fatalf("atomic execution inbox selections=%+v", selections)
 	}
 	agentGateway := events.NewGateway(l)
+	knowledgeID := core.ID("knowledge-agent-2")
+	title := "Execution-bound observation"
+	basis := core.KnowledgeBasisSingleExperience
+	applicability := ""
+	content := "This proposal came from the admitted Agent execution."
 	agentProposal, err := agentGateway.PublishAgentDraft(ctx, "org-1", string(agent.ID), "execution-task-2-v2", "work-1", events.Draft{
-		EventType: "KNOWLEDGE_PROPOSED", TaskID: string(task.ID), Payload: map[string]string{"summary": "execution-bound observation"},
+		EventType: "KNOWLEDGE_PROPOSED", TaskID: string(task.ID), Payload: events.KnowledgeProposedPayload{
+			KnowledgeID: &knowledgeID, KnowledgeType: core.KnowledgeLesson, Title: &title, Content: content,
+			BasisType: &basis, Applicability: &applicability,
+		},
 	})
 	if err != nil {
 		_ = l.Close()
 		t.Fatal(err)
 	}
 	knowledge := core.KnowledgeRecord{
-		KnowledgeID: "knowledge-agent-2", OrganizationID: "org-1", Version: 1,
+		KnowledgeID: knowledgeID, OrganizationID: "org-1", Version: 1,
 		Type: core.KnowledgeLesson, Scope: core.KnowledgeScopeOrganization, ScopeID: "org-1",
-		Status: core.KnowledgeCandidate, Title: "Execution-bound observation", Content: "This proposal came from the admitted Agent execution.",
+		Status: core.KnowledgeCandidate, Title: title, Content: content,
 		Basis: core.KnowledgeBasisSingleExperience, ProvenanceEventRefs: []string{agentProposal.EventID},
 		CreatedBy: agent.ID, CreatedByKind: core.PrincipalAgent, CreatedAt: time.Now().UTC(), ValidationMethod: core.KnowledgeValidationUnvalidated,
 	}
@@ -1663,6 +1671,16 @@ func TestMessageInboxSurvivesReopenAndObservation(t *testing.T) {
 	}); err != nil {
 		_ = l.Close()
 		t.Fatalf("admit execution-bound Agent knowledge: %v", err)
+	}
+	mismatched := knowledge
+	mismatched.KnowledgeID = "knowledge-agent-mismatch"
+	mismatched.Content = "The proposal did not contain this substituted content."
+	if _, err := l.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_PROPOSED", SourceActorID: "runtime", CorrelationID: "knowledge-knowledge-agent-mismatch"},
+		ProjectionKind: "knowledge", RecordID: string(mismatched.KnowledgeID), Version: 1, Value: mismatched,
+	}); err == nil {
+		_ = l.Close()
+		t.Fatal("Agent proposal was attributed to a different candidate payload")
 	}
 	lateMessage, err := l.Append(ctx, events.TrustedDraft{
 		OrganizationID: "org-1", EventType: "MESSAGE", SourceActorID: "agent-1",
@@ -1751,6 +1769,100 @@ func TestMessageInboxSurvivesReopenAndObservation(t *testing.T) {
 	stream, err := l.Events(ctx, "")
 	if err != nil || len(stream) != 13 || stream[len(stream)-1].EventID != observation.EventID {
 		t.Fatalf("durable message/observation stream=%+v err=%v", stream, err)
+	}
+}
+
+func TestIndependentAgentKnowledgeJudgmentRequiresAuthorizedExecutionBoundStatement(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	const correlationID = "work-agent-validation"
+	appendTaskProjectionParents(t, ctx, store, "org-1", correlationID, "work-1")
+	agent, config := appendTaskAssignmentAgent(t, ctx, store, "org-1", "knowledge-validator", false)
+	task := appendPendingAgentExecutionTask(t, ctx, store, correlationID, "task-knowledge-validator", agent, config)
+	if _, err := startPendingAgentExecution(ctx, store, correlationID, task); err != nil {
+		t.Fatal(err)
+	}
+
+	evidence, err := store.Append(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "knowledge-agent-judgment",
+		ArtifactRefs: []string{"artifact-1"}, Payload: map[string]string{"summary": "candidate evidence"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := core.KnowledgeRecord{
+		KnowledgeID: "knowledge-agent-judgment", OrganizationID: "org-1", Version: 1,
+		Type: core.KnowledgeLesson, Scope: core.KnowledgeScopeOrganization, ScopeID: "org-1",
+		Status: core.KnowledgeCandidate, Title: "Execution-bound judgment", Content: "An Agent judgment must come from its admitted execution.",
+		Basis: core.KnowledgeBasisExternalEvidence, ProvenanceEventRefs: []string{evidence.EventID}, EvidenceArtifactRefs: []string{"artifact-1"},
+		CreatedBy: "runtime", CreatedByKind: core.PrincipalRuntime, CreatedAt: time.Now().UTC(), ValidationMethod: core.KnowledgeValidationUnvalidated,
+	}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_PROPOSED", SourceActorID: "runtime", CorrelationID: "knowledge-knowledge-agent-judgment", ArtifactRefs: []string{"artifact-1"}},
+		ProjectionKind: "knowledge", RecordID: string(candidate.KnowledgeID), Version: 1, Value: candidate,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	lease := core.CapabilityLease{
+		ID: "lease-agent-knowledge-validation", ActorID: agent.ID, ActorKind: core.PrincipalAgent,
+		Action: "knowledge.validate", Resource: string(candidate.KnowledgeID), Scope: "org-1", OriginTaskID: task.ID,
+	}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "runtime", string(task.ID), nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+		t.Fatal(err)
+	}
+	trace := core.AuthorizationTrace{
+		Allowed: true, LeaseID: lease.ID, ActorID: lease.ActorID, ActorKind: lease.ActorKind, TaskID: lease.OriginTaskID,
+		Action: lease.Action, Resource: lease.Resource, Scope: lease.Scope, Reason: "exact capability lease matched",
+	}
+	capability, err := events.NewGateway(store).PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "CAPABILITY_CHECKED", SourceActorID: string(agent.ID), TaskID: string(task.ID),
+		AuthorizationRefs: []string{string(lease.ID)}, Payload: trace,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	active := candidate
+	active.Version = 2
+	active.Status = core.KnowledgeActive
+	active.ValidationMethod = core.KnowledgeValidationIndependentAgent
+	active.ValidationRefs = []string{capability.EventID}
+	active.ValidatedBy = agent.ID
+	active.ValidatedByKind = core.PrincipalAgent
+	verifiedAt := time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
+	supersedesVersion := 1
+	active.SupersedesVersion = &supersedesVersion
+	activation := events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_ACTIVATED", SourceActorID: "runtime", CorrelationID: "knowledge-knowledge-agent-judgment", ArtifactRefs: []string{"artifact-1"}},
+		ProjectionKind: "knowledge", RecordID: string(candidate.KnowledgeID), Version: 2, Value: active,
+	}
+	if _, err := store.AppendProjection(ctx, activation); err == nil {
+		t.Fatal("capability check alone was accepted as an independent Agent judgment")
+	}
+
+	statement, err := events.NewGateway(store).PublishAgentDraft(ctx, "org-1", string(agent.ID), "execution-task-knowledge-validator-v2", correlationID, events.Draft{
+		EventType: "KNOWLEDGE_JUDGMENT_PUBLISHED", TaskID: string(task.ID), ArtifactRefs: []string{"artifact-1"},
+		Payload: events.KnowledgeJudgmentPayload{
+			KnowledgeID: candidate.KnowledgeID, CandidateVersion: 1, Decision: events.KnowledgeJudgmentValidated,
+			Statement: "I independently validate this knowledge candidate.", CapabilityCheckEventID: capability.EventID,
+			SourcePrincipalID: string(agent.ID), SourcePrincipalKind: string(core.PrincipalAgent), SourceChannel: "INTERNAL_AGENT", ArtifactRefs: []string{"artifact-1"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	active.ValidationRefs = []string{capability.EventID, statement.EventID}
+	verifiedAt = time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
+	activation.Value = active
+	if _, err := store.AppendProjection(ctx, activation); err != nil {
+		t.Fatalf("authorized execution-bound Agent judgment was rejected: %v", err)
 	}
 }
 
@@ -2953,6 +3065,68 @@ func TestAuthorityLifecycleEventsRequireAtomicRecords(t *testing.T) {
 	if err != nil || len(leases) != 1 || len(freezes) != 0 {
 		t.Fatalf("record-backed authority snapshot was rejected: leases=%+v freezes=%+v err=%v", leases, freezes, err)
 	}
+}
+
+func TestAppendRecordRejectsMalformedAuthorityBeforeCommit(t *testing.T) {
+	ctx := context.Background()
+	l, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	lease := core.CapabilityLease{
+		ID: "lease-1", ActorID: "reviewer", ActorKind: core.PrincipalHuman, Action: "knowledge.validate",
+		Resource: "knowledge-1", Scope: "org-1", OriginTaskID: "task-1",
+	}
+	assertCounts := func(want int) {
+		t.Helper()
+		var eventsCount, recordsCount int
+		if err := l.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events`).Scan(&eventsCount); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM records`).Scan(&recordsCount); err != nil {
+			t.Fatal(err)
+		}
+		if eventsCount != want || recordsCount != want {
+			t.Fatalf("authority rejection left residue: events=%d records=%d want=%d", eventsCount, recordsCount, want)
+		}
+	}
+
+	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "runtime", "task-1", nil, nil, "approval", "lease-1", 1, lease); err == nil {
+		t.Fatal("authority event was admitted under an unrelated generic record kind")
+	}
+	assertCounts(0)
+	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "runtime", "task-1", nil, nil, "capability_lease", "lease-other", 1, lease); err == nil {
+		t.Fatal("capability record ID mismatch was admitted")
+	}
+	assertCounts(0)
+	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_REVOKED", "runtime", "task-1", nil, nil, "capability_lease", "lease-1", 2, lease); err == nil {
+		t.Fatal("capability history began with a revocation")
+	}
+	assertCounts(0)
+	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "runtime", "task-1", nil, nil, "capability_lease", "lease-1", 1, lease); err != nil {
+		t.Fatalf("valid capability grant was rejected: %v", err)
+	}
+	assertCounts(1)
+	revokedAt := time.Now().UTC()
+	lease.RevokedAt = &revokedAt
+	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_REVOKED", "runtime", "task-1", nil, nil, "capability_lease", "lease-1", 3, lease); err == nil {
+		t.Fatal("noncontiguous capability revision was admitted")
+	}
+	assertCounts(1)
+	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "runtime", "task-1", nil, nil, "capability_lease", "lease-1", 2, lease); err == nil {
+		t.Fatal("revoked capability state was admitted as a grant")
+	}
+	assertCounts(1)
+	freeze := struct {
+		OrganizationID core.ID   `json:"organization_id"`
+		Frozen         bool      `json:"frozen"`
+		UpdatedAt      time.Time `json:"updated_at"`
+	}{OrganizationID: "org-other", Frozen: true, UpdatedAt: time.Now().UTC()}
+	if err := l.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", "task-1", nil, nil, "organization_freeze", "org-1", 1, freeze); err == nil {
+		t.Fatal("cross-organization freeze record was admitted")
+	}
+	assertCounts(1)
 }
 
 func TestAgentKnowledgeCreatorLifetimeUsesLiveLedgerHistory(t *testing.T) {

@@ -4,9 +4,60 @@ import (
 	"bytes"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/dominicnunez/agentos/internal/core"
 )
+
+// ValidateAuthorityRecordDraft prevents the generic record writer from
+// committing an authority event that cannot be reconstructed as the exact
+// durable record written in the same transaction.
+func ValidateAuthorityRecordDraft(draft TrustedDraft, kind, recordID string, version int, body []byte) error {
+	if RequiresRecordAdmission(draft.EventType) && kind != "capability_lease" && kind != "organization_freeze" {
+		return fmt.Errorf("authority event type does not match its record kind")
+	}
+	switch kind {
+	case "capability_lease":
+		var lease core.CapabilityLease
+		if decodeExactEventJSON(body, &lease) != nil || lease.ID == "" || string(lease.ID) != recordID || lease.ActorID == "" ||
+			lease.Action == "" || lease.Resource == "" || lease.Scope == "" || lease.OriginTaskID == "" ||
+			draft.OrganizationID == "" || draft.TaskID != string(lease.OriginTaskID) || draft.SourceExecutionID != "" ||
+			draft.RecipientScope != "" || draft.RecipientID != "" || len(draft.ArtifactRefs) != 0 {
+			return fmt.Errorf("capability lease record admission is invalid")
+		}
+		expectedType := "CAPABILITY_GRANTED"
+		if version == 1 {
+			if lease.RevokedAt != nil {
+				return fmt.Errorf("capability lease cannot start revoked")
+			}
+		} else {
+			expectedType = "CAPABILITY_REVOKED"
+			if lease.RevokedAt == nil {
+				return fmt.Errorf("capability revocation requires its timestamp")
+			}
+		}
+		if draft.EventType != expectedType {
+			return fmt.Errorf("capability lease event does not match its version")
+		}
+	case "organization_freeze":
+		var state struct {
+			OrganizationID core.ID   `json:"organization_id"`
+			Frozen         bool      `json:"frozen"`
+			Reason         string    `json:"reason,omitempty"`
+			UpdatedAt      time.Time `json:"updated_at"`
+		}
+		if decodeExactEventJSON(body, &state) != nil || state.OrganizationID == "" || string(state.OrganizationID) != recordID ||
+			state.UpdatedAt.IsZero() || draft.EventType != "FREEZE_SET" || draft.OrganizationID != recordID || draft.SourceExecutionID != "" ||
+			draft.RecipientScope != "" || draft.RecipientID != "" || len(draft.ArtifactRefs) != 0 {
+			return fmt.Errorf("organization freeze record admission is invalid")
+		}
+	default:
+		if RequiresRecordAdmission(draft.EventType) {
+			return fmt.Errorf("authority event requires its exact authority record kind")
+		}
+	}
+	return nil
+}
 
 // KnowledgeAuthorityRecord is a non-projection authority record read from the
 // same durable snapshot as its Event Contracts.

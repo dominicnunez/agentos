@@ -10,6 +10,12 @@ This is deliberately not a general memory platform. It uses no embeddings,
 vector database, semantic retrieval, automatic consolidation, or model-driven
 promotion.
 
+The current runtime wire contract is
+[`schemas/knowledge-record.schema.json`](schemas/knowledge-record.schema.json).
+CI compares that closed schema's property and required-field sets with the Go
+`KnowledgeRecord` type. The preserved handoff schema records the earlier design
+snapshot and is not the active serialization contract.
+
 ## Lifecycle
 
 Knowledge has one stable identity and contiguous immutable revisions:
@@ -22,7 +28,10 @@ Generic record writes cannot create knowledge.
 
 An Agent may publish an untrusted `KNOWLEDGE_PROPOSED` event, but that event is
 input to curation and is not itself a knowledge projection. Runtime admission
-creates the candidate. A candidate, active record, or stale record may be
+creates the candidate only after the published proposal payload's knowledge
+identity, type, title, content, basis, applicability, occurrence refs, and
+artifact refs match the candidate and the emitting Agent's durable execution
+is proven live. A candidate, active record, or stale record may be
 revised into a later candidate under the same identity and scope with new
 content and provenance. That correction is excluded from active retrieval
 until it is independently activated again.
@@ -48,11 +57,24 @@ Later terminal revisions, including direct candidate quarantine, preserve the
 prior validation state and cannot mint a judgment while invalidating a record.
 
 Validation method names do not create proof. Deterministic activation requires
-a candidate-bound successful `TOOL_OUTCOME_RECORDED` contract with a verified
+a candidate-bound `KNOWLEDGE_VALIDATION_RECORDED` contract that references the
+exact successful `TOOL_OUTCOME_RECORDED` contract produced by one admitted,
+deterministic Task execution that remains open through validation admission,
+with a recomputed verified
 postcondition. Repeated-observation activation requires at least three
-candidate-bound `EVIDENCE_PUBLISHED` contracts from distinct executions. User
-and Agent judgments require the authenticated capability check described
-below. Experimental and mixed activation remain fail-closed until an equally
+candidate-artifact-bound `EVIDENCE_PUBLISHED` contracts, each using the published
+`summary` and nonempty `artifact_refs` payload, from distinct authenticated
+Agent executions. Their correlation remains the durable Work correlation so
+the exact execution can be proven; the candidate's validation references bind
+the evidence to the knowledge record. User and Agent judgments require both an
+exact-candidate typed `HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED`,
+`A2A_KNOWLEDGE_JUDGMENT_RECEIVED`, or `KNOWLEDGE_JUDGMENT_PUBLISHED` statement
+and the exact prior `CAPABILITY_CHECKED` contract it names. The statement binds
+the knowledge ID, candidate version, validator identity and kind, source
+channel, authorizing Task, artifacts, and decision. Generic user/A2A input is
+not a judgment. A
+capability check authorizes the judgment but is not itself proof that the
+validator made one. Experimental and mixed activation remain fail-closed until an equally
 specific relational evidence contract is admitted; an `AUDIT_NOTE` or other
 unrelated recent event is never validation evidence.
 
@@ -64,20 +86,31 @@ its cited provenance or occurrence evidence. Agent- and Team-scoped knowledge mu
 durable same-Organization roster record. Derived knowledge must contain at
 least one lineage reference and every reference must identify an exact earlier
 `ACTIVE` version in the same Organization. Proposal and activation also require
-that source version to remain current; terminal invalidation preserves the
+that source version to remain current, and the derived record's creation time
+cannot predate the cited source revision's activation; terminal invalidation preserves the
 already-admitted historical lineage so dependent knowledge can fail closed.
-User or Agent judgments require an
-exact `knowledge.validate` capability admission whose authenticated principal
-kind matches the claimed validator; revocation and expiry are rechecked in the
+User or Agent judgments require the typed exact-candidate statement described
+above; internal-Agent statements must also be tied to the exact admitted
+execution. Every statement names an exact `knowledge.validate` capability
+check whose authenticated principal kind matches the claimed validator;
+revocation and expiry are rechecked in the
 activation transaction, and the lease must have been admitted by that same
-Organization before the judgment. Freeze state is checked at both judgment
-and activation, and authorization uses the activation event's single captured
+Organization before the judgment. Freeze state is checked at the capability
+check, the typed statement, and activation, and authorization uses the activation event's single captured
 timestamp. Startup reconstruction and offline backup verification use the same
 Event-Contract admission validator. Capability and freeze history is replayed
 only when every lifecycle event has one exact, ordered durable record admitted
 atomically with it; bare authority-shaped event labels grant nothing. Recovery
 rechecks evidence timing, tenant ownership, scope, lifecycle order, validator
 attribution, lease expiry or revocation, and lineage.
+
+The deterministic Audit Service separately inspects every currently active
+record for missing or cross-Organization evidence, invalidated current lineage,
+and verification age. Verification age is deployment policy: Agent OS does not
+invent a universal duration. If an active record exists without an explicitly
+configured maximum age, the audit emits `knowledge_staleness_policy_missing`;
+an expired record emits `knowledge_revalidation_due`. Findings do not mutate or
+reactivate knowledge.
 
 Retrieval accepts one exact Organization and scope, reads one bounded SQLite
 snapshot of current `ACTIVE` records, ranks matching records by newest current
