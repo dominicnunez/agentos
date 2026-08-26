@@ -183,7 +183,7 @@ func buildAIMSEvidence(view OrganizationSnapshot, generatedAt time.Time) (AIMSEv
 		aimsEvidenceIndex("reviewed_work_lifecycle", len(view.Works)+len(view.Tasks), "organization.works+tasks", projectionLifecycleEventTypes("intent", "work", "task")...),
 		aimsEvidenceIndex("task_lifecycle_projection", len(view.Tasks), "organization.tasks", events.ProjectionLifecycleEventTypes("task")...),
 		aimsEvidenceIndex("reviewed_ai_system_configuration", len(view.Agents), "organization.agents", projectionLifecycleEventTypes("agent_blueprint", "execution_profile", "agent")...),
-		aimsEvidenceIndex("governed_experimentation", export.Inventory.Operations.Experiments, "organization.works[mode=EXPERIMENT]", projectionLifecycleEventTypes("lab_experiment", "lab_promotion_candidate")...),
+		aimsEvidenceIndex("governed_experimentation", export.Inventory.Operations.Experiments, "organization.works[mode=EXPERIMENT]", projectionLifecycleEventTypes("work", "lab_experiment")...),
 	}
 	encoded, err := json.Marshal(export)
 	if err != nil {

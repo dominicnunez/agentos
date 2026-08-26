@@ -52,7 +52,9 @@ func TestBuildAIMSEvidenceIsBoundedVerifiableAndExcludesPrivateContent(t *testin
 	if !strings.Contains(string(encoded), `"control":"task_lifecycle_projection"`) || !strings.Contains(string(encoded), `"state":"PROJECTION_AVAILABLE"`) || !strings.Contains(string(encoded), `"area":"impact_and_risk"`) {
 		t.Fatalf("AIMS evidence omitted controls or explicit gaps: %s", encoded)
 	}
-	if strings.Contains(string(encoded), "TASK_ASSIGNED") || !strings.Contains(string(encoded), "TASK_ASSIGNMENT_REVALIDATED") || !strings.Contains(string(encoded), "WORK_COMPLETED") || !strings.Contains(string(encoded), "WORK_FAILED") {
+	if strings.Contains(string(encoded), "TASK_ASSIGNED") || strings.Contains(string(encoded), "LAB_PROMOTION_CANDIDATE_CREATED") ||
+		!strings.Contains(string(encoded), "TASK_ASSIGNMENT_REVALIDATED") || !strings.Contains(string(encoded), "WORK_COMPLETED") ||
+		!strings.Contains(string(encoded), "WORK_FAILED") || !strings.Contains(string(encoded), "LAB_EXPERIMENT_STARTED") {
 		t.Fatalf("AIMS evidence did not use the closed projection lifecycle contracts: %s", encoded)
 	}
 }

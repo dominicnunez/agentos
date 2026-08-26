@@ -60,7 +60,8 @@ The current export is structurally minimized rather than a general ledger dump:
 it omits free-text Mission, Goal, Work, and Task content while retaining the
 minimum Agent purpose and configuration fields needed for the inventory. More
 detailed evidence requires an explicit future disclosure/redaction policy.
-The downloaded `.sha256` companion verifies the exact JSON artifact bytes; it
+The single downloaded tar contains the JSON artifact and its `.sha256`
+companion, which verifies the exact JSON bytes; it
 does not attest to ledger integrity, control effectiveness, or conformity.
 
 ## Delivery order

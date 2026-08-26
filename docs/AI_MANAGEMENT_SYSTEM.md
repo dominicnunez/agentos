@@ -23,10 +23,11 @@ records exist in that bounded projection; it does not assert that a control is
 effective or that a management-system requirement is satisfied. The export
 excludes raw events and payloads, prompts, results,
 artifacts, credentials, approvals, capabilities, and authority records. The
-dashboard verifies the response before saving both
-`agentos-aims-evidence.json` and `agentos-aims-evidence.json.sha256`. On Linux,
-run `sha256sum -c agentos-aims-evidence.json.sha256` in their download directory
-to verify the artifact again. The checksum is not a cryptographic attestation of
+dashboard verifies the response before saving one
+`agentos-aims-evidence.tar` bundle. On Linux, extract it with
+`tar -xf agentos-aims-evidence.tar`, then run
+`sha256sum -c agentos-aims-evidence.json.sha256` to verify the JSON artifact
+again. The checksum is not a cryptographic attestation of
 the SQLite ledger and does not convert readiness evidence into certification.
 
 The operating organization remains responsible for its AIMS scope, AI policy, accountable roles, legal and stakeholder obligations, risk criteria, impact assessments, competence, supplier decisions, incident handling, internal audits, management reviews, corrective actions, document retention, and selected controls. Agent OS must fail closed where one of those decisions is required but has not been supplied.
