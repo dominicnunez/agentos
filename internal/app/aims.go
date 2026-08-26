@@ -179,6 +179,7 @@ func buildAIMSEvidence(view OrganizationSnapshot, generatedAt time.Time) (AIMSEv
 	export.Inventory.Operations.TaskStates = sortedAIMSCounts(taskStates)
 	export.Inventory.Operations.InferencePolicies = sortedAIMSCounts(inferencePolicies)
 	export.EvidenceIndex = []AIMSEvidenceIndex{
+		aimsEvidenceIndex("organization_identity_and_policy", 1, "organization", events.ProjectionLifecycleEventTypes("organization")...),
 		aimsEvidenceIndex("durable_organizational_direction", len(view.Missions)+len(view.Goals), "organization.missions+goals", projectionLifecycleEventTypes("mission", "goal")...),
 		aimsEvidenceIndex("reviewed_work_lifecycle", len(view.Works)+len(view.Tasks), "organization.works+tasks", projectionLifecycleEventTypes("intent", "work", "task")...),
 		aimsEvidenceIndex("task_lifecycle_projection", len(view.Tasks), "organization.tasks", events.ProjectionLifecycleEventTypes("task")...),
