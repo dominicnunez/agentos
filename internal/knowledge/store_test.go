@@ -37,6 +37,34 @@ func TestStoreAdmitsValidatedKnowledgeAndRetrievesOnlyActiveTenantScope(t *testi
 	verifiedAt := candidate.CreatedAt.Add(time.Minute)
 	active.LastVerifiedAt = &verifiedAt
 	active.SupersedesVersion = integerPointer(1)
+	if _, err := service.Activate(ctx, active); err == nil {
+		t.Fatal("human judgment without authenticated authority was accepted")
+	}
+	taskID := core.ID("task-knowledge-validation")
+	lease := core.CapabilityLease{
+		ID:           "lease-knowledge-validation",
+		ActorID:      active.ValidatedBy,
+		Action:       "knowledge.validate",
+		Resource:     string(candidate.KnowledgeID),
+		Scope:        string(candidate.OrganizationID),
+		OriginTaskID: taskID,
+	}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_LEASED", "runtime", string(taskID), nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+		t.Fatalf("seed validator lease: %v", err)
+	}
+	trace := authorizedKnowledgeValidationTrace(lease)
+	judgment, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID:    "org-1",
+		EventType:         "CAPABILITY_CHECKED",
+		SourceActorID:     string(lease.ActorID),
+		TaskID:            string(taskID),
+		AuthorizationRefs: []string{string(lease.ID)},
+		Payload:           trace,
+	})
+	if err != nil {
+		t.Fatalf("admit validator judgment: %v", err)
+	}
+	active.ValidationRefs = []string{judgment.EventID}
 	if _, err := service.Activate(ctx, active); err != nil {
 		t.Fatalf("activate knowledge: %v", err)
 	}
@@ -65,6 +93,72 @@ func TestStoreAdmitsValidatedKnowledgeAndRetrievesOnlyActiveTenantScope(t *testi
 	}
 	if err := store.AppendRecord(ctx, "org-1", "KNOWLEDGE_PROPOSED", "runtime", "", nil, nil, "knowledge", "legacy", 1, candidate); err == nil {
 		t.Fatal("generic knowledge writer remained available")
+	}
+}
+
+func TestStoreRejectsRevokedValidatorAuthorityAfterJudgmentAdmission(t *testing.T) {
+	ctx := context.Background()
+	store, gateway := newKnowledgeTestStore(t)
+	evidence := seedKnowledgeOrganization(t, ctx, gateway, "org-1")
+	service := New(gateway)
+	candidate := knowledgeCandidate("k-revoked", "org-1", evidence.EventID)
+	if _, err := service.Propose(ctx, candidate); err != nil {
+		t.Fatal(err)
+	}
+	taskID := core.ID("task-revoked-validator")
+	lease := core.CapabilityLease{
+		ID:           "lease-revoked-validator",
+		ActorID:      "reviewer-revoked",
+		Action:       "knowledge.validate",
+		Resource:     string(candidate.KnowledgeID),
+		Scope:        string(candidate.OrganizationID),
+		OriginTaskID: taskID,
+	}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_LEASED", "runtime", string(taskID), nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+		t.Fatal(err)
+	}
+	trace := authorizedKnowledgeValidationTrace(lease)
+	judgment, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID:    "org-1",
+		EventType:         "CAPABILITY_CHECKED",
+		SourceActorID:     string(lease.ActorID),
+		TaskID:            string(taskID),
+		AuthorizationRefs: []string{string(lease.ID)},
+		Payload:           trace,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	revokedAt := time.Now().UTC()
+	lease.RevokedAt = &revokedAt
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_REVOKED", "runtime", string(taskID), nil, nil, "capability_lease", string(lease.ID), 2, lease); err != nil {
+		t.Fatal(err)
+	}
+	active := candidate
+	active.Version = 2
+	active.Status = core.KnowledgeActive
+	active.ValidationMethod = core.KnowledgeValidationHuman
+	active.ValidationRefs = []string{judgment.EventID}
+	active.ValidatedBy = lease.ActorID
+	active.ValidatedByKind = core.PrincipalHuman
+	verifiedAt := candidate.CreatedAt.Add(time.Minute)
+	active.LastVerifiedAt = &verifiedAt
+	active.SupersedesVersion = integerPointer(1)
+	if _, err := service.Activate(ctx, active); err == nil {
+		t.Fatal("revoked validator authority was accepted")
+	}
+}
+
+func authorizedKnowledgeValidationTrace(lease core.CapabilityLease) core.AuthorizationTrace {
+	return core.AuthorizationTrace{
+		Allowed:  true,
+		LeaseID:  lease.ID,
+		ActorID:  lease.ActorID,
+		TaskID:   lease.OriginTaskID,
+		Action:   lease.Action,
+		Resource: lease.Resource,
+		Scope:    lease.Scope,
+		Reason:   "exact capability lease matched",
 	}
 }
 
@@ -204,10 +298,10 @@ func TestStoreSupportsFailClosedStaleAndQuarantineTransitions(t *testing.T) {
 			if test.fromActive {
 				prior.Version = 2
 				prior.Status = core.KnowledgeActive
-				prior.ValidationMethod = core.KnowledgeValidationHuman
+				prior.ValidationMethod = core.KnowledgeValidationDeterministic
 				prior.ValidationRefs = []string{evidence.EventID}
-				prior.ValidatedBy = "reviewer-1"
-				prior.ValidatedByKind = core.PrincipalHuman
+				prior.ValidatedBy = "runtime"
+				prior.ValidatedByKind = core.PrincipalRuntime
 				verifiedAt := candidate.CreatedAt.Add(time.Minute)
 				prior.LastVerifiedAt = &verifiedAt
 				prior.SupersedesVersion = integerPointer(1)

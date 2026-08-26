@@ -792,6 +792,12 @@ func validateKnowledgeProjectionAtAdmission(value core.KnowledgeRecord, event ev
 	} else if record.Version != 1 || value.Status != core.KnowledgeCandidate {
 		return fmt.Errorf("knowledge history does not begin with a candidate")
 	}
+	if event.EventType == "KNOWLEDGE_ACTIVATED" && (value.ValidatedByKind == core.PrincipalHuman || value.ValidatedByKind == core.PrincipalExternalAgent) {
+		proposalSequence := admissionSequences[value.KnowledgeID]
+		if proposalSequence < 1 || !knowledgeHasAuthorizedJudgment(value, proposalSequence, eventIndex) {
+			return fmt.Errorf("knowledge activation lacks an authenticated validator admission")
+		}
+	}
 	if event.EventType == "KNOWLEDGE_ACTIVATED" && value.Basis == core.KnowledgeBasisRepeatedPattern {
 		proposalSequence := admissionSequences[value.KnowledgeID]
 		if proposalSequence < 1 || !knowledgeHasSubsequentValidation(value.OccurrenceEventRefs, value.ValidationRefs, proposalSequence, eventIndex) {
@@ -805,6 +811,27 @@ func validateKnowledgeProjectionAtAdmission(value core.KnowledgeRecord, event ev
 	}
 	revisions[value.KnowledgeID][record.Version] = value
 	return nil
+}
+
+func knowledgeHasAuthorizedJudgment(value core.KnowledgeRecord, proposalSequence int64, eventIndex map[string]events.Event) bool {
+	for _, ref := range value.ValidationRefs {
+		judgment, found := eventIndex[ref]
+		if !found || judgment.Sequence <= proposalSequence || judgment.EventType != "CAPABILITY_CHECKED" ||
+			judgment.OrganizationID != string(value.OrganizationID) || judgment.SourceActorID != string(value.ValidatedBy) ||
+			judgment.RecipientScope != "" || judgment.RecipientID != "" || judgment.TaskID == "" ||
+			len(judgment.AuthorizationRefs) == 0 || len(judgment.ArtifactRefs) != 0 || judgment.SchemaVersion != events.SchemaVersion {
+			continue
+		}
+		var trace core.AuthorizationTrace
+		if decodeExactProjectionJSON(judgment.Payload, &trace) != nil || !trace.Allowed || trace.LeaseID == "" ||
+			trace.ActorID != value.ValidatedBy || trace.TaskID != core.ID(judgment.TaskID) || trace.Action != "knowledge.validate" ||
+			trace.Resource != string(value.KnowledgeID) || trace.Scope != string(value.OrganizationID) ||
+			!slices.Contains(judgment.AuthorizationRefs, string(trace.LeaseID)) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func knowledgeHasSubsequentValidation(occurrences, validation []string, proposalSequence int64, eventIndex map[string]events.Event) bool {

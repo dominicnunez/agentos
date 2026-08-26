@@ -2106,20 +2106,57 @@ func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedPro
 	if err := core.ValidateKnowledgeTransition(item.draft.Event.EventType, previous, knowledge); err != nil {
 		return fmt.Errorf("knowledge revision: %w", err)
 	}
-	if item.draft.Event.EventType == "KNOWLEDGE_ACTIVATED" && knowledge.Basis == core.KnowledgeBasisRepeatedPattern {
+	if item.draft.Event.EventType == "KNOWLEDGE_ACTIVATED" {
 		proposalSequence, err := projectionAdmissionSequence(ctx, tx, "knowledge", item.draft.RecordID, record.Version)
 		if err != nil {
 			return err
 		}
-		subsequent, err := hasSubsequentKnowledgeValidationRef(ctx, tx, proposalSequence, knowledge.OccurrenceEventRefs, knowledge.ValidationRefs)
-		if err != nil {
-			return err
+		if knowledge.ValidatedByKind == core.PrincipalHuman || knowledge.ValidatedByKind == core.PrincipalExternalAgent {
+			if err := validateKnowledgeJudgmentAuthorization(ctx, tx, knowledge, proposalSequence); err != nil {
+				return err
+			}
 		}
-		if !subsequent {
-			return fmt.Errorf("repeated-pattern activation requires validation evidence admitted after the proposal")
+		if knowledge.Basis == core.KnowledgeBasisRepeatedPattern {
+			subsequent, err := hasSubsequentKnowledgeValidationRef(ctx, tx, proposalSequence, knowledge.OccurrenceEventRefs, knowledge.ValidationRefs)
+			if err != nil {
+				return err
+			}
+			if !subsequent {
+				return fmt.Errorf("repeated-pattern activation requires validation evidence admitted after the proposal")
+			}
 		}
 	}
 	return nil
+}
+
+func validateKnowledgeJudgmentAuthorization(ctx context.Context, tx *sql.Tx, knowledge core.KnowledgeRecord, proposalSequence int64) error {
+	for _, ref := range knowledge.ValidationRefs {
+		judgment, found, err := eventByID(ctx, tx, ref)
+		if err != nil {
+			return fmt.Errorf("read knowledge judgment authorization: %w", err)
+		}
+		if !found || judgment.Sequence <= proposalSequence || judgment.EventType != "CAPABILITY_CHECKED" ||
+			judgment.OrganizationID != string(knowledge.OrganizationID) || judgment.SourceActorID != string(knowledge.ValidatedBy) ||
+			judgment.RecipientScope != "" || judgment.RecipientID != "" || judgment.TaskID == "" || len(judgment.AuthorizationRefs) == 0 ||
+			len(judgment.ArtifactRefs) != 0 || judgment.SchemaVersion != events.SchemaVersion {
+			continue
+		}
+		var recorded core.AuthorizationTrace
+		if decodeExactJSONBytes(judgment.Payload, &recorded) != nil || !recorded.Allowed || recorded.LeaseID == "" ||
+			recorded.ActorID != knowledge.ValidatedBy || recorded.TaskID != core.ID(judgment.TaskID) || recorded.Action != "knowledge.validate" ||
+			recorded.Resource != string(knowledge.KnowledgeID) || recorded.Scope != string(knowledge.OrganizationID) ||
+			!slices.Contains(judgment.AuthorizationRefs, string(recorded.LeaseID)) {
+			continue
+		}
+		current, err := currentAuthorizationTrace(ctx, tx, knowledge.OrganizationID, recorded.ActorID, recorded.TaskID, recorded.Action, recorded.Resource, recorded.Scope, judgment.AuthorizationRefs, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		if current.Allowed && current.LeaseID == recorded.LeaseID {
+			return nil
+		}
+	}
+	return fmt.Errorf("knowledge judgment lacks an authenticated, currently authorized validator admission")
 }
 
 func projectionAdmissionSequence(ctx context.Context, tx *sql.Tx, kind, recordID string, version int) (int64, error) {
@@ -2796,46 +2833,16 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, obligation
 				return fmt.Errorf("decode approval %s: %w", obligation.ApprovalRef, err)
 			}
 		}
-		freezeBody, found, err := latestRecordBody(ctx, tx, "organization_freeze", string(obligation.OrganizationID))
-		if err != nil {
-			return err
-		}
-		frozen := false
-		if found {
-			var state authority.FreezeState
-			if err := json.Unmarshal(freezeBody, &state); err != nil {
-				return fmt.Errorf("decode organization freeze: %w", err)
-			}
-			if state.OrganizationID != obligation.OrganizationID {
-				return fmt.Errorf("organization freeze identity mismatch")
-			}
-			frozen = state.Frozen
-		}
-		leases := make([]core.CapabilityLease, 0, len(obligation.AuthorizationRefs))
-		for _, ref := range obligation.AuthorizationRefs {
-			leaseBody, found, err := latestRecordBody(ctx, tx, "capability_lease", ref)
-			if err != nil {
-				return err
-			}
-			if !found {
-				continue
-			}
-			var lease core.CapabilityLease
-			if err := json.Unmarshal(leaseBody, &lease); err != nil {
-				return fmt.Errorf("decode capability lease %s: %w", ref, err)
-			}
-			if string(lease.ID) != ref {
-				return fmt.Errorf("capability lease identity mismatch for %s", ref)
-			}
-			leases = append(leases, lease)
-		}
 		authorizedAt := time.Now().UTC()
 		if obligation.ApprovalRef != "" {
 			if err := approvals.ValidateForEffect(approval, obligation, authorizedAt); err != nil {
 				return err
 			}
 		}
-		trace = authority.Check(authorizedAt, obligation.ActorID, obligation.TaskID, obligation.Action, obligation.Resource, obligation.Scope, leases, frozen)
+		trace, err = currentAuthorizationTrace(ctx, tx, obligation.OrganizationID, obligation.ActorID, obligation.TaskID, obligation.Action, obligation.Resource, obligation.Scope, obligation.AuthorizationRefs, authorizedAt)
+		if err != nil {
+			return err
+		}
 		traceBody, err := json.Marshal(trace)
 		if err != nil {
 			return err
@@ -2868,6 +2875,43 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, obligation
 		return appendRecord(ctx, tx, effectDraft, "effect", string(obligation.ID), version, body)
 	})
 	return trace, err
+}
+
+func currentAuthorizationTrace(ctx context.Context, tx *sql.Tx, organizationID, actorID, taskID core.ID, action, resource, scope string, authorizationRefs []string, now time.Time) (core.AuthorizationTrace, error) {
+	freezeBody, found, err := latestRecordBody(ctx, tx, "organization_freeze", string(organizationID))
+	if err != nil {
+		return core.AuthorizationTrace{}, err
+	}
+	frozen := false
+	if found {
+		var state authority.FreezeState
+		if err := json.Unmarshal(freezeBody, &state); err != nil {
+			return core.AuthorizationTrace{}, fmt.Errorf("decode organization freeze: %w", err)
+		}
+		if state.OrganizationID != organizationID {
+			return core.AuthorizationTrace{}, fmt.Errorf("organization freeze identity mismatch")
+		}
+		frozen = state.Frozen
+	}
+	leases := make([]core.CapabilityLease, 0, len(authorizationRefs))
+	for _, ref := range authorizationRefs {
+		leaseBody, found, err := latestRecordBody(ctx, tx, "capability_lease", ref)
+		if err != nil {
+			return core.AuthorizationTrace{}, err
+		}
+		if !found {
+			continue
+		}
+		var lease core.CapabilityLease
+		if err := json.Unmarshal(leaseBody, &lease); err != nil {
+			return core.AuthorizationTrace{}, fmt.Errorf("decode capability lease %s: %w", ref, err)
+		}
+		if string(lease.ID) != ref {
+			return core.AuthorizationTrace{}, fmt.Errorf("capability lease identity mismatch for %s", ref)
+		}
+		leases = append(leases, lease)
+	}
+	return authority.Check(now, actorID, taskID, action, resource, scope, leases, frozen), nil
 }
 
 func latestRecordBody(ctx context.Context, tx *sql.Tx, kind, id string) ([]byte, bool, error) {
