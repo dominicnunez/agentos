@@ -2,9 +2,7 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -12,29 +10,6 @@ import (
 	"github.com/dominicnunez/agentos/internal/bootstrap"
 	"github.com/dominicnunez/agentos/internal/inference"
 )
-
-func TestPrepareInitialLedgerDirectoryCreatesPrivateParentAndRejectsLinks(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "data")
-	database := filepath.Join(directory, "agentos.db")
-	if err := prepareInitialLedgerDirectory(database); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(directory)
-	if err != nil || !info.IsDir() || runtime.GOOS == "linux" && info.Mode().Perm() != 0o700 {
-		t.Fatalf("initial directory info=%v err=%v", info, err)
-	}
-	target := filepath.Join(t.TempDir(), "target")
-	if err := os.Mkdir(target, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	link := filepath.Join(t.TempDir(), "linked-data")
-	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	if err := prepareInitialLedgerDirectory(filepath.Join(link, "agentos.db")); err == nil {
-		t.Fatal("initial ledger directory accepted a symlink")
-	}
-}
 
 type pathSetupUITestDouble struct {
 	selected int
@@ -122,7 +97,7 @@ func TestLoadOrBeginInitPersistsOneWayVersion1Upgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if upgraded.Version != bootstrap.ConfigVersion || upgradedState.Version != bootstrap.ConfigVersion || upgradedState.Stage != bootstrap.StageAnchor || len(upgraded.Providers) != 0 {
+	if upgraded.Version != bootstrap.ConfigVersion || upgradedState.Version != bootstrap.ConfigVersion || upgradedState.Stage != bootstrap.StageProvider || len(upgraded.Providers) != 0 {
 		t.Fatalf("version-1 checkpoint was not safely upgraded: config=%+v state=%+v", upgraded, upgradedState)
 	}
 	reloaded, err := bootstrap.LoadConfig(configPath)

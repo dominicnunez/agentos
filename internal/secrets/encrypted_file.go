@@ -67,9 +67,18 @@ func OpenSealedFile(path, purpose string, key []byte) ([]byte, error) {
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= int64(len(encryptedFileHeader)) || info.Size() > MaximumSealedBytes+1024 || (runtime.GOOS == "linux" && info.Mode().Perm()&0o077 != 0) {
 		return nil, fmt.Errorf("sealed credential is not a private bounded regular file")
 	}
-	body, err := fileguard.ReadUnchangedBoundedFile(path, info, MaximumSealedBytes+1024, "sealed credential")
+	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return nil, fmt.Errorf("sealed credential changed while it was opened")
+	}
+	body, err := io.ReadAll(io.LimitReader(file, MaximumSealedBytes+1025))
+	if err != nil || int64(len(body)) != info.Size() {
+		return nil, fmt.Errorf("sealed credential changed while it was read")
 	}
 	if len(body) < len(encryptedFileHeader) || string(body[:len(encryptedFileHeader)]) != encryptedFileHeader {
 		return nil, fmt.Errorf("sealed credential format is invalid")
