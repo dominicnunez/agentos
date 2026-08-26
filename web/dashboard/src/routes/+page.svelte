@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { APIError, api, connect, emptyJSONPost, identifier } from '$lib/api';
+  import { APIError, api, connect, emptyJSONPost, identifier, verifiedDownload } from '$lib/api';
+  import { buildEvidenceBundle } from '$lib/archive';
   import { approvalRetryBinding, completionReviewFeedback, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, discardStrategyRetry, loadAllCompletionReviews, matchesConfirmationRetry, matchesStrategyRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, parseStrategyRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, strategyRetryBinding, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
   import type { ApprovalRetryBinding, ReviewRetryBinding, StrategyRetryBinding } from '$lib/governance';
   import '$lib/app.css';
@@ -182,6 +183,34 @@
     if (failures.length) error = `Dashboard refresh failed; previously loaded governance data was preserved. ${failures.join(' ')}`;
     selectedApproval = approvals.find((item) => item.approval_id === selectedApproval?.approval_id) ?? (selectedApproval && (terminalApproval(selectedApproval) || pendingApprovalDecision) ? selectedApproval : null);
     selectedReview = reviews.find((item) => item.review_id === selectedReview?.review_id) ?? (selectedReview && (terminalCompletionReview(selectedReview) || pendingReviewDecision) ? selectedReview : null);
+  }
+
+  async function downloadAIMSEvidence(): Promise<void> {
+    busy = true;
+    error = '';
+    notice = '';
+    try {
+      const evidence = await verifiedDownload('/api/v1/user/aims/evidence');
+      const bundle = buildEvidenceBundle(evidence.body, evidence.sha256);
+      downloadBlob(new Blob([bundle], { type: 'application/x-tar' }), 'agentos-aims-evidence.tar');
+      notice = `Downloaded bounded AIMS readiness evidence bundle ${evidence.sha256.slice(0, 12)}.`;
+    } catch (cause) {
+      error = message(cause);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function downloadBlob(blob: Blob, filename: string): void {
+    const href = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = href;
+    link.download = filename;
+    link.rel = 'noopener';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 0);
   }
 
   async function loadOrganization(): Promise<OrganizationSnapshot | null> {
@@ -832,7 +861,7 @@
       </section>
     {:else}
       <section class="grid two"><div class="panel"><p class="eyebrow">Local boundary</p><h2>Dashboard session</h2><dl><div><dt>Organization</dt><dd>{safeDisplay(identity?.organization ?? 'Unavailable')}</dd></div><div><dt>Install mode</dt><dd>{safeDisplay(identity?.mode ?? 'Unavailable')}</dd></div><div><dt>Agent OS</dt><dd>{safeDisplay(identity?.version ?? 'Unavailable')}</dd></div><div><dt>Expires</dt><dd>{safeDisplay(identity?.session_expires_at ?? 'Unavailable')}</dd></div></dl></div><div class="panel"><p class="eyebrow">Diagnostics</p><h2>Read-only system checks</h2><p>Use <code>agentos doctor</code> for configuration, credential, service, private-gateway, and SQLite integrity checks.</p><pre>agentos doctor
-sudo agentos doctor</pre></div></section>
+sudo agentos doctor</pre></div><div class="panel"><p class="eyebrow">AI management system</p><h2>Readiness evidence</h2><p>Download a tenant-scoped technical-control inventory and evidence index. It excludes raw events, prompts, results, artifacts, credentials, approvals, and authority records.</p><button class="primary" onclick={downloadAIMSEvidence} disabled={busy || !identity}>Download evidence bundle</button><p class="boundary-note">This artifact supports ISO/IEC 42001 readiness work. It is not a conformity assessment or certification.</p></div></section>
     {/if}
   </main>
 </div>

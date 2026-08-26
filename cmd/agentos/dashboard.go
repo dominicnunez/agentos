@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -241,6 +242,16 @@ func (b *dashboardBridge) proxy(w http.ResponseWriter, incoming *http.Request) {
 		writeDashboardJSON(w, http.StatusBadGateway, map[string]string{"error": "local user gateway response is invalid"})
 		return
 	}
+	if upstreamPath == "/v1/user/aims/evidence" && response.StatusCode == http.StatusOK {
+		digest := sha256.Sum256(payload)
+		checksum := hex.EncodeToString(digest[:])
+		if response.Header.Get("X-AgentOS-SHA256") != checksum {
+			writeDashboardJSON(w, http.StatusBadGateway, map[string]string{"error": "local user gateway returned unverifiable AIMS evidence"})
+			return
+		}
+		w.Header().Set("Content-Disposition", `attachment; filename="agentos-aims-evidence.json"`)
+		w.Header().Set("X-AgentOS-SHA256", checksum)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(response.StatusCode)
@@ -267,6 +278,8 @@ func allowedDashboardRoute(method, requestPath, rawQuery string) bool {
 	case method == http.MethodGet && requestPath == "/v1/user/intents/active" && rawQuery == "":
 		return true
 	case method == http.MethodGet && requestPath == "/v1/user/organization" && rawQuery == "":
+		return true
+	case method == http.MethodGet && requestPath == "/v1/user/aims/evidence" && rawQuery == "":
 		return true
 	case method == http.MethodPost && len(segments) == 5 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "intents" && validDashboardIdentifier(segments[3]) && (segments[4] == "confirm" || segments[4] == "abandon") && rawQuery == "":
 		return true

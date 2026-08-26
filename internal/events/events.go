@@ -2628,40 +2628,67 @@ func validateUniqueJSONValue(decoder *json.Decoder) error {
 	return nil
 }
 
+type projectionLifecycleContract struct {
+	initial  []string
+	revision []string
+}
+
+var projectionLifecycleContracts = map[string]projectionLifecycleContract{
+	"organization":            {initial: []string{"ORGANIZATION_CREATED"}},
+	"mission":                 {initial: []string{"MISSION_CREATED"}, revision: []string{"MISSION_REVISED", "MISSION_RETIRED"}},
+	"goal":                    {initial: []string{"GOAL_CREATED"}, revision: []string{"GOAL_REFINED", "GOAL_PAUSED", "GOAL_RESUMED", "GOAL_RETIRED", "GOAL_ACHIEVED"}},
+	"team":                    {initial: []string{"TEAM_CREATED"}, revision: []string{"TEAM_REVISED"}},
+	"agent_blueprint":         {initial: []string{"AGENT_BLUEPRINT_CREATED"}, revision: []string{"AGENT_BLUEPRINT_UPDATED"}},
+	"execution_profile":       {initial: []string{"EXECUTION_PROFILE_CREATED"}, revision: []string{"EXECUTION_PROFILE_UPDATED"}},
+	"agent":                   {initial: []string{"AGENT_CREATED"}, revision: []string{"AGENT_CONFIGURATION_UPDATED", "AGENT_DEACTIVATED", "AGENT_REACTIVATED"}},
+	"intent":                  {initial: []string{"INTENT_CREATED"}},
+	"work":                    {initial: []string{"WORK_CREATED"}, revision: []string{"WORK_COMPLETED", "WORK_FAILED", "WORK_PLANNING_FAILED"}},
+	"lab_experiment":          {initial: []string{"LAB_EXPERIMENT_STARTED"}, revision: []string{"LAB_EXPERIMENT_COMPLETED", "LAB_EXPERIMENT_FAILED"}},
+	"lab_promotion_candidate": {initial: []string{"LAB_PROMOTION_CANDIDATE_CREATED"}},
+	"task": {
+		initial:  []string{"TASK_CREATED", "TASK_BLOCKED"},
+		revision: []string{"TASK_ASSIGNMENT_REVALIDATED", "TASK_BLOCKED", "TASK_RECOVERED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED"},
+	},
+}
+
+// ProjectionLifecycleEventTypes returns a copy of the closed Event Contract
+// labels that may materialize one projection kind across all revisions.
+func ProjectionLifecycleEventTypes(kind string) []string {
+	contract, ok := projectionLifecycleContracts[kind]
+	if !ok {
+		return nil
+	}
+	result := make([]string, 0, len(contract.initial)+len(contract.revision))
+	result = append(result, contract.initial...)
+	for _, eventType := range contract.revision {
+		if !slices.Contains(result, eventType) {
+			result = append(result, eventType)
+		}
+	}
+	return result
+}
+
 // RequiresProjectionAdmission identifies runtime event labels that are owned
 // by the typed projection writer. TASK_BLOCKED remains agent-proposable when
 // the authenticated source is an Agent execution, but runtime lifecycle state
 // always requires the sealed event/record transaction.
 func RequiresProjectionAdmission(eventType, sourceActorID string) bool {
-	switch eventType {
-	case "ORGANIZATION_CREATED",
-		"MISSION_CREATED", "MISSION_REVISED", "MISSION_RETIRED",
-		"GOAL_CREATED", "GOAL_REFINED", "GOAL_PAUSED", "GOAL_RESUMED", "GOAL_RETIRED", "GOAL_ACHIEVED",
-		"TEAM_CREATED", "TEAM_REVISED",
-		"AGENT_BLUEPRINT_CREATED", "AGENT_BLUEPRINT_UPDATED",
-		"EXECUTION_PROFILE_CREATED", "EXECUTION_PROFILE_UPDATED",
-		"AGENT_CREATED", "AGENT_CONFIGURATION_UPDATED", "AGENT_DEACTIVATED", "AGENT_REACTIVATED",
-		"INTENT_CREATED",
-		"WORK_CREATED", "WORK_COMPLETED", "WORK_FAILED", "WORK_PLANNING_FAILED",
-		"LAB_EXPERIMENT_STARTED", "LAB_EXPERIMENT_COMPLETED", "LAB_EXPERIMENT_FAILED", "LAB_PROMOTION_CANDIDATE_CREATED",
-		"TASK_CREATED", "TASK_ASSIGNMENT_REVALIDATED", "TASK_RECOVERED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED":
-		return true
-	case "TASK_BLOCKED":
-		return sourceActorID == "runtime"
-	default:
+	if eventType == "TASK_BLOCKED" && sourceActorID != "runtime" {
 		return false
 	}
+	for _, contract := range projectionLifecycleContracts {
+		if slices.Contains(contract.initial, eventType) || slices.Contains(contract.revision, eventType) {
+			return true
+		}
+	}
+	return false
 }
 
 // ProjectionKindRequiresAdmission identifies the closed set of organizational
 // projections carried by the current Event Contract schema.
 func ProjectionKindRequiresAdmission(kind string) bool {
-	switch kind {
-	case "organization", "mission", "goal", "team", "agent_blueprint", "execution_profile", "agent", "intent", "work", "task", "lab_experiment", "lab_promotion_candidate":
-		return true
-	default:
-		return false
-	}
+	_, required := projectionLifecycleContracts[kind]
+	return required
 }
 
 // ValidateProjectionEventBoundary proves that a sealed projection uses the
@@ -3107,39 +3134,14 @@ func validProjectionEventType(kind string, version int, eventType string) bool {
 	if version < 1 {
 		return false
 	}
-	switch kind {
-	case "organization":
-		return version == 1 && eventType == "ORGANIZATION_CREATED"
-	case "mission":
-		return version == 1 && eventType == "MISSION_CREATED" || version > 1 && (eventType == "MISSION_REVISED" || eventType == "MISSION_RETIRED")
-	case "goal":
-		return version == 1 && eventType == "GOAL_CREATED" || version > 1 && (eventType == "GOAL_REFINED" || eventType == "GOAL_PAUSED" || eventType == "GOAL_RESUMED" || eventType == "GOAL_RETIRED" || eventType == "GOAL_ACHIEVED")
-	case "team":
-		return version == 1 && eventType == "TEAM_CREATED" || version > 1 && eventType == "TEAM_REVISED"
-	case "agent_blueprint":
-		return version == 1 && eventType == "AGENT_BLUEPRINT_CREATED" || version > 1 && eventType == "AGENT_BLUEPRINT_UPDATED"
-	case "execution_profile":
-		return version == 1 && eventType == "EXECUTION_PROFILE_CREATED" || version > 1 && eventType == "EXECUTION_PROFILE_UPDATED"
-	case "agent":
-		return version == 1 && eventType == "AGENT_CREATED" || version > 1 && (eventType == "AGENT_CONFIGURATION_UPDATED" || eventType == "AGENT_DEACTIVATED" || eventType == "AGENT_REACTIVATED")
-	case "intent":
-		return version == 1 && eventType == "INTENT_CREATED"
-	case "work":
-		return version == 1 && eventType == "WORK_CREATED" || version > 1 && (eventType == "WORK_COMPLETED" || eventType == "WORK_FAILED" || eventType == "WORK_PLANNING_FAILED")
-	case "lab_experiment":
-		return version == 1 && eventType == "LAB_EXPERIMENT_STARTED" || version > 1 && (eventType == "LAB_EXPERIMENT_COMPLETED" || eventType == "LAB_EXPERIMENT_FAILED")
-	case "lab_promotion_candidate":
-		return version == 1 && eventType == "LAB_PROMOTION_CANDIDATE_CREATED"
-	case "task":
-		if version == 1 {
-			return eventType == "TASK_CREATED" || eventType == "TASK_BLOCKED"
-		}
-		switch eventType {
-		case "TASK_ASSIGNMENT_REVALIDATED", "TASK_BLOCKED", "TASK_RECOVERED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED":
-			return true
-		}
+	contract, ok := projectionLifecycleContracts[kind]
+	if !ok {
+		return false
 	}
-	return false
+	if version == 1 {
+		return slices.Contains(contract.initial, eventType)
+	}
+	return slices.Contains(contract.revision, eventType)
 }
 
 // ValidateOrdinaryEventPayload enforces the object-shaped Event Contract

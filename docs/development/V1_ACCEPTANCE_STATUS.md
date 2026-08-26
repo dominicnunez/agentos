@@ -82,6 +82,7 @@ Mission, Goal, Work, Task, Team, and Agent organization view.
 | Durable storage upgrades | Agent OS application ID, exact versioned layouts, atomic ordered migrations, Event Contract binding, oldest-supported fixtures, and no inferred pre-release compatibility state |
 | Required user deliverables | Durable structured fields and content-addressed artifact evidence; plain-text self-report cannot complete the Task |
 | Local dashboard safety | One-time owner bootstrap, expiring in-memory bearer, exact loopback Host/origin checks, no CORS or cookies, allowlisted proxy routes, bounded responses, tenant-scoped organization projection, narrow Mission/Goal bootstrap, and hash-bound CSP |
+| AIMS readiness evidence | Authenticated local-only, tenant-scoped, size-bounded JSON inventory with aggregate lifecycle projections, a closed projection-contract index derived from runtime admission contracts, explicit gaps, an exact-byte detached SHA-256 checksum, no raw payloads, and no certification claim; covered by [`TestBuildAIMSEvidenceIsBoundedVerifiableAndExcludesPrivateContent`](../../internal/app/aims_test.go), [`TestHumanOrganizationViewIsReadOnlyAndTenantScoped`](../../internal/gateway/human_test.go), and the Linux dashboard-loop test |
 
 Production consequential-effect adapters remain disabled. A security finding
 that weakens a row returns it to partial until the runtime path and adversarial

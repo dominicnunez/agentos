@@ -26,7 +26,7 @@ Operator deployments have their own scope and evidence. Product features may sup
 | Objectives and planning | Durable Mission, Goal, Work, and Task model; evidence-backed Goal progress | PARTIAL | Approved AIMS objectives, measures, owners, target dates, and change plans |
 | Resources and competence | Build contract, project guidance, CI, reviewed provider configuration | PARTIAL | Competence requirements, training/awareness evidence, communication plan, and resource review |
 | Documented information | Versioned repository, release source/provenance controls, immutable handoff | PARTIAL | Document owner, approval, retention, review, supersession, and external-document controls |
-| AI system inventory | Durable Agents, blueprints, execution profiles, providers, models, and inference policy | PARTIAL | Exportable inventory covering purpose, owner, lifecycle state, users, data, dependencies, and deployment |
+| AI system inventory | Authenticated bounded JSON export of durable Agents, roles, lifecycle and configuration state, providers, models, runtime adapters, aggregate operations, closed projection-lifecycle Event Contract sources, explicit gaps, and an exact-byte detached SHA-256 checksum | PARTIAL | Operator-owned intended-purpose, accountable-owner, intended-user, data, dependency-risk, deployment, retention, and review records |
 | Impact assessment | Consequence candidates and user approval boundaries | NOT STARTED | Repeatable AI impact assessment with affected-party, misuse, safety, rights, and residual-impact evidence |
 | Responsible lifecycle | Reviewed Intent, bounded planning, Task DAGs, assignment, execution manifests, completion verification, Lab | PARTIAL | Lifecycle control mapping, acceptance criteria, monitored operation, retirement, and change-management records |
 | Data and information | Input limits, untrusted-content treatment, artifact inspection, tenant isolation | PARTIAL | Data inventory, provenance, quality, access, retention, deletion, and privacy-impact procedures |
@@ -55,6 +55,14 @@ States mean:
 4. User policy decisions remain explicit and fail closed when unanswered.
 5. Evidence exports must be bounded, redactable where required, independently verifiable, and must not expose credentials, private prompts, or unrelated tenant data.
 6. Findings outside an active pull request become prioritized Issues; in-scope findings are fixed before merge.
+
+The current export is structurally minimized rather than a general ledger dump:
+it omits free-text Mission, Goal, Work, and Task content while retaining the
+minimum Agent purpose and configuration fields needed for the inventory. More
+detailed evidence requires an explicit future disclosure/redaction policy.
+The single downloaded tar contains the JSON artifact and its `.sha256`
+companion, which verifies the exact JSON bytes; it
+does not attest to ledger integrity, control effectiveness, or conformity.
 
 ## Delivery order
 

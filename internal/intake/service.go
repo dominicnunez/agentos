@@ -30,6 +30,7 @@ const (
 	CapabilityProvideInput         = "provide_input"
 	CapabilityReviewCompletion     = "review_completion"
 	CapabilityManageStrategy       = "manage_strategy"
+	CapabilityExportAIMSEvidence   = "export_aims_evidence"
 	MaximumReviewFeedbackBytes     = 64 << 10
 	MaximumIntentTurns             = 32
 	MaximumIntentConversationBytes = 128 << 10
@@ -487,6 +488,26 @@ func (s *Service) OrganizationState(ctx context.Context, principal Principal) (a
 		return app.OrganizationSnapshot{}, ErrNotFound
 	}
 	return view, nil
+}
+
+// AIMSEvidence exposes a bounded technical-control inventory only to the
+// authenticated local installation owner. It grants no authority and is never
+// available through A2A, even to an Agent that can read its own Work status.
+func (s *Service) AIMSEvidence(ctx context.Context, principal Principal) (app.AIMSEvidencePackage, error) {
+	if err := validatePrincipal(principal); err != nil {
+		return app.AIMSEvidencePackage{}, err
+	}
+	if principal.Kind != core.PrincipalHuman || principal.Channel != ChannelHumanDirect || principal.WorkScope != WorkScopeOrganization || !principal.Allowed(CapabilityExportAIMSEvidence) {
+		return app.AIMSEvidencePackage{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityExportAIMSEvidence)
+	}
+	export, found, err := s.app.AIMSEvidence(ctx, core.ID(principal.OrganizationID), time.Now().UTC())
+	if err != nil {
+		return app.AIMSEvidencePackage{}, fmt.Errorf("%w: build AIMS evidence", ErrUnavailable)
+	}
+	if !found {
+		return app.AIMSEvidencePackage{}, ErrNotFound
+	}
+	return export, nil
 }
 
 // BootstrapStrategy admits initial organizational direction only for the
