@@ -2087,6 +2087,7 @@ func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedPro
 	if err := validateKnowledgeCreatorEvidence(ctx, tx, knowledge); err != nil {
 		return err
 	}
+	requiresCurrentLineage := item.draft.Event.EventType == "KNOWLEDGE_PROPOSED" || item.draft.Event.EventType == "KNOWLEDGE_ACTIVATED"
 	for _, ref := range knowledge.DerivedKnowledgeRefs {
 		version, err := strconv.Atoi(ref.Version)
 		if err != nil || version < 1 || strconv.Itoa(version) != ref.Version || ref.ID == item.draft.RecordID {
@@ -2103,9 +2104,11 @@ func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedPro
 			derived.OrganizationID != knowledge.OrganizationID || derived.Status != core.KnowledgeActive {
 			return fmt.Errorf("derived knowledge must reference an exact active revision in the same organization")
 		}
-		currentRecord, current, currentFound, err := latestProjectionRevision[core.KnowledgeRecord](ctx, tx, "knowledge", ref.ID)
-		if err != nil || !currentFound || currentRecord.Version != version || current.Status != core.KnowledgeActive {
-			return fmt.Errorf("derived knowledge must reference the current active revision")
+		if requiresCurrentLineage {
+			currentRecord, current, currentFound, err := latestProjectionRevision[core.KnowledgeRecord](ctx, tx, "knowledge", ref.ID)
+			if err != nil || !currentFound || currentRecord.Version != version || current.Status != core.KnowledgeActive {
+				return fmt.Errorf("derived knowledge must reference the current active revision")
+			}
 		}
 	}
 	record, previous, found, err := latestProjectionRevision[core.KnowledgeRecord](ctx, tx, "knowledge", item.draft.RecordID)

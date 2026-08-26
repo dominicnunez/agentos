@@ -156,13 +156,14 @@ func (v *KnowledgeAdmissionValidator) Validate(value core.KnowledgeRecord, event
 	if !v.hasAuthenticatedCreator(value) {
 		return fmt.Errorf("knowledge creator kind is not bound to authenticated provenance")
 	}
+	requiresCurrentLineage := event.EventType == "KNOWLEDGE_PROPOSED" || event.EventType == "KNOWLEDGE_ACTIVATED"
 	for _, ref := range value.DerivedKnowledgeRefs {
 		version, err := strconv.Atoi(ref.Version)
 		derived, found := v.revisions[core.ID(ref.ID)][version]
 		current, currentFound := v.history[core.ID(ref.ID)]
 		if err != nil || version < 1 || strconv.Itoa(version) != ref.Version || ref.ID == record.RecordID || !found ||
-			derived.OrganizationID != value.OrganizationID || derived.Status != core.KnowledgeActive || !currentFound ||
-			current.version != version || current.value.Status != core.KnowledgeActive {
+			derived.OrganizationID != value.OrganizationID || derived.Status != core.KnowledgeActive ||
+			requiresCurrentLineage && (!currentFound || current.version != version || current.value.Status != core.KnowledgeActive) {
 			return fmt.Errorf("knowledge derived reference lacks an exact prior active revision")
 		}
 	}

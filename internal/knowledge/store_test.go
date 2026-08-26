@@ -362,6 +362,56 @@ func TestStoreTerminalRevisionRemovesKnowledgeFromRetrieval(t *testing.T) {
 	}
 }
 
+func TestStoreCanInvalidateDerivedKnowledgeAfterItsSourceBecomesStale(t *testing.T) {
+	ctx := context.Background()
+	_, gateway := newKnowledgeTestStore(t)
+	evidence := seedKnowledgeOrganization(t, ctx, gateway, "org-1")
+	service := New(gateway)
+	activate := func(candidate core.KnowledgeRecord) core.KnowledgeRecord {
+		t.Helper()
+		if _, err := service.Propose(ctx, candidate); err != nil {
+			t.Fatalf("propose %s: %v", candidate.KnowledgeID, err)
+		}
+		active := candidate
+		active.Version = 2
+		active.Status = core.KnowledgeActive
+		active.ValidationMethod = core.KnowledgeValidationDeterministic
+		active.ValidationRefs = []string{evidence.EventID}
+		active.ValidatedBy = "runtime"
+		active.ValidatedByKind = core.PrincipalRuntime
+		verifiedAt := time.Now().UTC()
+		active.LastVerifiedAt = &verifiedAt
+		active.SupersedesVersion = integerPointer(1)
+		if _, err := service.Activate(ctx, active); err != nil {
+			t.Fatalf("activate %s: %v", active.KnowledgeID, err)
+		}
+		return active
+	}
+
+	source := activate(knowledgeCandidate("k-source", "org-1", evidence.EventID))
+	dependentCandidate := knowledgeCandidate("k-dependent", "org-1", evidence.EventID)
+	dependentCandidate.Basis = core.KnowledgeBasisDerived
+	dependentCandidate.DerivedKnowledgeRefs = []core.VersionedRef{{
+		ID: string(source.KnowledgeID), Version: "2", MaterializationState: core.MaterializedFull,
+	}}
+	dependent := activate(dependentCandidate)
+
+	staleSource := source
+	staleSource.Version = 3
+	staleSource.Status = core.KnowledgeStale
+	staleSource.SupersedesVersion = integerPointer(2)
+	if _, err := service.MarkStale(ctx, staleSource); err != nil {
+		t.Fatalf("mark source stale: %v", err)
+	}
+	staleDependent := dependent
+	staleDependent.Version = 3
+	staleDependent.Status = core.KnowledgeStale
+	staleDependent.SupersedesVersion = integerPointer(2)
+	if _, err := service.MarkStale(ctx, staleDependent); err != nil {
+		t.Fatalf("mark dependent stale after source invalidation: %v", err)
+	}
+}
+
 func TestStoreRevisesActiveKnowledgeThroughCandidateReview(t *testing.T) {
 	ctx := context.Background()
 	_, gateway := newKnowledgeTestStore(t)

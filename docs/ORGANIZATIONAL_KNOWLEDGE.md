@@ -50,7 +50,10 @@ transition is committed, and a knowledge record's creation time cannot predate
 its cited provenance or occurrence evidence. Agent- and Team-scoped knowledge must bind to a
 durable same-Organization roster record. Derived knowledge must contain at
 least one lineage reference and every reference must identify an exact earlier
-`ACTIVE` version in the same Organization. User or Agent judgments require an
+`ACTIVE` version in the same Organization. Proposal and activation also require
+that source version to remain current; terminal invalidation preserves the
+already-admitted historical lineage so dependent knowledge can fail closed.
+User or Agent judgments require an
 exact `knowledge.validate` capability admission whose authenticated principal
 kind matches the claimed validator; revocation and expiry are rechecked in the
 activation transaction, and the lease must have been admitted by that same
