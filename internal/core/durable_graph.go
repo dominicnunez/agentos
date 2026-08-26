@@ -159,6 +159,7 @@ type DurableGraph struct {
 	Tasks               map[ID]DurableState[Task]
 	Experiments         map[ID]DurableState[Experiment]
 	PromotionCandidates map[ID]DurableState[PromotionCandidate]
+	Knowledge           map[ID]DurableState[KnowledgeRecord]
 }
 
 // ValidateDurableGraph applies the complete fail-closed organizational graph
@@ -169,7 +170,7 @@ func ValidateDurableGraph(graph DurableGraph) error {
 			return err
 		}
 	}
-	organized := make([]durableOrganizedIdentity, 0, len(graph.Missions)+len(graph.Goals)+len(graph.AgentBlueprints)+len(graph.ExecutionProfiles)+len(graph.Agents)+len(graph.Teams)+len(graph.Intents)+len(graph.Experiments)+len(graph.PromotionCandidates))
+	organized := make([]durableOrganizedIdentity, 0, len(graph.Missions)+len(graph.Goals)+len(graph.AgentBlueprints)+len(graph.ExecutionProfiles)+len(graph.Agents)+len(graph.Teams)+len(graph.Intents)+len(graph.Experiments)+len(graph.PromotionCandidates)+len(graph.Knowledge))
 	for id, state := range graph.Missions {
 		organized = append(organized, durableOrganizedIdentity{"mission", id, state.Value.ID, state.Value.OrganizationID})
 	}
@@ -196,6 +197,9 @@ func ValidateDurableGraph(graph DurableGraph) error {
 	}
 	for id, state := range graph.PromotionCandidates {
 		organized = append(organized, durableOrganizedIdentity{"promotion candidate", id, state.Value.ID, state.Value.OrganizationID})
+	}
+	for id, state := range graph.Knowledge {
+		organized = append(organized, durableOrganizedIdentity{"knowledge", id, state.Value.KnowledgeID, state.Value.OrganizationID})
 	}
 	for _, record := range organized {
 		if err := validateDurableOrganizedIdentity(record, graph.Organizations); err != nil {
@@ -357,6 +361,30 @@ func ValidateDurableGraph(graph DurableGraph) error {
 		intent := graph.Intents[work.Value.IntentID]
 		if candidate.NominatedBy != intent.Value.SourcePrincipalID {
 			return fmt.Errorf("promotion candidate %s does not preserve its commissioning actor", id)
+		}
+	}
+	for id, state := range graph.Knowledge {
+		knowledge := state.Value
+		if !ValidKnowledgeRecord(knowledge) || knowledge.Version != state.Version {
+			return fmt.Errorf("knowledge %s is incomplete or has an invalid version", id)
+		}
+		switch knowledge.Scope {
+		case KnowledgeScopeOrganization:
+			if knowledge.ScopeID != knowledge.OrganizationID {
+				return fmt.Errorf("knowledge %s crosses its Organization scope", id)
+			}
+		case KnowledgeScopeAgent:
+			agent, found := graph.Agents[knowledge.ScopeID]
+			if !found || agent.Value.OrganizationID != knowledge.OrganizationID {
+				return fmt.Errorf("knowledge %s references an invalid Agent scope", id)
+			}
+		case KnowledgeScopeTeam:
+			team, found := graph.Teams[knowledge.ScopeID]
+			if !found || team.Value.OrganizationID != knowledge.OrganizationID {
+				return fmt.Errorf("knowledge %s references an invalid Team scope", id)
+			}
+		default:
+			return fmt.Errorf("knowledge %s has an unsupported scope", id)
 		}
 	}
 	return nil

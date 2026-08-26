@@ -310,6 +310,14 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	lastMissions := map[core.ID]core.Mission{}
 	lastGoals := map[core.ID]core.Goal{}
 	lastWorks := map[core.ID]core.Work{}
+	lastCapabilityVersions := map[core.ID]int{}
+	lastCapabilitySequences := map[core.ID]int64{}
+	usedCapabilityEvents := map[string]struct{}{}
+	capabilityAdmissions := make([]events.CapabilityLeaseAdmission, 0)
+	lastFreezeVersions := map[core.ID]int{}
+	lastFreezeSequences := map[core.ID]int64{}
+	usedFreezeEvents := map[string]struct{}{}
+	freezeAdmissions := make([]events.OrganizationFreezeAdmission, 0)
 	for recordRows.Next() {
 		var kind, recordID, admissionEventID, admissionFingerprint string
 		var version int
@@ -327,6 +335,28 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			if admissionEventID != "" || admissionFingerprint != "" {
 				_ = recordRows.Close()
 				return fmt.Errorf("generic record %s/%s/%d carries projection authority", kind, recordID, version)
+			}
+			if kind == "capability_lease" {
+				admission, eventID, err := recoveryCapabilityLeaseAdmission(stream, body, recordID, version, lastCapabilityVersions, lastCapabilitySequences, usedCapabilityEvents)
+				if err != nil {
+					_ = recordRows.Close()
+					return err
+				}
+				lastCapabilityVersions[admission.Lease.ID] = version
+				lastCapabilitySequences[admission.Lease.ID] = admission.Sequence
+				usedCapabilityEvents[eventID] = struct{}{}
+				capabilityAdmissions = append(capabilityAdmissions, admission)
+			}
+			if kind == "organization_freeze" {
+				admission, eventID, err := recoveryOrganizationFreezeAdmission(stream, body, recordID, version, lastFreezeVersions, lastFreezeSequences, usedFreezeEvents)
+				if err != nil {
+					_ = recordRows.Close()
+					return err
+				}
+				lastFreezeVersions[admission.OrganizationID] = version
+				lastFreezeSequences[admission.OrganizationID] = admission.Sequence
+				usedFreezeEvents[eventID] = struct{}{}
+				freezeAdmissions = append(freezeAdmissions, admission)
 			}
 			continue
 		}
@@ -385,7 +415,83 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("projection admission event %s has no materialized record", eventID)
 		}
 	}
-	return validateProjectionOrganizationBindings(orderedAdmissions, stream)
+	for _, event := range stream {
+		switch event.EventType {
+		case "CAPABILITY_GRANTED", "CAPABILITY_REVOKED":
+			if _, found := usedCapabilityEvents[event.EventID]; !found {
+				return fmt.Errorf("capability admission event %s has no exact durable record", event.EventID)
+			}
+		case "FREEZE_SET":
+			if _, found := usedFreezeEvents[event.EventID]; !found {
+				return fmt.Errorf("freeze admission event %s has no exact durable record", event.EventID)
+			}
+		}
+	}
+	return validateProjectionOrganizationBindings(orderedAdmissions, stream, capabilityAdmissions, freezeAdmissions)
+}
+
+func recoveryCapabilityLeaseAdmission(stream []events.Event, body []byte, recordID string, version int, versions map[core.ID]int, sequences map[core.ID]int64, used map[string]struct{}) (events.CapabilityLeaseAdmission, string, error) {
+	var lease core.CapabilityLease
+	if decodeExactJSON(body, &lease) != nil || lease.ID == "" || string(lease.ID) != recordID || version != versions[lease.ID]+1 {
+		return events.CapabilityLeaseAdmission{}, "", fmt.Errorf("capability lease %s/%d has invalid or noncontiguous state", recordID, version)
+	}
+	expectedType := "CAPABILITY_GRANTED"
+	if version == 1 && lease.RevokedAt != nil {
+		return events.CapabilityLeaseAdmission{}, "", fmt.Errorf("capability lease %s starts revoked", recordID)
+	}
+	if version > 1 {
+		expectedType = "CAPABILITY_REVOKED"
+		if lease.RevokedAt == nil {
+			return events.CapabilityLeaseAdmission{}, "", fmt.Errorf("capability lease %s/%d lacks revocation time", recordID, version)
+		}
+	}
+	var matched events.Event
+	for _, event := range stream {
+		_, alreadyUsed := used[event.EventID]
+		if alreadyUsed || event.EventType != expectedType || event.OrganizationID == "" || event.TaskID != string(lease.OriginTaskID) ||
+			event.Sequence <= sequences[lease.ID] || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" ||
+			len(event.ArtifactRefs) != 0 || event.SchemaVersion != events.SchemaVersion || !bytes.Equal(event.Payload, body) {
+			continue
+		}
+		if matched.EventID != "" {
+			return events.CapabilityLeaseAdmission{}, "", fmt.Errorf("capability lease %s/%d has ambiguous Event Contract admission", recordID, version)
+		}
+		matched = event
+	}
+	if matched.EventID == "" {
+		return events.CapabilityLeaseAdmission{}, "", fmt.Errorf("capability lease %s/%d lacks exact Event Contract admission", recordID, version)
+	}
+	return events.CapabilityLeaseAdmission{Lease: lease, OrganizationID: core.ID(matched.OrganizationID), Sequence: matched.Sequence}, matched.EventID, nil
+}
+
+func recoveryOrganizationFreezeAdmission(stream []events.Event, body []byte, recordID string, version int, versions map[core.ID]int, sequences map[core.ID]int64, used map[string]struct{}) (events.OrganizationFreezeAdmission, string, error) {
+	var state struct {
+		OrganizationID core.ID   `json:"organization_id"`
+		Frozen         bool      `json:"frozen"`
+		Reason         string    `json:"reason,omitempty"`
+		UpdatedAt      time.Time `json:"updated_at"`
+	}
+	if decodeExactJSON(body, &state) != nil || state.OrganizationID == "" || string(state.OrganizationID) != recordID ||
+		version != versions[state.OrganizationID]+1 || state.UpdatedAt.IsZero() {
+		return events.OrganizationFreezeAdmission{}, "", fmt.Errorf("organization freeze %s/%d has invalid or noncontiguous state", recordID, version)
+	}
+	var matched events.Event
+	for _, event := range stream {
+		_, alreadyUsed := used[event.EventID]
+		if alreadyUsed || event.EventType != "FREEZE_SET" || event.OrganizationID != recordID || event.Sequence <= sequences[state.OrganizationID] ||
+			event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || len(event.ArtifactRefs) != 0 ||
+			event.SchemaVersion != events.SchemaVersion || !bytes.Equal(event.Payload, body) {
+			continue
+		}
+		if matched.EventID != "" {
+			return events.OrganizationFreezeAdmission{}, "", fmt.Errorf("organization freeze %s/%d has ambiguous Event Contract admission", recordID, version)
+		}
+		matched = event
+	}
+	if matched.EventID == "" {
+		return events.OrganizationFreezeAdmission{}, "", fmt.Errorf("organization freeze %s/%d lacks exact Event Contract admission", recordID, version)
+	}
+	return events.OrganizationFreezeAdmission{OrganizationID: state.OrganizationID, Frozen: state.Frozen, Sequence: matched.Sequence}, matched.EventID, nil
 }
 
 func validateRecoveryIntentConfirmations(stream []events.Event) error {
@@ -433,23 +539,29 @@ func validateRecoveryIntentConfirmations(stream []events.Event) error {
 	return nil
 }
 
-func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, stream []events.Event) error {
+func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, stream []events.Event, capabilityAdmissions []events.CapabilityLeaseAdmission, freezeAdmissions []events.OrganizationFreezeAdmission) error {
 	sort.Slice(admitted, func(left, right int) bool {
 		return admitted[left].event.Sequence < admitted[right].event.Sequence
 	})
 	snapshot := core.DurableGraph{
-		Organizations:     map[core.ID]core.DurableState[core.Organization]{},
-		Missions:          map[core.ID]core.DurableState[core.Mission]{},
-		Goals:             map[core.ID]core.DurableState[core.Goal]{},
-		Teams:             map[core.ID]core.DurableState[core.Team]{},
-		AgentBlueprints:   map[core.ID]core.DurableState[core.AgentBlueprint]{},
-		ExecutionProfiles: map[core.ID]core.DurableState[core.ExecutionProfile]{},
-		Agents:            map[core.ID]core.DurableState[core.Agent]{},
-		Intents:           map[core.ID]core.DurableState[core.Intent]{},
-		Works:             map[core.ID]core.DurableState[core.Work]{},
-		Tasks:             map[core.ID]core.DurableState[core.Task]{},
+		Organizations:       map[core.ID]core.DurableState[core.Organization]{},
+		Missions:            map[core.ID]core.DurableState[core.Mission]{},
+		Goals:               map[core.ID]core.DurableState[core.Goal]{},
+		Teams:               map[core.ID]core.DurableState[core.Team]{},
+		AgentBlueprints:     map[core.ID]core.DurableState[core.AgentBlueprint]{},
+		ExecutionProfiles:   map[core.ID]core.DurableState[core.ExecutionProfile]{},
+		Agents:              map[core.ID]core.DurableState[core.Agent]{},
+		Intents:             map[core.ID]core.DurableState[core.Intent]{},
+		Works:               map[core.ID]core.DurableState[core.Work]{},
+		Tasks:               map[core.ID]core.DurableState[core.Task]{},
+		Experiments:         map[core.ID]core.DurableState[core.Experiment]{},
+		PromotionCandidates: map[core.ID]core.DurableState[core.PromotionCandidate]{},
+		Knowledge:           map[core.ID]core.DurableState[core.KnowledgeRecord]{},
 	}
 	reviewEvidence := events.IndexReviewedIntentEvidence(stream)
+	knowledgeAdmissions := events.NewKnowledgeAdmissionValidator(stream)
+	knowledgeAdmissions.UseCapabilityLeaseAdmissions(capabilityAdmissions)
+	knowledgeAdmissions.UseOrganizationFreezeAdmissions(freezeAdmissions)
 	for _, admission := range admitted {
 		event, record := admission.event, admission.payload.Projection
 		var organizationID core.ID
@@ -590,6 +702,18 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, 
 				return fmt.Errorf("event %s contains invalid Task history: %w", event.EventID, err)
 			}
 			continue
+		case "knowledge":
+			var value core.KnowledgeRecord
+			if decodeExactJSON(record.Value, &value) != nil || value.KnowledgeID != core.ID(record.RecordID) {
+				return fmt.Errorf("event %s contains an invalid knowledge projection", event.EventID)
+			}
+			organizationID = value.OrganizationID
+			if err := knowledgeAdmissions.Validate(value, event, record, snapshot); err != nil {
+				return fmt.Errorf("event %s contains invalid knowledge admission: %w", event.EventID, err)
+			}
+			if err := setRecoveryProjection(snapshot.Knowledge, record, value, true, core.ValidKnowledgeRevision); err != nil {
+				return fmt.Errorf("event %s contains invalid knowledge history: %w", event.EventID, err)
+			}
 		default:
 			return fmt.Errorf("event %s contains unsupported projection kind %s", event.EventID, record.ProjectionKind)
 		}

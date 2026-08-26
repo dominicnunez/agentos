@@ -28,6 +28,60 @@ func TestOpenBootstrapsCurrentStorageContract(t *testing.T) {
 	}
 }
 
+func TestStorageV7QuarantinesLegacyUnsealedKnowledge(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "storage-v6-legacy-knowledge.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyBody := []byte(`{"knowledge_id":"legacy-1","version":1,"status":"CANDIDATE","content":"unsealed"}`)
+	if _, err := db.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES('knowledge','legacy-1',1,?,'2026-08-26T00:00:00Z')`, legacyBody); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE legacy_knowledge_quarantine`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	fingerprint, err := storageSchemaFingerprint(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=6,schema_fingerprint=?; PRAGMA user_version=6`, fingerprint); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = migrated.Close() })
+	var authoritative, quarantined int
+	var gotBody []byte
+	var reason string
+	if err := migrated.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM records WHERE kind='knowledge'`).Scan(&authoritative); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrated.db.QueryRowContext(ctx, `SELECT COUNT(*),body,reason FROM legacy_knowledge_quarantine WHERE record_id='legacy-1' AND version=1`).Scan(&quarantined, &gotBody, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if authoritative != 0 || quarantined != 1 || string(gotBody) != string(legacyBody) || reason != "PRE_EVENT_COUPLED_KNOWLEDGE_REQUIRES_REVIEW" {
+		t.Fatalf("legacy migration authoritative=%d quarantined=%d body=%s reason=%s", authoritative, quarantined, gotBody, reason)
+	}
+}
+
 func TestStorageV1FixtureMatchesFrozenFingerprint(t *testing.T) {
 	db := createStorageV1Fixture(t, filepath.Join(t.TempDir(), "storage-v1.db"))
 	defer func() { _ = db.Close() }()
@@ -199,7 +253,7 @@ func TestStorageV2MigrationPreservesReviewedIntentEvidence(t *testing.T) {
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE event_integrity; DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE legacy_knowledge_quarantine; DROP TABLE event_integrity; DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -281,7 +335,7 @@ func TestStorageV4MigrationRebuildsBoundedGovernanceQueues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE event_integrity; DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE legacy_knowledge_quarantine; DROP TABLE event_integrity; DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
