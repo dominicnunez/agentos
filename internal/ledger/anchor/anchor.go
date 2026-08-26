@@ -87,6 +87,13 @@ func PublicKeyID(publicKey ed25519.PublicKey) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
+func PublicKeyFromPrivate(privateKey ed25519.PrivateKey) (ed25519.PublicKey, error) {
+	if len(privateKey) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("ledger anchor private key is invalid")
+	}
+	return append(ed25519.PublicKey(nil), privateKey[ed25519.SeedSize:]...), nil
+}
+
 func EncodePublicKey(publicKey ed25519.PublicKey) (string, error) {
 	if _, err := PublicKeyID(publicKey); err != nil {
 		return "", err
@@ -136,7 +143,8 @@ func Open(path, installationID string, publicKey ed25519.PublicKey, privateKey e
 	if err := validatePath(path); err != nil {
 		return nil, err
 	}
-	if !validInstallationID(installationID) || len(publicKey) != ed25519.PublicKeySize || len(privateKey) != ed25519.PrivateKeySize || !bytes.Equal(privateKey.Public().(ed25519.PublicKey), publicKey) {
+	derivedPublicKey, keyErr := PublicKeyFromPrivate(privateKey)
+	if !validInstallationID(installationID) || len(publicKey) != ed25519.PublicKeySize || keyErr != nil || !bytes.Equal(derivedPublicKey, publicKey) {
 		return nil, fmt.Errorf("ledger anchor identity or signing key is invalid")
 	}
 	if err := state.Valid(); err != nil {
@@ -324,7 +332,11 @@ func newCheckpoint(installationID string, generation int64, state LedgerState, o
 	if generation == 0 && previous != "" || generation > 0 && !validSHA256(previous) {
 		return Checkpoint{}, nil, fmt.Errorf("ledger anchor predecessor is invalid")
 	}
-	keyID, _ := PublicKeyID(privateKey.Public().(ed25519.PublicKey))
+	publicKey, err := PublicKeyFromPrivate(privateKey)
+	if err != nil {
+		return Checkpoint{}, nil, err
+	}
+	keyID, _ := PublicKeyID(publicKey)
 	checkpoint := Checkpoint{
 		SchemaVersion: SchemaVersion, InstallationID: installationID, Generation: generation,
 		Ledger: state, ObservedAt: observedAt, TimeEvidence: TimeEvidence,

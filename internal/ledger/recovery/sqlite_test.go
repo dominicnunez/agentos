@@ -118,7 +118,10 @@ func TestAnchoredBackupAndRestorePublishMatchingEvidenceWithoutOverwrite(t *test
 		t.Fatal(errors.Join(err, closeErr))
 	}
 	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	publicKey := privateKey.Public().(ed25519.PublicKey)
+	publicKey, err := ledgeranchor.PublicKeyFromPrivate(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	encodedPublic, err := ledgeranchor.EncodePublicKey(publicKey)
 	if err != nil {
 		t.Fatal(err)

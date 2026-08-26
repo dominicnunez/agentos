@@ -44,7 +44,7 @@ func TestOpenCurrentRejectsLegacyStorageWithoutMigration(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 	var version int
-	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+	if err := db.QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
 	if version != 1 {

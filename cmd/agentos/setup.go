@@ -182,7 +182,10 @@ func configureLedgerAnchor(ctx context.Context, config *bootstrap.Config, ui *te
 		createdCredential = true
 	}
 	defer clear(privateKey)
-	publicKey := privateKey.Public().(ed25519.PublicKey)
+	publicKey, err := ledgeranchor.PublicKeyFromPrivate(privateKey)
+	if err != nil {
+		return err
+	}
 	encodedPublic, err := ledgeranchor.EncodePublicKey(publicKey)
 	if err != nil {
 		return err

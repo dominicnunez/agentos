@@ -52,7 +52,10 @@ func TestRunVerifyReturnsStructuredResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	publicKey := privateKey.Public().(ed25519.PublicKey)
+	publicKey, err := ledgeranchor.PublicKeyFromPrivate(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	encodedPublic, _ := ledgeranchor.EncodePublicKey(publicKey)
 	keyID, _ := ledgeranchor.PublicKeyID(publicKey)
 	installationID := "install-" + strings.Repeat("ab", 32)

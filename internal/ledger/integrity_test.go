@@ -169,7 +169,10 @@ func TestAttachedExternalAnchorAdvancesWithTheSQLiteCommit(t *testing.T) {
 		seed[index] = 7
 	}
 	privateKey := ed25519.NewKeyFromSeed(seed)
-	publicKey := privateKey.Public().(ed25519.PublicKey)
+	publicKey, err := ledgeranchor.PublicKeyFromPrivate(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	installationID := "install-" + strings.Repeat("ab", 32)
 	checkpointPath := filepath.Join(directory, "ledger-anchor.json")
 	now := time.Date(2026, 8, 26, 16, 0, 0, 0, time.UTC)
@@ -212,7 +215,10 @@ func TestAttachedExternalAnchorFailureRollsBackSQLite(t *testing.T) {
 		t.Fatal(err)
 	}
 	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	publicKey := privateKey.Public().(ed25519.PublicKey)
+	publicKey, err := ledgeranchor.PublicKeyFromPrivate(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	installationID := "install-" + strings.Repeat("cd", 32)
 	checkpointPath := filepath.Join(directory, "ledger-anchor.json")
 	now := time.Date(2026, 8, 26, 17, 0, 0, 0, time.UTC)

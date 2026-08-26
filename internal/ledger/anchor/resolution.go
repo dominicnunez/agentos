@@ -38,7 +38,10 @@ func NewPendingResolution(committed Checkpoint, committedBody []byte, pending Ch
 	if !validLocalAuthority(authorizedBy) || observedAt.IsZero() || observedAt.Location() != time.UTC || len(privateKey) != ed25519.PrivateKeySize {
 		return PendingResolution{}, nil, fmt.Errorf("pending checkpoint resolution authority, time, or key is invalid")
 	}
-	publicKey := privateKey.Public().(ed25519.PublicKey)
+	publicKey, err := PublicKeyFromPrivate(privateKey)
+	if err != nil {
+		return PendingResolution{}, nil, err
+	}
 	if err := exactCheckpointBytes(committed, committedBody); err != nil {
 		return PendingResolution{}, nil, err
 	}

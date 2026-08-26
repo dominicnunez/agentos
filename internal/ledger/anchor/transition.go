@@ -70,7 +70,7 @@ func newKeyTransition(continuity, reason string, previous Checkpoint, previousBo
 		if reason != "" || len(previousPrivateKey) != ed25519.PrivateKeySize {
 			return KeyTransition{}, nil, nil, fmt.Errorf("authorized rotation requires the prior signing key")
 		}
-		previousPublicKey = previousPrivateKey.Public().(ed25519.PublicKey)
+		previousPublicKey, _ = PublicKeyFromPrivate(previousPrivateKey)
 	case TransitionReviewedTrustReset:
 		if reason != RecoveryReasonKeyUnavailable || len(previousPrivateKey) != 0 || len(trustedPreviousPublicKey) != 1 {
 			return KeyTransition{}, nil, nil, fmt.Errorf("reviewed trust reset evidence is invalid")
@@ -93,7 +93,11 @@ func newKeyTransition(continuity, reason string, previous Checkpoint, previousBo
 		return KeyTransition{}, nil, nil, err
 	}
 	previousEncoded, _ := EncodePublicKey(previousPublicKey)
-	nextEncoded, _ := EncodePublicKey(nextPrivateKey.Public().(ed25519.PublicKey))
+	nextPublicKey, err := PublicKeyFromPrivate(nextPrivateKey)
+	if err != nil {
+		return KeyTransition{}, nil, nil, err
+	}
+	nextEncoded, _ := EncodePublicKey(nextPublicKey)
 	record := KeyTransition{
 		SchemaVersion: TransitionSchemaVersion, Continuity: continuity, InstallationID: previous.InstallationID,
 		AuthorizedBy: authorizedBy, Reason: reason, ObservedAt: observedAt, TimeEvidence: TimeEvidence,

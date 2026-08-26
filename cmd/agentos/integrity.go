@@ -128,7 +128,10 @@ func runIntegrityMaintenance(ctx context.Context, args []string, input *os.File,
 	if err != nil {
 		return err
 	}
-	nextPublicKey := nextPrivateKey.Public().(ed25519.PublicKey)
+	nextPublicKey, err := ledgeranchor.PublicKeyFromPrivate(nextPrivateKey)
+	if err != nil {
+		return err
+	}
 	nextKeyID, _ := ledgeranchor.PublicKeyID(nextPublicKey)
 	nextSecretRef := "ledger-anchor-key-" + nextKeyID
 	credential := ledgerAnchorCredential{
@@ -280,7 +283,12 @@ func resumePendingKeyTransition(ctx context.Context, configPath string, config b
 	if err != nil {
 		return false, fmt.Errorf("load pending replacement ledger anchor key: %w", err)
 	}
-	if !bytes.Equal(nextPrivateKey.Public().(ed25519.PublicKey), nextPublicKey) {
+	derivedNextPublicKey, err := ledgeranchor.PublicKeyFromPrivate(nextPrivateKey)
+	if err != nil {
+		clear(nextPrivateKey)
+		return false, err
+	}
+	if !bytes.Equal(derivedNextPublicKey, nextPublicKey) {
 		clear(nextPrivateKey)
 		return false, fmt.Errorf("pending replacement credential does not match its transition")
 	}
@@ -384,7 +392,8 @@ func revokePriorAnchorCredential(ctx context.Context, config bootstrap.Config, r
 		}
 		privateKey, loadErr := loadLedgerAnchorPrivateKey(ctx, config, ref)
 		if loadErr == nil {
-			matches := bytes.Equal(privateKey.Public().(ed25519.PublicKey), previousPublicKey)
+			candidatePublicKey, keyErr := ledgeranchor.PublicKeyFromPrivate(privateKey)
+			matches := keyErr == nil && bytes.Equal(candidatePublicKey, previousPublicKey)
 			clear(privateKey)
 			if !matches {
 				return fmt.Errorf("candidate prior credential %s does not match the retired key", ref)

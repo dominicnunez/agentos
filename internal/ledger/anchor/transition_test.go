@@ -37,7 +37,10 @@ func TestAuthorizedRotationPreservesHeadAndProvesPriorKeyAuthorization(t *testin
 	if verified.Continuity != TransitionAuthorizedRotation || !verified.NextCheckpoint.Ledger.Equal(previous.Ledger) || verified.NextCheckpoint.Generation != previous.Generation+1 {
 		t.Fatalf("transition=%+v", verified)
 	}
-	nextPublic := nextPrivate.Public().(ed25519.PublicKey)
+	nextPublic, err := PublicKeyFromPrivate(nextPrivate)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := verifyCheckpoint(record.NextCheckpoint, testInstallationID, nextPublic); err != nil {
 		t.Fatal(err)
 	}

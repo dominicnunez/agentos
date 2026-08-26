@@ -183,7 +183,7 @@ func keyPair(fill byte) (ed25519.PublicKey, ed25519.PrivateKey) {
 		seed[index] = fill
 	}
 	privateKey := ed25519.NewKeyFromSeed(seed)
-	return privateKey.Public().(ed25519.PublicKey), privateKey
+	return append(ed25519.PublicKey(nil), privateKey[ed25519.SeedSize:]...), privateKey
 }
 
 func state(sequence int64, eventID, head string) LedgerState {
