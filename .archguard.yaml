@@ -189,7 +189,7 @@ policy:
       from:
         module: ledger
       to:
-        modules: [approvals, authority, core, events, inference]
+        modules: [approvals, authority, core, events, fileguard, inference]
 
     - name: inference-provider-boundary
       from:

@@ -22,6 +22,7 @@
 ## Security and releases
 
 - [Threat model](THREAT_MODEL.md) - protected assets, attack surfaces, controls, and residual risks.
+- [Event ledger integrity](EVENT_LEDGER_INTEGRITY.md) - signed external checkpoints, key lifecycle, crash recovery, and assurance limits.
 - [Release artifacts](RELEASE.md) - reproducible Linux packages, corresponding source, and publication controls.
 - [Security policy](../SECURITY.md) - private vulnerability reporting.
 

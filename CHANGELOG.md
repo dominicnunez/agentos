@@ -36,6 +36,10 @@ Target: `1.0.0-rc.1`
 
 ### Security
 
+- Ed25519-signed external ledger-head checkpoints detect SQLite rollback,
+  truncation, and substitution; transaction-coupled crash recovery, paired
+  backup/restore, dual-key rotation, explicit key-loss trust reset, and signed
+  pending-resolution evidence preserve fail-closed operations.
 - Exact-effect approval, expiry, revocation, freeze, single-use, and
   attempt-time authorization checks.
 - Goal achievement fails closed until a durable progress evaluation is

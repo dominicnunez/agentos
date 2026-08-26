@@ -15,6 +15,21 @@ func ensureInitPrivileges(_ context.Context, _ bootstrap.Mode, _ *terminalUI) (b
 func ensureProviderSetupPrivileges(_ context.Context, _ bootstrap.Config, _ *terminalUI) (bool, error) {
 	return false, fmt.Errorf("Agent OS V1 setup is supported on Linux")
 }
+func ensureIntegrityMaintenancePrivileges(_ context.Context, _ bootstrap.Config, _ *terminalUI, _ string) (bool, error) {
+	return false, fmt.Errorf("Agent OS V1 integrity maintenance is supported on Linux")
+}
+func integrityMaintenanceAuthority(_ context.Context, _ bootstrap.Config) (string, error) {
+	return "", fmt.Errorf("Agent OS V1 integrity maintenance is supported on Linux")
+}
+func requireIntegrityServiceStopped(_ context.Context, _ bootstrap.Config) error {
+	return fmt.Errorf("Agent OS V1 integrity maintenance is supported on Linux")
+}
+func prepareIntegrityCheckpointAccess(_ context.Context, _ bootstrap.Config) error {
+	return fmt.Errorf("Agent OS V1 integrity maintenance is supported on Linux")
+}
+func doctorIntegrityCheckpointAccess(_ context.Context, _ bootstrap.Config) error {
+	return fmt.Errorf("Agent OS V1 ledger checkpoint inspection is supported on Linux")
+}
 func invokingSystemOwner(_ context.Context) (bootstrap.Owner, error) {
 	return bootstrap.Owner{}, fmt.Errorf("Agent OS V1 setup is supported on Linux")
 }
@@ -25,6 +40,9 @@ func readSetupCredential(_ string, _ int) ([]byte, error) {
 	return nil, fmt.Errorf("Agent OS V1 setup is supported on Linux")
 }
 func storeEncryptedCredential(_ context.Context, _ bootstrap.Config, _ string, _ []byte) error {
+	return fmt.Errorf("Agent OS V1 setup is supported on Linux")
+}
+func storeEncryptedCredentialNew(_ context.Context, _ bootstrap.Config, _ string, _ []byte) error {
 	return fmt.Errorf("Agent OS V1 setup is supported on Linux")
 }
 func installRuntime(_ context.Context, _ bootstrap.Config, _ int) error {

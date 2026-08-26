@@ -18,6 +18,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/bootstrap"
 	"github.com/dominicnunez/agentos/internal/fileguard"
 	"github.com/dominicnunez/agentos/internal/gateway"
+	ledgeranchor "github.com/dominicnunez/agentos/internal/ledger/anchor"
 	"github.com/dominicnunez/agentos/internal/secrets"
 )
 
@@ -33,6 +34,101 @@ func ensureProviderSetupPrivileges(ctx context.Context, config bootstrap.Config,
 		return false, nil
 	}
 	return runAdministratorSetup(ctx, ui, "administrator provider setup failed", "setup", "provider")
+}
+
+func ensureIntegrityMaintenancePrivileges(ctx context.Context, config bootstrap.Config, ui *terminalUI, action string) (bool, error) {
+	if config.Mode != bootstrap.ModeSystem || effectiveUID() == 0 {
+		return false, nil
+	}
+	return runAdministratorSetup(ctx, ui, "administrator ledger integrity maintenance failed", "integrity", action)
+}
+
+func integrityMaintenanceAuthority(ctx context.Context, config bootstrap.Config) (string, error) {
+	if config.Mode == bootstrap.ModeUser {
+		if effectiveUID() != config.Owner.UID {
+			return "", fmt.Errorf("user installation integrity maintenance requires its configured Linux owner")
+		}
+		return keyTransitionAuthority(config.Owner.UID), nil
+	}
+	owner, err := invokingSystemOwner(ctx)
+	if err != nil {
+		return "", err
+	}
+	if owner.UID != 0 && owner.UID != config.Owner.UID {
+		return "", fmt.Errorf("system integrity maintenance requires root or the configured Linux owner")
+	}
+	return keyTransitionAuthority(owner.UID), nil
+}
+
+func requireIntegrityServiceStopped(ctx context.Context, config bootstrap.Config) error {
+	arguments := []string{"is-active", "agentos.service"}
+	if config.Mode == bootstrap.ModeUser {
+		arguments = append([]string{"--user"}, arguments...)
+	}
+	command := exec.CommandContext(ctx, "/usr/bin/systemctl", arguments...)
+	output, err := command.CombinedOutput()
+	state := strings.TrimSpace(string(output))
+	if err == nil || state == "active" || state == "activating" || state == "reloading" {
+		return fmt.Errorf("stop agentos.service before ledger anchor key maintenance")
+	}
+	if state != "" && state != "inactive" && state != "failed" && state != "unknown" {
+		return fmt.Errorf("cannot prove agentos.service is stopped: %s", state)
+	}
+	return nil
+}
+
+func keyTransitionAuthority(uid int) string { return "local-uid-" + strconv.Itoa(uid) }
+
+func prepareIntegrityCheckpointAccess(ctx context.Context, config bootstrap.Config) error {
+	info, err := os.Lstat(config.Integrity.CheckpointFile)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > ledgeranchor.MaximumFileBytes {
+		return fmt.Errorf("ledger anchor checkpoint must be a bounded regular file, not a link")
+	}
+	if config.Mode == bootstrap.ModeSystem {
+		if effectiveUID() != 0 {
+			return fmt.Errorf("system checkpoint access requires administrator access")
+		}
+		uid, gid, identityErr := lookupNumericIdentity(ctx, "agentos")
+		if identityErr != nil {
+			return identityErr
+		}
+		if err := os.Chown(config.Integrity.CheckpointFile, uid, gid); err != nil {
+			return err
+		}
+	} else if effectiveUID() != config.Owner.UID {
+		return fmt.Errorf("user checkpoint access requires the configured Linux owner")
+	} else if uid, _, ownerErr := fileOwner(config.Integrity.CheckpointFile); ownerErr != nil || uid != config.Owner.UID {
+		return fmt.Errorf("user checkpoint must be owned by the configured Linux owner")
+	}
+	return os.Chmod(config.Integrity.CheckpointFile, 0o600)
+}
+
+func doctorIntegrityCheckpointAccess(ctx context.Context, config bootstrap.Config) error {
+	info, err := os.Lstat(config.Integrity.CheckpointFile)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > ledgeranchor.MaximumFileBytes {
+		return fmt.Errorf("ledger anchor checkpoint must be a bounded regular file, not a link")
+	}
+	if info.Mode().Perm() != 0o600 {
+		return fmt.Errorf("ledger anchor checkpoint permissions must be 0600")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("ledger anchor checkpoint ownership is unavailable")
+	}
+	expectedUID, expectedGID := config.Owner.UID, config.Owner.GID
+	if config.Mode == bootstrap.ModeSystem {
+		expectedUID, expectedGID, err = lookupNumericIdentity(ctx, "agentos")
+		if err != nil {
+			return fmt.Errorf("resolve Agent OS service identity: %w", err)
+		}
+	}
+	if int(stat.Uid) != expectedUID || int(stat.Gid) != expectedGID {
+		return fmt.Errorf("ledger anchor checkpoint is not owned by its service identity")
+	}
+	return nil
 }
 
 func runAdministratorSetup(ctx context.Context, ui *terminalUI, failure string, arguments ...string) (bool, error) {
@@ -141,6 +237,14 @@ func readSetupCredential(path string, ownerUID int) ([]byte, error) {
 }
 
 func storeEncryptedCredential(ctx context.Context, config bootstrap.Config, name string, secret []byte) error {
+	return storeEncryptedCredentialMode(ctx, config, name, secret, false)
+}
+
+func storeEncryptedCredentialNew(ctx context.Context, config bootstrap.Config, name string, secret []byte) error {
+	return storeEncryptedCredentialMode(ctx, config, name, secret, true)
+}
+
+func storeEncryptedCredentialMode(ctx context.Context, config bootstrap.Config, name string, secret []byte, exclusive bool) error {
 	if name == "" || filepath.Base(name) != name || len(secret) == 0 {
 		return fmt.Errorf("credential name and value are required")
 	}
@@ -176,7 +280,21 @@ func storeEncryptedCredential(ctx context.Context, config bootstrap.Config, name
 	if err := os.Chmod(temporaryPath, 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(temporaryPath, path); err != nil {
+	if exclusive {
+		if err := os.Link(temporaryPath, path); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return fmt.Errorf("encrypted credential already exists")
+			}
+			return err
+		}
+	} else if err := os.Rename(temporaryPath, path); err != nil {
+		return err
+	}
+	directoryFile, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	if err := errors.Join(directoryFile.Sync(), directoryFile.Close()); err != nil {
 		return err
 	}
 	return nil
@@ -262,6 +380,9 @@ func installSystemRuntime(ctx context.Context, config bootstrap.Config, serviceC
 		if err := prepareSystemDirectory(directory, serviceUID, serviceGID, 0o750); err != nil {
 			return err
 		}
+	}
+	if err := prepareIntegrityCheckpointAccess(ctx, config); err != nil {
+		return err
 	}
 	if err := prepareSystemProviderState(config, serviceUID, serviceGID); err != nil {
 		return err
@@ -458,6 +579,9 @@ func installUserRuntime(ctx context.Context, config bootstrap.Config, serviceCho
 		if err := ensureOwnedRuntimeDirectory(directory, config.Owner.UID, 0o700); err != nil {
 			return err
 		}
+	}
+	if err := prepareIntegrityCheckpointAccess(ctx, config); err != nil {
+		return err
 	}
 	binary := filepath.Join(current, ".local", "bin", "agentos")
 	if err := installExecutable(binary); err != nil {
@@ -689,6 +813,14 @@ func serviceCredentialDirectives(config bootstrap.Config) (string, error) {
 	case bootstrap.ProviderCodexSubscription:
 		directives.WriteString("LoadCredentialEncrypted=" + systemdQuote(provider.SecretRef+":"+filepath.Join(config.Paths.ConfigDir, "credentials", provider.SecretRef+".cred")) + "\n")
 	}
+	if config.Integrity.SecretRef == "" {
+		return "", fmt.Errorf("ledger anchor signing credential is required")
+	}
+	if _, duplicate := references[config.Integrity.SecretRef]; duplicate {
+		return "", fmt.Errorf("ledger anchor signing credential reference is duplicated")
+	}
+	references[config.Integrity.SecretRef] = struct{}{}
+	directives.WriteString("LoadCredentialEncrypted=" + systemdQuote(config.Integrity.SecretRef+":"+filepath.Join(config.Paths.ConfigDir, "credentials", config.Integrity.SecretRef+".cred")) + "\n")
 	if config.A2A.ActorsFile == "" {
 		return directives.String(), nil
 	}

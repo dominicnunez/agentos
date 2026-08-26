@@ -22,14 +22,17 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	ledgerstore "github.com/dominicnunez/agentos/internal/ledger"
+	ledgeranchor "github.com/dominicnunez/agentos/internal/ledger/anchor"
 	"modernc.org/sqlite"
 )
 
 type Result struct {
 	Path                string `json:"path"`
+	CheckpointPath      string `json:"checkpoint_path,omitempty"`
 	SHA256              string `json:"sha256"`
 	EventChainSHA256    string `json:"event_chain_sha256,omitempty"`
 	EventChainAlgorithm string `json:"event_chain_algorithm,omitempty"`
+	EventChainEventID   string `json:"event_chain_event_id,omitempty"`
 	SizeBytes           int64  `json:"size_bytes"`
 	EventCount          int64  `json:"event_count"`
 	MaxSequence         int64  `json:"max_sequence"`
@@ -141,6 +144,7 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 			}
 			result.EventChainSHA256 = integrity.SHA256
 			result.EventChainAlgorithm = integrity.Algorithm
+			result.EventChainEventID = integrity.EventID
 		}
 	} else {
 		if err := verifyLegacyAdmissionsAfterMigration(ctx, db); err != nil {
@@ -159,7 +163,138 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	verified.EventSchemaVersion = result.EventSchemaVersion
 	verified.EventChainSHA256 = result.EventChainSHA256
 	verified.EventChainAlgorithm = result.EventChainAlgorithm
+	verified.EventChainEventID = result.EventChainEventID
 	return verified, err
+}
+
+// VerifyAnchored proves that an offline SQLite snapshot matches the signed
+// checkpoint selected by the installation's public trust root.
+func VerifyAnchored(ctx context.Context, path, checkpointPath, installationID, encodedPublicKey string) (Result, error) {
+	result, err := Verify(ctx, path)
+	if err != nil {
+		return Result{}, err
+	}
+	publicKey, err := ledgeranchor.DecodePublicKey(encodedPublicKey)
+	if err != nil {
+		return Result{}, err
+	}
+	checkpoint, _, err := ledgeranchor.Read(checkpointPath, installationID, publicKey)
+	if err != nil {
+		return Result{}, fmt.Errorf("verify external ledger checkpoint: %w", err)
+	}
+	state := ledgeranchor.LedgerState{
+		ApplicationID: ledgerstore.StorageApplicationID, StorageVersion: result.StorageVersion,
+		EventSchemaVersion: result.EventSchemaVersion, EventCount: result.EventCount,
+		Sequence: result.MaxSequence, EventID: result.EventChainEventID,
+		ChainAlgorithm: result.EventChainAlgorithm, ChainHead: result.EventChainSHA256,
+	}
+	if !checkpoint.Ledger.Equal(state) {
+		return Result{}, fmt.Errorf("offline database does not match its external ledger checkpoint")
+	}
+	result.CheckpointPath = checkpointPath
+	return result, nil
+}
+
+// BackupAnchored creates a database snapshot and matching signed checkpoint.
+// If the live checkpoint changes during the snapshot, nothing is published.
+func BackupAnchored(ctx context.Context, source, destination, checkpointPath, checkpointDestination, installationID, encodedPublicKey string) (Result, error) {
+	return anchoredClone(ctx, source, destination, checkpointPath, checkpointDestination, installationID, encodedPublicKey, Backup)
+}
+
+// RestoreAnchored verifies and copies both halves of an anchored backup. It
+// never overwrites either destination.
+func RestoreAnchored(ctx context.Context, backup, destination, checkpointPath, checkpointDestination, installationID, encodedPublicKey string) (Result, error) {
+	return anchoredClone(ctx, backup, destination, checkpointPath, checkpointDestination, installationID, encodedPublicKey, Restore)
+}
+
+type cloneOperation func(context.Context, string, string) (Result, error)
+
+func anchoredClone(ctx context.Context, source, destination, checkpointPath, checkpointDestination, installationID, encodedPublicKey string, operation cloneOperation) (result Result, finalErr error) {
+	if ctx == nil || operation == nil || checkpointDestination == "" {
+		return Result{}, fmt.Errorf("anchored recovery paths, context, and operation are required")
+	}
+	resolvedDestination, err := destinationPath(destination)
+	if err != nil {
+		return Result{}, err
+	}
+	resolvedCheckpoint, err := destinationPath(checkpointDestination)
+	if err != nil {
+		return Result{}, fmt.Errorf("resolve checkpoint destination: %w", err)
+	}
+	if samePath(resolvedDestination, resolvedCheckpoint) {
+		return Result{}, fmt.Errorf("database and checkpoint destinations must differ")
+	}
+	publicKey, err := ledgeranchor.DecodePublicKey(encodedPublicKey)
+	if err != nil {
+		return Result{}, err
+	}
+	_, checkpointBefore, err := ledgeranchor.Read(checkpointPath, installationID, publicKey)
+	if err != nil {
+		return Result{}, fmt.Errorf("read source ledger checkpoint: %w", err)
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(resolvedDestination), ".agentos-anchored-recovery-*")
+	if err != nil {
+		return Result{}, err
+	}
+	temporaryPath := temporary.Name()
+	if err := temporary.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return Result{}, err
+	}
+	if err := os.Remove(temporaryPath); err != nil {
+		return Result{}, err
+	}
+	defer func() {
+		if err := os.Remove(temporaryPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			finalErr = errors.Join(finalErr, err)
+		}
+	}()
+	result, err = operation(ctx, source, temporaryPath)
+	if err != nil {
+		return Result{}, err
+	}
+	_, checkpointAfter, err := ledgeranchor.Read(checkpointPath, installationID, publicKey)
+	if err != nil || !bytes.Equal(checkpointBefore, checkpointAfter) {
+		return Result{}, fmt.Errorf("source ledger checkpoint changed during recovery snapshot")
+	}
+	if _, err := VerifyAnchored(ctx, temporaryPath, checkpointPath, installationID, encodedPublicKey); err != nil {
+		return Result{}, fmt.Errorf("verify anchored recovery snapshot: %w", err)
+	}
+	if err := writeExclusiveSynced(resolvedCheckpoint, checkpointBefore); err != nil {
+		return Result{}, fmt.Errorf("publish recovery checkpoint: %w", err)
+	}
+	removeCheckpoint := true
+	defer func() {
+		if removeCheckpoint {
+			finalErr = errors.Join(finalErr, os.Remove(resolvedCheckpoint))
+		}
+	}()
+	if err := os.Link(temporaryPath, resolvedDestination); err != nil {
+		return Result{}, fmt.Errorf("publish recovery database without overwrite: %w", err)
+	}
+	if err := syncDirectory(filepath.Dir(resolvedDestination)); err != nil {
+		return Result{}, errors.Join(err, os.Remove(resolvedDestination))
+	}
+	removeCheckpoint = false
+	result.Path = resolvedDestination
+	result.CheckpointPath = resolvedCheckpoint
+	return result, nil
+}
+
+func writeExclusiveSynced(path string, body []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	writeErr := error(nil)
+	if written, err := file.Write(body); err != nil || written != len(body) {
+		writeErr = errors.Join(err, io.ErrShortWrite)
+	}
+	closeErr := errors.Join(file.Sync(), file.Close())
+	if err := errors.Join(writeErr, closeErr); err != nil {
+		return errors.Join(err, os.Remove(path))
+	}
+	return syncDirectory(filepath.Dir(path))
 }
 
 // verifyLegacyAdmissionsAfterMigration audits the exact migration result in an

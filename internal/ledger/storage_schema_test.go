@@ -28,6 +28,30 @@ func TestOpenBootstrapsCurrentStorageContract(t *testing.T) {
 	}
 }
 
+func TestOpenCurrentRejectsLegacyStorageWithoutMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "storage-v1.db")
+	legacy := createStorageV1Fixture(t, path)
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if store, err := OpenCurrent(path); err == nil {
+		_ = store.Close()
+		t.Fatal("runtime open migrated legacy storage before anchor verification")
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 1 {
+		t.Fatalf("legacy storage was mutated to version %d", version)
+	}
+}
+
 func TestStorageV1FixtureMatchesFrozenFingerprint(t *testing.T) {
 	db := createStorageV1Fixture(t, filepath.Join(t.TempDir(), "storage-v1.db"))
 	defer func() { _ = db.Close() }()

@@ -4,6 +4,9 @@ package bootstrap
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,8 +26,9 @@ import (
 )
 
 const (
-	legacyConfigVersion = 1
-	ConfigVersion       = 2
+	legacyConfigVersion   = 1
+	previousConfigVersion = 2
+	ConfigVersion         = 3
 )
 
 type Mode string
@@ -85,16 +89,26 @@ type A2A struct {
 	TLSKeyFile    string `json:"tls_key_file,omitempty"`
 }
 
+type IntegrityAnchor struct {
+	InstallationID     string `json:"installation_id"`
+	CheckpointFile     string `json:"checkpoint_file"`
+	PublicKey          string `json:"public_key"`
+	KeyID              string `json:"key_id"`
+	SecretRef          string `json:"secret_ref"`
+	SignatureAlgorithm string `json:"signature_algorithm"`
+}
+
 type Config struct {
-	Version      int        `json:"version"`
-	Mode         Mode       `json:"mode"`
-	Owner        Owner      `json:"owner"`
-	Organization string     `json:"organization"`
-	Paths        Paths      `json:"paths"`
-	Providers    []Provider `json:"providers"`
-	A2A          A2A        `json:"a2a"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	Version      int             `json:"version"`
+	Mode         Mode            `json:"mode"`
+	Owner        Owner           `json:"owner"`
+	Organization string          `json:"organization"`
+	Paths        Paths           `json:"paths"`
+	Providers    []Provider      `json:"providers"`
+	A2A          A2A             `json:"a2a"`
+	Integrity    IntegrityAnchor `json:"integrity_anchor"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
 type State struct {
@@ -159,11 +173,22 @@ func (c Config) ValidateReady() error {
 		if err := provider.Validate(); err != nil {
 			problems = append(problems, fmt.Errorf("provider %d: %w", index+1, err))
 		}
+		if strings.HasPrefix(provider.SecretRef, "ledger-anchor-") {
+			problems = append(problems, fmt.Errorf("provider %d: credential reference uses the reserved ledger-anchor namespace", index+1))
+		}
 		if provider.Kind == ProviderCodexSubscription && !pathWithin(c.Paths.StateDir, provider.CodexCredential) {
 			problems = append(problems, fmt.Errorf("provider %d: Codex credential store must remain inside the state directory", index+1))
 		}
 		if provider.InferencePolicy.OrganizationID != c.Organization || provider.InferencePolicy.AuthorizedBy != "local-uid-"+strconv.Itoa(c.Owner.UID) {
 			problems = append(problems, fmt.Errorf("provider %d: inference policy must be approved for this organization by the installation owner", index+1))
+		}
+	}
+	if err := validateIntegrityAnchor(c.Integrity, c.Paths); err != nil {
+		problems = append(problems, err)
+	}
+	for _, provider := range c.Providers {
+		if provider.SecretRef == c.Integrity.SecretRef {
+			problems = append(problems, fmt.Errorf("ledger anchor and provider credential references must be distinct"))
 		}
 	}
 	if err := validateA2A(c.A2A); err != nil {
@@ -181,6 +206,9 @@ func (c Config) ValidateReady() error {
 		if path != "" && !pathWithin(c.Paths.ConfigDir, path) {
 			problems = append(problems, fmt.Errorf("A2A %s must remain inside the configuration directory", label))
 		}
+	}
+	if c.CreatedAt.IsZero() || c.UpdatedAt.IsZero() || c.CreatedAt.Location() != time.UTC || c.UpdatedAt.Location() != time.UTC || c.UpdatedAt.Before(c.CreatedAt) {
+		problems = append(problems, fmt.Errorf("configuration timestamps are invalid"))
 	}
 	return errors.Join(problems...)
 }
@@ -207,6 +235,47 @@ func UpgradeVersion1Checkpoint(config Config, state State) (Config, State, error
 	return upgradedConfig, upgradedState, nil
 }
 
+// UpgradeVersion2Checkpoint preserves the reviewed provider and boundary
+// configuration but returns setup to the service stage so a new signing key
+// and explicit external checkpoint can be enrolled before runtime starts.
+func UpgradeVersion2Checkpoint(config Config, state State) (Config, State, error) {
+	if config.Version != previousConfigVersion || state.Version != previousConfigVersion || config.Mode != state.Mode || config.Integrity != (IntegrityAnchor{}) {
+		return Config{}, State{}, fmt.Errorf("only a matching version-2 checkpoint without an anchor can be upgraded")
+	}
+	if !validStage(state.Stage) || state.UpdatedAt.IsZero() || state.UpdatedAt.Location() != time.UTC {
+		return Config{}, State{}, fmt.Errorf("version-2 initialization state is invalid")
+	}
+	upgradedConfig := Config{
+		Version: ConfigVersion, Mode: config.Mode, Owner: config.Owner, Organization: config.Organization,
+		Paths: config.Paths, Providers: config.Providers, A2A: config.A2A,
+		CreatedAt: config.CreatedAt, UpdatedAt: config.UpdatedAt,
+	}
+	var problems []error
+	problems = append(problems, configurationIdentityProblems(upgradedConfig.Mode, upgradedConfig.Owner, upgradedConfig.Organization, upgradedConfig.Paths, "owner must be a verified Linux user")...)
+	if len(upgradedConfig.Providers) != 1 {
+		problems = append(problems, fmt.Errorf("version-2 configuration requires exactly one provider"))
+	}
+	for index, provider := range upgradedConfig.Providers {
+		if err := provider.Validate(); err != nil {
+			problems = append(problems, fmt.Errorf("provider %d: %w", index+1, err))
+		}
+		if strings.HasPrefix(provider.SecretRef, "ledger-anchor-") {
+			problems = append(problems, fmt.Errorf("provider %d: credential reference uses the reserved ledger-anchor namespace", index+1))
+		}
+		if provider.Kind == ProviderCodexSubscription && !pathWithin(upgradedConfig.Paths.StateDir, provider.CodexCredential) {
+			problems = append(problems, fmt.Errorf("provider %d: Codex credential store must remain inside the state directory", index+1))
+		}
+		if provider.InferencePolicy.OrganizationID != upgradedConfig.Organization || provider.InferencePolicy.AuthorizedBy != "local-uid-"+strconv.Itoa(upgradedConfig.Owner.UID) {
+			problems = append(problems, fmt.Errorf("provider %d: inference policy authority is invalid", index+1))
+		}
+	}
+	problems = append(problems, configurationBoundaryProblems(upgradedConfig)...)
+	if err := errors.Join(problems...); err != nil {
+		return Config{}, State{}, fmt.Errorf("validate version-2 configuration: %w", err)
+	}
+	return upgradedConfig, State{Version: ConfigVersion, Mode: state.Mode, Stage: StageService, UpdatedAt: state.UpdatedAt}, nil
+}
+
 func validateVersion1Config(config Config) error {
 	problems := configurationIdentityProblems(config.Mode, config.Owner, config.Organization, config.Paths, "owner must be a verified Linux user")
 	if len(config.Providers) > 1 {
@@ -220,6 +289,12 @@ func validateVersion1Config(config Config) error {
 			problems = append(problems, fmt.Errorf("codex credential store must remain inside the state directory"))
 		}
 	}
+	problems = append(problems, configurationBoundaryProblems(config)...)
+	return errors.Join(problems...)
+}
+
+func configurationBoundaryProblems(config Config) []error {
+	var problems []error
 	if err := validateA2A(config.A2A); err != nil {
 		problems = append(problems, err)
 	}
@@ -231,7 +306,7 @@ func validateVersion1Config(config Config) error {
 	if config.CreatedAt.IsZero() || config.UpdatedAt.IsZero() || config.CreatedAt.Location() != time.UTC || config.UpdatedAt.Location() != time.UTC || config.UpdatedAt.Before(config.CreatedAt) {
 		problems = append(problems, fmt.Errorf("configuration timestamps are invalid"))
 	}
-	return errors.Join(problems...)
+	return problems
 }
 
 func configurationIdentityProblems(mode Mode, owner Owner, organization string, paths Paths, ownerProblem string) []error {
@@ -409,6 +484,54 @@ func validCredentialRef(name string) bool {
 	return true
 }
 
+func validateIntegrityAnchor(value IntegrityAnchor, paths Paths) error {
+	if len(value.InstallationID) != len("install-")+64 || !strings.HasPrefix(value.InstallationID, "install-") {
+		return fmt.Errorf("ledger anchor installation identity is invalid")
+	}
+	if _, err := strconv.ParseUint(value.InstallationID[len("install-"):len("install-")+16], 16, 64); err != nil {
+		return fmt.Errorf("ledger anchor installation identity is invalid")
+	}
+	for _, character := range value.InstallationID[len("install-"):] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return fmt.Errorf("ledger anchor installation identity is invalid")
+		}
+	}
+	publicKey, err := base64.StdEncoding.DecodeString(value.PublicKey)
+	if err != nil || len(publicKey) != ed25519.PublicKeySize {
+		return fmt.Errorf("ledger anchor public key is invalid")
+	}
+	digest := sha256.Sum256(publicKey)
+	if value.KeyID != fmt.Sprintf("%x", digest[:]) || value.SignatureAlgorithm != "Ed25519" || !validCredentialRef(value.SecretRef) {
+		return fmt.Errorf("ledger anchor key identity or credential reference is invalid")
+	}
+	if filepath.Dir(value.CheckpointFile) != paths.StateDir || !validIntegrityCheckpointName(filepath.Base(value.CheckpointFile)) {
+		return fmt.Errorf("ledger anchor checkpoint must use an approved file in the installation state directory")
+	}
+	return nil
+}
+
+func validIntegrityCheckpointName(name string) bool {
+	if name == "ledger-anchor.json" {
+		return true
+	}
+	const prefix = "ledger-anchor-restore-"
+	const suffix = ".json"
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+		return false
+	}
+	identity := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
+	if identity == "" || len(identity) > 64 {
+		return false
+	}
+	for _, character := range identity {
+		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func validatePaths(paths Paths) error {
 	values := []struct {
 		name, value string
@@ -439,7 +562,7 @@ func LoadState(path string) (State, error) {
 	if err := decodeFile(path, "initialization state", &state); err != nil {
 		return State{}, err
 	}
-	if (state.Version != legacyConfigVersion && state.Version != ConfigVersion) || (state.Mode != ModeSystem && state.Mode != ModeUser) || !validStage(state.Stage) {
+	if (state.Version != legacyConfigVersion && state.Version != previousConfigVersion && state.Version != ConfigVersion) || (state.Mode != ModeSystem && state.Mode != ModeUser) || !validStage(state.Stage) {
 		return State{}, fmt.Errorf("initialization state is invalid")
 	}
 	return state, nil

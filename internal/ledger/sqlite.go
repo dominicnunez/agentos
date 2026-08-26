@@ -19,6 +19,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
+	ledgeranchor "github.com/dominicnunez/agentos/internal/ledger/anchor"
 	_ "modernc.org/sqlite"
 )
 
@@ -26,6 +27,7 @@ type SQLite struct {
 	db                 *sql.DB
 	newWorkCorrelation func() (string, error)
 	now                func() time.Time
+	integrityAnchor    *ledgeranchor.Store
 }
 
 func Open(path string) (*SQLite, error) {
@@ -40,7 +42,61 @@ func Open(path string) (*SQLite, error) {
 	}
 	return l, nil
 }
-func (l *SQLite) Close() error { return l.db.Close() }
+
+// OpenCurrent opens an already-initialized runtime ledger without performing
+// a storage migration. An externally anchored installation must never mutate
+// an older database before its exact checkpoint has been verified through a
+// separately reviewed migration procedure.
+func OpenCurrent(path string) (*SQLite, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	l := &SQLite{db: db, newWorkCorrelation: randomWorkCorrelation, now: time.Now}
+	contract, err := ValidateStorageContract(context.Background(), db)
+	if err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
+	if contract.StorageVersion != CurrentStorageVersion || contract.EventSchemaVersion != events.SchemaVersion {
+		return nil, errors.Join(fmt.Errorf("runtime ledger requires current storage version %d and event schema %d; use reviewed anchored migration", CurrentStorageVersion, events.SchemaVersion), db.Close())
+	}
+	if _, err := ValidateEventIntegrity(context.Background(), db); err != nil {
+		return nil, errors.Join(fmt.Errorf("validate event integrity at startup: %w", err), db.Close())
+	}
+	return l, nil
+}
+func (l *SQLite) Close() error {
+	var anchorErr error
+	if l.integrityAnchor != nil {
+		anchorErr = l.integrityAnchor.Close()
+	}
+	return errors.Join(anchorErr, l.db.Close())
+}
+
+// AttachIntegrityAnchor binds every later ledger transaction to a signed
+// checkpoint outside SQLite. Runtime startup must call this before recovery or
+// serving work; tests and offline migration may intentionally use Open alone.
+func (l *SQLite) AttachIntegrityAnchor(ctx context.Context, store *ledgeranchor.Store) error {
+	if ctx == nil || store == nil {
+		return fmt.Errorf("ledger integrity anchor and context are required")
+	}
+	if l.integrityAnchor != nil {
+		return fmt.Errorf("ledger integrity anchor is already attached")
+	}
+	state, err := l.IntegrityAnchorState(ctx)
+	if err != nil {
+		return err
+	}
+	if err := store.VerifyState(state); err != nil {
+		return fmt.Errorf("verify ledger integrity anchor before attachment: %w", err)
+	}
+	l.integrityAnchor = store
+	if err := l.rebuildExternalWorkIndex(ctx); err != nil {
+		return fmt.Errorf("rebuild runtime indexes after ledger anchor verification: %w", err)
+	}
+	return nil
+}
 func (l *SQLite) migrate(ctx context.Context) error {
 	if err := migrateStorage(ctx, l.db); err != nil {
 		return err
@@ -2834,7 +2890,29 @@ func (l *SQLite) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	if err := fn(tx); err != nil {
 		return err
 	}
-	return tx.Commit()
+	prepared := false
+	if l.integrityAnchor != nil {
+		state, err := integrityAnchorState(ctx, tx)
+		if err != nil {
+			return err
+		}
+		prepared, err = l.integrityAnchor.Prepare(state)
+		if err != nil {
+			return fmt.Errorf("prepare external ledger checkpoint: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		if prepared {
+			return fmt.Errorf("SQLite commit result is uncertain; external checkpoint remains pending for fail-closed recovery: %w", err)
+		}
+		return err
+	}
+	if prepared {
+		if err := l.integrityAnchor.CommitPrepared(); err != nil {
+			return fmt.Errorf("commit external ledger checkpoint: %w", err)
+		}
+	}
+	return nil
 }
 
 func (l *SQLite) Records(ctx context.Context, kind, id string) ([][]byte, error) {

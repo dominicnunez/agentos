@@ -9,6 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+
+	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/ledger/anchor"
 )
 
 const (
@@ -241,4 +244,49 @@ func rebuildEventIntegrity(ctx context.Context, tx *sql.Tx) error {
 
 func (l *SQLite) Integrity(ctx context.Context) (EventIntegrityHead, error) {
 	return ValidateEventIntegrity(ctx, l.db)
+}
+
+// IntegrityAnchorState performs the complete storage and event-chain
+// validation needed before an external checkpoint is trusted or attached.
+func (l *SQLite) IntegrityAnchorState(ctx context.Context) (anchor.LedgerState, error) {
+	contract, err := ValidateStorageContract(ctx, l.db)
+	if err != nil {
+		return anchor.LedgerState{}, fmt.Errorf("validate storage before ledger anchoring: %w", err)
+	}
+	head, err := ValidateEventIntegrity(ctx, l.db)
+	if err != nil {
+		return anchor.LedgerState{}, fmt.Errorf("validate event chain before ledger anchoring: %w", err)
+	}
+	return anchor.LedgerState{
+		ApplicationID: StorageApplicationID, StorageVersion: contract.StorageVersion,
+		EventSchemaVersion: contract.EventSchemaVersion, EventCount: head.EventCount,
+		Sequence: head.Sequence, EventID: head.EventID,
+		ChainAlgorithm: head.Algorithm, ChainHead: head.SHA256,
+	}, nil
+}
+
+// integrityAnchorState reads the already-validated tip inside the writer's
+// SQLite transaction. Startup validated the complete chain, and every later
+// event and integrity row is appended atomically by this package.
+func integrityAnchorState(ctx context.Context, db storageQueryer) (anchor.LedgerState, error) {
+	head := EventIntegrityHead{Algorithm: EventIntegrityAlgorithm}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events`).Scan(&head.EventCount); err != nil {
+		return anchor.LedgerState{}, fmt.Errorf("count events for ledger anchor: %w", err)
+	}
+	if head.EventCount > 0 {
+		var integrityEventID, algorithm, eventHash string
+		if err := db.QueryRowContext(ctx, `SELECT e.sequence,e.event_id,i.event_id,i.algorithm,i.event_hash FROM events e JOIN event_integrity i ON i.sequence=e.sequence ORDER BY e.sequence DESC LIMIT 1`).Scan(&head.Sequence, &head.EventID, &integrityEventID, &algorithm, &eventHash); err != nil {
+			return anchor.LedgerState{}, fmt.Errorf("read event head for ledger anchor: %w", err)
+		}
+		if head.Sequence != head.EventCount || integrityEventID != head.EventID || algorithm != EventIntegrityAlgorithm || !validEventIntegrityHash(eventHash) {
+			return anchor.LedgerState{}, fmt.Errorf("event head is invalid for external anchoring")
+		}
+		head.SHA256 = eventHash
+	}
+	return anchor.LedgerState{
+		ApplicationID: StorageApplicationID, StorageVersion: CurrentStorageVersion,
+		EventSchemaVersion: events.SchemaVersion, EventCount: head.EventCount,
+		Sequence: head.Sequence, EventID: head.EventID,
+		ChainAlgorithm: head.Algorithm, ChainHead: head.SHA256,
+	}, nil
 }

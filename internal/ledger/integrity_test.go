@@ -2,12 +2,16 @@ package ledger
 
 import (
 	"context"
+	"crypto/ed25519"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
+	ledgeranchor "github.com/dominicnunez/agentos/internal/ledger/anchor"
 )
 
 func TestEventIntegrityChainsOrdinaryAndProjectionEvents(t *testing.T) {
@@ -145,5 +149,88 @@ func TestVerifiedReplayEventsUsesOneTenantScopedIntegritySnapshot(t *testing.T) 
 	}
 	if _, err := store.VerifiedReplayEvents(ctx, "org-1", "work-1", 2); err == nil || !strings.Contains(err.Error(), "integrity hash does not match") {
 		t.Fatalf("tampered replay error=%v", err)
+	}
+}
+
+func TestAttachedExternalAnchorAdvancesWithTheSQLiteCommit(t *testing.T) {
+	ctx := t.Context()
+	directory := t.TempDir()
+	store, err := Open(filepath.Join(directory, "agentos.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	initial, err := store.IntegrityAnchorState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := make([]byte, ed25519.SeedSize)
+	for index := range seed {
+		seed[index] = 7
+	}
+	privateKey := ed25519.NewKeyFromSeed(seed)
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	installationID := "install-" + strings.Repeat("ab", 32)
+	checkpointPath := filepath.Join(directory, "ledger-anchor.json")
+	now := time.Date(2026, 8, 26, 16, 0, 0, 0, time.UTC)
+	if _, err := ledgeranchor.Initialize(checkpointPath, installationID, privateKey, initial, now); err != nil {
+		t.Fatal(err)
+	}
+	anchorStore, err := ledgeranchor.Open(checkpointPath, installationID, publicKey, privateKey, initial, func() time.Time { return now.Add(time.Minute) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachIntegrityAnchor(ctx, anchorStore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "audit-1", Payload: map[string]string{"state": "anchored"}}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.IntegrityAnchorState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, _, err := ledgeranchor.Read(checkpointPath, installationID, publicKey)
+	if err != nil || checkpoint.Generation != 1 || !checkpoint.Ledger.Equal(current) {
+		t.Fatalf("checkpoint=%+v current=%+v err=%v", checkpoint, current, err)
+	}
+	if _, err := os.Stat(checkpointPath + ".pending"); !os.IsNotExist(err) {
+		t.Fatalf("pending checkpoint remains after commit: %v", err)
+	}
+}
+
+func TestAttachedExternalAnchorFailureRollsBackSQLite(t *testing.T) {
+	ctx := t.Context()
+	directory := t.TempDir()
+	store, err := Open(filepath.Join(directory, "agentos.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	initial, err := store.IntegrityAnchorState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	installationID := "install-" + strings.Repeat("cd", 32)
+	checkpointPath := filepath.Join(directory, "ledger-anchor.json")
+	now := time.Date(2026, 8, 26, 17, 0, 0, 0, time.UTC)
+	if _, err := ledgeranchor.Initialize(checkpointPath, installationID, privateKey, initial, now); err != nil {
+		t.Fatal(err)
+	}
+	anchorStore, err := ledgeranchor.Open(checkpointPath, installationID, publicKey, privateKey, initial, func() time.Time { return now.Add(-time.Minute) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachIntegrityAnchor(ctx, anchorStore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", Payload: map[string]string{"state": "must-roll-back"}}); err == nil || !strings.Contains(err.Error(), "prepare external ledger checkpoint") {
+		t.Fatalf("external anchor failure was accepted: %v", err)
+	}
+	current, err := store.IntegrityAnchorState(ctx)
+	if err != nil || !current.Equal(initial) {
+		t.Fatalf("failed external anchor changed SQLite: current=%+v initial=%+v err=%v", current, initial, err)
 	}
 }

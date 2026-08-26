@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,6 +27,8 @@ import (
 	"github.com/dominicnunez/agentos/internal/bootstrap"
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/inference"
+	"github.com/dominicnunez/agentos/internal/ledger"
+	ledgeranchor "github.com/dominicnunez/agentos/internal/ledger/anchor"
 	"github.com/dominicnunez/agentos/internal/modelid"
 	"github.com/dominicnunez/agentos/internal/secrets"
 )
@@ -90,6 +95,14 @@ func runInit(ctx context.Context, mode bootstrap.Mode, resume bool, input *os.Fi
 		}
 	}
 	if state.Stage == bootstrap.StageService {
+		if config.Integrity.InstallationID == "" {
+			if err := configureLedgerAnchor(ctx, &config, ui); err != nil {
+				return err
+			}
+			if err := checkpoint(configPath, statePath, &config, &state); err != nil {
+				return err
+			}
+		}
 		selected, selectErr := ui.selectOne("Service:", []string{"Enable and start", "Start once", "Leave stopped"})
 		if selectErr != nil {
 			return selectErr
@@ -107,6 +120,138 @@ func runInit(ctx context.Context, mode bootstrap.Mode, resume bool, input *os.Fi
 	}
 	_, err = fmt.Fprintln(output, "\nAgent OS is ready. Run agentos to open the organization dashboard.")
 	return err
+}
+
+type ledgerAnchorCredential struct {
+	Version        int    `json:"version"`
+	InstallationID string `json:"installation_id"`
+	PrivateKey     string `json:"private_key"`
+}
+
+func configureLedgerAnchor(ctx context.Context, config *bootstrap.Config, ui *terminalUI) error {
+	if ctx == nil || config == nil || ui == nil || config.Integrity.InstallationID != "" {
+		return fmt.Errorf("new ledger anchor configuration is required")
+	}
+	const secretRef = "ledger-anchor-signing-key"
+	credentialPath := filepath.Join(config.Paths.ConfigDir, "credentials", secretRef+".cred")
+	createdCredential := false
+	var credential ledgerAnchorCredential
+	var privateKey ed25519.PrivateKey
+	if _, err := os.Lstat(credentialPath); err == nil {
+		body, decryptErr := decryptProviderCredential(ctx, config.Mode, credentialPath, secretRef)
+		if decryptErr != nil {
+			return fmt.Errorf("resume ledger anchor signing credential: %w", decryptErr)
+		}
+		defer clear(body)
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&credential) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+			return fmt.Errorf("stored ledger anchor signing credential is invalid")
+		}
+		decoded, decodeErr := base64.StdEncoding.DecodeString(credential.PrivateKey)
+		if decodeErr != nil || len(decoded) != ed25519.PrivateKeySize || credential.Version != 1 {
+			clear(decoded)
+			return fmt.Errorf("stored ledger anchor signing credential is invalid")
+		}
+		privateKey = ed25519.PrivateKey(decoded)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect ledger anchor signing credential: %w", err)
+	} else {
+		_, generatedPrivate, generateErr := ed25519.GenerateKey(rand.Reader)
+		if generateErr != nil {
+			return fmt.Errorf("generate ledger anchor signing key: %w", generateErr)
+		}
+		privateKey = generatedPrivate
+		var identity [32]byte
+		if _, err := rand.Read(identity[:]); err != nil {
+			clear(privateKey)
+			return fmt.Errorf("generate installation identity: %w", err)
+		}
+		credential = ledgerAnchorCredential{Version: 1, InstallationID: "install-" + hex.EncodeToString(identity[:]), PrivateKey: base64.StdEncoding.EncodeToString(privateKey)}
+		credentialBody, encodeErr := json.Marshal(credential)
+		if encodeErr != nil {
+			clear(privateKey)
+			return encodeErr
+		}
+		if err := storeEncryptedCredentialNew(ctx, *config, secretRef, credentialBody); err != nil {
+			clear(credentialBody)
+			clear(privateKey)
+			return fmt.Errorf("store ledger anchor signing key: %w", err)
+		}
+		clear(credentialBody)
+		createdCredential = true
+	}
+	defer clear(privateKey)
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	encodedPublic, err := ledgeranchor.EncodePublicKey(publicKey)
+	if err != nil {
+		return err
+	}
+	keyID, err := ledgeranchor.PublicKeyID(publicKey)
+	if err != nil {
+		return err
+	}
+	var state ledgeranchor.LedgerState
+	if info, statErr := os.Lstat(config.Paths.Database); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("existing Agent OS database is not a regular file")
+		}
+		store, openErr := ledger.Open(config.Paths.Database)
+		if openErr != nil {
+			return fmt.Errorf("validate existing ledger before anchor enrollment: %w", openErr)
+		}
+		state, err = store.IntegrityAnchorState(ctx)
+		closeErr := store.Close()
+		if err != nil || closeErr != nil {
+			return errors.Join(err, closeErr)
+		}
+	} else if errors.Is(statErr, os.ErrNotExist) {
+		store, openErr := ledger.Open(config.Paths.Database)
+		if openErr != nil {
+			return fmt.Errorf("initialize ledger before anchor enrollment: %w", openErr)
+		}
+		state, err = store.IntegrityAnchorState(ctx)
+		closeErr := store.Close()
+		if err != nil || closeErr != nil {
+			return errors.Join(err, closeErr)
+		}
+	} else {
+		return fmt.Errorf("inspect Agent OS database before anchor enrollment: %w", statErr)
+	}
+	checkpointFile := filepath.Join(config.Paths.StateDir, "ledger-anchor.json")
+	if _, statErr := os.Lstat(checkpointFile); errors.Is(statErr, os.ErrNotExist) {
+		if state.EventCount > 0 {
+			confirmation, confirmErr := ui.line("Type ENROLL EXISTING LEDGER:", true)
+			if confirmErr != nil {
+				return confirmErr
+			}
+			if confirmation != "ENROLL EXISTING LEDGER" {
+				return fmt.Errorf("existing ledger anchor enrollment was not approved")
+			}
+		}
+		if _, err := ledgeranchor.Initialize(checkpointFile, credential.InstallationID, privateKey, state, nowUTC()); err != nil {
+			if createdCredential {
+				_ = os.Remove(credentialPath)
+			}
+			return err
+		}
+	} else if statErr != nil {
+		return fmt.Errorf("inspect ledger anchor checkpoint: %w", statErr)
+	} else {
+		store, openErr := ledgeranchor.Open(checkpointFile, credential.InstallationID, publicKey, privateKey, state, time.Now)
+		if openErr != nil {
+			return fmt.Errorf("resume ledger anchor checkpoint: %w", openErr)
+		}
+		if err := store.Close(); err != nil {
+			return err
+		}
+	}
+	config.Integrity = bootstrap.IntegrityAnchor{
+		InstallationID: credential.InstallationID, CheckpointFile: checkpointFile,
+		PublicKey: encodedPublic, KeyID: keyID, SecretRef: secretRef,
+		SignatureAlgorithm: ledgeranchor.SignatureAlgorithm,
+	}
+	return nil
 }
 
 func initialPaths(ctx context.Context, mode bootstrap.Mode) (bootstrap.Paths, bootstrap.Owner, error) {
@@ -148,7 +293,17 @@ func loadOrBeginInit(mode bootstrap.Mode, owner bootstrap.Owner, paths bootstrap
 			return bootstrap.Config{}, bootstrap.State{}, fmt.Errorf("installation belongs to Linux user %s (UID %d), not the user who started this command", config.Owner.Username, config.Owner.UID)
 		}
 		if config.Version != bootstrap.ConfigVersion || state.Version != bootstrap.ConfigVersion {
-			upgradedConfig, upgradedState, upgradeErr := bootstrap.UpgradeVersion1Checkpoint(config, state)
+			var upgradedConfig bootstrap.Config
+			var upgradedState bootstrap.State
+			var upgradeErr error
+			switch config.Version {
+			case 1:
+				upgradedConfig, upgradedState, upgradeErr = bootstrap.UpgradeVersion1Checkpoint(config, state)
+			case 2:
+				upgradedConfig, upgradedState, upgradeErr = bootstrap.UpgradeVersion2Checkpoint(config, state)
+			default:
+				upgradeErr = fmt.Errorf("unsupported setup checkpoint version %d", config.Version)
+			}
 			if upgradeErr != nil {
 				return bootstrap.Config{}, bootstrap.State{}, upgradeErr
 			}

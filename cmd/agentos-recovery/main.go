@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/dominicnunez/agentos/internal/bootstrap"
 	"github.com/dominicnunez/agentos/internal/ledger/recovery"
 )
 
@@ -41,29 +42,59 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	case "backup":
 		flags := flag.NewFlagSet("backup", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)
-		database := flags.String("database", "", "source Agent OS SQLite database")
+		configPath := flags.String("config", "", "Agent OS installation configuration")
 		destination := flags.String("output", "", "new backup file")
 		if err := parseFlags(flags, args[1:]); err != nil {
 			return err
 		}
-		result, err = recovery.Backup(ctx, *database, *destination)
+		config, configErr := recoveryConfig(*configPath)
+		if configErr != nil {
+			return configErr
+		}
+		result, err = recovery.BackupAnchored(ctx, config.Paths.Database, *destination, config.Integrity.CheckpointFile, *destination+".anchor.json", config.Integrity.InstallationID, config.Integrity.PublicKey)
 	case "restore":
 		flags := flag.NewFlagSet("restore", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)
 		backup := flags.String("backup", "", "verified Agent OS backup")
+		backupAnchor := flags.String("backup-anchor", "", "signed checkpoint for the backup")
+		configPath := flags.String("config", "", "Agent OS installation configuration")
 		destination := flags.String("output", "", "new restored database file")
+		destinationAnchor := flags.String("output-anchor", "", "new restored checkpoint file")
 		if err := parseFlags(flags, args[1:]); err != nil {
 			return err
 		}
-		result, err = recovery.Restore(ctx, *backup, *destination)
+		config, configErr := recoveryConfig(*configPath)
+		if configErr != nil {
+			return configErr
+		}
+		if *backupAnchor == "" {
+			*backupAnchor = *backup + ".anchor.json"
+		}
+		if *destinationAnchor == "" {
+			*destinationAnchor = *destination + ".anchor.json"
+		}
+		result, err = recovery.RestoreAnchored(ctx, *backup, *destination, *backupAnchor, *destinationAnchor, config.Integrity.InstallationID, config.Integrity.PublicKey)
 	case "verify":
 		flags := flag.NewFlagSet("verify", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)
 		database := flags.String("database", "", "offline backup or restore candidate")
+		checkpoint := flags.String("anchor", "", "signed checkpoint for the database")
+		configPath := flags.String("config", "", "Agent OS installation configuration")
 		if err := parseFlags(flags, args[1:]); err != nil {
 			return err
 		}
-		result, err = recovery.Verify(ctx, *database)
+		config, configErr := recoveryConfig(*configPath)
+		if configErr != nil {
+			return configErr
+		}
+		if *checkpoint == "" {
+			if *database == config.Paths.Database {
+				*checkpoint = config.Integrity.CheckpointFile
+			} else {
+				*checkpoint = *database + ".anchor.json"
+			}
+		}
+		result, err = recovery.VerifyAnchored(ctx, *database, *checkpoint, config.Integrity.InstallationID, config.Integrity.PublicKey)
 	default:
 		return fmt.Errorf("unsupported command %q: use backup, restore, verify, or version", args[0])
 	}
@@ -73,6 +104,20 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	encoder := json.NewEncoder(output)
 	encoder.SetEscapeHTML(false)
 	return encoder.Encode(result)
+}
+
+func recoveryConfig(path string) (bootstrap.Config, error) {
+	if path == "" {
+		return bootstrap.Config{}, fmt.Errorf("--config is required for anchored recovery")
+	}
+	config, err := bootstrap.LoadConfig(path)
+	if err != nil {
+		return bootstrap.Config{}, err
+	}
+	if err := config.ValidateReady(); err != nil {
+		return bootstrap.Config{}, fmt.Errorf("recovery configuration is invalid: %w", err)
+	}
+	return config, nil
 }
 
 func parseFlags(flags *flag.FlagSet, args []string) error {

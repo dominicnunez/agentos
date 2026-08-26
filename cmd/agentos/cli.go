@@ -69,6 +69,8 @@ func execute(ctx context.Context, args []string, input *os.File, output, errorOu
 		return runDashboard(ctx, config, output)
 	case "doctor":
 		return runDoctor(ctx, args[1:], output)
+	case "integrity":
+		return runIntegrityMaintenance(ctx, args[1:], input, output)
 	case "setup":
 		if len(args) != 2 || args[1] != "provider" {
 			return fmt.Errorf("use agentos setup provider")
@@ -230,6 +232,9 @@ func printHelp(output io.Writer) error {
   agentos init --user     Set up an installation for the current Linux user
   agentos doctor          Inspect local health without changing anything
   agentos dashboard       Open the local organization dashboard
+  agentos integrity rotate-key   Rotate the ledger checkpoint key with continuity evidence
+  agentos integrity recover-key  Reset the ledger checkpoint trust root after reviewed key loss
+  agentos integrity resolve-pending  Resolve an ambiguous prepared checkpoint under review
   agentos setup provider  Replace and test the configured model provider
   agentos serve           Run the configured service
   agentos version         Print the version`)
@@ -261,6 +266,8 @@ func runDoctor(ctx context.Context, args []string, output io.Writer) error {
 	checks = append(checks, doctorCheck{Name: "configuration", Status: status(validationErr == nil), Detail: detail(validationErr, configPath)})
 	policyErr := doctorInferencePolicy(config, nowUTC())
 	checks = append(checks, doctorCheck{Name: "inference authorization", Status: status(policyErr == nil), Detail: detail(policyErr, "current reviewed provider budget")})
+	checkpointAccessErr := doctorIntegrityCheckpointAccess(ctx, config)
+	checks = append(checks, doctorCheck{Name: "ledger checkpoint access", Status: status(checkpointAccessErr == nil), Detail: detail(checkpointAccessErr, "private checkpoint ownership and permissions verified")})
 	for _, configuredPath := range []struct {
 		name string
 		path string
@@ -275,19 +282,19 @@ func runDoctor(ctx context.Context, args []string, output io.Writer) error {
 		checks = append(checks, doctorCheck{Name: name + " path", Status: status(ok), Detail: detail(pathErr, path)})
 	}
 	if _, ledgerErr := os.Lstat(config.Paths.Database); errors.Is(ledgerErr, os.ErrNotExist) {
-		checks = append(checks, doctorCheck{Name: "event ledger", Status: "INFO", Detail: "not created until the service starts"})
+		checks = append(checks, doctorCheck{Name: "event ledger", Status: "BLOCKED", Detail: "initialized database is missing"})
 	} else if ledgerErr != nil {
 		checks = append(checks, doctorCheck{Name: "event ledger", Status: "BLOCKED", Detail: ledgerErr.Error()})
 	} else if config.Mode == bootstrap.ModeSystem && effectiveUID() != 0 {
 		checks = append(checks, doctorCheck{Name: "event ledger", Status: "INFO", Detail: "administrator access is required to verify private storage"})
-	} else if result, verifyErr := ledgerrecovery.Verify(ctx, config.Paths.Database); verifyErr != nil {
+	} else if result, verifyErr := ledgerrecovery.VerifyAnchored(ctx, config.Paths.Database, config.Integrity.CheckpointFile, config.Integrity.InstallationID, config.Integrity.PublicKey); verifyErr != nil {
 		checks = append(checks, doctorCheck{Name: "event ledger", Status: "BLOCKED", Detail: verifyErr.Error()})
 	} else {
 		chain := "empty"
 		if result.EventChainSHA256 != "" {
 			chain = result.EventChainSHA256[:12]
 		}
-		checks = append(checks, doctorCheck{Name: "event ledger", Status: "PASS", Detail: fmt.Sprintf("storage v%d; events v%d; %d events; file sha256 %s; chain sha256 %s", result.StorageVersion, result.EventSchemaVersion, result.EventCount, result.SHA256[:12], chain)})
+		checks = append(checks, doctorCheck{Name: "event ledger", Status: "PASS", Detail: fmt.Sprintf("storage v%d; events v%d; %d events; file sha256 %s; chain sha256 %s; signed external checkpoint verified", result.StorageVersion, result.EventSchemaVersion, result.EventCount, result.SHA256[:12], chain)})
 	}
 	credentialErr := error(nil)
 	if config.Mode == bootstrap.ModeSystem && effectiveUID() != 0 {
@@ -346,7 +353,10 @@ func doctorProviderCredential(config bootstrap.Config) error {
 		return fmt.Errorf("exactly one active provider is required")
 	}
 	provider := config.Providers[0]
-	paths := []string{filepath.Join(config.Paths.ConfigDir, "credentials", provider.SecretRef+".cred")}
+	paths := []string{
+		filepath.Join(config.Paths.ConfigDir, "credentials", provider.SecretRef+".cred"),
+		filepath.Join(config.Paths.ConfigDir, "credentials", config.Integrity.SecretRef+".cred"),
+	}
 	if provider.Kind == bootstrap.ProviderCodexSubscription {
 		paths = append(paths, provider.CodexCredential)
 	}
@@ -356,10 +366,10 @@ func doctorProviderCredential(config bootstrap.Config) error {
 			return err
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 65<<10 {
-			return fmt.Errorf("provider credential is not a bounded regular file")
+			return fmt.Errorf("service credential is not a bounded regular file")
 		}
 		if info.Mode().Perm()&0o077 != 0 {
-			return fmt.Errorf("provider credential permissions are too broad")
+			return fmt.Errorf("service credential permissions are too broad")
 		}
 	}
 	return nil

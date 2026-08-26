@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -21,6 +22,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	ledgeranchor "github.com/dominicnunez/agentos/internal/ledger/anchor"
 	_ "modernc.org/sqlite"
 )
 
@@ -96,6 +98,57 @@ func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	var eventCount int
 	if err := restoredDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events`).Scan(&eventCount); err != nil || eventCount != 1 {
 		t.Fatalf("restored event count=%d err=%v", eventCount, err)
+	}
+}
+
+func TestAnchoredBackupAndRestorePublishMatchingEvidenceWithoutOverwrite(t *testing.T) {
+	ctx := t.Context()
+	directory := t.TempDir()
+	source := filepath.Join(directory, "live.db")
+	store, err := ledger.Open(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", Payload: map[string]string{"state": "anchored"}}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	state, err := store.IntegrityAnchorState(ctx)
+	if closeErr := store.Close(); err != nil || closeErr != nil {
+		t.Fatal(errors.Join(err, closeErr))
+	}
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	publicKey := privateKey.Public().(ed25519.PublicKey)
+	encodedPublic, err := ledgeranchor.EncodePublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installationID := "install-" + strings.Repeat("ef", 32)
+	checkpoint := filepath.Join(directory, "ledger-anchor.json")
+	if _, err := ledgeranchor.Initialize(checkpoint, installationID, privateKey, state, time.Date(2026, 8, 26, 18, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+
+	backup := filepath.Join(directory, "backup.db")
+	backupCheckpoint := filepath.Join(directory, "backup.anchor.json")
+	result, err := BackupAnchored(ctx, source, backup, checkpoint, backupCheckpoint, installationID, encodedPublic)
+	if err != nil || result.Path != backup || result.EventCount != 1 {
+		t.Fatalf("anchored backup=%+v err=%v", result, err)
+	}
+	if _, err := VerifyAnchored(ctx, backup, backupCheckpoint, installationID, encodedPublic); err != nil {
+		t.Fatalf("published backup does not match checkpoint: %v", err)
+	}
+
+	restored := filepath.Join(directory, "restored.db")
+	restoredCheckpoint := filepath.Join(directory, "restored.anchor.json")
+	if _, err := RestoreAnchored(ctx, backup, restored, backupCheckpoint, restoredCheckpoint, installationID, encodedPublic); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyAnchored(ctx, restored, restoredCheckpoint, installationID, encodedPublic); err != nil {
+		t.Fatalf("restored database does not match checkpoint: %v", err)
+	}
+	if _, err := BackupAnchored(ctx, source, backup, checkpoint, filepath.Join(directory, "other.anchor.json"), installationID, encodedPublic); err == nil {
+		t.Fatal("anchored backup overwrote an existing database")
 	}
 }
 
