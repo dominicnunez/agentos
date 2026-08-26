@@ -1088,6 +1088,58 @@ func TestAgentExecutionStartBindsExactActiveRosterRevision(t *testing.T) {
 	}
 }
 
+func TestAppendAgentEvidenceRequiresExactRunningExecution(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	correlationID := "evidence-run"
+	appendTaskProjectionParents(t, ctx, store, "org-1", correlationID, "work-1")
+	agent, config := appendTaskAssignmentAgent(t, ctx, store, "org-1", "evidence", false)
+	task := appendPendingAgentExecutionTask(t, ctx, store, correlationID, "task-evidence", agent, config)
+	if _, err := startPendingAgentExecution(ctx, store, correlationID, task); err != nil {
+		t.Fatal(err)
+	}
+
+	draft := events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "EVIDENCE_PUBLISHED", SourceActorID: string(agent.ID),
+		SourceExecutionID: "execution-task-evidence-v2", TaskID: string(task.ID), CorrelationID: correlationID,
+		ArtifactRefs: []string{"artifact-1"}, Payload: events.EvidencePublishedPayload{Summary: "bounded evidence", ArtifactRefs: []string{"artifact-1"}},
+	}
+	if _, err := store.Append(ctx, draft); err == nil {
+		t.Fatal("ordinary append bypassed typed Agent evidence admission")
+	}
+	if _, err := store.AppendAgentEvidence(ctx, draft); err != nil {
+		t.Fatalf("valid execution-bound evidence was rejected: %v", err)
+	}
+	stream, err := store.Events(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEvents := len(stream)
+	for name, mutate := range map[string]func(*events.TrustedDraft){
+		"wrong tenant":    func(value *events.TrustedDraft) { value.OrganizationID = "org-2" },
+		"wrong actor":     func(value *events.TrustedDraft) { value.SourceActorID = "agent-other" },
+		"wrong execution": func(value *events.TrustedDraft) { value.SourceExecutionID = "execution-other" },
+		"wrong Task":      func(value *events.TrustedDraft) { value.TaskID = "task-other" },
+		"wrong artifacts": func(value *events.TrustedDraft) { value.ArtifactRefs = []string{"artifact-other"} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := draft
+			mutate(&candidate)
+			if _, err := store.AppendAgentEvidence(ctx, candidate); err == nil {
+				t.Fatal("malformed or unbound Agent evidence was admitted")
+			}
+		})
+	}
+	stream, err = store.Events(ctx, "")
+	if err != nil || len(stream) != wantEvents {
+		t.Fatalf("rejected Agent evidence changed the ledger: events=%d want=%d err=%v", len(stream), wantEvents, err)
+	}
+}
+
 func TestAgentExecutionStartAtomicallyRejectsStrategicRevisionDrift(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(":memory:")

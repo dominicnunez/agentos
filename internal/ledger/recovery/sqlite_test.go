@@ -99,6 +99,85 @@ func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	}
 }
 
+func TestVerifyRejectsAgentEvidenceDetachedFromItsExecution(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "agent-evidence.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "publish evidence", NormalizedObjective: "publish evidence", CreatedAt: now}
+	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	blueprint := core.AgentBlueprint{ID: "blueprint-1", OrganizationID: organization.ID, Version: "v1", Role: "worker", OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE", CreatedAt: now}
+	profile := core.ExecutionProfile{ID: "profile-1", OrganizationID: organization.ID, Version: "v1", ModelProvider: "provider", Model: "model", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE", CreatedAt: now}
+	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "local", Status: "ACTIVE"}
+	config := core.AgentConfig{BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ProfileID: profile.ID, ProfileVersion: profile.Version, RuntimeAdapter: agent.RuntimeAdapter}
+	task := core.Task{ID: "task-1", WorkID: work.ID, Description: "publish evidence", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: &config, TaskContractVersion: "1", Status: core.TaskPending}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"}, ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"}, ProjectionKind: "work", RecordID: string(work.ID), Version: 1, Value: work},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_BLUEPRINT_CREATED", SourceActorID: "runtime", CorrelationID: "roster"}, ProjectionKind: "agent_blueprint", RecordID: string(blueprint.ID), Version: 1, Value: blueprint},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_PROFILE_CREATED", SourceActorID: "runtime", CorrelationID: "roster"}, ProjectionKind: "execution_profile", RecordID: string(profile.ID), Version: 1, Value: profile},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_CREATED", SourceActorID: "runtime", CorrelationID: "roster"}, ProjectionKind: "agent", RecordID: string(agent.ID), Version: 1, Value: agent},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1"}, ProjectionKind: "task", RecordID: string(task.ID), Version: 1, Value: task},
+	} {
+		if _, err := store.AppendProjection(ctx, draft); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	task.Status = core.TaskRunning
+	if _, _, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1"},
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
+	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: string(task.ID)}, {Scope: events.RecipientAgent, ID: string(agent.ID)}}, func([]events.InboxSelection) error { return nil }); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	evidence, err := store.AppendAgentEvidence(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "EVIDENCE_PUBLISHED", SourceActorID: string(agent.ID), SourceExecutionID: "execution-task-1-v2",
+		TaskID: string(task.ID), ArtifactRefs: []string{"artifact-1"}, CorrelationID: "work-1",
+		Payload: events.EvidencePublishedPayload{Summary: "bounded evidence", ArtifactRefs: []string{"artifact-1"}},
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err != nil {
+		t.Fatalf("valid Agent evidence failed recovery: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE events SET task_id='task-other' WHERE event_id=?; DROP TABLE event_integrity`, evidence.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	fingerprint, err := testStorageSchemaFingerprint(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=5,schema_fingerprint=?; PRAGMA user_version=5`, fingerprint); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "Agent evidence") {
+		t.Fatalf("execution-detached Agent evidence passed recovery: %v", err)
+	}
+}
+
 func TestVerifyRejectsSemanticallyValidEventPayloadTampering(t *testing.T) {
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "tampered.db")

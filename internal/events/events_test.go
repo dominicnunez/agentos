@@ -7,6 +7,7 @@ import (
 	"math"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -621,6 +622,9 @@ func (m *memoryLedger) Append(_ context.Context, d TrustedDraft) (Event, error) 
 	m.events = append(m.events, e)
 	return e, nil
 }
+func (m *memoryLedger) AppendAgentEvidence(ctx context.Context, draft TrustedDraft) (Event, error) {
+	return m.Append(ctx, draft)
+}
 func (m *memoryLedger) Events(context.Context, string) ([]Event, error) { return m.events, nil }
 
 func TestProjectionAdmissionBindsExactEventBoundary(t *testing.T) {
@@ -1138,6 +1142,37 @@ func TestResultPublishedRequiresCanonicalSummaryAndArtifactRefs(t *testing.T) {
 	}
 	if len(ledger.events) != 1 {
 		t.Fatalf("invalid results were persisted: %+v", ledger.events)
+	}
+}
+
+func TestEvidencePublishedRequiresClosedBoundedArtifactContract(t *testing.T) {
+	ledger := &memoryLedger{}
+	gateway := NewGateway(ledger)
+	valid := Draft{
+		EventType:    "EVIDENCE_PUBLISHED",
+		TaskID:       "task-1",
+		ArtifactRefs: []string{"artifact-1"},
+		Payload:      EvidencePublishedPayload{Summary: "runtime-verifiable evidence", ArtifactRefs: []string{"artifact-1"}},
+	}
+	if _, err := gateway.PublishAgentDraft(context.Background(), "org", "agent", "execution", "correlation", valid); err != nil {
+		t.Fatal(err)
+	}
+	invalid := []Draft{
+		{EventType: "EVIDENCE_PUBLISHED", ArtifactRefs: valid.ArtifactRefs, Payload: valid.Payload},
+		{EventType: "EVIDENCE_PUBLISHED", TaskID: "task-1", Payload: EvidencePublishedPayload{Summary: "missing artifacts"}},
+		{EventType: "EVIDENCE_PUBLISHED", TaskID: "task-1", ArtifactRefs: valid.ArtifactRefs, Payload: EvidencePublishedPayload{Summary: "mismatch", ArtifactRefs: []string{"other"}}},
+		{EventType: "EVIDENCE_PUBLISHED", TaskID: "task-1", ArtifactRefs: []string{"artifact-1", "artifact-1"}, Payload: EvidencePublishedPayload{Summary: "duplicate", ArtifactRefs: []string{"artifact-1", "artifact-1"}}},
+		{EventType: "EVIDENCE_PUBLISHED", TaskID: "task-1", ArtifactRefs: valid.ArtifactRefs, Payload: map[string]any{"summary": "unknown field", "artifact_refs": valid.ArtifactRefs, "authority": true}},
+		{EventType: "EVIDENCE_PUBLISHED", RecipientScope: RecipientTask, RecipientID: "task-2", TaskID: "task-1", ArtifactRefs: valid.ArtifactRefs, Payload: valid.Payload},
+		{EventType: "EVIDENCE_PUBLISHED", TaskID: "task-1", ArtifactRefs: valid.ArtifactRefs, Payload: EvidencePublishedPayload{Summary: strings.Repeat("x", 4097), ArtifactRefs: valid.ArtifactRefs}},
+	}
+	for index, draft := range invalid {
+		if _, err := gateway.PublishAgentDraft(context.Background(), "org", "agent", "execution", "correlation", draft); err == nil {
+			t.Fatalf("invalid evidence draft %d was admitted", index)
+		}
+	}
+	if len(ledger.events) != 1 {
+		t.Fatalf("malformed evidence was persisted: %+v", ledger.events)
 	}
 }
 

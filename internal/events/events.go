@@ -92,6 +92,53 @@ type ResultPublishedPayload struct {
 	ArtifactRefs []string `json:"artifact_refs,omitempty"`
 }
 
+type EvidencePublishedPayload struct {
+	Summary      string   `json:"summary"`
+	ArtifactRefs []string `json:"artifact_refs"`
+}
+
+func (payload EvidencePublishedPayload) ValidFor(envelopeRefs []string) bool {
+	if !utf8.ValidString(payload.Summary) || strings.TrimSpace(payload.Summary) == "" || len(payload.Summary) > 4096 ||
+		len(payload.ArtifactRefs) == 0 || len(payload.ArtifactRefs) > 64 || !slices.Equal(payload.ArtifactRefs, envelopeRefs) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(payload.ArtifactRefs))
+	for _, ref := range payload.ArtifactRefs {
+		if !utf8.ValidString(ref) || strings.TrimSpace(ref) == "" || len(ref) > 512 {
+			return false
+		}
+		if _, duplicate := seen[ref]; duplicate {
+			return false
+		}
+		seen[ref] = struct{}{}
+	}
+	return true
+}
+
+// ValidateAgentEvidencePublished proves that model-authored evidence is bound
+// to one admitted running Agent Task revision and its exact execution start.
+// The evidence remains an untrusted claim and grants no authority or completion.
+func ValidateAgentEvidencePublished(event Event, task core.Task, taskVersion int, start Event, stream []Event) error {
+	var payload EvidencePublishedPayload
+	if event.EventID == "" || event.Sequence <= start.Sequence || event.CreatedAt.IsZero() || event.SchemaVersion != SchemaVersion ||
+		event.EventType != "EVIDENCE_PUBLISHED" || event.OrganizationID == "" || event.SourceActorID == "" ||
+		event.SourceExecutionID == "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID == "" ||
+		len(event.AuthorizationRefs) != 0 || event.CorrelationID == "" || decodeExactEventJSON(event.Payload, &payload) != nil ||
+		!payload.ValidFor(event.ArtifactRefs) {
+		return fmt.Errorf("published Agent evidence has an invalid closed Event Contract")
+	}
+	if taskVersion < 2 || task.ID != core.ID(event.TaskID) || task.ExecutionKind != core.ExecutionAgent ||
+		task.Status != core.TaskRunning || task.AssigneeID == "" || string(task.AssigneeID) != event.SourceActorID ||
+		event.SourceExecutionID != fmt.Sprintf("execution-%s-v%d", task.ID, taskVersion) ||
+		event.OrganizationID != start.OrganizationID || event.TaskID != start.TaskID || event.CorrelationID != start.CorrelationID {
+		return fmt.Errorf("published Agent evidence is not bound to its running Task execution")
+	}
+	if err := ValidateAgentDispatchStart(start, task, taskVersion, stream); err != nil {
+		return fmt.Errorf("published Agent evidence lacks exact dispatch admission: %w", err)
+	}
+	return nil
+}
+
 type CandidateCompletePayload struct {
 	ToolInvocationID string   `json:"tool_invocation_id"`
 	ResultEventID    string   `json:"result_event_id"`
@@ -3320,6 +3367,9 @@ type WorkCompletionAppender interface {
 type WorkCompletionEvidenceAppender interface {
 	AppendWorkCompletionEvidence(context.Context, TrustedDraft) (Event, error)
 }
+type AgentEvidenceAppender interface {
+	AppendAgentEvidence(context.Context, TrustedDraft) (Event, error)
+}
 type GoalProgressAdmission struct {
 	Evaluation      GoalProgressEvaluatedPayload
 	EvaluationEvent Event
@@ -3464,9 +3514,24 @@ func (g *Gateway) PublishAgentDraft(ctx context.Context, organizationID, actorID
 			return Event{}, fmt.Errorf("result published draft requires a task, summary, and matching artifact refs")
 		}
 	}
+	if draft.EventType == "EVIDENCE_PUBLISHED" {
+		var evidence EvidencePublishedPayload
+		if organizationID == "" || actorID == "" || executionID == "" || correlationID == "" || draft.TaskID == "" ||
+			draft.RecipientScope != "" || draft.RecipientID != "" || decodeExactPayload(draft.Payload, &evidence) != nil ||
+			!evidence.ValidFor(draft.ArtifactRefs) {
+			return Event{}, fmt.Errorf("evidence published draft requires a running Task execution, bounded summary, and matching non-empty artifact refs")
+		}
+	}
 	trusted := TrustedDraft{OrganizationID: organizationID, EventType: draft.EventType, SourceActorID: actorID, SourceExecutionID: executionID, RecipientScope: draft.RecipientScope, RecipientID: draft.RecipientID, TaskID: draft.TaskID, ArtifactRefs: draft.ArtifactRefs, Payload: draft.Payload, CorrelationID: correlationID}
 	if err := g.validateAddressed(ctx, trusted, true); err != nil {
 		return Event{}, err
+	}
+	if draft.EventType == "EVIDENCE_PUBLISHED" {
+		appender, ok := g.ledger.(AgentEvidenceAppender)
+		if !ok {
+			return Event{}, fmt.Errorf("event ledger does not support typed Agent evidence admission")
+		}
+		return appender.AppendAgentEvidence(ctx, trusted)
 	}
 	return g.ledger.Append(ctx, trusted)
 }
