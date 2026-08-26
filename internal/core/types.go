@@ -573,9 +573,7 @@ type ToolOutcomeStatus string
 const (
 	OutcomeSucceeded ToolOutcomeStatus = "SUCCESS"
 	OutcomeFailed    ToolOutcomeStatus = "FAILED"
-	// OutcomePartial is part of the supported ToolOutcome contract even though no V1 adapter emits it yet.
-	// gallow-ignore-next-line unused-const
-	OutcomePartial ToolOutcomeStatus = "PARTIAL"
+	OutcomePartial   ToolOutcomeStatus = "PARTIAL"
 )
 
 type PostconditionStatus string
@@ -589,10 +587,8 @@ const (
 type Retryability string
 
 const (
-	Retryable    Retryability = "RETRYABLE"
-	NotRetryable Retryability = "NOT_RETRYABLE"
-	// RetryAfterChange is part of the supported ToolOutcome contract even though no V1 adapter emits it yet.
-	// gallow-ignore-next-line unused-const
+	Retryable        Retryability = "RETRYABLE"
+	NotRetryable     Retryability = "NOT_RETRYABLE"
 	RetryAfterChange Retryability = "RETRY_AFTER_CHANGE"
 )
 
