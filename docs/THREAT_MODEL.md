@@ -76,6 +76,8 @@ does not claim to defend against a compromised operating-system administrator.
   approve an effect, add an execution mechanism, or make its children public.
 - A principal cannot expand its own capability or inherit authority through a
   Task relationship.
+- An authority Event Contract without its exact tenant-bound record is inert;
+  neither an event label nor payload-shaped content can grant or revoke authority.
 - A dispatch binding authorizes one exact Agent invocation only; it cannot be
   reused, substituted, or treated as approval, capability, or effect authority.
 - Acknowledgement is not approval; approval binds one immutable effect.
