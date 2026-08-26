@@ -18,7 +18,7 @@ event chain inside one read transaction. The report is deterministic for that
 exact SQLite snapshot and contains:
 
 - the public conversation and organization identities;
-- an opaque verified ledger-chain algorithm and head hash;
+- the complete-ledger-chain verification method, without its global head;
 - stream-local event order, Event Contract type, timestamp, and event ID;
 - source actor, execution, recipient, and Task identities when present;
 - authorization and artifact references;
@@ -26,17 +26,17 @@ exact SQLite snapshot and contains:
 - explicit stream, Task, and execution predecessor links.
 
 The report excludes raw payloads, prompts, results, artifact contents, the
-private ledger correlation, global event counts, the global head event ID, and
-global sequence positions. A stream larger than 256 events, an event with more
+private ledger correlation, global event counts, the global head event ID or
+hash, and global sequence positions. A stream larger than 256 events, an event with more
 than 1,024 authorization or artifact references, an exposed envelope value
 larger than 4 KiB, or a JSON report larger than 2 MiB fails closed rather than
 returning an incomplete reconstruction.
 
 Predecessor links express recorded ordering only. They are not a root-cause
 finding, policy judgment, proof that an event was true, or proof that a control
-was effective. The global chain head can change when any later event is added,
-including an event outside the selected conversation; that does not rewrite the
-selected timeline.
+was effective. Complete-chain verification occurs inside the private read
+snapshot, but the global head is withheld so activity in another organization
+cannot be inferred by polling this tenant-scoped report.
 
 ## Safety boundary
 

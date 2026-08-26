@@ -127,11 +127,12 @@ func TestHumanIncidentReplayIsVerifiedPayloadFreeAndTenantScoped(t *testing.T) {
 	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" ||
 		!strings.Contains(response.Body.String(), `"conversation_id":"incident-first"`) ||
 		!strings.Contains(response.Body.String(), `"algorithm":"SHA-256"`) ||
+		!strings.Contains(response.Body.String(), `"verification":"COMPLETE_LEDGER_CHAIN"`) ||
 		!strings.Contains(response.Body.String(), `"payload_sha256"`) ||
 		!strings.Contains(response.Body.String(), `"kind":"STREAM_PREDECESSOR"`) {
 		t.Fatalf("incident replay=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
 	}
-	for _, forbidden := range []string{privateText, "other tenant secret", `"payload":`, `"organization_id":"org-2"`, `"ledger_events":`, `"ledger_event_id":`, `"sequence":`} {
+	for _, forbidden := range []string{privateText, "other tenant secret", `"payload":`, `"organization_id":"org-2"`, `"ledger_events":`, `"ledger_event_id":`, `"ledger_sha256":`, `"sequence":`} {
 		if strings.Contains(response.Body.String(), forbidden) {
 			t.Fatalf("incident replay leaked %q: %s", forbidden, response.Body.String())
 		}

@@ -25,7 +25,7 @@ const (
 
 type Integrity struct {
 	Algorithm    string `json:"algorithm"`
-	LedgerSHA256 string `json:"ledger_sha256"`
+	Verification string `json:"verification"`
 }
 
 type Entry struct {
@@ -82,7 +82,7 @@ func Project(snapshot events.VerifiedEventSnapshot, conversationID string) (Repo
 		CorrelationID:  snapshot.CorrelationID,
 		Integrity: Integrity{
 			Algorithm:    snapshot.Algorithm,
-			LedgerSHA256: snapshot.LedgerSHA256,
+			Verification: "COMPLETE_LEDGER_CHAIN",
 		},
 		EventCount: len(snapshot.Events),
 		Entries:    make([]Entry, 0, len(snapshot.Events)),
@@ -91,7 +91,7 @@ func Project(snapshot events.VerifiedEventSnapshot, conversationID string) (Repo
 	seen := make(map[string]struct{}, len(snapshot.Events))
 	lastTask := make(map[string]string)
 	lastExecution := make(map[string]string)
-	metadataBytes := len(snapshot.OrganizationID) + len(conversationID) + len(snapshot.LedgerSHA256)
+	metadataBytes := len(snapshot.OrganizationID) + len(conversationID)
 	var previous events.Event
 	for index, event := range snapshot.Events {
 		if err := validateEvent(snapshot, previous, event, seen); err != nil {
