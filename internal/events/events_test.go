@@ -747,6 +747,63 @@ func TestTrustedPublicationRequiresObjectPayload(t *testing.T) {
 	}
 }
 
+func TestTrustedToolOutcomeRequiresClosedValidatedContract(t *testing.T) {
+	now := time.Unix(10, 0).UTC()
+	valid := core.ToolOutcome{
+		ToolInvocationID: "invocation-1", ToolID: "bounded/test", Status: core.OutcomeSucceeded,
+		PostconditionStatus: core.PostconditionVerified, Retryability: core.NotRetryable,
+		ArtifactRefs: []string{"artifact-1"}, StartedAt: now, FinishedAt: now.Add(time.Second),
+	}
+	base := TrustedDraft{
+		OrganizationID: "org-1", EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime",
+		SourceExecutionID: "execution-task-1-v1", TaskID: "task-1", CorrelationID: "work-1",
+		ArtifactRefs: []string{"artifact-1"}, Payload: valid,
+	}
+	for name, mutate := range map[string]func(*TrustedDraft){
+		"missing task": func(draft *TrustedDraft) { draft.TaskID = "" },
+		"non-runtime source": func(draft *TrustedDraft) {
+			draft.SourceActorID = "agent-1"
+		},
+		"missing execution": func(draft *TrustedDraft) { draft.SourceExecutionID = "" },
+		"artifact mismatch": func(draft *TrustedDraft) { draft.ArtifactRefs = nil },
+		"unknown status": func(draft *TrustedDraft) {
+			outcome := valid
+			outcome.Status = "UNKNOWN"
+			draft.Payload = outcome
+		},
+		"unknown retryability": func(draft *TrustedDraft) {
+			outcome := valid
+			outcome.Retryability = "UNKNOWN"
+			draft.Payload = outcome
+		},
+		"unknown field": func(draft *TrustedDraft) {
+			encoded, err := json.Marshal(valid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(encoded, &payload); err != nil {
+				t.Fatal(err)
+			}
+			payload["unexpected"] = true
+			draft.Payload = payload
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ledger := &memoryLedger{}
+			draft := base
+			mutate(&draft)
+			if _, err := NewGateway(ledger).PublishTrusted(context.Background(), draft); err == nil || len(ledger.events) != 0 {
+				t.Fatalf("invalid outcome reached ledger: events=%+v err=%v", ledger.events, err)
+			}
+		})
+	}
+	ledger := &memoryLedger{}
+	if _, err := NewGateway(ledger).PublishTrusted(context.Background(), base); err != nil || len(ledger.events) != 1 {
+		t.Fatalf("valid outcome was not persisted exactly once: events=%+v err=%v", ledger.events, err)
+	}
+}
+
 type routeValidatorFunc func(context.Context, AddressedRoute) error
 
 func (f routeValidatorFunc) ValidateAddressedRoute(ctx context.Context, route AddressedRoute) error {

@@ -608,3 +608,27 @@ type ToolOutcome struct {
 	StartedAt           time.Time           `json:"started_at"`
 	FinishedAt          time.Time           `json:"finished_at"`
 }
+
+// Valid reports whether the outcome uses the closed V1 contract vocabulary and
+// carries the minimum durable identity and timing evidence required for replay.
+func (o ToolOutcome) Valid() bool {
+	if o.ToolInvocationID == "" || o.ToolID == "" || o.StartedAt.IsZero() || o.FinishedAt.IsZero() || o.FinishedAt.Before(o.StartedAt) {
+		return false
+	}
+	switch o.Status {
+	case OutcomeSucceeded, OutcomeFailed, OutcomePartial:
+	default:
+		return false
+	}
+	switch o.PostconditionStatus {
+	case PostconditionVerified, PostconditionFailed, PostconditionNotChecked:
+	default:
+		return false
+	}
+	switch o.Retryability {
+	case Retryable, NotRetryable, RetryAfterChange:
+		return true
+	default:
+		return false
+	}
+}

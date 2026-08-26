@@ -1127,7 +1127,7 @@ func ValidateTaskCompletionEvidenceChain(binding WorkCompletionBinding, task Wor
 	outcomeEvent, found := eventWithID(stream, decision.OutcomeEventRef)
 	var outcome core.ToolOutcome
 	if !found || outcomeEvent.EventType != "TOOL_OUTCOME_RECORDED" || outcomeEvent.OrganizationID != binding.OrganizationID || outcomeEvent.SourceActorID != "runtime" || outcomeEvent.SourceExecutionID == "" || outcomeEvent.RecipientScope != "" || outcomeEvent.RecipientID != "" || outcomeEvent.TaskID != string(task.Task.ID) || len(outcomeEvent.AuthorizationRefs) != 0 || outcomeEvent.CorrelationID != binding.CorrelationID || outcomeEvent.Sequence >= verification.Sequence || outcomeEvent.SchemaVersion != SchemaVersion ||
-		decodeExactEventJSON(outcomeEvent.Payload, &outcome) != nil || outcome.ToolInvocationID == "" || outcome.ToolID == "" || outcome.StartedAt.IsZero() || outcome.FinishedAt.Before(outcome.StartedAt) || !slices.Equal(outcomeEvent.ArtifactRefs, outcome.ArtifactRefs) || !slices.Equal(verification.ArtifactRefs, outcome.ArtifactRefs) || verification.SourceExecutionID != "" && verification.SourceExecutionID != outcomeEvent.SourceExecutionID {
+		decodeExactEventJSON(outcomeEvent.Payload, &outcome) != nil || !outcome.Valid() || !slices.Equal(outcomeEvent.ArtifactRefs, outcome.ArtifactRefs) || !slices.Equal(verification.ArtifactRefs, outcome.ArtifactRefs) || verification.SourceExecutionID != "" && verification.SourceExecutionID != outcomeEvent.SourceExecutionID {
 		return CompletionDecisionPayload{}, fmt.Errorf("task completion outcome evidence is invalid")
 	}
 	expected, err := completionDecisionResult(binding, task, decision, outcome, outcomeEvent, verification, stream)
@@ -1251,7 +1251,7 @@ func completionEvidenceTasks(binding WorkCompletionBinding, evidence WorkComplet
 			return fmt.Errorf("work completion outcome reference is invalid")
 		}
 		var outcome core.ToolOutcome
-		if json.Unmarshal(outcomeEvent.Payload, &outcome) != nil || outcome.ToolInvocationID == "" || outcome.ToolID == "" || outcome.StartedAt.IsZero() || outcome.FinishedAt.Before(outcome.StartedAt) || !slices.Equal(outcome.ArtifactRefs, claim.ArtifactRefs) {
+		if json.Unmarshal(outcomeEvent.Payload, &outcome) != nil || !outcome.Valid() || !slices.Equal(outcome.ArtifactRefs, claim.ArtifactRefs) {
 			return fmt.Errorf("work completion outcome is invalid")
 		}
 		if verification.SourceExecutionID != "" && outcomeEvent.SourceExecutionID != verification.SourceExecutionID {
@@ -1638,7 +1638,7 @@ func ResolveVerifiedTaskResult(organizationID, correlationID string, task core.T
 	outcomeEvent, found := eventWithID(stream, decision.OutcomeEventRef)
 	var outcome core.ToolOutcome
 	if !found || outcomeEvent.EventID == "" || outcomeEvent.Sequence < 1 || outcomeEvent.CreatedAt.IsZero() || outcomeEvent.SchemaVersion != SchemaVersion || outcomeEvent.EventType != "TOOL_OUTCOME_RECORDED" || outcomeEvent.OrganizationID != organizationID || outcomeEvent.SourceActorID != "runtime" || outcomeEvent.SourceExecutionID == "" || outcomeEvent.RecipientScope != "" || outcomeEvent.RecipientID != "" || outcomeEvent.TaskID != string(task.ID) || len(outcomeEvent.AuthorizationRefs) != 0 || outcomeEvent.CorrelationID != correlationID || outcomeEvent.Sequence >= verification.Sequence ||
-		decodeExactEventJSON(outcomeEvent.Payload, &outcome) != nil || outcome.ToolInvocationID == "" || outcome.ToolID == "" || outcome.StartedAt.IsZero() || outcome.FinishedAt.Before(outcome.StartedAt) || !slices.Equal(outcomeEvent.ArtifactRefs, outcome.ArtifactRefs) || !slices.Equal(verification.ArtifactRefs, outcome.ArtifactRefs) || verification.SourceExecutionID != "" && verification.SourceExecutionID != outcomeEvent.SourceExecutionID {
+		decodeExactEventJSON(outcomeEvent.Payload, &outcome) != nil || !outcome.Valid() || !slices.Equal(outcomeEvent.ArtifactRefs, outcome.ArtifactRefs) || !slices.Equal(verification.ArtifactRefs, outcome.ArtifactRefs) || verification.SourceExecutionID != "" && verification.SourceExecutionID != outcomeEvent.SourceExecutionID {
 		return Event{}, ResultPublishedPayload{}, fmt.Errorf("verified Task result outcome is invalid")
 	}
 	expectedSummary, err := core.ToolOutcomeSummary(outcome)
@@ -3463,6 +3463,11 @@ func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event
 		return Event{}, fmt.Errorf("inbox observations require atomic inbox admission")
 	}
 	switch draft.EventType {
+	case "TOOL_OUTCOME_RECORDED":
+		var outcome core.ToolOutcome
+		if draft.TaskID == "" || draft.SourceActorID != "runtime" || draft.SourceExecutionID == "" || decodeExactPayload(draft.Payload, &outcome) != nil || !outcome.Valid() || !slices.Equal(draft.ArtifactRefs, outcome.ArtifactRefs) {
+			return Event{}, fmt.Errorf("tool outcome requires a valid runtime execution, task, and matching artifact refs")
+		}
 	case "WORK_COMPLETION_EVALUATED", "WORK_COMPLETED", "GOAL_PROGRESS_EVALUATED", "GOAL_ACHIEVED":
 		return Event{}, fmt.Errorf("terminal evidence requires its typed admission")
 	}
@@ -3807,6 +3812,14 @@ func decodePayload(value any, target any) error {
 		return err
 	}
 	return json.Unmarshal(payload, target)
+}
+
+func decodeExactPayload(value any, target any) error {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return decodeExactEventJSON(payload, target)
 }
 
 func validRecipient(scope string) bool {

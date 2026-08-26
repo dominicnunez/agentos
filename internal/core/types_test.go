@@ -1,6 +1,9 @@
 package core
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestTaskReady(t *testing.T) {
 	a := Task{ID: "a", Status: TaskCompleted}
@@ -34,6 +37,50 @@ func TestValidIntentSourceIdentity(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if got := ValidIntentSourceIdentity(test.id, test.kind, test.channel); got != test.valid {
 				t.Fatalf("valid=%t want=%t", got, test.valid)
+			}
+		})
+	}
+}
+
+func TestToolOutcomeValidUsesClosedContractVocabulary(t *testing.T) {
+	now := time.Unix(10, 0).UTC()
+	valid := ToolOutcome{
+		ToolInvocationID: "invocation-1", ToolID: "bounded/test", Status: OutcomeSucceeded,
+		PostconditionStatus: PostconditionVerified, Retryability: NotRetryable,
+		StartedAt: now, FinishedAt: now.Add(time.Second),
+	}
+	if !valid.Valid() {
+		t.Fatal("valid outcome was rejected")
+	}
+	for _, status := range []ToolOutcomeStatus{OutcomeSucceeded, OutcomeFailed, OutcomePartial} {
+		candidate := valid
+		candidate.Status = status
+		if !candidate.Valid() {
+			t.Fatalf("supported status %q was rejected", status)
+		}
+	}
+	for _, retryability := range []Retryability{Retryable, NotRetryable, RetryAfterChange} {
+		candidate := valid
+		candidate.Retryability = retryability
+		if !candidate.Valid() {
+			t.Fatalf("supported retryability %q was rejected", retryability)
+		}
+	}
+	for name, mutate := range map[string]func(*ToolOutcome){
+		"missing invocation": func(outcome *ToolOutcome) { outcome.ToolInvocationID = "" },
+		"missing tool":       func(outcome *ToolOutcome) { outcome.ToolID = "" },
+		"unknown status":     func(outcome *ToolOutcome) { outcome.Status = "UNKNOWN" },
+		"unknown check":      func(outcome *ToolOutcome) { outcome.PostconditionStatus = "UNKNOWN" },
+		"unknown retry":      func(outcome *ToolOutcome) { outcome.Retryability = "UNKNOWN" },
+		"missing start":      func(outcome *ToolOutcome) { outcome.StartedAt = time.Time{} },
+		"missing finish":     func(outcome *ToolOutcome) { outcome.FinishedAt = time.Time{} },
+		"reversed time":      func(outcome *ToolOutcome) { outcome.FinishedAt = now.Add(-time.Second) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			if candidate.Valid() {
+				t.Fatal("invalid outcome was accepted")
 			}
 		})
 	}
