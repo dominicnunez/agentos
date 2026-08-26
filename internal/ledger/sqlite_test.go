@@ -13,9 +13,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 )
+
+type changingAuthorityJSON struct {
+	calls int
+}
+
+func (value *changingAuthorityJSON) MarshalJSON() ([]byte, error) {
+	value.calls++
+	id := "lease-1"
+	if value.calls > 1 {
+		id = "lease-substituted"
+	}
+	return []byte(fmt.Sprintf(`{"id":%q,"actor_id":"actor-1","action":"write","resource":"record-1","scope":"org-1","origin_task_id":"task-1"}`, id)), nil
+}
 
 func appendTaskProjectionParents(t *testing.T, ctx context.Context, store *SQLite, organizationID, correlationID, workID string) {
 	t.Helper()
@@ -1897,6 +1911,119 @@ func TestApprovalConsumptionAndAttemptTransitionAreAtomic(t *testing.T) {
 	}
 	if _, err := l.AuthorizeAndAppendEffectAttempt(ctx, obligation, 3, attempted); err == nil {
 		t.Fatal("consumed single-use approval was reused")
+	}
+}
+
+func TestEffectAuthorizationCannotUseAnotherOrganizationsLease(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	lease := core.CapabilityLease{ID: "lease-shared", ActorID: "actor-1", OriginTaskID: "task-1", Action: "cache", Resource: "record-1", Scope: "org-1"}
+	if err := store.AppendRecord(ctx, "org-2", "CAPABILITY_GRANTED", "user-2", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+		t.Fatal(err)
+	}
+	obligation := core.EffectObligation{
+		ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1",
+		Action: "cache", Resource: "record-1", Scope: "org-1", AuthorizationRefs: []string{"lease-shared"},
+	}
+	trace, err := store.AuthorizeAndAppendEffectAttempt(ctx, obligation, 1, map[string]string{"status": "ATTEMPTED"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trace.Allowed || trace.LeaseID != "" {
+		t.Fatalf("cross-tenant lease authorized an effect: %+v", trace)
+	}
+	records, err := store.Records(ctx, "effect", string(obligation.ID))
+	if err != nil || len(records) != 0 {
+		t.Fatalf("denied cross-tenant effect was attempted: records=%d err=%v", len(records), err)
+	}
+}
+
+func TestAppendRecordRejectsMalformedAuthorityHistoryAtomically(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1", Action: "write", Resource: "record-1", Scope: "org-1"}
+	if _, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "CAPABILITY_GRANTED", SourceActorID: "user-1", TaskID: "task-1", Payload: lease}); err == nil {
+		t.Fatal("bare capability event bypassed atomic authority admission")
+	}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+		t.Fatal(err)
+	}
+	revokedAt := time.Now().UTC()
+	changed := lease
+	changed.Resource = "record-2"
+	changed.RevokedAt = &revokedAt
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_REVOKED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 2, changed); err == nil {
+		t.Fatal("revocation expanded or changed the granted authority")
+	}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_REVOKED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 3, changed); err == nil {
+		t.Fatal("noncontiguous revocation was admitted")
+	}
+	lease.RevokedAt = &revokedAt
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_REVOKED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 2, lease); err != nil {
+		t.Fatalf("valid terminal revocation was rejected: %v", err)
+	}
+
+	freezeAt := time.Now().UTC()
+	wrongTenant := authority.FreezeState{OrganizationID: "org-2", Frozen: true, Reason: "incident", UpdatedAt: freezeAt}
+	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "task-1", nil, nil, "organization_freeze", "org-1", 1, wrongTenant); err == nil {
+		t.Fatal("organization-mismatched freeze was admitted")
+	}
+	freeze := authority.FreezeState{OrganizationID: "org-1", Frozen: true, Reason: "incident", UpdatedAt: freezeAt}
+	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "task-1", nil, nil, "organization_freeze", "org-1", 1, freeze); err != nil {
+		t.Fatal(err)
+	}
+	freeze.Frozen = false
+	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "task-1", nil, nil, "organization_freeze", "org-1", 2, freeze); err == nil {
+		t.Fatal("freeze revision reused a non-increasing timestamp")
+	}
+
+	var authorityEvents, authorityRecords int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE event_type IN ('CAPABILITY_GRANTED','CAPABILITY_REVOKED','FREEZE_SET')`).Scan(&authorityEvents); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM records WHERE kind IN ('capability_lease','organization_freeze')`).Scan(&authorityRecords); err != nil {
+		t.Fatal(err)
+	}
+	if authorityEvents != 3 || authorityRecords != 3 {
+		t.Fatalf("rejected authority writes left residue: events=%d records=%d", authorityEvents, authorityRecords)
+	}
+}
+
+func TestAuthorityRecordUsesOneCanonicalPayloadSerialization(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	value := &changingAuthorityJSON{}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", "lease-1", 1, value); err != nil {
+		t.Fatal(err)
+	}
+	if value.calls != 1 {
+		t.Fatalf("authority payload was serialized %d times", value.calls)
+	}
+	stream, err := store.Events(ctx, "")
+	if err != nil || len(stream) != 1 {
+		t.Fatalf("authority event stream=%d err=%v", len(stream), err)
+	}
+	records, err := store.Records(ctx, "capability_lease", "lease-1")
+	if err != nil || len(records) != 1 {
+		t.Fatalf("authority records=%d err=%v", len(records), err)
+	}
+	if string(stream[0].Payload) != string(records[0]) {
+		t.Fatal("authority Event Contract and record used different payload bytes")
 	}
 }
 

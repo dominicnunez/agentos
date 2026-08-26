@@ -144,8 +144,35 @@ func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, ac
 	if err != nil {
 		return fmt.Errorf("encode record: %w", err)
 	}
+	draft := events.TrustedDraft{OrganizationID: organizationID, EventType: eventType, SourceActorID: actorID, TaskID: taskID, AuthorizationRefs: authorizationRefs, ArtifactRefs: artifactRefs, Payload: value}
+	if kind == "capability_lease" || kind == "organization_freeze" || events.RequiresAuthorityRecordAdmission(eventType) {
+		if err := events.ValidateAuthorityRecordDraft(draft, kind, id, version, body); err != nil {
+			return err
+		}
+		// Use the already validated canonical bytes as the Event Contract
+		// payload. A caller-controlled json.Marshaler must not be able to return
+		// different authority on the record and event serialization passes.
+		draft.Payload = json.RawMessage(append([]byte(nil), body...))
+	}
 	return l.withTx(ctx, func(tx *sql.Tx) error {
-		draft := events.TrustedDraft{OrganizationID: organizationID, EventType: eventType, SourceActorID: actorID, TaskID: taskID, AuthorizationRefs: authorizationRefs, ArtifactRefs: artifactRefs, Payload: value}
+		if kind == "capability_lease" || kind == "organization_freeze" {
+			var priorVersion int
+			var priorBody []byte
+			err := tx.QueryRowContext(ctx, `SELECT version,body FROM records WHERE kind=? AND record_id=? ORDER BY version DESC LIMIT 1`, kind, id).Scan(&priorVersion, &priorBody)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("read prior authority record: %w", err)
+			}
+			if errors.Is(err, sql.ErrNoRows) {
+				priorVersion = 0
+				priorBody = nil
+			}
+			if version != priorVersion+1 {
+				return fmt.Errorf("authority record version is noncontiguous")
+			}
+			if err := events.ValidateAuthorityRecordTransition(kind, id, version, body, priorBody); err != nil {
+				return err
+			}
+		}
 		return appendRecord(ctx, tx, draft, kind, id, version, body)
 	})
 }
@@ -2628,36 +2655,29 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, obligation
 				return fmt.Errorf("decode approval %s: %w", obligation.ApprovalRef, err)
 			}
 		}
-		freezeBody, found, err := latestRecordBody(ctx, tx, "organization_freeze", string(obligation.OrganizationID))
+		leaseAdmissions, freezeAdmissions, err := authorityAdmissionsSnapshot(ctx, tx)
 		if err != nil {
-			return err
+			return fmt.Errorf("validate durable authority state: %w", err)
 		}
 		frozen := false
-		if found {
-			var state authority.FreezeState
-			if err := json.Unmarshal(freezeBody, &state); err != nil {
-				return fmt.Errorf("decode organization freeze: %w", err)
+		var freezeSequence int64
+		for _, admission := range freezeAdmissions {
+			if admission.OrganizationID == obligation.OrganizationID && admission.Sequence > freezeSequence {
+				frozen = admission.Frozen
+				freezeSequence = admission.Sequence
 			}
-			if state.OrganizationID != obligation.OrganizationID {
-				return fmt.Errorf("organization freeze identity mismatch")
+		}
+		leaseByID := make(map[core.ID]core.CapabilityLease)
+		for _, admission := range leaseAdmissions {
+			if admission.OrganizationID == obligation.OrganizationID {
+				leaseByID[admission.Lease.ID] = admission.Lease
 			}
-			frozen = state.Frozen
 		}
 		leases := make([]core.CapabilityLease, 0, len(obligation.AuthorizationRefs))
 		for _, ref := range obligation.AuthorizationRefs {
-			leaseBody, found, err := latestRecordBody(ctx, tx, "capability_lease", ref)
-			if err != nil {
-				return err
-			}
+			lease, found := leaseByID[core.ID(ref)]
 			if !found {
 				continue
-			}
-			var lease core.CapabilityLease
-			if err := json.Unmarshal(leaseBody, &lease); err != nil {
-				return fmt.Errorf("decode capability lease %s: %w", ref, err)
-			}
-			if string(lease.ID) != ref {
-				return fmt.Errorf("capability lease identity mismatch for %s", ref)
 			}
 			leases = append(leases, lease)
 		}
@@ -2722,6 +2742,41 @@ func latestRecordBody(ctx context.Context, tx *sql.Tx, kind, id string) ([]byte,
 		return nil, false, err
 	}
 	return body, true, nil
+}
+
+const maximumAuthorityAdmissions = 4096
+
+func authorityAdmissionsSnapshot(ctx context.Context, queryer rowsQueryer) ([]events.CapabilityLeaseAdmission, []events.OrganizationFreezeAdmission, error) {
+	stream, err := collectEvents(queryer.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE event_type IN ('CAPABILITY_GRANTED','CAPABILITY_REVOKED','FREEZE_SET') ORDER BY sequence LIMIT ?`, maximumAuthorityAdmissions+1))
+	if err != nil {
+		return nil, nil, fmt.Errorf("read authority Event Contracts: %w", err)
+	}
+	if len(stream) > maximumAuthorityAdmissions {
+		return nil, nil, fmt.Errorf("authority Event Contract history exceeds the supported bound")
+	}
+	rows, err := queryer.QueryContext(ctx, `SELECT kind,record_id,version,body FROM records
+WHERE kind IN ('capability_lease','organization_freeze') ORDER BY kind,record_id,version LIMIT ?`, maximumAuthorityAdmissions+1)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read authority records: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	records := make([]events.AuthorityRecord, 0)
+	for rows.Next() {
+		var record events.AuthorityRecord
+		if err := rows.Scan(&record.Kind, &record.RecordID, &record.Version, &record.Body); err != nil {
+			return nil, nil, fmt.Errorf("scan authority record: %w", err)
+		}
+		record.Body = append([]byte(nil), record.Body...)
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterate authority records: %w", err)
+	}
+	if len(records) > maximumAuthorityAdmissions {
+		return nil, nil, fmt.Errorf("authority record history exceeds the supported bound")
+	}
+	return events.ResolveAuthorityAdmissions(stream, records)
 }
 
 func recordBodyAtVersion(ctx context.Context, queryer rowsQueryer, kind, id string, version int) ([]byte, bool, error) {
@@ -2947,6 +3002,9 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 	}
 	if events.RequiresProjectionAdmission(d.EventType, d.SourceActorID) {
 		return events.Event{}, fmt.Errorf("projection lifecycle events require typed admission")
+	}
+	if events.RequiresAuthorityRecordAdmission(d.EventType) {
+		return events.Event{}, fmt.Errorf("authority lifecycle events require atomic record admission")
 	}
 	if d.EventType == "EVIDENCE_PUBLISHED" {
 		return events.Event{}, fmt.Errorf("agent evidence requires typed execution-bound admission")

@@ -178,6 +178,153 @@ func TestVerifyRejectsAgentEvidenceDetachedFromItsExecution(t *testing.T) {
 	}
 }
 
+func TestVerifyRejectsAuthorityEventWithoutItsExactRecord(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "orphaned-authority.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1", Action: "write", Resource: "record-1", Scope: "org-1"}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err != nil {
+		t.Fatalf("valid authority history failed recovery: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM records WHERE kind='capability_lease' AND record_id='lease-1'`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "authority admission event") {
+		t.Fatalf("orphaned authority event passed recovery: %v", err)
+	}
+}
+
+func TestVerifyRejectsMalformedAuthorityRevisions(t *testing.T) {
+	ctx := context.Background()
+	for _, test := range []struct {
+		name   string
+		mutate func(*sql.DB) error
+	}{
+		{
+			name: "noncontiguous lease",
+			mutate: func(db *sql.DB) error {
+				_, err := db.ExecContext(ctx, `UPDATE records SET version=3 WHERE kind='capability_lease' AND record_id='lease-1' AND version=2`)
+				return err
+			},
+		},
+		{
+			name: "changed revocation",
+			mutate: func(db *sql.DB) error {
+				var body []byte
+				if err := db.QueryRowContext(ctx, `SELECT body FROM records WHERE kind='capability_lease' AND record_id='lease-1' AND version=2`).Scan(&body); err != nil {
+					return err
+				}
+				var lease core.CapabilityLease
+				if err := json.Unmarshal(body, &lease); err != nil {
+					return err
+				}
+				lease.Resource = "expanded-resource"
+				body, err := json.Marshal(lease)
+				if err != nil {
+					return err
+				}
+				_, err = db.ExecContext(ctx, `UPDATE records SET body=? WHERE kind='capability_lease' AND record_id='lease-1' AND version=2`, body)
+				return err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "authority.db")
+			store, err := ledger.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1", Action: "write", Resource: "record-1", Scope: "org-1"}
+			if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+				_ = store.Close()
+				t.Fatal(err)
+			}
+			revokedAt := time.Now().UTC()
+			lease.RevokedAt = &revokedAt
+			if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_REVOKED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 2, lease); err != nil {
+				_ = store.Close()
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Verify(ctx, path); err != nil {
+				t.Fatalf("valid authority history failed recovery: %v", err)
+			}
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := test.mutate(db); err != nil {
+				_ = db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "authority record") {
+				t.Fatalf("malformed authority history passed recovery: %v", err)
+			}
+		})
+	}
+}
+
+func TestVerifyRejectsOrganizationMismatchedFreezeRecord(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "freeze.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := map[string]any{"organization_id": "org-1", "frozen": true, "reason": "incident", "updated_at": time.Now().UTC()}
+	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "task-1", nil, nil, "organization_freeze", "org-1", 1, state); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state["organization_id"] = "org-2"
+	body, err := json.Marshal(state)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE records SET body=? WHERE kind='organization_freeze' AND record_id='org-1'`, body); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "authority record") {
+		t.Fatalf("organization-mismatched freeze passed recovery: %v", err)
+	}
+}
+
 func TestVerifyRejectsSemanticallyValidEventPayloadTampering(t *testing.T) {
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "tampered.db")
