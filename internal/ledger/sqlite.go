@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -128,6 +129,7 @@ type preparedProjection struct {
 	work               *core.Work
 	experiment         *core.Experiment
 	promotionCandidate *core.PromotionCandidate
+	knowledge          *core.KnowledgeRecord
 }
 
 // AppendRecord is retained for non-projection domain records whose bounded
@@ -152,7 +154,7 @@ func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, ac
 
 func genericRecordKindAllowed(kind string) bool {
 	switch kind {
-	case "approval", "authorization_trace", "capability_lease", "effect", "knowledge", "organization_freeze":
+	case "approval", "authorization_trace", "capability_lease", "effect", "organization_freeze":
 		return true
 	default:
 		return false
@@ -1454,6 +1456,12 @@ func prepareProjection(draft events.ProjectionDraft, allowWorkCompletion, allowG
 			return preparedProjection{}, fmt.Errorf("decode Lab promotion-candidate projection: %w", err)
 		}
 		item.promotionCandidate = &candidate
+	case "knowledge":
+		var knowledge core.KnowledgeRecord
+		if err := decodeExactJSONBytes(value, &knowledge); err != nil {
+			return preparedProjection{}, fmt.Errorf("decode knowledge projection: %w", err)
+		}
+		item.knowledge = &knowledge
 	}
 	return item, nil
 }
@@ -1603,70 +1611,16 @@ func loadTaskAssignmentProfile(ctx context.Context, tx *sql.Tx, target map[core.
 }
 
 func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProjection) (events.Event, error) {
-	if item.intent != nil {
-		if err := validateIntentRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.mission != nil {
-		if err := validateMissionRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.goal != nil {
-		if err := validateGoalRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.team != nil {
-		if err := validateTeamRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.blueprint != nil {
-		if err := validateAgentBlueprintRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.profile != nil {
-		if err := validateExecutionProfileRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.agent != nil {
-		if err := validateAgentRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.task != nil {
-		if err := validateTaskRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-		if err := validateTaskWorkBinding(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.work != nil {
-		if err := validateWorkRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-		if err := validateWorkIntentBinding(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.experiment != nil {
-		if err := validateLabExperimentRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.promotionCandidate != nil {
-		if err := validateLabPromotionCandidateRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
+	if err := validatePreparedProjectionRevision(ctx, tx, item); err != nil {
+		return events.Event{}, err
 	}
 	event, payload, err := appendProjectionEvent(ctx, tx, item.eventDraft, item.record, item.detail)
 	if err != nil {
 		return events.Event{}, err
+	}
+	if item.knowledge != nil && (item.knowledge.CreatedAt.After(event.CreatedAt) ||
+		(item.knowledge.LastVerifiedAt != nil && item.knowledge.LastVerifiedAt.After(event.CreatedAt))) {
+		return events.Event{}, fmt.Errorf("knowledge timestamps postdate their admitting event")
 	}
 	if item.task != nil && item.draft.Event.EventType == "TASK_VERIFIED_COMPLETE" {
 		if err := validateTaskCompletionTransition(ctx, tx, item, event); err != nil {
@@ -1703,6 +1657,45 @@ func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProj
 		}
 	}
 	return event, nil
+}
+
+func validatePreparedProjectionRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+	switch item.draft.ProjectionKind {
+	case "organization":
+		return nil
+	case "intent":
+		return validateIntentRevision(ctx, tx, item)
+	case "mission":
+		return validateMissionRevision(ctx, tx, item)
+	case "goal":
+		return validateGoalRevision(ctx, tx, item)
+	case "team":
+		return validateTeamRevision(ctx, tx, item)
+	case "agent_blueprint":
+		return validateAgentBlueprintRevision(ctx, tx, item)
+	case "execution_profile":
+		return validateExecutionProfileRevision(ctx, tx, item)
+	case "agent":
+		return validateAgentRevision(ctx, tx, item)
+	case "task":
+		if err := validateTaskRevision(ctx, tx, item); err != nil {
+			return err
+		}
+		return validateTaskWorkBinding(ctx, tx, item)
+	case "work":
+		if err := validateWorkRevision(ctx, tx, item); err != nil {
+			return err
+		}
+		return validateWorkIntentBinding(ctx, tx, item)
+	case "lab_experiment":
+		return validateLabExperimentRevision(ctx, tx, item)
+	case "lab_promotion_candidate":
+		return validateLabPromotionCandidateRevision(ctx, tx, item)
+	case "knowledge":
+		return validateKnowledgeRevision(ctx, tx, item)
+	default:
+		return fmt.Errorf("projection kind has no typed revision validator")
+	}
 }
 
 func validateTaskCompletionTransition(ctx context.Context, tx *sql.Tx, item preparedProjection, transition events.Event) error {
@@ -2043,6 +2036,137 @@ func validateGoalRevision(ctx context.Context, tx *sql.Tx, item preparedProjecti
 		return fmt.Errorf("goal version %d follows %d", item.draft.Version, record.Version)
 	}
 	return events.ValidateGoalProjectionTransition(item.draft.Event.EventType, item.draft.Version, &previous, goal)
+}
+
+func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+	knowledge := *item.knowledge
+	if knowledge.KnowledgeID != core.ID(item.draft.RecordID) || string(knowledge.OrganizationID) != item.draft.Event.OrganizationID ||
+		item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" ||
+		item.draft.Event.RecipientScope != "" || item.draft.Event.RecipientID != "" || item.draft.Event.CorrelationID == "" ||
+		!slices.Equal(item.draft.Event.ArtifactRefs, knowledge.EvidenceArtifactRefs) {
+		return fmt.Errorf("knowledge projection crosses its runtime-owned identity, tenant, route, or evidence boundary")
+	}
+	if err := validateRosterParentOrganization(ctx, tx, knowledge.OrganizationID); err != nil {
+		return fmt.Errorf("knowledge: %w", err)
+	}
+	if err := validateKnowledgeScopeBinding(ctx, tx, knowledge); err != nil {
+		return err
+	}
+	for _, refs := range [][]string{knowledge.ProvenanceEventRefs, knowledge.OccurrenceEventRefs, knowledge.ValidationRefs} {
+		for _, eventRef := range refs {
+			if err := validateKnowledgeEventReference(ctx, tx, knowledge.OrganizationID, eventRef); err != nil {
+				return err
+			}
+		}
+	}
+	for _, ref := range knowledge.DerivedKnowledgeRefs {
+		version, err := strconv.Atoi(ref.Version)
+		if err != nil || version < 1 || strconv.Itoa(version) != ref.Version || ref.ID == item.draft.RecordID {
+			return fmt.Errorf("knowledge derived reference is invalid")
+		}
+		body, found, err := recordBodyAtVersion(ctx, tx, "knowledge", ref.ID, version)
+		if err != nil {
+			return fmt.Errorf("read derived knowledge reference: %w", err)
+		}
+		var record events.ProjectionRecord
+		var derived core.KnowledgeRecord
+		if !found || decodeExactJSONBytes(body, &record) != nil || decodeExactJSONBytes(record.Value, &derived) != nil ||
+			record.ProjectionKind != "knowledge" || record.RecordID != ref.ID || record.Version != version ||
+			derived.OrganizationID != knowledge.OrganizationID || derived.Status != core.KnowledgeActive {
+			return fmt.Errorf("derived knowledge must reference an exact active revision in the same organization")
+		}
+		currentRecord, current, currentFound, err := latestProjectionRevision[core.KnowledgeRecord](ctx, tx, "knowledge", ref.ID)
+		if err != nil || !currentFound || currentRecord.Version != version || current.Status != core.KnowledgeActive {
+			return fmt.Errorf("derived knowledge must reference the current active revision")
+		}
+	}
+	record, previous, found, err := latestProjectionRevision[core.KnowledgeRecord](ctx, tx, "knowledge", item.draft.RecordID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		if item.draft.Event.CorrelationID != "knowledge-"+item.draft.RecordID {
+			return fmt.Errorf("knowledge proposal correlation is not deterministic")
+		}
+		return nil
+	}
+	if record.CorrelationID != item.draft.Event.CorrelationID || item.draft.Version != record.Version+1 {
+		return fmt.Errorf("knowledge revision crosses its correlation or version boundary")
+	}
+	if err := core.ValidateKnowledgeTransition(item.draft.Event.EventType, previous, knowledge); err != nil {
+		return fmt.Errorf("knowledge revision: %w", err)
+	}
+	if item.draft.Event.EventType == "KNOWLEDGE_ACTIVATED" && knowledge.Basis == core.KnowledgeBasisRepeatedPattern &&
+		!containsNovelKnowledgeValidationRef(knowledge.OccurrenceEventRefs, knowledge.ValidationRefs) {
+		return fmt.Errorf("repeated-pattern activation requires validation evidence beyond the proposal occurrences")
+	}
+	return nil
+}
+
+func validateKnowledgeScopeBinding(ctx context.Context, tx *sql.Tx, knowledge core.KnowledgeRecord) error {
+	if knowledge.Scope == core.KnowledgeScopeOrganization {
+		return nil
+	}
+	kind := "agent"
+	if knowledge.Scope == core.KnowledgeScopeTeam {
+		kind = "team"
+	}
+	body, found, err := latestRecordBody(ctx, tx, kind, string(knowledge.ScopeID))
+	if err != nil {
+		return fmt.Errorf("read knowledge scope binding: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("knowledge scope is not a durable %s", kind)
+	}
+	var record events.ProjectionRecord
+	if decodeExactJSONBytes(body, &record) != nil || record.ProjectionKind != kind || record.RecordID != string(knowledge.ScopeID) {
+		return fmt.Errorf("knowledge scope projection is invalid")
+	}
+	var organizationID core.ID
+	if kind == "agent" {
+		var agent core.Agent
+		if decodeExactJSONBytes(record.Value, &agent) != nil || agent.ID != knowledge.ScopeID {
+			return fmt.Errorf("knowledge Agent scope projection is invalid")
+		}
+		organizationID = agent.OrganizationID
+	} else {
+		var team core.Team
+		if decodeExactJSONBytes(record.Value, &team) != nil || team.ID != knowledge.ScopeID {
+			return fmt.Errorf("knowledge Team scope projection is invalid")
+		}
+		organizationID = team.OrganizationID
+	}
+	if organizationID != knowledge.OrganizationID {
+		return fmt.Errorf("knowledge scope crosses its organization boundary")
+	}
+	return nil
+}
+
+func validateKnowledgeEventReference(ctx context.Context, tx *sql.Tx, organizationID core.ID, eventRef string) error {
+	var actualOrganization string
+	if err := tx.QueryRowContext(ctx, `SELECT organization_id FROM events WHERE event_id=?`, eventRef).Scan(&actualOrganization); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("knowledge references an unavailable event")
+		}
+		return fmt.Errorf("read knowledge event reference: %w", err)
+	}
+	if actualOrganization != string(organizationID) {
+		return fmt.Errorf("knowledge event reference crosses its organization boundary")
+	}
+	return nil
+}
+
+func containsNovelKnowledgeValidationRef(occurrences, validation []string) bool {
+	seen := make(map[string]struct{}, len(occurrences))
+	for _, ref := range occurrences {
+		seen[ref] = struct{}{}
+	}
+	for _, ref := range validation {
+		if _, repeated := seen[ref]; !repeated {
+			return true
+		}
+	}
+	return false
 }
 
 func latestProjectionRevision[T any](ctx context.Context, tx *sql.Tx, kind, recordID string) (events.ProjectionRecord, T, bool, error) {
@@ -2842,6 +2966,30 @@ func (l *SQLite) Records(ctx context.Context, kind, id string) ([][]byte, error)
 		return admittedProjectionRecordBodies(ctx, l.db, `WHERE r.kind=? AND (?='' OR r.record_id=?) ORDER BY r.record_id,r.version`, kind, id, id)
 	}
 	return collectRecordBodies(l.db.QueryContext(ctx, `SELECT body FROM records WHERE kind=? AND (?='' OR record_id=?) ORDER BY record_id,version`, kind, id, id))
+}
+
+// ActiveKnowledgeRecords returns only current, event-admitted knowledge rows
+// from one organization. The caller applies the remaining scope and text
+// filters, but can never turn this into an unbounded or cross-tenant scan.
+func (l *SQLite) ActiveKnowledgeRecords(ctx context.Context, organizationID, scope, scopeID string, limit int) ([][]byte, error) {
+	if organizationID == "" || scopeID == "" || limit < 1 || limit > 256 ||
+		(scope != string(core.KnowledgeScopeAgent) && scope != string(core.KnowledgeScopeTeam) && scope != string(core.KnowledgeScopeOrganization)) {
+		return nil, fmt.Errorf("organization, closed knowledge scope, scope identity, and limit from 1 through 256 are required")
+	}
+	bodies, err := admittedProjectionRecordBodies(ctx, l.db, `JOIN (
+	SELECT record_id, MAX(version) AS version
+	FROM records
+	WHERE kind='knowledge'
+	GROUP BY record_id
+) AS latest ON latest.record_id=r.record_id AND latest.version=r.version
+WHERE r.kind='knowledge' AND e.organization_id=? AND json_extract(r.body,'$.value.status')=?
+AND json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scope_id')=?
+ORDER BY r.record_id
+LIMIT ?`, organizationID, string(core.KnowledgeActive), scope, scopeID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return bodies, nil
 }
 
 // LatestRecords returns the current durable version of every record of a kind,

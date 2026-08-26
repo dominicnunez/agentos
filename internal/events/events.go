@@ -2645,6 +2645,7 @@ var projectionLifecycleContracts = map[string]projectionLifecycleContract{
 	"work":                    {initial: []string{"WORK_CREATED"}, revision: []string{"WORK_COMPLETED", "WORK_FAILED", "WORK_PLANNING_FAILED"}},
 	"lab_experiment":          {initial: []string{"LAB_EXPERIMENT_STARTED"}, revision: []string{"LAB_EXPERIMENT_COMPLETED", "LAB_EXPERIMENT_FAILED"}},
 	"lab_promotion_candidate": {initial: []string{"LAB_PROMOTION_CANDIDATE_CREATED"}},
+	"knowledge":               {initial: []string{"KNOWLEDGE_PROPOSED"}, revision: []string{"KNOWLEDGE_ACTIVATED", "KNOWLEDGE_SUPERSEDED", "KNOWLEDGE_MARKED_STALE", "KNOWLEDGE_QUARANTINED"}},
 	"task": {
 		initial:  []string{"TASK_CREATED", "TASK_BLOCKED"},
 		revision: []string{"TASK_ASSIGNMENT_REVALIDATED", "TASK_BLOCKED", "TASK_RECOVERED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED"},
@@ -2695,7 +2696,8 @@ func ProjectionKindRequiresAdmission(kind string) bool {
 // runtime-owned label and routing envelope reserved for its kind and version.
 func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload) error {
 	record := payload.Projection
-	if event.OrganizationID == "" || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.SchemaVersion != SchemaVersion {
+	if event.OrganizationID == "" || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || len(event.AuthorizationRefs) != 0 ||
+		(record.ProjectionKind != "knowledge" && len(event.ArtifactRefs) != 0) || event.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("projection event crosses its runtime-owned envelope")
 	}
 	if !validProjectionEventType(record.ProjectionKind, record.Version, event.EventType) {
@@ -2764,6 +2766,18 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 			return fmt.Errorf("lab promotion-candidate projection value is invalid or lacks its correlation boundary")
 		}
 		if err := ValidatePromotionCandidateProjectionTarget(event.EventType, record.Version, candidate); err != nil {
+			return err
+		}
+	}
+	if record.ProjectionKind == "knowledge" {
+		var knowledge core.KnowledgeRecord
+		if decodeExactEventJSON(record.Value, &knowledge) != nil || knowledge.KnowledgeID != core.ID(record.RecordID) || string(knowledge.OrganizationID) != event.OrganizationID || record.CorrelationID == "" || record.CorrelationID != event.CorrelationID {
+			return fmt.Errorf("knowledge projection value is invalid or lacks its correlation boundary")
+		}
+		if !slices.Equal(event.ArtifactRefs, knowledge.EvidenceArtifactRefs) {
+			return fmt.Errorf("knowledge projection evidence does not match its event envelope")
+		}
+		if err := core.ValidateKnowledgeProjectionTarget(event.EventType, record.Version, knowledge); err != nil {
 			return err
 		}
 	}
@@ -3337,6 +3351,9 @@ type ExecutionStartAppender interface {
 type ProjectionReader interface {
 	Records(context.Context, string, string) ([][]byte, error)
 }
+type ActiveKnowledgeReader interface {
+	ActiveKnowledgeRecords(context.Context, string, string, string, int) ([][]byte, error)
+}
 type IntentConfirmer interface {
 	AppendIntentConfirmation(context.Context, TrustedDraft, core.ID, core.ID) (Event, error)
 }
@@ -3708,6 +3725,13 @@ func (g *Gateway) ProjectionRecords(ctx context.Context, kind, id string) ([][]b
 		return nil, fmt.Errorf("event ledger does not support durable projections")
 	}
 	return store.Records(ctx, kind, id)
+}
+func (g *Gateway) ActiveKnowledgeRecords(ctx context.Context, organizationID, scope, scopeID string, limit int) ([][]byte, error) {
+	store, ok := g.ledger.(ActiveKnowledgeReader)
+	if !ok {
+		return nil, fmt.Errorf("event ledger does not support bounded active knowledge reads")
+	}
+	return store.ActiveKnowledgeRecords(ctx, organizationID, scope, scopeID, limit)
 }
 func (g *Gateway) Events(ctx context.Context, correlationID string) ([]Event, error) {
 	return g.ledger.Events(ctx, correlationID)

@@ -170,7 +170,7 @@ policy:
       from:
         module: knowledge
       to:
-        module: core
+        modules: [core, events]
 
     - name: lab-composition
       from:

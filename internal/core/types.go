@@ -450,6 +450,14 @@ type AuthorizationTrace struct {
 
 type KnowledgeStatus string
 
+type KnowledgeType string
+
+type KnowledgeScope string
+
+type KnowledgeBasis string
+
+type KnowledgeValidationMethod string
+
 const (
 	KnowledgeCandidate   KnowledgeStatus = "CANDIDATE"
 	KnowledgeActive      KnowledgeStatus = "ACTIVE"
@@ -458,21 +466,60 @@ const (
 	KnowledgeQuarantined KnowledgeStatus = "QUARANTINED"
 )
 
+const (
+	KnowledgeExperience KnowledgeType = "EXPERIENCE"
+	KnowledgeLesson     KnowledgeType = "LESSON"
+	KnowledgeClaim      KnowledgeType = "KNOWLEDGE"
+	KnowledgeProcedure  KnowledgeType = "PROCEDURE"
+
+	KnowledgeScopeAgent        KnowledgeScope = "AGENT"
+	KnowledgeScopeTeam         KnowledgeScope = "TEAM"
+	KnowledgeScopeOrganization KnowledgeScope = "ORGANIZATION"
+
+	KnowledgeBasisSingleExperience KnowledgeBasis = "SINGLE_EXPERIENCE"
+	KnowledgeBasisRepeatedPattern  KnowledgeBasis = "REPEATED_PATTERN"
+	KnowledgeBasisExperiment       KnowledgeBasis = "DELIBERATE_EXPERIMENT"
+	KnowledgeBasisHumanInput       KnowledgeBasis = "HUMAN_INPUT"
+	KnowledgeBasisExternalEvidence KnowledgeBasis = "EXTERNAL_EVIDENCE"
+	KnowledgeBasisDerived          KnowledgeBasis = "DERIVED"
+	KnowledgeBasisMixed            KnowledgeBasis = "MIXED"
+
+	KnowledgeValidationUnvalidated         KnowledgeValidationMethod = "UNVALIDATED"
+	KnowledgeValidationDeterministic       KnowledgeValidationMethod = "DETERMINISTIC_CHECK"
+	KnowledgeValidationExperimental        KnowledgeValidationMethod = "EXPERIMENTAL_EVIDENCE"
+	KnowledgeValidationRepeatedObservation KnowledgeValidationMethod = "REPEATED_OBSERVATION"
+	KnowledgeValidationIndependentAgent    KnowledgeValidationMethod = "INDEPENDENT_AGENT_JUDGMENT"
+	KnowledgeValidationHuman               KnowledgeValidationMethod = "HUMAN_JUDGMENT"
+	KnowledgeValidationMixed               KnowledgeValidationMethod = "MIXED"
+)
+
 type KnowledgeRecord struct {
-	KnowledgeID          ID              `json:"knowledge_id"`
-	Version              int             `json:"version"`
-	Type                 string          `json:"type"`
-	Scope                string          `json:"scope"`
-	Tags                 []string        `json:"tags,omitempty"`
-	Status               KnowledgeStatus `json:"status"`
-	Content              string          `json:"content"`
-	ProvenanceEventRefs  []string        `json:"provenance_event_refs"`
-	EvidenceArtifactRefs []string        `json:"evidence_artifact_refs"`
-	Applicability        string          `json:"applicability,omitempty"`
-	CreatedBy            ID              `json:"created_by"`
-	CreatedAt            time.Time       `json:"created_at"`
-	LastVerifiedAt       *time.Time      `json:"last_verified_at,omitempty"`
-	SupersedesVersion    *int            `json:"supersedes_version,omitempty"`
+	KnowledgeID          ID                        `json:"knowledge_id"`
+	OrganizationID       ID                        `json:"organization_id"`
+	Version              int                       `json:"version"`
+	Type                 KnowledgeType             `json:"type"`
+	Scope                KnowledgeScope            `json:"scope"`
+	ScopeID              ID                        `json:"scope_id"`
+	Tags                 []string                  `json:"tags,omitempty"`
+	Status               KnowledgeStatus           `json:"status"`
+	Title                string                    `json:"title"`
+	Content              string                    `json:"content"`
+	Basis                KnowledgeBasis            `json:"basis"`
+	ProvenanceEventRefs  []string                  `json:"provenance_event_refs"`
+	OccurrenceEventRefs  []string                  `json:"occurrence_event_refs,omitempty"`
+	DerivedKnowledgeRefs []VersionedRef            `json:"derived_knowledge_refs,omitempty"`
+	EvidenceArtifactRefs []string                  `json:"evidence_artifact_refs"`
+	Applicability        string                    `json:"applicability,omitempty"`
+	CreatedBy            ID                        `json:"created_by"`
+	CreatedByKind        PrincipalKind             `json:"created_by_kind"`
+	CreatedAt            time.Time                 `json:"created_at"`
+	LastVerifiedAt       *time.Time                `json:"last_verified_at,omitempty"`
+	ValidationMethod     KnowledgeValidationMethod `json:"validation_method"`
+	ValidationRefs       []string                  `json:"validation_refs,omitempty"`
+	ValidatedBy          ID                        `json:"validated_by,omitempty"`
+	ValidatedByKind      PrincipalKind             `json:"validated_by_kind,omitempty"`
+	Limitations          string                    `json:"limitations,omitempty"`
+	SupersedesVersion    *int                      `json:"supersedes_version,omitempty"`
 }
 type Skill struct {
 	SkillID                   ID              `json:"skill_id"`

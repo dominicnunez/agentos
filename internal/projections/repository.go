@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
@@ -29,6 +30,7 @@ const (
 	KindTask                  = "task"
 	KindLabExperiment         = "lab_experiment"
 	KindLabPromotionCandidate = "lab_promotion_candidate"
+	KindKnowledge             = "knowledge"
 )
 
 var projectionKinds = [...]string{
@@ -44,6 +46,7 @@ var projectionKinds = [...]string{
 	KindTask,
 	KindLabExperiment,
 	KindLabPromotionCandidate,
+	KindKnowledge,
 }
 
 type Versioned[T any] = core.DurableState[T]
@@ -61,6 +64,7 @@ type Snapshot struct {
 	Tasks               map[core.ID]Versioned[core.Task]
 	Experiments         map[core.ID]Versioned[core.Experiment]
 	PromotionCandidates map[core.ID]Versioned[core.PromotionCandidate]
+	Knowledge           map[core.ID]Versioned[core.KnowledgeRecord]
 }
 
 type Repository struct{ gateway *events.Gateway }
@@ -501,6 +505,8 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 	goals := make(map[core.ID]Versioned[core.Goal])
 	works := make(map[core.ID]Versioned[core.Work])
 	experiments := make(map[core.ID]Versioned[core.Experiment])
+	knowledgeHistory := make(map[core.ID]Versioned[core.KnowledgeRecord])
+	knowledgeRevisions := make(map[core.ID]map[int]core.KnowledgeRecord)
 	graph := core.DurableGraph{
 		Organizations: map[core.ID]core.DurableState[core.Organization]{}, Missions: map[core.ID]core.DurableState[core.Mission]{},
 		Goals: map[core.ID]core.DurableState[core.Goal]{}, Teams: map[core.ID]core.DurableState[core.Team]{},
@@ -508,6 +514,7 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 		Agents: map[core.ID]core.DurableState[core.Agent]{}, Intents: map[core.ID]core.DurableState[core.Intent]{},
 		Works: map[core.ID]core.DurableState[core.Work]{}, Tasks: map[core.ID]core.DurableState[core.Task]{},
 		Experiments: map[core.ID]core.DurableState[core.Experiment]{}, PromotionCandidates: map[core.ID]core.DurableState[core.PromotionCandidate]{},
+		Knowledge: map[core.ID]core.DurableState[core.KnowledgeRecord]{},
 	}
 	confirmations := make(map[string][]events.Event)
 	replacementConfirmations := make(map[core.ID]string)
@@ -687,6 +694,17 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 			if err == nil {
 				err = core.AdmitDurableRevision(graph.PromotionCandidates, value.ID, record.Version, record.CorrelationID, value, true, nil)
 			}
+		case KindKnowledge:
+			var value core.KnowledgeRecord
+			if decodeExactProjectionJSON(record.Value, &value) != nil || value.KnowledgeID != core.ID(record.RecordID) ||
+				!core.ValidKnowledgeRecord(value) || value.Version != record.Version {
+				err = fmt.Errorf("contains an invalid knowledge projection")
+			} else {
+				err = validateKnowledgeProjectionAtAdmission(value, event, record, graph, knowledgeHistory, knowledgeRevisions, ordered)
+			}
+			if err == nil {
+				err = core.AdmitDurableRevision(graph.Knowledge, value.KnowledgeID, record.Version, record.CorrelationID, value, true, validKnowledgeRevision)
+			}
 		default:
 			err = fmt.Errorf("contains unsupported projection kind %s", record.ProjectionKind)
 		}
@@ -703,6 +721,103 @@ func validateProjectionOrganizationAtAdmission(organizationID core.ID, event eve
 		return fmt.Errorf("requires its durable parent Organization at admission")
 	}
 	return nil
+}
+
+func validateKnowledgeProjectionAtAdmission(value core.KnowledgeRecord, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, history map[core.ID]Versioned[core.KnowledgeRecord], revisions map[core.ID]map[int]core.KnowledgeRecord, stream []events.Event) error {
+	if err := validateProjectionOrganizationAtAdmission(value.OrganizationID, event, graph); err != nil {
+		return err
+	}
+	if record.CorrelationID != "knowledge-"+record.RecordID {
+		return fmt.Errorf("knowledge correlation is not deterministic")
+	}
+	switch value.Scope {
+	case core.KnowledgeScopeOrganization:
+		if value.ScopeID != value.OrganizationID {
+			return fmt.Errorf("knowledge crosses its Organization scope")
+		}
+	case core.KnowledgeScopeAgent:
+		agent, found := graph.Agents[value.ScopeID]
+		if !found || agent.Value.OrganizationID != value.OrganizationID {
+			return fmt.Errorf("knowledge references an invalid Agent scope")
+		}
+	case core.KnowledgeScopeTeam:
+		team, found := graph.Teams[value.ScopeID]
+		if !found || team.Value.OrganizationID != value.OrganizationID {
+			return fmt.Errorf("knowledge references an invalid Team scope")
+		}
+	default:
+		return fmt.Errorf("knowledge has an unsupported scope")
+	}
+	for _, refs := range [][]string{value.ProvenanceEventRefs, value.OccurrenceEventRefs, value.ValidationRefs} {
+		for _, ref := range refs {
+			evidence, found := eventByID(stream, ref)
+			if !found || evidence.Sequence >= event.Sequence || evidence.OrganizationID != event.OrganizationID {
+				return fmt.Errorf("knowledge references unavailable, future, or cross-organization evidence")
+			}
+		}
+	}
+	for _, ref := range value.DerivedKnowledgeRefs {
+		version, err := strconv.Atoi(ref.Version)
+		derived, found := revisions[core.ID(ref.ID)][version]
+		current, currentFound := history[core.ID(ref.ID)]
+		if err != nil || version < 1 || strconv.Itoa(version) != ref.Version || ref.ID == record.RecordID || !found ||
+			derived.OrganizationID != value.OrganizationID || derived.Status != core.KnowledgeActive || !currentFound ||
+			current.Version != version || current.Value.Status != core.KnowledgeActive {
+			return fmt.Errorf("knowledge derived reference lacks an exact prior active revision")
+		}
+	}
+	if value.CreatedAt.After(event.CreatedAt) || value.LastVerifiedAt != nil && value.LastVerifiedAt.After(event.CreatedAt) {
+		return fmt.Errorf("knowledge timestamps postdate their admitting event")
+	}
+	previous, found := history[value.KnowledgeID]
+	if found {
+		if record.Version != previous.Version+1 || record.CorrelationID != previous.CorrelationID {
+			return fmt.Errorf("knowledge history is noncontiguous")
+		}
+		if err := core.ValidateKnowledgeTransition(event.EventType, previous.Value, value); err != nil {
+			return err
+		}
+	} else if record.Version != 1 || value.Status != core.KnowledgeCandidate {
+		return fmt.Errorf("knowledge history does not begin with a candidate")
+	}
+	if event.EventType == "KNOWLEDGE_ACTIVATED" && value.Basis == core.KnowledgeBasisRepeatedPattern &&
+		!knowledgeHasNovelValidation(value.OccurrenceEventRefs, value.ValidationRefs) {
+		return fmt.Errorf("repeated-pattern activation lacks subsequent validation evidence")
+	}
+	history[value.KnowledgeID] = Versioned[core.KnowledgeRecord]{Version: record.Version, CorrelationID: record.CorrelationID, Value: value}
+	if revisions[value.KnowledgeID] == nil {
+		revisions[value.KnowledgeID] = make(map[int]core.KnowledgeRecord)
+	}
+	revisions[value.KnowledgeID][record.Version] = value
+	return nil
+}
+
+func knowledgeHasNovelValidation(occurrences, validation []string) bool {
+	seen := make(map[string]struct{}, len(occurrences))
+	for _, ref := range occurrences {
+		seen[ref] = struct{}{}
+	}
+	for _, ref := range validation {
+		if _, repeated := seen[ref]; !repeated {
+			return true
+		}
+	}
+	return false
+}
+
+func validKnowledgeRevision(previous, next core.KnowledgeRecord) bool {
+	eventType := ""
+	switch next.Status {
+	case core.KnowledgeActive:
+		eventType = "KNOWLEDGE_ACTIVATED"
+	case core.KnowledgeSuperseded:
+		eventType = "KNOWLEDGE_SUPERSEDED"
+	case core.KnowledgeStale:
+		eventType = "KNOWLEDGE_MARKED_STALE"
+	case core.KnowledgeQuarantined:
+		eventType = "KNOWLEDGE_QUARANTINED"
+	}
+	return core.ValidateKnowledgeTransition(eventType, previous, next) == nil
 }
 
 func validateProjectionTeamAtAdmission(team core.Team, event events.Event, graph core.DurableGraph) error {
@@ -1087,6 +1202,8 @@ func validateProjectionEventOrganizationBindings(snapshot Snapshot, stream []eve
 			organizationID, err = projectionOrganizationID[core.Experiment](event, payload.Projection, "Lab experiment", func(value core.Experiment) core.ID { return value.OrganizationID })
 		case KindLabPromotionCandidate:
 			organizationID, err = projectionOrganizationID[core.PromotionCandidate](event, payload.Projection, "Lab promotion candidate", func(value core.PromotionCandidate) core.ID { return value.OrganizationID })
+		case KindKnowledge:
+			organizationID, err = projectionOrganizationID[core.KnowledgeRecord](event, payload.Projection, "knowledge", func(value core.KnowledgeRecord) core.ID { return value.OrganizationID })
 		case KindTask:
 			var value core.Task
 			if decodeExactProjectionJSON(payload.Projection.Value, &value) != nil {
@@ -1465,6 +1582,7 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 		Tasks:               make(map[core.ID]Versioned[core.Task]),
 		Experiments:         make(map[core.ID]Versioned[core.Experiment]),
 		PromotionCandidates: make(map[core.ID]Versioned[core.PromotionCandidate]),
+		Knowledge:           make(map[core.ID]Versioned[core.KnowledgeRecord]),
 	}
 	if err := decodeKind(records[KindOrganization], snapshot.Organizations, false, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode organizations: %w", err)
@@ -1502,10 +1620,29 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 	if err := decodeKind(records[KindLabPromotionCandidate], snapshot.PromotionCandidates, true, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode Lab promotion candidates: %w", err)
 	}
+	if err := decodeKnowledgeKind(records[KindKnowledge], snapshot.Knowledge); err != nil {
+		return Snapshot{}, fmt.Errorf("decode knowledge: %w", err)
+	}
 	if err := ValidateSnapshot(snapshot); err != nil {
 		return Snapshot{}, err
 	}
 	return snapshot, nil
+}
+
+func decodeKnowledgeKind(bodies [][]byte, target map[core.ID]Versioned[core.KnowledgeRecord]) error {
+	for _, body := range bodies {
+		var record events.ProjectionRecord
+		var value core.KnowledgeRecord
+		if decodeExactProjectionJSON(body, &record) != nil || decodeExactProjectionJSON(record.Value, &value) != nil ||
+			record.ProjectionKind != KindKnowledge || record.RecordID != string(value.KnowledgeID) ||
+			record.Version != value.Version || !core.ValidKnowledgeRecord(value) {
+			return fmt.Errorf("knowledge record is invalid")
+		}
+		if err := core.AdmitDurableRevision(target, value.KnowledgeID, record.Version, record.CorrelationID, value, true, validKnowledgeRevision); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func decodeKind[T any](bodies [][]byte, target map[core.ID]Versioned[T], correlationStable bool, sameRecordConfiguration func(T, T) bool) error {
@@ -1579,5 +1716,6 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		Tasks:               snapshot.Tasks,
 		Experiments:         snapshot.Experiments,
 		PromotionCandidates: snapshot.PromotionCandidates,
+		Knowledge:           snapshot.Knowledge,
 	})
 }
