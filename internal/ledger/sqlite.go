@@ -2227,7 +2227,7 @@ AND json_extract(CAST(payload AS TEXT),'$.detail.dispatch_binding.dispatch_id')=
 func agentKnowledgeExecutionClosedBeforeProposal(ctx context.Context, tx *sql.Tx, start events.Event, startVersion int, proposal events.Event) (bool, error) {
 	if start.EventID == "" || start.Sequence < 1 || startVersion < 1 || proposal.Sequence <= start.Sequence ||
 		start.OrganizationID != proposal.OrganizationID || start.TaskID != proposal.TaskID || start.CorrelationID != proposal.CorrelationID || proposal.SourceExecutionID == "" {
-		return false, fmt.Errorf("Agent knowledge execution lifetime boundary is invalid")
+		return false, fmt.Errorf("agent knowledge execution lifetime boundary is invalid")
 	}
 	var closed bool
 	err := tx.QueryRowContext(ctx, `SELECT EXISTS(
