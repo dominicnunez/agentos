@@ -68,3 +68,23 @@ func TestBuildAIMSEvidenceRejectsMissingGenerationTime(t *testing.T) {
 		t.Fatal("missing generation time was accepted")
 	}
 }
+
+func TestBuildAIMSEvidenceIncludesWireNewlineInByteLimit(t *testing.T) {
+	generatedAt := time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC)
+	view := OrganizationSnapshot{
+		Organization: OrganizationSummary{ID: "org-1", Name: "Example", PolicyVersion: "policy-v1", Version: 1},
+		Agents:       []AgentSummary{{ID: "agent-1"}},
+	}
+	base, err := buildAIMSEvidence(view, generatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.Agents[0].Role = strings.Repeat("x", maximumAIMSEvidenceBytes-len(encoded))
+	if _, err := buildAIMSEvidence(view, generatedAt); err == nil || !strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("exact-limit JSON plus its wire newline was accepted: %v", err)
+	}
+}

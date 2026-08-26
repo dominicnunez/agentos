@@ -191,7 +191,7 @@ func buildAIMSEvidence(view OrganizationSnapshot, generatedAt time.Time) (AIMSEv
 	if err != nil {
 		return AIMSEvidencePackage{}, fmt.Errorf("encode AIMS evidence package: %w", err)
 	}
-	if len(encoded) > maximumAIMSEvidenceBytes {
+	if len(encoded)+1 > maximumAIMSEvidenceBytes {
 		return AIMSEvidencePackage{}, fmt.Errorf("AIMS evidence package exceeds its byte limit")
 	}
 	return export, nil
