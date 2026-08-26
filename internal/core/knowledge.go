@@ -81,7 +81,7 @@ func ValidateKnowledgeProjectionTarget(eventType string, version int, record Kno
 		if version < 2 || record.Status != KnowledgeSuperseded {
 			return fmt.Errorf("knowledge supersession must create a superseded revision")
 		}
-	case "KNOWLEDGE_MARKED_STALE":
+	case "KNOWLEDGE_STALE":
 		if version < 2 || record.Status != KnowledgeStale {
 			return fmt.Errorf("knowledge staleness must create a stale revision")
 		}
@@ -118,7 +118,7 @@ func ValidateKnowledgeTransition(eventType string, prior, next KnowledgeRecord) 
 		if prior.Status != KnowledgeActive || next.Status != KnowledgeSuperseded || !sameKnowledgeCandidate(prior, next) || !sameKnowledgeValidation(prior, next) {
 			return fmt.Errorf("only active knowledge may be superseded")
 		}
-	case "KNOWLEDGE_MARKED_STALE":
+	case "KNOWLEDGE_STALE":
 		if prior.Status != KnowledgeActive || next.Status != KnowledgeStale || !sameKnowledgeCandidate(prior, next) || !sameKnowledgeValidation(prior, next) {
 			return fmt.Errorf("only active knowledge may be marked stale")
 		}
@@ -243,7 +243,7 @@ func ValidKnowledgeRevision(previous, next KnowledgeRecord) bool {
 	case KnowledgeSuperseded:
 		eventType = "KNOWLEDGE_SUPERSEDED"
 	case KnowledgeStale:
-		eventType = "KNOWLEDGE_MARKED_STALE"
+		eventType = "KNOWLEDGE_STALE"
 	case KnowledgeQuarantined:
 		eventType = "KNOWLEDGE_QUARANTINED"
 	default:

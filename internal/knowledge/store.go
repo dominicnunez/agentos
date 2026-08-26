@@ -49,7 +49,7 @@ func (s *Store) MarkStale(ctx context.Context, record core.KnowledgeRecord) (eve
 	if record.Status != core.KnowledgeStale || !core.ValidKnowledgeRecord(record) {
 		return events.Event{}, fmt.Errorf("knowledge staleness requires a valid stale revision")
 	}
-	return s.publish(ctx, "KNOWLEDGE_MARKED_STALE", record)
+	return s.publish(ctx, "KNOWLEDGE_STALE", record)
 }
 
 func (s *Store) Quarantine(ctx context.Context, record core.KnowledgeRecord) (events.Event, error) {

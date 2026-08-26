@@ -139,7 +139,8 @@ func TestVerifyReplaysEventAdmittedKnowledge(t *testing.T) {
 	active.ValidationRefs = []string{organizationEvent.EventID}
 	active.ValidatedBy = "runtime"
 	active.ValidatedByKind = core.PrincipalRuntime
-	active.LastVerifiedAt = &now
+	verifiedAt := time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
 	active.SupersedesVersion = recoveryIntPointer(1)
 	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_ACTIVATED", SourceActorID: "runtime", CorrelationID: "knowledge-knowledge-1"},
@@ -189,7 +190,7 @@ func TestVerifyRejectsKnowledgeWhenValidatorLeaseRecordIsMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	lease := core.CapabilityLease{ID: "lease-human", ActorID: "user-1", ActorKind: core.PrincipalHuman, Action: "knowledge.validate", Resource: "knowledge-human", Scope: "org-1", OriginTaskID: "task-validation"}
-	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_LEASED", "runtime", "task-validation", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "runtime", "task-validation", []string{"approval-capability"}, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
 		_ = store.Close()
 		t.Fatal(err)
 	}
@@ -206,7 +207,8 @@ func TestVerifyRejectsKnowledgeWhenValidatorLeaseRecordIsMissing(t *testing.T) {
 	active.ValidationRefs = []string{judgment.EventID}
 	active.ValidatedBy = "user-1"
 	active.ValidatedByKind = core.PrincipalHuman
-	active.LastVerifiedAt = &now
+	verifiedAt := time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
 	active.SupersedesVersion = recoveryIntPointer(1)
 	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_ACTIVATED", SourceActorID: "runtime", CorrelationID: "knowledge-knowledge-human"},

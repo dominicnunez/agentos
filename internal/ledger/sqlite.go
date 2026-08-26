@@ -2053,16 +2053,23 @@ func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedPro
 		return err
 	}
 	evidenceArtifacts := make(map[string]struct{})
-	for _, refs := range [][]string{knowledge.ProvenanceEventRefs, knowledge.OccurrenceEventRefs, knowledge.ValidationRefs} {
+	var latestValidationAt time.Time
+	for index, refs := range [][]string{knowledge.ProvenanceEventRefs, knowledge.OccurrenceEventRefs, knowledge.ValidationRefs} {
 		for _, eventRef := range refs {
-			artifactRefs, err := validateKnowledgeEventReference(ctx, tx, knowledge.OrganizationID, eventRef)
+			artifactRefs, createdAt, err := validateKnowledgeEventReference(ctx, tx, knowledge.OrganizationID, eventRef)
 			if err != nil {
 				return err
 			}
 			for _, artifactRef := range artifactRefs {
 				evidenceArtifacts[artifactRef] = struct{}{}
 			}
+			if index == 2 && createdAt.After(latestValidationAt) {
+				latestValidationAt = createdAt
+			}
 		}
+	}
+	if knowledge.LastVerifiedAt != nil && knowledge.LastVerifiedAt.Before(latestValidationAt) {
+		return fmt.Errorf("knowledge verification predates its validation evidence")
 	}
 	for _, artifactRef := range knowledge.EvidenceArtifactRefs {
 		if _, evidenced := evidenceArtifacts[artifactRef]; !evidenced {
@@ -2168,13 +2175,14 @@ func validateAgentKnowledgeCreatorExecution(ctx context.Context, tx *sql.Tx, pro
 		return false, nil
 	}
 	starts, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
-FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND event_type='EXECUTION_STARTED' AND sequence<? ORDER BY sequence DESC LIMIT 17`,
-		proposal.OrganizationID, proposal.TaskID, proposal.CorrelationID, proposal.Sequence))
+FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND event_type='EXECUTION_STARTED' AND sequence<?
+AND json_extract(CAST(payload AS TEXT),'$.detail.dispatch_binding.dispatch_id')=? ORDER BY sequence DESC LIMIT 2`,
+		proposal.OrganizationID, proposal.TaskID, proposal.CorrelationID, proposal.Sequence, proposal.SourceExecutionID))
 	if err != nil {
 		return false, fmt.Errorf("read Agent knowledge execution starts: %w", err)
 	}
-	if len(starts) > 16 {
-		return false, fmt.Errorf("agent knowledge execution history exceeds its bound")
+	if len(starts) > 1 {
+		return false, fmt.Errorf("agent knowledge execution identity is ambiguous")
 	}
 	for _, start := range starts {
 		payload, present, err := events.AdmittedProjection(start)
@@ -2286,23 +2294,28 @@ func validateKnowledgeScopeBinding(ctx context.Context, tx *sql.Tx, knowledge co
 	return nil
 }
 
-func validateKnowledgeEventReference(ctx context.Context, tx *sql.Tx, organizationID core.ID, eventRef string) ([]string, error) {
+func validateKnowledgeEventReference(ctx context.Context, tx *sql.Tx, organizationID core.ID, eventRef string) ([]string, time.Time, error) {
 	var actualOrganization string
 	var encodedArtifactRefs []byte
-	if err := tx.QueryRowContext(ctx, `SELECT organization_id,artifact_refs FROM events WHERE event_id=?`, eventRef).Scan(&actualOrganization, &encodedArtifactRefs); err != nil {
+	var encodedCreatedAt string
+	if err := tx.QueryRowContext(ctx, `SELECT organization_id,artifact_refs,created_at FROM events WHERE event_id=?`, eventRef).Scan(&actualOrganization, &encodedArtifactRefs, &encodedCreatedAt); err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("knowledge references an unavailable event")
+			return nil, time.Time{}, fmt.Errorf("knowledge references an unavailable event")
 		}
-		return nil, fmt.Errorf("read knowledge event reference: %w", err)
+		return nil, time.Time{}, fmt.Errorf("read knowledge event reference: %w", err)
 	}
 	if actualOrganization != string(organizationID) {
-		return nil, fmt.Errorf("knowledge event reference crosses its organization boundary")
+		return nil, time.Time{}, fmt.Errorf("knowledge event reference crosses its organization boundary")
 	}
 	var artifactRefs []string
 	if decodeExactJSONBytes(encodedArtifactRefs, &artifactRefs) != nil {
-		return nil, fmt.Errorf("knowledge evidence event artifact references are invalid")
+		return nil, time.Time{}, fmt.Errorf("knowledge evidence event artifact references are invalid")
 	}
-	return artifactRefs, nil
+	createdAt, err := time.Parse(time.RFC3339Nano, encodedCreatedAt)
+	if err != nil || createdAt.IsZero() {
+		return nil, time.Time{}, fmt.Errorf("knowledge evidence event timestamp is invalid")
+	}
+	return artifactRefs, createdAt, nil
 }
 
 func hasSubsequentKnowledgeValidationRef(ctx context.Context, tx *sql.Tx, proposalSequence int64, occurrences, validation []string) (bool, error) {
@@ -2970,7 +2983,7 @@ func currentAuthorizationTrace(ctx context.Context, tx *sql.Tx, organizationID, 
 	}
 	leases := make([]core.CapabilityLease, 0, len(authorizationRefs))
 	for _, ref := range authorizationRefs {
-		leaseBody, found, err := latestRecordBody(ctx, tx, "capability_lease", ref)
+		leaseBody, found, err := latestCapabilityLeaseBody(ctx, tx, organizationID, ref)
 		if err != nil {
 			return core.AuthorizationTrace{}, err
 		}
@@ -2987,6 +3000,39 @@ func currentAuthorizationTrace(ctx context.Context, tx *sql.Tx, organizationID, 
 		leases = append(leases, lease)
 	}
 	return authority.Check(now, actorID, taskID, action, resource, scope, leases, frozen), nil
+}
+
+func latestCapabilityLeaseBody(ctx context.Context, tx *sql.Tx, organizationID core.ID, leaseID string) ([]byte, bool, error) {
+	var version int
+	var body []byte
+	err := tx.QueryRowContext(ctx, `SELECT version,body FROM records WHERE kind='capability_lease' AND record_id=? ORDER BY version DESC LIMIT 1`, leaseID).Scan(&version, &body)
+	if err == sql.ErrNoRows {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	var lease core.CapabilityLease
+	if version < 1 || decodeExactJSONBytes(body, &lease) != nil || string(lease.ID) != leaseID || lease.OriginTaskID == "" {
+		return nil, false, fmt.Errorf("capability lease %s has invalid durable state", leaseID)
+	}
+	eventType := "CAPABILITY_GRANTED"
+	if version > 1 {
+		eventType = "CAPABILITY_REVOKED"
+	}
+	var admissions int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE organization_id=? AND event_type=? AND task_id=? AND payload=?
+AND source_execution_id='' AND recipient_scope='' AND recipient_id='' AND schema_version=?`,
+		organizationID, eventType, lease.OriginTaskID, body, events.SchemaVersion).Scan(&admissions); err != nil {
+		return nil, false, fmt.Errorf("read capability lease %s admission: %w", leaseID, err)
+	}
+	if admissions == 0 {
+		return nil, false, nil
+	}
+	if admissions != 1 {
+		return nil, false, fmt.Errorf("capability lease %s has ambiguous organization admission", leaseID)
+	}
+	return body, true, nil
 }
 
 func latestRecordBody(ctx context.Context, tx *sql.Tx, kind, id string) ([]byte, bool, error) {

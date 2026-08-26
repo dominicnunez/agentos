@@ -33,7 +33,8 @@ artifact evidence. Repeated observations require at least three distinct event
 references to create a candidate, but frequency never activates it.
 
 Activation records a closed validation method, validator identity and kind,
-validation event references, and verification time. `AGENT` identifies a
+validation event references, and verification time that cannot predate its
+evidence. `AGENT` identifies a
 durable internal Agent; `EXTERNAL_AGENT` identifies an authenticated A2A actor.
 Those identities are never interchangeable. Internal-Agent authorship must
 reference a proposal bound to that Agent's exact admitted task execution. User and external-Agent
@@ -51,7 +52,8 @@ least one lineage reference and every reference must identify an exact earlier
 `ACTIVE` version in the same Organization. User or Agent judgments require an
 exact `knowledge.validate` capability admission whose authenticated principal
 kind matches the claimed validator; revocation and expiry are rechecked in the
-activation transaction. Startup reconstruction and offline backup verification
+activation transaction, and the lease must have been admitted by that same
+Organization. Startup reconstruction and offline backup verification
 use the same Event-Contract admission validator and verified capability-lease
 history to recheck evidence timing, tenant ownership, scope, lifecycle order,
 validator attribution, lease expiry or revocation, and lineage.

@@ -408,7 +408,7 @@ func recoveryCapabilityLeaseAdmission(stream []events.Event, body []byte, record
 	if decodeExactJSON(body, &lease) != nil || lease.ID == "" || string(lease.ID) != recordID || version != versions[lease.ID]+1 {
 		return events.CapabilityLeaseAdmission{}, "", fmt.Errorf("capability lease %s/%d has invalid or noncontiguous state", recordID, version)
 	}
-	expectedType := "CAPABILITY_LEASED"
+	expectedType := "CAPABILITY_GRANTED"
 	if version == 1 && lease.RevokedAt != nil {
 		return events.CapabilityLeaseAdmission{}, "", fmt.Errorf("capability lease %s starts revoked", recordID)
 	}
@@ -421,9 +421,9 @@ func recoveryCapabilityLeaseAdmission(stream []events.Event, body []byte, record
 	var matched events.Event
 	for _, event := range stream {
 		_, alreadyUsed := used[event.EventID]
-		if alreadyUsed || event.EventType != expectedType || event.OrganizationID != lease.Scope || event.TaskID != string(lease.OriginTaskID) ||
+		if alreadyUsed || event.EventType != expectedType || event.OrganizationID == "" || event.TaskID != string(lease.OriginTaskID) ||
 			event.Sequence <= sequences[lease.ID] || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" ||
-			len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.SchemaVersion != events.SchemaVersion || !bytes.Equal(event.Payload, body) {
+			len(event.ArtifactRefs) != 0 || event.SchemaVersion != events.SchemaVersion || !bytes.Equal(event.Payload, body) {
 			continue
 		}
 		if matched.EventID != "" {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"time"
 
 	"github.com/dominicnunez/agentos/internal/core"
 )
@@ -37,7 +38,7 @@ func NewKnowledgeAdmissionValidator(stream []Event) *KnowledgeAdmissionValidator
 	leaseAdmissions := make(map[core.ID][]CapabilityLeaseAdmission)
 	for _, event := range stream {
 		index[event.EventID] = event
-		if event.EventType == "CAPABILITY_LEASED" || event.EventType == "CAPABILITY_REVOKED" {
+		if event.EventType == "CAPABILITY_GRANTED" || event.EventType == "CAPABILITY_REVOKED" {
 			var lease core.CapabilityLease
 			if decodeExactPayload(event.Payload, &lease) == nil && lease.ID != "" {
 				leaseAdmissions[lease.ID] = append(leaseAdmissions[lease.ID], CapabilityLeaseAdmission{Lease: lease, OrganizationID: core.ID(event.OrganizationID), Sequence: event.Sequence})
@@ -96,7 +97,8 @@ func (v *KnowledgeAdmissionValidator) Validate(value core.KnowledgeRecord, event
 		return fmt.Errorf("knowledge has an unsupported scope")
 	}
 	evidenceArtifacts := make(map[string]struct{})
-	for _, refs := range [][]string{value.ProvenanceEventRefs, value.OccurrenceEventRefs, value.ValidationRefs} {
+	var latestValidationAt time.Time
+	for index, refs := range [][]string{value.ProvenanceEventRefs, value.OccurrenceEventRefs, value.ValidationRefs} {
 		for _, ref := range refs {
 			evidence, found := v.events[ref]
 			if !found || evidence.Sequence >= event.Sequence || evidence.OrganizationID != event.OrganizationID {
@@ -104,6 +106,9 @@ func (v *KnowledgeAdmissionValidator) Validate(value core.KnowledgeRecord, event
 			}
 			for _, artifactRef := range evidence.ArtifactRefs {
 				evidenceArtifacts[artifactRef] = struct{}{}
+			}
+			if index == 2 && evidence.CreatedAt.After(latestValidationAt) {
+				latestValidationAt = evidence.CreatedAt
 			}
 		}
 	}
@@ -127,6 +132,9 @@ func (v *KnowledgeAdmissionValidator) Validate(value core.KnowledgeRecord, event
 	}
 	if value.CreatedAt.After(event.CreatedAt) || value.LastVerifiedAt != nil && value.LastVerifiedAt.After(event.CreatedAt) {
 		return fmt.Errorf("knowledge timestamps postdate their admitting event")
+	}
+	if value.LastVerifiedAt != nil && value.LastVerifiedAt.Before(latestValidationAt) {
+		return fmt.Errorf("knowledge verification predates its validation evidence")
 	}
 	previous, found := v.history[value.KnowledgeID]
 	if found {

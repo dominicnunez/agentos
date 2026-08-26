@@ -34,13 +34,42 @@ func TestStoreAdmitsValidatedKnowledgeAndRetrievesOnlyActiveTenantScope(t *testi
 	active.ValidationRefs = []string{orgOneEvent.EventID}
 	active.ValidatedBy = "reviewer-1"
 	active.ValidatedByKind = core.PrincipalHuman
-	verifiedAt := candidate.CreatedAt.Add(time.Minute)
+	verifiedAt := time.Now().UTC()
 	active.LastVerifiedAt = &verifiedAt
 	active.SupersedesVersion = integerPointer(1)
 	if _, err := service.Activate(ctx, active); err == nil {
 		t.Fatal("human judgment without authenticated authority was accepted")
 	}
 	taskID := core.ID("task-knowledge-validation")
+	crossTenantLease := core.CapabilityLease{
+		ID:           "lease-cross-tenant-validation",
+		ActorID:      active.ValidatedBy,
+		ActorKind:    active.ValidatedByKind,
+		Action:       "knowledge.validate",
+		Resource:     string(candidate.KnowledgeID),
+		Scope:        string(candidate.OrganizationID),
+		OriginTaskID: taskID,
+	}
+	if err := store.AppendRecord(ctx, "org-2", "CAPABILITY_GRANTED", "runtime", string(taskID), nil, nil, "capability_lease", string(crossTenantLease.ID), 1, crossTenantLease); err != nil {
+		t.Fatalf("seed cross-tenant validator lease: %v", err)
+	}
+	crossTenantJudgment, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID:    "org-1",
+		EventType:         "CAPABILITY_CHECKED",
+		SourceActorID:     string(crossTenantLease.ActorID),
+		TaskID:            string(taskID),
+		AuthorizationRefs: []string{string(crossTenantLease.ID)},
+		Payload:           authorizedKnowledgeValidationTrace(crossTenantLease),
+	})
+	if err != nil {
+		t.Fatalf("admit cross-tenant validator judgment: %v", err)
+	}
+	active.ValidationRefs = []string{crossTenantJudgment.EventID}
+	verifiedAt = time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
+	if _, err := service.Activate(ctx, active); err == nil {
+		t.Fatal("validator lease admitted by another organization was accepted")
+	}
 	lease := core.CapabilityLease{
 		ID:           "lease-knowledge-validation",
 		ActorID:      active.ValidatedBy,
@@ -50,7 +79,7 @@ func TestStoreAdmitsValidatedKnowledgeAndRetrievesOnlyActiveTenantScope(t *testi
 		Scope:        string(candidate.OrganizationID),
 		OriginTaskID: taskID,
 	}
-	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_LEASED", "runtime", string(taskID), nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "runtime", string(taskID), nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
 		t.Fatalf("seed validator lease: %v", err)
 	}
 	trace := authorizedKnowledgeValidationTrace(lease)
@@ -66,6 +95,13 @@ func TestStoreAdmitsValidatedKnowledgeAndRetrievesOnlyActiveTenantScope(t *testi
 		t.Fatalf("admit validator judgment: %v", err)
 	}
 	active.ValidationRefs = []string{judgment.EventID}
+	verifiedBeforeEvidence := judgment.CreatedAt.Add(-time.Nanosecond)
+	active.LastVerifiedAt = &verifiedBeforeEvidence
+	if _, err := service.Activate(ctx, active); err == nil {
+		t.Fatal("knowledge verified before its validation evidence was accepted")
+	}
+	verifiedAt = time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
 	misclassified := active
 	misclassified.ValidationMethod = core.KnowledgeValidationIndependentAgent
 	misclassified.ValidatedByKind = core.PrincipalExternalAgent
@@ -139,7 +175,7 @@ func TestStoreRejectsRevokedValidatorAuthorityAfterJudgmentAdmission(t *testing.
 		Scope:        string(candidate.OrganizationID),
 		OriginTaskID: taskID,
 	}
-	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_LEASED", "runtime", string(taskID), nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "runtime", string(taskID), nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
 		t.Fatal(err)
 	}
 	trace := authorizedKnowledgeValidationTrace(lease)
@@ -166,7 +202,7 @@ func TestStoreRejectsRevokedValidatorAuthorityAfterJudgmentAdmission(t *testing.
 	active.ValidationRefs = []string{judgment.EventID}
 	active.ValidatedBy = lease.ActorID
 	active.ValidatedByKind = core.PrincipalHuman
-	verifiedAt := candidate.CreatedAt.Add(time.Minute)
+	verifiedAt := time.Now().UTC()
 	active.LastVerifiedAt = &verifiedAt
 	active.SupersedesVersion = integerPointer(1)
 	if _, err := service.Activate(ctx, active); err == nil {
@@ -230,7 +266,7 @@ func TestStoreTerminalRevisionRemovesKnowledgeFromRetrieval(t *testing.T) {
 	active.ValidationRefs = []string{evidence.EventID}
 	active.ValidatedBy = "runtime"
 	active.ValidatedByKind = core.PrincipalRuntime
-	verifiedAt := candidate.CreatedAt.Add(time.Minute)
+	verifiedAt := time.Now().UTC()
 	active.LastVerifiedAt = &verifiedAt
 	active.SupersedesVersion = integerPointer(1)
 	if _, err := service.Activate(ctx, active); err != nil {
@@ -273,7 +309,7 @@ func TestStoreRevisesActiveKnowledgeThroughCandidateReview(t *testing.T) {
 	active.ValidationRefs = []string{evidence.EventID}
 	active.ValidatedBy = "runtime"
 	active.ValidatedByKind = core.PrincipalRuntime
-	verifiedAt := candidate.CreatedAt.Add(time.Minute)
+	verifiedAt := time.Now().UTC()
 	active.LastVerifiedAt = &verifiedAt
 	active.SupersedesVersion = integerPointer(1)
 	if _, err := service.Activate(ctx, active); err != nil {
@@ -332,10 +368,11 @@ func TestStoreSupportsFailClosedStaleAndQuarantineTransitions(t *testing.T) {
 		name       string
 		fromActive bool
 		status     core.KnowledgeStatus
+		eventType  string
 		transition func(*Store, context.Context, core.KnowledgeRecord) (events.Event, error)
 	}{
-		{name: "stale", fromActive: true, status: core.KnowledgeStale, transition: (*Store).MarkStale},
-		{name: "quarantine candidate", status: core.KnowledgeQuarantined, transition: (*Store).Quarantine},
+		{name: "stale", fromActive: true, status: core.KnowledgeStale, eventType: "KNOWLEDGE_STALE", transition: (*Store).MarkStale},
+		{name: "quarantine candidate", status: core.KnowledgeQuarantined, eventType: "KNOWLEDGE_QUARANTINED", transition: (*Store).Quarantine},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -354,7 +391,7 @@ func TestStoreSupportsFailClosedStaleAndQuarantineTransitions(t *testing.T) {
 				prior.ValidationRefs = []string{evidence.EventID}
 				prior.ValidatedBy = "runtime"
 				prior.ValidatedByKind = core.PrincipalRuntime
-				verifiedAt := candidate.CreatedAt.Add(time.Minute)
+				verifiedAt := time.Now().UTC()
 				prior.LastVerifiedAt = &verifiedAt
 				prior.SupersedesVersion = integerPointer(1)
 				if _, err := service.Activate(ctx, prior); err != nil {
@@ -365,8 +402,12 @@ func TestStoreSupportsFailClosedStaleAndQuarantineTransitions(t *testing.T) {
 			next.Version++
 			next.Status = test.status
 			next.SupersedesVersion = integerPointer(prior.Version)
-			if _, err := test.transition(service, ctx, next); err != nil {
+			transition, err := test.transition(service, ctx, next)
+			if err != nil {
 				t.Fatalf("transition knowledge: %v", err)
+			}
+			if transition.EventType != test.eventType {
+				t.Fatalf("transition event type=%q want %q", transition.EventType, test.eventType)
 			}
 		})
 	}
@@ -448,7 +489,7 @@ func TestSearchFiltersBeforeApplyingResultLimit(t *testing.T) {
 		active.ValidationRefs = []string{evidence.EventID}
 		active.ValidatedBy = "runtime"
 		active.ValidatedByKind = core.PrincipalRuntime
-		verifiedAt := candidate.CreatedAt.Add(time.Minute)
+		verifiedAt := time.Now().UTC()
 		active.LastVerifiedAt = &verifiedAt
 		active.SupersedesVersion = integerPointer(1)
 		if _, err := service.Activate(ctx, active); err != nil {

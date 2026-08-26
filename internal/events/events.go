@@ -2645,7 +2645,7 @@ var projectionLifecycleContracts = map[string]projectionLifecycleContract{
 	"work":                    {initial: []string{"WORK_CREATED"}, revision: []string{"WORK_COMPLETED", "WORK_FAILED", "WORK_PLANNING_FAILED"}},
 	"lab_experiment":          {initial: []string{"LAB_EXPERIMENT_STARTED"}, revision: []string{"LAB_EXPERIMENT_COMPLETED", "LAB_EXPERIMENT_FAILED"}},
 	"lab_promotion_candidate": {initial: []string{"LAB_PROMOTION_CANDIDATE_CREATED"}},
-	"knowledge":               {initial: []string{"KNOWLEDGE_PROPOSED"}, revision: []string{"KNOWLEDGE_PROPOSED", "KNOWLEDGE_ACTIVATED", "KNOWLEDGE_SUPERSEDED", "KNOWLEDGE_MARKED_STALE", "KNOWLEDGE_QUARANTINED"}},
+	"knowledge":               {initial: []string{"KNOWLEDGE_PROPOSED"}, revision: []string{"KNOWLEDGE_PROPOSED", "KNOWLEDGE_ACTIVATED", "KNOWLEDGE_SUPERSEDED", "KNOWLEDGE_STALE", "KNOWLEDGE_QUARANTINED"}},
 	"task": {
 		initial:  []string{"TASK_CREATED", "TASK_BLOCKED"},
 		revision: []string{"TASK_ASSIGNMENT_REVALIDATED", "TASK_BLOCKED", "TASK_RECOVERED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED"},
