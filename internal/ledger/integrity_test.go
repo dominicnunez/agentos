@@ -294,7 +294,7 @@ func TestExternalAnchorRejectsOfflineAuthorityRecordMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tampered.Close()
+	defer func() { _ = tampered.Close() }()
 	tamperedState, err := tampered.IntegrityAnchorState(ctx)
 	if err != nil {
 		t.Fatal(err)

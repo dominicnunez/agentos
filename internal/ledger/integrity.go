@@ -56,7 +56,7 @@ func recordIntegrityState(ctx context.Context, db storageQueryer) (RecordIntegri
 	if err != nil {
 		return RecordIntegrityState{}, fmt.Errorf("read records for integrity binding: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	digest := sha256.New()
 	writeIntegrityField(digest, []byte(recordIntegrityDomain))
 	state := RecordIntegrityState{Algorithm: EventIntegrityAlgorithm}
