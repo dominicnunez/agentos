@@ -117,7 +117,7 @@ func TestTrustedRecoveryCheckpointAcceptsOnlyRetainedAncestor(t *testing.T) {
 	nextPrivate := ed25519.NewKeyFromSeed(nextSeed)
 	nextPublic, _ := ledgeranchor.PublicKeyFromPrivate(nextPrivate)
 	now := time.Date(2026, 8, 26, 18, 0, 0, 0, time.UTC)
-	state := ledgeranchor.LedgerState{ApplicationID: ledger.StorageApplicationID, StorageVersion: ledger.CurrentStorageVersion, EventSchemaVersion: 1, ChainAlgorithm: ledger.EventIntegrityAlgorithm}
+	state := ledgeranchor.LedgerState{ApplicationID: ledger.StorageApplicationID, StorageVersion: ledger.CurrentStorageVersion, EventSchemaVersion: 1, ChainAlgorithm: ledger.EventIntegrityAlgorithm, RecordAlgorithm: ledger.EventIntegrityAlgorithm, RecordSHA256: strings.Repeat("0", 64)}
 	oldCheckpointPath := filepath.Join(directory, "old.anchor.json")
 	oldCheckpoint, err := ledgeranchor.Initialize(oldCheckpointPath, installationID, oldPrivate, state, now)
 	if err != nil {

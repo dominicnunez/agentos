@@ -153,7 +153,7 @@ func discoverInstallation() (string, bootstrap.Config, bootstrap.State, error) {
 	return "", bootstrap.Config{}, bootstrap.State{}, os.ErrNotExist
 }
 
-func runProviderSetup(ctx context.Context, input *os.File, output io.Writer) error {
+func runProviderSetup(ctx context.Context, input *os.File, output io.Writer) (finalErr error) {
 	configPath, config, state, err := discoverInstallation()
 	if err != nil {
 		return fmt.Errorf("initialize Agent OS first: %w", err)
@@ -171,6 +171,15 @@ func runProviderSetup(ctx context.Context, input *os.File, output io.Writer) err
 	completed, err := ensureProviderSetupPrivileges(ctx, config, ui)
 	if err != nil || completed {
 		return err
+	}
+	config, configLock, err := lockAndReloadReadyConfig(configPath, config)
+	if err != nil {
+		return err
+	}
+	defer func() { finalErr = errors.Join(finalErr, configLock.Close()) }()
+	state, err = bootstrap.LoadState(bootstrap.StatePath(config.Paths))
+	if err != nil || state.Stage != bootstrap.StageReady || state.Version != bootstrap.ConfigVersion {
+		return fmt.Errorf("installation changed while provider setup was waiting for exclusive access")
 	}
 	previous := config.Providers[0]
 	provider, err := collectProvider(ctx, config, input, output)

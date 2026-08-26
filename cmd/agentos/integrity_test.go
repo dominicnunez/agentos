@@ -107,7 +107,7 @@ func TestPendingResolutionEvidenceIsRetrySafeAndCollisionResistant(t *testing.T)
 	installationID := "install-" + strings.Repeat("ab", 32)
 	committedState := ledgeranchor.LedgerState{
 		ApplicationID: ledger.StorageApplicationID, StorageVersion: ledger.CurrentStorageVersion,
-		EventSchemaVersion: events.SchemaVersion, ChainAlgorithm: "SHA-256",
+		EventSchemaVersion: events.SchemaVersion, ChainAlgorithm: "SHA-256", RecordAlgorithm: "SHA-256", RecordSHA256: strings.Repeat("0", 64),
 	}
 	observedAt := time.Date(2026, 8, 26, 18, 0, 0, 0, time.UTC)
 	if _, err := ledgeranchor.Initialize(checkpointPath, installationID, privateKey, committedState, observedAt); err != nil {
@@ -121,6 +121,7 @@ func TestPendingResolutionEvidenceIsRetrySafeAndCollisionResistant(t *testing.T)
 		ApplicationID: ledger.StorageApplicationID, StorageVersion: ledger.CurrentStorageVersion,
 		EventSchemaVersion: events.SchemaVersion, EventCount: 1, Sequence: 1, EventID: "evt-1",
 		ChainAlgorithm: "SHA-256", ChainHead: strings.Repeat("a", 64),
+		RecordAlgorithm: "SHA-256", RecordSHA256: strings.Repeat("0", 64),
 	}, observedAt.Add(time.Minute))
 	firstPath, err := preservePendingResolution(directory, "local-uid-1000", committed, committedBody, firstPending, firstBody, committedState, privateKey, publicKey, observedAt.Add(2*time.Minute))
 	if err != nil {
@@ -145,6 +146,7 @@ func TestPendingResolutionEvidenceIsRetrySafeAndCollisionResistant(t *testing.T)
 		ApplicationID: ledger.StorageApplicationID, StorageVersion: ledger.CurrentStorageVersion,
 		EventSchemaVersion: events.SchemaVersion, EventCount: 1, Sequence: 1, EventID: "evt-2",
 		ChainAlgorithm: "SHA-256", ChainHead: strings.Repeat("b", 64),
+		RecordAlgorithm: "SHA-256", RecordSHA256: strings.Repeat("0", 64),
 	}, observedAt.Add(4*time.Minute))
 	secondPath, err := preservePendingResolution(directory, "local-uid-1000", committed, committedBody, secondPending, secondBody, committedState, privateKey, publicKey, observedAt.Add(5*time.Minute))
 	if err != nil {

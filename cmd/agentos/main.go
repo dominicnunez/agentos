@@ -32,6 +32,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/effectstatus"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
+	"github.com/dominicnunez/agentos/internal/fileguard"
 	"github.com/dominicnunez/agentos/internal/gateway"
 	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/intake"
@@ -80,6 +81,11 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 	if err := validateRuntimeBoundary(config); err != nil {
 		return fmt.Errorf("runtime boundary is unsafe: %w", err)
 	}
+	writerLock, err := fileguard.AcquireProcessLock(filepath.Join(config.Paths.StateDir, "ledger-writer.lock"), 0o700)
+	if err != nil {
+		return fmt.Errorf("acquire exclusive ledger writer: %w", err)
+	}
+	defer func() { err = errors.Join(err, writerLock.Close()) }()
 	l, err := ledger.OpenCurrent(config.Paths.Database)
 	if err != nil {
 		return err

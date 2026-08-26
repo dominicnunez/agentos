@@ -37,6 +37,30 @@ func ensureProviderSetupPrivileges(ctx context.Context, config bootstrap.Config,
 	return runAdministratorSetup(ctx, ui, "administrator provider setup failed", "setup", "provider")
 }
 
+func acquireConfigurationLock(config bootstrap.Config) (*fileguard.ProcessLock, error) {
+	mode := os.FileMode(0o700)
+	if config.Mode == bootstrap.ModeSystem {
+		if effectiveUID() != 0 {
+			return nil, fmt.Errorf("system configuration mutation requires administrator access")
+		}
+		mode = 0o711
+		if err := prepareSystemDirectory(config.Paths.RuntimeDir, 0, 0, mode); err != nil {
+			return nil, err
+		}
+	} else {
+		if effectiveUID() != config.Owner.UID {
+			return nil, fmt.Errorf("user configuration mutation requires the configured Linux owner")
+		}
+		if err := validateUserRuntimeBase(config); err != nil {
+			return nil, err
+		}
+		if err := ensureOwnedRuntimeDirectory(config.Paths.RuntimeDir, config.Owner.UID, mode); err != nil {
+			return nil, err
+		}
+	}
+	return fileguard.AcquireProcessLock(filepath.Join(config.Paths.RuntimeDir, "configuration.lock"), mode)
+}
+
 func ensureIntegrityMaintenancePrivileges(ctx context.Context, config bootstrap.Config, ui *terminalUI, action, configPath string) (bool, error) {
 	if config.Mode != bootstrap.ModeSystem || effectiveUID() == 0 {
 		return false, nil

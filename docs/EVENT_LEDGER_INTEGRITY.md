@@ -3,8 +3,8 @@
 Agent OS protects durable event evidence with two distinct layers:
 
 1. every event is part of a domain-separated SHA-256 chain inside SQLite; and
-2. the verified chain head is bound to an Ed25519-signed checkpoint outside
-   SQLite.
+2. the verified chain head and exact ordered durable record projection are
+   bound to an Ed25519-signed checkpoint outside SQLite.
 
 Runtime startup, diagnostics, backup, restore, and explicit verification fail
 closed unless the complete event chain and the expected external checkpoint
@@ -38,6 +38,8 @@ The canonical checkpoint binds all of the following under Ed25519:
 - exact event count and sequence;
 - exact terminal event ID;
 - chain algorithm and head;
+- exact record count, domain-separated record algorithm, and digest over every
+  stored record identity, version, body, admission binding, and timestamp;
 - ordinary host wall-clock evidence;
 - prior checkpoint SHA-256; and
 - signature algorithm and key ID.
@@ -54,6 +56,12 @@ The checkpoint is not stored in SQLite and is never inferred from a supplied
 database. Replacing, truncating, or rolling back only the database therefore
 causes the externally expected head to disagree and startup to stop.
 
+The record digest closes a separate substitution path: changing an
+authority-bearing projection without changing its admitting event also makes
+the database disagree with the external checkpoint. It does not make record
+content true or authoritative by itself; Event Contract and recovery
+validation remain required.
+
 ## Atomic append and crash recovery
 
 Every event-writing transaction follows this order:
@@ -64,6 +72,12 @@ Every event-writing transaction follows this order:
 4. commit SQLite;
 5. atomically promote the pending checkpoint; and
 6. sync the containing directory.
+
+Agent OS also holds a kernel-backed exclusive writer lock for the runtime
+lifetime. A second `serve` process cannot attach another checkpoint writer to
+the same installation. Provider configuration and checkpoint-key maintenance
+share a separate exclusive configuration lock and reload configuration after
+acquiring it, preventing stale saves from restoring retired trust material.
 
 Failures before checkpoint preparation roll SQLite back without creating a
 pending checkpoint. Any error returned by SQLite commit is treated as

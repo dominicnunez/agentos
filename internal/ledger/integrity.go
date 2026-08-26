@@ -18,6 +18,7 @@ const (
 	EventIntegrityAlgorithm      = "SHA-256"
 	EventIntegrityStorageVersion = 6
 	eventIntegrityDomain         = "agentos.event-integrity.v1"
+	recordIntegrityDomain        = "agentos.record-integrity.v1"
 )
 
 // EventIntegrityHead identifies the verified tip of the ledger's
@@ -29,6 +30,56 @@ type EventIntegrityHead struct {
 	Sequence   int64  `json:"sequence"`
 	EventID    string `json:"event_id,omitempty"`
 	SHA256     string `json:"sha256,omitempty"`
+}
+
+// RecordIntegrityState identifies the exact durable record projection bound
+// into an external checkpoint. Records remain projections of the chained
+// event stream, but binding their stored bytes prevents an offline database
+// rewrite from changing an authority decision before recovery can rebuild it.
+type RecordIntegrityState struct {
+	Algorithm string `json:"algorithm"`
+	Count     int64  `json:"count"`
+	SHA256    string `json:"sha256"`
+}
+
+// ValidateRecordIntegrity hashes the exact ordered record projection stored
+// in one SQLite snapshot.
+func ValidateRecordIntegrity(ctx context.Context, db *sql.DB) (RecordIntegrityState, error) {
+	if ctx == nil || db == nil {
+		return RecordIntegrityState{}, fmt.Errorf("record integrity context and database are required")
+	}
+	return recordIntegrityState(ctx, db)
+}
+
+func recordIntegrityState(ctx context.Context, db storageQueryer) (RecordIntegrityState, error) {
+	rows, err := db.QueryContext(ctx, `SELECT CAST(kind AS BLOB),CAST(record_id AS BLOB),version,CAST(body AS BLOB),CAST(admission_event_id AS BLOB),CAST(admission_fingerprint AS BLOB),CAST(created_at AS BLOB) FROM records ORDER BY kind,record_id,version`)
+	if err != nil {
+		return RecordIntegrityState{}, fmt.Errorf("read records for integrity binding: %w", err)
+	}
+	defer rows.Close()
+	digest := sha256.New()
+	writeIntegrityField(digest, []byte(recordIntegrityDomain))
+	state := RecordIntegrityState{Algorithm: EventIntegrityAlgorithm}
+	for rows.Next() {
+		var kind, recordID, body, admissionEventID, admissionFingerprint, createdAt []byte
+		var version int64
+		if err := rows.Scan(&kind, &recordID, &version, &body, &admissionEventID, &admissionFingerprint, &createdAt); err != nil {
+			return RecordIntegrityState{}, fmt.Errorf("decode record integrity row: %w", err)
+		}
+		writeIntegrityField(digest, kind)
+		writeIntegrityField(digest, recordID)
+		writeIntegrityInt(digest, version)
+		writeIntegrityField(digest, body)
+		writeIntegrityField(digest, admissionEventID)
+		writeIntegrityField(digest, admissionFingerprint)
+		writeIntegrityField(digest, createdAt)
+		state.Count++
+	}
+	if err := rows.Err(); err != nil {
+		return RecordIntegrityState{}, fmt.Errorf("scan record integrity rows: %w", err)
+	}
+	state.SHA256 = hex.EncodeToString(digest.Sum(nil))
+	return state, nil
 }
 
 type storedIntegrityEvent struct {
@@ -86,19 +137,6 @@ func eventIntegritySHA256(previous string, event storedIntegrityEvent) string {
 	writeIntegrityField(digest, []byte(event.createdAt))
 	writeIntegrityInt(digest, event.schemaVersion)
 	return hex.EncodeToString(digest.Sum(nil))
-}
-
-func writeIntegrityField(digest hash.Hash, value []byte) {
-	var length [8]byte
-	binary.BigEndian.PutUint64(length[:], uint64(len(value)))
-	_, _ = digest.Write(length[:])
-	_, _ = digest.Write(value)
-}
-
-func writeIntegrityInt(digest hash.Hash, value int64) {
-	var encoded [8]byte
-	binary.BigEndian.PutUint64(encoded[:], uint64(value))
-	_, _ = digest.Write(encoded[:])
 }
 
 func sealEventIntegrity(ctx context.Context, db sqlExecutor, sequence int64) error {
@@ -257,11 +295,16 @@ func (l *SQLite) IntegrityAnchorState(ctx context.Context) (anchor.LedgerState, 
 	if err != nil {
 		return anchor.LedgerState{}, fmt.Errorf("validate event chain before ledger anchoring: %w", err)
 	}
+	records, err := recordIntegrityState(ctx, l.db)
+	if err != nil {
+		return anchor.LedgerState{}, fmt.Errorf("validate records before ledger anchoring: %w", err)
+	}
 	return anchor.LedgerState{
 		ApplicationID: StorageApplicationID, StorageVersion: contract.StorageVersion,
 		EventSchemaVersion: contract.EventSchemaVersion, EventCount: head.EventCount,
 		Sequence: head.Sequence, EventID: head.EventID,
 		ChainAlgorithm: head.Algorithm, ChainHead: head.SHA256,
+		RecordCount: records.Count, RecordAlgorithm: records.Algorithm, RecordSHA256: records.SHA256,
 	}, nil
 }
 
@@ -283,10 +326,28 @@ func integrityAnchorState(ctx context.Context, db storageQueryer) (anchor.Ledger
 		}
 		head.SHA256 = eventHash
 	}
+	records, err := recordIntegrityState(ctx, db)
+	if err != nil {
+		return anchor.LedgerState{}, err
+	}
 	return anchor.LedgerState{
 		ApplicationID: StorageApplicationID, StorageVersion: CurrentStorageVersion,
 		EventSchemaVersion: events.SchemaVersion, EventCount: head.EventCount,
 		Sequence: head.Sequence, EventID: head.EventID,
 		ChainAlgorithm: head.Algorithm, ChainHead: head.SHA256,
+		RecordCount: records.Count, RecordAlgorithm: records.Algorithm, RecordSHA256: records.SHA256,
 	}, nil
+}
+
+func writeIntegrityField(digest hash.Hash, value []byte) {
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(value)))
+	_, _ = digest.Write(length[:])
+	_, _ = digest.Write(value)
+}
+
+func writeIntegrityInt(digest hash.Hash, value int64) {
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], uint64(value))
+	_, _ = digest.Write(encoded[:])
 }

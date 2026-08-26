@@ -35,6 +35,9 @@ type Result struct {
 	EventChainSHA256    string `json:"event_chain_sha256,omitempty"`
 	EventChainAlgorithm string `json:"event_chain_algorithm,omitempty"`
 	EventChainEventID   string `json:"event_chain_event_id,omitempty"`
+	RecordSHA256        string `json:"record_sha256,omitempty"`
+	RecordAlgorithm     string `json:"record_algorithm,omitempty"`
+	RecordCount         int64  `json:"record_count"`
 	SizeBytes           int64  `json:"size_bytes"`
 	EventCount          int64  `json:"event_count"`
 	MaxSequence         int64  `json:"max_sequence"`
@@ -158,6 +161,11 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(sequence), 0) FROM events`).Scan(&result.EventCount, &result.MaxSequence); err != nil {
 		return Result{}, fmt.Errorf("inspect Agent OS event ledger: %w", err)
 	}
+	records, err := ledgerstore.ValidateRecordIntegrity(ctx, db)
+	if err != nil {
+		return Result{}, fmt.Errorf("verify record integrity binding: %w", err)
+	}
+	result.RecordSHA256, result.RecordAlgorithm, result.RecordCount = records.SHA256, records.Algorithm, records.Count
 	if err := db.Close(); err != nil {
 		return Result{}, fmt.Errorf("close verified database before checksum: %w", err)
 	}
@@ -168,6 +176,9 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	verified.EventChainSHA256 = result.EventChainSHA256
 	verified.EventChainAlgorithm = result.EventChainAlgorithm
 	verified.EventChainEventID = result.EventChainEventID
+	verified.RecordSHA256 = result.RecordSHA256
+	verified.RecordAlgorithm = result.RecordAlgorithm
+	verified.RecordCount = result.RecordCount
 	return verified, err
 }
 
@@ -285,6 +296,7 @@ func resultAnchorState(result Result) ledgeranchor.LedgerState {
 		EventSchemaVersion: result.EventSchemaVersion, EventCount: result.EventCount,
 		Sequence: result.MaxSequence, EventID: result.EventChainEventID,
 		ChainAlgorithm: result.EventChainAlgorithm, ChainHead: result.EventChainSHA256,
+		RecordCount: result.RecordCount, RecordAlgorithm: result.RecordAlgorithm, RecordSHA256: result.RecordSHA256,
 	}
 }
 

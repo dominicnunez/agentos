@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/dominicnunez/agentos/internal/bootstrap"
+	"github.com/dominicnunez/agentos/internal/fileguard"
 )
 
 func ensureInitPrivileges(_ context.Context, _ bootstrap.Mode, _ *terminalUI) (bool, error) {
@@ -14,6 +15,9 @@ func ensureInitPrivileges(_ context.Context, _ bootstrap.Mode, _ *terminalUI) (b
 }
 func ensureProviderSetupPrivileges(_ context.Context, _ bootstrap.Config, _ *terminalUI) (bool, error) {
 	return false, fmt.Errorf("Agent OS V1 setup is supported on Linux")
+}
+func acquireConfigurationLock(_ bootstrap.Config) (*fileguard.ProcessLock, error) {
+	return nil, fmt.Errorf("Agent OS V1 configuration mutation is supported on Linux")
 }
 func ensureIntegrityMaintenancePrivileges(_ context.Context, _ bootstrap.Config, _ *terminalUI, _, _ string) (bool, error) {
 	return false, fmt.Errorf("Agent OS V1 integrity maintenance is supported on Linux")

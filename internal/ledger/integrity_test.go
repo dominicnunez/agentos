@@ -3,6 +3,7 @@ package ledger
 import (
 	"context"
 	"crypto/ed25519"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -238,5 +239,67 @@ func TestAttachedExternalAnchorFailureRollsBackSQLite(t *testing.T) {
 	current, err := store.IntegrityAnchorState(ctx)
 	if err != nil || !current.Equal(initial) {
 		t.Fatalf("failed external anchor changed SQLite: current=%+v initial=%+v err=%v", current, initial, err)
+	}
+}
+
+func TestExternalAnchorRejectsOfflineAuthorityRecordMutation(t *testing.T) {
+	ctx := t.Context()
+	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "agentos.db")
+	store, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := store.IntegrityAnchorState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	publicKey, _ := ledgeranchor.PublicKeyFromPrivate(privateKey)
+	installationID := "install-" + strings.Repeat("ef", 32)
+	checkpointPath := filepath.Join(directory, "ledger-anchor.json")
+	now := time.Date(2026, 8, 26, 19, 0, 0, 0, time.UTC)
+	if _, err := ledgeranchor.Initialize(checkpointPath, installationID, privateKey, initial, now); err != nil {
+		t.Fatal(err)
+	}
+	anchorStore, err := ledgeranchor.Open(checkpointPath, installationID, publicKey, privateKey, initial, func() time.Time { return now.Add(time.Minute) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachIntegrityAnchor(ctx, anchorStore); err != nil {
+		t.Fatal(err)
+	}
+	organization := core.Organization{ID: "org-1", Name: "Original", PolicyVersion: "policy-v1", CreatedAt: now}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup-1"},
+		ProjectionKind: "organization", RecordID: "org-1", Version: 1, Value: organization,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE records SET body='{"forged":true}' WHERE kind='organization' AND record_id='org-1'`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	tampered, err := OpenCurrent(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tampered.Close()
+	tamperedState, err := tampered.IntegrityAnchorState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledgeranchor.Open(checkpointPath, installationID, publicKey, privateKey, tamperedState, nil); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("offline authority record mutation was accepted: %v", err)
 	}
 }

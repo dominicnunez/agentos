@@ -51,6 +51,11 @@ func runIntegrityMaintenance(ctx context.Context, args []string, input *os.File,
 	if err != nil || completed {
 		return err
 	}
+	config, configLock, err := lockAndReloadReadyConfig(configPath, config)
+	if err != nil {
+		return err
+	}
+	defer func() { finalErr = errors.Join(finalErr, configLock.Close()) }()
 	authorizedBy, err := integrityMaintenanceAuthority(ctx, config)
 	if err != nil {
 		return err

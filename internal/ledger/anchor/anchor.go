@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	SchemaVersion      = 1
+	SchemaVersion      = 2
 	SignatureAlgorithm = "Ed25519"
 	TimeEvidence       = "SYSTEM_WALL_CLOCK_UNTRUSTED"
 	MaximumFileBytes   = 64 << 10
@@ -47,6 +47,9 @@ type LedgerState struct {
 	EventID            string `json:"event_id,omitempty"`
 	ChainAlgorithm     string `json:"chain_algorithm"`
 	ChainHead          string `json:"chain_head,omitempty"`
+	RecordCount        int64  `json:"record_count"`
+	RecordAlgorithm    string `json:"record_algorithm"`
+	RecordSHA256       string `json:"record_sha256"`
 }
 
 // Checkpoint is public evidence. Its time is ordinary host wall-clock
@@ -376,7 +379,7 @@ func validateSuccessor(committed Checkpoint, committedBytes []byte, pending Chec
 }
 
 func (s LedgerState) Valid() error {
-	if s.ApplicationID <= 0 || s.StorageVersion < 1 || s.EventSchemaVersion < 1 || s.EventCount < 0 || s.Sequence < 0 || s.EventCount != s.Sequence || s.ChainAlgorithm != "SHA-256" {
+	if s.ApplicationID <= 0 || s.StorageVersion < 1 || s.EventSchemaVersion < 1 || s.EventCount < 0 || s.Sequence < 0 || s.EventCount != s.Sequence || s.ChainAlgorithm != "SHA-256" || s.RecordCount < 0 || s.RecordAlgorithm != "SHA-256" || !validSHA256(s.RecordSHA256) {
 		return fmt.Errorf("ledger anchor state is invalid")
 	}
 	if s.EventCount == 0 {
@@ -394,7 +397,7 @@ func (s LedgerState) Valid() error {
 func (s LedgerState) Equal(other LedgerState) bool { return s == other }
 
 func (s LedgerState) ForwardFrom(previous LedgerState) bool {
-	return s.ApplicationID == previous.ApplicationID && s.StorageVersion == previous.StorageVersion && s.EventSchemaVersion == previous.EventSchemaVersion && s.EventCount > previous.EventCount && s.Sequence > previous.Sequence
+	return s.ApplicationID == previous.ApplicationID && s.StorageVersion == previous.StorageVersion && s.EventSchemaVersion == previous.EventSchemaVersion && s.EventCount > previous.EventCount && s.Sequence > previous.Sequence && s.RecordCount >= previous.RecordCount
 }
 
 func signaturePayload(checkpoint Checkpoint) []byte {
@@ -411,6 +414,9 @@ func signaturePayload(checkpoint Checkpoint) []byte {
 	writeField(digest, []byte(checkpoint.Ledger.EventID))
 	writeField(digest, []byte(checkpoint.Ledger.ChainAlgorithm))
 	writeField(digest, []byte(checkpoint.Ledger.ChainHead))
+	writeInt(digest, checkpoint.Ledger.RecordCount)
+	writeField(digest, []byte(checkpoint.Ledger.RecordAlgorithm))
+	writeField(digest, []byte(checkpoint.Ledger.RecordSHA256))
 	writeField(digest, []byte(checkpoint.ObservedAt.Format(time.RFC3339Nano)))
 	writeField(digest, []byte(checkpoint.TimeEvidence))
 	writeField(digest, []byte(checkpoint.PreviousCheckpointSHA256))
