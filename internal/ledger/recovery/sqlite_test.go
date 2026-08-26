@@ -132,8 +132,15 @@ func TestVerifyReplaysEventAdmittedKnowledge(t *testing.T) {
 		_ = store.Close()
 		t.Fatal(err)
 	}
+	validationAt := time.Now().UTC()
+	validationOutcome := core.ToolOutcome{
+		ToolInvocationID: "knowledge-validation-1", ToolID: "knowledge-validator", ToolVersion: "1",
+		Status: core.OutcomeSucceeded, PostconditionStatus: core.PostconditionVerified, Retryability: core.NotRetryable,
+		StartedAt: validationAt, FinishedAt: validationAt,
+	}
 	validationEvent, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
-		OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", Payload: map[string]string{"validation": "passed"},
+		OrganizationID: "org-1", EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: "validation-1",
+		TaskID: "task-knowledge-validation", CorrelationID: "knowledge-knowledge-1", Payload: validationOutcome,
 	})
 	if err != nil {
 		_ = store.Close()

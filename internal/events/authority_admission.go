@@ -17,6 +17,11 @@ type KnowledgeAuthorityRecord struct {
 	Body     []byte
 }
 
+type knowledgeAuthorityEventKey struct {
+	eventType string
+	payload   string
+}
+
 // ResolveKnowledgeAuthorityAdmissions admits only capability and freeze
 // history with a one-to-one, ordered, exact durable record binding. Bare event
 // labels never become replay authority.
@@ -37,12 +42,19 @@ func ResolveKnowledgeAuthorityAdmissions(stream []Event, records []KnowledgeAuth
 	freezeVersions := make(map[core.ID]int)
 	freezeSequences := make(map[core.ID]int64)
 	usedEvents := make(map[string]struct{})
+	eventIndex := make(map[knowledgeAuthorityEventKey][]Event)
+	for _, event := range stream {
+		if RequiresRecordAdmission(event.EventType) {
+			key := knowledgeAuthorityEventKey{eventType: event.EventType, payload: string(event.Payload)}
+			eventIndex[key] = append(eventIndex[key], event)
+		}
+	}
 	leases := make([]CapabilityLeaseAdmission, 0)
 	freezes := make([]OrganizationFreezeAdmission, 0)
 	for _, record := range ordered {
 		switch record.Kind {
 		case "capability_lease":
-			admission, eventID, err := resolveCapabilityLeaseAdmission(stream, record, leaseVersions, leaseSequences, usedEvents)
+			admission, eventID, err := resolveCapabilityLeaseAdmission(eventIndex, record, leaseVersions, leaseSequences, usedEvents)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -51,7 +63,7 @@ func ResolveKnowledgeAuthorityAdmissions(stream []Event, records []KnowledgeAuth
 			usedEvents[eventID] = struct{}{}
 			leases = append(leases, admission)
 		case "organization_freeze":
-			admission, eventID, err := resolveOrganizationFreezeAdmission(stream, record, freezeVersions, freezeSequences, usedEvents)
+			admission, eventID, err := resolveOrganizationFreezeAdmission(eventIndex, record, freezeVersions, freezeSequences, usedEvents)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -74,7 +86,7 @@ func ResolveKnowledgeAuthorityAdmissions(stream []Event, records []KnowledgeAuth
 	return leases, freezes, nil
 }
 
-func resolveCapabilityLeaseAdmission(stream []Event, record KnowledgeAuthorityRecord, versions map[core.ID]int, sequences map[core.ID]int64, used map[string]struct{}) (CapabilityLeaseAdmission, string, error) {
+func resolveCapabilityLeaseAdmission(eventIndex map[knowledgeAuthorityEventKey][]Event, record KnowledgeAuthorityRecord, versions map[core.ID]int, sequences map[core.ID]int64, used map[string]struct{}) (CapabilityLeaseAdmission, string, error) {
 	var lease core.CapabilityLease
 	if decodeExactEventJSON(record.Body, &lease) != nil || lease.ID == "" || string(lease.ID) != record.RecordID || record.Version != versions[lease.ID]+1 {
 		return CapabilityLeaseAdmission{}, "", fmt.Errorf("capability lease %s/%d has invalid or noncontiguous state", record.RecordID, record.Version)
@@ -90,7 +102,7 @@ func resolveCapabilityLeaseAdmission(stream []Event, record KnowledgeAuthorityRe
 		}
 	}
 	var matched Event
-	for _, event := range stream {
+	for _, event := range eventIndex[knowledgeAuthorityEventKey{eventType: expectedType, payload: string(record.Body)}] {
 		_, alreadyUsed := used[event.EventID]
 		if alreadyUsed || event.EventType != expectedType || event.OrganizationID == "" || event.TaskID != string(lease.OriginTaskID) ||
 			event.Sequence <= sequences[lease.ID] || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" ||
@@ -108,14 +120,14 @@ func resolveCapabilityLeaseAdmission(stream []Event, record KnowledgeAuthorityRe
 	return CapabilityLeaseAdmission{Lease: lease, OrganizationID: core.ID(matched.OrganizationID), Sequence: matched.Sequence}, matched.EventID, nil
 }
 
-func resolveOrganizationFreezeAdmission(stream []Event, record KnowledgeAuthorityRecord, versions map[core.ID]int, sequences map[core.ID]int64, used map[string]struct{}) (OrganizationFreezeAdmission, string, error) {
+func resolveOrganizationFreezeAdmission(eventIndex map[knowledgeAuthorityEventKey][]Event, record KnowledgeAuthorityRecord, versions map[core.ID]int, sequences map[core.ID]int64, used map[string]struct{}) (OrganizationFreezeAdmission, string, error) {
 	var state organizationFreezePayload
 	if decodeExactEventJSON(record.Body, &state) != nil || state.OrganizationID == "" || string(state.OrganizationID) != record.RecordID ||
 		record.Version != versions[state.OrganizationID]+1 || state.UpdatedAt.IsZero() {
 		return OrganizationFreezeAdmission{}, "", fmt.Errorf("organization freeze %s/%d has invalid or noncontiguous state", record.RecordID, record.Version)
 	}
 	var matched Event
-	for _, event := range stream {
+	for _, event := range eventIndex[knowledgeAuthorityEventKey{eventType: "FREEZE_SET", payload: string(record.Body)}] {
 		_, alreadyUsed := used[event.EventID]
 		if alreadyUsed || event.EventType != "FREEZE_SET" || event.OrganizationID != record.RecordID || event.Sequence <= sequences[state.OrganizationID] ||
 			event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || len(event.ArtifactRefs) != 0 ||

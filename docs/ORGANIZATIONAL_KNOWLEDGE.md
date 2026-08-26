@@ -47,6 +47,15 @@ reuse an occurrence as its validation. No Agent may activate its own proposal.
 Later terminal revisions, including direct candidate quarantine, preserve the
 prior validation state and cannot mint a judgment while invalidating a record.
 
+Validation method names do not create proof. Deterministic activation requires
+a candidate-bound successful `TOOL_OUTCOME_RECORDED` contract with a verified
+postcondition. Repeated-observation activation requires at least three
+candidate-bound `EVIDENCE_PUBLISHED` contracts from distinct executions. User
+and Agent judgments require the authenticated capability check described
+below. Experimental and mixed activation remain fail-closed until an equally
+specific relational evidence contract is admitted; an `AUDIT_NOTE` or other
+unrelated recent event is never validation evidence.
+
 ## Security boundary
 
 All referenced events must already exist in the same Organization when a

@@ -356,12 +356,13 @@ func (v *KnowledgeAdmissionValidator) organizationFrozenAt(organizationID core.I
 
 func (v *KnowledgeAdmissionValidator) hasPostProposalValidation(value core.KnowledgeRecord, proposalSequence int64) bool {
 	occurrences := make(map[string]struct{}, len(value.OccurrenceEventRefs))
+	executions := make(map[string]struct{}, len(value.ValidationRefs))
 	for _, ref := range value.OccurrenceEventRefs {
 		occurrences[ref] = struct{}{}
 	}
 	for _, ref := range value.ValidationRefs {
 		evidence, found := v.events[ref]
-		if !found || evidence.Sequence <= proposalSequence {
+		if !found || !ValidKnowledgeValidationEvidence(evidence, value, proposalSequence) {
 			return false
 		}
 		if value.Basis == core.KnowledgeBasisRepeatedPattern {
@@ -369,6 +370,48 @@ func (v *KnowledgeAdmissionValidator) hasPostProposalValidation(value core.Knowl
 				return false
 			}
 		}
+		if value.ValidationMethod == core.KnowledgeValidationRepeatedObservation {
+			if _, duplicate := executions[evidence.SourceExecutionID]; duplicate {
+				return false
+			}
+			executions[evidence.SourceExecutionID] = struct{}{}
+		}
 	}
 	return len(value.ValidationRefs) > 0
+}
+
+// ValidKnowledgeValidationEvidence binds each supported validation method to a
+// concrete Event Contract and the exact candidate identity. Unsupported
+// methods fail closed until they have an equally specific contract.
+func ValidKnowledgeValidationEvidence(evidence Event, value core.KnowledgeRecord, proposalSequence int64) bool {
+	if evidence.EventID == "" || evidence.Sequence <= proposalSequence || evidence.OrganizationID != string(value.OrganizationID) || evidence.SchemaVersion != SchemaVersion {
+		return false
+	}
+	switch value.ValidationMethod {
+	case core.KnowledgeValidationDeterministic:
+		var outcome core.ToolOutcome
+		return evidence.CorrelationID == "knowledge-"+string(value.KnowledgeID) && evidence.EventType == "TOOL_OUTCOME_RECORDED" && evidence.SourceActorID == "runtime" && evidence.SourceExecutionID != "" && evidence.TaskID != "" &&
+			evidence.RecipientScope == "" && evidence.RecipientID == "" && len(evidence.AuthorizationRefs) == 0 &&
+			decodeExactEventJSON(evidence.Payload, &outcome) == nil && outcome.Valid() && outcome.Status == core.OutcomeSucceeded &&
+			outcome.PostconditionStatus == core.PostconditionVerified && !outcome.StartedAt.Before(value.CreatedAt) && !outcome.FinishedAt.After(evidence.CreatedAt) &&
+			slices.Equal(evidence.ArtifactRefs, outcome.ArtifactRefs)
+	case core.KnowledgeValidationRepeatedObservation:
+		var observation KnowledgeObservationPayload
+		return evidence.CorrelationID == "knowledge-"+string(value.KnowledgeID) && evidence.EventType == "EVIDENCE_PUBLISHED" && evidence.SourceActorID != "" && evidence.SourceExecutionID != "" && evidence.TaskID != "" &&
+			evidence.RecipientScope == "" && evidence.RecipientID == "" && len(evidence.AuthorizationRefs) == 0 &&
+			decodeExactEventJSON(evidence.Payload, &observation) == nil && observation.KnowledgeID == value.KnowledgeID &&
+			observation.CandidateVersion == value.Version-1 && strings.TrimSpace(observation.Observation) != "" && utf8.ValidString(observation.Observation)
+	case core.KnowledgeValidationHuman, core.KnowledgeValidationIndependentAgent:
+		return evidence.EventType == "CAPABILITY_CHECKED"
+	case core.KnowledgeValidationExperimental, core.KnowledgeValidationMixed, core.KnowledgeValidationUnvalidated:
+		return false
+	default:
+		return false
+	}
+}
+
+type KnowledgeObservationPayload struct {
+	KnowledgeID      core.ID `json:"knowledge_id"`
+	CandidateVersion int     `json:"candidate_version"`
+	Observation      string  `json:"observation"`
 }

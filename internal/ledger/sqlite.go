@@ -2355,6 +2355,7 @@ func validateKnowledgeEventReference(ctx context.Context, tx *sql.Tx, organizati
 
 func validatePostProposalKnowledgeEvidence(ctx context.Context, tx *sql.Tx, proposalSequence int64, knowledge core.KnowledgeRecord) error {
 	occurrences := make(map[string]struct{}, len(knowledge.OccurrenceEventRefs))
+	executions := make(map[string]struct{}, len(knowledge.ValidationRefs))
 	for _, ref := range knowledge.OccurrenceEventRefs {
 		occurrences[ref] = struct{}{}
 	}
@@ -2363,13 +2364,19 @@ func validatePostProposalKnowledgeEvidence(ctx context.Context, tx *sql.Tx, prop
 		if err != nil {
 			return fmt.Errorf("read knowledge validation event: %w", err)
 		}
-		if !found || evidence.Sequence <= proposalSequence {
+		if !found || !events.ValidKnowledgeValidationEvidence(evidence, knowledge, proposalSequence) {
 			return fmt.Errorf("knowledge activation requires validation evidence admitted after its candidate proposal")
 		}
 		if knowledge.Basis == core.KnowledgeBasisRepeatedPattern {
 			if _, repeated := occurrences[ref]; repeated {
 				return fmt.Errorf("repeated-pattern validation must be independent of its occurrence evidence")
 			}
+		}
+		if knowledge.ValidationMethod == core.KnowledgeValidationRepeatedObservation {
+			if _, duplicate := executions[evidence.SourceExecutionID]; duplicate {
+				return fmt.Errorf("repeated-observation validation requires distinct execution evidence")
+			}
+			executions[evidence.SourceExecutionID] = struct{}{}
 		}
 	}
 	if len(knowledge.ValidationRefs) == 0 {
