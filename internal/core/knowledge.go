@@ -124,7 +124,7 @@ func ValidateKnowledgeTransition(eventType string, prior, next KnowledgeRecord) 
 		}
 	case "KNOWLEDGE_QUARANTINED":
 		if (prior.Status != KnowledgeCandidate && prior.Status != KnowledgeActive) || next.Status != KnowledgeQuarantined ||
-			!sameKnowledgeCandidate(prior, next) || (prior.Status == KnowledgeActive && !sameKnowledgeValidation(prior, next)) {
+			!sameKnowledgeCandidate(prior, next) || !sameKnowledgeValidation(prior, next) {
 			return fmt.Errorf("only candidate or active knowledge may be quarantined")
 		}
 	default:

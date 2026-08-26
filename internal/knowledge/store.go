@@ -107,17 +107,20 @@ func (s *Store) Search(ctx context.Context, organizationID core.ID, scope core.K
 		return nil, fmt.Errorf("active knowledge scope exceeds the deterministic search bound")
 	}
 	results := make([]core.KnowledgeRecord, 0, limit)
-	previousRecordID := ""
+	seenRecordIDs := make(map[string]struct{}, len(rows))
 	for _, body := range rows {
 		var projection events.ProjectionRecord
 		var record core.KnowledgeRecord
 		if json.Unmarshal(body, &projection) != nil || json.Unmarshal(projection.Value, &record) != nil ||
-			projection.ProjectionKind != "knowledge" || projection.RecordID != string(record.KnowledgeID) || projection.RecordID <= previousRecordID || projection.Version != record.Version ||
+			projection.ProjectionKind != "knowledge" || projection.RecordID != string(record.KnowledgeID) || projection.Version != record.Version ||
 			record.OrganizationID != organizationID || record.Scope != scope || record.ScopeID != scopeID || record.Status != core.KnowledgeActive ||
 			!core.ValidKnowledgeRecord(record) {
 			return nil, fmt.Errorf("active knowledge projection is invalid")
 		}
-		previousRecordID = projection.RecordID
+		if _, duplicate := seenRecordIDs[projection.RecordID]; duplicate {
+			return nil, fmt.Errorf("active knowledge projection is duplicated")
+		}
+		seenRecordIDs[projection.RecordID] = struct{}{}
 		if knowledgeContains(record, needle) {
 			results = append(results, record)
 			if len(results) == limit {

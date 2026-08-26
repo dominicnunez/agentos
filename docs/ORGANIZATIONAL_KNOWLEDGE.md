@@ -37,11 +37,15 @@ validation event references, and verification time that cannot predate its
 evidence. `AGENT` identifies a
 durable internal Agent; `EXTERNAL_AGENT` identifies an authenticated A2A actor.
 Those identities are never interchangeable. Internal-Agent authorship must
-reference a proposal bound to that Agent's exact admitted task execution. User and external-Agent
-authorship must reference an authenticated gateway event. Repeated-pattern
-activation requires validation evidence admitted after the candidate proposal.
-No Agent may activate its own proposal. Later terminal revisions preserve the
-prior validation record.
+reference a proposal bound to that Agent's exact admitted task execution. User
+and external-Agent authorship must reference the complete canonical gateway
+Event Contract, not only a decodable payload. Internal-Agent proposals must
+also occur before the bound execution finishes or advances to another Task
+revision. Every activation requires validation evidence admitted after the
+current candidate proposal; repeated-pattern evidence additionally cannot
+reuse an occurrence as its validation. No Agent may activate its own proposal.
+Later terminal revisions, including direct candidate quarantine, preserve the
+prior validation state and cannot mint a judgment while invalidating a record.
 
 ## Security boundary
 
@@ -59,15 +63,18 @@ kind matches the claimed validator; revocation and expiry are rechecked in the
 activation transaction, and the lease must have been admitted by that same
 Organization before the judgment. Freeze state is checked at both judgment
 and activation, and authorization uses the activation event's single captured
-timestamp. Startup reconstruction and offline backup verification
-use the same Event-Contract admission validator and verified capability-lease
-history to recheck evidence timing, tenant ownership, scope, lifecycle order,
-validator attribution, lease expiry or revocation, and lineage.
+timestamp. Startup reconstruction and offline backup verification use the same
+Event-Contract admission validator. Capability and freeze history is replayed
+only when every lifecycle event has one exact, ordered durable record admitted
+atomically with it; bare authority-shaped event labels grant nothing. Recovery
+rechecks evidence timing, tenant ownership, scope, lifecycle order, validator
+attribution, lease expiry or revocation, and lineage.
 
 Retrieval accepts one exact Organization and scope, reads one bounded SQLite
-snapshot of current `ACTIVE` records, and uses deterministic text matching. Candidate,
-superseded, stale, quarantined, cross-tenant, malformed, and unadmitted records
-are excluded.
+snapshot of current `ACTIVE` records, ranks matching records by newest current
+activation and stable record identity, and uses deterministic text matching.
+Candidate, superseded, stale, quarantined, cross-tenant, malformed, and
+unadmitted records are excluded.
 
 Storage migration quarantines pre-admission legacy knowledge records outside
 the authoritative projection namespace while preserving their exact bytes for

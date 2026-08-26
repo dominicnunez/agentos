@@ -49,18 +49,10 @@ func TestAgentKnowledgeProposalRemainsUnsealedInput(t *testing.T) {
 }
 
 func TestKnowledgeAdmissionFreezeStateUsesLatestPriorAdmission(t *testing.T) {
-	updatedAt := time.Date(2026, time.August, 26, 1, 0, 0, 0, time.UTC)
-	frozenPayload, err := json.Marshal(organizationFreezePayload{OrganizationID: "org-1", Frozen: true, UpdatedAt: updatedAt})
-	if err != nil {
-		t.Fatal(err)
-	}
-	unfrozenPayload, err := json.Marshal(organizationFreezePayload{OrganizationID: "org-1", Frozen: false, UpdatedAt: updatedAt.Add(time.Minute)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	validator := NewKnowledgeAdmissionValidator([]Event{
-		{EventID: "freeze-2", Sequence: 2, OrganizationID: "org-1", EventType: "FREEZE_SET", CreatedAt: updatedAt, SchemaVersion: SchemaVersion, Payload: frozenPayload},
-		{EventID: "freeze-4", Sequence: 4, OrganizationID: "org-1", EventType: "FREEZE_SET", CreatedAt: updatedAt.Add(time.Minute), SchemaVersion: SchemaVersion, Payload: unfrozenPayload},
+	validator := NewKnowledgeAdmissionValidator(nil)
+	validator.UseOrganizationFreezeAdmissions([]OrganizationFreezeAdmission{
+		{OrganizationID: "org-1", Frozen: true, Sequence: 2},
+		{OrganizationID: "org-1", Frozen: false, Sequence: 4},
 	})
 	if !validator.organizationFrozenAt("org-1", 3) {
 		t.Fatal("active freeze was not replayed")
@@ -567,6 +559,15 @@ func TestDecodeDurableOperatorInputRequiresCanonicalContract(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(decoded, payload) {
 		t.Fatalf("canonical operator input was rejected: payload=%+v err=%v", decoded, err)
 	}
+	creator := core.KnowledgeRecord{OrganizationID: "org-1", CreatedBy: "external-agent", CreatedByKind: core.PrincipalExternalAgent}
+	if !ValidKnowledgeCreatorEvidence(event, creator) {
+		t.Fatal("canonical operator input was not accepted as creator evidence")
+	}
+	malformedEnvelope := event
+	malformedEnvelope.TaskID = ""
+	if ValidKnowledgeCreatorEvidence(malformedEnvelope, creator) {
+		t.Fatal("payload-only creator evidence bypassed its canonical envelope")
+	}
 
 	for name, invalidBody := range map[string][]byte{
 		"legacy only":           []byte(`{"text":"bounded user input","source_external_actor":"external-agent"}`),
@@ -580,6 +581,39 @@ func TestDecodeDurableOperatorInputRequiresCanonicalContract(t *testing.T) {
 				t.Fatal("non-canonical operator input was accepted")
 			}
 		})
+	}
+}
+
+func TestAgentKnowledgeProposalMustPrecedeExecutionFinish(t *testing.T) {
+	start := Event{EventID: "start", Sequence: 10, OrganizationID: "org-1", EventType: "EXECUTION_STARTED", TaskID: "task-1", CorrelationID: "work-1"}
+	finish := Event{EventID: "finish", Sequence: 11, OrganizationID: "org-1", EventType: "EXECUTION_FINISHED", SourceExecutionID: "execution-1", TaskID: "task-1", CorrelationID: "work-1"}
+	proposal := Event{EventID: "proposal", Sequence: 12, OrganizationID: "org-1", EventType: "KNOWLEDGE_PROPOSED", SourceExecutionID: "execution-1", TaskID: "task-1", CorrelationID: "work-1"}
+	if agentExecutionOpenAtProposal(start, 2, proposal, []Event{start, finish, proposal}) {
+		t.Fatal("proposal emitted after execution finish retained creator authority")
+	}
+	if !agentExecutionOpenAtProposal(start, 2, proposal, []Event{start, proposal}) {
+		t.Fatal("open execution was rejected")
+	}
+}
+
+func TestKnowledgeAuthorityRequiresExactDurableRecords(t *testing.T) {
+	now := time.Unix(10, 0).UTC()
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "reviewer", ActorKind: core.PrincipalHuman, Action: "knowledge.validate", Resource: "knowledge-1", Scope: "org-1", OriginTaskID: "task-1"}
+	body, err := json.Marshal(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := []Event{{EventID: "grant-1", Sequence: 1, OrganizationID: "org-1", EventType: "CAPABILITY_GRANTED", TaskID: "task-1", Payload: body, CreatedAt: now, SchemaVersion: SchemaVersion}}
+	if _, _, err := ResolveKnowledgeAuthorityAdmissions(stream, nil); err == nil {
+		t.Fatal("bare capability event became replay authority")
+	}
+	leases, freezes, err := ResolveKnowledgeAuthorityAdmissions(stream, []KnowledgeAuthorityRecord{{Kind: "capability_lease", RecordID: "lease-1", Version: 1, Body: body}})
+	if err != nil || len(leases) != 1 || len(freezes) != 0 {
+		t.Fatalf("exact record-backed capability was rejected: leases=%+v freezes=%+v err=%v", leases, freezes, err)
+	}
+	validator := NewKnowledgeAdmissionValidator(stream)
+	if len(validator.leaseAdmissions) != 0 {
+		t.Fatal("validator derived authority from an unbacked event label")
 	}
 }
 

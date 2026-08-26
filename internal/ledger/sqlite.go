@@ -2133,18 +2133,12 @@ func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedPro
 		if err != nil {
 			return err
 		}
+		if err := validatePostProposalKnowledgeEvidence(ctx, tx, proposalSequence, knowledge); err != nil {
+			return err
+		}
 		if knowledge.ValidatedByKind == core.PrincipalHuman || knowledge.ValidatedByKind == core.PrincipalAgent || knowledge.ValidatedByKind == core.PrincipalExternalAgent {
 			if err := validateKnowledgeJudgmentAuthorization(ctx, tx, knowledge, proposalSequence, admissionAt); err != nil {
 				return err
-			}
-		}
-		if knowledge.Basis == core.KnowledgeBasisRepeatedPattern {
-			subsequent, err := hasSubsequentKnowledgeValidationRef(ctx, tx, proposalSequence, knowledge.OccurrenceEventRefs, knowledge.ValidationRefs)
-			if err != nil {
-				return err
-			}
-			if !subsequent {
-				return fmt.Errorf("repeated-pattern activation requires validation evidence admitted after the proposal")
 			}
 		}
 	}
@@ -2334,24 +2328,29 @@ func validateKnowledgeEventReference(ctx context.Context, tx *sql.Tx, organizati
 	return artifactRefs, createdAt, nil
 }
 
-func hasSubsequentKnowledgeValidationRef(ctx context.Context, tx *sql.Tx, proposalSequence int64, occurrences, validation []string) (bool, error) {
-	seen := make(map[string]struct{}, len(occurrences))
-	for _, ref := range occurrences {
-		seen[ref] = struct{}{}
+func validatePostProposalKnowledgeEvidence(ctx context.Context, tx *sql.Tx, proposalSequence int64, knowledge core.KnowledgeRecord) error {
+	occurrences := make(map[string]struct{}, len(knowledge.OccurrenceEventRefs))
+	for _, ref := range knowledge.OccurrenceEventRefs {
+		occurrences[ref] = struct{}{}
 	}
-	for _, ref := range validation {
-		if _, repeated := seen[ref]; repeated {
-			continue
-		}
+	for _, ref := range knowledge.ValidationRefs {
 		evidence, found, err := eventByID(ctx, tx, ref)
 		if err != nil {
-			return false, fmt.Errorf("read repeated-pattern validation event: %w", err)
+			return fmt.Errorf("read knowledge validation event: %w", err)
 		}
-		if found && evidence.Sequence > proposalSequence {
-			return true, nil
+		if !found || evidence.Sequence <= proposalSequence {
+			return fmt.Errorf("knowledge activation requires validation evidence admitted after its candidate proposal")
+		}
+		if knowledge.Basis == core.KnowledgeBasisRepeatedPattern {
+			if _, repeated := occurrences[ref]; repeated {
+				return fmt.Errorf("repeated-pattern validation must be independent of its occurrence evidence")
+			}
 		}
 	}
-	return false, nil
+	if len(knowledge.ValidationRefs) == 0 {
+		return fmt.Errorf("knowledge activation requires validation evidence")
+	}
+	return nil
 }
 
 func latestProjectionRevision[T any](ctx context.Context, tx *sql.Tx, kind, recordID string) (events.ProjectionRecord, T, bool, error) {
@@ -3326,7 +3325,7 @@ func (l *SQLite) ActiveKnowledgeRecords(ctx context.Context, organizationID, sco
 ) AS latest ON latest.record_id=r.record_id AND latest.version=r.version
 WHERE r.kind='knowledge' AND e.organization_id=? AND json_extract(r.body,'$.value.status')=?
 AND json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scope_id')=?
-ORDER BY r.record_id
+ORDER BY e.sequence DESC,r.record_id
 LIMIT ?`, organizationID, string(core.KnowledgeActive), scope, scopeID, limit)
 	if err != nil {
 		return nil, err
@@ -3437,6 +3436,9 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 	}
 	if events.RequiresProjectionAdmission(d.EventType, d.SourceActorID) {
 		return events.Event{}, fmt.Errorf("projection lifecycle events require typed admission")
+	}
+	if events.RequiresRecordAdmission(d.EventType) {
+		return events.Event{}, fmt.Errorf("authority lifecycle events require atomic record admission")
 	}
 	if d.EventType == "INBOX_EVENTS_OBSERVED" {
 		return events.Event{}, fmt.Errorf("inbox observations require atomic inbox admission")
@@ -3981,6 +3983,49 @@ WHERE pending_completion_reviews.request_sequence<excluded.request_sequence`, ev
 }
 func (l *SQLite) Events(ctx context.Context, correlationID string) ([]events.Event, error) {
 	return collectEvents(l.db.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE (?='' OR correlation_id=?) ORDER BY sequence`, correlationID, correlationID))
+}
+
+// KnowledgeAuthorityAdmissions resolves capability and freeze history from an
+// exact event-and-record snapshot. Event labels alone never grant replay
+// authority.
+func (l *SQLite) KnowledgeAuthorityAdmissions(ctx context.Context) ([]events.CapabilityLeaseAdmission, []events.OrganizationFreezeAdmission, error) {
+	tx, err := l.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, fmt.Errorf("begin knowledge authority snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events ORDER BY sequence`))
+	if err != nil {
+		return nil, nil, fmt.Errorf("read knowledge authority events: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT kind,record_id,version,body FROM records WHERE kind IN ('capability_lease','organization_freeze') ORDER BY kind,record_id,version`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read knowledge authority records: %w", err)
+	}
+	records := make([]events.KnowledgeAuthorityRecord, 0)
+	for rows.Next() {
+		var record events.KnowledgeAuthorityRecord
+		if err := rows.Scan(&record.Kind, &record.RecordID, &record.Version, &record.Body); err != nil {
+			_ = rows.Close()
+			return nil, nil, fmt.Errorf("scan knowledge authority record: %w", err)
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, nil, fmt.Errorf("iterate knowledge authority records: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, nil, fmt.Errorf("close knowledge authority records: %w", err)
+	}
+	leases, freezes, err := events.ResolveKnowledgeAuthorityAdmissions(stream, records)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, fmt.Errorf("finish knowledge authority snapshot: %w", err)
+	}
+	return leases, freezes, nil
 }
 
 // VerifiedReplayEvents returns a bounded tenant/correlation slice and the

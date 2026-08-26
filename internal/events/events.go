@@ -3354,6 +3354,9 @@ type ProjectionReader interface {
 type ActiveKnowledgeReader interface {
 	ActiveKnowledgeRecords(context.Context, string, string, string, int) ([][]byte, error)
 }
+type KnowledgeAuthorityAdmissionReader interface {
+	KnowledgeAuthorityAdmissions(context.Context) ([]CapabilityLeaseAdmission, []OrganizationFreezeAdmission, error)
+}
 type IntentConfirmer interface {
 	AppendIntentConfirmation(context.Context, TrustedDraft, core.ID, core.ID) (Event, error)
 }
@@ -3494,6 +3497,9 @@ func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event
 	if RequiresProjectionAdmission(draft.EventType, draft.SourceActorID) {
 		return Event{}, fmt.Errorf("projection lifecycle events require typed admission")
 	}
+	if RequiresRecordAdmission(draft.EventType) {
+		return Event{}, fmt.Errorf("authority lifecycle events require atomic record admission")
+	}
 	if draft.EventType == "INBOX_EVENTS_OBSERVED" {
 		return Event{}, fmt.Errorf("inbox observations require atomic inbox admission")
 	}
@@ -3513,6 +3519,17 @@ func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event
 		return Event{}, err
 	}
 	return g.ledger.Append(ctx, draft)
+}
+
+// RequiresRecordAdmission reserves authority-bearing lifecycle contracts for
+// the transaction that atomically appends their corresponding durable record.
+func RequiresRecordAdmission(eventType string) bool {
+	switch eventType {
+	case "CAPABILITY_GRANTED", "CAPABILITY_REVOKED", "FREEZE_SET":
+		return true
+	default:
+		return false
+	}
 }
 
 // PublishWorkCompletionEvidence admits the aggregate evidence only through a
@@ -3732,6 +3749,14 @@ func (g *Gateway) ActiveKnowledgeRecords(ctx context.Context, organizationID, sc
 		return nil, fmt.Errorf("event ledger does not support bounded active knowledge reads")
 	}
 	return store.ActiveKnowledgeRecords(ctx, organizationID, scope, scopeID, limit)
+}
+
+func (g *Gateway) KnowledgeAuthorityAdmissions(ctx context.Context) ([]CapabilityLeaseAdmission, []OrganizationFreezeAdmission, error) {
+	reader, ok := g.ledger.(KnowledgeAuthorityAdmissionReader)
+	if !ok {
+		return nil, nil, fmt.Errorf("record-backed knowledge authority admission reader is unavailable")
+	}
+	return reader.KnowledgeAuthorityAdmissions(ctx)
 }
 func (g *Gateway) Events(ctx context.Context, correlationID string) ([]Event, error) {
 	return g.ledger.Events(ctx, correlationID)

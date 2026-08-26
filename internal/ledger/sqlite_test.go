@@ -2931,6 +2931,30 @@ func appendReviewedIntentWithLineage(t *testing.T, ctx context.Context, l *SQLit
 	return draft
 }
 
+func TestAuthorityLifecycleEventsRequireAtomicRecords(t *testing.T) {
+	ctx := context.Background()
+	l, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "reviewer", ActorKind: core.PrincipalHuman, Action: "knowledge.validate", Resource: "knowledge-1", Scope: "org-1", OriginTaskID: "task-1"}
+	draft := events.TrustedDraft{OrganizationID: "org-1", EventType: "CAPABILITY_GRANTED", SourceActorID: "runtime", TaskID: "task-1", Payload: lease}
+	if _, err := l.Append(ctx, draft); err == nil {
+		t.Fatal("bare authority lifecycle event bypassed atomic record admission")
+	}
+	if _, err := events.NewGateway(l).PublishTrusted(ctx, draft); err == nil {
+		t.Fatal("gateway published bare authority lifecycle event")
+	}
+	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "runtime", "task-1", nil, nil, "capability_lease", "lease-1", 1, lease); err != nil {
+		t.Fatalf("atomic capability record was rejected: %v", err)
+	}
+	leases, freezes, err := l.KnowledgeAuthorityAdmissions(ctx)
+	if err != nil || len(leases) != 1 || len(freezes) != 0 {
+		t.Fatalf("record-backed authority snapshot was rejected: leases=%+v freezes=%+v err=%v", leases, freezes, err)
+	}
+}
+
 func appendTestMission(t *testing.T, ctx context.Context, l *SQLite, organizationID, missionID core.ID, createdAt time.Time) {
 	t.Helper()
 	organization := core.Organization{ID: organizationID, Name: "Organization", PolicyVersion: "v1", CreatedAt: createdAt}

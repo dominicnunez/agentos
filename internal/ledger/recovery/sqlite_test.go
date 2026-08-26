@@ -132,11 +132,18 @@ func TestVerifyReplaysEventAdmittedKnowledge(t *testing.T) {
 		_ = store.Close()
 		t.Fatal(err)
 	}
+	validationEvent, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", Payload: map[string]string{"validation": "passed"},
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
 	active := candidate
 	active.Version = 2
 	active.Status = core.KnowledgeActive
 	active.ValidationMethod = core.KnowledgeValidationDeterministic
-	active.ValidationRefs = []string{organizationEvent.EventID}
+	active.ValidationRefs = []string{validationEvent.EventID}
 	active.ValidatedBy = "runtime"
 	active.ValidatedByKind = core.PrincipalRuntime
 	verifiedAt := time.Now().UTC()

@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dominicnunez/agentos/internal/core"
 )
@@ -49,22 +51,8 @@ type organizationFreezePayload struct {
 
 func NewKnowledgeAdmissionValidator(stream []Event) *KnowledgeAdmissionValidator {
 	index := make(map[string]Event, len(stream))
-	leaseAdmissions := make(map[core.ID][]CapabilityLeaseAdmission)
-	freezeAdmissions := make(map[core.ID][]OrganizationFreezeAdmission)
 	for _, event := range stream {
 		index[event.EventID] = event
-		if event.EventType == "CAPABILITY_GRANTED" || event.EventType == "CAPABILITY_REVOKED" {
-			var lease core.CapabilityLease
-			if decodeExactPayload(event.Payload, &lease) == nil && lease.ID != "" {
-				leaseAdmissions[lease.ID] = append(leaseAdmissions[lease.ID], CapabilityLeaseAdmission{Lease: lease, OrganizationID: core.ID(event.OrganizationID), Sequence: event.Sequence})
-			}
-		}
-		if event.EventType == "FREEZE_SET" {
-			var state organizationFreezePayload
-			if decodeExactPayload(event.Payload, &state) == nil && state.OrganizationID != "" && string(state.OrganizationID) == event.OrganizationID {
-				freezeAdmissions[state.OrganizationID] = append(freezeAdmissions[state.OrganizationID], OrganizationFreezeAdmission{OrganizationID: state.OrganizationID, Frozen: state.Frozen, Sequence: event.Sequence})
-			}
-		}
 	}
 	return &KnowledgeAdmissionValidator{
 		stream:             append([]Event(nil), stream...),
@@ -72,8 +60,8 @@ func NewKnowledgeAdmissionValidator(stream []Event) *KnowledgeAdmissionValidator
 		history:            make(map[core.ID]knowledgeAdmissionVersion),
 		revisions:          make(map[core.ID]map[int]core.KnowledgeRecord),
 		admissionSequences: make(map[core.ID]int64),
-		leaseAdmissions:    leaseAdmissions,
-		freezeAdmissions:   freezeAdmissions,
+		leaseAdmissions:    make(map[core.ID][]CapabilityLeaseAdmission),
+		freezeAdmissions:   make(map[core.ID][]OrganizationFreezeAdmission),
 	}
 }
 
@@ -187,16 +175,13 @@ func (v *KnowledgeAdmissionValidator) Validate(value core.KnowledgeRecord, event
 	} else if record.Version != 1 || value.Status != core.KnowledgeCandidate {
 		return fmt.Errorf("knowledge history does not begin with a candidate")
 	}
-	if event.EventType == "KNOWLEDGE_ACTIVATED" && governedKnowledgeValidator(value.ValidatedByKind) {
+	if event.EventType == "KNOWLEDGE_ACTIVATED" {
 		proposalSequence := v.admissionSequences[value.KnowledgeID]
-		if proposalSequence < 1 || !v.hasAuthorizedJudgment(value, proposalSequence, event) {
-			return fmt.Errorf("knowledge activation lacks an authenticated validator admission")
+		if proposalSequence < 1 || !v.hasPostProposalValidation(value, proposalSequence) {
+			return fmt.Errorf("knowledge activation lacks validation evidence admitted after its candidate proposal")
 		}
-	}
-	if event.EventType == "KNOWLEDGE_ACTIVATED" && value.Basis == core.KnowledgeBasisRepeatedPattern {
-		proposalSequence := v.admissionSequences[value.KnowledgeID]
-		if proposalSequence < 1 || !v.hasSubsequentValidation(value.OccurrenceEventRefs, value.ValidationRefs, proposalSequence) {
-			return fmt.Errorf("repeated-pattern activation lacks validation evidence admitted after the proposal")
+		if governedKnowledgeValidator(value.ValidatedByKind) && !v.hasAuthorizedJudgment(value, proposalSequence, event) {
+			return fmt.Errorf("knowledge activation lacks an authenticated validator admission")
 		}
 	}
 	v.history[value.KnowledgeID] = knowledgeAdmissionVersion{version: record.Version, correlationID: record.CorrelationID, value: value}
@@ -237,15 +222,25 @@ func ValidKnowledgeCreatorEvidence(event Event, value core.KnowledgeRecord) bool
 	switch event.EventType {
 	case "INTAKE_MESSAGE_RECORDED":
 		var payload IntakeMessageRecordedPayload
-		return decodeExactPayload(event.Payload, &payload) == nil && payload.SourcePrincipalID == string(value.CreatedBy) &&
+		return validKnowledgeIntakeCreatorEnvelope(event, &payload) && payload.SourcePrincipalID == string(value.CreatedBy) &&
 			payload.SourcePrincipalKind == string(value.CreatedByKind) && payload.SourceChannel == expectedChannel
 	case "HUMAN_INPUT_RECEIVED", "A2A_INPUT_RECEIVED":
-		var payload OperatorInputReceivedPayload
-		return decodeExactPayload(event.Payload, &payload) == nil && payload.SourcePrincipalID == string(value.CreatedBy) &&
+		payload, err := DecodeDurableOperatorInput(event)
+		return err == nil && payload.SourcePrincipalID == string(value.CreatedBy) &&
 			payload.SourcePrincipalKind == string(value.CreatedByKind) && payload.SourceChannel == expectedChannel
 	default:
 		return false
 	}
+}
+
+func validKnowledgeIntakeCreatorEnvelope(event Event, payload *IntakeMessageRecordedPayload) bool {
+	return decodeExactEventJSON(event.Payload, payload) == nil && event.EventID != "" && event.Sequence > 0 && !event.CreatedAt.IsZero() &&
+		event.SchemaVersion == SchemaVersion && event.OrganizationID != "" && event.SourceActorID != "" &&
+		event.SourceExecutionID == "" && event.RecipientScope == "" && event.RecipientID == "" && event.TaskID != "" &&
+		event.CorrelationID != "" && len(event.AuthorizationRefs) == 0 && len(event.ArtifactRefs) == 0 &&
+		payload.MessageID != "" && strings.TrimSpace(payload.Text) != "" && utf8.ValidString(payload.Text) &&
+		payload.SourcePrincipalID == event.SourceActorID &&
+		validReviewedOperatorIdentity(payload.SourcePrincipalID, payload.SourcePrincipalKind, payload.SourceChannel)
 }
 
 // ValidAgentKnowledgeCreatorEvidence proves that an internal Agent proposal
@@ -267,7 +262,7 @@ func ValidAgentKnowledgeCreatorEvidence(proposal Event, value core.KnowledgeReco
 			continue
 		}
 		var task core.Task
-		if decodeExactPayload(payload.Projection.Value, &task) != nil || task.ID != core.ID(proposal.TaskID) ||
+		if decodeExactEventJSON(payload.Projection.Value, &task) != nil || task.ID != core.ID(proposal.TaskID) ||
 			task.AssigneeID != value.CreatedBy || task.AssigneeType != "AGENT" || task.ExecutionKind != core.ExecutionAgent {
 			continue
 		}
@@ -275,11 +270,30 @@ func ValidAgentKnowledgeCreatorEvidence(proposal Event, value core.KnowledgeReco
 		if err != nil || detail.DispatchBinding.DispatchID != core.ID(proposal.SourceExecutionID) || detail.DispatchBinding.AgentID != value.CreatedBy {
 			continue
 		}
-		if ValidateAgentDispatchStart(start, task, payload.Projection.Version, stream) == nil {
+		if ValidateAgentDispatchStart(start, task, payload.Projection.Version, stream) == nil &&
+			agentExecutionOpenAtProposal(start, payload.Projection.Version, proposal, stream) {
 			return true
 		}
 	}
 	return false
+}
+
+func agentExecutionOpenAtProposal(start Event, startVersion int, proposal Event, stream []Event) bool {
+	for _, event := range stream {
+		if event.Sequence <= start.Sequence || event.Sequence >= proposal.Sequence || event.OrganizationID != start.OrganizationID ||
+			event.TaskID != start.TaskID || event.CorrelationID != start.CorrelationID {
+			continue
+		}
+		if event.EventType == "EXECUTION_FINISHED" && event.SourceExecutionID == proposal.SourceExecutionID {
+			return false
+		}
+		payload, present, err := AdmittedProjection(event)
+		if err == nil && present && payload.Projection.ProjectionKind == "task" && payload.Projection.RecordID == start.TaskID &&
+			payload.Projection.Version > startVersion {
+			return false
+		}
+	}
+	return true
 }
 
 func governedKnowledgeValidator(kind core.PrincipalKind) bool {
@@ -340,16 +354,21 @@ func (v *KnowledgeAdmissionValidator) organizationFrozenAt(organizationID core.I
 	return current.Sequence > 0 && current.Frozen
 }
 
-func (v *KnowledgeAdmissionValidator) hasSubsequentValidation(occurrences, validation []string, proposalSequence int64) bool {
-	seen := make(map[string]struct{}, len(occurrences))
-	for _, ref := range occurrences {
-		seen[ref] = struct{}{}
+func (v *KnowledgeAdmissionValidator) hasPostProposalValidation(value core.KnowledgeRecord, proposalSequence int64) bool {
+	occurrences := make(map[string]struct{}, len(value.OccurrenceEventRefs))
+	for _, ref := range value.OccurrenceEventRefs {
+		occurrences[ref] = struct{}{}
 	}
-	for _, ref := range validation {
+	for _, ref := range value.ValidationRefs {
 		evidence, found := v.events[ref]
-		if _, repeated := seen[ref]; !repeated && found && evidence.Sequence > proposalSequence {
-			return true
+		if !found || evidence.Sequence <= proposalSequence {
+			return false
+		}
+		if value.Basis == core.KnowledgeBasisRepeatedPattern {
+			if _, repeated := occurrences[ref]; repeated {
+				return false
+			}
 		}
 	}
-	return false
+	return len(value.ValidationRefs) > 0
 }

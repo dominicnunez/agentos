@@ -421,7 +421,11 @@ func (r *Repository) ValidateCompletionAdmissions(ctx context.Context, snapshot 
 	if err != nil {
 		return err
 	}
-	if err := validateProjectionEventAdmissions(stream, inboxObservations); err != nil {
+	leaseAdmissions, freezeAdmissions, err := projectionKnowledgeAuthorityAdmissions(ctx, r.gateway, stream)
+	if err != nil {
+		return err
+	}
+	if err := validateProjectionEventAdmissions(stream, inboxObservations, leaseAdmissions, freezeAdmissions); err != nil {
 		return err
 	}
 	records, err := r.readProjectionRecords(ctx)
@@ -454,7 +458,11 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if err := validateProjectionEventAdmissions(stream, inboxObservations); err != nil {
+	leaseAdmissions, freezeAdmissions, err := projectionKnowledgeAuthorityAdmissions(ctx, r.gateway, stream)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if err := validateProjectionEventAdmissions(stream, inboxObservations, leaseAdmissions, freezeAdmissions); err != nil {
 		return Snapshot{}, err
 	}
 	records := make(map[string][][]byte)
@@ -492,7 +500,16 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 	return snapshot, nil
 }
 
-func validateProjectionEventAdmissions(stream []events.Event, inboxObservations map[string]events.InboxObservationBinding) error {
+func projectionKnowledgeAuthorityAdmissions(ctx context.Context, gateway *events.Gateway, stream []events.Event) ([]events.CapabilityLeaseAdmission, []events.OrganizationFreezeAdmission, error) {
+	for _, event := range stream {
+		if events.RequiresRecordAdmission(event.EventType) {
+			return gateway.KnowledgeAuthorityAdmissions(ctx)
+		}
+	}
+	return nil, nil, nil
+}
+
+func validateProjectionEventAdmissions(stream []events.Event, inboxObservations map[string]events.InboxObservationBinding, leaseAdmissions []events.CapabilityLeaseAdmission, freezeAdmissions []events.OrganizationFreezeAdmission) error {
 	eventIDs := make(map[string]struct{}, len(stream))
 	eventIndex := make(map[string]events.Event, len(stream))
 	sequences := make(map[int64]struct{}, len(stream))
@@ -506,6 +523,8 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 	works := make(map[core.ID]Versioned[core.Work])
 	experiments := make(map[core.ID]Versioned[core.Experiment])
 	knowledgeAdmissions := events.NewKnowledgeAdmissionValidator(ordered)
+	knowledgeAdmissions.UseCapabilityLeaseAdmissions(leaseAdmissions)
+	knowledgeAdmissions.UseOrganizationFreezeAdmissions(freezeAdmissions)
 	graph := core.DurableGraph{
 		Organizations: map[core.ID]core.DurableState[core.Organization]{}, Missions: map[core.ID]core.DurableState[core.Mission]{},
 		Goals: map[core.ID]core.DurableState[core.Goal]{}, Teams: map[core.ID]core.DurableState[core.Team]{},

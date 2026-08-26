@@ -332,7 +332,7 @@ func TestStoreTerminalRevisionRemovesKnowledgeFromRetrieval(t *testing.T) {
 	active.Version = 2
 	active.Status = core.KnowledgeActive
 	active.ValidationMethod = core.KnowledgeValidationDeterministic
-	active.ValidationRefs = []string{evidence.EventID}
+	active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, gateway, "terminal activation").EventID}
 	active.ValidatedBy = "runtime"
 	active.ValidatedByKind = core.PrincipalRuntime
 	verifiedAt := time.Now().UTC()
@@ -376,7 +376,7 @@ func TestStoreCanInvalidateDerivedKnowledgeAfterItsSourceBecomesStale(t *testing
 		active.Version = 2
 		active.Status = core.KnowledgeActive
 		active.ValidationMethod = core.KnowledgeValidationDeterministic
-		active.ValidationRefs = []string{evidence.EventID}
+		active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, gateway, "derived activation").EventID}
 		active.ValidatedBy = "runtime"
 		active.ValidatedByKind = core.PrincipalRuntime
 		verifiedAt := time.Now().UTC()
@@ -425,7 +425,7 @@ func TestStoreRevisesActiveKnowledgeThroughCandidateReview(t *testing.T) {
 	active.Version = 2
 	active.Status = core.KnowledgeActive
 	active.ValidationMethod = core.KnowledgeValidationDeterministic
-	active.ValidationRefs = []string{evidence.EventID}
+	active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, gateway, "initial activation").EventID}
 	active.ValidatedBy = "runtime"
 	active.ValidatedByKind = core.PrincipalRuntime
 	verifiedAt := time.Now().UTC()
@@ -507,7 +507,7 @@ func TestStoreSupportsFailClosedStaleAndQuarantineTransitions(t *testing.T) {
 				prior.Version = 2
 				prior.Status = core.KnowledgeActive
 				prior.ValidationMethod = core.KnowledgeValidationDeterministic
-				prior.ValidationRefs = []string{evidence.EventID}
+				prior.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, gateway, "terminal transition activation").EventID}
 				prior.ValidatedBy = "runtime"
 				prior.ValidatedByKind = core.PrincipalRuntime
 				verifiedAt := time.Now().UTC()
@@ -521,6 +521,18 @@ func TestStoreSupportsFailClosedStaleAndQuarantineTransitions(t *testing.T) {
 			next.Version++
 			next.Status = test.status
 			next.SupersedesVersion = integerPointer(prior.Version)
+			if !test.fromActive {
+				mutated := next
+				mutated.ValidationMethod = core.KnowledgeValidationDeterministic
+				mutated.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, gateway, "forged quarantine validation").EventID}
+				mutated.ValidatedBy = "runtime"
+				mutated.ValidatedByKind = core.PrincipalRuntime
+				verifiedAt := time.Now().UTC()
+				mutated.LastVerifiedAt = &verifiedAt
+				if _, err := test.transition(service, ctx, mutated); err == nil {
+					t.Fatal("candidate quarantine added validation authority")
+				}
+			}
 			transition, err := test.transition(service, ctx, next)
 			if err != nil {
 				t.Fatalf("transition knowledge: %v", err)
@@ -595,6 +607,36 @@ func TestRepeatedPatternActivationRequiresEvidenceAfterProposal(t *testing.T) {
 	}
 }
 
+func TestDeterministicActivationRequiresEvidenceAfterProposal(t *testing.T) {
+	ctx := context.Background()
+	_, gateway := newKnowledgeTestStore(t)
+	evidence := seedKnowledgeOrganization(t, ctx, gateway, "org-1")
+	candidate := knowledgeCandidate("k-deterministic-order", "org-1", evidence.EventID)
+	service := New(gateway)
+	if _, err := service.Propose(ctx, candidate); err != nil {
+		t.Fatal(err)
+	}
+	active := candidate
+	active.Version = 2
+	active.Status = core.KnowledgeActive
+	active.ValidationMethod = core.KnowledgeValidationDeterministic
+	active.ValidationRefs = []string{evidence.EventID}
+	active.ValidatedBy = "runtime"
+	active.ValidatedByKind = core.PrincipalRuntime
+	verifiedAt := time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
+	active.SupersedesVersion = integerPointer(1)
+	if _, err := service.Activate(ctx, active); err == nil {
+		t.Fatal("pre-proposal deterministic evidence activated knowledge")
+	}
+	active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, gateway, "post-proposal deterministic validation").EventID}
+	verifiedAt = time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
+	if _, err := service.Activate(ctx, active); err != nil {
+		t.Fatalf("post-proposal deterministic evidence was rejected: %v", err)
+	}
+}
+
 func TestSearchFiltersBeforeApplyingResultLimit(t *testing.T) {
 	ctx := context.Background()
 	_, gateway := newKnowledgeTestStore(t)
@@ -612,7 +654,7 @@ func TestSearchFiltersBeforeApplyingResultLimit(t *testing.T) {
 		active.Version = 2
 		active.Status = core.KnowledgeActive
 		active.ValidationMethod = core.KnowledgeValidationDeterministic
-		active.ValidationRefs = []string{evidence.EventID}
+		active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, gateway, fmt.Sprintf("bulk activation %d", index)).EventID}
 		active.ValidatedBy = "runtime"
 		active.ValidatedByKind = core.PrincipalRuntime
 		verifiedAt := time.Now().UTC()
@@ -625,6 +667,37 @@ func TestSearchFiltersBeforeApplyingResultLimit(t *testing.T) {
 	rows, err := service.Search(ctx, "org-1", core.KnowledgeScopeOrganization, "org-1", "needle-only-last", 1)
 	if err != nil || len(rows) != 1 || rows[0].KnowledgeID != "k-256" {
 		t.Fatalf("post-filter result window lost the match: rows=%+v err=%v", rows, err)
+	}
+}
+
+func TestSearchRanksNewestActivationFirst(t *testing.T) {
+	ctx := context.Background()
+	_, gateway := newKnowledgeTestStore(t)
+	evidence := seedKnowledgeOrganization(t, ctx, gateway, "org-1")
+	service := New(gateway)
+	for _, id := range []core.ID{"older", "newer"} {
+		candidate := knowledgeCandidate(id, "org-1", evidence.EventID)
+		candidate.Content = "shared retrieval phrase"
+		if _, err := service.Propose(ctx, candidate); err != nil {
+			t.Fatal(err)
+		}
+		active := candidate
+		active.Version = 2
+		active.Status = core.KnowledgeActive
+		active.ValidationMethod = core.KnowledgeValidationDeterministic
+		active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, gateway, "rank "+string(id)).EventID}
+		active.ValidatedBy = "runtime"
+		active.ValidatedByKind = core.PrincipalRuntime
+		verifiedAt := time.Now().UTC()
+		active.LastVerifiedAt = &verifiedAt
+		active.SupersedesVersion = integerPointer(1)
+		if _, err := service.Activate(ctx, active); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := service.Search(ctx, "org-1", core.KnowledgeScopeOrganization, "org-1", "shared retrieval phrase", 1)
+	if err != nil || len(rows) != 1 || rows[0].KnowledgeID != "newer" {
+		t.Fatalf("bounded search did not prefer newest activation: rows=%+v err=%v", rows, err)
 	}
 }
 
@@ -664,6 +737,20 @@ func seedKnowledgeOrganization(t *testing.T, ctx context.Context, gateway *event
 	})
 	if err != nil {
 		t.Fatalf("seed organization %s: %v", organizationID, err)
+	}
+	return event
+}
+
+func appendKnowledgeValidation(t *testing.T, ctx context.Context, gateway *events.Gateway, label string) events.Event {
+	t.Helper()
+	event, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1",
+		EventType:      "AUDIT_NOTE",
+		SourceActorID:  "runtime",
+		Payload:        map[string]string{"validation": label},
+	})
+	if err != nil {
+		t.Fatalf("append validation evidence: %v", err)
 	}
 	return event
 }
