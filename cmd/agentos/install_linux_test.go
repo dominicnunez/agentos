@@ -3,19 +3,38 @@
 package main
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/bootstrap"
 )
 
+func testIntegrityAnchor(config bootstrap.Config) bootstrap.IntegrityAnchor {
+	publicKey := make([]byte, 32)
+	digest := sha256.Sum256(publicKey)
+	return bootstrap.IntegrityAnchor{
+		InstallationID:     "install-" + strings.Repeat("ab", 32),
+		CheckpointFile:     filepath.Join(config.Paths.StateDir, "ledger-anchor.json"),
+		PublicKey:          base64.StdEncoding.EncodeToString(publicKey),
+		KeyID:              fmt.Sprintf("%x", digest[:]),
+		SecretRef:          "ledger-anchor-signing-key",
+		SignatureAlgorithm: "Ed25519",
+	}
+}
+
 func TestSystemdUnitsQuoteConfiguredPathsAndPercentSpecifiers(t *testing.T) {
 	config := bootstrap.NewConfig(bootstrap.ModeSystem, bootstrap.Owner{Username: "root", UID: 0, GID: 0}, bootstrap.SystemPaths(), time.Now())
 	config.Paths.Workspace = "/var/lib/agentos/work spaces/%n"
 	config.Providers = []bootstrap.Provider{testOpenAIProvider(config, "gpt-test-2026-01-01", "openai-api-key")}
+	config.Integrity = testIntegrityAnchor(config)
 	unit, err := systemServiceUnit(config)
 	if err != nil {
 		t.Fatal(err)
@@ -26,11 +45,17 @@ func TestSystemdUnitsQuoteConfiguredPathsAndPercentSpecifiers(t *testing.T) {
 	if !strings.Contains(unit, `LoadCredentialEncrypted="openai-api-key:/etc/agentos/credentials/openai-api-key.cred"`) {
 		t.Fatalf("credential directive was not quoted:\n%s", unit)
 	}
+	if !strings.Contains(unit, `LoadCredentialEncrypted="ledger-anchor-signing-key:/etc/agentos/credentials/ledger-anchor-signing-key.cred"`) {
+		t.Fatalf("ledger anchor credential directive was not quoted:\n%s", unit)
+	}
 	if !strings.Contains(unit, "RuntimeDirectory=agentos-private\nRuntimeDirectoryMode=0700") || !strings.Contains(unit, `"/run/agentos-private"`) {
 		t.Fatalf("private provider runtime directory is missing:\n%s", unit)
 	}
 	if !strings.Contains(unit, "UMask=0077") {
 		t.Fatal("system service does not enforce a private file-creation mask")
+	}
+	if !strings.Contains(unit, `ExecStartPre=/usr/bin/test ! -e "/run/agentos/integrity-maintenance.lock"`) {
+		t.Fatal("system service can start during ledger integrity maintenance")
 	}
 	if !strings.Contains(systemSocketUnit(config), "DirectoryMode=0711") {
 		t.Fatal("socket parent directory mode is not explicit")
@@ -45,6 +70,7 @@ func TestUserServiceLoadsReviewedA2ACredentials(t *testing.T) {
 	}
 	config := bootstrap.NewConfig(bootstrap.ModeUser, bootstrap.Owner{Username: "alice", UID: effectiveUID(), GID: effectiveUID()}, paths, time.Now())
 	config.Providers = []bootstrap.Provider{testOpenAIProvider(config, "gpt-test-2026-01-01", "openai-api-key")}
+	config.Integrity = testIntegrityAnchor(config)
 	config.A2A.ActorsFile = filepath.Join(paths.ConfigDir, "a2a-actors.json")
 	if err := os.MkdirAll(filepath.Join(paths.ConfigDir, "credentials"), 0o700); err != nil {
 		t.Fatal(err)
@@ -60,11 +86,14 @@ func TestUserServiceLoadsReviewedA2ACredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(unit, `LoadCredential="a2a-actors.json:`) || !strings.Contains(unit, `LoadCredentialEncrypted="agent-1-token:`) {
+	if !strings.Contains(unit, `LoadCredential="a2a-actors.json:`) || !strings.Contains(unit, `LoadCredentialEncrypted="agent-1-token:`) || !strings.Contains(unit, `LoadCredentialEncrypted="ledger-anchor-signing-key:`) {
 		t.Fatalf("A2A credential directives are missing:\n%s", unit)
 	}
 	if !strings.Contains(unit, "UMask=0077") {
 		t.Fatal("user service does not enforce a private file-creation mask")
+	}
+	if !strings.Contains(unit, "ExecStartPre=/usr/bin/test ! -e ") || !strings.Contains(unit, "integrity-maintenance.lock") {
+		t.Fatal("user service can start during ledger integrity maintenance")
 	}
 }
 
@@ -88,6 +117,27 @@ func TestEnsureOwnedRuntimeDirectoryRejectsBroadModesAndLinks(t *testing.T) {
 	}
 	if err := ensureOwnedRuntimeDirectory(link, effectiveUID(), 0o700); err == nil {
 		t.Fatal("runtime directory symlink was accepted")
+	}
+}
+
+func TestIntegrityMaintenanceFenceIsRecoverableAndBlocksRuntime(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "integrity-maintenance.lock")
+	if err := adoptOrCreateIntegrityFence(path); err != nil {
+		t.Fatal(err)
+	}
+	config := bootstrap.Config{Paths: bootstrap.Paths{RuntimeDir: directory}}
+	if err := ensureNoIntegrityMaintenance(config); err == nil {
+		t.Fatal("runtime accepted an integrity maintenance fence")
+	}
+	if err := adoptOrCreateIntegrityFence(path); err != nil {
+		t.Fatalf("stale valid maintenance fence could not be adopted: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("forged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := adoptOrCreateIntegrityFence(path); err == nil {
+		t.Fatal("malformed maintenance fence was adopted")
 	}
 }
 
@@ -186,4 +236,105 @@ func TestServiceCredentialsRejectMissingProvider(t *testing.T) {
 	if _, err := serviceCredentialDirectives(config); err == nil {
 		t.Fatal("service credential generation accepted a missing provider")
 	}
+}
+
+func TestUserCheckpointAccessIsPrivateAndRejectsLinks(t *testing.T) {
+	directory := t.TempDir()
+	checkpoint := filepath.Join(directory, "ledger-anchor.json")
+	if err := os.WriteFile(checkpoint, []byte("checkpoint"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid, err := fileIdentity(checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := bootstrap.Config{
+		Mode: bootstrap.ModeUser, Owner: bootstrap.Owner{Username: "owner", UID: uid, GID: gid},
+		Integrity: bootstrap.IntegrityAnchor{CheckpointFile: checkpoint},
+	}
+	if err := prepareIntegrityCheckpointAccess(context.Background(), config); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("checkpoint mode=%v", info.Mode().Perm())
+	}
+	if err := doctorIntegrityCheckpointAccess(context.Background(), config); err != nil {
+		t.Fatalf("doctor rejected protected checkpoint: %v", err)
+	}
+	if err := os.Chmod(checkpoint, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := doctorIntegrityCheckpointAccess(context.Background(), config); err == nil {
+		t.Fatal("doctor accepted group-readable checkpoint")
+	}
+	if err := os.Chmod(checkpoint, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(directory, "ledger-anchor-link.json")
+	if err := os.Symlink(checkpoint, link); err != nil {
+		t.Fatal(err)
+	}
+	config.Integrity.CheckpointFile = link
+	if err := prepareIntegrityCheckpointAccess(context.Background(), config); err == nil {
+		t.Fatal("checkpoint symlink was accepted")
+	}
+	if err := doctorIntegrityCheckpointAccess(context.Background(), config); err == nil {
+		t.Fatal("doctor accepted checkpoint symlink")
+	}
+}
+
+func TestUserDatabaseAccessIsPrivateAndRejectsLinks(t *testing.T) {
+	directory := t.TempDir()
+	database := filepath.Join(directory, "agentos.db")
+	if err := os.WriteFile(database, []byte("database"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	wal := database + "-wal"
+	if err := os.WriteFile(wal, []byte("wal"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid, err := fileIdentity(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := bootstrap.Config{
+		Mode: bootstrap.ModeUser, Owner: bootstrap.Owner{Username: "owner", UID: uid, GID: gid},
+		Paths: bootstrap.Paths{Database: database},
+	}
+	if err := prepareLedgerDatabaseAccess(context.Background(), config); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{database, wal} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode=%v", path, info.Mode().Perm())
+		}
+	}
+	link := filepath.Join(directory, "agentos-link.db")
+	if err := os.Symlink(database, link); err != nil {
+		t.Fatal(err)
+	}
+	config.Paths.Database = link
+	if err := prepareLedgerDatabaseAccess(context.Background(), config); err == nil {
+		t.Fatal("database symlink was accepted")
+	}
+}
+
+func fileIdentity(path string) (int, int, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, 0, fmt.Errorf("file ownership is unavailable")
+	}
+	return int(stat.Uid), int(stat.Gid), nil
 }

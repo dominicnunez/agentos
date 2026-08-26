@@ -28,6 +28,57 @@ func TestOpenBootstrapsCurrentStorageContract(t *testing.T) {
 	}
 }
 
+func TestOpenCurrentRejectsLegacyStorageWithoutMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "storage-v1.db")
+	legacy := createStorageV1Fixture(t, path)
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if store, err := OpenCurrent(path); err == nil {
+		_ = store.Close()
+		t.Fatal("runtime open migrated legacy storage before anchor verification")
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var version int
+	if err := db.QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 1 {
+		t.Fatalf("legacy storage was mutated to version %d", version)
+	}
+}
+
+func TestOpenCurrentDoesNotCreateOrFollowRuntimeLedger(t *testing.T) {
+	directory := t.TempDir()
+	missing := filepath.Join(directory, "missing.db")
+	if store, err := OpenCurrent(missing); err == nil {
+		_ = store.Close()
+		t.Fatal("runtime open created a missing anchored ledger")
+	}
+	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+		t.Fatalf("missing runtime ledger was created: %v", err)
+	}
+	target := filepath.Join(directory, "target.db")
+	store, err := Open(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(directory, "redirect.db")
+	if err := os.Symlink(target, link); err == nil {
+		if store, err := OpenCurrent(link); err == nil {
+			_ = store.Close()
+			t.Fatal("runtime open followed a ledger symlink")
+		}
+	}
+}
+
 func TestStorageV1FixtureMatchesFrozenFingerprint(t *testing.T) {
 	db := createStorageV1Fixture(t, filepath.Join(t.TempDir(), "storage-v1.db"))
 	defer func() { _ = db.Close() }()

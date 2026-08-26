@@ -49,3 +49,17 @@ func TestWriteAtomicallyPreservesModesAndRejectsSymlinkedParents(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteAtomicallyNewNeverReplacesDestination(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "checkpoint")
+	if err := WriteAtomicallyNew(path, []byte("first"), 0o600, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteAtomicallyNew(path, []byte("second"), 0o600, 0o700); err == nil {
+		t.Fatal("create-only atomic write replaced its destination")
+	}
+	body, err := os.ReadFile(path)
+	if err != nil || string(body) != "first" {
+		t.Fatalf("body=%q err=%v", body, err)
+	}
+}

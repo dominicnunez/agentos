@@ -31,11 +31,13 @@ again. The checksum is not a cryptographic attestation of
 the SQLite ledger and does not convert readiness evidence into certification.
 
 Separately, Agent OS verifies a cryptographic stored-byte chain across the
-durable SQLite event stream at startup and during recovery operations. The
-verified head helps detect partial ledger modification but is not included as
-a signed claim in the tenant-scoped AIMS export. It is not externally anchored
-and does not prove the truth of event content, control effectiveness,
-conformity, or certification. See [Event ledger integrity](EVENT_LEDGER_INTEGRITY.md).
+durable SQLite event stream and binds its expected head and exact durable
+authority-bearing state to an Ed25519-signed
+checkpoint outside SQLite. Startup, diagnostics, backup, and restore verify
+both layers. The checkpoint is not included as a claim in the tenant-scoped
+AIMS export and does not prove event truth, trusted time, control
+effectiveness, conformity, or certification. See
+[Event ledger integrity](EVENT_LEDGER_INTEGRITY.md).
 
 The authenticated local user can also produce a bounded, payload-free
 [deterministic incident replay](INCIDENT_REPLAY.md) for one durable Work

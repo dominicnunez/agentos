@@ -2,12 +2,17 @@ package ledger
 
 import (
 	"context"
+	"crypto/ed25519"
+	"database/sql"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
+	ledgeranchor "github.com/dominicnunez/agentos/internal/ledger/anchor"
 )
 
 func TestEventIntegrityChainsOrdinaryAndProjectionEvents(t *testing.T) {
@@ -146,4 +151,181 @@ func TestVerifiedReplayEventsUsesOneTenantScopedIntegritySnapshot(t *testing.T) 
 	if _, err := store.VerifiedReplayEvents(ctx, "org-1", "work-1", 2); err == nil || !strings.Contains(err.Error(), "integrity hash does not match") {
 		t.Fatalf("tampered replay error=%v", err)
 	}
+}
+
+func TestAttachedExternalAnchorAdvancesWithTheSQLiteCommit(t *testing.T) {
+	ctx := t.Context()
+	directory := t.TempDir()
+	store, err := Open(filepath.Join(directory, "agentos.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	initial, err := store.IntegrityAnchorState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := make([]byte, ed25519.SeedSize)
+	for index := range seed {
+		seed[index] = 7
+	}
+	privateKey := ed25519.NewKeyFromSeed(seed)
+	publicKey, err := ledgeranchor.PublicKeyFromPrivate(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installationID := "install-" + strings.Repeat("ab", 32)
+	checkpointPath := filepath.Join(directory, "ledger-anchor.json")
+	now := time.Date(2026, 8, 26, 16, 0, 0, 0, time.UTC)
+	if _, err := ledgeranchor.Initialize(checkpointPath, installationID, privateKey, initial, now); err != nil {
+		t.Fatal(err)
+	}
+	anchorStore, err := ledgeranchor.Open(checkpointPath, installationID, publicKey, privateKey, initial, func() time.Time { return now.Add(time.Minute) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachIntegrityAnchor(ctx, anchorStore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "audit-1", Payload: map[string]string{"state": "anchored"}}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.IntegrityAnchorState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, _, err := ledgeranchor.Read(checkpointPath, installationID, publicKey)
+	if err != nil || checkpoint.Generation != 1 || !checkpoint.Ledger.Equal(current) {
+		t.Fatalf("checkpoint=%+v current=%+v err=%v", checkpoint, current, err)
+	}
+	if _, err := os.Stat(checkpointPath + ".pending"); !os.IsNotExist(err) {
+		t.Fatalf("pending checkpoint remains after commit: %v", err)
+	}
+}
+
+func TestAttachedExternalAnchorFailureRollsBackSQLite(t *testing.T) {
+	ctx := t.Context()
+	directory := t.TempDir()
+	store, err := Open(filepath.Join(directory, "agentos.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	initial, err := store.IntegrityAnchorState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	publicKey, err := ledgeranchor.PublicKeyFromPrivate(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installationID := "install-" + strings.Repeat("cd", 32)
+	checkpointPath := filepath.Join(directory, "ledger-anchor.json")
+	now := time.Date(2026, 8, 26, 17, 0, 0, 0, time.UTC)
+	if _, err := ledgeranchor.Initialize(checkpointPath, installationID, privateKey, initial, now); err != nil {
+		t.Fatal(err)
+	}
+	anchorStore, err := ledgeranchor.Open(checkpointPath, installationID, publicKey, privateKey, initial, func() time.Time { return now.Add(-time.Minute) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachIntegrityAnchor(ctx, anchorStore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", Payload: map[string]string{"state": "must-roll-back"}}); err == nil || !strings.Contains(err.Error(), "prepare external ledger checkpoint") {
+		t.Fatalf("external anchor failure was accepted: %v", err)
+	}
+	current, err := store.IntegrityAnchorState(ctx)
+	if err != nil || !current.Equal(initial) {
+		t.Fatalf("failed external anchor changed SQLite: current=%+v initial=%+v err=%v", current, initial, err)
+	}
+}
+
+func TestExternalAnchorRejectsOfflineAuthorityMutation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate string
+	}{
+		{name: "record", mutate: `UPDATE records SET body='{"forged":true}' WHERE kind='organization' AND record_id='org-1'`},
+		{name: "consumed approval", mutate: `DELETE FROM consumed_approvals WHERE approval_id='approval-1'`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := t.Context()
+			databasePath, checkpointPath, installationID, publicKey, privateKey := anchoredAuthorityFixture(t)
+			db, err := sql.Open("sqlite", databasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.ExecContext(ctx, test.mutate); err != nil {
+				_ = db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			tampered, err := OpenCurrent(databasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tampered.Close() }()
+			tamperedState, err := tampered.IntegrityAnchorState(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ledgeranchor.Open(checkpointPath, installationID, publicKey, privateKey, tamperedState, nil); err == nil || !strings.Contains(err.Error(), "does not match") {
+				t.Fatalf("offline authority mutation was accepted: %v", err)
+			}
+		})
+	}
+}
+
+func anchoredAuthorityFixture(t *testing.T) (string, string, string, ed25519.PublicKey, ed25519.PrivateKey) {
+	t.Helper()
+	ctx := t.Context()
+	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "agentos.db")
+	store, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := store.IntegrityAnchorState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	publicKey, _ := ledgeranchor.PublicKeyFromPrivate(privateKey)
+	installationID := "install-" + strings.Repeat("ef", 32)
+	checkpointPath := filepath.Join(directory, "ledger-anchor.json")
+	now := time.Date(2026, 8, 26, 19, 0, 0, 0, time.UTC)
+	if _, err := ledgeranchor.Initialize(checkpointPath, installationID, privateKey, initial, now); err != nil {
+		t.Fatal(err)
+	}
+	anchorStore, err := ledgeranchor.Open(checkpointPath, installationID, publicKey, privateKey, initial, func() time.Time { return now.Add(time.Minute) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachIntegrityAnchor(ctx, anchorStore); err != nil {
+		t.Fatal(err)
+	}
+	organization := core.Organization{ID: "org-1", Name: "Original", PolicyVersion: "policy-v1", CreatedAt: now}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup-1"},
+		ProjectionKind: "organization", RecordID: "org-1", Version: 1, Value: organization,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := appendEvent(ctx, tx, events.TrustedDraft{OrganizationID: "org-1", EventType: "APPROVAL_CONSUMED", SourceActorID: "runtime", CorrelationID: "effect-1", Payload: map[string]string{"approval_id": "approval-1", "effect_fingerprint": "effect-fingerprint"}}); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO consumed_approvals(approval_id,effect_fingerprint,consumed_at) VALUES('approval-1','effect-fingerprint',?)`, now.Format(time.RFC3339Nano))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return databasePath, checkpointPath, installationID, publicKey, privateKey
 }

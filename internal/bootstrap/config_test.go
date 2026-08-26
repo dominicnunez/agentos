@@ -1,6 +1,9 @@
 package bootstrap
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,6 +13,17 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/inference"
 )
+
+func testIntegrity(config Config) IntegrityAnchor {
+	publicKey := make([]byte, 32)
+	digest := sha256.Sum256(publicKey)
+	return IntegrityAnchor{
+		InstallationID: "install-" + strings.Repeat("ab", 32),
+		CheckpointFile: filepath.Join(config.Paths.StateDir, "ledger-anchor.json"),
+		PublicKey:      base64.StdEncoding.EncodeToString(publicKey), KeyID: fmt.Sprintf("%x", digest[:]),
+		SecretRef: "ledger-anchor-signing-key", SignatureAlgorithm: "Ed25519",
+	}
+}
 
 func testProviderPolicy(organization string, uid int, provider, model, profile string, mode inference.AccessMode) inference.Policy {
 	now := time.Now().UTC()
@@ -61,6 +75,7 @@ func TestReadyConfigurationRequiresRealTypedProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := NewConfig(ModeUser, Owner{Username: "alice", UID: 1000, GID: 1000}, paths, time.Now())
+	config.Integrity = testIntegrity(config)
 	if err := config.ValidateReady(); err == nil || !strings.Contains(err.Error(), "real model provider") {
 		t.Fatalf("expected provider blocker, got %v", err)
 	}
@@ -76,12 +91,44 @@ func TestReadyConfigurationRequiresRealTypedProvider(t *testing.T) {
 	}
 }
 
+func TestReadyConfigurationReservesLedgerAnchorCredentialNamespace(t *testing.T) {
+	config := NewConfig(ModeSystem, Owner{Username: "root", UID: 0, GID: 0}, SystemPaths(), time.Now())
+	config.Integrity = testIntegrity(config)
+	provider := testOpenAIProvider(config, "gpt-test-2026-01-01")
+	provider.SecretRef = "ledger-anchor-provider-confusion"
+	config.Providers = []Provider{provider}
+	if err := config.ValidateReady(); err == nil || !strings.Contains(err.Error(), "reserved ledger-anchor namespace") {
+		t.Fatalf("reserved credential namespace was accepted: %v", err)
+	}
+}
+
+func TestReadyConfigurationAllowsOnlyReviewedRestoreCheckpointNames(t *testing.T) {
+	paths, err := UserPaths(filepath.Join(t.TempDir(), "home"), filepath.Join(t.TempDir(), "run"), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := NewConfig(ModeUser, Owner{Username: "alice", UID: 1000, GID: 1000}, paths, time.Now())
+	config.Integrity = testIntegrity(config)
+	config.Providers = []Provider{testOpenAIProvider(config, "gpt-test-2026-01-01")}
+	config.Integrity.CheckpointFile = filepath.Join(config.Paths.StateDir, "ledger-anchor-restore-incident-42.json")
+	if err := config.ValidateReady(); err != nil {
+		t.Fatalf("reviewed restore checkpoint name was rejected: %v", err)
+	}
+	for _, name := range []string{"other.json", "ledger-anchor.pending", "ledger-anchor-restore-../escape.json", "ledger-anchor-transition.json"} {
+		config.Integrity.CheckpointFile = filepath.Join(config.Paths.StateDir, name)
+		if err := config.ValidateReady(); err == nil {
+			t.Fatalf("unsafe checkpoint name %q was accepted", name)
+		}
+	}
+}
+
 func TestSystemOwnerMayBeVerifiedRootAccount(t *testing.T) {
 	paths, err := UserPaths(filepath.Join(t.TempDir(), "root"), filepath.Join(t.TempDir(), "run"), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	config := NewConfig(ModeSystem, Owner{Username: "root", UID: 0, GID: 0}, paths, time.Now())
+	config.Integrity = testIntegrity(config)
 	config.Providers = []Provider{testOpenAIProvider(config, "gpt-test-2026-01-01")}
 	if err := config.ValidateReady(); err != nil {
 		t.Fatalf("verified root owner was rejected: %v", err)
@@ -94,6 +141,7 @@ func TestConfigurationRejectsUnitAndCredentialInjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := NewConfig(ModeUser, Owner{Username: "alice\nUser=root", UID: 1000, GID: 1000}, paths, time.Now())
+	config.Integrity = testIntegrity(config)
 	config.Providers = []Provider{testOpenAIProvider(config, "gpt-test-2026-01-01")}
 	if err := config.ValidateReady(); err == nil || !strings.Contains(err.Error(), "verified Linux user") {
 		t.Fatalf("unsafe owner was accepted: %v", err)
@@ -111,6 +159,7 @@ func TestConfigurationRejectsImplicitRemoteA2A(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := NewConfig(ModeUser, Owner{Username: "alice", UID: 1000, GID: 1000}, paths, time.Now())
+	config.Integrity = testIntegrity(config)
 	config.Providers = []Provider{testOpenAIProvider(config, "gpt-test-2026-01-01")}
 	config.A2A.ListenAddress = "0.0.0.0:8080"
 	if err := config.ValidateReady(); err == nil || !strings.Contains(err.Error(), "enabled explicitly") {
@@ -128,6 +177,7 @@ func TestConfigurationConfinesReviewedA2ASources(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := NewConfig(ModeUser, Owner{Username: "alice", UID: 1000, GID: 1000}, paths, time.Now())
+	config.Integrity = testIntegrity(config)
 	config.Providers = []Provider{testOpenAIProvider(config, "gpt-test-2026-01-01")}
 	config.A2A.ActorsFile = filepath.Join(t.TempDir(), "actors.json")
 	if err := config.ValidateReady(); err == nil || !strings.Contains(err.Error(), "inside the configuration directory") {
@@ -148,6 +198,7 @@ func TestCodexCredentialStoreCannotEscapeStateDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := NewConfig(ModeUser, Owner{Username: "alice", UID: 1000, GID: 1000}, paths, time.Now())
+	config.Integrity = testIntegrity(config)
 	config.Providers = []Provider{{
 		Kind: ProviderCodexSubscription, Model: "gpt-codex-test", SecretRef: "codex-store-key-test",
 		CodexBinary: filepath.Join(paths.DataDir, "bin", "codex"), CodexCredential: filepath.Join(paths.DataDir, "outside.enc"),
@@ -169,6 +220,7 @@ func TestConfigurationRoundTripIsStrictAndRefusesSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := NewConfig(ModeUser, Owner{Username: "alice", UID: 1000, GID: 1000}, paths, time.Now())
+	config.Integrity = testIntegrity(config)
 	config.Providers = []Provider{testOpenAIProvider(config, "gpt-5.4-2026-06-01")}
 	path := filepath.Join(directory, "config.json")
 	if err := SaveConfig(path, config); err != nil {
@@ -208,8 +260,14 @@ func TestVersion1CheckpointUpgradeRequiresReconfirmedProviderPolicy(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if upgraded.Version != ConfigVersion || upgradedState.Version != ConfigVersion || upgradedState.Stage != StageProvider || len(upgraded.Providers) != 0 {
+	if upgraded.Version != ConfigVersion || upgradedState.Version != ConfigVersion || upgradedState.Stage != StageAnchor || len(upgraded.Providers) != 0 {
 		t.Fatalf("upgrade did not require provider policy confirmation: config=%+v state=%+v", upgraded, upgradedState)
+	}
+	incompleteState := state
+	incompleteState.Stage = StageProvider
+	_, incompleteUpgrade, err := UpgradeVersion1Checkpoint(legacy, incompleteState)
+	if err != nil || incompleteUpgrade.Stage != StageProvider {
+		t.Fatalf("incomplete version-1 setup stage=%q err=%v", incompleteUpgrade.Stage, err)
 	}
 	legacy.Owner.Username = "../root"
 	if _, _, err := UpgradeVersion1Checkpoint(legacy, state); err == nil {
@@ -217,6 +275,55 @@ func TestVersion1CheckpointUpgradeRequiresReconfirmedProviderPolicy(t *testing.T
 	}
 	if _, _, err := UpgradeVersion1Checkpoint(upgraded, upgradedState); err == nil {
 		t.Fatal("current checkpoint was accepted by the one-way version-1 upgrader")
+	}
+}
+
+func TestVersion2CheckpointUpgradePreservesReviewedBoundaryAndRequiresAnchorEnrollment(t *testing.T) {
+	now := time.Now().UTC()
+	paths, err := UserPaths(filepath.Join(t.TempDir(), "home"), filepath.Join(t.TempDir(), "run"), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := NewConfig(ModeUser, Owner{Username: "alice", UID: 1000, GID: 1000}, paths, now)
+	legacy.Version = previousConfigVersion
+	legacy.Providers = []Provider{testOpenAIProvider(legacy, "gpt-test-2026-01-01")}
+	legacy.A2A.ListenAddress = "127.0.0.1:9443"
+	state := State{Version: previousConfigVersion, Mode: ModeUser, Stage: StageReady, UpdatedAt: now}
+
+	upgraded, upgradedState, err := UpgradeVersion2Checkpoint(legacy, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upgraded.Version != ConfigVersion || upgraded.Integrity != (IntegrityAnchor{}) || len(upgraded.Providers) != 1 || upgraded.A2A != legacy.A2A || upgradedState.Version != ConfigVersion || upgradedState.Stage != StageAnchor {
+		t.Fatalf("config=%+v state=%+v", upgraded, upgradedState)
+	}
+	if err := upgraded.ValidateReady(); err == nil || !strings.Contains(err.Error(), "ledger anchor") {
+		t.Fatalf("upgraded configuration ran without anchor enrollment: %v", err)
+	}
+
+	legacy.Providers[0].SecretRef = "ledger-anchor-provider-confusion"
+	if _, _, err := UpgradeVersion2Checkpoint(legacy, state); err == nil {
+		t.Fatal("version-2 upgrade preserved a credential in the reserved anchor namespace")
+	}
+}
+
+func TestVersion2CheckpointUpgradePreservesIncompleteSetupStage(t *testing.T) {
+	now := time.Now().UTC()
+	paths, err := UserPaths(filepath.Join(t.TempDir(), "home"), filepath.Join(t.TempDir(), "run"), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stage := range []Stage{StageWorkspace, StageProvider} {
+		legacy := NewConfig(ModeUser, Owner{Username: "alice", UID: 1000, GID: 1000}, paths, now)
+		legacy.Version = previousConfigVersion
+		state := State{Version: previousConfigVersion, Mode: ModeUser, Stage: stage, UpdatedAt: now}
+		upgraded, upgradedState, err := UpgradeVersion2Checkpoint(legacy, state)
+		if err != nil {
+			t.Fatalf("stage %s: %v", stage, err)
+		}
+		if upgraded.Version != ConfigVersion || len(upgraded.Providers) != 0 || upgradedState.Stage != stage {
+			t.Fatalf("stage %s was not preserved: config=%+v state=%+v", stage, upgraded, upgradedState)
+		}
 	}
 }
 

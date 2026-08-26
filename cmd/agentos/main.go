@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,10 +32,12 @@ import (
 	"github.com/dominicnunez/agentos/internal/effectstatus"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
+	"github.com/dominicnunez/agentos/internal/fileguard"
 	"github.com/dominicnunez/agentos/internal/gateway"
 	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/intake"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	ledgeranchor "github.com/dominicnunez/agentos/internal/ledger/anchor"
 	"github.com/dominicnunez/agentos/internal/planning"
 	"github.com/dominicnunez/agentos/internal/secrets"
 )
@@ -76,13 +81,32 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 	if err := validateRuntimeBoundary(config); err != nil {
 		return fmt.Errorf("runtime boundary is unsafe: %w", err)
 	}
-	l, err := ledger.Open(config.Paths.Database)
+	if err := ensureNoIntegrityMaintenance(config); err != nil {
+		return err
+	}
+	writerLock, err := fileguard.AcquireProcessLock(filepath.Join(config.Paths.StateDir, "ledger-writer.lock"), 0o700)
+	if err != nil {
+		return fmt.Errorf("acquire exclusive ledger writer: %w", err)
+	}
+	defer func() { err = errors.Join(err, writerLock.Close()) }()
+	l, err := ledger.OpenCurrent(config.Paths.Database)
 	if err != nil {
 		return err
 	}
 	defer func() {
 		err = errors.Join(err, l.Close())
 	}()
+	anchorState, err := l.IntegrityAnchorState(ctx)
+	if err != nil {
+		return err
+	}
+	anchorStore, err := configuredLedgerAnchor(ctx, config, source, anchorState)
+	if err != nil {
+		return err
+	}
+	if err := l.AttachIntegrityAnchor(ctx, anchorStore); err != nil {
+		return err
+	}
 	publicURL := config.A2A.PublicURL
 	actorFile := runtimeCredentialFile(config.A2A.ActorsFile, "a2a-actors.json")
 	tlsCertFile := runtimeCredentialFile(config.A2A.TLSCertFile, "a2a-tls-cert")
@@ -182,6 +206,40 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 		bindings = append(bindings, serverBinding{server: a2aServer, listener: a2aListener, certFile: tlsCertFile, keyFile: tlsKeyFile})
 	}
 	return serveAll(ctx, bindings)
+}
+
+func configuredLedgerAnchor(ctx context.Context, config bootstrap.Config, source secrets.Source, state ledgeranchor.LedgerState) (*ledgeranchor.Store, error) {
+	if ctx == nil || source == nil {
+		return nil, fmt.Errorf("ledger anchor credential source is required")
+	}
+	value, err := source.Resolve(ctx, secrets.Ref(config.Integrity.SecretRef))
+	if err != nil {
+		return nil, fmt.Errorf("resolve ledger anchor signing key: %w", err)
+	}
+	var credential ledgerAnchorCredential
+	decoder := json.NewDecoder(bytes.NewReader([]byte(value)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&credential); err != nil {
+		return nil, fmt.Errorf("decode ledger anchor signing credential: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("ledger anchor signing credential has trailing content")
+	}
+	privateKey, err := base64.StdEncoding.DecodeString(credential.PrivateKey)
+	if err != nil || len(privateKey) != ed25519.PrivateKeySize || credential.Version != 1 || credential.InstallationID != config.Integrity.InstallationID {
+		clear(privateKey)
+		return nil, fmt.Errorf("ledger anchor signing credential is invalid")
+	}
+	defer clear(privateKey)
+	publicKey, err := ledgeranchor.DecodePublicKey(config.Integrity.PublicKey)
+	if err != nil {
+		return nil, err
+	}
+	store, err := ledgeranchor.Open(config.Integrity.CheckpointFile, config.Integrity.InstallationID, publicKey, ed25519.PrivateKey(privateKey), state, time.Now)
+	if err != nil {
+		return nil, fmt.Errorf("open external ledger anchor: %w", err)
+	}
+	return store, nil
 }
 
 type inferenceAdmissionStore interface {

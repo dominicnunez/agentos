@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -21,6 +22,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	ledgeranchor "github.com/dominicnunez/agentos/internal/ledger/anchor"
 	_ "modernc.org/sqlite"
 )
 
@@ -96,6 +98,230 @@ func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	var eventCount int
 	if err := restoredDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events`).Scan(&eventCount); err != nil || eventCount != 1 {
 		t.Fatalf("restored event count=%d err=%v", eventCount, err)
+	}
+}
+
+func TestAnchoredBackupAndRestorePublishMatchingEvidenceWithoutOverwrite(t *testing.T) {
+	ctx := t.Context()
+	directory := t.TempDir()
+	source := filepath.Join(directory, "live.db")
+	store, err := ledger.Open(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", Payload: map[string]string{"state": "anchored"}}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	state, err := store.IntegrityAnchorState(ctx)
+	if closeErr := store.Close(); err != nil || closeErr != nil {
+		t.Fatal(errors.Join(err, closeErr))
+	}
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	publicKey, err := ledgeranchor.PublicKeyFromPrivate(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedPublic, err := ledgeranchor.EncodePublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installationID := "install-" + strings.Repeat("ef", 32)
+	checkpoint := filepath.Join(directory, "ledger-anchor.json")
+	if _, err := ledgeranchor.Initialize(checkpoint, installationID, privateKey, state, time.Date(2026, 8, 26, 18, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+
+	backup := filepath.Join(directory, "backup.db")
+	backupCheckpoint := filepath.Join(directory, "backup.anchor.json")
+	result, err := BackupAnchored(ctx, source, backup, checkpoint, backupCheckpoint, installationID, encodedPublic)
+	if err != nil || result.Path != backup || result.EventCount != 1 {
+		t.Fatalf("anchored backup=%+v err=%v", result, err)
+	}
+	if _, err := VerifyAnchored(ctx, backup, backupCheckpoint, installationID, encodedPublic); err != nil {
+		t.Fatalf("published backup does not match checkpoint: %v", err)
+	}
+	if _, err := VerifyAnchoredLive(ctx, backup, backupCheckpoint, installationID, encodedPublic); err != nil {
+		t.Fatalf("stable live verification rejected matching evidence: %v", err)
+	}
+
+	restored := filepath.Join(directory, "restored.db")
+	restoredCheckpoint := filepath.Join(directory, "restored.anchor.json")
+	if _, err := RestoreAnchored(ctx, backup, restored, backupCheckpoint, restoredCheckpoint, installationID, encodedPublic); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyAnchored(ctx, restored, restoredCheckpoint, installationID, encodedPublic); err != nil {
+		t.Fatalf("restored database does not match checkpoint: %v", err)
+	}
+	if _, err := BackupAnchored(ctx, source, backup, checkpoint, filepath.Join(directory, "other.anchor.json"), installationID, encodedPublic); err == nil {
+		t.Fatal("anchored backup overwrote an existing database")
+	}
+}
+
+func TestVerifyAnchoredLiveClassifiesCommitPromotionWindow(t *testing.T) {
+	ctx := t.Context()
+	directory := t.TempDir()
+	database := filepath.Join(directory, "live.db")
+	store, err := ledger.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committedState, err := store.IntegrityAnchorState(ctx)
+	if closeErr := store.Close(); err != nil || closeErr != nil {
+		t.Fatal(errors.Join(err, closeErr))
+	}
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	publicKey, err := ledgeranchor.PublicKeyFromPrivate(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedPublic, err := ledgeranchor.EncodePublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installationID := "install-" + strings.Repeat("cd", 32)
+	checkpoint := filepath.Join(directory, "ledger-anchor.json")
+	observedAt := time.Date(2026, 8, 26, 18, 0, 0, 0, time.UTC)
+	if _, err := ledgeranchor.Initialize(checkpoint, installationID, privateKey, committedState, observedAt); err != nil {
+		t.Fatal(err)
+	}
+	store, err = ledger.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", Payload: map[string]string{"state": "committed"}}); err != nil {
+		t.Fatal(err)
+	}
+	advancedState, err := store.IntegrityAnchorState(ctx)
+	if closeErr := store.Close(); err != nil || closeErr != nil {
+		t.Fatal(errors.Join(err, closeErr))
+	}
+	anchorStore, err := ledgeranchor.Open(checkpoint, installationID, publicKey, privateKey, committedState, func() time.Time { return observedAt.Add(time.Minute) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := anchorStore.Prepare(advancedState); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = anchorStore.Close() }()
+	if _, err := VerifyAnchoredLive(ctx, database, checkpoint, installationID, encodedPublic); !errors.Is(err, ErrAnchorChanging) {
+		t.Fatalf("promotion window error=%v, want ErrAnchorChanging", err)
+	}
+}
+
+func TestVerifyAnchoredLiveRejectsPersistentAmbiguousPendingCheckpoint(t *testing.T) {
+	ctx := t.Context()
+	directory := t.TempDir()
+	database := filepath.Join(directory, "live.db")
+	store, err := ledger.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committedState, err := store.IntegrityAnchorState(ctx)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", Payload: map[string]string{"state": "uncommitted"}}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	pendingState, err := store.IntegrityAnchorState(ctx)
+	if closeErr := store.Close(); err != nil || closeErr != nil {
+		t.Fatal(errors.Join(err, closeErr))
+	}
+
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	publicKey, err := ledgeranchor.PublicKeyFromPrivate(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedPublic, err := ledgeranchor.EncodePublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installationID := "install-" + strings.Repeat("ab", 32)
+	checkpoint := filepath.Join(directory, "ledger-anchor.json")
+	observedAt := time.Date(2026, 8, 26, 18, 0, 0, 0, time.UTC)
+	if _, err := ledgeranchor.Initialize(checkpoint, installationID, privateKey, committedState, observedAt); err != nil {
+		t.Fatal(err)
+	}
+	anchorStore, err := ledgeranchor.Open(checkpoint, installationID, publicKey, privateKey, committedState, func() time.Time { return observedAt.Add(time.Minute) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := anchorStore.Prepare(pendingState); err != nil {
+		_ = anchorStore.Close()
+		t.Fatal(err)
+	}
+	if err := anchorStore.Close(); err == nil {
+		t.Fatal("closing an unresolved anchor did not report its pending checkpoint")
+	}
+	if _, err := VerifyAnchored(ctx, database, checkpoint, installationID, encodedPublic); !errors.Is(err, ledgeranchor.ErrAmbiguousPending) {
+		t.Fatalf("offline verification error=%v, want ErrAmbiguousPending", err)
+	}
+
+	reverted := filepath.Join(directory, "reverted.db")
+	if _, err := Backup(ctx, database, reverted); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", reverted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM event_integrity WHERE sequence=1; DELETE FROM events WHERE sequence=1`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyAnchoredLive(ctx, reverted, checkpoint, installationID, encodedPublic); !errors.Is(err, ledgeranchor.ErrAmbiguousPending) {
+		t.Fatalf("ambiguous pending verification error=%v, want ErrAmbiguousPending", err)
+	}
+}
+
+func TestVerifyAnchoredLiveRejectsMismatchBehindDuplicatedCheckpoint(t *testing.T) {
+	ctx := t.Context()
+	directory := t.TempDir()
+	database := filepath.Join(directory, "live.db")
+	store, err := ledger.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committedState, err := store.IntegrityAnchorState(ctx)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	publicKey, _ := ledgeranchor.PublicKeyFromPrivate(privateKey)
+	encodedPublic, _ := ledgeranchor.EncodePublicKey(publicKey)
+	installationID := "install-" + strings.Repeat("ad", 32)
+	checkpoint := filepath.Join(directory, "ledger-anchor.json")
+	if _, err := ledgeranchor.Initialize(checkpoint, installationID, privateKey, committedState, time.Date(2026, 8, 26, 18, 0, 0, 0, time.UTC)); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	checkpointBody, err := os.ReadFile(checkpoint)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(checkpoint+".pending", checkpointBody, 0o600); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", Payload: map[string]string{"state": "advanced"}}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = VerifyAnchoredLive(ctx, database, checkpoint, installationID, encodedPublic)
+	if err == nil || errors.Is(err, ErrAnchorChanging) || !strings.Contains(err.Error(), "duplicated committed checkpoint") {
+		t.Fatalf("duplicated checkpoint mismatch error=%v", err)
 	}
 }
 
