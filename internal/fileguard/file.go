@@ -68,7 +68,15 @@ func WriteAtomicallyNew(path string, body []byte, fileMode, directoryMode os.Fil
 		return err
 	}
 	if err := os.Remove(temporaryPath); err != nil {
-		return err
+		staged, stagedErr := os.Lstat(temporaryPath)
+		published, publishedErr := os.Lstat(path)
+		if stagedErr != nil || publishedErr != nil || !os.SameFile(staged, published) {
+			return errors.Join(err, stagedErr, publishedErr)
+		}
+		if syncErr := syncDirectory(directory); syncErr != nil {
+			return errors.Join(err, syncErr)
+		}
+		return nil
 	}
 	return syncDirectory(directory)
 }

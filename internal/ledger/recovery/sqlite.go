@@ -247,6 +247,9 @@ func VerifyAnchoredLive(ctx context.Context, path, checkpointPath, installationI
 			return Result{}, fmt.Errorf("live database does not match its stable external ledger checkpoint")
 		}
 		if bytes.Equal(committedBodyAfter, pendingBodyAfter) {
+			if !committedAfter.Ledger.Equal(state) {
+				return Result{}, fmt.Errorf("live database does not match its duplicated committed checkpoint")
+			}
 			if err := waitForAnchorRetry(ctx); err != nil {
 				return Result{}, err
 			}

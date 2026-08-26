@@ -194,7 +194,6 @@ func configureLedgerAnchor(ctx context.Context, config *bootstrap.Config, ui *te
 	}
 	const secretRef = "ledger-anchor-signing-key"
 	credentialPath := filepath.Join(config.Paths.ConfigDir, "credentials", secretRef+".cred")
-	createdCredential := false
 	var credential ledgerAnchorCredential
 	var privateKey ed25519.PrivateKey
 	if _, err := os.Lstat(credentialPath); err == nil {
@@ -239,7 +238,6 @@ func configureLedgerAnchor(ctx context.Context, config *bootstrap.Config, ui *te
 			return fmt.Errorf("store ledger anchor signing key: %w", err)
 		}
 		clear(credentialBody)
-		createdCredential = true
 	}
 	defer clear(privateKey)
 	publicKey, err := ledgeranchor.PublicKeyFromPrivate(privateKey)
@@ -296,9 +294,6 @@ func configureLedgerAnchor(ctx context.Context, config *bootstrap.Config, ui *te
 			}
 		}
 		if _, err := ledgeranchor.Initialize(checkpointFile, credential.InstallationID, privateKey, state, nowUTC()); err != nil {
-			if createdCredential {
-				_ = os.Remove(credentialPath)
-			}
 			return err
 		}
 	} else if statErr != nil {
