@@ -3998,25 +3998,9 @@ func (l *SQLite) KnowledgeAuthorityAdmissions(ctx context.Context) ([]events.Cap
 	if err != nil {
 		return nil, nil, fmt.Errorf("read knowledge authority events: %w", err)
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT kind,record_id,version,body FROM records WHERE kind IN ('capability_lease','organization_freeze') ORDER BY kind,record_id,version`)
+	records, err := readKnowledgeAuthorityRecords(ctx, tx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read knowledge authority records: %w", err)
-	}
-	records := make([]events.KnowledgeAuthorityRecord, 0)
-	for rows.Next() {
-		var record events.KnowledgeAuthorityRecord
-		if err := rows.Scan(&record.Kind, &record.RecordID, &record.Version, &record.Body); err != nil {
-			_ = rows.Close()
-			return nil, nil, fmt.Errorf("scan knowledge authority record: %w", err)
-		}
-		records = append(records, record)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, nil, fmt.Errorf("iterate knowledge authority records: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, nil, fmt.Errorf("close knowledge authority records: %w", err)
+		return nil, nil, err
 	}
 	leases, freezes, err := events.ResolveKnowledgeAuthorityAdmissions(stream, records)
 	if err != nil {
@@ -4026,6 +4010,26 @@ func (l *SQLite) KnowledgeAuthorityAdmissions(ctx context.Context) ([]events.Cap
 		return nil, nil, fmt.Errorf("finish knowledge authority snapshot: %w", err)
 	}
 	return leases, freezes, nil
+}
+
+func readKnowledgeAuthorityRecords(ctx context.Context, tx *sql.Tx) ([]events.KnowledgeAuthorityRecord, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT kind,record_id,version,body FROM records WHERE kind IN ('capability_lease','organization_freeze') ORDER BY kind,record_id,version`)
+	if err != nil {
+		return nil, fmt.Errorf("read knowledge authority records: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	records := make([]events.KnowledgeAuthorityRecord, 0)
+	for rows.Next() {
+		var record events.KnowledgeAuthorityRecord
+		if err := rows.Scan(&record.Kind, &record.RecordID, &record.Version, &record.Body); err != nil {
+			return nil, fmt.Errorf("scan knowledge authority record: %w", err)
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate knowledge authority records: %w", err)
+	}
+	return records, nil
 }
 
 // VerifiedReplayEvents returns a bounded tenant/correlation slice and the
