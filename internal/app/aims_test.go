@@ -49,12 +49,14 @@ func TestBuildAIMSEvidenceIsBoundedVerifiableAndExcludesPrivateContent(t *testin
 			t.Fatalf("AIMS evidence leaked %q: %s", forbidden, encoded)
 		}
 	}
-	if !strings.Contains(string(encoded), `"control":"task_lifecycle_projection"`) || !strings.Contains(string(encoded), `"state":"PROJECTION_AVAILABLE"`) || !strings.Contains(string(encoded), `"area":"impact_and_risk"`) {
+	if !strings.Contains(string(encoded), `"control":"task_lifecycle_projection"`) || !strings.Contains(string(encoded), `"control":"organizational_team_roster"`) ||
+		!strings.Contains(string(encoded), `"state":"PROJECTION_AVAILABLE"`) || !strings.Contains(string(encoded), `"area":"impact_and_risk"`) {
 		t.Fatalf("AIMS evidence omitted controls or explicit gaps: %s", encoded)
 	}
 	if strings.Contains(string(encoded), "TASK_ASSIGNED") || strings.Contains(string(encoded), "LAB_PROMOTION_CANDIDATE_CREATED") ||
 		!strings.Contains(string(encoded), "TASK_ASSIGNMENT_REVALIDATED") || !strings.Contains(string(encoded), "WORK_COMPLETED") ||
-		!strings.Contains(string(encoded), "WORK_FAILED") || !strings.Contains(string(encoded), "LAB_EXPERIMENT_STARTED") {
+		!strings.Contains(string(encoded), "WORK_FAILED") || !strings.Contains(string(encoded), "LAB_EXPERIMENT_STARTED") ||
+		!strings.Contains(string(encoded), "TEAM_CREATED") || !strings.Contains(string(encoded), "TEAM_REVISED") {
 		t.Fatalf("AIMS evidence did not use the closed projection lifecycle contracts: %s", encoded)
 	}
 }
