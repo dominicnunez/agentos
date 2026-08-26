@@ -2198,6 +2198,13 @@ AND json_extract(CAST(payload AS TEXT),'$.detail.dispatch_binding.dispatch_id')=
 		if decodeExactJSONBytes(payload.Detail, &detail) != nil || detail.DispatchBinding == nil {
 			continue
 		}
+		closed, err := agentKnowledgeExecutionClosedBeforeProposal(ctx, tx, start, payload.Projection.Version, proposal)
+		if err != nil {
+			return false, err
+		}
+		if closed {
+			continue
+		}
 		stream := []events.Event{start}
 		for _, ref := range []string{detail.DispatchBinding.AgentEventRef, detail.DispatchBinding.BlueprintEventRef, detail.DispatchBinding.ExecutionProfileEventRef} {
 			bound, found, err := eventByID(ctx, tx, ref)
@@ -2215,6 +2222,24 @@ AND json_extract(CAST(payload AS TEXT),'$.detail.dispatch_binding.dispatch_id')=
 		}
 	}
 	return false, nil
+}
+
+func agentKnowledgeExecutionClosedBeforeProposal(ctx context.Context, tx *sql.Tx, start events.Event, startVersion int, proposal events.Event) (bool, error) {
+	if start.EventID == "" || start.Sequence < 1 || startVersion < 1 || proposal.Sequence <= start.Sequence ||
+		start.OrganizationID != proposal.OrganizationID || start.TaskID != proposal.TaskID || start.CorrelationID != proposal.CorrelationID || proposal.SourceExecutionID == "" {
+		return false, fmt.Errorf("Agent knowledge execution lifetime boundary is invalid")
+	}
+	var closed bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1 FROM events e
+LEFT JOIN records r ON r.admission_event_id=e.event_id AND r.kind='task' AND r.record_id=?
+WHERE e.organization_id=? AND e.task_id=? AND e.correlation_id=? AND e.sequence>? AND e.sequence<?
+AND ((e.event_type='EXECUTION_FINISHED' AND e.source_execution_id=?) OR r.version>?))`,
+		start.TaskID, start.OrganizationID, start.TaskID, start.CorrelationID, start.Sequence, proposal.Sequence, proposal.SourceExecutionID, startVersion).Scan(&closed)
+	if err != nil {
+		return false, fmt.Errorf("inspect Agent knowledge execution lifetime: %w", err)
+	}
+	return closed, nil
 }
 
 func validateKnowledgeJudgmentAuthorization(ctx context.Context, tx *sql.Tx, knowledge core.KnowledgeRecord, proposalSequence int64, admissionAt time.Time) error {

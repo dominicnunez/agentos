@@ -2955,6 +2955,39 @@ func TestAuthorityLifecycleEventsRequireAtomicRecords(t *testing.T) {
 	}
 }
 
+func TestAgentKnowledgeCreatorLifetimeUsesLiveLedgerHistory(t *testing.T) {
+	ctx := context.Background()
+	l, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	err = l.withTx(ctx, func(tx *sql.Tx) error {
+		start, err := appendEvent(ctx, tx, events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: "task-1", CorrelationID: "work-1", Payload: map[string]string{"state": "started"}})
+		if err != nil {
+			return err
+		}
+		if _, err := appendEvent(ctx, tx, events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_FINISHED", SourceActorID: "runtime", SourceExecutionID: "execution-1", TaskID: "task-1", CorrelationID: "work-1", Payload: map[string]string{"state": "finished"}}); err != nil {
+			return err
+		}
+		proposal, err := appendEvent(ctx, tx, events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_PROPOSED", SourceActorID: "agent-1", SourceExecutionID: "execution-1", TaskID: "task-1", CorrelationID: "work-1", Payload: map[string]string{"summary": "late proposal"}})
+		if err != nil {
+			return err
+		}
+		closed, err := agentKnowledgeExecutionClosedBeforeProposal(ctx, tx, start, 2, proposal)
+		if err != nil {
+			return err
+		}
+		if !closed {
+			return fmt.Errorf("finished execution remained live for knowledge attribution")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func appendTestMission(t *testing.T, ctx context.Context, l *SQLite, organizationID, missionID core.ID, createdAt time.Time) {
 	t.Helper()
 	organization := core.Organization{ID: organizationID, Name: "Organization", PolicyVersion: "v1", CreatedAt: createdAt}
