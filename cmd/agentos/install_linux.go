@@ -202,7 +202,10 @@ func systemUnitActive(ctx context.Context, config bootstrap.Config, unit string)
 	if state == "inactive" || state == "failed" || state == "unknown" || state == "not-found" {
 		return false, nil
 	}
-	return false, fmt.Errorf("cannot determine %s state (%v): %s", unit, commandErr, state)
+	if commandErr != nil {
+		return false, fmt.Errorf("cannot determine %s state %q: %w", unit, state, commandErr)
+	}
+	return false, fmt.Errorf("unsupported %s state: %s", unit, state)
 }
 
 func keyTransitionAuthority(uid int) string { return "local-uid-" + strconv.Itoa(uid) }
@@ -239,7 +242,7 @@ func prepareLedgerDatabaseAccess(ctx context.Context, config bootstrap.Config) e
 			continue
 		}
 		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || (index == 0 && info.Size() <= 0) {
-			return fmt.Errorf("Agent OS database files must be regular files, not links")
+			return fmt.Errorf("agent OS database files must be regular files, not links")
 		}
 		if err := prepareLedgerFileAccess(ctx, config, path); err != nil {
 			return err
