@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -96,5 +97,52 @@ func TestRunVerifyReturnsStructuredResult(t *testing.T) {
 	}
 	if result.Path != source || result.CheckpointPath != checkpoint || result.SHA256 == "" || result.SizeBytes == 0 {
 		t.Fatalf("result=%+v", result)
+	}
+	if result.CheckpointKeyID != keyID || result.CheckpointPublicKey != encodedPublic {
+		t.Fatalf("checkpoint trust result=%+v", result)
+	}
+}
+
+func TestTrustedRecoveryCheckpointAcceptsOnlyRetainedAncestor(t *testing.T) {
+	directory := t.TempDir()
+	transitions := filepath.Join(directory, "ledger-anchor-transitions")
+	if err := os.Mkdir(transitions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	installationID := "install-" + strings.Repeat("ac", 32)
+	oldPrivate := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	oldPublic, _ := ledgeranchor.PublicKeyFromPrivate(oldPrivate)
+	nextSeed := make([]byte, ed25519.SeedSize)
+	nextSeed[0] = 1
+	nextPrivate := ed25519.NewKeyFromSeed(nextSeed)
+	nextPublic, _ := ledgeranchor.PublicKeyFromPrivate(nextPrivate)
+	now := time.Date(2026, 8, 26, 18, 0, 0, 0, time.UTC)
+	state := ledgeranchor.LedgerState{ApplicationID: ledger.StorageApplicationID, StorageVersion: ledger.CurrentStorageVersion, EventSchemaVersion: 1, ChainAlgorithm: ledger.EventIntegrityAlgorithm}
+	oldCheckpointPath := filepath.Join(directory, "old.anchor.json")
+	oldCheckpoint, err := ledgeranchor.Initialize(oldCheckpointPath, installationID, oldPrivate, state, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldBody, err := os.ReadFile(oldCheckpointPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, transitionBody, err := ledgeranchor.NewAuthorizedRotation(oldCheckpoint, oldBody, oldPrivate, nextPrivate, "local-uid-1000", now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(transitions, "rotation.json"), transitionBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	encodedNext, _ := ledgeranchor.EncodePublicKey(nextPublic)
+	config := bootstrap.Config{Paths: bootstrap.Paths{StateDir: directory}, Integrity: bootstrap.IntegrityAnchor{InstallationID: installationID, PublicKey: encodedNext}}
+	encodedOld, oldKeyID, err := trustedRecoveryCheckpoint(config, oldCheckpointPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEncodedOld, _ := ledgeranchor.EncodePublicKey(oldPublic)
+	wantOldKeyID, _ := ledgeranchor.PublicKeyID(oldPublic)
+	if encodedOld != wantEncodedOld || oldKeyID != wantOldKeyID {
+		t.Fatalf("historical key=%q/%q want=%q/%q", encodedOld, oldKeyID, wantEncodedOld, wantOldKeyID)
 	}
 }

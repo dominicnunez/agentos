@@ -260,8 +260,14 @@ func TestVersion1CheckpointUpgradeRequiresReconfirmedProviderPolicy(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if upgraded.Version != ConfigVersion || upgradedState.Version != ConfigVersion || upgradedState.Stage != StageProvider || len(upgraded.Providers) != 0 {
+	if upgraded.Version != ConfigVersion || upgradedState.Version != ConfigVersion || upgradedState.Stage != StageAnchor || len(upgraded.Providers) != 0 {
 		t.Fatalf("upgrade did not require provider policy confirmation: config=%+v state=%+v", upgraded, upgradedState)
+	}
+	incompleteState := state
+	incompleteState.Stage = StageProvider
+	_, incompleteUpgrade, err := UpgradeVersion1Checkpoint(legacy, incompleteState)
+	if err != nil || incompleteUpgrade.Stage != StageProvider {
+		t.Fatalf("incomplete version-1 setup stage=%q err=%v", incompleteUpgrade.Stage, err)
 	}
 	legacy.Owner.Username = "../root"
 	if _, _, err := UpgradeVersion1Checkpoint(legacy, state); err == nil {

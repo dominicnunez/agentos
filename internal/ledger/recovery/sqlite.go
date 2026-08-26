@@ -29,6 +29,8 @@ import (
 type Result struct {
 	Path                string `json:"path"`
 	CheckpointPath      string `json:"checkpoint_path,omitempty"`
+	CheckpointKeyID     string `json:"checkpoint_key_id,omitempty"`
+	CheckpointPublicKey string `json:"checkpoint_public_key,omitempty"`
 	SHA256              string `json:"sha256"`
 	EventChainSHA256    string `json:"event_chain_sha256,omitempty"`
 	EventChainAlgorithm string `json:"event_chain_algorithm,omitempty"`
@@ -172,11 +174,16 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 // VerifyAnchored proves that an offline SQLite snapshot matches the signed
 // checkpoint selected by the installation's public trust root.
 func VerifyAnchored(ctx context.Context, path, checkpointPath, installationID, encodedPublicKey string) (Result, error) {
-	result, err := Verify(ctx, path)
+	publicKey, err := ledgeranchor.DecodePublicKey(encodedPublicKey)
 	if err != nil {
 		return Result{}, err
 	}
-	publicKey, err := ledgeranchor.DecodePublicKey(encodedPublicKey)
+	if _, _, pendingErr := ledgeranchor.Read(checkpointPath+".pending", installationID, publicKey); pendingErr == nil {
+		return Result{}, fmt.Errorf("%w: offline recovery cannot omit unresolved checkpoint evidence", ledgeranchor.ErrAmbiguousPending)
+	} else if !errors.Is(pendingErr, os.ErrNotExist) {
+		return Result{}, fmt.Errorf("verify pending external ledger checkpoint: %w", pendingErr)
+	}
+	result, err := Verify(ctx, path)
 	if err != nil {
 		return Result{}, err
 	}

@@ -92,6 +92,13 @@ func runIntegrityMaintenance(ctx context.Context, args []string, input *os.File,
 	}
 
 	previousPrivateKey, previousKeyErr := loadLedgerAnchorPrivateKey(ctx, config, config.Integrity.SecretRef)
+	if previousKeyErr == nil {
+		if !privateKeyMatchesPublicKey(previousPrivateKey, previousPublicKey) {
+			clear(previousPrivateKey)
+			previousPrivateKey = nil
+			previousKeyErr = fmt.Errorf("configured signing credential does not match the pinned public key")
+		}
+	}
 	if action == integrityRotateKey && previousKeyErr != nil {
 		return fmt.Errorf("rotation requires the current signing key; use reviewed key recovery only after investigating its loss: %w", previousKeyErr)
 	}
@@ -418,6 +425,9 @@ func revokePriorAnchorCredential(ctx context.Context, config bootstrap.Config, r
 			matches := keyErr == nil && bytes.Equal(candidatePublicKey, previousPublicKey)
 			clear(privateKey)
 			if !matches {
+				if record.Continuity == ledgeranchor.TransitionReviewedTrustReset {
+					continue
+				}
 				return fmt.Errorf("candidate prior credential %s does not match the retired key", ref)
 			}
 		} else if record.Continuity != ledgeranchor.TransitionReviewedTrustReset {
@@ -449,6 +459,11 @@ func loadLedgerAnchorPrivateKey(ctx context.Context, config bootstrap.Config, se
 		return nil, fmt.Errorf("ledger anchor signing credential is invalid")
 	}
 	return ed25519.PrivateKey(privateKey), nil
+}
+
+func privateKeyMatchesPublicKey(privateKey ed25519.PrivateKey, publicKey ed25519.PublicKey) bool {
+	derived, err := ledgeranchor.PublicKeyFromPrivate(privateKey)
+	return err == nil && bytes.Equal(derived, publicKey)
 }
 
 func currentIntegrityState(ctx context.Context, databasePath string) (ledgeranchor.LedgerState, error) {

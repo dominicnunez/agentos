@@ -26,6 +26,7 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/bootstrap"
 	"github.com/dominicnunez/agentos/internal/execution"
+	"github.com/dominicnunez/agentos/internal/fileguard"
 	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/ledger"
 	ledgeranchor "github.com/dominicnunez/agentos/internal/ledger/anchor"
@@ -130,6 +131,16 @@ func runInit(ctx context.Context, mode bootstrap.Mode, resume bool, input *os.Fi
 func enrollMigratedLedgerAnchor(ctx context.Context, configPath, statePath string, config *bootstrap.Config, state *bootstrap.State, ui *terminalUI) (finalErr error) {
 	if config == nil || state == nil || ui == nil || state.Stage != bootstrap.StageAnchor {
 		return fmt.Errorf("migrated ledger anchor enrollment state is invalid")
+	}
+	if len(config.Providers) == 0 {
+		provider, err := collectProvider(ctx, *config, ui.input, ui.output)
+		if err != nil {
+			return err
+		}
+		config.Providers = []bootstrap.Provider{provider}
+		if err := checkpoint(configPath, statePath, config, state); err != nil {
+			return fmt.Errorf("persist migrated provider policy: %w", err)
+		}
 	}
 	release, err := beginIntegrityMaintenance(ctx, *config)
 	if err != nil {
@@ -258,6 +269,9 @@ func configureLedgerAnchor(ctx context.Context, config *bootstrap.Config, ui *te
 			return errors.Join(err, closeErr)
 		}
 	} else if errors.Is(statErr, os.ErrNotExist) {
+		if err := prepareInitialLedgerDirectory(config.Paths.Database); err != nil {
+			return fmt.Errorf("prepare initial ledger directory: %w", err)
+		}
 		store, openErr := ledger.Open(config.Paths.Database)
 		if openErr != nil {
 			return fmt.Errorf("initialize ledger before anchor enrollment: %w", openErr)
@@ -302,6 +316,34 @@ func configureLedgerAnchor(ctx context.Context, config *bootstrap.Config, ui *te
 		InstallationID: credential.InstallationID, CheckpointFile: checkpointFile,
 		PublicKey: encodedPublic, KeyID: keyID, SecretRef: secretRef,
 		SignatureAlgorithm: ledgeranchor.SignatureAlgorithm,
+	}
+	return nil
+}
+
+func prepareInitialLedgerDirectory(databasePath string) error {
+	directory := filepath.Dir(databasePath)
+	if !filepath.IsAbs(databasePath) || filepath.Clean(databasePath) != databasePath || filepath.Base(databasePath) == "." {
+		return fmt.Errorf("initial ledger path is invalid")
+	}
+	if err := fileguard.ValidateDirectoryChain(directory); err != nil {
+		return err
+	}
+	created := false
+	if info, err := os.Lstat(directory); errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			return err
+		}
+		created = true
+	} else if err != nil {
+		return err
+	} else if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("initial ledger directory must be a directory, not a link")
+	}
+	if err := fileguard.ValidateDirectoryChain(directory); err != nil {
+		return err
+	}
+	if created {
+		return os.Chmod(directory, 0o700)
 	}
 	return nil
 }

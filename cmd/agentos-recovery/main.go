@@ -9,9 +9,11 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/dominicnunez/agentos/internal/bootstrap"
+	ledgeranchor "github.com/dominicnunez/agentos/internal/ledger/anchor"
 	"github.com/dominicnunez/agentos/internal/ledger/recovery"
 )
 
@@ -52,6 +54,9 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			return configErr
 		}
 		result, err = recovery.BackupAnchored(ctx, config.Paths.Database, *destination, config.Integrity.CheckpointFile, *destination+".anchor.json", config.Integrity.InstallationID, config.Integrity.PublicKey)
+		if err == nil {
+			result.CheckpointKeyID, result.CheckpointPublicKey = config.Integrity.KeyID, config.Integrity.PublicKey
+		}
 	case "restore":
 		flags := flag.NewFlagSet("restore", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)
@@ -73,7 +78,14 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		if *destinationAnchor == "" {
 			*destinationAnchor = *destination + ".anchor.json"
 		}
-		result, err = recovery.RestoreAnchored(ctx, *backup, *destination, *backupAnchor, *destinationAnchor, config.Integrity.InstallationID, config.Integrity.PublicKey)
+		trustedKey, keyID, keyErr := trustedRecoveryCheckpoint(config, *backupAnchor)
+		if keyErr != nil {
+			return keyErr
+		}
+		result, err = recovery.RestoreAnchored(ctx, *backup, *destination, *backupAnchor, *destinationAnchor, config.Integrity.InstallationID, trustedKey)
+		if err == nil {
+			result.CheckpointKeyID, result.CheckpointPublicKey = keyID, trustedKey
+		}
 	case "verify":
 		flags := flag.NewFlagSet("verify", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)
@@ -94,7 +106,18 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 				*checkpoint = *database + ".anchor.json"
 			}
 		}
-		result, err = recovery.VerifyAnchored(ctx, *database, *checkpoint, config.Integrity.InstallationID, config.Integrity.PublicKey)
+		trustedKey := config.Integrity.PublicKey
+		keyID := config.Integrity.KeyID
+		if *database != config.Paths.Database || *checkpoint != config.Integrity.CheckpointFile {
+			trustedKey, keyID, err = trustedRecoveryCheckpoint(config, *checkpoint)
+			if err != nil {
+				return err
+			}
+		}
+		result, err = recovery.VerifyAnchored(ctx, *database, *checkpoint, config.Integrity.InstallationID, trustedKey)
+		if err == nil {
+			result.CheckpointKeyID, result.CheckpointPublicKey = keyID, trustedKey
+		}
 	default:
 		return fmt.Errorf("unsupported command %q: use backup, restore, verify, or version", args[0])
 	}
@@ -104,6 +127,27 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	encoder := json.NewEncoder(output)
 	encoder.SetEscapeHTML(false)
 	return encoder.Encode(result)
+}
+
+func trustedRecoveryCheckpoint(config bootstrap.Config, checkpointPath string) (string, string, error) {
+	current, err := ledgeranchor.DecodePublicKey(config.Integrity.PublicKey)
+	if err != nil {
+		return "", "", err
+	}
+	history, err := ledgeranchor.TrustedPublicKeyHistory(filepath.Join(config.Paths.StateDir, "ledger-anchor-transitions"), config.Integrity.InstallationID, current)
+	if err != nil {
+		return "", "", fmt.Errorf("verify retained ledger anchor key history: %w", err)
+	}
+	_, _, selected, err := ledgeranchor.ReadTrustedCheckpoint(checkpointPath, config.Integrity.InstallationID, history)
+	if err != nil {
+		return "", "", err
+	}
+	encoded, err := ledgeranchor.EncodePublicKey(selected)
+	if err != nil {
+		return "", "", err
+	}
+	keyID, err := ledgeranchor.PublicKeyID(selected)
+	return encoded, keyID, err
 }
 
 func recoveryConfig(path string) (bootstrap.Config, error) {

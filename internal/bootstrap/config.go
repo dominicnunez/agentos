@@ -232,7 +232,11 @@ func UpgradeVersion1Checkpoint(config Config, state State) (Config, State, error
 		Version: ConfigVersion, Mode: config.Mode, Owner: config.Owner, Organization: config.Organization,
 		Paths: config.Paths, A2A: config.A2A, CreatedAt: config.CreatedAt, UpdatedAt: config.UpdatedAt,
 	}
-	upgradedState := State{Version: ConfigVersion, Mode: state.Mode, Stage: StageProvider, UpdatedAt: state.UpdatedAt}
+	nextStage := StageProvider
+	if state.Stage == StageService || state.Stage == StageReady {
+		nextStage = StageAnchor
+	}
+	upgradedState := State{Version: ConfigVersion, Mode: state.Mode, Stage: nextStage, UpdatedAt: state.UpdatedAt}
 	return upgradedConfig, upgradedState, nil
 }
 

@@ -86,6 +86,12 @@ func TestConfiguredLedgerAnchorRequiresMatchingAvailableSigningCredential(t *tes
 	if _, err := configuredLedgerAnchor(ctx, config, testSecrets{"ledger-anchor-signing-key": secrets.Value(wrongBody)}, state); err == nil {
 		t.Fatal("runtime accepted a signing credential outside the configured trust root")
 	}
+	if !privateKeyMatchesPublicKey(privateKey, publicKey) {
+		t.Fatal("matching maintenance credential was rejected")
+	}
+	if privateKeyMatchesPublicKey(wrongPrivateKey, publicKey) {
+		t.Fatal("substituted maintenance credential was treated as the current key")
+	}
 }
 
 func TestPendingResolutionEvidenceIsRetrySafeAndCollisionResistant(t *testing.T) {

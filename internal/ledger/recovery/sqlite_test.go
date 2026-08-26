@@ -257,6 +257,9 @@ func TestVerifyAnchoredLiveRejectsPersistentAmbiguousPendingCheckpoint(t *testin
 	if err := anchorStore.Close(); err == nil {
 		t.Fatal("closing an unresolved anchor did not report its pending checkpoint")
 	}
+	if _, err := VerifyAnchored(ctx, database, checkpoint, installationID, encodedPublic); !errors.Is(err, ledgeranchor.ErrAmbiguousPending) {
+		t.Fatalf("offline verification error=%v, want ErrAmbiguousPending", err)
+	}
 
 	reverted := filepath.Join(directory, "reverted.db")
 	if _, err := Backup(ctx, database, reverted); err != nil {

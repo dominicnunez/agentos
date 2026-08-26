@@ -32,9 +32,9 @@ the operator, and neither destination may exist. The command:
 6. publishes the database and `agentos-backup.db.anchor.json` without
    overwriting either destination.
 
-The JSON result reports both paths, the database SHA-256 and size, storage and
-Event Contract versions, event count and terminal sequence/event ID, chain
-algorithm, and chain head.
+The JSON result reports both paths, the checkpoint key ID and public key, the
+database SHA-256 and size, storage and Event Contract versions, event count and
+terminal sequence/event ID, chain algorithm, and chain head.
 
 Backups can contain sensitive organizational data. Moving them across a data
 boundary requires the established approval. The utility does not transmit or
@@ -63,6 +63,13 @@ name. Verification is read-only and rejects corruption, a wrong Agent OS
 application ID, unsupported or drifted storage, incomplete event-chain
 coverage, malformed Event Contracts, projection or tenant mismatches, and a
 checkpoint that does not bind the exact database head.
+
+For offline backups, the utility reconstructs only public-key ancestry that is
+cryptographically connected to the installation's current pin through
+finalized evidence under `state/ledger-anchor-transitions`. This permits
+verification of backups signed before a key rotation without restoring any
+retired private key. Unrelated, malformed, forked, or pending evidence does not
+expand trust.
 
 ## Restore without overwrite
 
@@ -96,10 +103,19 @@ The operational switch remains explicit:
 4. In system mode, set the restored database and checkpoint owner to the
    `agentos` service account and mode `0600`; user mode retains the configured
    user's ownership.
-5. Update both `paths.database` and `integrity_anchor.checkpoint_file` in the
-   installation configuration under the trusted-core approval boundary.
-6. Start Agent OS and run `agentos doctor` before accepting work.
-7. Retain the prior pair until the restored installation is accepted.
+5. Compare the restore result's `checkpoint_key_id` with the installation's
+   current key ID. If they differ, keep the service stopped and, under the
+   trusted-core approval boundary, update the database and checkpoint paths
+   plus the pinned public key and key ID to the values reported by the restore.
+   Then run `agentos integrity recover-key`. Its exact confirmation records a
+   reviewed trust discontinuity and re-anchors the restored head under a fresh
+   signing key; it never revives the retired private key.
+6. If the key IDs match, update only `paths.database` and
+   `integrity_anchor.checkpoint_file` under the same boundary.
+7. Start Agent OS and run `agentos doctor` before accepting work.
+8. Retain the prior pair, transition evidence, and trust-reset evidence until
+   the restored installation is accepted under the applicable retention
+   policy.
 
 A database pointer cannot be rolled back independently of its exact signed
 checkpoint. Swapping only the database intentionally fails closed.

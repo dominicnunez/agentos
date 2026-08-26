@@ -138,10 +138,16 @@ authority, online revocation service, or remote key-recovery authority.
 ## Backup, restore, and migration boundary
 
 Every database backup is paired with the exact signed checkpoint observed
-before and after the SQLite snapshot. A changed checkpoint aborts the backup.
-Restore publishes a new database and its paired checkpoint without overwriting
-either destination. Verification requires the installation identity and
-configured public key; a database file alone is insufficient.
+before and after the SQLite snapshot. A changed checkpoint or any unresolved
+pending successor aborts backup, verification, and restore. Restore publishes
+a new database and its paired checkpoint without overwriting either
+destination; a database file alone is insufficient.
+
+Finalized key-transition evidence authenticates older backup keys back to the
+currently pinned trust root. Retired private credentials remain revoked.
+Activating a restored backup under an ancestor key therefore requires the
+explicit reviewed `recover-key` procedure, which records the discontinuity and
+re-anchors that restored ledger head under a fresh key.
 
 Encrypted signing credentials and configuration are not embedded in database
 backups. Operators need a separately reviewed secret-recovery or escrow plan

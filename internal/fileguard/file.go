@@ -153,3 +153,10 @@ func rejectSymlinkComponents(path string) error {
 	}
 	return nil
 }
+
+// ValidateDirectoryChain rejects non-absolute paths and any existing path
+// component that is not a real directory. Missing trailing components are
+// permitted so callers can create them after validation and then revalidate.
+func ValidateDirectoryChain(path string) error {
+	return rejectSymlinkComponents(path)
+}
