@@ -48,6 +48,32 @@ func TestAgentKnowledgeProposalRemainsUnsealedInput(t *testing.T) {
 	}
 }
 
+func TestKnowledgeAdmissionFreezeStateUsesLatestPriorAdmission(t *testing.T) {
+	updatedAt := time.Date(2026, time.August, 26, 1, 0, 0, 0, time.UTC)
+	frozenPayload, err := json.Marshal(organizationFreezePayload{OrganizationID: "org-1", Frozen: true, UpdatedAt: updatedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unfrozenPayload, err := json.Marshal(organizationFreezePayload{OrganizationID: "org-1", Frozen: false, UpdatedAt: updatedAt.Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator := NewKnowledgeAdmissionValidator([]Event{
+		{EventID: "freeze-2", Sequence: 2, OrganizationID: "org-1", EventType: "FREEZE_SET", CreatedAt: updatedAt, SchemaVersion: SchemaVersion, Payload: frozenPayload},
+		{EventID: "freeze-4", Sequence: 4, OrganizationID: "org-1", EventType: "FREEZE_SET", CreatedAt: updatedAt.Add(time.Minute), SchemaVersion: SchemaVersion, Payload: unfrozenPayload},
+	})
+	if !validator.organizationFrozenAt("org-1", 3) {
+		t.Fatal("active freeze was not replayed")
+	}
+	if validator.organizationFrozenAt("org-1", 5) {
+		t.Fatal("later unfreeze was not replayed")
+	}
+	validator.UseOrganizationFreezeAdmissions([]OrganizationFreezeAdmission{{OrganizationID: "org-1", Frozen: true, Sequence: 6}})
+	if !validator.organizationFrozenAt("org-1", 7) || validator.organizationFrozenAt("org-1", 6) {
+		t.Fatal("record-backed freeze override ignored sequence boundary")
+	}
+}
+
 func TestTaskProjectionTransitionsAreExact(t *testing.T) {
 	base := core.Task{
 		ID: "task-1", WorkID: "work-1", Description: "bounded work",

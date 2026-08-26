@@ -200,6 +200,17 @@ func TestVerifyRejectsKnowledgeWhenValidatorLeaseRecordIsMissing(t *testing.T) {
 		_ = store.Close()
 		t.Fatal(err)
 	}
+	freeze := recoveryFreezeState("org-1", true, "incident")
+	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", "task-validation", nil, nil, "organization_freeze", "org-1", 1, freeze); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	freeze.Frozen = false
+	freeze.UpdatedAt = time.Now().UTC()
+	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", "task-validation", nil, nil, "organization_freeze", "org-1", 2, freeze); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
 	active := candidate
 	active.Version = 2
 	active.Status = core.KnowledgeActive
@@ -234,12 +245,60 @@ func TestVerifyRejectsKnowledgeWhenValidatorLeaseRecordIsMissing(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "authenticated validator admission") {
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "capability admission event") {
 		t.Fatalf("missing validator lease record was certified: %v", err)
 	}
 }
 
+func TestVerifyRejectsFreezeEventWithoutDurableState(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "missing-freeze-state.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := recoveryFreezeState("org-1", true, "incident")
+	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", "task-incident", nil, nil, "organization_freeze", "org-1", 1, state); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err != nil {
+		t.Fatalf("verify exact freeze admission: %v", err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM records WHERE kind='organization_freeze'`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "freeze admission event") {
+		t.Fatalf("orphaned freeze event was certified: %v", err)
+	}
+}
+
 func recoveryIntPointer(value int) *int { return &value }
+
+func recoveryFreezeState(organizationID core.ID, frozen bool, reason string) struct {
+	OrganizationID core.ID   `json:"organization_id"`
+	Frozen         bool      `json:"frozen"`
+	Reason         string    `json:"reason,omitempty"`
+	UpdatedAt      time.Time `json:"updated_at"`
+} {
+	return struct {
+		OrganizationID core.ID   `json:"organization_id"`
+		Frozen         bool      `json:"frozen"`
+		Reason         string    `json:"reason,omitempty"`
+		UpdatedAt      time.Time `json:"updated_at"`
+	}{OrganizationID: organizationID, Frozen: frozen, Reason: reason, UpdatedAt: time.Now().UTC()}
+}
 
 func TestVerifyRejectsSemanticallyValidEventPayloadTampering(t *testing.T) {
 	ctx := t.Context()

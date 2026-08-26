@@ -53,7 +53,9 @@ least one lineage reference and every reference must identify an exact earlier
 exact `knowledge.validate` capability admission whose authenticated principal
 kind matches the claimed validator; revocation and expiry are rechecked in the
 activation transaction, and the lease must have been admitted by that same
-Organization. Startup reconstruction and offline backup verification
+Organization before the judgment. Freeze state is checked at both judgment
+and activation, and authorization uses the activation event's single captured
+timestamp. Startup reconstruction and offline backup verification
 use the same Event-Contract admission validator and verified capability-lease
 history to recheck evidence timing, tenant ownership, scope, lifecycle order,
 validator attribution, lease expiry or revocation, and lineage.

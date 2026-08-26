@@ -1611,10 +1611,11 @@ func loadTaskAssignmentProfile(ctx context.Context, tx *sql.Tx, target map[core.
 }
 
 func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProjection) (events.Event, error) {
-	if err := validatePreparedProjectionRevision(ctx, tx, item); err != nil {
+	admissionAt := time.Now().UTC()
+	if err := validatePreparedProjectionRevision(ctx, tx, item, admissionAt); err != nil {
 		return events.Event{}, err
 	}
-	event, payload, err := appendProjectionEvent(ctx, tx, item.eventDraft, item.record, item.detail)
+	event, payload, err := appendProjectionEventAt(ctx, tx, item.eventDraft, item.record, item.detail, admissionAt)
 	if err != nil {
 		return events.Event{}, err
 	}
@@ -1659,7 +1660,7 @@ func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProj
 	return event, nil
 }
 
-func validatePreparedProjectionRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+func validatePreparedProjectionRevision(ctx context.Context, tx *sql.Tx, item preparedProjection, admissionAt time.Time) error {
 	switch item.draft.ProjectionKind {
 	case "organization":
 		return nil
@@ -1692,7 +1693,7 @@ func validatePreparedProjectionRevision(ctx context.Context, tx *sql.Tx, item pr
 	case "lab_promotion_candidate":
 		return validateLabPromotionCandidateRevision(ctx, tx, item)
 	case "knowledge":
-		return validateKnowledgeRevision(ctx, tx, item)
+		return validateKnowledgeRevision(ctx, tx, item, admissionAt)
 	default:
 		return fmt.Errorf("projection kind has no typed revision validator")
 	}
@@ -2038,7 +2039,7 @@ func validateGoalRevision(ctx context.Context, tx *sql.Tx, item preparedProjecti
 	return events.ValidateGoalProjectionTransition(item.draft.Event.EventType, item.draft.Version, &previous, goal)
 }
 
-func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedProjection, admissionAt time.Time) error {
 	knowledge := *item.knowledge
 	if knowledge.KnowledgeID != core.ID(item.draft.RecordID) || string(knowledge.OrganizationID) != item.draft.Event.OrganizationID ||
 		item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" ||
@@ -2123,7 +2124,7 @@ func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedPro
 			return err
 		}
 		if knowledge.ValidatedByKind == core.PrincipalHuman || knowledge.ValidatedByKind == core.PrincipalAgent || knowledge.ValidatedByKind == core.PrincipalExternalAgent {
-			if err := validateKnowledgeJudgmentAuthorization(ctx, tx, knowledge, proposalSequence); err != nil {
+			if err := validateKnowledgeJudgmentAuthorization(ctx, tx, knowledge, proposalSequence, admissionAt); err != nil {
 				return err
 			}
 		}
@@ -2212,7 +2213,7 @@ AND json_extract(CAST(payload AS TEXT),'$.detail.dispatch_binding.dispatch_id')=
 	return false, nil
 }
 
-func validateKnowledgeJudgmentAuthorization(ctx context.Context, tx *sql.Tx, knowledge core.KnowledgeRecord, proposalSequence int64) error {
+func validateKnowledgeJudgmentAuthorization(ctx context.Context, tx *sql.Tx, knowledge core.KnowledgeRecord, proposalSequence int64, admissionAt time.Time) error {
 	for _, ref := range knowledge.ValidationRefs {
 		judgment, found, err := eventByID(ctx, tx, ref)
 		if err != nil {
@@ -2231,11 +2232,16 @@ func validateKnowledgeJudgmentAuthorization(ctx context.Context, tx *sql.Tx, kno
 			!slices.Contains(judgment.AuthorizationRefs, string(recorded.LeaseID)) {
 			continue
 		}
-		current, err := currentAuthorizationTrace(ctx, tx, knowledge.OrganizationID, recorded.ActorID, recorded.TaskID, recorded.Action, recorded.Resource, recorded.Scope, judgment.AuthorizationRefs, time.Now().UTC())
+		atJudgment, err := authorizationTraceAtSequence(ctx, tx, knowledge.OrganizationID, recorded.ActorID, recorded.TaskID, recorded.Action, recorded.Resource, recorded.Scope, judgment.AuthorizationRefs, judgment.Sequence, judgment.CreatedAt)
 		if err != nil {
 			return err
 		}
-		if current.Allowed && current.LeaseID == recorded.LeaseID && current.ActorKind == recorded.ActorKind {
+		current, err := currentAuthorizationTrace(ctx, tx, knowledge.OrganizationID, recorded.ActorID, recorded.TaskID, recorded.Action, recorded.Resource, recorded.Scope, judgment.AuthorizationRefs, admissionAt)
+		if err != nil {
+			return err
+		}
+		if atJudgment.Allowed && atJudgment.LeaseID == recorded.LeaseID && atJudgment.ActorKind == recorded.ActorKind &&
+			current.Allowed && current.LeaseID == recorded.LeaseID && current.ActorKind == recorded.ActorKind {
 			return nil
 		}
 	}
@@ -3002,6 +3008,124 @@ func currentAuthorizationTrace(ctx context.Context, tx *sql.Tx, organizationID, 
 	return authority.Check(now, actorID, taskID, action, resource, scope, leases, frozen), nil
 }
 
+func authorizationTraceAtSequence(ctx context.Context, tx *sql.Tx, organizationID, actorID, taskID core.ID, action, resource, scope string, authorizationRefs []string, beforeSequence int64, at time.Time) (core.AuthorizationTrace, error) {
+	frozen, err := organizationFrozenAtSequence(ctx, tx, organizationID, beforeSequence)
+	if err != nil {
+		return core.AuthorizationTrace{}, err
+	}
+	leases := make([]core.CapabilityLease, 0, len(authorizationRefs))
+	for _, leaseID := range authorizationRefs {
+		lease, found, err := capabilityLeaseAtSequence(ctx, tx, organizationID, leaseID, beforeSequence)
+		if err != nil {
+			return core.AuthorizationTrace{}, err
+		}
+		if found {
+			leases = append(leases, lease)
+		}
+	}
+	return authority.Check(at, actorID, taskID, action, resource, scope, leases, frozen), nil
+}
+
+type genericRecordRevision struct {
+	version int
+	body    []byte
+}
+
+func genericRecordRevisions(ctx context.Context, tx *sql.Tx, kind, recordID string) ([]genericRecordRevision, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT version,body FROM records WHERE kind=? AND record_id=? ORDER BY version`, kind, recordID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var revisions []genericRecordRevision
+	for rows.Next() {
+		var revision genericRecordRevision
+		if err := rows.Scan(&revision.version, &revision.body); err != nil {
+			return nil, err
+		}
+		revisions = append(revisions, revision)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return revisions, nil
+}
+
+func capabilityLeaseAtSequence(ctx context.Context, tx *sql.Tx, organizationID core.ID, leaseID string, beforeSequence int64) (core.CapabilityLease, bool, error) {
+	revisions, err := genericRecordRevisions(ctx, tx, "capability_lease", leaseID)
+	if err != nil {
+		return core.CapabilityLease{}, false, fmt.Errorf("read capability lease %s history: %w", leaseID, err)
+	}
+	var selected core.CapabilityLease
+	var selectedSequence int64
+	for index, revision := range revisions {
+		var lease core.CapabilityLease
+		if revision.version != index+1 || decodeExactJSONBytes(revision.body, &lease) != nil || string(lease.ID) != leaseID || lease.OriginTaskID == "" {
+			return core.CapabilityLease{}, false, fmt.Errorf("capability lease %s history is invalid", leaseID)
+		}
+		eventType := "CAPABILITY_GRANTED"
+		if revision.version > 1 {
+			eventType = "CAPABILITY_REVOKED"
+		}
+		count, sequence, err := exactGenericAdmissionBefore(ctx, tx, organizationID, eventType, lease.OriginTaskID, revision.body, beforeSequence)
+		if err != nil {
+			return core.CapabilityLease{}, false, fmt.Errorf("read capability lease %s admission: %w", leaseID, err)
+		}
+		if count > 1 {
+			return core.CapabilityLease{}, false, fmt.Errorf("capability lease %s has ambiguous organization admission", leaseID)
+		}
+		if count == 1 && sequence > selectedSequence {
+			selected, selectedSequence = lease, sequence
+		}
+	}
+	return selected, selectedSequence > 0, nil
+}
+
+func organizationFrozenAtSequence(ctx context.Context, tx *sql.Tx, organizationID core.ID, beforeSequence int64) (bool, error) {
+	revisions, err := genericRecordRevisions(ctx, tx, "organization_freeze", string(organizationID))
+	if err != nil {
+		return false, fmt.Errorf("read organization freeze history: %w", err)
+	}
+	var frozen bool
+	var selectedSequence int64
+	for index, revision := range revisions {
+		var state authority.FreezeState
+		if revision.version != index+1 || decodeExactJSONBytes(revision.body, &state) != nil || state.OrganizationID != organizationID || state.UpdatedAt.IsZero() {
+			return false, fmt.Errorf("organization freeze history is invalid")
+		}
+		count, sequence, err := exactGenericAdmissionBefore(ctx, tx, organizationID, "FREEZE_SET", "", revision.body, beforeSequence)
+		if err != nil {
+			return false, fmt.Errorf("read organization freeze admission: %w", err)
+		}
+		if count > 1 {
+			return false, fmt.Errorf("organization freeze has ambiguous admission")
+		}
+		if count == 1 && sequence > selectedSequence {
+			frozen, selectedSequence = state.Frozen, sequence
+		}
+	}
+	return selectedSequence > 0 && frozen, nil
+}
+
+func exactGenericAdmissionBefore(ctx context.Context, tx *sql.Tx, organizationID core.ID, eventType string, taskID core.ID, body []byte, beforeSequence int64) (int, int64, error) {
+	query := `SELECT COUNT(*),COALESCE(MAX(sequence),0) FROM events WHERE organization_id=? AND event_type=? AND payload=? AND sequence<?
+AND source_execution_id='' AND recipient_scope='' AND recipient_id='' AND schema_version=?`
+	args := []any{organizationID, eventType, body, beforeSequence, events.SchemaVersion}
+	if taskID != "" {
+		query += ` AND task_id=?`
+		args = append(args, taskID)
+	}
+	var count int
+	var sequence int64
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&count, &sequence); err != nil {
+		return 0, 0, err
+	}
+	return count, sequence, nil
+}
+
 func latestCapabilityLeaseBody(ctx context.Context, tx *sql.Tx, organizationID core.ID, leaseID string) ([]byte, bool, error) {
 	var version int
 	var body []byte
@@ -3738,11 +3862,15 @@ func appendEventWithID(ctx context.Context, db sqlExecutor, d events.TrustedDraf
 }
 
 func appendProjectionEvent(ctx context.Context, db sqlExecutor, draft events.TrustedDraft, record events.ProjectionRecord, detail json.RawMessage) (events.Event, events.ProjectionEventPayload, error) {
+	return appendProjectionEventAt(ctx, db, draft, record, detail, time.Now().UTC())
+}
+
+func appendProjectionEventAt(ctx context.Context, db sqlExecutor, draft events.TrustedDraft, record events.ProjectionRecord, detail json.RawMessage, admissionAt time.Time) (events.Event, events.ProjectionEventPayload, error) {
 	id, err := newEventID()
 	if err != nil {
 		return events.Event{}, events.ProjectionEventPayload{}, err
 	}
-	event, err := insertEvent(ctx, db, draft, id, []byte(`{}`), time.Now().UTC(), false)
+	event, err := insertEvent(ctx, db, draft, id, []byte(`{}`), admissionAt, false)
 	if err != nil {
 		return events.Event{}, events.ProjectionEventPayload{}, err
 	}

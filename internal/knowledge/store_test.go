@@ -210,6 +210,75 @@ func TestStoreRejectsRevokedValidatorAuthorityAfterJudgmentAdmission(t *testing.
 	}
 }
 
+func TestStoreBindsJudgmentToPriorLeaseAndFreezeState(t *testing.T) {
+	ctx := context.Background()
+	store, gateway := newKnowledgeTestStore(t)
+	evidence := seedKnowledgeOrganization(t, ctx, gateway, "org-1")
+	service := New(gateway)
+	candidate := knowledgeCandidate("k-judgment-order", "org-1", evidence.EventID)
+	if _, err := service.Propose(ctx, candidate); err != nil {
+		t.Fatal(err)
+	}
+	lease := core.CapabilityLease{
+		ID: "lease-judgment-order", ActorID: "reviewer-1", ActorKind: core.PrincipalHuman,
+		Action: "knowledge.validate", Resource: string(candidate.KnowledgeID), Scope: "org-1", OriginTaskID: "task-validation",
+	}
+	prematureJudgment, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "CAPABILITY_CHECKED", SourceActorID: string(lease.ActorID), TaskID: string(lease.OriginTaskID),
+		AuthorizationRefs: []string{string(lease.ID)}, Payload: authorizedKnowledgeValidationTrace(lease),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "runtime", string(lease.OriginTaskID), nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+		t.Fatal(err)
+	}
+	active := candidate
+	active.Version = 2
+	active.Status = core.KnowledgeActive
+	active.ValidationMethod = core.KnowledgeValidationHuman
+	active.ValidationRefs = []string{prematureJudgment.EventID}
+	active.ValidatedBy = lease.ActorID
+	active.ValidatedByKind = lease.ActorKind
+	verifiedAt := time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
+	active.SupersedesVersion = integerPointer(1)
+	if _, err := service.Activate(ctx, active); err == nil {
+		t.Fatal("judgment recorded before its lease grant was accepted")
+	}
+	judgment, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "CAPABILITY_CHECKED", SourceActorID: string(lease.ActorID), TaskID: string(lease.OriginTaskID),
+		AuthorizationRefs: []string{string(lease.ID)}, Payload: authorizedKnowledgeValidationTrace(lease),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	active.ValidationRefs = []string{judgment.EventID}
+	verifiedAt = time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
+	frozenAt := time.Now().UTC()
+	freeze := struct {
+		OrganizationID core.ID   `json:"organization_id"`
+		Frozen         bool      `json:"frozen"`
+		Reason         string    `json:"reason,omitempty"`
+		UpdatedAt      time.Time `json:"updated_at"`
+	}{OrganizationID: "org-1", Frozen: true, Reason: "incident", UpdatedAt: frozenAt}
+	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", string(lease.OriginTaskID), nil, nil, "organization_freeze", "org-1", 1, freeze); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Activate(ctx, active); err == nil {
+		t.Fatal("knowledge activation while the organization was frozen was accepted")
+	}
+	freeze.Frozen = false
+	freeze.UpdatedAt = time.Now().UTC()
+	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", string(lease.OriginTaskID), nil, nil, "organization_freeze", "org-1", 2, freeze); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Activate(ctx, active); err != nil {
+		t.Fatalf("activation after an admitted unfreeze was rejected: %v", err)
+	}
+}
+
 func TestStoreRejectsAgentCreatorWithoutDurableExecutionBinding(t *testing.T) {
 	ctx := context.Background()
 	_, gateway := newKnowledgeTestStore(t)

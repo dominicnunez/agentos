@@ -25,6 +25,7 @@ type KnowledgeAdmissionValidator struct {
 	revisions          map[core.ID]map[int]core.KnowledgeRecord
 	admissionSequences map[core.ID]int64
 	leaseAdmissions    map[core.ID][]CapabilityLeaseAdmission
+	freezeAdmissions   map[core.ID][]OrganizationFreezeAdmission
 }
 
 type CapabilityLeaseAdmission struct {
@@ -33,15 +34,35 @@ type CapabilityLeaseAdmission struct {
 	Sequence       int64
 }
 
+type OrganizationFreezeAdmission struct {
+	OrganizationID core.ID
+	Frozen         bool
+	Sequence       int64
+}
+
+type organizationFreezePayload struct {
+	OrganizationID core.ID   `json:"organization_id"`
+	Frozen         bool      `json:"frozen"`
+	Reason         string    `json:"reason,omitempty"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
 func NewKnowledgeAdmissionValidator(stream []Event) *KnowledgeAdmissionValidator {
 	index := make(map[string]Event, len(stream))
 	leaseAdmissions := make(map[core.ID][]CapabilityLeaseAdmission)
+	freezeAdmissions := make(map[core.ID][]OrganizationFreezeAdmission)
 	for _, event := range stream {
 		index[event.EventID] = event
 		if event.EventType == "CAPABILITY_GRANTED" || event.EventType == "CAPABILITY_REVOKED" {
 			var lease core.CapabilityLease
 			if decodeExactPayload(event.Payload, &lease) == nil && lease.ID != "" {
 				leaseAdmissions[lease.ID] = append(leaseAdmissions[lease.ID], CapabilityLeaseAdmission{Lease: lease, OrganizationID: core.ID(event.OrganizationID), Sequence: event.Sequence})
+			}
+		}
+		if event.EventType == "FREEZE_SET" {
+			var state organizationFreezePayload
+			if decodeExactPayload(event.Payload, &state) == nil && state.OrganizationID != "" && string(state.OrganizationID) == event.OrganizationID {
+				freezeAdmissions[state.OrganizationID] = append(freezeAdmissions[state.OrganizationID], OrganizationFreezeAdmission{OrganizationID: state.OrganizationID, Frozen: state.Frozen, Sequence: event.Sequence})
 			}
 		}
 	}
@@ -52,6 +73,17 @@ func NewKnowledgeAdmissionValidator(stream []Event) *KnowledgeAdmissionValidator
 		revisions:          make(map[core.ID]map[int]core.KnowledgeRecord),
 		admissionSequences: make(map[core.ID]int64),
 		leaseAdmissions:    leaseAdmissions,
+		freezeAdmissions:   freezeAdmissions,
+	}
+}
+
+func (v *KnowledgeAdmissionValidator) UseOrganizationFreezeAdmissions(admissions []OrganizationFreezeAdmission) {
+	if v == nil {
+		return
+	}
+	v.freezeAdmissions = make(map[core.ID][]OrganizationFreezeAdmission)
+	for _, admission := range admissions {
+		v.freezeAdmissions[admission.OrganizationID] = append(v.freezeAdmissions[admission.OrganizationID], admission)
 	}
 }
 
@@ -270,6 +302,9 @@ func (v *KnowledgeAdmissionValidator) hasAuthorizedJudgment(value core.Knowledge
 }
 
 func (v *KnowledgeAdmissionValidator) leaseAllowsAt(trace core.AuthorizationTrace, value core.KnowledgeRecord, judgment, activation Event) bool {
+	if v.organizationFrozenAt(value.OrganizationID, judgment.Sequence) || v.organizationFrozenAt(value.OrganizationID, activation.Sequence) {
+		return false
+	}
 	var atJudgment, atActivation CapabilityLeaseAdmission
 	for _, admission := range v.leaseAdmissions[trace.LeaseID] {
 		if admission.Sequence < judgment.Sequence && admission.Sequence > atJudgment.Sequence {
@@ -285,6 +320,16 @@ func (v *KnowledgeAdmissionValidator) leaseAllowsAt(trace core.AuthorizationTrac
 		lease.ActorID == trace.ActorID && lease.ActorKind == trace.ActorKind && lease.OriginTaskID == trace.TaskID &&
 		lease.Action == trace.Action && lease.Resource == trace.Resource && lease.Scope == trace.Scope && lease.RevokedAt == nil &&
 		(lease.ExpiresAt == nil || (judgment.CreatedAt.Before(*lease.ExpiresAt) && activation.CreatedAt.Before(*lease.ExpiresAt)))
+}
+
+func (v *KnowledgeAdmissionValidator) organizationFrozenAt(organizationID core.ID, beforeSequence int64) bool {
+	var current OrganizationFreezeAdmission
+	for _, admission := range v.freezeAdmissions[organizationID] {
+		if admission.Sequence < beforeSequence && admission.Sequence > current.Sequence {
+			current = admission
+		}
+	}
+	return current.Sequence > 0 && current.Frozen
 }
 
 func (v *KnowledgeAdmissionValidator) hasSubsequentValidation(occurrences, validation []string, proposalSequence int64) bool {
