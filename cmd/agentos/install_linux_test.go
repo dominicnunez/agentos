@@ -54,6 +54,9 @@ func TestSystemdUnitsQuoteConfiguredPathsAndPercentSpecifiers(t *testing.T) {
 	if !strings.Contains(unit, "UMask=0077") {
 		t.Fatal("system service does not enforce a private file-creation mask")
 	}
+	if !strings.Contains(unit, `ExecStartPre=/usr/bin/test ! -e "/run/agentos/integrity-maintenance.lock"`) {
+		t.Fatal("system service can start during ledger integrity maintenance")
+	}
 	if !strings.Contains(systemSocketUnit(config), "DirectoryMode=0711") {
 		t.Fatal("socket parent directory mode is not explicit")
 	}
@@ -88,6 +91,9 @@ func TestUserServiceLoadsReviewedA2ACredentials(t *testing.T) {
 	}
 	if !strings.Contains(unit, "UMask=0077") {
 		t.Fatal("user service does not enforce a private file-creation mask")
+	}
+	if !strings.Contains(unit, "ExecStartPre=/usr/bin/test ! -e ") || !strings.Contains(unit, "integrity-maintenance.lock") {
+		t.Fatal("user service can start during ledger integrity maintenance")
 	}
 }
 
@@ -257,6 +263,46 @@ func TestUserCheckpointAccessIsPrivateAndRejectsLinks(t *testing.T) {
 	}
 	if err := doctorIntegrityCheckpointAccess(context.Background(), config); err == nil {
 		t.Fatal("doctor accepted checkpoint symlink")
+	}
+}
+
+func TestUserDatabaseAccessIsPrivateAndRejectsLinks(t *testing.T) {
+	directory := t.TempDir()
+	database := filepath.Join(directory, "agentos.db")
+	if err := os.WriteFile(database, []byte("database"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	wal := database + "-wal"
+	if err := os.WriteFile(wal, []byte("wal"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid, err := fileIdentity(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := bootstrap.Config{
+		Mode: bootstrap.ModeUser, Owner: bootstrap.Owner{Username: "owner", UID: uid, GID: gid},
+		Paths: bootstrap.Paths{Database: database},
+	}
+	if err := prepareLedgerDatabaseAccess(context.Background(), config); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{database, wal} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode=%v", path, info.Mode().Perm())
+		}
+	}
+	link := filepath.Join(directory, "agentos-link.db")
+	if err := os.Symlink(database, link); err != nil {
+		t.Fatal(err)
+	}
+	config.Paths.Database = link
+	if err := prepareLedgerDatabaseAccess(context.Background(), config); err == nil {
+		t.Fatal("database symlink was accepted")
 	}
 }
 

@@ -266,8 +266,12 @@ func runDoctor(ctx context.Context, args []string, output io.Writer) error {
 	checks = append(checks, doctorCheck{Name: "configuration", Status: status(validationErr == nil), Detail: detail(validationErr, configPath)})
 	policyErr := doctorInferencePolicy(config, nowUTC())
 	checks = append(checks, doctorCheck{Name: "inference authorization", Status: status(policyErr == nil), Detail: detail(policyErr, "current reviewed provider budget")})
-	checkpointAccessErr := doctorIntegrityCheckpointAccess(ctx, config)
-	checks = append(checks, doctorCheck{Name: "ledger checkpoint access", Status: status(checkpointAccessErr == nil), Detail: detail(checkpointAccessErr, "private checkpoint ownership and permissions verified")})
+	if config.Mode == bootstrap.ModeSystem && effectiveUID() != 0 {
+		checks = append(checks, doctorCheck{Name: "ledger checkpoint access", Status: "INFO", Detail: "administrator access is required to inspect the service-private checkpoint"})
+	} else {
+		checkpointAccessErr := doctorIntegrityCheckpointAccess(ctx, config)
+		checks = append(checks, doctorCheck{Name: "ledger checkpoint access", Status: status(checkpointAccessErr == nil), Detail: detail(checkpointAccessErr, "private checkpoint ownership and permissions verified")})
+	}
 	for _, configuredPath := range []struct {
 		name string
 		path string
@@ -287,8 +291,12 @@ func runDoctor(ctx context.Context, args []string, output io.Writer) error {
 		checks = append(checks, doctorCheck{Name: "event ledger", Status: "BLOCKED", Detail: ledgerErr.Error()})
 	} else if config.Mode == bootstrap.ModeSystem && effectiveUID() != 0 {
 		checks = append(checks, doctorCheck{Name: "event ledger", Status: "INFO", Detail: "administrator access is required to verify private storage"})
-	} else if result, verifyErr := ledgerrecovery.VerifyAnchored(ctx, config.Paths.Database, config.Integrity.CheckpointFile, config.Integrity.InstallationID, config.Integrity.PublicKey); verifyErr != nil {
-		checks = append(checks, doctorCheck{Name: "event ledger", Status: "BLOCKED", Detail: verifyErr.Error()})
+	} else if result, verifyErr := ledgerrecovery.VerifyAnchoredLive(ctx, config.Paths.Database, config.Integrity.CheckpointFile, config.Integrity.InstallationID, config.Integrity.PublicKey); verifyErr != nil {
+		if errors.Is(verifyErr, ledgerrecovery.ErrAnchorChanging) {
+			checks = append(checks, doctorCheck{Name: "event ledger", Status: "INFO", Detail: "ledger changed during verification; rerun doctor, or stop the service and investigate if this persists"})
+		} else {
+			checks = append(checks, doctorCheck{Name: "event ledger", Status: "BLOCKED", Detail: verifyErr.Error()})
+		}
 	} else {
 		chain := "empty"
 		if result.EventChainSHA256 != "" {

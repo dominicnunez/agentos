@@ -94,6 +94,11 @@ func runInit(ctx context.Context, mode bootstrap.Mode, resume bool, input *os.Fi
 			return err
 		}
 	}
+	if state.Stage == bootstrap.StageAnchor {
+		if err := enrollMigratedLedgerAnchor(ctx, configPath, statePath, &config, &state, ui); err != nil {
+			return err
+		}
+	}
 	if state.Stage == bootstrap.StageService {
 		if config.Integrity.InstallationID == "" {
 			if err := configureLedgerAnchor(ctx, &config, ui); err != nil {
@@ -120,6 +125,50 @@ func runInit(ctx context.Context, mode bootstrap.Mode, resume bool, input *os.Fi
 	}
 	_, err = fmt.Fprintln(output, "\nAgent OS is ready. Run agentos to open the organization dashboard.")
 	return err
+}
+
+func enrollMigratedLedgerAnchor(ctx context.Context, configPath, statePath string, config *bootstrap.Config, state *bootstrap.State, ui *terminalUI) (finalErr error) {
+	if config == nil || state == nil || ui == nil || state.Stage != bootstrap.StageAnchor {
+		return fmt.Errorf("migrated ledger anchor enrollment state is invalid")
+	}
+	release, err := beginIntegrityMaintenance(ctx, *config)
+	if err != nil {
+		return fmt.Errorf("secure migrated ledger anchor enrollment: %w", err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			finalErr = errors.Join(finalErr, release())
+		}
+	}()
+	if config.Integrity.InstallationID == "" {
+		if err := configureLedgerAnchor(ctx, config, ui); err != nil {
+			return err
+		}
+		if err := checkpoint(configPath, statePath, config, state); err != nil {
+			return fmt.Errorf("persist migrated ledger anchor enrollment: %w", err)
+		}
+	}
+	selected, err := ui.selectOne("Service:", []string{"Enable and start", "Start once", "Leave stopped"})
+	if err != nil {
+		return err
+	}
+	if err := installRuntime(ctx, *config, 2); err != nil {
+		return err
+	}
+	if err := release(); err != nil {
+		released = true
+		return fmt.Errorf("release migrated ledger anchor maintenance boundary: %w", err)
+	}
+	released = true
+	if err := activateInstalledRuntime(ctx, *config, selected); err != nil {
+		return err
+	}
+	state.Stage = bootstrap.StageReady
+	if err := checkpoint(configPath, statePath, config, state); err != nil {
+		return fmt.Errorf("persist migrated service installation: %w", err)
+	}
+	return nil
 }
 
 type ledgerAnchorCredential struct {

@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,7 +30,7 @@ const (
 	integrityResolvePending = "resolve-pending"
 )
 
-func runIntegrityMaintenance(ctx context.Context, args []string, input *os.File, output io.Writer) error {
+func runIntegrityMaintenance(ctx context.Context, args []string, input *os.File, output io.Writer) (finalErr error) {
 	if len(args) == 0 || (args[0] != integrityRotateKey && args[0] != integrityRecoverKey && args[0] != integrityResolvePending) {
 		return fmt.Errorf("use agentos integrity rotate-key, agentos integrity recover-key, or agentos integrity resolve-pending")
 	}
@@ -45,7 +47,7 @@ func runIntegrityMaintenance(ctx context.Context, args []string, input *os.File,
 		return fmt.Errorf("installation configuration is invalid: %w", err)
 	}
 	ui := newTerminalUI(input, output)
-	completed, err := ensureIntegrityMaintenancePrivileges(ctx, config, ui, action)
+	completed, err := ensureIntegrityMaintenancePrivileges(ctx, config, ui, action, configPath)
 	if err != nil || completed {
 		return err
 	}
@@ -53,9 +55,11 @@ func runIntegrityMaintenance(ctx context.Context, args []string, input *os.File,
 	if err != nil {
 		return err
 	}
-	if err := requireIntegrityServiceStopped(ctx, config); err != nil {
+	releaseMaintenance, err := beginIntegrityMaintenance(ctx, config)
+	if err != nil {
 		return err
 	}
+	defer func() { finalErr = errors.Join(finalErr, releaseMaintenance()) }()
 	if action == integrityResolvePending {
 		return resolveAmbiguousPendingCheckpoint(ctx, config, authorizedBy, ui, output)
 	}
@@ -204,14 +208,8 @@ func resolveAmbiguousPendingCheckpoint(ctx context.Context, config bootstrap.Con
 	if answer != "RETAIN CURRENT LEDGER HEAD" {
 		return fmt.Errorf("pending ledger checkpoint recovery was not approved")
 	}
-	record, body, err := ledgeranchor.NewPendingResolution(committed, committedBody, pending, pendingBody, state, privateKey, authorizedBy, nowUTC())
-	if err != nil {
+	if _, err := preservePendingResolution(config.Paths.StateDir, authorizedBy, committed, committedBody, pending, pendingBody, state, privateKey, publicKey, nowUTC()); err != nil {
 		return err
-	}
-	directory := filepath.Join(config.Paths.StateDir, "ledger-anchor-resolutions")
-	path := filepath.Join(directory, fmt.Sprintf("%020d-retain-committed-%s.json", record.DiscardedCheckpoint.Generation, record.DiscardedCheckpoint.KeyID))
-	if err := writeExclusiveOrSame(path, body); err != nil {
-		return fmt.Errorf("preserve pending checkpoint resolution evidence: %w", err)
 	}
 	if err := os.Remove(pendingPath); err != nil {
 		return fmt.Errorf("remove resolved pending checkpoint: %w", err)
@@ -221,6 +219,30 @@ func resolveAmbiguousPendingCheckpoint(ctx context.Context, config bootstrap.Con
 	}
 	_, err = fmt.Fprintln(output, "Pending checkpoint preserved as signed recovery evidence and current SQLite head retained. The service remains stopped.")
 	return err
+}
+
+func preservePendingResolution(stateDir, authorizedBy string, committed ledgeranchor.Checkpoint, committedBody []byte, pending ledgeranchor.Checkpoint, pendingBody []byte, state ledgeranchor.LedgerState, privateKey ed25519.PrivateKey, publicKey ed25519.PublicKey, observedAt time.Time) (string, error) {
+	directory := filepath.Join(stateDir, "ledger-anchor-resolutions")
+	pendingDigest := sha256.Sum256(pendingBody)
+	path := filepath.Join(directory, fmt.Sprintf("%020d-retain-committed-%s-%s.json", pending.Generation, pending.KeyID, hex.EncodeToString(pendingDigest[:])))
+	if _, statErr := os.Lstat(path); statErr == nil {
+		body, readErr := readBoundedPrivateFile(path, ledgeranchor.MaximumFileBytes)
+		record, verifyErr := ledgeranchor.VerifyPendingResolution(body, publicKey)
+		if readErr != nil || verifyErr != nil || record.AuthorizedBy != authorizedBy || record.CommittedCheckpoint != committed || record.DiscardedCheckpoint != pending {
+			return "", fmt.Errorf("existing pending checkpoint resolution evidence does not match this recovery")
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return "", fmt.Errorf("inspect pending checkpoint resolution evidence: %w", statErr)
+	} else {
+		_, body, createErr := ledgeranchor.NewPendingResolution(committed, committedBody, pending, pendingBody, state, privateKey, authorizedBy, observedAt)
+		if createErr != nil {
+			return "", createErr
+		}
+		if err := writeExclusiveSynced(path, body); err != nil {
+			return "", fmt.Errorf("preserve pending checkpoint resolution evidence: %w", err)
+		}
+	}
+	return path, nil
 }
 
 func resumePendingKeyTransition(ctx context.Context, configPath string, config bootstrap.Config, action string) (bool, error) {
@@ -494,19 +516,6 @@ func ensurePrivateEvidenceDirectory(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0o700 {
 		return fmt.Errorf("evidence directory must be a private directory, not a link")
-	}
-	return nil
-}
-
-func writeExclusiveOrSame(path string, body []byte) error {
-	if err := writeExclusiveSynced(path, body); err == nil {
-		return nil
-	} else if !errors.Is(err, os.ErrExist) {
-		return err
-	}
-	existing, err := readBoundedPrivateFile(path, ledgeranchor.MaximumFileBytes)
-	if err != nil || !bytes.Equal(existing, body) {
-		return fmt.Errorf("existing evidence differs from the reviewed recovery record")
 	}
 	return nil
 }

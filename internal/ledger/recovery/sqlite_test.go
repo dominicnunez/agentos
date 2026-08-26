@@ -141,6 +141,9 @@ func TestAnchoredBackupAndRestorePublishMatchingEvidenceWithoutOverwrite(t *test
 	if _, err := VerifyAnchored(ctx, backup, backupCheckpoint, installationID, encodedPublic); err != nil {
 		t.Fatalf("published backup does not match checkpoint: %v", err)
 	}
+	if _, err := VerifyAnchoredLive(ctx, backup, backupCheckpoint, installationID, encodedPublic); err != nil {
+		t.Fatalf("stable live verification rejected matching evidence: %v", err)
+	}
 
 	restored := filepath.Join(directory, "restored.db")
 	restoredCheckpoint := filepath.Join(directory, "restored.anchor.json")
@@ -152,6 +155,57 @@ func TestAnchoredBackupAndRestorePublishMatchingEvidenceWithoutOverwrite(t *test
 	}
 	if _, err := BackupAnchored(ctx, source, backup, checkpoint, filepath.Join(directory, "other.anchor.json"), installationID, encodedPublic); err == nil {
 		t.Fatal("anchored backup overwrote an existing database")
+	}
+}
+
+func TestVerifyAnchoredLiveClassifiesCommitPromotionWindow(t *testing.T) {
+	ctx := t.Context()
+	directory := t.TempDir()
+	database := filepath.Join(directory, "live.db")
+	store, err := ledger.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committedState, err := store.IntegrityAnchorState(ctx)
+	if closeErr := store.Close(); err != nil || closeErr != nil {
+		t.Fatal(errors.Join(err, closeErr))
+	}
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	publicKey, err := ledgeranchor.PublicKeyFromPrivate(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedPublic, err := ledgeranchor.EncodePublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installationID := "install-" + strings.Repeat("cd", 32)
+	checkpoint := filepath.Join(directory, "ledger-anchor.json")
+	observedAt := time.Date(2026, 8, 26, 18, 0, 0, 0, time.UTC)
+	if _, err := ledgeranchor.Initialize(checkpoint, installationID, privateKey, committedState, observedAt); err != nil {
+		t.Fatal(err)
+	}
+	store, err = ledger.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", Payload: map[string]string{"state": "committed"}}); err != nil {
+		t.Fatal(err)
+	}
+	advancedState, err := store.IntegrityAnchorState(ctx)
+	if closeErr := store.Close(); err != nil || closeErr != nil {
+		t.Fatal(errors.Join(err, closeErr))
+	}
+	anchorStore, err := ledgeranchor.Open(checkpoint, installationID, publicKey, privateKey, committedState, func() time.Time { return observedAt.Add(time.Minute) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := anchorStore.Prepare(advancedState); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = anchorStore.Close() }()
+	if _, err := VerifyAnchoredLive(ctx, database, checkpoint, installationID, encodedPublic); !errors.Is(err, ErrAnchorChanging) {
+		t.Fatalf("promotion window error=%v, want ErrAnchorChanging", err)
 	}
 }
 

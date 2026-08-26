@@ -43,6 +43,7 @@ type Stage string
 const (
 	StageWorkspace Stage = "workspace"
 	StageProvider  Stage = "provider"
+	StageAnchor    Stage = "anchor"
 	StageService   Stage = "service"
 	StageReady     Stage = "ready"
 )
@@ -235,9 +236,9 @@ func UpgradeVersion1Checkpoint(config Config, state State) (Config, State, error
 	return upgradedConfig, upgradedState, nil
 }
 
-// UpgradeVersion2Checkpoint preserves the reviewed provider and boundary
-// configuration but returns setup to the service stage so a new signing key
-// and explicit external checkpoint can be enrolled before runtime starts.
+// UpgradeVersion2Checkpoint preserves incomplete setup progress. Installations
+// that had reached the service boundary enter a distinct, durable anchor stage
+// so setup can stop all activation before touching the existing ledger.
 func UpgradeVersion2Checkpoint(config Config, state State) (Config, State, error) {
 	if config.Version != previousConfigVersion || state.Version != previousConfigVersion || config.Mode != state.Mode || config.Integrity != (IntegrityAnchor{}) {
 		return Config{}, State{}, fmt.Errorf("only a matching version-2 checkpoint without an anchor can be upgraded")
@@ -252,8 +253,11 @@ func UpgradeVersion2Checkpoint(config Config, state State) (Config, State, error
 	}
 	var problems []error
 	problems = append(problems, configurationIdentityProblems(upgradedConfig.Mode, upgradedConfig.Owner, upgradedConfig.Organization, upgradedConfig.Paths, "owner must be a verified Linux user")...)
-	if len(upgradedConfig.Providers) != 1 {
-		problems = append(problems, fmt.Errorf("version-2 configuration requires exactly one provider"))
+	if len(upgradedConfig.Providers) > 1 {
+		problems = append(problems, fmt.Errorf("version-2 configuration has multiple providers"))
+	}
+	if (state.Stage == StageService || state.Stage == StageReady) && len(upgradedConfig.Providers) != 1 {
+		problems = append(problems, fmt.Errorf("version-2 service setup requires exactly one provider"))
 	}
 	for index, provider := range upgradedConfig.Providers {
 		if err := provider.Validate(); err != nil {
@@ -273,7 +277,11 @@ func UpgradeVersion2Checkpoint(config Config, state State) (Config, State, error
 	if err := errors.Join(problems...); err != nil {
 		return Config{}, State{}, fmt.Errorf("validate version-2 configuration: %w", err)
 	}
-	return upgradedConfig, State{Version: ConfigVersion, Mode: state.Mode, Stage: StageService, UpdatedAt: state.UpdatedAt}, nil
+	nextStage := state.Stage
+	if state.Stage == StageService || state.Stage == StageReady {
+		nextStage = StageAnchor
+	}
+	return upgradedConfig, State{Version: ConfigVersion, Mode: state.Mode, Stage: nextStage, UpdatedAt: state.UpdatedAt}, nil
 }
 
 func validateVersion1Config(config Config) error {
@@ -569,7 +577,7 @@ func LoadState(path string) (State, error) {
 }
 
 func validStage(stage Stage) bool {
-	return stage == StageWorkspace || stage == StageProvider || stage == StageService || stage == StageReady
+	return stage == StageWorkspace || stage == StageProvider || stage == StageAnchor || stage == StageService || stage == StageReady
 }
 
 func SaveConfig(path string, config Config) error { return writeJSON(path, config, 0o600) }

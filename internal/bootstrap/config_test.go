@@ -288,7 +288,7 @@ func TestVersion2CheckpointUpgradePreservesReviewedBoundaryAndRequiresAnchorEnro
 	if err != nil {
 		t.Fatal(err)
 	}
-	if upgraded.Version != ConfigVersion || upgraded.Integrity != (IntegrityAnchor{}) || len(upgraded.Providers) != 1 || upgraded.A2A != legacy.A2A || upgradedState.Version != ConfigVersion || upgradedState.Stage != StageService {
+	if upgraded.Version != ConfigVersion || upgraded.Integrity != (IntegrityAnchor{}) || len(upgraded.Providers) != 1 || upgraded.A2A != legacy.A2A || upgradedState.Version != ConfigVersion || upgradedState.Stage != StageAnchor {
 		t.Fatalf("config=%+v state=%+v", upgraded, upgradedState)
 	}
 	if err := upgraded.ValidateReady(); err == nil || !strings.Contains(err.Error(), "ledger anchor") {
@@ -298,6 +298,26 @@ func TestVersion2CheckpointUpgradePreservesReviewedBoundaryAndRequiresAnchorEnro
 	legacy.Providers[0].SecretRef = "ledger-anchor-provider-confusion"
 	if _, _, err := UpgradeVersion2Checkpoint(legacy, state); err == nil {
 		t.Fatal("version-2 upgrade preserved a credential in the reserved anchor namespace")
+	}
+}
+
+func TestVersion2CheckpointUpgradePreservesIncompleteSetupStage(t *testing.T) {
+	now := time.Now().UTC()
+	paths, err := UserPaths(filepath.Join(t.TempDir(), "home"), filepath.Join(t.TempDir(), "run"), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stage := range []Stage{StageWorkspace, StageProvider} {
+		legacy := NewConfig(ModeUser, Owner{Username: "alice", UID: 1000, GID: 1000}, paths, now)
+		legacy.Version = previousConfigVersion
+		state := State{Version: previousConfigVersion, Mode: ModeUser, Stage: stage, UpdatedAt: now}
+		upgraded, upgradedState, err := UpgradeVersion2Checkpoint(legacy, state)
+		if err != nil {
+			t.Fatalf("stage %s: %v", stage, err)
+		}
+		if upgraded.Version != ConfigVersion || len(upgraded.Providers) != 0 || upgradedState.Stage != stage {
+			t.Fatalf("stage %s was not preserved: config=%+v state=%+v", stage, upgraded, upgradedState)
+		}
 	}
 }
 

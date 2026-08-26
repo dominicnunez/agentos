@@ -40,6 +40,8 @@ type Result struct {
 	EventSchemaVersion  int    `json:"event_schema_version"`
 }
 
+var ErrAnchorChanging = errors.New("ledger checkpoint changed during live verification")
+
 type backuper interface {
 	NewBackup(string) (*sqlite.Backup, error)
 }
@@ -182,17 +184,81 @@ func VerifyAnchored(ctx context.Context, path, checkpointPath, installationID, e
 	if err != nil {
 		return Result{}, fmt.Errorf("verify external ledger checkpoint: %w", err)
 	}
-	state := ledgeranchor.LedgerState{
-		ApplicationID: ledgerstore.StorageApplicationID, StorageVersion: result.StorageVersion,
-		EventSchemaVersion: result.EventSchemaVersion, EventCount: result.EventCount,
-		Sequence: result.MaxSequence, EventID: result.EventChainEventID,
-		ChainAlgorithm: result.EventChainAlgorithm, ChainHead: result.EventChainSHA256,
-	}
+	state := resultAnchorState(result)
 	if !checkpoint.Ledger.Equal(state) {
 		return Result{}, fmt.Errorf("offline database does not match its external ledger checkpoint")
 	}
 	result.CheckpointPath = checkpointPath
 	return result, nil
+}
+
+// VerifyAnchoredLive retries when a healthy writer advances the external
+// checkpoint or is between SQLite commit and checkpoint promotion. A stable
+// mismatch still fails immediately as integrity evidence, rather than being
+// treated as ordinary concurrency.
+func VerifyAnchoredLive(ctx context.Context, path, checkpointPath, installationID, encodedPublicKey string) (Result, error) {
+	publicKey, err := ledgeranchor.DecodePublicKey(encodedPublicKey)
+	if err != nil {
+		return Result{}, err
+	}
+	const attempts = 5
+	for attempt := 0; attempt < attempts; attempt++ {
+		_, checkpointBefore, err := ledgeranchor.Read(checkpointPath, installationID, publicKey)
+		if err != nil {
+			return Result{}, fmt.Errorf("verify external ledger checkpoint: %w", err)
+		}
+		result, err := Verify(ctx, path)
+		if err != nil {
+			return Result{}, err
+		}
+		checkpoint, checkpointAfter, err := ledgeranchor.Read(checkpointPath, installationID, publicKey)
+		if err != nil {
+			return Result{}, fmt.Errorf("verify external ledger checkpoint: %w", err)
+		}
+		if !bytes.Equal(checkpointBefore, checkpointAfter) {
+			if err := waitForAnchorRetry(ctx); err != nil {
+				return Result{}, err
+			}
+			continue
+		}
+		state := resultAnchorState(result)
+		if checkpoint.Ledger.Equal(state) {
+			result.CheckpointPath = checkpointPath
+			return result, nil
+		}
+		pending, _, pendingErr := ledgeranchor.Read(checkpointPath+".pending", installationID, publicKey)
+		if pendingErr == nil && pending.Ledger.Equal(state) {
+			if err := waitForAnchorRetry(ctx); err != nil {
+				return Result{}, err
+			}
+			continue
+		}
+		if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
+			return Result{}, fmt.Errorf("verify pending external ledger checkpoint: %w", pendingErr)
+		}
+		return Result{}, fmt.Errorf("live database does not match its stable external ledger checkpoint")
+	}
+	return Result{}, ErrAnchorChanging
+}
+
+func resultAnchorState(result Result) ledgeranchor.LedgerState {
+	return ledgeranchor.LedgerState{
+		ApplicationID: ledgerstore.StorageApplicationID, StorageVersion: result.StorageVersion,
+		EventSchemaVersion: result.EventSchemaVersion, EventCount: result.EventCount,
+		Sequence: result.MaxSequence, EventID: result.EventChainEventID,
+		ChainAlgorithm: result.EventChainAlgorithm, ChainHead: result.EventChainSHA256,
+	}
+}
+
+func waitForAnchorRetry(ctx context.Context) error {
+	timer := time.NewTimer(20 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // BackupAnchored creates a database snapshot and matching signed checkpoint.
