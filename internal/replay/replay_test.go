@@ -34,8 +34,19 @@ func TestProjectBuildsDeterministicPayloadFreeTimeline(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(first, second) {
 		t.Fatalf("replay is not deterministic: first=%+v second=%+v err=%v", first, second, err)
 	}
-	if first.EventCount != 4 || len(first.Entries) != 4 || first.Entries[0].Index != 1 || first.Entries[3].Index != 4 || first.Entries[0].PayloadSHA256 == "" || len(first.Links) != 4 {
+	if first.EventCount != 4 || len(first.Entries) != 4 || first.Entries[0].Index != 1 || first.Entries[3].Index != 4 || first.Entries[0].PayloadSHA256 == "" || len(first.Links) != 6 {
 		t.Fatalf("unexpected replay report: %+v", first)
+	}
+	expectedLinks := []Link{
+		{FromEventID: "event-1", ToEventID: "event-2", Kind: "STREAM_PREDECESSOR"},
+		{FromEventID: "event-2", ToEventID: "event-3", Kind: "STREAM_PREDECESSOR"},
+		{FromEventID: "event-1", ToEventID: "event-3", Kind: "TASK_PREDECESSOR"},
+		{FromEventID: "event-3", ToEventID: "event-4", Kind: "STREAM_PREDECESSOR"},
+		{FromEventID: "event-3", ToEventID: "event-4", Kind: "TASK_PREDECESSOR"},
+		{FromEventID: "event-3", ToEventID: "event-4", Kind: "EXECUTION_PREDECESSOR"},
+	}
+	if !reflect.DeepEqual(first.Links, expectedLinks) {
+		t.Fatalf("replay predecessor links=%+v want %+v", first.Links, expectedLinks)
 	}
 	encoded, err := json.Marshal(first)
 	if err != nil {

@@ -121,10 +121,10 @@ func Project(snapshot events.VerifiedEventSnapshot, conversationID string) (Repo
 		if previous.EventID != "" {
 			report.Links = append(report.Links, Link{FromEventID: previous.EventID, ToEventID: event.EventID, Kind: "STREAM_PREDECESSOR"})
 		}
-		if prior := lastTask[event.TaskID]; event.TaskID != "" && prior != "" && prior != previous.EventID {
+		if prior := lastTask[event.TaskID]; event.TaskID != "" && prior != "" {
 			report.Links = append(report.Links, Link{FromEventID: prior, ToEventID: event.EventID, Kind: "TASK_PREDECESSOR"})
 		}
-		if prior := lastExecution[event.SourceExecutionID]; event.SourceExecutionID != "" && prior != "" && prior != previous.EventID {
+		if prior := lastExecution[event.SourceExecutionID]; event.SourceExecutionID != "" && prior != "" {
 			report.Links = append(report.Links, Link{FromEventID: prior, ToEventID: event.EventID, Kind: "EXECUTION_PREDECESSOR"})
 		}
 		if event.TaskID != "" {
