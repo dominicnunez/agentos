@@ -203,40 +203,68 @@ func VerifyAnchoredLive(ctx context.Context, path, checkpointPath, installationI
 	}
 	const attempts = 5
 	for attempt := 0; attempt < attempts; attempt++ {
-		_, checkpointBefore, err := ledgeranchor.Read(checkpointPath, installationID, publicKey)
+		_, committedBodyBefore, err := ledgeranchor.Read(checkpointPath, installationID, publicKey)
 		if err != nil {
 			return Result{}, fmt.Errorf("verify external ledger checkpoint: %w", err)
+		}
+		_, pendingBodyBefore, pendingBeforeErr := ledgeranchor.Read(checkpointPath+".pending", installationID, publicKey)
+		if pendingBeforeErr != nil && !errors.Is(pendingBeforeErr, os.ErrNotExist) {
+			return Result{}, fmt.Errorf("verify pending external ledger checkpoint: %w", pendingBeforeErr)
 		}
 		result, err := Verify(ctx, path)
 		if err != nil {
 			return Result{}, err
 		}
-		checkpoint, checkpointAfter, err := ledgeranchor.Read(checkpointPath, installationID, publicKey)
+		committedAfter, committedBodyAfter, err := ledgeranchor.Read(checkpointPath, installationID, publicKey)
 		if err != nil {
 			return Result{}, fmt.Errorf("verify external ledger checkpoint: %w", err)
 		}
-		if !bytes.Equal(checkpointBefore, checkpointAfter) {
+		pendingAfter, pendingBodyAfter, pendingAfterErr := ledgeranchor.Read(checkpointPath+".pending", installationID, publicKey)
+		if pendingAfterErr != nil && !errors.Is(pendingAfterErr, os.ErrNotExist) {
+			return Result{}, fmt.Errorf("verify pending external ledger checkpoint: %w", pendingAfterErr)
+		}
+		pendingBeforePresent := pendingBeforeErr == nil
+		pendingAfterPresent := pendingAfterErr == nil
+		if !bytes.Equal(committedBodyBefore, committedBodyAfter) || pendingBeforePresent != pendingAfterPresent || pendingBeforePresent && !bytes.Equal(pendingBodyBefore, pendingBodyAfter) {
 			if err := waitForAnchorRetry(ctx); err != nil {
 				return Result{}, err
 			}
 			continue
 		}
 		state := resultAnchorState(result)
-		if checkpoint.Ledger.Equal(state) {
+		if !pendingAfterPresent && committedAfter.Ledger.Equal(state) {
 			result.CheckpointPath = checkpointPath
 			return result, nil
 		}
-		pending, _, pendingErr := ledgeranchor.Read(checkpointPath+".pending", installationID, publicKey)
-		if pendingErr == nil && pending.Ledger.Equal(state) {
+		if !pendingAfterPresent {
+			return Result{}, fmt.Errorf("live database does not match its stable external ledger checkpoint")
+		}
+		if bytes.Equal(committedBodyAfter, pendingBodyAfter) {
 			if err := waitForAnchorRetry(ctx); err != nil {
 				return Result{}, err
 			}
 			continue
 		}
-		if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
-			return Result{}, fmt.Errorf("verify pending external ledger checkpoint: %w", pendingErr)
+		committedDigest := sha256.Sum256(committedBodyAfter)
+		if pendingAfter.Generation != committedAfter.Generation+1 || pendingAfter.PreviousCheckpointSHA256 != hex.EncodeToString(committedDigest[:]) || pendingAfter.ObservedAt.Before(committedAfter.ObservedAt) || !pendingAfter.Ledger.ForwardFrom(committedAfter.Ledger) {
+			return Result{}, fmt.Errorf("pending external ledger checkpoint is not the exact committed successor")
 		}
-		return Result{}, fmt.Errorf("live database does not match its stable external ledger checkpoint")
+		if pendingAfter.Ledger.Equal(state) {
+			if err := waitForAnchorRetry(ctx); err != nil {
+				return Result{}, err
+			}
+			continue
+		}
+		if committedAfter.Ledger.Equal(state) {
+			if attempt+1 == attempts {
+				return Result{}, fmt.Errorf("%w: reviewed recovery must decide whether the SQLite commit occurred", ledgeranchor.ErrAmbiguousPending)
+			}
+			if err := waitForAnchorRetry(ctx); err != nil {
+				return Result{}, err
+			}
+			continue
+		}
+		return Result{}, fmt.Errorf("live database matches neither its committed nor pending external ledger checkpoint")
 	}
 	return Result{}, ErrAnchorChanging
 }
