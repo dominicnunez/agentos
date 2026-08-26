@@ -46,7 +46,8 @@ prior validation record.
 ## Security boundary
 
 All referenced events must already exist in the same Organization when a
-transition is committed. Agent- and Team-scoped knowledge must bind to a
+transition is committed, and a knowledge record's creation time cannot predate
+its cited provenance or occurrence evidence. Agent- and Team-scoped knowledge must bind to a
 durable same-Organization roster record. Derived knowledge must contain at
 least one lineage reference and every reference must identify an exact earlier
 `ACTIVE` version in the same Organization. User or Agent judgments require an

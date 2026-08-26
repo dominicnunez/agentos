@@ -507,13 +507,20 @@ func TestRepeatedPatternActivationRequiresEvidenceAfterProposal(t *testing.T) {
 		}
 		return event
 	}
-	occurrences := []string{appendEvidence("one").EventID, appendEvidence("two").EventID, appendEvidence("three").EventID}
+	occurrenceEvents := []events.Event{appendEvidence("one"), appendEvidence("two"), appendEvidence("three")}
+	occurrences := []string{occurrenceEvents[0].EventID, occurrenceEvents[1].EventID, occurrenceEvents[2].EventID}
 	olderValidation := appendEvidence("older-validation")
 	candidate := knowledgeCandidate("k-pattern", "org-1", occurrences[0])
 	candidate.Basis = core.KnowledgeBasisRepeatedPattern
 	candidate.ProvenanceEventRefs = append([]string(nil), occurrences...)
 	candidate.OccurrenceEventRefs = append([]string(nil), occurrences...)
 	service := New(gateway)
+	premature := candidate
+	premature.KnowledgeID = "k-pattern-premature"
+	premature.CreatedAt = occurrenceEvents[len(occurrenceEvents)-1].CreatedAt.Add(-time.Nanosecond)
+	if _, err := service.Propose(ctx, premature); err == nil {
+		t.Fatal("candidate created before its occurrence evidence was accepted")
+	}
 	if _, err := service.Propose(ctx, candidate); err != nil {
 		t.Fatal(err)
 	}
@@ -627,7 +634,7 @@ func knowledgeCandidate(id, organizationID core.ID, evidenceRef string) core.Kno
 		ProvenanceEventRefs: []string{evidenceRef},
 		CreatedBy:           "runtime",
 		CreatedByKind:       core.PrincipalRuntime,
-		CreatedAt:           time.Date(2026, time.August, 26, 0, 1, 0, 0, time.UTC),
+		CreatedAt:           time.Now().UTC(),
 		ValidationMethod:    core.KnowledgeValidationUnvalidated,
 	}
 }

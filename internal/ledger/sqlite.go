@@ -2054,6 +2054,7 @@ func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedPro
 		return err
 	}
 	evidenceArtifacts := make(map[string]struct{})
+	var latestSourceAt time.Time
 	var latestValidationAt time.Time
 	for index, refs := range [][]string{knowledge.ProvenanceEventRefs, knowledge.OccurrenceEventRefs, knowledge.ValidationRefs} {
 		for _, eventRef := range refs {
@@ -2067,7 +2068,13 @@ func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedPro
 			if index == 2 && createdAt.After(latestValidationAt) {
 				latestValidationAt = createdAt
 			}
+			if index < 2 && createdAt.After(latestSourceAt) {
+				latestSourceAt = createdAt
+			}
 		}
+	}
+	if knowledge.CreatedAt.Before(latestSourceAt) {
+		return fmt.Errorf("knowledge creation predates its provenance or occurrence evidence")
 	}
 	if knowledge.LastVerifiedAt != nil && knowledge.LastVerifiedAt.Before(latestValidationAt) {
 		return fmt.Errorf("knowledge verification predates its validation evidence")

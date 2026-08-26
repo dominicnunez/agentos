@@ -80,7 +80,7 @@ func TestV1SafetyServicesEnforceAndRecordContracts(t *testing.T) {
 		Scope: core.KnowledgeScopeOrganization, ScopeID: "org-1", Status: core.KnowledgeCandidate,
 		Title: "Exact authority", Content: "Require exact authority before effects.", Basis: core.KnowledgeBasisHumanInput,
 		ProvenanceEventRefs: []string{organizationEvent.EventID}, CreatedBy: "runtime", CreatedByKind: core.PrincipalRuntime,
-		CreatedAt: now, ValidationMethod: core.KnowledgeValidationUnvalidated,
+		CreatedAt: time.Now().UTC(), ValidationMethod: core.KnowledgeValidationUnvalidated,
 	}
 	knowledgeStore := knowledge.New(gateway)
 	if _, err := knowledgeStore.Propose(ctx, record); err != nil {

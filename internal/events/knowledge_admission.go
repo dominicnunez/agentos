@@ -129,6 +129,7 @@ func (v *KnowledgeAdmissionValidator) Validate(value core.KnowledgeRecord, event
 		return fmt.Errorf("knowledge has an unsupported scope")
 	}
 	evidenceArtifacts := make(map[string]struct{})
+	var latestSourceAt time.Time
 	var latestValidationAt time.Time
 	for index, refs := range [][]string{value.ProvenanceEventRefs, value.OccurrenceEventRefs, value.ValidationRefs} {
 		for _, ref := range refs {
@@ -141,6 +142,9 @@ func (v *KnowledgeAdmissionValidator) Validate(value core.KnowledgeRecord, event
 			}
 			if index == 2 && evidence.CreatedAt.After(latestValidationAt) {
 				latestValidationAt = evidence.CreatedAt
+			}
+			if index < 2 && evidence.CreatedAt.After(latestSourceAt) {
+				latestSourceAt = evidence.CreatedAt
 			}
 		}
 	}
@@ -164,6 +168,9 @@ func (v *KnowledgeAdmissionValidator) Validate(value core.KnowledgeRecord, event
 	}
 	if value.CreatedAt.After(event.CreatedAt) || value.LastVerifiedAt != nil && value.LastVerifiedAt.After(event.CreatedAt) {
 		return fmt.Errorf("knowledge timestamps postdate their admitting event")
+	}
+	if value.CreatedAt.Before(latestSourceAt) {
+		return fmt.Errorf("knowledge creation predates its provenance or occurrence evidence")
 	}
 	if value.LastVerifiedAt != nil && value.LastVerifiedAt.Before(latestValidationAt) {
 		return fmt.Errorf("knowledge verification predates its validation evidence")

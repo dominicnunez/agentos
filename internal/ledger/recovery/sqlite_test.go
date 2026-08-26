@@ -122,7 +122,7 @@ func TestVerifyReplaysEventAdmittedKnowledge(t *testing.T) {
 		Type: core.KnowledgeLesson, Scope: core.KnowledgeScopeOrganization, ScopeID: "org-1",
 		Status: core.KnowledgeCandidate, Title: "Recoverable knowledge", Content: "Offline verification replays this admission.",
 		Basis: core.KnowledgeBasisHumanInput, ProvenanceEventRefs: []string{organizationEvent.EventID},
-		CreatedBy: "runtime", CreatedByKind: core.PrincipalRuntime, CreatedAt: now,
+		CreatedBy: "runtime", CreatedByKind: core.PrincipalRuntime, CreatedAt: time.Now().UTC(),
 		ValidationMethod: core.KnowledgeValidationUnvalidated,
 	}
 	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
@@ -180,7 +180,7 @@ func TestVerifyRejectsKnowledgeWhenValidatorLeaseRecordIsMissing(t *testing.T) {
 		Type: core.KnowledgeLesson, Scope: core.KnowledgeScopeOrganization, ScopeID: "org-1",
 		Status: core.KnowledgeCandidate, Title: "Reviewed knowledge", Content: "This requires exact validator authority.",
 		Basis: core.KnowledgeBasisHumanInput, ProvenanceEventRefs: []string{organizationEvent.EventID},
-		CreatedBy: "runtime", CreatedByKind: core.PrincipalRuntime, CreatedAt: now, ValidationMethod: core.KnowledgeValidationUnvalidated,
+		CreatedBy: "runtime", CreatedByKind: core.PrincipalRuntime, CreatedAt: time.Now().UTC(), ValidationMethod: core.KnowledgeValidationUnvalidated,
 	}
 	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_PROPOSED", SourceActorID: "runtime", CorrelationID: "knowledge-knowledge-human"},
