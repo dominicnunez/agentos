@@ -3273,6 +3273,47 @@ func recordedWorkCompletionEvidence(stream []events.Event, organizationID core.I
 	return recordedEvent, recorded, nil
 }
 
+func validateCompletedWork(stream []events.Event, snapshot projections.Snapshot, state projections.Versioned[core.Work], intent core.Intent) error {
+	plan, err := workCompletionPlan(stream, intent, state.CorrelationID)
+	if err != nil {
+		return err
+	}
+	tasks, err := completedWorkTaskEvidence(stream, snapshot, state.Value.ID, intent.OrganizationID, state.CorrelationID, plan)
+	if err != nil {
+		return err
+	}
+	evidenceEvent, evidence, err := recordedWorkCompletionEvidence(stream, intent.OrganizationID, state.CorrelationID)
+	if err != nil {
+		return err
+	}
+	if evidenceEvent.EventID == "" || !evidence.MatchesCurrent(state.Value, state.Version, intent, plan, tasks) {
+		return fmt.Errorf("work completion evidence is missing or stale")
+	}
+	var transition events.Event
+	for _, event := range stream {
+		if event.EventType != "WORK_COMPLETED" {
+			continue
+		}
+		var payload events.ProjectionEventPayload
+		var projected core.Work
+		var detail workCompletionDetail
+		if event.OrganizationID != string(intent.OrganizationID) || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.TaskID != "" || event.CorrelationID != state.CorrelationID ||
+			json.Unmarshal(event.Payload, &payload) != nil || payload.Projection.ProjectionKind != projections.KindWork || payload.Projection.RecordID != string(state.Value.ID) || payload.Projection.Version != state.Version ||
+			payload.Projection.CorrelationID != state.CorrelationID || json.Unmarshal(payload.Projection.Value, &projected) != nil || !reflect.DeepEqual(projected, state.Value) || json.Unmarshal(payload.Detail, &detail) != nil ||
+			detail.EvidenceEventRef != evidenceEvent.EventID || detail.Fingerprint != evidence.Fingerprint || evidenceEvent.Sequence >= event.Sequence {
+			continue
+		}
+		if transition.EventID != "" {
+			return fmt.Errorf("multiple authoritative Work completion transitions")
+		}
+		transition = event
+	}
+	if transition.EventID == "" {
+		return fmt.Errorf("authoritative Work completion transition is missing")
+	}
+	return nil
+}
+
 func distinctStrings(values []string) bool {
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
