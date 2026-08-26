@@ -245,7 +245,7 @@ func TestLegacyVerificationRejectsTamperedAdmissionsAfterMigration(t *testing.T)
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE event_integrity; DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE legacy_knowledge_quarantine; DROP TABLE event_integrity; DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -2692,3 +2692,4 @@ func createTestLedger(t *testing.T, path string) *sql.DB {
 	}
 	return db
 }
+

@@ -2,6 +2,7 @@ package knowledge
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -110,6 +111,76 @@ func TestStoreTerminalRevisionRemovesKnowledgeFromRetrieval(t *testing.T) {
 	}
 }
 
+func TestStoreRevisesActiveKnowledgeThroughCandidateReview(t *testing.T) {
+	ctx := context.Background()
+	_, gateway := newKnowledgeTestStore(t)
+	evidence := seedKnowledgeOrganization(t, ctx, gateway, "org-1")
+	service := New(gateway)
+	candidate := knowledgeCandidate("k-1", "org-1", evidence.EventID)
+	if _, err := service.Propose(ctx, candidate); err != nil {
+		t.Fatal(err)
+	}
+	active := candidate
+	active.Version = 2
+	active.Status = core.KnowledgeActive
+	active.ValidationMethod = core.KnowledgeValidationDeterministic
+	active.ValidationRefs = []string{evidence.EventID}
+	active.ValidatedBy = "runtime"
+	active.ValidatedByKind = core.PrincipalRuntime
+	verifiedAt := candidate.CreatedAt.Add(time.Minute)
+	active.LastVerifiedAt = &verifiedAt
+	active.SupersedesVersion = integerPointer(1)
+	if _, err := service.Activate(ctx, active); err != nil {
+		t.Fatal(err)
+	}
+	correctionEvidence, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", Payload: map[string]string{"finding": "procedure changed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	corrected := active
+	corrected.Version = 3
+	corrected.Status = core.KnowledgeCandidate
+	corrected.Title = "Corrected rollback procedure"
+	corrected.Content = "Verify the corrected rollback before applying it."
+	corrected.ProvenanceEventRefs = []string{correctionEvidence.EventID}
+	corrected.CreatedBy = "agent-2"
+	corrected.CreatedByKind = core.PrincipalExternalAgent
+	corrected.CreatedAt = time.Now().UTC()
+	corrected.ValidationMethod = core.KnowledgeValidationUnvalidated
+	corrected.ValidationRefs = nil
+	corrected.ValidatedBy = ""
+	corrected.ValidatedByKind = ""
+	corrected.LastVerifiedAt = nil
+	corrected.SupersedesVersion = integerPointer(2)
+	if _, err := service.Propose(ctx, corrected); err != nil {
+		t.Fatalf("propose corrected knowledge: %v", err)
+	}
+	if rows, err := service.Search(ctx, "org-1", core.KnowledgeScopeOrganization, "org-1", "corrected", 10); err != nil || len(rows) != 0 {
+		t.Fatalf("unvalidated correction entered active retrieval: rows=%+v err=%v", rows, err)
+	}
+	validation, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", Payload: map[string]string{"validation": "passed"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reactivated := corrected
+	reactivated.Version = 4
+	reactivated.Status = core.KnowledgeActive
+	reactivated.ValidationMethod = core.KnowledgeValidationDeterministic
+	reactivated.ValidationRefs = []string{validation.EventID}
+	reactivated.ValidatedBy = "runtime"
+	reactivated.ValidatedByKind = core.PrincipalRuntime
+	verifiedAt = time.Now().UTC()
+	reactivated.LastVerifiedAt = &verifiedAt
+	reactivated.SupersedesVersion = integerPointer(3)
+	if _, err := service.Activate(ctx, reactivated); err != nil {
+		t.Fatalf("activate corrected knowledge: %v", err)
+	}
+}
+
 func TestStoreSupportsFailClosedStaleAndQuarantineTransitions(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -163,6 +234,84 @@ func TestPatternCandidateRequiresDistinctConcreteEvents(t *testing.T) {
 	}
 	if err := PatternCandidate([]string{"1", "2", "3"}); err != nil {
 		t.Fatalf("three distinct occurrences rejected: %v", err)
+	}
+}
+
+func TestRepeatedPatternActivationRequiresEvidenceAfterProposal(t *testing.T) {
+	ctx := context.Background()
+	_, gateway := newKnowledgeTestStore(t)
+	seedKnowledgeOrganization(t, ctx, gateway, "org-1")
+	appendEvidence := func(label string) events.Event {
+		t.Helper()
+		event, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+			OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", Payload: map[string]string{"label": label},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return event
+	}
+	occurrences := []string{appendEvidence("one").EventID, appendEvidence("two").EventID, appendEvidence("three").EventID}
+	olderValidation := appendEvidence("older-validation")
+	candidate := knowledgeCandidate("k-pattern", "org-1", occurrences[0])
+	candidate.Basis = core.KnowledgeBasisRepeatedPattern
+	candidate.ProvenanceEventRefs = append([]string(nil), occurrences...)
+	candidate.OccurrenceEventRefs = append([]string(nil), occurrences...)
+	service := New(gateway)
+	if _, err := service.Propose(ctx, candidate); err != nil {
+		t.Fatal(err)
+	}
+	active := candidate
+	active.Version = 2
+	active.Status = core.KnowledgeActive
+	active.ValidationMethod = core.KnowledgeValidationDeterministic
+	active.ValidationRefs = []string{olderValidation.EventID}
+	active.ValidatedBy = "runtime"
+	active.ValidatedByKind = core.PrincipalRuntime
+	verifiedAt := time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
+	active.SupersedesVersion = integerPointer(1)
+	if _, err := service.Activate(ctx, active); err == nil {
+		t.Fatal("evidence admitted before the proposal activated repeated-pattern knowledge")
+	}
+	active.ValidationRefs = []string{appendEvidence("subsequent-validation").EventID}
+	verifiedAt = time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
+	if _, err := service.Activate(ctx, active); err != nil {
+		t.Fatalf("subsequent validation evidence was rejected: %v", err)
+	}
+}
+
+func TestSearchFiltersBeforeApplyingResultLimit(t *testing.T) {
+	ctx := context.Background()
+	_, gateway := newKnowledgeTestStore(t)
+	evidence := seedKnowledgeOrganization(t, ctx, gateway, "org-1")
+	service := New(gateway)
+	for index := 0; index < 257; index++ {
+		candidate := knowledgeCandidate(core.ID(fmt.Sprintf("k-%03d", index)), "org-1", evidence.EventID)
+		if index == 256 {
+			candidate.Content = "needle-only-last"
+		}
+		if _, err := service.Propose(ctx, candidate); err != nil {
+			t.Fatalf("propose knowledge %d: %v", index, err)
+		}
+		active := candidate
+		active.Version = 2
+		active.Status = core.KnowledgeActive
+		active.ValidationMethod = core.KnowledgeValidationDeterministic
+		active.ValidationRefs = []string{evidence.EventID}
+		active.ValidatedBy = "runtime"
+		active.ValidatedByKind = core.PrincipalRuntime
+		verifiedAt := candidate.CreatedAt.Add(time.Minute)
+		active.LastVerifiedAt = &verifiedAt
+		active.SupersedesVersion = integerPointer(1)
+		if _, err := service.Activate(ctx, active); err != nil {
+			t.Fatalf("activate knowledge %d: %v", index, err)
+		}
+	}
+	rows, err := service.Search(ctx, "org-1", core.KnowledgeScopeOrganization, "org-1", "needle-only-last", 1)
+	if err != nil || len(rows) != 1 || rows[0].KnowledgeID != "k-256" {
+		t.Fatalf("post-filter result window lost the match: rows=%+v err=%v", rows, err)
 	}
 }
 
@@ -228,3 +377,4 @@ func knowledgeCandidate(id, organizationID core.ID, evidenceRef string) core.Kno
 }
 
 func integerPointer(value int) *int { return &value }
+

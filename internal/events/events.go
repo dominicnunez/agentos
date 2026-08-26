@@ -2645,7 +2645,7 @@ var projectionLifecycleContracts = map[string]projectionLifecycleContract{
 	"work":                    {initial: []string{"WORK_CREATED"}, revision: []string{"WORK_COMPLETED", "WORK_FAILED", "WORK_PLANNING_FAILED"}},
 	"lab_experiment":          {initial: []string{"LAB_EXPERIMENT_STARTED"}, revision: []string{"LAB_EXPERIMENT_COMPLETED", "LAB_EXPERIMENT_FAILED"}},
 	"lab_promotion_candidate": {initial: []string{"LAB_PROMOTION_CANDIDATE_CREATED"}},
-	"knowledge":               {initial: []string{"KNOWLEDGE_PROPOSED"}, revision: []string{"KNOWLEDGE_ACTIVATED", "KNOWLEDGE_SUPERSEDED", "KNOWLEDGE_MARKED_STALE", "KNOWLEDGE_QUARANTINED"}},
+	"knowledge":               {initial: []string{"KNOWLEDGE_PROPOSED"}, revision: []string{"KNOWLEDGE_PROPOSED", "KNOWLEDGE_ACTIVATED", "KNOWLEDGE_SUPERSEDED", "KNOWLEDGE_MARKED_STALE", "KNOWLEDGE_QUARANTINED"}},
 	"task": {
 		initial:  []string{"TASK_CREATED", "TASK_BLOCKED"},
 		revision: []string{"TASK_ASSIGNMENT_REVALIDATED", "TASK_BLOCKED", "TASK_RECOVERED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED"},
@@ -2674,7 +2674,7 @@ func ProjectionLifecycleEventTypes(kind string) []string {
 // the authenticated source is an Agent execution, but runtime lifecycle state
 // always requires the sealed event/record transaction.
 func RequiresProjectionAdmission(eventType, sourceActorID string) bool {
-	if eventType == "TASK_BLOCKED" && sourceActorID != "runtime" {
+	if (eventType == "TASK_BLOCKED" || eventType == "KNOWLEDGE_PROPOSED") && sourceActorID != "runtime" {
 		return false
 	}
 	for _, contract := range projectionLifecycleContracts {
@@ -3352,7 +3352,7 @@ type ProjectionReader interface {
 	Records(context.Context, string, string) ([][]byte, error)
 }
 type ActiveKnowledgeReader interface {
-	ActiveKnowledgeRecords(context.Context, string, string, string, int) ([][]byte, error)
+	ActiveKnowledgeRecords(context.Context, string, string, string, string, int) ([][]byte, error)
 }
 type IntentConfirmer interface {
 	AppendIntentConfirmation(context.Context, TrustedDraft, core.ID, core.ID) (Event, error)
@@ -3726,12 +3726,12 @@ func (g *Gateway) ProjectionRecords(ctx context.Context, kind, id string) ([][]b
 	}
 	return store.Records(ctx, kind, id)
 }
-func (g *Gateway) ActiveKnowledgeRecords(ctx context.Context, organizationID, scope, scopeID string, limit int) ([][]byte, error) {
+func (g *Gateway) ActiveKnowledgeRecords(ctx context.Context, organizationID, scope, scopeID, afterRecordID string, limit int) ([][]byte, error) {
 	store, ok := g.ledger.(ActiveKnowledgeReader)
 	if !ok {
 		return nil, fmt.Errorf("event ledger does not support bounded active knowledge reads")
 	}
-	return store.ActiveKnowledgeRecords(ctx, organizationID, scope, scopeID, limit)
+	return store.ActiveKnowledgeRecords(ctx, organizationID, scope, scopeID, afterRecordID, limit)
 }
 func (g *Gateway) Events(ctx context.Context, correlationID string) ([]Event, error) {
 	return g.ledger.Events(ctx, correlationID)
@@ -3890,3 +3890,4 @@ func sameStrings(left, right []string) bool {
 	}
 	return true
 }
+

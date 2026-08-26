@@ -495,6 +495,7 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 
 func validateProjectionEventAdmissions(stream []events.Event, inboxObservations map[string]events.InboxObservationBinding) error {
 	eventIDs := make(map[string]struct{}, len(stream))
+	eventIndex := make(map[string]events.Event, len(stream))
 	sequences := make(map[int64]struct{}, len(stream))
 	ordered := append([]events.Event(nil), stream...)
 	sort.Slice(ordered, func(left, right int) bool { return ordered[left].Sequence < ordered[right].Sequence })
@@ -507,6 +508,7 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 	experiments := make(map[core.ID]Versioned[core.Experiment])
 	knowledgeHistory := make(map[core.ID]Versioned[core.KnowledgeRecord])
 	knowledgeRevisions := make(map[core.ID]map[int]core.KnowledgeRecord)
+	knowledgeAdmissionSequences := make(map[core.ID]int64)
 	graph := core.DurableGraph{
 		Organizations: map[core.ID]core.DurableState[core.Organization]{}, Missions: map[core.ID]core.DurableState[core.Mission]{},
 		Goals: map[core.ID]core.DurableState[core.Goal]{}, Teams: map[core.ID]core.DurableState[core.Team]{},
@@ -535,6 +537,7 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 			return fmt.Errorf("event stream contains duplicate sequence %d at %s", event.Sequence, event.EventType)
 		}
 		eventIDs[event.EventID] = struct{}{}
+		eventIndex[event.EventID] = event
 		sequences[event.Sequence] = struct{}{}
 		payload, present, err := events.AdmittedProjection(event)
 		if err != nil {
@@ -700,7 +703,7 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 				!core.ValidKnowledgeRecord(value) || value.Version != record.Version {
 				err = fmt.Errorf("contains an invalid knowledge projection")
 			} else {
-				err = validateKnowledgeProjectionAtAdmission(value, event, record, graph, knowledgeHistory, knowledgeRevisions, ordered)
+				err = validateKnowledgeProjectionAtAdmission(value, event, record, graph, knowledgeHistory, knowledgeRevisions, knowledgeAdmissionSequences, eventIndex)
 			}
 			if err == nil {
 				err = core.AdmitDurableRevision(graph.Knowledge, value.KnowledgeID, record.Version, record.CorrelationID, value, true, validKnowledgeRevision)
@@ -723,7 +726,7 @@ func validateProjectionOrganizationAtAdmission(organizationID core.ID, event eve
 	return nil
 }
 
-func validateKnowledgeProjectionAtAdmission(value core.KnowledgeRecord, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, history map[core.ID]Versioned[core.KnowledgeRecord], revisions map[core.ID]map[int]core.KnowledgeRecord, stream []events.Event) error {
+func validateKnowledgeProjectionAtAdmission(value core.KnowledgeRecord, event events.Event, record events.ProjectionRecord, graph core.DurableGraph, history map[core.ID]Versioned[core.KnowledgeRecord], revisions map[core.ID]map[int]core.KnowledgeRecord, admissionSequences map[core.ID]int64, eventIndex map[string]events.Event) error {
 	if err := validateProjectionOrganizationAtAdmission(value.OrganizationID, event, graph); err != nil {
 		return err
 	}
@@ -751,7 +754,7 @@ func validateKnowledgeProjectionAtAdmission(value core.KnowledgeRecord, event ev
 	evidenceArtifacts := make(map[string]struct{})
 	for _, refs := range [][]string{value.ProvenanceEventRefs, value.OccurrenceEventRefs, value.ValidationRefs} {
 		for _, ref := range refs {
-			evidence, found := eventByID(stream, ref)
+			evidence, found := eventIndex[ref]
 			if !found || evidence.Sequence >= event.Sequence || evidence.OrganizationID != event.OrganizationID {
 				return fmt.Errorf("knowledge references unavailable, future, or cross-organization evidence")
 			}
@@ -789,11 +792,14 @@ func validateKnowledgeProjectionAtAdmission(value core.KnowledgeRecord, event ev
 	} else if record.Version != 1 || value.Status != core.KnowledgeCandidate {
 		return fmt.Errorf("knowledge history does not begin with a candidate")
 	}
-	if event.EventType == "KNOWLEDGE_ACTIVATED" && value.Basis == core.KnowledgeBasisRepeatedPattern &&
-		!knowledgeHasNovelValidation(value.OccurrenceEventRefs, value.ValidationRefs) {
-		return fmt.Errorf("repeated-pattern activation lacks subsequent validation evidence")
+	if event.EventType == "KNOWLEDGE_ACTIVATED" && value.Basis == core.KnowledgeBasisRepeatedPattern {
+		proposalSequence := admissionSequences[value.KnowledgeID]
+		if proposalSequence < 1 || !knowledgeHasSubsequentValidation(value.OccurrenceEventRefs, value.ValidationRefs, proposalSequence, eventIndex) {
+			return fmt.Errorf("repeated-pattern activation lacks validation evidence admitted after the proposal")
+		}
 	}
 	history[value.KnowledgeID] = Versioned[core.KnowledgeRecord]{Version: record.Version, CorrelationID: record.CorrelationID, Value: value}
+	admissionSequences[value.KnowledgeID] = event.Sequence
 	if revisions[value.KnowledgeID] == nil {
 		revisions[value.KnowledgeID] = make(map[int]core.KnowledgeRecord)
 	}
@@ -801,13 +807,14 @@ func validateKnowledgeProjectionAtAdmission(value core.KnowledgeRecord, event ev
 	return nil
 }
 
-func knowledgeHasNovelValidation(occurrences, validation []string) bool {
+func knowledgeHasSubsequentValidation(occurrences, validation []string, proposalSequence int64, eventIndex map[string]events.Event) bool {
 	seen := make(map[string]struct{}, len(occurrences))
 	for _, ref := range occurrences {
 		seen[ref] = struct{}{}
 	}
 	for _, ref := range validation {
-		if _, repeated := seen[ref]; !repeated {
+		evidence, found := eventIndex[ref]
+		if _, repeated := seen[ref]; !repeated && found && evidence.Sequence > proposalSequence {
 			return true
 		}
 	}
@@ -818,7 +825,7 @@ func validKnowledgeRevision(previous, next core.KnowledgeRecord) bool {
 	eventType := ""
 	switch next.Status {
 	case core.KnowledgeCandidate:
-		return false
+		eventType = "KNOWLEDGE_PROPOSED"
 	case core.KnowledgeActive:
 		eventType = "KNOWLEDGE_ACTIVATED"
 	case core.KnowledgeSuperseded:
@@ -1732,3 +1739,4 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		Knowledge:           snapshot.Knowledge,
 	})
 }
+

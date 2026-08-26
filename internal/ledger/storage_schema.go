@@ -25,7 +25,7 @@ const (
 	// not identify or publish an Agent OS release.
 	OldestSupportedStorageVersion = 1
 	// CurrentStorageVersion is the only layout accepted after runtime startup.
-	CurrentStorageVersion = 6
+	CurrentStorageVersion = 7
 	// LegacyEventSchemaVersion identifies the immediately preceding Event
 	// Contract. Its payload semantics already included Intent mode; migration
 	// validates review evidence and reseals schema-bound projection admissions.
@@ -62,6 +62,10 @@ var storageColumnsV5 = map[string][]string{
 
 var storageColumnsV6 = map[string][]string{
 	"event_integrity": {"sequence", "event_id", "algorithm", "previous_hash", "event_hash"},
+}
+
+var storageColumnsV7 = map[string][]string{
+	"legacy_knowledge_quarantine": {"record_id", "version", "body", "source_created_at", "reason"},
 }
 
 var storageIndexes = map[string]string{
@@ -156,6 +160,11 @@ ON pending_completion_reviews(organization_id,request_sequence);`
 const storageSchemaV6SQL = `CREATE TABLE event_integrity (
 sequence INTEGER PRIMARY KEY, event_id TEXT NOT NULL UNIQUE,
 algorithm TEXT NOT NULL, previous_hash TEXT NOT NULL, event_hash TEXT NOT NULL UNIQUE);`
+
+const storageSchemaV7SQL = `CREATE TABLE legacy_knowledge_quarantine (
+record_id TEXT NOT NULL, version INTEGER NOT NULL, body BLOB NOT NULL,
+source_created_at TEXT NOT NULL, reason TEXT NOT NULL,
+PRIMARY KEY(record_id,version));`
 
 func migrateStorage(ctx context.Context, db *sql.DB) error {
 	if ctx == nil || db == nil {
@@ -276,9 +285,40 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 			return err
 		}
 		return advanceProjectionStorageContract(ctx, tx, from, to, "event-integrity")
+	case from == 6 && to == 7:
+		if _, err := tx.ExecContext(ctx, storageSchemaV7SQL); err != nil {
+			return err
+		}
+		if err := quarantineLegacyKnowledgeRecords(ctx, tx); err != nil {
+			return err
+		}
+		return advanceProjectionStorageContract(ctx, tx, from, to, "knowledge-admission")
 	default:
 		return fmt.Errorf("no reviewed storage migration exists")
 	}
+}
+
+func quarantineLegacyKnowledgeRecords(ctx context.Context, tx *sql.Tx) error {
+	const reason = "PRE_EVENT_COUPLED_KNOWLEDGE_REQUIRES_REVIEW"
+	if _, err := tx.ExecContext(ctx, `INSERT INTO legacy_knowledge_quarantine(record_id,version,body,source_created_at,reason)
+SELECT record_id,version,body,created_at,? FROM records
+WHERE kind='knowledge' AND admission_event_id='' AND admission_fingerprint=''
+ORDER BY record_id,version`, reason); err != nil {
+		return fmt.Errorf("quarantine legacy knowledge records: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM records
+WHERE kind='knowledge' AND admission_event_id='' AND admission_fingerprint=''`); err != nil {
+		return fmt.Errorf("remove quarantined knowledge from authoritative projections: %w", err)
+	}
+	var ambiguous int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM records
+WHERE kind='knowledge' AND (admission_event_id='' OR admission_fingerprint='')`).Scan(&ambiguous); err != nil {
+		return fmt.Errorf("verify knowledge admission migration: %w", err)
+	}
+	if ambiguous != 0 {
+		return fmt.Errorf("knowledge admission migration found %d partially admitted records", ambiguous)
+	}
+	return nil
 }
 
 func advanceProjectionStorageContract(ctx context.Context, tx *sql.Tx, from, to int, boundary string) error {
@@ -478,6 +518,11 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 			expected[table] = columns
 		}
 	}
+	if version >= 7 {
+		for table, columns := range storageColumnsV7 {
+			expected[table] = columns
+		}
+	}
 	tables, err := userStorageTables(ctx, query)
 	if err != nil {
 		return StorageContract{}, err
@@ -621,3 +666,4 @@ func storageSchemaFingerprint(ctx context.Context, query storageQueryer) (finger
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
+

@@ -67,8 +67,8 @@ func ValidateKnowledgeProjectionTarget(eventType string, version int, record Kno
 	}
 	switch eventType {
 	case "KNOWLEDGE_PROPOSED":
-		if version != 1 || record.Status != KnowledgeCandidate {
-			return fmt.Errorf("knowledge proposal must create candidate version 1")
+		if record.Status != KnowledgeCandidate {
+			return fmt.Errorf("knowledge proposal must create a candidate revision")
 		}
 	case "KNOWLEDGE_ACTIVATED":
 		if version < 2 || record.Status != KnowledgeActive {
@@ -95,38 +95,48 @@ func ValidateKnowledgeProjectionTarget(eventType string, version int, record Kno
 func ValidateKnowledgeTransition(eventType string, prior, next KnowledgeRecord) error {
 	if prior.KnowledgeID != next.KnowledgeID || prior.OrganizationID != next.OrganizationID || next.Version != prior.Version+1 ||
 		next.SupersedesVersion == nil || *next.SupersedesVersion != prior.Version ||
-		prior.Type != next.Type || prior.Scope != next.Scope || prior.ScopeID != next.ScopeID || prior.Title != next.Title || prior.Content != next.Content ||
-		prior.Basis != next.Basis || !slices.Equal(prior.Tags, next.Tags) || !slices.Equal(prior.ProvenanceEventRefs, next.ProvenanceEventRefs) ||
-		!slices.Equal(prior.OccurrenceEventRefs, next.OccurrenceEventRefs) || !reflect.DeepEqual(prior.DerivedKnowledgeRefs, next.DerivedKnowledgeRefs) ||
-		!slices.Equal(prior.EvidenceArtifactRefs, next.EvidenceArtifactRefs) || prior.Applicability != next.Applicability ||
-		prior.CreatedBy != next.CreatedBy || prior.CreatedByKind != next.CreatedByKind || !prior.CreatedAt.Equal(next.CreatedAt) {
-		return fmt.Errorf("knowledge revision changes immutable candidate identity or provenance")
+		prior.Type != next.Type || prior.Scope != next.Scope || prior.ScopeID != next.ScopeID {
+		return fmt.Errorf("knowledge revision changes immutable identity or scope")
 	}
 	switch eventType {
+	case "KNOWLEDGE_PROPOSED":
+		if (prior.Status != KnowledgeCandidate && prior.Status != KnowledgeActive && prior.Status != KnowledgeStale) ||
+			next.Status != KnowledgeCandidate || !next.CreatedAt.After(prior.CreatedAt) {
+			return fmt.Errorf("knowledge correction must create a later candidate revision from candidate, active, or stale knowledge")
+		}
 	case "KNOWLEDGE_ACTIVATED":
-		if prior.Status != KnowledgeCandidate || next.Status != KnowledgeActive {
+		if prior.Status != KnowledgeCandidate || next.Status != KnowledgeActive || !sameKnowledgeCandidate(prior, next) {
 			return fmt.Errorf("only a candidate may be activated")
 		}
 		if prior.CreatedByKind == PrincipalExternalAgent && next.ValidatedByKind == PrincipalExternalAgent && prior.CreatedBy == next.ValidatedBy {
 			return fmt.Errorf("an Agent cannot activate its own proposed knowledge")
 		}
 	case "KNOWLEDGE_SUPERSEDED":
-		if prior.Status != KnowledgeActive || next.Status != KnowledgeSuperseded || !sameKnowledgeValidation(prior, next) {
+		if prior.Status != KnowledgeActive || next.Status != KnowledgeSuperseded || !sameKnowledgeCandidate(prior, next) || !sameKnowledgeValidation(prior, next) {
 			return fmt.Errorf("only active knowledge may be superseded")
 		}
 	case "KNOWLEDGE_MARKED_STALE":
-		if prior.Status != KnowledgeActive || next.Status != KnowledgeStale || !sameKnowledgeValidation(prior, next) {
+		if prior.Status != KnowledgeActive || next.Status != KnowledgeStale || !sameKnowledgeCandidate(prior, next) || !sameKnowledgeValidation(prior, next) {
 			return fmt.Errorf("only active knowledge may be marked stale")
 		}
 	case "KNOWLEDGE_QUARANTINED":
 		if (prior.Status != KnowledgeCandidate && prior.Status != KnowledgeActive) || next.Status != KnowledgeQuarantined ||
-			(prior.Status == KnowledgeActive && !sameKnowledgeValidation(prior, next)) {
+			!sameKnowledgeCandidate(prior, next) || (prior.Status == KnowledgeActive && !sameKnowledgeValidation(prior, next)) {
 			return fmt.Errorf("only candidate or active knowledge may be quarantined")
 		}
 	default:
 		return fmt.Errorf("knowledge transition is unsupported")
 	}
 	return nil
+}
+
+func sameKnowledgeCandidate(prior, next KnowledgeRecord) bool {
+	return prior.Title == next.Title && prior.Content == next.Content && prior.Basis == next.Basis &&
+		slices.Equal(prior.Tags, next.Tags) && slices.Equal(prior.ProvenanceEventRefs, next.ProvenanceEventRefs) &&
+		slices.Equal(prior.OccurrenceEventRefs, next.OccurrenceEventRefs) && reflect.DeepEqual(prior.DerivedKnowledgeRefs, next.DerivedKnowledgeRefs) &&
+		slices.Equal(prior.EvidenceArtifactRefs, next.EvidenceArtifactRefs) && prior.Applicability == next.Applicability &&
+		prior.Limitations == next.Limitations && prior.CreatedBy == next.CreatedBy && prior.CreatedByKind == next.CreatedByKind &&
+		prior.CreatedAt.Equal(next.CreatedAt)
 }
 
 func validTerminalKnowledgeValidation(record KnowledgeRecord) bool {
@@ -259,3 +269,4 @@ func validKnowledgeVersionedRefs(values []VersionedRef) bool {
 	}
 	return true
 }
+

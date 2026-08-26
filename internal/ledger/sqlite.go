@@ -2106,11 +2106,33 @@ func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedPro
 	if err := core.ValidateKnowledgeTransition(item.draft.Event.EventType, previous, knowledge); err != nil {
 		return fmt.Errorf("knowledge revision: %w", err)
 	}
-	if item.draft.Event.EventType == "KNOWLEDGE_ACTIVATED" && knowledge.Basis == core.KnowledgeBasisRepeatedPattern &&
-		!containsNovelKnowledgeValidationRef(knowledge.OccurrenceEventRefs, knowledge.ValidationRefs) {
-		return fmt.Errorf("repeated-pattern activation requires validation evidence beyond the proposal occurrences")
+	if item.draft.Event.EventType == "KNOWLEDGE_ACTIVATED" && knowledge.Basis == core.KnowledgeBasisRepeatedPattern {
+		proposalSequence, err := projectionAdmissionSequence(ctx, tx, "knowledge", item.draft.RecordID, record.Version)
+		if err != nil {
+			return err
+		}
+		subsequent, err := hasSubsequentKnowledgeValidationRef(ctx, tx, proposalSequence, knowledge.OccurrenceEventRefs, knowledge.ValidationRefs)
+		if err != nil {
+			return err
+		}
+		if !subsequent {
+			return fmt.Errorf("repeated-pattern activation requires validation evidence admitted after the proposal")
+		}
 	}
 	return nil
+}
+
+func projectionAdmissionSequence(ctx context.Context, tx *sql.Tx, kind, recordID string, version int) (int64, error) {
+	var sequence int64
+	if err := tx.QueryRowContext(ctx, `SELECT e.sequence FROM records r
+JOIN events e ON e.event_id=r.admission_event_id
+WHERE r.kind=? AND r.record_id=? AND r.version=?`, kind, recordID, version).Scan(&sequence); err != nil {
+		return 0, fmt.Errorf("read prior %s admission sequence: %w", kind, err)
+	}
+	if sequence < 1 {
+		return 0, fmt.Errorf("prior %s admission sequence is invalid", kind)
+	}
+	return sequence, nil
 }
 
 func validateKnowledgeScopeBinding(ctx context.Context, tx *sql.Tx, knowledge core.KnowledgeRecord) error {
@@ -2171,17 +2193,24 @@ func validateKnowledgeEventReference(ctx context.Context, tx *sql.Tx, organizati
 	return artifactRefs, nil
 }
 
-func containsNovelKnowledgeValidationRef(occurrences, validation []string) bool {
+func hasSubsequentKnowledgeValidationRef(ctx context.Context, tx *sql.Tx, proposalSequence int64, occurrences, validation []string) (bool, error) {
 	seen := make(map[string]struct{}, len(occurrences))
 	for _, ref := range occurrences {
 		seen[ref] = struct{}{}
 	}
 	for _, ref := range validation {
-		if _, repeated := seen[ref]; !repeated {
-			return true
+		if _, repeated := seen[ref]; repeated {
+			continue
+		}
+		evidence, found, err := eventByID(ctx, tx, ref)
+		if err != nil {
+			return false, fmt.Errorf("read repeated-pattern validation event: %w", err)
+		}
+		if found && evidence.Sequence > proposalSequence {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func latestProjectionRevision[T any](ctx context.Context, tx *sql.Tx, kind, recordID string) (events.ProjectionRecord, T, bool, error) {
@@ -2983,13 +3012,13 @@ func (l *SQLite) Records(ctx context.Context, kind, id string) ([][]byte, error)
 	return collectRecordBodies(l.db.QueryContext(ctx, `SELECT body FROM records WHERE kind=? AND (?='' OR record_id=?) ORDER BY record_id,version`, kind, id, id))
 }
 
-// ActiveKnowledgeRecords returns only current, event-admitted knowledge rows
-// from one organization. The caller applies the remaining scope and text
-// filters, but can never turn this into an unbounded or cross-tenant scan.
-func (l *SQLite) ActiveKnowledgeRecords(ctx context.Context, organizationID, scope, scopeID string, limit int) ([][]byte, error) {
-	if organizationID == "" || scopeID == "" || limit < 1 || limit > 256 ||
+// ActiveKnowledgeRecords returns one deterministic page of current,
+// event-admitted knowledge in one exact tenant and scope. The caller advances
+// the exclusive record-ID cursor and applies Unicode-aware text matching.
+func (l *SQLite) ActiveKnowledgeRecords(ctx context.Context, organizationID, scope, scopeID, afterRecordID string, limit int) ([][]byte, error) {
+	if organizationID == "" || scopeID == "" || len(afterRecordID) > 4096 || strings.TrimSpace(afterRecordID) != afterRecordID || limit < 1 || limit > 128 ||
 		(scope != string(core.KnowledgeScopeAgent) && scope != string(core.KnowledgeScopeTeam) && scope != string(core.KnowledgeScopeOrganization)) {
-		return nil, fmt.Errorf("organization, closed knowledge scope, scope identity, and limit from 1 through 256 are required")
+		return nil, fmt.Errorf("organization, closed knowledge scope, scope identity, canonical cursor, and limit from 1 through 128 are required")
 	}
 	bodies, err := admittedProjectionRecordBodies(ctx, l.db, `JOIN (
 	SELECT record_id, MAX(version) AS version
@@ -2999,8 +3028,9 @@ func (l *SQLite) ActiveKnowledgeRecords(ctx context.Context, organizationID, sco
 ) AS latest ON latest.record_id=r.record_id AND latest.version=r.version
 WHERE r.kind='knowledge' AND e.organization_id=? AND json_extract(r.body,'$.value.status')=?
 AND json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scope_id')=?
+AND r.record_id>?
 ORDER BY r.record_id
-LIMIT ?`, organizationID, string(core.KnowledgeActive), scope, scopeID, limit)
+LIMIT ?`, organizationID, string(core.KnowledgeActive), scope, scopeID, afterRecordID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -3842,3 +3872,4 @@ func scanEvent(row rowScanner) (events.Event, error) {
 	event.CreatedAt = parsed
 	return event, nil
 }
+

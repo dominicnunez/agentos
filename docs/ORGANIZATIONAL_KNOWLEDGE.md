@@ -20,14 +20,23 @@ A candidate may also move directly to `QUARANTINED`. Every transition is a
 runtime-owned Event Contract coupled atomically to its projection record.
 Generic record writes cannot create knowledge.
 
+An Agent may publish an untrusted `KNOWLEDGE_PROPOSED` event, but that event is
+input to curation and is not itself a knowledge projection. Runtime admission
+creates the candidate. A candidate, active record, or stale record may be
+revised into a later candidate under the same identity and scope with new
+content and provenance. That correction is excluded from active retrieval
+until it is independently activated again.
+
 A proposal records its type, exact scope, content, basis, author, concrete
 provenance events, optional occurrence events, derived knowledge versions, and
 artifact evidence. Repeated observations require at least three distinct event
 references to create a candidate, but frequency never activates it.
 
 Activation records a closed validation method, validator identity, validation
-event references, and verification time. An external Agent cannot activate its
-own proposal. Later terminal revisions preserve the prior validation record.
+event references, and verification time. Repeated-pattern activation requires
+validation evidence admitted after the candidate proposal. An external Agent
+cannot activate its own proposal. Later terminal revisions preserve the prior
+validation record.
 
 ## Security boundary
 
@@ -43,6 +52,10 @@ Retrieval accepts one exact Organization and scope, reads only current
 superseded, stale, quarantined, cross-tenant, malformed, and unadmitted records
 are excluded.
 
+Storage migration quarantines pre-admission legacy knowledge records outside
+the authoritative projection namespace while preserving their exact bytes for
+review. It never silently promotes those incomplete historical records.
+
 Knowledge remains untrusted context. It cannot grant a capability, satisfy an
 approval, permit an effect, change policy, certify completion, establish event
 truth, or demonstrate ISO/IEC 42001 conformity or certification.
@@ -55,3 +68,4 @@ inputs. Enabling that requires selection and current-state validation inside
 the same SQLite transaction that admits execution start, plus exact
 completion-time replay of every manifested knowledge version. Until those
 checks exist, execution manifests continue to contain no knowledge references.
+

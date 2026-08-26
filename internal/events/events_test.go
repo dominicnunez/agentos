@@ -39,6 +39,15 @@ func TestProjectionLifecycleEventTypesAreClosedAndImmutable(t *testing.T) {
 	}
 }
 
+func TestAgentKnowledgeProposalRemainsUnsealedInput(t *testing.T) {
+	if RequiresProjectionAdmission("KNOWLEDGE_PROPOSED", "agent-1") {
+		t.Fatal("Agent proposal was mistaken for a runtime-curated knowledge projection")
+	}
+	if !RequiresProjectionAdmission("KNOWLEDGE_PROPOSED", "runtime") {
+		t.Fatal("runtime knowledge proposal bypassed typed projection admission")
+	}
+}
+
 func TestTaskProjectionTransitionsAreExact(t *testing.T) {
 	base := core.Task{
 		ID: "task-1", WorkID: "work-1", Description: "bounded work",
@@ -1292,3 +1301,4 @@ func TestReviewedIntentAdmissionRequiresDurableSelectedGoalMatch(t *testing.T) {
 		})
 	}
 }
+
