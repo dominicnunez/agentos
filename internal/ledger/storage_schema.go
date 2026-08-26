@@ -417,9 +417,8 @@ func resealLegacyProjectionAdmissions(ctx context.Context, tx *sql.Tx) error {
 }
 
 // ValidateStorageContract verifies a supported offline database without
-// modifying it. Normal runtime startup uses OpenCurrent and rejects older
-// externally anchored layouts; reviewed offline recovery may still migrate an
-// isolated copy before activation.
+// modifying it. Runtime startup subsequently migrates supported older layouts
+// and requires CurrentStorageVersion before serving work.
 func ValidateStorageContract(ctx context.Context, db *sql.DB) (StorageContract, error) {
 	if ctx == nil || db == nil {
 		return StorageContract{}, fmt.Errorf("storage validation requires context and database")
