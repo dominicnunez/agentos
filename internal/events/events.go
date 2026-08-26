@@ -3477,6 +3477,9 @@ func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event
 	if RequiresProjectionAdmission(draft.EventType, draft.SourceActorID) {
 		return Event{}, fmt.Errorf("projection lifecycle events require typed admission")
 	}
+	if RequiresAuthorityRecordAdmission(draft.EventType) {
+		return Event{}, fmt.Errorf("authority lifecycle events require atomic record admission")
+	}
 	if draft.EventType == "INBOX_EVENTS_OBSERVED" {
 		return Event{}, fmt.Errorf("inbox observations require atomic inbox admission")
 	}
