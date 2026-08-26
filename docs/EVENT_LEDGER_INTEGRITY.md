@@ -3,7 +3,7 @@
 Agent OS protects durable event evidence with two distinct layers:
 
 1. every event is part of a domain-separated SHA-256 chain inside SQLite; and
-2. the verified chain head and exact ordered durable record projection are
+2. the verified chain head and exact ordered authority-bearing state are
    bound to an Ed25519-signed checkpoint outside SQLite.
 
 Runtime startup, diagnostics, backup, restore, and explicit verification fail
@@ -38,8 +38,9 @@ The canonical checkpoint binds all of the following under Ed25519:
 - exact event count and sequence;
 - exact terminal event ID;
 - chain algorithm and head;
-- exact record count, domain-separated record algorithm, and digest over every
-  stored record identity, version, body, admission binding, and timestamp;
+- exact authority-row count, domain-separated algorithm, and digest over every
+  stored record, consumed single-use approval, inference policy, and inference
+  reservation field;
 - ordinary host wall-clock evidence;
 - prior checkpoint SHA-256; and
 - signature algorithm and key ID.
@@ -56,9 +57,10 @@ The checkpoint is not stored in SQLite and is never inferred from a supplied
 database. Replacing, truncating, or rolling back only the database therefore
 causes the externally expected head to disagree and startup to stop.
 
-The record digest closes a separate substitution path: changing an
-authority-bearing projection without changing its admitting event also makes
-the database disagree with the external checkpoint. It does not make record
+The authority digest closes a separate substitution path: changing an
+authority-bearing projection, deleting consumed-approval evidence, or
+rewriting inference budget state without changing its admitting event also
+makes the database disagree with the external checkpoint. It does not make
 content true or authoritative by itself; Event Contract and recovery
 validation remain required.
 
@@ -78,6 +80,10 @@ lifetime. A second `serve` process cannot attach another checkpoint writer to
 the same installation. Provider configuration and checkpoint-key maintenance
 share a separate exclusive configuration lock and reload configuration after
 acquiring it, preventing stale saves from restoring retired trust material.
+Maintenance stops managed activation and then acquires the same writer lock as
+direct `serve` processes before reading SQLite. Its service-start fence may be
+adopted by a later maintenance command after a crash, but malformed fences
+fail closed.
 
 Failures before checkpoint preparation roll SQLite back without creating a
 pending checkpoint. Any error returned by SQLite commit is treated as
@@ -106,6 +112,12 @@ reviewed recovery decision; it does not prove that the discarded event never
 occurred in another system.
 
 ## Signing-key lifecycle
+
+Retained transition history is bounded at 128 finalized records. A new
+rotation or reviewed trust reset is rejected before it would exceed that
+limit, while an interrupted pending transition retains its reserved final
+slot. Current-key backup verification does not depend on scanning historical
+transitions.
 
 Key maintenance is Linux-only, requires the service to be stopped, and is
 restricted to root or the configured installation owner. It never starts the

@@ -242,7 +242,46 @@ func TestAttachedExternalAnchorFailureRollsBackSQLite(t *testing.T) {
 	}
 }
 
-func TestExternalAnchorRejectsOfflineAuthorityRecordMutation(t *testing.T) {
+func TestExternalAnchorRejectsOfflineAuthorityMutation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate string
+	}{
+		{name: "record", mutate: `UPDATE records SET body='{"forged":true}' WHERE kind='organization' AND record_id='org-1'`},
+		{name: "consumed approval", mutate: `DELETE FROM consumed_approvals WHERE approval_id='approval-1'`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := t.Context()
+			databasePath, checkpointPath, installationID, publicKey, privateKey := anchoredAuthorityFixture(t)
+			db, err := sql.Open("sqlite", databasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.ExecContext(ctx, test.mutate); err != nil {
+				_ = db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			tampered, err := OpenCurrent(databasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tampered.Close() }()
+			tamperedState, err := tampered.IntegrityAnchorState(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ledgeranchor.Open(checkpointPath, installationID, publicKey, privateKey, tamperedState, nil); err == nil || !strings.Contains(err.Error(), "does not match") {
+				t.Fatalf("offline authority mutation was accepted: %v", err)
+			}
+		})
+	}
+}
+
+func anchoredAuthorityFixture(t *testing.T) (string, string, string, ed25519.PublicKey, ed25519.PrivateKey) {
+	t.Helper()
 	ctx := t.Context()
 	directory := t.TempDir()
 	databasePath := filepath.Join(directory, "agentos.db")
@@ -276,30 +315,17 @@ func TestExternalAnchorRejectsOfflineAuthorityRecordMutation(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := appendEvent(ctx, tx, events.TrustedDraft{OrganizationID: "org-1", EventType: "APPROVAL_CONSUMED", SourceActorID: "runtime", CorrelationID: "effect-1", Payload: map[string]string{"approval_id": "approval-1", "effect_fingerprint": "effect-fingerprint"}}); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO consumed_approvals(approval_id,effect_fingerprint,consumed_at) VALUES('approval-1','effect-fingerprint',?)`, now.Format(time.RFC3339Nano))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	db, err := sql.Open("sqlite", databasePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE records SET body='{"forged":true}' WHERE kind='organization' AND record_id='org-1'`); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	tampered, err := OpenCurrent(databasePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tampered.Close() }()
-	tamperedState, err := tampered.IntegrityAnchorState(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ledgeranchor.Open(checkpointPath, installationID, publicKey, privateKey, tamperedState, nil); err == nil || !strings.Contains(err.Error(), "does not match") {
-		t.Fatalf("offline authority record mutation was accepted: %v", err)
-	}
+	return databasePath, checkpointPath, installationID, publicKey, privateKey
 }

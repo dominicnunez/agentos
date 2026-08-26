@@ -122,11 +122,12 @@ func beginIntegrityMaintenance(ctx context.Context, config bootstrap.Config) (fu
 		}
 	}
 	lockPath := filepath.Join(config.Paths.RuntimeDir, "integrity-maintenance.lock")
-	if err := fileguard.WriteAtomicallyNew(lockPath, []byte("Agent OS ledger integrity maintenance\n"), 0o600, 0o700); err != nil {
+	if err := adoptOrCreateIntegrityFence(lockPath); err != nil {
 		return nil, fmt.Errorf("acquire ledger integrity maintenance lock: %w", err)
 	}
 	locked := true
 	serviceMasked := false
+	var writerLock *fileguard.ProcessLock
 	release := func() error {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
@@ -138,6 +139,10 @@ func beginIntegrityMaintenance(ctx context.Context, config bootstrap.Config) (fu
 		if serviceMasked {
 			releaseErr = errors.Join(releaseErr, runCommand(cleanupCtx, "systemctl", arguments...))
 			serviceMasked = false
+		}
+		if writerLock != nil {
+			releaseErr = errors.Join(releaseErr, writerLock.Close())
+			writerLock = nil
 		}
 		if locked {
 			if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -190,7 +195,47 @@ func beginIntegrityMaintenance(ctx context.Context, config bootstrap.Config) (fu
 	if err := requireIntegrityServiceStopped(ctx, config); err != nil {
 		return nil, errors.Join(err, release())
 	}
+	writerPath := filepath.Join(config.Paths.StateDir, "ledger-writer.lock")
+	writerLock, err = fileguard.AcquireProcessLock(writerPath, 0o700)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("acquire exclusive ledger writer for integrity maintenance: %w", err), release())
+	}
+	if config.Mode == bootstrap.ModeSystem {
+		uid, gid, identityErr := lookupNumericIdentity(ctx, "agentos")
+		if identityErr != nil {
+			return nil, errors.Join(identityErr, release())
+		}
+		if err := os.Chown(writerPath, uid, gid); err != nil {
+			return nil, errors.Join(err, release())
+		}
+	}
 	return release, nil
+}
+
+func ensureNoIntegrityMaintenance(config bootstrap.Config) error {
+	path := filepath.Join(config.Paths.RuntimeDir, "integrity-maintenance.lock")
+	if _, err := os.Lstat(path); err == nil {
+		return fmt.Errorf("ledger integrity maintenance is active or requires recovery")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect ledger integrity maintenance fence: %w", err)
+	}
+	return nil
+}
+
+func adoptOrCreateIntegrityFence(path string) error {
+	const body = "Agent OS ledger integrity maintenance\n"
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return fileguard.WriteAtomicallyNew(path, []byte(body), 0o600, 0o700)
+	}
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() != int64(len(body)) {
+		return fmt.Errorf("existing ledger integrity maintenance fence is invalid")
+	}
+	stored, err := fileguard.ReadUnchangedBoundedFile(path, info, int64(len(body)), "ledger integrity maintenance fence")
+	if err != nil || string(stored) != body {
+		return fmt.Errorf("existing ledger integrity maintenance fence is invalid")
+	}
+	return nil
 }
 
 func systemUnitMasked(ctx context.Context, config bootstrap.Config, unit string) (bool, error) {

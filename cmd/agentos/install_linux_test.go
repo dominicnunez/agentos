@@ -120,6 +120,27 @@ func TestEnsureOwnedRuntimeDirectoryRejectsBroadModesAndLinks(t *testing.T) {
 	}
 }
 
+func TestIntegrityMaintenanceFenceIsRecoverableAndBlocksRuntime(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "integrity-maintenance.lock")
+	if err := adoptOrCreateIntegrityFence(path); err != nil {
+		t.Fatal(err)
+	}
+	config := bootstrap.Config{Paths: bootstrap.Paths{RuntimeDir: directory}}
+	if err := ensureNoIntegrityMaintenance(config); err == nil {
+		t.Fatal("runtime accepted an integrity maintenance fence")
+	}
+	if err := adoptOrCreateIntegrityFence(path); err != nil {
+		t.Fatalf("stale valid maintenance fence could not be adopted: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("forged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := adoptOrCreateIntegrityFence(path); err == nil {
+		t.Fatal("malformed maintenance fence was adopted")
+	}
+}
+
 func TestUserRuntimeBaseMustBePrivateAndOwned(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "runtime")
 	if err := os.Mkdir(base, 0o700); err != nil {

@@ -32,7 +32,7 @@ the SQLite ledger and does not convert readiness evidence into certification.
 
 Separately, Agent OS verifies a cryptographic stored-byte chain across the
 durable SQLite event stream and binds its expected head and exact durable
-record projection to an Ed25519-signed
+authority-bearing state to an Ed25519-signed
 checkpoint outside SQLite. Startup, diagnostics, backup, and restore verify
 both layers. The checkpoint is not included as a claim in the tenant-scoped
 AIMS export and does not prove event truth, trusted time, control

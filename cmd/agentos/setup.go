@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
@@ -131,6 +132,16 @@ func runInit(ctx context.Context, mode bootstrap.Mode, resume bool, input *os.Fi
 func enrollMigratedLedgerAnchor(ctx context.Context, configPath, statePath string, config *bootstrap.Config, state *bootstrap.State, ui *terminalUI) (finalErr error) {
 	if config == nil || state == nil || ui == nil || state.Stage != bootstrap.StageAnchor {
 		return fmt.Errorf("migrated ledger anchor enrollment state is invalid")
+	}
+	configLock, err := acquireConfigurationLock(*config)
+	if err != nil {
+		return fmt.Errorf("acquire migrated configuration lock: %w", err)
+	}
+	defer func() { finalErr = errors.Join(finalErr, configLock.Close()) }()
+	lockedConfig, configErr := bootstrap.LoadConfig(configPath)
+	lockedState, stateErr := bootstrap.LoadState(statePath)
+	if configErr != nil || stateErr != nil || !reflect.DeepEqual(lockedConfig, *config) || !reflect.DeepEqual(lockedState, *state) {
+		return fmt.Errorf("migrated installation changed while waiting for exclusive access")
 	}
 	if len(config.Providers) == 0 {
 		provider, err := collectProvider(ctx, *config, ui.input, ui.output)

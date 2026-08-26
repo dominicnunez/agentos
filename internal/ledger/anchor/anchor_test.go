@@ -72,7 +72,7 @@ func TestStoreRejectsRollbackSubstitutionAndWrongTrustRoot(t *testing.T) {
 	for name, candidate := range map[string]LedgerState{
 		"truncation":   genesis,
 		"substitution": state(1, "evt-other", strings.Repeat("d", 64)),
-		"application":  {ApplicationID: 2, StorageVersion: 6, EventSchemaVersion: 4, EventCount: 1, Sequence: 1, EventID: "evt-1", ChainAlgorithm: "SHA-256", ChainHead: strings.Repeat("c", 64), RecordAlgorithm: "SHA-256", RecordSHA256: strings.Repeat("0", 64)},
+		"application":  {ApplicationID: 2, StorageVersion: 6, EventSchemaVersion: 4, EventCount: 1, Sequence: 1, EventID: "evt-1", ChainAlgorithm: "SHA-256", ChainHead: strings.Repeat("c", 64), AuthorityAlgorithm: "SHA-256", AuthoritySHA256: strings.Repeat("0", 64)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Open(path, installationID, publicKey, privateKey, candidate, nil); err == nil {
@@ -173,7 +173,7 @@ func fixture(t *testing.T) (string, string, ed25519.PublicKey, ed25519.PrivateKe
 	t.Helper()
 	publicKey, privateKey := keyPair(1)
 	return filepath.Join(t.TempDir(), "ledger-anchor.json"), "install-" + strings.Repeat("1a", 32), publicKey, privateKey,
-		LedgerState{ApplicationID: 0x41474f53, StorageVersion: 6, EventSchemaVersion: 4, ChainAlgorithm: "SHA-256", RecordAlgorithm: "SHA-256", RecordSHA256: strings.Repeat("0", 64)},
+		LedgerState{ApplicationID: 0x41474f53, StorageVersion: 6, EventSchemaVersion: 4, ChainAlgorithm: "SHA-256", AuthorityAlgorithm: "SHA-256", AuthoritySHA256: strings.Repeat("0", 64)},
 		time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 }
 
@@ -191,6 +191,6 @@ func state(sequence int64, eventID, head string) LedgerState {
 		ApplicationID: 0x41474f53, StorageVersion: 6, EventSchemaVersion: 4,
 		EventCount: sequence, Sequence: sequence, EventID: eventID,
 		ChainAlgorithm: "SHA-256", ChainHead: head,
-		RecordAlgorithm: "SHA-256", RecordSHA256: strings.Repeat("0", 64),
+		AuthorityAlgorithm: "SHA-256", AuthoritySHA256: strings.Repeat("0", 64),
 	}
 }

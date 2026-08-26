@@ -74,6 +74,9 @@ func runIntegrityMaintenance(ctx context.Context, args []string, input *os.File,
 		_, err = fmt.Fprintln(output, "Ledger anchor key transition recovered and completed. The service remains stopped.")
 		return err
 	}
+	if err := ledgeranchor.EnsureTransitionCapacity(filepath.Join(config.Paths.StateDir, "ledger-anchor-transitions")); err != nil {
+		return err
+	}
 	if _, err := os.Lstat(config.Integrity.CheckpointFile + ".pending"); err == nil {
 		return fmt.Errorf("resolve the pending ledger checkpoint before changing its signing key")
 	} else if !errors.Is(err, os.ErrNotExist) {

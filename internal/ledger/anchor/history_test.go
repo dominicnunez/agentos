@@ -2,6 +2,7 @@ package anchor
 
 import (
 	"crypto/ed25519"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,5 +76,27 @@ func TestTrustedPublicKeyHistoryIgnoresUnrelatedValidEvidence(t *testing.T) {
 	trusted, err := TrustedPublicKeyHistory(directory, installationID, currentPublic)
 	if err != nil || len(trusted) != 1 || !containsPublicKey(trusted, currentPublic) {
 		t.Fatalf("unrelated evidence expanded trust: keys=%d err=%v", len(trusted), err)
+	}
+}
+
+func TestTransitionCapacityReservesFinalSlotForPendingRecovery(t *testing.T) {
+	directory := t.TempDir()
+	for index := 0; index < maximumTransitionHistory-1; index++ {
+		name := filepath.Join(directory, fmt.Sprintf("%03d.json", index))
+		if err := os.WriteFile(name, []byte("evidence"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(directory, "interrupted.pending.json"), []byte("pending"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureTransitionCapacity(directory); err != nil {
+		t.Fatalf("pending evidence consumed the reserved final slot: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "final.json"), []byte("evidence"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureTransitionCapacity(directory); err == nil {
+		t.Fatal("new transition was accepted after retained history reached its bound")
 	}
 }

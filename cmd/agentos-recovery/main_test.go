@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -117,7 +118,7 @@ func TestTrustedRecoveryCheckpointAcceptsOnlyRetainedAncestor(t *testing.T) {
 	nextPrivate := ed25519.NewKeyFromSeed(nextSeed)
 	nextPublic, _ := ledgeranchor.PublicKeyFromPrivate(nextPrivate)
 	now := time.Date(2026, 8, 26, 18, 0, 0, 0, time.UTC)
-	state := ledgeranchor.LedgerState{ApplicationID: ledger.StorageApplicationID, StorageVersion: ledger.CurrentStorageVersion, EventSchemaVersion: 1, ChainAlgorithm: ledger.EventIntegrityAlgorithm, RecordAlgorithm: ledger.EventIntegrityAlgorithm, RecordSHA256: strings.Repeat("0", 64)}
+	state := ledgeranchor.LedgerState{ApplicationID: ledger.StorageApplicationID, StorageVersion: ledger.CurrentStorageVersion, EventSchemaVersion: 1, ChainAlgorithm: ledger.EventIntegrityAlgorithm, AuthorityAlgorithm: ledger.EventIntegrityAlgorithm, AuthoritySHA256: strings.Repeat("0", 64)}
 	oldCheckpointPath := filepath.Join(directory, "old.anchor.json")
 	oldCheckpoint, err := ledgeranchor.Initialize(oldCheckpointPath, installationID, oldPrivate, state, now)
 	if err != nil {
@@ -144,5 +145,32 @@ func TestTrustedRecoveryCheckpointAcceptsOnlyRetainedAncestor(t *testing.T) {
 	wantOldKeyID, _ := ledgeranchor.PublicKeyID(oldPublic)
 	if encodedOld != wantEncodedOld || oldKeyID != wantOldKeyID {
 		t.Fatalf("historical key=%q/%q want=%q/%q", encodedOld, oldKeyID, wantEncodedOld, wantOldKeyID)
+	}
+}
+
+func TestTrustedRecoveryCheckpointUsesCurrentKeyWhenHistoryIsOverBound(t *testing.T) {
+	directory := t.TempDir()
+	transitions := filepath.Join(directory, "ledger-anchor-transitions")
+	if err := os.Mkdir(transitions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 129; index++ {
+		if err := os.WriteFile(filepath.Join(transitions, fmt.Sprintf("%03d.json", index)), []byte("untrusted"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	installationID := "install-" + strings.Repeat("ad", 32)
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	publicKey, _ := ledgeranchor.PublicKeyFromPrivate(privateKey)
+	encoded, _ := ledgeranchor.EncodePublicKey(publicKey)
+	checkpointPath := filepath.Join(directory, "current.anchor.json")
+	state := ledgeranchor.LedgerState{ApplicationID: ledger.StorageApplicationID, StorageVersion: ledger.CurrentStorageVersion, EventSchemaVersion: 1, ChainAlgorithm: ledger.EventIntegrityAlgorithm, AuthorityAlgorithm: ledger.EventIntegrityAlgorithm, AuthoritySHA256: strings.Repeat("0", 64)}
+	if _, err := ledgeranchor.Initialize(checkpointPath, installationID, privateKey, state, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	config := bootstrap.Config{Paths: bootstrap.Paths{StateDir: directory}, Integrity: bootstrap.IntegrityAnchor{InstallationID: installationID, PublicKey: encoded}}
+	selected, _, err := trustedRecoveryCheckpoint(config, checkpointPath)
+	if err != nil || selected != encoded {
+		t.Fatalf("current-key recovery depended on over-bound history: selected=%q err=%v", selected, err)
 	}
 }

@@ -134,6 +134,10 @@ func trustedRecoveryCheckpoint(config bootstrap.Config, checkpointPath string) (
 	if err != nil {
 		return "", "", err
 	}
+	if _, _, err := ledgeranchor.Read(checkpointPath, config.Integrity.InstallationID, current); err == nil {
+		keyID, keyErr := ledgeranchor.PublicKeyID(current)
+		return config.Integrity.PublicKey, keyID, keyErr
+	}
 	history, err := ledgeranchor.TrustedPublicKeyHistory(filepath.Join(config.Paths.StateDir, "ledger-anchor-transitions"), config.Integrity.InstallationID, current)
 	if err != nil {
 		return "", "", fmt.Errorf("verify retained ledger anchor key history: %w", err)

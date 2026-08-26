@@ -152,7 +152,7 @@ func testNonEmptyState() LedgerState {
 		ApplicationID: 1, StorageVersion: 6, EventSchemaVersion: 1,
 		EventCount: 2, Sequence: 2, EventID: "event-2",
 		ChainAlgorithm: "SHA-256", ChainHead: testSHA256("head"),
-		RecordAlgorithm: "SHA-256", RecordSHA256: testSHA256("records"),
+		AuthorityAlgorithm: "SHA-256", AuthoritySHA256: testSHA256("authority"),
 	}
 }
 

@@ -81,6 +81,9 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 	if err := validateRuntimeBoundary(config); err != nil {
 		return fmt.Errorf("runtime boundary is unsafe: %w", err)
 	}
+	if err := ensureNoIntegrityMaintenance(config); err != nil {
+		return err
+	}
 	writerLock, err := fileguard.AcquireProcessLock(filepath.Join(config.Paths.StateDir, "ledger-writer.lock"), 0o700)
 	if err != nil {
 		return fmt.Errorf("acquire exclusive ledger writer: %w", err)

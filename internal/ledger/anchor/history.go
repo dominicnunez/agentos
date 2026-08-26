@@ -15,6 +15,35 @@ import (
 
 const maximumTransitionHistory = 128
 
+// EnsureTransitionCapacity rejects a new key transition before retained
+// history would cross the bounded verification limit. Pending evidence is not
+// counted because it must be resumed into its already-reserved final slot.
+func EnsureTransitionCapacity(directory string) error {
+	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
+		return fmt.Errorf("ledger anchor transition history path is invalid")
+	}
+	if err := fileguard.ValidateDirectoryChain(directory); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read ledger anchor transition history: %w", err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") && !strings.HasSuffix(entry.Name(), ".pending.json") {
+			count++
+		}
+	}
+	if count >= maximumTransitionHistory {
+		return fmt.Errorf("ledger anchor transition history has reached its bound")
+	}
+	return nil
+}
+
 type verifiedKeyTransition struct {
 	continuity string
 	previous   ed25519.PublicKey
@@ -40,14 +69,14 @@ func TrustedPublicKeyHistory(directory, installationID string, current ed25519.P
 	if err != nil {
 		return nil, fmt.Errorf("read ledger anchor transition history: %w", err)
 	}
-	if len(entries) > maximumTransitionHistory {
-		return nil, fmt.Errorf("ledger anchor transition history exceeds its bound")
-	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	records := make([]verifiedKeyTransition, 0, len(entries))
 	for _, entry := range entries {
 		if !strings.HasSuffix(entry.Name(), ".json") || strings.HasSuffix(entry.Name(), ".pending.json") {
 			continue
+		}
+		if len(records) >= maximumTransitionHistory {
+			return nil, fmt.Errorf("ledger anchor transition history exceeds its bound")
 		}
 		if !entry.Type().IsRegular() {
 			return nil, fmt.Errorf("ledger anchor transition evidence must be a regular file")

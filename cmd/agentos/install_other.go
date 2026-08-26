@@ -19,6 +19,9 @@ func ensureProviderSetupPrivileges(_ context.Context, _ bootstrap.Config, _ *ter
 func acquireConfigurationLock(_ bootstrap.Config) (*fileguard.ProcessLock, error) {
 	return nil, fmt.Errorf("Agent OS V1 configuration mutation is supported on Linux")
 }
+func ensureNoIntegrityMaintenance(_ bootstrap.Config) error {
+	return fmt.Errorf("Agent OS V1 integrity fencing is supported on Linux")
+}
 func ensureIntegrityMaintenancePrivileges(_ context.Context, _ bootstrap.Config, _ *terminalUI, _, _ string) (bool, error) {
 	return false, fmt.Errorf("Agent OS V1 integrity maintenance is supported on Linux")
 }
