@@ -817,6 +817,8 @@ func knowledgeHasNovelValidation(occurrences, validation []string) bool {
 func validKnowledgeRevision(previous, next core.KnowledgeRecord) bool {
 	eventType := ""
 	switch next.Status {
+	case core.KnowledgeCandidate:
+		return false
 	case core.KnowledgeActive:
 		eventType = "KNOWLEDGE_ACTIVATED"
 	case core.KnowledgeSuperseded:
@@ -825,6 +827,8 @@ func validKnowledgeRevision(previous, next core.KnowledgeRecord) bool {
 		eventType = "KNOWLEDGE_MARKED_STALE"
 	case core.KnowledgeQuarantined:
 		eventType = "KNOWLEDGE_QUARANTINED"
+	default:
+		return false
 	}
 	return core.ValidateKnowledgeTransition(eventType, previous, next) == nil
 }

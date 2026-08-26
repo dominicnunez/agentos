@@ -150,8 +150,12 @@ func validKnowledgeVerification(record KnowledgeRecord) bool {
 		return record.ValidatedByKind == PrincipalExternalAgent
 	case KnowledgeValidationRepeatedObservation:
 		return len(record.ValidationRefs) >= 3
-	default:
+	case KnowledgeValidationDeterministic, KnowledgeValidationExperimental, KnowledgeValidationMixed:
 		return true
+	case KnowledgeValidationUnvalidated:
+		return false
+	default:
+		return false
 	}
 }
 
