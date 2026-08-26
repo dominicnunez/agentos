@@ -2174,7 +2174,7 @@ FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND event
 		return false, fmt.Errorf("read Agent knowledge execution starts: %w", err)
 	}
 	if len(starts) > 16 {
-		return false, fmt.Errorf("Agent knowledge execution history exceeds its bound")
+		return false, fmt.Errorf("agent knowledge execution history exceeds its bound")
 	}
 	for _, start := range starts {
 		payload, present, err := events.AdmittedProjection(start)
