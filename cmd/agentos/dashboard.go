@@ -281,6 +281,8 @@ func allowedDashboardRoute(method, requestPath, rawQuery string) bool {
 		return true
 	case method == http.MethodGet && requestPath == "/v1/user/aims/evidence" && rawQuery == "":
 		return true
+	case method == http.MethodGet && requestPath == "/v1/user/incidents/replay":
+		return validIncidentReplayQuery(rawQuery)
 	case method == http.MethodPost && len(segments) == 5 && segments[0] == "v1" && segments[1] == "user" && segments[2] == "intents" && validDashboardIdentifier(segments[3]) && (segments[4] == "confirm" || segments[4] == "abandon") && rawQuery == "":
 		return true
 	case method == http.MethodGet && requestPath == "/v1/user/tasks/recent" && rawQuery == "":
@@ -341,6 +343,18 @@ func validReviewQuery(raw string) bool {
 		}
 	}
 	return true
+}
+
+func validIncidentReplayQuery(raw string) bool {
+	if raw == "" || strings.HasPrefix(raw, "&") || strings.HasSuffix(raw, "&") || strings.Contains(raw, "&&") {
+		return false
+	}
+	values, err := url.ParseQuery(raw)
+	if err != nil || len(values) != 1 {
+		return false
+	}
+	conversations := values["conversation_id"]
+	return len(conversations) == 1 && intake.ValidateIdentifier("incident conversation", conversations[0]) == nil
 }
 
 func validDashboardIdentifier(identifier string) bool {

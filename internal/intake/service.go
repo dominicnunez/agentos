@@ -16,6 +16,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/inference"
+	"github.com/dominicnunez/agentos/internal/replay"
 )
 
 const (
@@ -508,6 +509,29 @@ func (s *Service) AIMSEvidence(ctx context.Context, principal Principal) (app.AI
 		return app.AIMSEvidencePackage{}, ErrNotFound
 	}
 	return export, nil
+}
+
+// IncidentReplay exposes a bounded, payload-free reconstruction only to the
+// authenticated local installation owner. An A2A actor cannot use this
+// organization-wide inspection boundary even when it can read its own Work.
+func (s *Service) IncidentReplay(ctx context.Context, principal Principal, conversationID string) (replay.Report, error) {
+	if err := validatePrincipal(principal); err != nil {
+		return replay.Report{}, err
+	}
+	if principal.Kind != core.PrincipalHuman || principal.Channel != ChannelHumanDirect || principal.WorkScope != WorkScopeOrganization || !principal.Allowed(CapabilityReadStatus) {
+		return replay.Report{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityReadStatus)
+	}
+	if err := ValidateIdentifier("conversation", conversationID); err != nil {
+		return replay.Report{}, err
+	}
+	report, found, err := s.app.IncidentReplay(ctx, core.ID(principal.OrganizationID), conversationID)
+	if err != nil {
+		return replay.Report{}, fmt.Errorf("%w: reconstruct incident replay", ErrUnavailable)
+	}
+	if !found {
+		return replay.Report{}, ErrNotFound
+	}
+	return report, nil
 }
 
 // BootstrapStrategy admits initial organizational direction only for the

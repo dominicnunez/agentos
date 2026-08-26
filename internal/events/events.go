@@ -3281,6 +3281,24 @@ type Appender interface {
 type Reader interface {
 	Events(context.Context, string) ([]Event, error)
 }
+
+// VerifiedEventSnapshot binds a bounded event selection to the independently
+// verified head of the complete ledger snapshot from which it was read. It is
+// read-only evidence and grants no authority or permission to replay effects.
+type VerifiedEventSnapshot struct {
+	OrganizationID string  `json:"-"`
+	CorrelationID  string  `json:"-"`
+	Algorithm      string  `json:"-"`
+	LedgerEvents   int64   `json:"-"`
+	LedgerSequence int64   `json:"-"`
+	LedgerEventID  string  `json:"-"`
+	LedgerSHA256   string  `json:"-"`
+	Events         []Event `json:"-"`
+}
+
+type VerifiedReplayReader interface {
+	VerifiedReplayEvents(context.Context, string, string, int) (VerifiedEventSnapshot, error)
+}
 type RecentEventReader interface {
 	RecentEvents(context.Context, string, string, int) ([]Event, error)
 }
@@ -3693,6 +3711,17 @@ func (g *Gateway) ProjectionRecords(ctx context.Context, kind, id string) ([][]b
 }
 func (g *Gateway) Events(ctx context.Context, correlationID string) ([]Event, error) {
 	return g.ledger.Events(ctx, correlationID)
+}
+
+// VerifiedReplayEvents reads one bounded tenant/correlation slice and verifies
+// the complete event-integrity chain in the same database snapshot. It never
+// republishes events or invokes an execution path.
+func (g *Gateway) VerifiedReplayEvents(ctx context.Context, organizationID, correlationID string, limit int) (VerifiedEventSnapshot, error) {
+	reader, ok := g.ledger.(VerifiedReplayReader)
+	if !ok {
+		return VerifiedEventSnapshot{}, fmt.Errorf("event ledger does not support verified replay reads")
+	}
+	return reader.VerifiedReplayEvents(ctx, organizationID, correlationID, limit)
 }
 
 // StrategyCreationEvents returns only the bounded immutable creation
