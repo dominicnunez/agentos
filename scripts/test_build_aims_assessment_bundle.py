@@ -124,6 +124,7 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
                 evidence_index = json.load(
                     archive.extractfile("assessment/evidence-index.json")  # type: ignore[arg-type]
                 )
+                assessment_readme = archive.extractfile("ASSESSMENT_README.txt").read().decode()  # type: ignore[union-attr]
                 self.assertFalse(report["certification_assessment_ready"])
                 self.assertFalse(report["conformity_determined"])
                 self.assertFalse(report["certified"])
@@ -132,6 +133,8 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
                 self.assertEqual(report["source"]["binding"], "SOURCE_UNVERIFIED")
                 self.assertIn("SOURCE_NOT_GIT_VERIFIED", report["blockers"])
                 self.assertEqual(evidence_index["source"]["binding"], "SOURCE_UNVERIFIED")
+                self.assertIn("source-unverified working tree", assessment_readme)
+                self.assertIn("not bound to the declared source commit", assessment_readme)
 
     def test_readiness_requires_approved_governance_records(self) -> None:
         report = readiness_report(
@@ -158,6 +161,7 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
             self.approved_readiness_manifest(outcomes),
             "a" * 40,
             datetime(2026, 8, 27, 12),
+            commit_at=datetime(2026, 8, 27, 11),
             source_verified=True,
         )
         self.assertFalse(report["certification_assessment_ready"])
@@ -170,6 +174,7 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
             self.approved_readiness_manifest(outcomes),
             "a" * 40,
             datetime(2026, 8, 27, 12),
+            commit_at=datetime(2026, 8, 27, 11),
             source_verified=True,
         )
         self.assertFalse(report["certification_assessment_ready"])
@@ -181,11 +186,38 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
             self.approved_readiness_manifest(outcomes),
             "a" * 40,
             datetime(2026, 8, 27, 12),
+            commit_at=datetime(2026, 8, 27, 11),
             source_verified=True,
         )
         self.assertTrue(report["certification_assessment_ready"])
         self.assertEqual(report["assessment_outcomes"], outcomes)
         self.assertEqual(report["blockers"], [])
+
+    def test_readiness_rejects_approval_after_verified_source_commit(self) -> None:
+        outcomes = self.affirmative_outcomes()
+        report = readiness_report(
+            self.approved_readiness_manifest(outcomes),
+            "a" * 40,
+            datetime(2026, 8, 27, 12),
+            commit_at=datetime(2026, 8, 27, 10, 59, 59),
+            source_verified=True,
+        )
+        self.assertFalse(report["certification_assessment_ready"])
+        self.assertEqual(
+            report["source_commit_postdated_approval_document_ids"],
+            sorted(REQUIRED_APPROVED_DOCUMENTS),
+        )
+        self.assertIn("APPROVALS_POSTDATE_SOURCE_COMMIT", report["blockers"])
+
+    def test_readiness_rejects_verified_source_without_commit_time(self) -> None:
+        report = readiness_report(
+            self.approved_readiness_manifest(self.affirmative_outcomes()),
+            "a" * 40,
+            datetime(2026, 8, 27, 12),
+            source_verified=True,
+        )
+        self.assertFalse(report["certification_assessment_ready"])
+        self.assertIn("VERIFIED_SOURCE_COMMIT_TIME_MISSING", report["blockers"])
 
     def test_readiness_follows_approved_successor(self) -> None:
         report = readiness_report(

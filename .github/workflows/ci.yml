@@ -68,7 +68,7 @@ jobs:
           else
             history_baseline="${{ github.event.before }}"
             if [ "$history_baseline" = "0000000000000000000000000000000000000000" ]; then
-              history_baseline=$(git rev-list --max-parents=0 HEAD | head -n 1)
+              history_baseline=$(git merge-base "origin/${{ github.event.repository.default_branch }}" "${GITHUB_SHA}")
             fi
           fi
           python3 scripts/build_aims_assessment_bundle.py --commit "${GITHUB_SHA}" --assessment-at "$assessment_at" --history-baseline "$history_baseline" --output work/aims-first/agentos-aims-assessment.tar.gz

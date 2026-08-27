@@ -28,8 +28,11 @@ if git cat-file -e HEAD:governance/aims/manifest.json 2>/dev/null; then
 else
   "$PYTHON_BIN" "$staged_root/scripts/verify_aims_documents.py" --root "$staged_root"
 fi
-"$PYTHON_BIN" -m unittest scripts/test_verify_aims_documents.py
-"$PYTHON_BIN" -m unittest scripts/test_build_aims_assessment_bundle.py
+(
+  cd "$staged_root"
+  "$PYTHON_BIN" -m unittest scripts/test_verify_aims_documents.py
+  "$PYTHON_BIN" -m unittest scripts/test_build_aims_assessment_bundle.py
+)
 
 staged_go="$(git diff --cached --name-only --diff-filter=ACMR -- '*.go')"
 if [ -n "$staged_go" ]; then

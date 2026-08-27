@@ -384,6 +384,14 @@ def readiness_report(
         and document["status"] == "APPROVED"
         and datetime.strptime(document["approved_at"], "%Y-%m-%dT%H:%M:%SZ") > assessment_at
     )
+    postdated_source_commit = sorted(
+        document_id
+        for document_id, document in effective.items()
+        if document is not None
+        and document["status"] == "APPROVED"
+        and commit_at is not None
+        and datetime.strptime(document["approved_at"], "%Y-%m-%dT%H:%M:%SZ") > commit_at
+    )
     blockers: list[str] = []
     if missing:
         blockers.append("REQUIRED_GOVERNANCE_RECORDS_MISSING")
@@ -393,6 +401,10 @@ def readiness_report(
         blockers.append("CONTROLLED_REVIEWS_OVERDUE")
     if postdated:
         blockers.append("APPROVALS_POSTDATE_ASSESSMENT")
+    if source_verified and commit_at is None:
+        blockers.append("VERIFIED_SOURCE_COMMIT_TIME_MISSING")
+    if postdated_source_commit:
+        blockers.append("APPROVALS_POSTDATE_SOURCE_COMMIT")
     if any(entry["status"] == "DRAFT" for entry in documents):
         blockers.append("CONTROLLED_DRAFTS_REMAIN")
     if "aims.audit-result" in missing:
@@ -453,6 +465,7 @@ def readiness_report(
         "not_approved_required_document_ids": not_approved,
         "overdue_required_document_ids": overdue,
         "postdated_approval_document_ids": postdated,
+        "source_commit_postdated_approval_document_ids": postdated_source_commit,
         "assessment_outcomes": outcomes,
         "blockers": blockers,
         "limitations": [
@@ -576,10 +589,19 @@ def build(
             verify_source,
         )
     )
+    if verify_source:
+        source_statement = (
+            "This deterministic bundle contains bounded public repository evidence for the exact source commit.\n"
+            "The local Git object check does not authenticate repository identity; use separate trusted provenance.\n"
+        )
+    else:
+        source_statement = (
+            "This deterministic bundle contains bounded public repository evidence from a source-unverified working tree.\n"
+            "It is not bound to the declared source commit and must not be represented as Git-verified evidence.\n"
+        )
     entries["ASSESSMENT_README.txt"] = (
         "Agent OS public AIMS assessment-evidence bundle\n\n"
-        "This deterministic bundle contains bounded public repository evidence for the exact source commit.\n"
-        "The local Git object check does not authenticate repository identity; use separate trusted provenance.\n"
+        f"{source_statement}"
         "It does not contain confidential operating evidence, determine conformity, or establish certification.\n"
         "Use an approved AIMS scope, an authorized ISO/IEC 42001 copy, and competent independent assessment.\n"
     ).encode("utf-8")
