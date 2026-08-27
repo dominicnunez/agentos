@@ -2759,6 +2759,13 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			for _, selectedKnowledge := range knowledgeSelections {
 				inputContext.Knowledge = append(inputContext.Knowledge, selectedKnowledge.Record)
 			}
+			for _, selectedPeer := range selection.Coordination {
+				peer, err := core.NewAgentExecutionPeerTask(selectedPeer.Task, selectedPeer.Version, selectedPeer.EventRef)
+				if err != nil {
+					return core.ExecutionContextManifest{}, fmt.Errorf("materialize peer coordination: %w", err)
+				}
+				inputContext.PeerTasks = append(inputContext.PeerTasks, peer)
+			}
 			for _, event := range sortedInboxEvents(inboxBatches) {
 				inputContext.InboxEvents = append(inputContext.InboxEvents, core.AgentExecutionInboxEvent{
 					Sequence: event.Sequence, EventID: event.EventID, EventType: event.EventType,
@@ -2785,6 +2792,12 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 					ID: string(selectedKnowledge.Record.KnowledgeID), Version: strconv.Itoa(selectedKnowledge.Record.Version), MaterializationState: core.MaterializedFull,
 				})
 			}
+			coordinationRefs := make([]core.VersionedRef, 0, len(selection.Coordination))
+			for _, selectedPeer := range selection.Coordination {
+				coordinationRefs = append(coordinationRefs, core.VersionedRef{
+					ID: string(selectedPeer.Task.ID), Version: strconv.Itoa(selectedPeer.Version), MaterializationState: core.MaterializedFull,
+				})
+			}
 			manifest = core.ExecutionContextManifest{
 				ExecutionID:             executionID,
 				AgentID:                 task.AssigneeID,
@@ -2799,11 +2812,12 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 				PolicyVersion:           "v1",
 				EventRefs:               eventRefs,
 				KnowledgeRefs:           knowledgeRefs,
+				CoordinationRefs:        coordinationRefs,
 				SkillRefs:               []core.VersionedRef{},
 				ToolDefinitions:         []core.VersionedRef{},
 				ArtifactRefs:            []core.VersionedRef{},
 				AdditionalContextRefs:   strategyContextRefs,
-				ContextBuilderVersion:   "v2",
+				ContextBuilderVersion:   "v3",
 				CreatedAt:               selection.Started.CreatedAt,
 			}
 			manifest.ExecutionInputSHA256 = core.FingerprintExecutionInput(executionInput)

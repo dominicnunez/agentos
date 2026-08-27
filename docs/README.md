@@ -8,6 +8,7 @@
 - [Approval control](APPROVAL_CONTROL.md) - the owner-only exact-effect decision boundary.
 - [Completion review](COMPLETION_REVIEW.md) - user review of model-backed completion candidates.
 - [Planning and Task DAGs](PLANNING_AND_TASK_DAGS.md) - bounded planning, atomic graph admission, dependency evidence, and external root isolation.
+- [Shared coordination](SHARED_COORDINATION.md) - replayable same-Work peer Task context for Agent executions.
 - [Governed Lab](LAB.md) - contained experiments, unverified results, and nomination-only promotion candidates.
 - [Organizational knowledge](ORGANIZATIONAL_KNOWLEDGE.md) - evidence-backed versioned learning, lifecycle controls, and retrieval boundaries.
 - [Governance inspection](GOVERNANCE_INSPECTION.md) - deterministic tenant-scoped runtime findings over chain-verified Event Contracts.

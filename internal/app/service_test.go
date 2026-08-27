@@ -230,6 +230,7 @@ func saveTestVerifiedTask(ctx context.Context, gateway *events.Gateway, reposito
 	task := state.Value
 	executionInput := ""
 	var snapshot projections.Snapshot
+	var executionBlueprint core.AgentBlueprint
 	if task.ExecutionKind == core.ExecutionAgent {
 		var err error
 		snapshot, err = repository.Load(ctx)
@@ -240,21 +241,38 @@ func saveTestVerifiedTask(ctx context.Context, gateway *events.Gateway, reposito
 		if !ok {
 			return fmt.Errorf("test Agent blueprint is unavailable")
 		}
-		_, executionInput, err = core.MaterializeAgentExecutionInput(core.AgentExecutionInputContext{Blueprint: blueprint.Value, Task: task})
-		if err != nil {
-			return err
-		}
+		executionBlueprint = blueprint.Value
 	}
 	task.Status = core.TaskRunning
 	startVersion := state.Version + 1
 	if task.ExecutionKind == core.ExecutionAgent {
 		_, selections, err := repository.StartAgentExecution(ctx, organizationID, correlationID, startVersion, task, "", nil, nil, nil, actionBoundaryRoutes(snapshot, task), func(selection events.ExecutionStartSelection) (core.ExecutionContextManifest, error) {
+			inputContext := core.AgentExecutionInputContext{Blueprint: executionBlueprint, Task: task}
+			knowledgeRefs := make([]core.VersionedRef, 0, len(selection.Knowledge))
+			for _, knowledge := range selection.Knowledge {
+				inputContext.Knowledge = append(inputContext.Knowledge, knowledge.Record)
+				knowledgeRefs = append(knowledgeRefs, core.VersionedRef{ID: string(knowledge.Record.KnowledgeID), Version: fmt.Sprintf("%d", knowledge.Record.Version), MaterializationState: core.MaterializedFull})
+			}
+			coordinationRefs := make([]core.VersionedRef, 0, len(selection.Coordination))
+			for _, selectedPeer := range selection.Coordination {
+				peer, err := core.NewAgentExecutionPeerTask(selectedPeer.Task, selectedPeer.Version, selectedPeer.EventRef)
+				if err != nil {
+					return core.ExecutionContextManifest{}, err
+				}
+				inputContext.PeerTasks = append(inputContext.PeerTasks, peer)
+				coordinationRefs = append(coordinationRefs, core.VersionedRef{ID: string(selectedPeer.Task.ID), Version: fmt.Sprintf("%d", selectedPeer.Version), MaterializationState: core.MaterializedFull})
+			}
+			var materializeErr error
+			_, executionInput, materializeErr = core.MaterializeAgentExecutionInput(inputContext)
+			if materializeErr != nil {
+				return core.ExecutionContextManifest{}, materializeErr
+			}
 			return core.ExecutionContextManifest{
 				ExecutionID: core.ID(fmt.Sprintf("execution-%s-v%d", task.ID, startVersion)), AgentID: task.AssigneeID,
 				AgentBlueprintVersion: task.AgentConfig.BlueprintVersion, ExecutionProfileVersion: task.AgentConfig.ProfileVersion,
 				RuntimeAdapter: task.AgentConfig.RuntimeAdapter, Provider: "fake", Model: "fake-model/v1",
 				TaskID: task.ID, TaskContractVersion: task.TaskContractVersion, PromptVersion: "v1",
-				PolicyVersion: "v1", ContextBuilderVersion: "v2",
+				PolicyVersion: "v1", KnowledgeRefs: knowledgeRefs, CoordinationRefs: coordinationRefs, ContextBuilderVersion: "v3",
 				ExecutionInputSHA256: core.FingerprintExecutionInput(executionInput), CreatedAt: selection.Started.CreatedAt,
 			}, nil
 		})
@@ -3563,7 +3581,7 @@ func TestRecoveryIsDeterministicFirst(t *testing.T) {
 							AgentBlueprintVersion: task.AgentConfig.BlueprintVersion, ExecutionProfileVersion: task.AgentConfig.ProfileVersion,
 							RuntimeAdapter: task.AgentConfig.RuntimeAdapter, Provider: "fake", Model: "fake-model/v1",
 							TaskID: task.ID, TaskContractVersion: task.TaskContractVersion, PromptVersion: "v1", PolicyVersion: "v1",
-							ContextBuilderVersion: "v2", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
+							ContextBuilderVersion: "v3", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
 						}, nil
 					})
 					return err

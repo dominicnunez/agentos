@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,12 +23,16 @@ func recoveryTestManifest(task core.Task, selection events.ExecutionStartSelecti
 			refs = append(refs, event.EventID)
 		}
 	}
+	coordinationRefs := make([]core.VersionedRef, 0, len(selection.Coordination))
+	for _, peer := range selection.Coordination {
+		coordinationRefs = append(coordinationRefs, core.VersionedRef{ID: string(peer.Task.ID), Version: fmt.Sprintf("%d", peer.Version), MaterializationState: core.MaterializedFull})
+	}
 	return core.ExecutionContextManifest{
 		ExecutionID: "execution-" + task.ID + "-v2", AgentID: task.AssigneeID,
 		AgentBlueprintVersion: task.AgentConfig.BlueprintVersion, ExecutionProfileVersion: task.AgentConfig.ProfileVersion,
 		RuntimeAdapter: task.AgentConfig.RuntimeAdapter, Provider: "test", Model: "test", TaskID: task.ID,
-		TaskContractVersion: task.TaskContractVersion, PromptVersion: "test", PolicyVersion: "v1", EventRefs: refs,
-		ContextBuilderVersion: "v2", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
+		TaskContractVersion: task.TaskContractVersion, PromptVersion: "test", PolicyVersion: "v1", EventRefs: refs, CoordinationRefs: coordinationRefs,
+		ContextBuilderVersion: "v3", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
 	}
 }
 

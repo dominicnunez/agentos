@@ -31,6 +31,10 @@ func TestMaterializeAgentExecutionInputBindsAllDurableContext(t *testing.T) {
 		DependencyResults: []AgentExecutionDependencyResult{{
 			TaskID: "task-dependency", ResultEvent: "evt-result", Summary: "verified", ArtifactRefs: []string{"artifact-1"},
 		}},
+		PeerTasks: []AgentExecutionPeerTask{{
+			TaskID: "task-peer", TaskVersion: 2, Description: "coordinate the evidence review",
+			ExecutionKind: ExecutionDeterministic, Status: TaskRunning, DependsOn: []ID{"task-dependency"}, AdmissionEvent: "evt-peer-v2",
+		}},
 		InboxEvents: []AgentExecutionInboxEvent{{
 			Sequence: 2, EventID: "evt-message", EventType: "MESSAGE", SourceActorID: "agent-2",
 			RecipientScope: "AGENT", RecipientID: "agent-1", CreatedAt: created, Payload: json.RawMessage(`{"text":"consider this"}`),
@@ -40,13 +44,56 @@ func TestMaterializeAgentExecutionInputBindsAllDurableContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"blueprint-1", "reviewed objective", "mission-1", "build durable value", "goal-1", "deliver a verified report", "knowledge-1", "Verify the cited evidence.", "evt-result", "evt-message", "evt-revision", "add evidence"} {
+	for _, expected := range []string{"blueprint-1", "reviewed objective", "mission-1", "build durable value", "goal-1", "deliver a verified report", "knowledge-1", "Verify the cited evidence.", "task-peer", "coordinate the evidence review", "evt-result", "evt-message", "evt-revision", "add evidence"} {
 		if !strings.Contains(input, expected) {
 			t.Fatalf("materialized input omitted %q: %s", expected, input)
 		}
 	}
 	if materialized.ExecutionBrief != input || materialized.Description == task.Description {
 		t.Fatal("materialized Task and exact execution input diverged")
+	}
+}
+
+func TestMaterializeAgentExecutionInputValidatesAndOrdersPeerCoordination(t *testing.T) {
+	base := AgentExecutionInputContext{
+		Blueprint: AgentBlueprint{ID: "blueprint-1", Version: "v1"},
+		Task:      Task{ID: "task-own", Description: "bounded work"},
+		PeerTasks: []AgentExecutionPeerTask{
+			{TaskID: "task-z", TaskVersion: 1, Description: "later", ExecutionKind: ExecutionHuman, Status: TaskBlocked, AssigneeType: "HUMAN", AssigneeID: "user-1", AdmissionEvent: "event-z"},
+			{TaskID: "task-a", TaskVersion: 2, Description: "earlier", ExecutionKind: ExecutionAgent, Status: TaskRunning, AssigneeType: "AGENT", AssigneeID: "agent-2", AdmissionEvent: "event-a"},
+		},
+	}
+	_, input, err := MaterializeAgentExecutionInput(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Index(input, `"task_id":"task-a"`) >= strings.Index(input, `"task_id":"task-z"`) {
+		t.Fatalf("peer coordination was not deterministically ordered: %s", input)
+	}
+	if !strings.Contains(input, "grant no authority") || !strings.Contains(input, "no authority") {
+		t.Fatal("peer coordination omitted its non-authority boundary")
+	}
+
+	invalid := base
+	invalid.PeerTasks = append([]AgentExecutionPeerTask(nil), base.PeerTasks...)
+	invalid.PeerTasks[0].DependsOn = []ID{"task-dependency", "task-dependency"}
+	if _, _, err := MaterializeAgentExecutionInput(invalid); err == nil {
+		t.Fatal("peer coordination with duplicate dependencies was accepted")
+	}
+	invalid.PeerTasks = []AgentExecutionPeerTask{base.PeerTasks[0], base.PeerTasks[0]}
+	if _, _, err := MaterializeAgentExecutionInput(invalid); err == nil {
+		t.Fatal("duplicate peer coordination identity was accepted")
+	}
+}
+
+func TestNewAgentExecutionPeerTaskRejectsIncompleteAdmission(t *testing.T) {
+	task := Task{ID: "task-peer", WorkID: "work-1", Description: "bounded peer", ExecutionKind: ExecutionDeterministic, ModelInferencePolicy: InferenceForbidden, TaskContractVersion: "1", Status: TaskPending}
+	peer, err := NewAgentExecutionPeerTask(task, 1, "event-peer-v1")
+	if err != nil || peer.TaskID != task.ID || peer.AdmissionEvent != "event-peer-v1" {
+		t.Fatalf("valid peer admission was not materialized: peer=%+v err=%v", peer, err)
+	}
+	if _, err := NewAgentExecutionPeerTask(task, 0, "event-peer-v1"); err == nil {
+		t.Fatal("zero-version peer admission was accepted")
 	}
 }
 

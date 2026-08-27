@@ -201,7 +201,8 @@ func TestCompletionReplayPreservesVersionOneExecutionContext(t *testing.T) {
 		Payload: manifestBody, CreatedAt: now, SchemaVersion: SchemaVersion,
 	}
 	outcomeEvent := Event{EventID: "outcome-event", Sequence: 6, OrganizationID: "org-1", TaskID: string(task.ID), CorrelationID: "run-1"}
-	stream := append(activeExecutionKnowledge(t, 1, "knowledge-1", core.KnowledgeScopeOrganization, "org-1", "Rollback", "Use verified rollback steps."), planEvent, start, manifestEvent, outcomeEvent)
+	knowledgeHistory := activeExecutionKnowledge(t, 1, "knowledge-1", core.KnowledgeScopeOrganization, "org-1", "Rollback", "Use verified rollback steps.")
+	stream := append(knowledgeHistory, planEvent, start, manifestEvent, outcomeEvent)
 	binding := WorkCompletionBinding{
 		OrganizationID: "org-1", CorrelationID: "run-1", Work: work, Intent: intent,
 		AgentBlueprints:   map[core.ID]core.AgentBlueprint{blueprint.ID: blueprint},
@@ -216,6 +217,88 @@ func TestCompletionReplayPreservesVersionOneExecutionContext(t *testing.T) {
 	stream[len(stream)-2] = manifestEvent
 	if _, err := completionExecutionModel(binding, task, string(manifest.ExecutionID), start, outcomeEvent, stream); err == nil {
 		t.Fatal("version 1 execution manifest accepted post-version-1 knowledge references")
+	}
+
+	manifest.ContextBuilderVersion = "v2"
+	manifest.CoordinationRefs = nil
+	activeKnowledge := decodeKnowledgeProjection(t, knowledgeHistory[1])
+	_, versionTwoInput, err := core.MaterializeAgentExecutionInput(core.AgentExecutionInputContext{Blueprint: blueprint, Task: task, Knowledge: []core.KnowledgeRecord{activeKnowledge}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.ExecutionInputSHA256 = core.FingerprintExecutionInput(versionTwoInput)
+	manifestEvent.Payload, _ = json.Marshal(manifest)
+	stream[len(stream)-2] = manifestEvent
+	if _, err := completionExecutionModel(binding, task, string(manifest.ExecutionID), start, outcomeEvent, stream); err != nil {
+		t.Fatalf("persisted version 2 execution manifest was rejected: %v", err)
+	}
+	manifest.CoordinationRefs = []core.VersionedRef{{ID: "task-peer", Version: "1", MaterializationState: core.MaterializedFull}}
+	manifestEvent.Payload, _ = json.Marshal(manifest)
+	stream[len(stream)-2] = manifestEvent
+	if _, err := completionExecutionModel(binding, task, string(manifest.ExecutionID), start, outcomeEvent, stream); err == nil {
+		t.Fatal("version 2 execution manifest accepted version 3 coordination references")
+	}
+}
+
+func TestCompletionReplayBindsVersionThreePeerCoordinationAtStart(t *testing.T) {
+	now := time.Unix(20, 0).UTC()
+	intent := core.Intent{ID: "intent-1", OrganizationID: "org-1", AcceptedFingerprint: "accepted", CreatedAt: now}
+	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: "prepare evidence", Status: core.WorkActive, CreatedAt: now}
+	config := &core.AgentConfig{BlueprintID: "blueprint-1", BlueprintVersion: "blueprint-v1", ProfileID: "profile-1", ProfileVersion: "profile-v1", RuntimeAdapter: "fake"}
+	task := core.Task{
+		ID: "task-run-1", WorkID: work.ID, Description: "prepare evidence", ExecutionKind: core.ExecutionAgent,
+		ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: "agent-1", AgentConfig: config,
+		TaskContractVersion: "1", Status: core.TaskRunning,
+	}
+	blueprint := core.AgentBlueprint{ID: config.BlueprintID, OrganizationID: "org-1", Version: config.BlueprintVersion, Role: "operator", OperatingInstructions: "Use bounded evidence.", Status: "ACTIVE", CreatedAt: now}
+	profile := core.ExecutionProfile{ID: config.ProfileID, OrganizationID: "org-1", Version: config.ProfileVersion, ModelProvider: "fake", Model: "model", PromptVersion: "prompt-v1", Status: "ACTIVE", CreatedAt: now}
+	plan := core.Plan{ID: "plan-run-1", IntentID: intent.ID, IntentFingerprint: intent.AcceptedFingerprint, Version: 1, Tasks: []core.PlanTask{{Key: "root", Description: task.Description, ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed}}, CreatedAt: now}
+	plan.Fingerprint, _ = core.FingerprintPlan(plan)
+	planBody, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planEvent := Event{EventID: "plan-event", Sequence: 1, OrganizationID: "org-1", EventType: "PLAN_CREATED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "run-1", Payload: planBody, CreatedAt: now, SchemaVersion: SchemaVersion}
+	ownPending := task
+	ownPending.Status = core.TaskPending
+	peer := coordinationTask("task-peer", work.ID, core.TaskPending)
+	ownCreated := executionCoordinationProjection(t, 2, "TASK_CREATED", 1, ownPending)
+	peerCreated := executionCoordinationProjection(t, 3, "TASK_CREATED", 1, peer)
+	start := strategicExecutionStartEvent(t, 4, nil, nil)
+	selectedPeer, err := core.NewAgentExecutionPeerTask(peer, 1, peerCreated.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, input, err := core.MaterializeAgentExecutionInput(core.AgentExecutionInputContext{Blueprint: blueprint, Task: task, PeerTasks: []core.AgentExecutionPeerTask{selectedPeer}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := core.ExecutionContextManifest{
+		ExecutionID: "execution-1", AgentID: task.AssigneeID, AgentBlueprintVersion: blueprint.Version,
+		ExecutionProfileVersion: profile.Version, RuntimeAdapter: config.RuntimeAdapter, Provider: profile.ModelProvider, Model: profile.Model,
+		TaskID: task.ID, TaskContractVersion: task.TaskContractVersion, ExecutionInputSHA256: core.FingerprintExecutionInput(input),
+		PromptVersion: profile.PromptVersion, PolicyVersion: "v1", ContextBuilderVersion: "v3", CreatedAt: now,
+		CoordinationRefs: []core.VersionedRef{{ID: string(peer.ID), Version: "1", MaterializationState: core.MaterializedFull}},
+	}
+	manifestBody, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestEvent := Event{EventID: "manifest-event", Sequence: 5, OrganizationID: "org-1", EventType: "EXECUTION_CONTEXT_MANIFESTED", SourceActorID: "runtime", SourceExecutionID: string(manifest.ExecutionID), TaskID: string(task.ID), CorrelationID: "run-1", Payload: manifestBody, CreatedAt: now, SchemaVersion: SchemaVersion}
+	peerBlocked := peer
+	peerBlocked.Status = core.TaskBlocked
+	postStartPeerRevision := executionCoordinationProjection(t, 6, "TASK_BLOCKED", 2, peerBlocked)
+	outcomeEvent := Event{EventID: "outcome-event", Sequence: 7, OrganizationID: "org-1", TaskID: string(task.ID), CorrelationID: "run-1"}
+	stream := []Event{planEvent, ownCreated, peerCreated, start, manifestEvent, postStartPeerRevision, outcomeEvent}
+	binding := WorkCompletionBinding{OrganizationID: "org-1", CorrelationID: "run-1", Work: work, Intent: intent, AgentBlueprints: map[core.ID]core.AgentBlueprint{blueprint.ID: blueprint}, ExecutionProfiles: map[core.ID]core.ExecutionProfile{profile.ID: profile}}
+	if _, err := completionExecutionModel(binding, task, string(manifest.ExecutionID), start, outcomeEvent, stream); err != nil {
+		t.Fatalf("version 3 peer coordination was not replayed at the start boundary: %v", err)
+	}
+	manifest.CoordinationRefs[0].Version = "2"
+	manifestEvent.Payload, _ = json.Marshal(manifest)
+	stream[4] = manifestEvent
+	if _, err := completionExecutionModel(binding, task, string(manifest.ExecutionID), start, outcomeEvent, stream); err == nil {
+		t.Fatal("substituted version 3 peer coordination reference was accepted")
 	}
 }
 

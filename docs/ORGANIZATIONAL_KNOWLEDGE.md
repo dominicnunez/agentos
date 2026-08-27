@@ -152,7 +152,10 @@ first with stable identity as the tie-breaker. The aggregate Agent input remains
 subject to the separate 256 KiB execution-context limit. Records that do not
 fit are not represented as materialized. Every included record is listed by
 exact identity and version with `FULL` materialization in the
-`ExecutionContextManifest`; the context-builder contract is `v2`.
+`ExecutionContextManifest`. Knowledge-aware historical executions use
+context-builder `v2`; current executions use `v3`, which preserves the same
+knowledge selection while also binding the same-Work peer snapshot. Historical
+`v1` and `v2` manifests remain replayable under their original contracts.
 
 Completion admission reconstructs knowledge history from sealed projection
 Event Contracts at the execution-start sequence, reruns the same scope,

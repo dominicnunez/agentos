@@ -195,6 +195,17 @@ event references. A blocked child emits a typed `TASK_BLOCKED` contract to its
 parent Task without granting or otherwise changing authority; the payload
 describes the unmet requirement rather than an authority transition.
 
+The AgentExecution boundary also selects the latest exact revision of every
+other Task in the same Work inside the execution-start transaction. Context
+builder `v3` materializes at most 15 peers in deterministic Task-ID order and
+records their exact IDs and versions in `coordination_refs`. Completion and
+recovery replay the same pre-start revisions from sealed Task Event Contracts;
+later peer changes do not alter the recorded input. Peer descriptions,
+assignments, dependencies, and status are untrusted coordination context. They
+grant no authority, effect permission, approval, or completion evidence and do
+not replace addressed inbox events or exact dependency results. Internal peer
+state remains outside the A2A surface.
+
 Approval-required effects persist their complete obligation before notification.
 Approval notification, acknowledgement, pending-decision, approval, and denial
 are versioned durable records. Acknowledgement has no authority effect, and a

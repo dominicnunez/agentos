@@ -744,6 +744,15 @@ type KnowledgeSelection struct {
 	Record core.KnowledgeRecord
 }
 
+// CoordinationSelection is one exact peer Task revision selected inside the
+// execution-start transaction. Peer state is explanatory coordination context,
+// never authority or completion evidence.
+type CoordinationSelection struct {
+	Task     core.Task
+	Version  int
+	EventRef string
+}
+
 // CurrentKnowledgeRevision is one exact current event-coupled knowledge
 // projection selected inside the execution-start transaction.
 type CurrentKnowledgeRevision struct {
@@ -753,9 +762,10 @@ type CurrentKnowledgeRevision struct {
 }
 
 type ExecutionStartSelection struct {
-	Started   Event
-	Inbox     []InboxSelection
-	Knowledge []KnowledgeSelection
+	Started      Event
+	Inbox        []InboxSelection
+	Knowledge    []KnowledgeSelection
+	Coordination []CoordinationSelection
 }
 
 // ExecutionStartValidator materializes the exact Agent input selected inside
@@ -1622,10 +1632,11 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 		return "", fmt.Errorf("execution manifest does not bind the planned strategic context")
 	}
 	var knowledge []core.KnowledgeRecord
+	var peerTasks []core.AgentExecutionPeerTask
 	switch manifest.ContextBuilderVersion {
 	case "v1":
-		if len(manifest.KnowledgeRefs) != 0 {
-			return "", fmt.Errorf("version 1 execution manifest contains knowledge references")
+		if len(manifest.KnowledgeRefs) != 0 || len(manifest.CoordinationRefs) != 0 {
+			return "", fmt.Errorf("version 1 execution manifest contains unsupported context references")
 		}
 	case "v2":
 		knowledgeRefs, selected, err := executionKnowledge(binding, task, startEvent, stream)
@@ -1635,7 +1646,27 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 		if !slices.Equal(manifest.KnowledgeRefs, knowledgeRefs) {
 			return "", fmt.Errorf("execution knowledge references do not match durable runtime selection")
 		}
+		if len(manifest.CoordinationRefs) != 0 {
+			return "", fmt.Errorf("version 2 execution manifest contains coordination references")
+		}
 		knowledge = selected
+	case "v3":
+		knowledgeRefs, selectedKnowledge, err := executionKnowledge(binding, task, startEvent, stream)
+		if err != nil {
+			return "", err
+		}
+		if !slices.Equal(manifest.KnowledgeRefs, knowledgeRefs) {
+			return "", fmt.Errorf("execution knowledge references do not match durable runtime selection")
+		}
+		coordinationRefs, selectedPeers, err := executionCoordination(binding, task, startEvent, stream)
+		if err != nil {
+			return "", err
+		}
+		if !slices.Equal(manifest.CoordinationRefs, coordinationRefs) {
+			return "", fmt.Errorf("execution coordination references do not match durable runtime selection")
+		}
+		knowledge = selectedKnowledge
+		peerTasks = selectedPeers
 	default:
 		return "", fmt.Errorf("execution context builder version is unsupported")
 	}
@@ -1661,13 +1692,13 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 		return "", fmt.Errorf("execution context references do not match durable runtime selection")
 	}
 	_, input, err := core.MaterializeAgentExecutionInput(core.AgentExecutionInputContext{
-		Blueprint: blueprint, Task: task, Strategy: strategy, Knowledge: knowledge, DependencyResults: dependencies, InboxEvents: inbox, Revision: revision,
+		Blueprint: blueprint, Task: task, Strategy: strategy, Knowledge: knowledge, DependencyResults: dependencies, InboxEvents: inbox, PeerTasks: peerTasks, Revision: revision,
 	})
 	return input, err
 }
 
 func validExecutionContextBuilderVersion(version string) bool {
-	return version == "v1" || version == "v2"
+	return version == "v1" || version == "v2" || version == "v3"
 }
 
 func executionKnowledge(binding WorkCompletionBinding, task core.Task, startEvent Event, stream []Event) ([]core.VersionedRef, []core.KnowledgeRecord, error) {
@@ -1684,6 +1715,24 @@ func executionKnowledge(binding WorkCompletionBinding, task core.Task, startEven
 		records = append(records, selection.Record)
 	}
 	return refs, records, nil
+}
+
+func executionCoordination(binding WorkCompletionBinding, task core.Task, startEvent Event, stream []Event) ([]core.VersionedRef, []core.AgentExecutionPeerTask, error) {
+	selected, err := ResolveExecutionCoordination(binding.OrganizationID, binding.CorrelationID, task.WorkID, task.ID, startEvent.Sequence, stream)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve execution coordination: %w", err)
+	}
+	refs := make([]core.VersionedRef, 0, len(selected))
+	peers := make([]core.AgentExecutionPeerTask, 0, len(selected))
+	for _, selection := range selected {
+		peer, err := core.NewAgentExecutionPeerTask(selection.Task, selection.Version, selection.EventRef)
+		if err != nil {
+			return nil, nil, fmt.Errorf("materialize execution coordination: %w", err)
+		}
+		refs = append(refs, core.VersionedRef{ID: string(selection.Task.ID), Version: strconv.Itoa(selection.Version), MaterializationState: core.MaterializedFull})
+		peers = append(peers, peer)
+	}
+	return refs, peers, nil
 }
 
 func executionStrategicContext(binding WorkCompletionBinding, startEvent Event, stream []Event) (*core.StrategicContext, []string, []core.VersionedRef, error) {
@@ -2004,7 +2053,68 @@ func AgentExecutionRoutes(teamRevisions map[core.ID][]TeamRevisionBinding, task 
 const (
 	maximumExecutionKnowledgeRecords = 16
 	maximumExecutionKnowledgeBytes   = 96 << 10
+	maximumExecutionPeerTasks        = 15
 )
+
+type executionCoordinationRevision struct {
+	task     core.Task
+	version  int
+	eventRef string
+	sequence int64
+}
+
+// ResolveExecutionCoordination deterministically reconstructs the latest
+// exact revision of every peer Task in the same Work immediately before an
+// Agent execution started. The result is explanatory coordination context;
+// it cannot grant authority or prove a peer's completion.
+func ResolveExecutionCoordination(organizationID, correlationID string, workID, taskID core.ID, startSequence int64, stream []Event) ([]CoordinationSelection, error) {
+	if organizationID == "" || correlationID == "" || workID == "" || taskID == "" || startSequence < 1 {
+		return nil, fmt.Errorf("complete Agent execution coordination boundary is required")
+	}
+	history := make(map[core.ID]executionCoordinationRevision)
+	for _, event := range stream {
+		if event.Sequence >= startSequence || event.OrganizationID != organizationID || event.CorrelationID != correlationID {
+			continue
+		}
+		payload, present, err := AdmittedProjection(event)
+		if err != nil {
+			return nil, fmt.Errorf("execution coordination projection is invalid: %w", err)
+		}
+		if !present || payload.Projection.ProjectionKind != "task" {
+			continue
+		}
+		var task core.Task
+		if decodeExactEventJSON(payload.Projection.Value, &task) != nil || task.ID != core.ID(payload.Projection.RecordID) ||
+			event.TaskID != string(task.ID) || payload.Projection.CorrelationID != correlationID || task.WorkID != workID {
+			return nil, fmt.Errorf("execution coordination Task revision is outside its Work boundary")
+		}
+		previous, found := history[task.ID]
+		if !found {
+			if payload.Projection.Version != 1 || ValidateTaskProjectionTransition(event.EventType, payload.Projection.Version, nil, task) != nil {
+				return nil, fmt.Errorf("execution coordination Task history is incomplete")
+			}
+		} else if previous.sequence >= event.Sequence || payload.Projection.Version != previous.version+1 ||
+			ValidateTaskProjectionTransition(event.EventType, payload.Projection.Version, &previous.task, task) != nil {
+			return nil, fmt.Errorf("execution coordination Task history is noncontiguous")
+		}
+		history[task.ID] = executionCoordinationRevision{
+			task: task, version: payload.Projection.Version, eventRef: event.EventID, sequence: event.Sequence,
+		}
+		if len(history) > maximumExecutionPeerTasks+1 {
+			return nil, fmt.Errorf("%w: Agent execution Work has more than %d Tasks", core.ErrExecutionContextLimitExceeded, maximumExecutionPeerTasks+1)
+		}
+	}
+	delete(history, taskID)
+	if len(history) > maximumExecutionPeerTasks {
+		return nil, fmt.Errorf("%w: Agent execution has more than %d peer Tasks", core.ErrExecutionContextLimitExceeded, maximumExecutionPeerTasks)
+	}
+	selected := make([]CoordinationSelection, 0, len(history))
+	for _, revision := range history {
+		selected = append(selected, CoordinationSelection{Task: revision.task, Version: revision.version, EventRef: revision.eventRef})
+	}
+	sort.Slice(selected, func(i, j int) bool { return selected[i].Task.ID < selected[j].Task.ID })
+	return selected, nil
+}
 
 type executionKnowledgeRevision struct {
 	record   core.KnowledgeRecord

@@ -214,7 +214,7 @@ func assertActiveKnowledgeSelectedAtExecutionStart(t *testing.T, ctx context.Con
 			RuntimeAdapter: task.AgentConfig.RuntimeAdapter, Provider: "test", Model: "test", TaskID: task.ID,
 			TaskContractVersion: task.TaskContractVersion, PromptVersion: "test", PolicyVersion: "v1",
 			KnowledgeRefs:         []core.VersionedRef{{ID: string(knowledge.KnowledgeID), Version: strconv.Itoa(knowledge.Version), MaterializationState: core.MaterializedFull}},
-			ContextBuilderVersion: "v2", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
+			ContextBuilderVersion: "v3", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
 		}, nil
 	}); err != nil {
 		t.Fatalf("start Agent execution with active knowledge: %v", err)

@@ -425,6 +425,7 @@ type ExecutionContextManifest struct {
 	PolicyVersion           string         `json:"policy_version,omitempty"`
 	EventRefs               []string       `json:"event_refs"`
 	KnowledgeRefs           []VersionedRef `json:"knowledge_refs"`
+	CoordinationRefs        []VersionedRef `json:"coordination_refs,omitempty"`
 	SkillRefs               []VersionedRef `json:"skill_refs"`
 	ToolDefinitions         []VersionedRef `json:"tool_definitions"`
 	ArtifactRefs            []VersionedRef `json:"artifact_refs"`
