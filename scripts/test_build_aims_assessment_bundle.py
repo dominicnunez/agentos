@@ -7,6 +7,7 @@ import gzip
 import hashlib
 import io
 import json
+import os
 import subprocess
 import tarfile
 import tempfile
@@ -473,7 +474,7 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
             ),
             patch(
                 "scripts.build_aims_assessment_bundle._verify_aims_history",
-                side_effect=lambda _root, _baseline, _commit, entries: (
+                side_effect=lambda _root, _baseline, _commit, entries, _assessment_at: (
                     _verify_captured_aims_snapshot(entries, None)
                 ),
             ),
@@ -615,7 +616,9 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(VerificationError, "lacks new approval evidence"):
-            _verify_aims_history(self.root, baseline, commit, source_entries)
+            _verify_aims_history(
+                self.root, baseline, commit, source_entries, datetime(2100, 1, 1)
+            )
 
     def test_history_walk_rejects_approval_reuse_in_merge_resolution(self) -> None:
         document = self.root / "governance" / "aims" / "records" / "policy.md"
@@ -711,7 +714,9 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(VerificationError, "lacks new approval evidence"):
-            _verify_aims_history(self.root, baseline, commit, source_entries)
+            _verify_aims_history(
+                self.root, baseline, commit, source_entries, datetime(2100, 1, 1)
+            )
 
     def test_history_walk_rejects_intermediate_non_regular_git_mode(self) -> None:
         subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
@@ -751,7 +756,96 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(VerificationError, "regular non-executable"):
-            _verify_aims_history(self.root, baseline, commit, source_entries)
+            _verify_aims_history(
+                self.root, baseline, commit, source_entries, datetime(2100, 1, 1)
+            )
+
+    def test_history_walk_rejects_any_post_assessment_ancestor(self) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "config", "core.autocrlf", "false"], cwd=self.root, check=True
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "tests@agentos.invalid"],
+            cwd=self.root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Agent OS Tests"], cwd=self.root, check=True
+        )
+
+        def commit_at(message: str, value: str) -> str:
+            env = os.environ.copy()
+            env["GIT_AUTHOR_DATE"] = value
+            env["GIT_COMMITTER_DATE"] = value
+            subprocess.run(["git", "add", "."], cwd=self.root, check=True, env=env)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", message],
+                cwd=self.root,
+                check=True,
+                env=env,
+            )
+            return subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=self.root
+            ).decode().strip()
+
+        baseline = commit_at("baseline", "2026-08-27T12:00:00Z")
+        (self.root / "README.md").write_text(
+            "post-assessment ancestor\n", encoding="utf-8", newline="\n"
+        )
+        commit_at("future ancestor", "2026-08-27T14:00:00Z")
+        (self.root / "README.md").write_text(
+            "backdated descendant\n", encoding="utf-8", newline="\n"
+        )
+        commit = commit_at("backdated descendant", "2026-08-27T13:00:00Z")
+        source_entries = {
+            "governance/aims/manifest.json": (
+                self.root / "governance" / "aims" / "manifest.json"
+            ).read_bytes(),
+        }
+
+        with self.assertRaisesRegex(
+            VerificationError, "source history commit postdates the assessment instant"
+        ):
+            _verify_aims_history(
+                self.root,
+                baseline,
+                commit,
+                source_entries,
+                datetime(2026, 8, 27, 13, 30),
+            )
+
+    def test_history_walk_bounds_revision_listing_before_materializing_it(self) -> None:
+        baseline = "a" * 40
+        revisions = [f"{index:040x}" for index in range(1, 514)]
+        commit = revisions[-1]
+
+        with patch("scripts.build_aims_assessment_bundle._git") as git:
+            git.side_effect = [
+                baseline.encode(),
+                ("\n".join(revisions) + "\n").encode(),
+            ]
+            with self.assertRaisesRegex(VerificationError, "history exceeds 512 commits"):
+                _verify_aims_history(
+                    self.root,
+                    baseline,
+                    commit,
+                    {},
+                    datetime(2100, 1, 1),
+                )
+
+        self.assertEqual(
+            git.call_args_list[1].args[1],
+            [
+                "rev-list",
+                "--max-count=513",
+                "--topo-order",
+                "--reverse",
+                commit,
+                "--not",
+                baseline,
+            ],
+        )
 
     def test_git_snapshot_rejects_oversized_blob_before_materializing_it(self) -> None:
         object_id = "a" * 40
@@ -804,3 +898,4 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

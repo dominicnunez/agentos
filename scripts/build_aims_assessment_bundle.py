@@ -339,7 +339,9 @@ def _verify_aims_history(
     baseline: str,
     commit: str,
     source_entries: dict[str, bytes],
+    assessment_at: datetime,
 ) -> dict[str, Any]:
+    assessment_at = _normalize_assessment_at(assessment_at)
     if not COMMIT_PATTERN.fullmatch(baseline):
         raise VerificationError("history baseline must be an exact lowercase 40-character Git commit SHA")
     merge_base = _git(repo_root, ["merge-base", baseline, commit]).decode(
@@ -349,7 +351,15 @@ def _verify_aims_history(
         raise VerificationError("history baseline is not an ancestor of the assessed commit")
     revisions = _git(
         repo_root,
-        ["rev-list", "--topo-order", "--reverse", commit, "--not", baseline],
+        [
+            "rev-list",
+            f"--max-count={MAX_HISTORY_COMMITS + 1}",
+            "--topo-order",
+            "--reverse",
+            commit,
+            "--not",
+            baseline,
+        ],
     ).decode("ascii", errors="strict").splitlines()
     if not revisions or revisions[-1] != commit:
         raise VerificationError("assessed commit is not reachable after the history baseline")
@@ -388,6 +398,11 @@ def _verify_aims_history(
             raise VerificationError(
                 f"history boundary parent is not an ancestor of the trusted baseline: {parent}"
             )
+        parent_commit_at = _commit_at(repo_root, parent)
+        if parent_commit_at > assessment_at:
+            raise VerificationError(
+                f"source history commit postdates the assessment instant: {parent}"
+            )
         entries = _git_aims_entries(repo_root, parent)
         manifest_bytes = entries.get("governance/aims/manifest.json")
         manifest_by_commit[parent] = manifest_bytes
@@ -395,12 +410,15 @@ def _verify_aims_history(
             parent_manifest = _verify_captured_aims_snapshot(
                 entries, None, enforce_display_status=False
             )
-            _verify_governed_commit_order(
-                parent_manifest, _commit_at(repo_root, parent), parent
-            )
+            _verify_governed_commit_order(parent_manifest, parent_commit_at, parent)
 
     final_manifest: dict[str, Any] | None = None
     for revision in revisions:
+        revision_commit_at = _commit_at(repo_root, revision)
+        if revision_commit_at > assessment_at:
+            raise VerificationError(
+                f"source history commit postdates the assessment instant: {revision}"
+            )
         parents = parents_by_commit[revision]
         if not parents or any(parent not in manifest_by_commit for parent in parents):
             raise VerificationError(
@@ -429,9 +447,7 @@ def _verify_aims_history(
             None,
             enforce_display_status=revision == commit,
         )
-        _verify_governed_commit_order(
-            final_manifest, _commit_at(repo_root, revision), revision
-        )
+        _verify_governed_commit_order(final_manifest, revision_commit_at, revision)
         for parent in parents:
             prior_manifest = manifest_by_commit[parent]
             if prior_manifest is not None:
@@ -731,7 +747,7 @@ def build(
         _verify_controlled_commit_snapshot(repo_root, commit, source_entries)
         commit_at = _verified_commit_at(repo_root, commit, assessment_at)
         manifest = _verify_aims_history(
-            repo_root, history_baseline, commit, source_entries
+            repo_root, history_baseline, commit, source_entries, assessment_at
         )
     else:
         commit_at = None
@@ -845,3 +861,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
