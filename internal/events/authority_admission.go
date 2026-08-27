@@ -17,10 +17,11 @@ const (
 // AuthorityRecord is a non-projection authority record read from the same
 // durable snapshot as its Event Contracts.
 type AuthorityRecord struct {
-	Kind     string
-	RecordID string
-	Version  int
-	Body     []byte
+	Kind             string
+	RecordID         string
+	Version          int
+	Body             []byte
+	AdmissionEventID string
 }
 
 // CapabilityLeaseAdmission binds one exact lease revision to the tenant and
@@ -156,6 +157,20 @@ func ValidateAuthorityRecordTransition(kind, recordID string, version int, body,
 // ResolveAuthorityAdmissions proves a one-to-one, ordered, exact binding
 // between authority records and Event Contracts in one durable snapshot.
 func ResolveAuthorityAdmissions(stream []Event, records []AuthorityRecord) ([]CapabilityLeaseAdmission, []OrganizationFreezeAdmission, error) {
+	leasing, freezes, _, err := resolveAuthorityAdmissions(stream, records, true)
+	return leasing, freezes, err
+}
+
+// BindAuthorityAdmissions is used only by the reviewed storage migration that
+// converts already validated pre-binding authority history. Runtime and
+// recovery callers must use ResolveAuthorityAdmissions, which requires every
+// record to name its exact admission event.
+func BindAuthorityAdmissions(stream []Event, records []AuthorityRecord) ([]AuthorityRecord, error) {
+	_, _, bound, err := resolveAuthorityAdmissions(stream, records, false)
+	return bound, err
+}
+
+func resolveAuthorityAdmissions(stream []Event, records []AuthorityRecord, requireBound bool) ([]CapabilityLeaseAdmission, []OrganizationFreezeAdmission, []AuthorityRecord, error) {
 	ordered := append([]AuthorityRecord(nil), records...)
 	sort.Slice(ordered, func(i, j int) bool {
 		if ordered[i].Kind != ordered[j].Kind {
@@ -175,18 +190,24 @@ func ResolveAuthorityAdmissions(stream []Event, records []AuthorityRecord) ([]Ca
 	versions := make(map[string]int)
 	leasing := make([]CapabilityLeaseAdmission, 0)
 	freezes := make([]OrganizationFreezeAdmission, 0)
+	bound := make([]AuthorityRecord, 0, len(ordered))
 	for _, record := range ordered {
 		key := record.Kind + "\x00" + record.RecordID
 		if record.Version != versions[key]+1 {
-			return nil, nil, fmt.Errorf("authority record %s/%s/%d is noncontiguous", record.Kind, record.RecordID, record.Version)
+			return nil, nil, nil, fmt.Errorf("authority record %s/%s/%d is noncontiguous", record.Kind, record.RecordID, record.Version)
 		}
 		if err := ValidateAuthorityRecordTransition(record.Kind, record.RecordID, record.Version, record.Body, priorBodies[key]); err != nil {
-			return nil, nil, fmt.Errorf("authority record %s/%s/%d: %w", record.Kind, record.RecordID, record.Version, err)
+			return nil, nil, nil, fmt.Errorf("authority record %s/%s/%d: %w", record.Kind, record.RecordID, record.Version, err)
+		}
+		if requireBound && record.AdmissionEventID == "" {
+			return nil, nil, nil, fmt.Errorf("authority record %s/%s/%d lacks its admission event identity", record.Kind, record.RecordID, record.Version)
 		}
 		event, err := matchAuthorityEvent(eventIndex, record, organizations[key], priorSequences[key], usedEvents)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
+		record.AdmissionEventID = event.EventID
+		bound = append(bound, record)
 		versions[key] = record.Version
 		priorBodies[key] = append([]byte(nil), record.Body...)
 		priorSequences[key] = event.Sequence
@@ -208,10 +229,10 @@ func ResolveAuthorityAdmissions(stream []Event, records []AuthorityRecord) ([]Ca
 			continue
 		}
 		if _, used := usedEvents[event.EventID]; !used {
-			return nil, nil, fmt.Errorf("authority admission event %s has no exact durable record", event.EventID)
+			return nil, nil, nil, fmt.Errorf("authority admission event %s has no exact durable record", event.EventID)
 		}
 	}
-	return leasing, freezes, nil
+	return leasing, freezes, bound, nil
 }
 
 type authorityEventIndex map[string][]Event
@@ -252,6 +273,7 @@ func matchAuthorityEvent(index authorityEventIndex, record AuthorityRecord, orga
 	var matched Event
 	for _, event := range candidates {
 		if _, alreadyUsed := used[event.EventID]; alreadyUsed || event.EventType != expectedType ||
+			record.AdmissionEventID != "" && event.EventID != record.AdmissionEventID ||
 			event.EventID == "" || event.Sequence <= after || event.OrganizationID == "" || organizationID != "" && event.OrganizationID != organizationID || event.SourceActorID == "" || event.CreatedAt.IsZero() ||
 			event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" ||
 			len(event.ArtifactRefs) != 0 || event.SchemaVersion != SchemaVersion || !bytes.Equal(event.Payload, record.Body) {

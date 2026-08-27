@@ -28,6 +28,47 @@ func TestOpenBootstrapsCurrentStorageContract(t *testing.T) {
 	}
 }
 
+func TestStorageV7MigrationBindsAuthorityRecordsToExactEvents(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "storage-v6-authority.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", Action: "read", Resource: "record-1", Scope: "org-1", OriginTaskID: "task-1"}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE records SET admission_event_id='' WHERE kind='capability_lease'; UPDATE agentos_storage SET storage_version=6 WHERE singleton=1; PRAGMA user_version=6;`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	var admissionEventID, eventID string
+	if err := store.db.QueryRowContext(ctx, `SELECT r.admission_event_id,e.event_id FROM records r JOIN events e ON e.event_id=r.admission_event_id WHERE r.kind='capability_lease' AND r.record_id='lease-1' AND r.version=1`).Scan(&admissionEventID, &eventID); err != nil || admissionEventID == "" || admissionEventID != eventID {
+		t.Fatalf("migrated authority binding event=%q matched=%q err=%v", admissionEventID, eventID, err)
+	}
+	contract, err := ValidateStorageContract(ctx, store.db)
+	if err != nil || contract.StorageVersion != CurrentStorageVersion {
+		t.Fatalf("migrated authority storage contract=%+v err=%v", contract, err)
+	}
+}
+
 func TestStorageV1FixtureMatchesFrozenFingerprint(t *testing.T) {
 	db := createStorageV1Fixture(t, filepath.Join(t.TempDir(), "storage-v1.db"))
 	defer func() { _ = db.Close() }()

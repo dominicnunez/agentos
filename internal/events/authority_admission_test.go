@@ -25,8 +25,8 @@ func TestResolveAuthorityAdmissionsKeepsLeaseRevisionsInGrantOrganization(t *tes
 		t.Fatal(err)
 	}
 	records := []AuthorityRecord{
-		{Kind: authorityKindLease, RecordID: "lease-1", Version: 1, Body: grantBody},
-		{Kind: authorityKindLease, RecordID: "lease-1", Version: 2, Body: revocationBody},
+		{Kind: authorityKindLease, RecordID: "lease-1", Version: 1, Body: grantBody, AdmissionEventID: "grant-1"},
+		{Kind: authorityKindLease, RecordID: "lease-1", Version: 2, Body: revocationBody, AdmissionEventID: "revoke-1"},
 	}
 	stream := []Event{
 		{EventID: "grant-1", Sequence: 1, OrganizationID: "org-1", EventType: "CAPABILITY_GRANTED", SourceActorID: "user-1", TaskID: "task-1", Payload: grantBody, CreatedAt: grantedAt, SchemaVersion: SchemaVersion},
@@ -64,7 +64,7 @@ func TestResolveAuthorityAdmissionsHasNoLifetimeEventLimit(t *testing.T) {
 			EventID: fmt.Sprintf("event-%d", index), Sequence: sequence, OrganizationID: "org-1", EventType: "CAPABILITY_GRANTED",
 			SourceActorID: "user-1", TaskID: taskID, Payload: body, CreatedAt: created.Add(time.Duration(index) * time.Second), SchemaVersion: SchemaVersion,
 		})
-		records = append(records, AuthorityRecord{Kind: authorityKindLease, RecordID: leaseID, Version: 1, Body: body})
+		records = append(records, AuthorityRecord{Kind: authorityKindLease, RecordID: leaseID, Version: 1, Body: body, AdmissionEventID: fmt.Sprintf("event-%d", index)})
 	}
 	admissions, freezes, err := ResolveAuthorityAdmissions(stream, records)
 	if err != nil {

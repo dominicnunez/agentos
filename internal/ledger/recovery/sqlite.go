@@ -325,12 +325,15 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("record %s/%s/%d body: %w", kind, recordID, version, err)
 		}
 		if !events.ProjectionKindRequiresAdmission(kind) {
-			if admissionEventID != "" || admissionFingerprint != "" {
+			if kind == "capability_lease" || kind == "organization_freeze" {
+				if admissionEventID == "" || admissionFingerprint != "" {
+					_ = recordRows.Close()
+					return fmt.Errorf("authority record %s/%s/%d lacks its exact admission event", kind, recordID, version)
+				}
+				authorityRecords = append(authorityRecords, events.AuthorityRecord{Kind: kind, RecordID: recordID, Version: version, Body: append([]byte(nil), body...), AdmissionEventID: admissionEventID})
+			} else if admissionEventID != "" || admissionFingerprint != "" {
 				_ = recordRows.Close()
 				return fmt.Errorf("generic record %s/%s/%d carries projection authority", kind, recordID, version)
-			}
-			if kind == "capability_lease" || kind == "organization_freeze" {
-				authorityRecords = append(authorityRecords, events.AuthorityRecord{Kind: kind, RecordID: recordID, Version: version, Body: append([]byte(nil), body...)})
 			}
 			continue
 		}
