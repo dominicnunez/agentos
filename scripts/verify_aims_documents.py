@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from datetime import date, datetime
@@ -17,6 +18,7 @@ MAX_MANIFEST_BYTES = 256 * 1024
 MAX_DOCUMENT_BYTES = 256 * 1024
 MAX_TOTAL_DOCUMENT_BYTES = 2 * 1024 * 1024
 MAX_DOCUMENTS = 128
+MAX_RECORD_TREE_ENTRIES = MAX_DOCUMENTS * 8
 MANIFEST_KEYS_BY_VERSION = {
     1: {"schema_version", "documents"},
     2: {"schema_version", "documents", "assessment_outcomes"},
@@ -271,6 +273,46 @@ def _validate_document_path(repo_root: Path, raw_path: Any, label: str) -> Path:
     if not candidate.is_file():
         raise VerificationError(f"{label}.path is not a regular file: {path_text}")
     return candidate
+
+
+def _verify_records_tree(repo_root: Path, records_root: Path, listed_paths: set[str]) -> None:
+    if records_root.is_symlink():
+        raise VerificationError(f"controlled records directory contains a symbolic link: {records_root}")
+    pending = [records_root]
+    visited = 0
+    while pending:
+        directory = pending.pop()
+        children: list[tuple[str, Path, bool, bool, bool]] = []
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    visited += 1
+                    if visited > MAX_RECORD_TREE_ENTRIES:
+                        raise VerificationError(
+                            f"controlled records tree exceeds {MAX_RECORD_TREE_ENTRIES} entries"
+                        )
+                    children.append(
+                        (
+                            entry.name,
+                            Path(entry.path),
+                            entry.is_symlink(),
+                            entry.is_dir(follow_symlinks=False),
+                            entry.is_file(follow_symlinks=False),
+                        )
+                    )
+        except OSError as exc:
+            raise VerificationError(f"controlled records directory cannot be inspected: {directory}") from exc
+        for _, candidate, is_symlink, is_directory, is_file in sorted(children):
+            if is_symlink:
+                raise VerificationError(f"controlled records directory contains a symbolic link: {candidate}")
+            if is_directory:
+                pending.append(candidate)
+                continue
+            if not is_file:
+                raise VerificationError(f"controlled records directory contains a non-regular entry: {candidate}")
+            relative = candidate.relative_to(repo_root).as_posix()
+            if relative not in listed_paths:
+                raise VerificationError(f"controlled records directory contains an unlisted file: {relative}")
 
 
 def _version_tuple(value: Any, label: str) -> tuple[int, int]:
@@ -560,13 +602,7 @@ def verify(
 
     records_root = repo_root / "governance" / "aims" / "records"
     if records_root.exists():
-        for candidate in records_root.rglob("*"):
-            if candidate.is_symlink():
-                raise VerificationError(f"controlled records directory contains a symbolic link: {candidate}")
-            if candidate.is_file():
-                relative = candidate.relative_to(repo_root).as_posix()
-                if relative not in paths:
-                    raise VerificationError(f"controlled records directory contains an unlisted file: {relative}")
+        _verify_records_tree(repo_root, records_root, paths)
     if prior_manifest_path is not None and prior_manifest_bytes is not None:
         raise VerificationError("provide at most one prior AIMS manifest source")
     if prior_manifest_path is not None:
@@ -607,4 +643,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

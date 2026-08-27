@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from scripts.verify_aims_documents import (
     MAX_DOCUMENT_BYTES,
+    MAX_RECORD_TREE_ENTRIES,
     VerificationError,
     _parse_manifest_bytes,
     _read_controlled_bytes,
@@ -214,6 +215,11 @@ class VerifyAIMSDocumentsTest(unittest.TestCase):
 
     def test_accepts_exact_draft(self) -> None:
         verify(self.root, self.write_manifest(self.manifest()))
+
+    def test_rejects_wide_records_tree_at_the_bounded_entry_limit(self) -> None:
+        for index in range(MAX_RECORD_TREE_ENTRIES + 1):
+            (self.records / f"directory-{index:04d}").mkdir()
+        self.assert_rejected(self.manifest(), "controlled records tree exceeds")
 
     def test_rejects_structured_json_before_schema_two(self) -> None:
         structured = self.records / "scope.json"
@@ -640,4 +646,3 @@ class VerifyAIMSDocumentsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
