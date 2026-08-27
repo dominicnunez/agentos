@@ -12,9 +12,7 @@ import (
 func TestResolveAuthorityAdmissionsKeepsLeaseRevisionsInGrantOrganization(t *testing.T) {
 	grantedAt := time.Unix(1, 0).UTC()
 	revokedAt := grantedAt.Add(time.Second)
-	lease := core.CapabilityLease{
-		ID: "lease-1", ActorID: "agent-1", Action: "write", Resource: "record-1", Scope: "org-1", OriginTaskID: "task-1",
-	}
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "agent-1", Action: "write", Resource: "record-1", Scope: "org-1", OriginTaskID: "task-1"}
 	grantBody, err := json.Marshal(lease)
 	if err != nil {
 		t.Fatal(err)
@@ -45,6 +43,51 @@ func TestResolveAuthorityAdmissionsKeepsLeaseRevisionsInGrantOrganization(t *tes
 	}
 }
 
+func TestValidateAuthorityRecordTransitionPreservesActorKindAtRevocation(t *testing.T) {
+	grantedAt := time.Unix(1, 0).UTC()
+	revokedAt := grantedAt.Add(time.Second)
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "agent-1", ActorKind: core.PrincipalAgent, Action: "write", Resource: "record-1", Scope: "org-1", OriginTaskID: "task-1"}
+	grantBody, err := json.Marshal(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.ActorKind = core.PrincipalExternalAgent
+	lease.RevokedAt = &revokedAt
+	revocationBody, err := json.Marshal(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAuthorityRecordTransition(authorityKindLease, "lease-1", 2, revocationBody, grantBody); err == nil {
+		t.Fatal("lease revocation changed the durable principal kind")
+	}
+}
+
+func TestNewCapabilityAdmissionRequiresPrincipalKind(t *testing.T) {
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "agent-1", Action: "write", Resource: "record-1", Scope: "org-1", OriginTaskID: "task-1"}
+	body, err := json.Marshal(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft := TrustedDraft{OrganizationID: "org-1", EventType: "CAPABILITY_GRANTED", SourceActorID: "user-1", TaskID: "task-1"}
+	if err := ValidateAuthorityRecordDraft(draft, authorityKindLease, "lease-1", 1, body); err == nil {
+		t.Fatal("principal-less capability draft was admitted")
+	}
+	if err := ValidateAuthorityRecordTransition(authorityKindLease, "lease-1", 1, body, nil); err == nil {
+		t.Fatal("principal-less initial capability transition was admitted")
+	}
+	lease.ActorKind = core.PrincipalAgent
+	body, err = json.Marshal(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAuthorityRecordDraft(draft, authorityKindLease, "lease-1", 1, body); err != nil {
+		t.Fatalf("closed principal capability draft was rejected: %v", err)
+	}
+	if err := ValidateAuthorityRecordTransition(authorityKindLease, "lease-1", 1, body, nil); err != nil {
+		t.Fatalf("closed principal capability transition was rejected: %v", err)
+	}
+}
+
 func TestResolveAuthorityAdmissionsHasNoLifetimeEventLimit(t *testing.T) {
 	const count = 4097
 	stream := make([]Event, 0, count)
@@ -53,17 +96,12 @@ func TestResolveAuthorityAdmissionsHasNoLifetimeEventLimit(t *testing.T) {
 	for index := 0; index < count; index++ {
 		leaseID := fmt.Sprintf("lease-%d", index)
 		taskID := fmt.Sprintf("task-%d", index)
-		body, err := json.Marshal(core.CapabilityLease{
-			ID: core.ID(leaseID), ActorID: "agent-1", Action: "read", Resource: "record-1", Scope: "org-1", OriginTaskID: core.ID(taskID),
-		})
+		body, err := json.Marshal(core.CapabilityLease{ID: core.ID(leaseID), ActorID: "agent-1", Action: "read", Resource: "record-1", Scope: "org-1", OriginTaskID: core.ID(taskID)})
 		if err != nil {
 			t.Fatal(err)
 		}
 		sequence := int64(index + 1)
-		stream = append(stream, Event{
-			EventID: fmt.Sprintf("event-%d", index), Sequence: sequence, OrganizationID: "org-1", EventType: "CAPABILITY_GRANTED",
-			SourceActorID: "user-1", TaskID: taskID, Payload: body, CreatedAt: created.Add(time.Duration(index) * time.Second), SchemaVersion: SchemaVersion,
-		})
+		stream = append(stream, Event{EventID: fmt.Sprintf("event-%d", index), Sequence: sequence, OrganizationID: "org-1", EventType: "CAPABILITY_GRANTED", SourceActorID: "user-1", TaskID: taskID, Payload: body, CreatedAt: created.Add(time.Duration(index) * time.Second), SchemaVersion: SchemaVersion})
 		records = append(records, AuthorityRecord{Kind: authorityKindLease, RecordID: leaseID, Version: 1, Body: body, AdmissionEventID: fmt.Sprintf("event-%d", index)})
 	}
 	admissions, freezes, err := ResolveAuthorityAdmissions(stream, records)

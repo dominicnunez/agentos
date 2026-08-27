@@ -2,6 +2,8 @@ package approvals_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -86,7 +88,7 @@ func TestApprovalWaitsAcrossRestart(t *testing.T) {
 		ReplayContext:       map[string]string{"body": "hello"},
 	}
 	fingerprint := setApprovalTestFingerprint(t, &obligation)
-	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1", Action: "send", Resource: "customer-1", Scope: "org-1"}
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", ActorKind: obligation.ActorKind, OriginTaskID: "task-1", Action: "send", Resource: "customer-1", Scope: "org-1"}
 	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "human-approver", "task-1", nil, nil, "capability_lease", "lease-1", 1, lease); err != nil {
 		_ = l.Close()
 		t.Fatal(err)
@@ -321,6 +323,64 @@ func TestApprovalMutationsRevalidateAuthorityAndCurrentEffect(t *testing.T) {
 	}
 }
 
+func TestLegacyActorlessPendingApprovalCanOnlyBeInspectedAndDenied(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	obligation := core.EffectObligation{
+		ID: "effect-legacy", OrganizationID: "org-1", TaskID: "task-1", ActorID: "agent-1",
+		Action: "deploy", Resource: "agent-os", Scope: "org-1", ConsequenceBoundary: core.BoundaryDeployment,
+		Descriptor: "deploy exact release", AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-legacy",
+		IdempotencyKey: "effect-key-legacy", ReplayContext: map[string]string{"version": "0.9.0"}, Status: core.EffectPending,
+	}
+	legacyFingerprint := legacyActorlessTestFingerprint(t, obligation)
+	obligation.EffectFingerprint = legacyFingerprint
+	approval := core.HumanApproval{
+		ID: "approval-legacy", OrganizationID: "org-1", TaskID: "task-1", EffectObligationID: obligation.ID,
+		Action: obligation.Action, Resource: obligation.Resource, Boundary: obligation.ConsequenceBoundary,
+		Risk: "HIGH", Urgency: "MEDIUM", EffectFingerprint: legacyFingerprint, Status: core.ApprovalPendingDecision,
+	}
+	approvedLegacy := approval
+	approvedLegacy.Status = core.ApprovalApproved
+	if err := approvals.ValidateForEffect(approvedLegacy, obligation, time.Now().UTC()); err == nil {
+		t.Fatal("legacy actorless approval was accepted at the effect boundary")
+	}
+	if err := store.AppendRecord(t.Context(), "org-1", "EFFECT_OBLIGATION_PREPARED", "agent-1", "task-1", obligation.AuthorizationRefs, nil, "effect", string(obligation.ID), 1, obligation); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendRecord(t.Context(), "org-1", "APPROVAL_DECISION_STARTED", "approver-1", "task-1", nil, nil, "approval", string(approval.ID), 1, approval); err != nil {
+		t.Fatal(err)
+	}
+	service := approvals.New(store, nil, approvals.StaticAuthorizer{{
+		OrganizationID: "org-1", HumanID: "approver-1", Boundary: core.BoundaryDeployment, Risk: "HIGH",
+	}})
+	context, err := service.DecisionContext(t.Context(), approval.ID, "approver-1")
+	if err != nil || context.Effect.ActorKind != "" || context.Effect.EffectFingerprint != legacyFingerprint {
+		t.Fatalf("legacy pending approval was not recoverable for inspection: context=%+v err=%v", context, err)
+	}
+	if _, err := service.Decide(t.Context(), approvals.Decision{
+		ApprovalID: approval.ID, HumanID: "approver-1", EffectFingerprint: legacyFingerprint, Approve: true,
+	}); err == nil {
+		t.Fatal("legacy actorless approval authorized an effect")
+	}
+	denied, err := service.Decide(t.Context(), approvals.Decision{
+		ApprovalID: approval.ID, HumanID: "approver-1", EffectFingerprint: legacyFingerprint, Approve: false,
+	})
+	if err != nil || denied.Status != core.ApprovalDenied {
+		t.Fatalf("legacy pending approval could not be denied: approval=%+v err=%v", denied, err)
+	}
+	effectRecords, err := store.Records(t.Context(), "effect", string(obligation.ID))
+	if err != nil || len(effectRecords) != 2 {
+		t.Fatalf("legacy effect was not terminalized: versions=%d err=%v", len(effectRecords), err)
+	}
+	var cancelled core.EffectObligation
+	if err := json.Unmarshal(effectRecords[1], &cancelled); err != nil || cancelled.Status != core.EffectCancelled {
+		t.Fatalf("legacy effect was not cancelled: effect=%+v err=%v", cancelled, err)
+	}
+}
+
 func TestDeniedDecisionCancelsPreparedEffect(t *testing.T) {
 	ctx := context.Background()
 	l, err := ledger.Open(":memory:")
@@ -374,12 +434,46 @@ func assertEffectWaiting(t *testing.T, ctx context.Context, coordinator *effects
 
 func setApprovalTestFingerprint(t *testing.T, obligation *core.EffectObligation) string {
 	t.Helper()
+	if obligation.ActorKind == "" {
+		obligation.ActorKind = core.PrincipalAgent
+	}
 	fingerprint, err := effects.Fingerprint(*obligation)
 	if err != nil {
 		t.Fatal(err)
 	}
 	obligation.EffectFingerprint = fingerprint
 	return fingerprint
+}
+
+func legacyActorlessTestFingerprint(t *testing.T, obligation core.EffectObligation) string {
+	t.Helper()
+	canonical, err := json.Marshal(struct {
+		ID                  core.ID           `json:"effect_obligation_id"`
+		OrganizationID      core.ID           `json:"organization_id"`
+		TaskID              core.ID           `json:"task_id"`
+		ActorID             core.ID           `json:"actor_id"`
+		Action              string            `json:"action"`
+		Resource            string            `json:"resource"`
+		Scope               string            `json:"scope"`
+		ConsequenceBoundary string            `json:"consequence_boundary"`
+		Descriptor          string            `json:"canonical_effect_descriptor"`
+		AuthorizationRefs   []string          `json:"authorization_refs"`
+		ApprovalRef         string            `json:"approval_ref"`
+		IdempotencyKey      string            `json:"idempotency_key"`
+		ReplayContext       map[string]string `json:"replay_context"`
+	}{
+		ID: obligation.ID, OrganizationID: obligation.OrganizationID, TaskID: obligation.TaskID,
+		ActorID: obligation.ActorID, Action: obligation.Action, Resource: obligation.Resource,
+		Scope: obligation.Scope, ConsequenceBoundary: obligation.ConsequenceBoundary,
+		Descriptor: obligation.Descriptor, AuthorizationRefs: obligation.AuthorizationRefs,
+		ApprovalRef: obligation.ApprovalRef, IdempotencyKey: obligation.IdempotencyKey,
+		ReplayContext: obligation.ReplayContext,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:])
 }
 
 func assertEventOrder(t *testing.T, stream []events.Event, expected ...string) {

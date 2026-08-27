@@ -5,9 +5,9 @@
   import { approvalRetryBinding, completionReviewFeedback, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, discardStrategyRetry, loadAllCompletionReviews, matchesConfirmationRetry, matchesStrategyRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, parseStrategyRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, strategyRetryBinding, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
   import type { ApprovalRetryBinding, ReviewRetryBinding, StrategyRetryBinding } from '$lib/governance';
   import '$lib/app.css';
-  import type { Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, IntentDraft, OrganizationSnapshot, TaskView } from '$lib/types';
+  import type { Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, GovernanceFinding, GovernanceInspection, IntentDraft, OrganizationSnapshot, TaskView } from '$lib/types';
 
-  type Section = 'overview' | 'organization' | 'work' | 'approvals' | 'reviews' | 'system';
+  type Section = 'overview' | 'organization' | 'work' | 'approvals' | 'reviews' | 'governance' | 'system';
   type IntentList = 'context' | 'deliverables' | 'completion_criteria' | 'constraints';
   type GoalSummary = OrganizationSnapshot['goals'][number];
   type WorkSummary = OrganizationSnapshot['works'][number];
@@ -33,6 +33,8 @@
   let reviews: CompletionReview[] = [];
   let selectedApproval: Approval | null = null;
   let selectedReview: CompletionReview | null = null;
+  let governance: GovernanceInspection | null = null;
+  let selectedFinding: GovernanceFinding | null = null;
   let task: TaskView | null = null;
   let taskID = '';
   let workText = '';
@@ -194,6 +196,26 @@
       const bundle = buildEvidenceBundle(evidence.body, evidence.sha256);
       downloadBlob(new Blob([bundle], { type: 'application/x-tar' }), 'agentos-aims-evidence.tar');
       notice = `Downloaded bounded AIMS readiness evidence bundle ${evidence.sha256.slice(0, 12)}.`;
+    } catch (cause) {
+      error = message(cause);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function openSection(next: Section): Promise<void> {
+    section = next;
+    if (next === 'governance' && !governance) await refreshGovernance();
+  }
+
+  async function refreshGovernance(): Promise<void> {
+    if (!identity) return;
+    busy = true;
+    error = '';
+    try {
+      const report = await api<GovernanceInspection>('/api/v1/user/governance/inspection');
+      governance = report;
+      selectedFinding = report.findings.find((item) => item.id === selectedFinding?.id) ?? report.findings[0] ?? null;
     } catch (cause) {
       error = message(cause);
     } finally {
@@ -747,15 +769,15 @@
   <aside>
     <div class="brand"><span class="mark">AO</span><div><strong>Agent OS</strong><small>Organization control</small></div></div>
     <nav aria-label="Dashboard">
-      {#each [['overview','Overview'],['organization','Organization'],['work','Work'],['approvals','Approvals'],['reviews','Reviews'],['system','System']] as item}
-        <button class:active={section === item[0]} onclick={() => section = item[0] as Section}><span class="nav-dot"></span>{item[1]}</button>
+      {#each [['overview','Overview'],['organization','Organization'],['work','Work'],['approvals','Approvals'],['reviews','Reviews'],['governance','Governance'],['system','System']] as item}
+        <button class:active={section === item[0]} onclick={() => openSection(item[0] as Section)}><span class="nav-dot"></span>{item[1]}</button>
       {/each}
     </nav>
     <div class="identity"><span class:online={Boolean(identity)}></span><div><strong>{safeDisplay(identity?.organization ?? 'Not connected')}</strong><small>{identity ? `${safeDisplay(identity.mode)} installation` : 'local session required'}</small></div></div>
   </aside>
 
   <main>
-    <header><div><p class="eyebrow">Artificial organization</p><h1>{section === 'overview' ? 'Command center' : section[0].toUpperCase() + section.slice(1)}</h1></div><button class="quiet" onclick={refresh} disabled={!identity || busy}>Refresh</button></header>
+    <header><div><p class="eyebrow">Artificial organization</p><h1>{section === 'overview' ? 'Command center' : section[0].toUpperCase() + section.slice(1)}</h1></div><button class="quiet" onclick={() => section === 'governance' ? refreshGovernance() : refresh()} disabled={!identity || busy}>Refresh</button></header>
     {#if error}<div class="banner error" role="alert">{safeDisplay(error)}</div>{/if}
     {#if notice}<div class="banner notice" role="status">{safeDisplay(notice)}</div>{/if}
 
@@ -859,6 +881,23 @@
       <section class="split"><div class="panel list"><div class="panel-title"><div><p class="eyebrow">Completion evidence</p><h2>Completion reviews</h2></div><span class="count">{pendingReviewCount()}</span></div>{#if reviews.length}{#each reviews as review}<button class:selected={selectedReview?.review_id === review.review_id} onclick={() => {selectedReview=review; reviewPhrase=''; reviewFeedback='';}}><div><strong>{safeDisplay(review.objective)}</strong><span>{safeDisplay(review.task_id)}</span></div><span class="status">{safeDisplay(review.state)}</span></button>{/each}{:else}<div class="empty">No pending or recent completion reviews.</div>{/if}</div>
         <div class="panel detail">{#if selectedReview}<p class="eyebrow">Candidate result</p><h2>{safeDisplay(selectedReview.objective)}</h2><blockquote>{safeDisplay(selectedReview.candidate_result ?? selectedReview.result ?? 'No text result supplied.')}</blockquote><h4>Done when</h4><ul>{#each selectedReview.criteria as criterion}<li>{safeDisplay(criterion.description)}</li>{/each}</ul><h4>Evidence references</h4><ul class="mono">{#each selectedReview.evidence_refs as ref}<li>{safeDisplay(ref)}</li>{/each}</ul><div class="fingerprint"><span>Evidence fingerprint</span><code>{selectedReview.fingerprint}</code></div><p class="boundary-note">This judgment verifies the recorded candidate only. It does not approve any consequential effect.</p>{#if selectedReview.state !== 'PENDING'}<dl><div><dt>Decision</dt><dd>{safeDisplay(selectedReview.state)}</dd></div><div><dt>Reviewer</dt><dd>{safeDisplay(selectedReview.reviewer_id ?? 'No reviewer recorded')}</dd></div></dl>{#if selectedReview.feedback}<h4>Recorded feedback</h4><pre>{safeDisplay(selectedReview.feedback)}</pre>{/if}<p class="boundary-note">The authoritative ledger recorded this completion-review decision. It is immutable.</p>{:else if pendingReviewDecision}<p class="boundary-note">The earlier completion-review decision is being recovered. Refresh before beginning another judgment.</p><button onclick={() => refresh()} disabled={busy}>Retry recovery</button>{:else}<label>Type <code>APPROVE {selectedReview.fingerprint.slice(0,12)}</code>, <code>REJECT {selectedReview.fingerprint.slice(0,12)}</code>, or <code>REVISE {selectedReview.fingerprint.slice(0,12)}</code><input bind:value={reviewPhrase} autocomplete="off" /></label>{#if reviewPhrase.startsWith('REJECT') || reviewPhrase.startsWith('REVISE')}<label>Feedback<textarea bind:value={reviewFeedback} required={reviewPhrase.startsWith('REVISE')}></textarea></label>{/if}<div class="actions three"><button class="danger" onclick={() => decideReview('REJECT')} disabled={busy}>Reject</button><button onclick={() => decideReview('REVISE')} disabled={busy}>Request revision</button><button class="primary" onclick={() => decideReview('APPROVE')} disabled={busy}>Approve evidence</button></div>{/if}{:else}<div class="empty">Select a review to compare the candidate result with its exact completion contract.</div>{/if}</div>
       </section>
+    {:else if section === 'governance'}
+      {#if governance}
+        <section class="metrics">
+          <div><span>Critical</span><strong>{governance.summary.critical}</strong><small>Immediate governance holes</small></div>
+          <div><span>High</span><strong>{governance.summary.high}</strong><small>Material governance holes</small></div>
+          <div><span>Rules</span><strong>{governance.summary.rules_executed}</strong><small>{governance.summary.findings} open findings</small></div>
+        </section>
+        <section class="panel">
+          <div class="panel-title"><div><p class="eyebrow">Verified runtime inspection</p><h2>Governance findings</h2></div><span class="status">{safeDisplay(governance.integrity.verification)}</span></div>
+          <p class="boundary-note">{safeDisplay(governance.boundary.authority)}</p>
+          <dl><div><dt>Observed</dt><dd>{safeDisplay(governance.observed_at)}</dd></div><div><dt>Ledger head</dt><dd class="mono">{safeDisplay(governance.integrity.ledger_event_id)}</dd></div><div><dt>Report digest</dt><dd class="mono">{safeDisplay(governance.sha256)}</dd></div></dl>
+        </section>
+        <section class="split">
+          <div class="panel list"><div class="panel-title"><div><p class="eyebrow">Deterministic rule host</p><h2>Open findings</h2></div><span class="count">{governance.findings.length}</span></div>{#if governance.findings.length}{#each governance.findings as finding}<button class:selected={selectedFinding?.id === finding.id} onclick={() => selectedFinding = finding}><div><strong>{safeDisplay(finding.rule_id)}</strong><span>{safeDisplay(finding.scope_kind)} · {safeDisplay(finding.scope_id)}</span></div><span class="risk">{safeDisplay(finding.severity)}</span></button>{/each}{:else}<div class="empty">No governance holes were found by the executed rules at this ledger head.</div>{/if}</div>
+          <div class="panel detail">{#if selectedFinding}<p class="eyebrow">{safeDisplay(selectedFinding.category)}</p><h2>{safeDisplay(selectedFinding.message)}</h2><dl><div><dt>Severity</dt><dd>{safeDisplay(selectedFinding.severity)}</dd></div><div><dt>Status</dt><dd>{safeDisplay(selectedFinding.status)}</dd></div><div><dt>Scope</dt><dd>{safeDisplay(selectedFinding.scope_kind)} {safeDisplay(selectedFinding.scope_id)}</dd></div><div><dt>Rule</dt><dd class="mono">{safeDisplay(selectedFinding.rule_id)}</dd></div></dl><h4>Evidence references</h4><ul class="mono">{#each selectedFinding.evidence_refs as ref}<li>{safeDisplay(ref)}</li>{/each}</ul><p class="boundary-note">Inspection is read-only. Resolving a finding requires the normal governed workflow and does not occur from this view.</p>{:else}<div class="empty">Select a finding to inspect its exact rule, scope, and evidence references.</div>{/if}</div>
+        </section>
+      {:else}<div class="panel empty">Open Governance to run a bounded inspection of the current verified organization.</div>{/if}
     {:else}
       <section class="grid two"><div class="panel"><p class="eyebrow">Local boundary</p><h2>Dashboard session</h2><dl><div><dt>Organization</dt><dd>{safeDisplay(identity?.organization ?? 'Unavailable')}</dd></div><div><dt>Install mode</dt><dd>{safeDisplay(identity?.mode ?? 'Unavailable')}</dd></div><div><dt>Agent OS</dt><dd>{safeDisplay(identity?.version ?? 'Unavailable')}</dd></div><div><dt>Expires</dt><dd>{safeDisplay(identity?.session_expires_at ?? 'Unavailable')}</dd></div></dl></div><div class="panel"><p class="eyebrow">Diagnostics</p><h2>Read-only system checks</h2><p>Use <code>agentos doctor</code> for configuration, credential, service, private-gateway, and SQLite integrity checks.</p><pre>agentos doctor
 sudo agentos doctor</pre></div><div class="panel"><p class="eyebrow">AI management system</p><h2>Readiness evidence</h2><p>Download a tenant-scoped technical-control inventory and evidence index. It excludes raw events, prompts, results, artifacts, credentials, approvals, and authority records.</p><button class="primary" onclick={downloadAIMSEvidence} disabled={busy || !identity}>Download evidence bundle</button><p class="boundary-note">This artifact supports ISO/IEC 42001 readiness work. It is not a conformity assessment or certification.</p></div></section>
