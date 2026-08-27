@@ -69,17 +69,20 @@ retry.
 ## Storage and Event Contract versions
 
 SQLite storage versions are independent of the Agent OS binary version. The
-current runtime writes storage schema v7 and accepts v1 as the oldest supported
+current runtime writes storage schema v9 and accepts v1 as the oldest supported
 upgrade source. Schema v1 is frozen in
 `internal/ledger/testdata/storage-v1.sql`. Schema v2 adds metadata that binds
 the storage version, Agent OS application ID, current Event Contract schema,
 and a fingerprint of the reviewed SQLite layout. The ordered migrations then
 reseal Event Contract v4 projection admissions, add bounded pending-approval
 and completion-review projections, add the stored-byte event-integrity chain,
-and bind every capability/freeze record to its exact admission event. The v7
-binding migration first validates the complete pre-binding authority history
-and fails without partial updates when a record or event is missing,
-ambiguous, cross-tenant, or malformed.
+quarantine legacy knowledge that predates event-coupled admission, and bind
+every capability/freeze record to its exact admission event. The v8 binding
+migration first validates the complete pre-binding authority history and fails
+without partial updates when a record or event is missing, ambiguous,
+cross-tenant, or malformed. Storage v9 adds the reviewed tenant-scoped index
+used to select current knowledge for an Agent execution without scanning other
+Organizations' knowledge records.
 
 Startup inspects the application ID and complete source layout before making a
 change, then applies each ordered migration in one SQLite transaction. A
@@ -91,9 +94,9 @@ use only an explicitly reviewed migration.
 
 Event Contract schema v4 is the current contract. Legacy v3 is accepted only
 at the reviewed migration boundary that reseals it to v4. Future code that
-changes durable Event Contract meaning must introduce a
-new storage migration and retain an explicit validator for every Event version
-it claims to support; permissive decoding is not a migration mechanism.
+changes durable Event Contract meaning must introduce a new storage migration
+and retain an explicit validator for every Event version it claims to support;
+permissive decoding is not a migration mechanism.
 
 ## Restore without overwrite
 

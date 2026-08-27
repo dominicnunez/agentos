@@ -25,10 +25,10 @@ const (
 	// not identify or publish an Agent OS release.
 	OldestSupportedStorageVersion = 1
 	// CurrentStorageVersion is the only layout accepted after runtime startup.
-	CurrentStorageVersion = 7
+	CurrentStorageVersion = 9
 	// AuthorityAdmissionBindingStorageVersion is the first storage contract in
 	// which every capability and freeze record names its exact admitting event.
-	AuthorityAdmissionBindingStorageVersion = 7
+	AuthorityAdmissionBindingStorageVersion = 8
 	// LegacyEventSchemaVersion identifies the immediately preceding Event
 	// Contract. Its payload semantics already included Intent mode; migration
 	// validates review evidence and reseals schema-bound projection admissions.
@@ -67,6 +67,10 @@ var storageColumnsV6 = map[string][]string{
 	"event_integrity": {"sequence", "event_id", "algorithm", "previous_hash", "event_hash"},
 }
 
+var storageColumnsV7 = map[string][]string{
+	"legacy_knowledge_quarantine": {"record_id", "version", "body", "source_created_at", "reason"},
+}
+
 var storageIndexes = map[string]string{
 	"events_correlation_idx":            "events",
 	"events_intake_actor_idx":           "events",
@@ -82,6 +86,10 @@ var storageIndexesV5 = map[string]string{
 	"events_recent_commit_idx":                "events",
 	"pending_approvals_expiry_idx":            "pending_approvals",
 	"pending_completion_reviews_sequence_idx": "pending_completion_reviews",
+}
+
+var storageIndexesV9 = map[string]string{
+	"records_knowledge_organization_idx": "records",
 }
 
 const storageSchemaV1SQL = `CREATE TABLE events (
@@ -159,6 +167,15 @@ ON pending_completion_reviews(organization_id,request_sequence);`
 const storageSchemaV6SQL = `CREATE TABLE event_integrity (
 sequence INTEGER PRIMARY KEY, event_id TEXT NOT NULL UNIQUE,
 algorithm TEXT NOT NULL, previous_hash TEXT NOT NULL, event_hash TEXT NOT NULL UNIQUE);`
+
+const storageSchemaV7SQL = `CREATE TABLE legacy_knowledge_quarantine (
+record_id TEXT NOT NULL, version INTEGER NOT NULL, body BLOB NOT NULL,
+source_created_at TEXT NOT NULL, reason TEXT NOT NULL,
+PRIMARY KEY(record_id,version));`
+
+const storageSchemaV9SQL = `CREATE INDEX records_knowledge_organization_idx
+ON records(json_extract(body,'$.value.organization_id'),record_id,version)
+WHERE kind='knowledge';`
 
 func migrateStorage(ctx context.Context, db *sql.DB) error {
 	if ctx == nil || db == nil {
@@ -280,6 +297,14 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 		}
 		return advanceProjectionStorageContract(ctx, tx, from, to, "event-integrity")
 	case from == 6 && to == 7:
+		if _, err := tx.ExecContext(ctx, storageSchemaV7SQL); err != nil {
+			return err
+		}
+		if err := quarantineLegacyKnowledgeRecords(ctx, tx); err != nil {
+			return err
+		}
+		return advanceProjectionStorageContract(ctx, tx, from, to, "knowledge-admission")
+	case from == 7 && to == 8:
 		if _, err := ValidateEventIntegrity(ctx, tx); err != nil {
 			return fmt.Errorf("validate event integrity before authority admission binding: %w", err)
 		}
@@ -287,6 +312,11 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 			return err
 		}
 		return advanceProjectionStorageContract(ctx, tx, from, to, "authority-admission-binding")
+	case from == 8 && to == 9:
+		if _, err := tx.ExecContext(ctx, storageSchemaV9SQL); err != nil {
+			return err
+		}
+		return advanceProjectionStorageContract(ctx, tx, from, to, "knowledge-tenant-index")
 	default:
 		return fmt.Errorf("no reviewed storage migration exists")
 	}
@@ -335,6 +365,29 @@ WHERE kind IN ('capability_lease','organization_freeze') ORDER BY kind,record_id
 		if err != nil || changed != 1 {
 			return fmt.Errorf("authority admission binding %s/%s/%d changed across migration", record.Kind, record.RecordID, record.Version)
 		}
+	}
+	return nil
+}
+
+func quarantineLegacyKnowledgeRecords(ctx context.Context, tx *sql.Tx) error {
+	const reason = "PRE_EVENT_COUPLED_KNOWLEDGE_REQUIRES_REVIEW"
+	if _, err := tx.ExecContext(ctx, `INSERT INTO legacy_knowledge_quarantine(record_id,version,body,source_created_at,reason)
+SELECT record_id,version,body,created_at,? FROM records
+WHERE kind='knowledge' AND admission_event_id='' AND admission_fingerprint=''
+ORDER BY record_id,version`, reason); err != nil {
+		return fmt.Errorf("quarantine legacy knowledge records: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM records
+WHERE kind='knowledge' AND admission_event_id='' AND admission_fingerprint=''`); err != nil {
+		return fmt.Errorf("remove quarantined knowledge from authoritative projections: %w", err)
+	}
+	var ambiguous int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM records
+WHERE kind='knowledge' AND (admission_event_id='' OR admission_fingerprint='')`).Scan(&ambiguous); err != nil {
+		return fmt.Errorf("verify knowledge admission migration: %w", err)
+	}
+	if ambiguous != 0 {
+		return fmt.Errorf("knowledge admission migration found %d partially admitted records", ambiguous)
 	}
 	return nil
 }
@@ -536,6 +589,11 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 			expected[table] = columns
 		}
 	}
+	if version >= 7 {
+		for table, columns := range storageColumnsV7 {
+			expected[table] = columns
+		}
+	}
 	tables, err := userStorageTables(ctx, query)
 	if err != nil {
 		return StorageContract{}, err
@@ -568,6 +626,17 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 	}
 	if version >= 5 {
 		for index, table := range storageIndexesV5 {
+			var count int
+			if err := query.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name=? AND tbl_name=?`, index, table).Scan(&count); err != nil {
+				return StorageContract{}, fmt.Errorf("inspect storage index %s: %w", index, err)
+			}
+			if count != 1 {
+				return StorageContract{}, fmt.Errorf("storage schema version %d lacks exact index %s", version, index)
+			}
+		}
+	}
+	if version >= 9 {
+		for index, table := range storageIndexesV9 {
 			var count int
 			if err := query.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name=? AND tbl_name=?`, index, table).Scan(&count); err != nil {
 				return StorageContract{}, fmt.Errorf("inspect storage index %s: %w", index, err)
