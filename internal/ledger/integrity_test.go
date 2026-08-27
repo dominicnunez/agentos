@@ -174,6 +174,9 @@ func TestVerifiedOrganizationEventsUsesOneBoundedTenantIntegritySnapshot(t *test
 	if _, err := store.VerifiedOrganizationEvents(ctx, "org-1", 1); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("unbounded organization snapshot error=%v", err)
 	}
+	if _, err := store.verifiedEventSnapshot(ctx, "org-1", "", 2, 2, 1); err == nil || !strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("oversized organization snapshot error=%v", err)
+	}
 	if _, err := store.VerifiedOrganizationEvents(ctx, "", 2); err == nil {
 		t.Fatal("tenantless organization snapshot was accepted")
 	}

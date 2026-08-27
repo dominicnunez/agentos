@@ -4505,33 +4505,36 @@ func (l *SQLite) verifiedEventSnapshot(ctx context.Context, organizationID, corr
 	if err != nil {
 		return events.VerifiedEventSnapshot{}, fmt.Errorf("verify event ledger snapshot: %w", err)
 	}
-	query := `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
-FROM events WHERE organization_id=? AND correlation_id=? ORDER BY sequence LIMIT ?`
-	var stream []events.Event
-	if correlationID == "" {
-		stream, err = collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
-FROM events WHERE organization_id=? ORDER BY sequence LIMIT ?`, organizationID, limit+1))
-	} else {
-		stream, err = collectEvents(tx.QueryContext(ctx, query, organizationID, correlationID, limit+1))
+	where := `organization_id=?`
+	args := []any{organizationID}
+	if correlationID != "" {
+		where += ` AND correlation_id=?`
+		args = append(args, correlationID)
 	}
+	selection := `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE ` + where + ` ORDER BY sequence LIMIT ?`
+	args = append(args, limit+1)
+	var selectedCount int
+	var selectedBytes int64
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(
+		length(event_id)+length(organization_id)+length(event_type)+length(source_actor_id)+length(source_execution_id)+
+		length(recipient_scope)+length(recipient_id)+length(task_id)+length(authorization_refs)+length(artifact_refs)+
+		length(payload)+length(correlation_id)+length(created_at)+length(schema_version)),0)
+		FROM (`+selection+`)`, args...).Scan(&selectedCount, &selectedBytes); err != nil {
+		return events.VerifiedEventSnapshot{}, fmt.Errorf("measure verified event stream: %w", err)
+	}
+	if selectedCount > limit {
+		return events.VerifiedEventSnapshot{}, fmt.Errorf("verified event stream exceeds its %d event limit", limit)
+	}
+	if selectedBytes > int64(maximumBytes) {
+		return events.VerifiedEventSnapshot{}, fmt.Errorf("verified event stream exceeds its %d byte limit", maximumBytes)
+	}
+	stream, err := collectEvents(tx.QueryContext(ctx, selection, args...))
 	if err != nil {
 		return events.VerifiedEventSnapshot{}, fmt.Errorf("read verified event stream: %w", err)
 	}
-	if len(stream) > limit {
-		return events.VerifiedEventSnapshot{}, fmt.Errorf("verified event stream exceeds its %d event limit", limit)
-	}
-	bytes := 0
-	for _, event := range stream {
-		bytes += len(event.EventID) + len(event.OrganizationID) + len(event.EventType) + len(event.SourceActorID) + len(event.SourceExecutionID) + len(event.RecipientScope) + len(event.RecipientID) + len(event.TaskID) + len(event.CorrelationID) + len(event.Payload)
-		for _, ref := range event.AuthorizationRefs {
-			bytes += len(ref)
-		}
-		for _, ref := range event.ArtifactRefs {
-			bytes += len(ref)
-		}
-		if bytes > maximumBytes {
-			return events.VerifiedEventSnapshot{}, fmt.Errorf("verified event stream exceeds its %d byte limit", maximumBytes)
-		}
+	if len(stream) != selectedCount {
+		return events.VerifiedEventSnapshot{}, fmt.Errorf("verified event stream changed during its read transaction")
 	}
 	if err := tx.Commit(); err != nil {
 		return events.VerifiedEventSnapshot{}, fmt.Errorf("finish verified event snapshot: %w", err)
