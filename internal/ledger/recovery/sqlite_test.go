@@ -97,6 +97,59 @@ func TestVerifyMigratesPreBindingAuthoritySnapshotWithoutChangingSource(t *testi
 	}
 }
 
+func TestVerifyMigratesV7KnowledgeIntoIsolatedQuarantine(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "storage-v7-knowledge.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.ExecContext(ctx, `DROP INDEX records_knowledge_organization_idx; DROP TABLE legacy_knowledge_quarantine;
+INSERT INTO records(kind,record_id,version,body,admission_event_id,admission_fingerprint,created_at)
+VALUES('knowledge','legacy-knowledge',1,'{"legacy":"unsealed"}','','',?)`, created); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	fingerprint, err := testStorageSchemaFingerprint(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	version := ledger.AuthorityAdmissionBindingStorageVersion
+	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=?,schema_fingerprint=? WHERE singleton=1`, version, fingerprint); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA user_version=`+fmt.Sprint(version)); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := Verify(ctx, path)
+	if err != nil || verified.StorageVersion != version {
+		t.Fatalf("verify storage-v7 knowledge snapshot: result=%+v err=%v", verified, err)
+	}
+	db, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var sourceRows int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM records WHERE kind='knowledge' AND record_id='legacy-knowledge'`).Scan(&sourceRows); err != nil || sourceRows != 1 {
+		t.Fatalf("offline verification mutated the v7 source: rows=%d err=%v", sourceRows, err)
+	}
+}
+
 func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	ctx := context.Background()
 	directory := t.TempDir()

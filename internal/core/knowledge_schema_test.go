@@ -18,12 +18,16 @@ func TestKnowledgeRecordMatchesActiveSchemaProperties(t *testing.T) {
 		AdditionalProperties bool                       `json:"additionalProperties"`
 		Required             []string                   `json:"required"`
 		Properties           map[string]json.RawMessage `json:"properties"`
+		AllOf                []json.RawMessage          `json:"allOf"`
 	}
 	if err := json.Unmarshal(body, &schema); err != nil {
 		t.Fatal(err)
 	}
 	if schema.AdditionalProperties {
 		t.Fatal("knowledge schema must remain closed")
+	}
+	if len(schema.AllOf) == 0 {
+		t.Fatal("knowledge schema must encode lifecycle and validation constraints")
 	}
 	typeOfRecord := reflect.TypeFor[KnowledgeRecord]()
 	properties := make([]string, 0, typeOfRecord.NumField())

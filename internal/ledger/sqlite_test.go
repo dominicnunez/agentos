@@ -2696,6 +2696,31 @@ func TestExecutionKnowledgeRejectsUnboundedTeamScopes(t *testing.T) {
 	}
 }
 
+func TestProjectionAdmissionScanRejectsBytesBeforeRetention(t *testing.T) {
+	ctx := t.Context()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	err = store.withTx(ctx, func(tx *sql.Tx) error {
+		created := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version)
+VALUES('oversized-event','org-1','KNOWLEDGE_ACTIVATED','runtime','','','','','[]','[]',?,'knowledge-1',?,?)`, []byte(strings.Repeat("x", 2048)), created, events.SchemaVersion); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,admission_event_id,admission_fingerprint,created_at)
+VALUES('knowledge','knowledge-1',1,'{}','oversized-event','fingerprint',?)`, created); err != nil {
+			return err
+		}
+		_, err := admittedProjectionRecordsBounded(ctx, tx, 1024, `WHERE r.kind='knowledge'`)
+		return err
+	})
+	if err == nil || !strings.Contains(err.Error(), "scan exceeds") {
+		t.Fatalf("oversized projection scan was retained or decoded: %v", err)
+	}
+}
+
 func TestGoalProgressWitnessSelectionCrossesFormerEvidenceWindow(t *testing.T) {
 	ctx := context.Background()
 	l, err := Open(":memory:")

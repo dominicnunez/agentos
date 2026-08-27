@@ -85,6 +85,11 @@ reusing the already deployed v7 contract. Storage v9 adds the reviewed tenant-sc
 used to select current knowledge for an Agent execution without scanning other
 Organizations' knowledge records.
 
+Offline verification routes every older supported storage layout, including
+v7 snapshots with pre-admission knowledge, through an isolated migrated copy.
+The source remains read-only while the copy applies the same knowledge
+quarantine and admission checks as runtime startup.
+
 Startup inspects the application ID and complete source layout before making a
 change, then applies each ordered migration in one SQLite transaction. A
 missing migration, future version, altered layout, or conflicting metadata
@@ -98,6 +103,11 @@ at the reviewed migration boundary that reseals it to v4. Future code that
 changes durable Event Contract meaning must introduce a new storage migration
 and retain an explicit validator for every Event version it claims to support;
 permissive decoding is not a migration mechanism.
+
+An `ATTEMPTED` effect created before principal kinds were durable may be used
+only by the read-only reconciliation path. It may be confirmed or failed from
+exact destination evidence, but it cannot authorize a new attempt or automatic
+resend. Newly prepared and executed effects require a closed principal kind.
 
 ## Restore without overwrite
 

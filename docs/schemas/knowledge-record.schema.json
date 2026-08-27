@@ -50,6 +50,79 @@
     "validated_by_kind": { "enum": ["RUNTIME", "HUMAN", "AGENT", "EXTERNAL_AGENT"] },
     "limitations": { "type": "string" },
     "supersedes_version": { "type": "integer", "minimum": 1 }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "basis": { "const": "REPEATED_PATTERN" } }, "required": ["basis"] },
+      "then": { "required": ["occurrence_event_refs"], "properties": { "occurrence_event_refs": { "minItems": 3 } } }
+    },
+    {
+      "if": { "properties": { "basis": { "const": "DERIVED" } }, "required": ["basis"] },
+      "then": { "required": ["derived_knowledge_refs"], "properties": { "derived_knowledge_refs": { "minItems": 1 } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "CANDIDATE" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "validation_method": { "const": "UNVALIDATED" },
+          "validation_refs": { "maxItems": 0 },
+          "validated_by": { "maxLength": 0 }
+        },
+        "not": { "anyOf": [
+          { "required": ["validated_by_kind"] },
+          { "required": ["last_verified_at"] }
+        ] }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "ACTIVE" } }, "required": ["status"] },
+      "then": {
+        "required": ["validation_refs", "validated_by", "validated_by_kind", "last_verified_at"],
+        "properties": {
+          "validation_method": { "not": { "const": "UNVALIDATED" } },
+          "validation_refs": { "minItems": 1 },
+          "validated_by": { "minLength": 1 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "enum": ["SUPERSEDED", "STALE", "QUARANTINED"] } }, "required": ["status"] },
+      "then": {
+        "properties": { "version": { "minimum": 2 } },
+        "oneOf": [
+          {
+            "properties": {
+              "validation_method": { "const": "UNVALIDATED" },
+              "validation_refs": { "maxItems": 0 },
+              "validated_by": { "maxLength": 0 }
+            },
+            "not": { "anyOf": [
+              { "required": ["validated_by_kind"] },
+              { "required": ["last_verified_at"] }
+            ] }
+          },
+          {
+            "required": ["validation_refs", "validated_by", "validated_by_kind", "last_verified_at"],
+            "properties": {
+              "validation_method": { "not": { "const": "UNVALIDATED" } },
+              "validation_refs": { "minItems": 1 },
+              "validated_by": { "minLength": 1 }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": { "properties": { "validation_method": { "const": "HUMAN_JUDGMENT" } }, "required": ["validation_method"] },
+      "then": { "properties": { "validated_by_kind": { "const": "HUMAN" } } }
+    },
+    {
+      "if": { "properties": { "validation_method": { "const": "INDEPENDENT_AGENT_JUDGMENT" } }, "required": ["validation_method"] },
+      "then": { "properties": { "validated_by_kind": { "enum": ["AGENT", "EXTERNAL_AGENT"] } } }
+    },
+    {
+      "if": { "properties": { "validation_method": { "const": "REPEATED_OBSERVATION" } }, "required": ["validation_method"] },
+      "then": { "required": ["validation_refs"], "properties": { "validation_refs": { "minItems": 3 } } }
+    }
+  ]
 }
-

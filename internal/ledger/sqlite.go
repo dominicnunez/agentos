@@ -1221,8 +1221,9 @@ ORDER BY e.sequence`, draft.Event.OrganizationID, route.Scope, route.ID, cutoff)
 }
 
 const (
-	maximumCurrentExecutionKnowledgeScan = 1024
-	maximumExecutionKnowledgeTeamScopes  = 256
+	maximumCurrentExecutionKnowledgeScan  = 1024
+	maximumExecutionKnowledgeTeamScopes   = 256
+	maximumCurrentExecutionKnowledgeBytes = 8 << 20
 )
 
 func currentExecutionKnowledgeRecords(ctx context.Context, tx *sql.Tx, organizationID string, task core.Task, startSequence int64, routes []events.InboxRoute) ([]admittedProjectionRecord, error) {
@@ -1263,7 +1264,7 @@ OR (json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scop
 	}
 	query += ") ORDER BY e.sequence DESC,r.record_id LIMIT ?"
 	args = append(args, maximumCurrentExecutionKnowledgeScan+1)
-	records, err := admittedProjectionRecords(ctx, tx, query, args...)
+	records, err := admittedProjectionRecordsBounded(ctx, tx, maximumCurrentExecutionKnowledgeBytes, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -3775,6 +3776,13 @@ func admittedProjectionRecordBodies(ctx context.Context, queryer rowsQueryer, su
 }
 
 func admittedProjectionRecords(ctx context.Context, queryer rowsQueryer, suffix string, args ...any) ([]admittedProjectionRecord, error) {
+	return admittedProjectionRecordsBounded(ctx, queryer, 0, suffix, args...)
+}
+
+func admittedProjectionRecordsBounded(ctx context.Context, queryer rowsQueryer, maximumBytes int, suffix string, args ...any) ([]admittedProjectionRecord, error) {
+	if maximumBytes < 0 {
+		return nil, fmt.Errorf("projection admission byte limit is invalid")
+	}
 	query := `SELECT r.body,r.kind,r.record_id,r.version,r.admission_event_id,r.admission_fingerprint,
 e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version
 FROM records AS r
@@ -3785,6 +3793,7 @@ LEFT JOIN events AS e ON e.event_id=r.admission_event_id ` + suffix
 	}
 	defer func() { _ = rows.Close() }()
 	var records []admittedProjectionRecord
+	loadedBytes := 0
 	for rows.Next() {
 		var body []byte
 		var kind, recordID, admissionEventID, admissionFingerprint string
@@ -3796,6 +3805,13 @@ LEFT JOIN events AS e ON e.event_id=r.admission_event_id ` + suffix
 			&event.EventID, &event.Sequence, &event.OrganizationID, &event.EventType, &event.SourceActorID, &event.SourceExecutionID, &event.RecipientScope, &event.RecipientID, &event.TaskID,
 			&authorizationRefs, &artifactRefs, &event.Payload, &event.CorrelationID, &createdAt, &event.SchemaVersion); err != nil {
 			return nil, err
+		}
+		loadedBytes += len(body) + len(kind) + len(recordID) + len(admissionEventID) + len(admissionFingerprint) +
+			len(event.EventID) + len(event.OrganizationID) + len(event.EventType) + len(event.SourceActorID) + len(event.SourceExecutionID) +
+			len(event.RecipientScope) + len(event.RecipientID) + len(event.TaskID) + len(authorizationRefs) + len(artifactRefs) + len(event.Payload) +
+			len(event.CorrelationID) + len(createdAt)
+		if maximumBytes > 0 && loadedBytes > maximumBytes {
+			return nil, fmt.Errorf("projection admission scan exceeds %d bytes", maximumBytes)
 		}
 		if json.Unmarshal(authorizationRefs, &event.AuthorizationRefs) != nil || json.Unmarshal(artifactRefs, &event.ArtifactRefs) != nil {
 			return nil, fmt.Errorf("projection admission event references are invalid")
