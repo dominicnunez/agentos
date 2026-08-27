@@ -54,13 +54,16 @@ judgment.
 ## Public assessment bundle
 
 `scripts/build_aims_assessment_bundle.py` creates a deterministic, bounded
-archive for one exact source commit and assessment date containing the
+archive for one exact source commit and assessment instant containing the
 controlled public records, a curated technical evidence set, exact checksums,
 and a machine-readable readiness report. The builder requires the declared
 commit to equal checked-out `HEAD`, disables Git replacement objects, compares
 every bundled byte with the corresponding Git object, and validates governed
-history against the first parent when an earlier manifest exists. CI builds it
-twice for the same assessment date and requires identical bytes. The report
+history against the first parent when an earlier manifest exists. This proves
+the bundled bytes came from the declared local Git commit; it does not
+authenticate which repository owns that commit. Trusted provenance or an
+attestation must establish repository identity separately. CI builds the bundle
+twice for the same assessment instant and requires identical bytes. The report
 fails the assessment-readiness state while required approved audit, management
 review, applicability, and accountable decision records are absent or their
 review date is overdue.

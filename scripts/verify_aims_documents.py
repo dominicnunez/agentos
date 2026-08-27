@@ -39,6 +39,7 @@ VERSION_PATTERN = re.compile(r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 PATH_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")
 TIMESTAMP_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+DATE_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 UNRESOLVED_MARKERS = ("TODO", "TBD", "{{", "}}", "<INSERT", "[INSERT")
 FORBIDDEN_METADATA_CLAIMS = ("CERTIFIED", "CONFORMANT")
 DISPLAYED_STATUS_PATTERN = re.compile(r"^Status: \*\*(DRAFT|APPROVED|RETIRED)\*\*$", re.MULTILINE)
@@ -130,6 +131,8 @@ def _validate_timestamp(value: str, label: str) -> None:
 
 
 def _validate_date(value: str, label: str) -> None:
+    if not DATE_PATTERN.fullmatch(value):
+        raise VerificationError(f"{label} must use exact YYYY-MM-DD calendar-date syntax")
     try:
         date.fromisoformat(value)
     except ValueError as exc:
@@ -201,17 +204,28 @@ def verify_history(prior_manifest: dict[str, Any], manifest: dict[str, Any]) -> 
         current_version = _version_tuple(current["version"], f"current {document_id}.version")
         if prior_status == "RETIRED" and current != prior:
             raise VerificationError(f"retired controlled history was changed: {document_id}")
-        if prior_status == "APPROVED" and current_status == "DRAFT":
-            raise VerificationError(f"approved controlled document regressed to DRAFT: {document_id}")
         if prior_status == "DRAFT" and current_status == "RETIRED":
             raise VerificationError(f"draft controlled document cannot be retired directly: {document_id}")
-        versioned_change = current != prior and not (
-            prior_status == "DRAFT" and current_status == "DRAFT"
-        )
-        if versioned_change and current_version <= prior_version:
+        if current != prior and current_version <= prior_version:
             raise VerificationError(f"changed controlled document did not increment its version: {document_id}")
         if current == prior and current_version != prior_version:
             raise VerificationError(f"unchanged controlled document has inconsistent version history: {document_id}")
+        if prior_status == "APPROVED" and current_status in {"APPROVED", "RETIRED"} and current != prior:
+            prior_approved_at_value = prior["approved_at"]
+            if not isinstance(prior_approved_at_value, str):
+                raise VerificationError(
+                    f"prior approved document has invalid approval evidence: {document_id}"
+                )
+            _validate_timestamp(prior_approved_at_value, f"prior {document_id}.approved_at")
+            prior_approved_at = datetime.strptime(prior_approved_at_value, "%Y-%m-%dT%H:%M:%SZ")
+            current_approved_at = datetime.strptime(current["approved_at"], "%Y-%m-%dT%H:%M:%SZ")
+            if (
+                current["approval_ref"] == prior["approval_ref"]
+                or current_approved_at <= prior_approved_at
+            ):
+                raise VerificationError(
+                    f"changed approved document lacks new approval evidence: {document_id}"
+                )
 
 
 def verify(
@@ -315,16 +329,17 @@ def verify(
             if any(marker in text for marker in UNRESOLVED_MARKERS):
                 raise VerificationError(f"{label} contains an unresolved placeholder marker")
 
+    documents_by_id = {entry["id"]: entry for entry in documents}
     retired_ids = {entry["id"] for entry in documents if entry["status"] == "RETIRED"}
     for index, document in enumerate(documents):
         successor = document["superseded_by"]
         if successor is not None and successor not in ids:
             raise VerificationError(f"manifest.documents[{index}].superseded_by references an unknown document")
         if successor is not None:
-            successor_document = next(entry for entry in documents if entry["id"] == successor)
-            if successor_document["status"] != "APPROVED":
+            successor_document = documents_by_id[successor]
+            if successor_document["status"] not in {"APPROVED", "RETIRED"}:
                 raise VerificationError(
-                    f"manifest.documents[{index}].superseded_by must identify an APPROVED successor"
+                    f"manifest.documents[{index}].superseded_by must identify a governed successor"
                 )
             if document["id"] not in successor_document["supersedes"]:
                 raise VerificationError(
@@ -340,6 +355,20 @@ def verify(
                 raise VerificationError(
                     f"manifest.documents[{index}].supersedes is not owned by this successor"
                 )
+
+    for document_id in retired_ids:
+        seen: set[str] = set()
+        current = documents_by_id[document_id]
+        while current["status"] == "RETIRED":
+            if current["id"] in seen:
+                raise VerificationError(f"controlled successor cycle begins at {document_id}")
+            seen.add(current["id"])
+            successor_id = current["superseded_by"]
+            if successor_id not in documents_by_id:
+                raise VerificationError(f"controlled successor chain is incomplete: {document_id}")
+            current = documents_by_id[successor_id]
+        if current["status"] != "APPROVED":
+            raise VerificationError(f"controlled successor chain does not terminate in APPROVED: {document_id}")
 
     records_root = repo_root / "governance" / "aims" / "records"
     if records_root.exists():

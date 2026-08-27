@@ -11,7 +11,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
-from datetime import date
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -54,13 +54,11 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
         first = self.root / "work" / "first.tar.gz"
         second = self.root / "work" / "second.tar.gz"
         first_result = build(
-            self.root, "https://github.com/dominicnunez/agentos", "a" * 40,
-            date(2026, 8, 27), first,
+            self.root, "a" * 40, datetime(2026, 8, 27, 12), first,
             verify_source=False,
         )
         second_result = build(
-            self.root, "https://github.com/dominicnunez/agentos", "a" * 40,
-            date(2026, 8, 27), second,
+            self.root, "a" * 40, datetime(2026, 8, 27, 12), second,
             verify_source=False,
         )
         self.assertEqual(first_result, second_result)
@@ -76,24 +74,14 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
                 self.assertFalse(report["certification_assessment_ready"])
                 self.assertFalse(report["conformity_determined"])
                 self.assertFalse(report["certified"])
-
-    def test_rejects_noncanonical_repository(self) -> None:
-        with self.assertRaisesRegex(VerificationError, "canonical"):
-            build(
-                self.root,
-                "https://example.com/agentos",
-                "a" * 40,
-                date(2026, 8, 27),
-                self.root / "work" / "bad.tar.gz",
-                verify_source=False,
-            )
+                self.assertIsNone(report["source"]["repository"])
+                self.assertIn("UNAUTHENTICATED", report["source"]["binding"])
 
     def test_readiness_requires_approved_governance_records(self) -> None:
         report = readiness_report(
             {"schema_version": 1, "documents": []},
-            "https://github.com/dominicnunez/agentos",
             "a" * 40,
-            date(2026, 8, 27),
+            datetime(2026, 8, 27, 12),
         )
         self.assertFalse(report["certification_assessment_ready"])
         self.assertIn("REQUIRED_GOVERNANCE_RECORDS_MISSING", report["blockers"])
@@ -113,13 +101,13 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
                         "id": "aims.ai-policy-v2",
                         "status": "APPROVED",
                         "superseded_by": None,
+                        "approved_at": "2026-08-27T11:00:00Z",
                         "review_due": "2027-08-27",
                     },
                 ],
             },
-            "https://github.com/dominicnunez/agentos",
             "a" * 40,
-            date(2026, 8, 27),
+            datetime(2026, 8, 27, 12),
         )
         self.assertNotIn("aims.ai-policy", report["not_approved_required_document_ids"])
 
@@ -132,16 +120,36 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
                         "id": "aims.ai-policy",
                         "status": "APPROVED",
                         "superseded_by": None,
+                        "approved_at": "2026-08-27T11:00:00Z",
                         "review_due": "2026-08-26",
                     }
                 ],
             },
-            "https://github.com/dominicnunez/agentos",
             "a" * 40,
-            date(2026, 8, 27),
+            datetime(2026, 8, 27, 12),
         )
         self.assertIn("aims.ai-policy", report["overdue_required_document_ids"])
         self.assertIn("CONTROLLED_REVIEWS_OVERDUE", report["blockers"])
+
+    def test_readiness_rejects_approval_after_assessment(self) -> None:
+        report = readiness_report(
+            {
+                "schema_version": 1,
+                "documents": [
+                    {
+                        "id": "aims.ai-policy",
+                        "status": "APPROVED",
+                        "superseded_by": None,
+                        "approved_at": "2026-08-27T12:00:01Z",
+                        "review_due": "2027-08-27",
+                    }
+                ],
+            },
+            "a" * 40,
+            datetime(2026, 8, 27, 12),
+        )
+        self.assertIn("aims.ai-policy", report["postdated_approval_document_ids"])
+        self.assertIn("APPROVALS_POSTDATE_ASSESSMENT", report["blockers"])
 
     def test_rejects_output_outside_work_without_overwriting(self) -> None:
         source = self.root / "governance" / "aims" / "manifest.json"
@@ -149,9 +157,8 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
         with self.assertRaisesRegex(VerificationError, "work directory"):
             build(
                 self.root,
-                "https://github.com/dominicnunez/agentos",
                 "a" * 40,
-                date(2026, 8, 27),
+                datetime(2026, 8, 27, 12),
                 source,
                 verify_source=False,
             )
@@ -164,9 +171,8 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
         with self.assertRaisesRegex(VerificationError, "already exists"):
             build(
                 self.root,
-                "https://github.com/dominicnunez/agentos",
                 "a" * 40,
-                date(2026, 8, 27),
+                datetime(2026, 8, 27, 12),
                 output,
                 verify_source=False,
             )
@@ -205,9 +211,8 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
         output = self.root / "work" / "long.tar.gz"
         build(
             self.root,
-            "https://github.com/dominicnunez/agentos",
             "a" * 40,
-            date(2026, 8, 27),
+            datetime(2026, 8, 27, 12),
             output,
             verify_source=False,
         )

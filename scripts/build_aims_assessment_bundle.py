@@ -12,7 +12,7 @@ import os
 import re
 import subprocess
 import tarfile
-from datetime import date
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -137,7 +137,7 @@ def _effective_document(document_id: str, documents_by_id: dict[str, dict[str, A
 
 
 def readiness_report(
-    manifest: dict[str, Any], repository: str, commit: str, assessment_date: date
+    manifest: dict[str, Any], commit: str, assessment_at: datetime
 ) -> dict[str, Any]:
     documents = manifest["documents"]
     documents_by_id = {entry["id"]: entry for entry in documents}
@@ -156,7 +156,14 @@ def readiness_report(
         for document_id, document in effective.items()
         if document is not None
         and document["status"] == "APPROVED"
-        and date.fromisoformat(document["review_due"]) < assessment_date
+        and datetime.strptime(document["review_due"], "%Y-%m-%d").date() < assessment_at.date()
+    )
+    postdated = sorted(
+        document_id
+        for document_id, document in effective.items()
+        if document is not None
+        and document["status"] == "APPROVED"
+        and datetime.strptime(document["approved_at"], "%Y-%m-%dT%H:%M:%SZ") > assessment_at
     )
     blockers: list[str] = []
     if missing:
@@ -165,6 +172,8 @@ def readiness_report(
         blockers.append("REQUIRED_GOVERNANCE_RECORDS_NOT_APPROVED")
     if overdue:
         blockers.append("CONTROLLED_REVIEWS_OVERDUE")
+    if postdated:
+        blockers.append("APPROVALS_POSTDATE_ASSESSMENT")
     if any(entry["status"] == "DRAFT" for entry in documents):
         blockers.append("CONTROLLED_DRAFTS_REMAIN")
     if "aims.audit-result" in missing:
@@ -179,8 +188,12 @@ def readiness_report(
     return {
         "schema_version": 1,
         "project": "Agent OS",
-        "source": {"repository": repository, "commit": commit},
-        "assessment_date": assessment_date.isoformat(),
+        "source": {
+            "repository": None,
+            "commit": commit,
+            "binding": "LOCAL_GIT_OBJECTS_VERIFIED_REPOSITORY_IDENTITY_UNAUTHENTICATED",
+        },
+        "assessment_at": assessment_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "claim": "READINESS_WORK_IN_PROGRESS",
         "conformity_determined": False,
         "certified": False,
@@ -193,10 +206,12 @@ def readiness_report(
         "missing_required_document_ids": missing,
         "not_approved_required_document_ids": not_approved,
         "overdue_required_document_ids": overdue,
+        "postdated_approval_document_ids": postdated,
         "blockers": blockers,
         "limitations": [
             "This automated report validates bounded repository evidence and controlled-document state only.",
             "It does not evaluate confidential operating evidence or reproduce ISO/IEC 42001 requirements.",
+            "Repository identity requires separately authenticated provenance or attestation.",
             "A true readiness state still does not determine conformity or certification.",
         ],
     }
@@ -230,16 +245,13 @@ def _tar_bytes(entries: dict[str, bytes]) -> bytes:
 
 def build(
     repo_root: Path,
-    repository: str,
     commit: str,
-    assessment_date: date,
+    assessment_at: datetime,
     output: Path,
     *,
     verify_source: bool = True,
 ) -> tuple[str, int]:
     repo_root = repo_root.resolve(strict=True)
-    if repository != "https://github.com/dominicnunez/agentos":
-        raise VerificationError("repository must identify the canonical Agent OS repository")
     if not COMMIT_PATTERN.fullmatch(commit):
         raise VerificationError("commit must be an exact lowercase 40-character Git commit SHA")
     manifest = verify(repo_root)
@@ -282,16 +294,21 @@ def build(
     entries["assessment/evidence-index.json"] = _canonical_json(
         {
             "schema_version": 1,
-            "source": {"repository": repository, "commit": commit},
+            "source": {
+                "repository": None,
+                "commit": commit,
+                "binding": "LOCAL_GIT_OBJECTS_VERIFIED_REPOSITORY_IDENTITY_UNAUTHENTICATED",
+            },
             "entries": evidence_index,
         }
     )
     entries["assessment/readiness.json"] = _canonical_json(
-        readiness_report(manifest, repository, commit, assessment_date)
+        readiness_report(manifest, commit, assessment_at)
     )
     entries["ASSESSMENT_README.txt"] = (
         "Agent OS public AIMS assessment-evidence bundle\n\n"
         "This deterministic bundle contains bounded public repository evidence for the exact source commit.\n"
+        "The local Git object check does not authenticate repository identity; use separate trusted provenance.\n"
         "It does not contain confidential operating evidence, determine conformity, or establish certification.\n"
         "Use an approved AIMS scope, an authorized ISO/IEC 42001 copy, and competent independent assessment.\n"
     ).encode("utf-8")
@@ -329,14 +346,19 @@ def build(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--repository", default="https://github.com/dominicnunez/agentos")
     parser.add_argument("--commit", required=True)
-    parser.add_argument("--assessment-date", type=date.fromisoformat, required=True)
+    parser.add_argument("--assessment-at", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
+        if not re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+            args.assessment_at,
+        ):
+            raise VerificationError("assessment-at must use exact RFC 3339 UTC whole-second syntax")
+        assessment_at = datetime.strptime(args.assessment_at, "%Y-%m-%dT%H:%M:%SZ")
         digest, size = build(
-            args.root, args.repository, args.commit, args.assessment_date, args.output
+            args.root, args.commit, assessment_at, args.output
         )
     except VerificationError as exc:
         print(f"AIMS assessment bundle failed: {exc}")

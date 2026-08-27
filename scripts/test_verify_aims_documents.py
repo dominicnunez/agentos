@@ -144,6 +144,18 @@ class VerifyAIMSDocumentsTest(unittest.TestCase):
         )
         self.assert_rejected(manifest, "must be after")
 
+    def test_rejects_noncanonical_review_date(self) -> None:
+        self.write_document("APPROVED", "Approved.\n")
+        manifest = self.manifest(
+            status="APPROVED",
+            approval_ref="decision-date",
+            approved_by="project-owner",
+            approved_at="2026-08-27T12:00:00Z",
+            review_due="20270827",
+            sha256=hashlib.sha256(self.document.read_bytes()).hexdigest(),
+        )
+        self.assert_rejected(manifest, "exact YYYY-MM-DD")
+
     def test_rejects_displayed_status_mismatch(self) -> None:
         manifest = self.manifest(
             status="APPROVED",
@@ -184,6 +196,58 @@ class VerifyAIMSDocumentsTest(unittest.TestCase):
         with self.assertRaisesRegex(VerificationError, "did not increment"):
             verify(self.root, path, prior_manifest_bytes=(json.dumps(prior) + "\n").encode())
 
+    def test_rejects_changed_draft_history_without_version_increment(self) -> None:
+        prior = self.manifest()
+        self.write_document("DRAFT", "Revised draft.\n")
+        current = self.manifest(sha256=hashlib.sha256(self.document.read_bytes()).hexdigest())
+        path = self.write_manifest(current)
+        with self.assertRaisesRegex(VerificationError, "did not increment"):
+            verify(self.root, path, prior_manifest_bytes=(json.dumps(prior) + "\n").encode())
+
+    def test_rejects_reused_approval_for_changed_bytes(self) -> None:
+        self.write_document("APPROVED", "Original approved bytes.\n")
+        approval = {
+            "status": "APPROVED",
+            "approval_ref": "decision-original",
+            "approved_by": "project-owner",
+            "approved_at": "2026-08-27T12:00:00Z",
+            "review_due": "2027-08-27",
+        }
+        prior = self.manifest(
+            **approval, version="1.0", sha256=hashlib.sha256(self.document.read_bytes()).hexdigest()
+        )
+        self.write_document("APPROVED", "Changed bytes.\n")
+        current = self.manifest(
+            **approval, version="1.1", sha256=hashlib.sha256(self.document.read_bytes()).hexdigest()
+        )
+        path = self.write_manifest(current)
+        with self.assertRaisesRegex(VerificationError, "lacks new approval evidence"):
+            verify(self.root, path, prior_manifest_bytes=(json.dumps(prior) + "\n").encode())
+
+    def test_rejects_malformed_prior_approval_timestamp_as_verification_error(self) -> None:
+        self.write_document("APPROVED", "Changed bytes.\n")
+        current = self.manifest(
+            status="APPROVED",
+            version="1.1",
+            approval_ref="decision-current",
+            approved_by="project-owner",
+            approved_at="2026-08-27T13:00:00Z",
+            review_due="2027-08-27",
+            sha256=hashlib.sha256(self.document.read_bytes()).hexdigest(),
+        )
+        prior = self.manifest(
+            status="APPROVED",
+            version="1.0",
+            approval_ref="decision-prior",
+            approved_by="project-owner",
+            approved_at="not-a-timestamp",
+            review_due="2027-08-27",
+            sha256="0" * 64,
+        )
+        path = self.write_manifest(current)
+        with self.assertRaisesRegex(VerificationError, "timestamp"):
+            verify(self.root, path, prior_manifest_bytes=(json.dumps(prior) + "\n").encode())
+
     def test_rejects_two_successors_claiming_one_retired_document(self) -> None:
         records: list[dict[str, object]] = []
         specifications = (
@@ -217,6 +281,39 @@ class VerifyAIMSDocumentsTest(unittest.TestCase):
             )
         manifest = {"schema_version": 1, "documents": records}
         self.assert_rejected(manifest, "is not owned by this successor")
+
+    def test_accepts_multi_generation_successor_chain(self) -> None:
+        records: list[dict[str, object]] = []
+        specifications = (
+            ("aims.scope", "scope.md", "RETIRED", [], "aims.scope-v2"),
+            ("aims.scope-v2", "scope-v2.md", "RETIRED", ["aims.scope"], "aims.scope-v3"),
+            ("aims.scope-v3", "scope-v3.md", "APPROVED", ["aims.scope-v2"], None),
+        )
+        for document_id, filename, status, supersedes, superseded_by in specifications:
+            path = self.records / filename
+            path.write_text(
+                f"# Scope\n\nStatus: **{status}**\n\nControlled.\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            records.append(
+                {
+                    "id": document_id,
+                    "path": f"governance/aims/records/{filename}",
+                    "version": "1.0",
+                    "status": status,
+                    "owner": "project-leadership",
+                    "classification": "PUBLIC",
+                    "approval_ref": f"decision-{document_id}",
+                    "approved_by": "project-owner",
+                    "approved_at": "2026-08-27T12:00:00Z",
+                    "review_due": "2027-08-27",
+                    "supersedes": supersedes,
+                    "superseded_by": superseded_by,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            )
+        verify(self.root, self.write_manifest({"schema_version": 1, "documents": records}))
 
 
 if __name__ == "__main__":

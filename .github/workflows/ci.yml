@@ -62,9 +62,9 @@ jobs:
           python3 -m unittest scripts/test_verify_aims_documents.py
           python3 -m unittest scripts/test_build_aims_assessment_bundle.py
           mkdir -p work/aims-first work/aims-second
-          assessment_date=$(date -u +%F)
-          python3 scripts/build_aims_assessment_bundle.py --commit "${GITHUB_SHA}" --assessment-date "$assessment_date" --output work/aims-first/agentos-aims-assessment.tar.gz
-          python3 scripts/build_aims_assessment_bundle.py --commit "${GITHUB_SHA}" --assessment-date "$assessment_date" --output work/aims-second/agentos-aims-assessment.tar.gz
+          assessment_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          python3 scripts/build_aims_assessment_bundle.py --commit "${GITHUB_SHA}" --assessment-at "$assessment_at" --output work/aims-first/agentos-aims-assessment.tar.gz
+          python3 scripts/build_aims_assessment_bundle.py --commit "${GITHUB_SHA}" --assessment-at "$assessment_at" --output work/aims-second/agentos-aims-assessment.tar.gz
           cmp work/aims-first/agentos-aims-assessment.tar.gz work/aims-second/agentos-aims-assessment.tar.gz
 
       - name: Build
