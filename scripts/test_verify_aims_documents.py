@@ -8,10 +8,13 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.verify_aims_documents import (
+    MAX_DOCUMENT_BYTES,
     VerificationError,
     _parse_manifest_bytes,
+    _read_controlled_bytes,
     verify,
     verify_history_bytes,
 )
@@ -31,6 +34,18 @@ class VerifyAIMSDocumentsTest(unittest.TestCase):
         self.document.write_text(
             f"# Scope\n\nStatus: **{status}**\n\n{body}", encoding="utf-8", newline="\n"
         )
+
+    def test_controlled_file_limit_precedes_unbounded_materialization(self) -> None:
+        self.document.write_bytes(b"x" * (MAX_DOCUMENT_BYTES + 1))
+        with patch.object(
+            Path,
+            "read_bytes",
+            side_effect=AssertionError("unbounded read_bytes must not be used"),
+        ):
+            with self.assertRaisesRegex(VerificationError, "controlled AIMS document exceeds"):
+                _read_controlled_bytes(
+                    self.document, MAX_DOCUMENT_BYTES, "controlled AIMS document"
+                )
 
     def manifest(self, **changes: object) -> dict[str, object]:
         entry: dict[str, object] = {
@@ -625,3 +640,4 @@ class VerifyAIMSDocumentsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

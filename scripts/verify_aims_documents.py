@@ -107,7 +107,10 @@ def _read_controlled_bytes(path: Path, limit: int, label: str) -> bytes:
     if path.is_symlink():
         raise VerificationError(f"{label} must not be a symbolic link: {path}")
     try:
-        data = path.read_bytes()
+        if path.stat().st_size > limit:
+            raise VerificationError(f"{label} exceeds {limit} bytes: {path}")
+        with path.open("rb") as source:
+            data = source.read(limit + 1)
     except OSError as exc:
         raise VerificationError(f"cannot read {label}: {path}: {exc}") from exc
     if len(data) > limit:
@@ -604,3 +607,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
