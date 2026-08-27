@@ -18,9 +18,23 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 try:
-    from scripts.verify_aims_documents import VerificationError, verify, verify_history_bytes
+    from scripts.verify_aims_documents import (
+        MAX_DOCUMENT_BYTES,
+        MAX_MANIFEST_BYTES,
+        MAX_TOTAL_DOCUMENT_BYTES,
+        VerificationError,
+        verify,
+        verify_history_bytes,
+    )
 except ModuleNotFoundError:
-    from verify_aims_documents import VerificationError, verify, verify_history_bytes
+    from verify_aims_documents import (
+        MAX_DOCUMENT_BYTES,
+        MAX_MANIFEST_BYTES,
+        MAX_TOTAL_DOCUMENT_BYTES,
+        VerificationError,
+        verify,
+        verify_history_bytes,
+    )
 
 
 MAX_SOURCE_FILE_BYTES = 512 * 1024
@@ -173,19 +187,24 @@ def _git_aims_entries(repo_root: Path, commit: str) -> dict[str, bytes]:
             "ls-tree",
             "-r",
             "-z",
+            "-l",
             commit,
             "--",
             "governance/aims/manifest.json",
             "governance/aims/records",
         ],
     )
-    entries: dict[str, bytes] = {}
+    metadata_entries: list[tuple[str, str, int]] = []
+    paths: set[str] = set()
+    record_bytes = 0
     for raw_entry in listing.split(b"\0"):
         if not raw_entry:
             continue
         try:
             metadata, raw_relative = raw_entry.split(b"\t", 1)
-            mode, object_type, _object_id = metadata.decode("ascii", errors="strict").split()
+            mode, object_type, object_id, size_text = metadata.decode(
+                "ascii", errors="strict"
+            ).split()
             relative = raw_relative.decode("utf-8", errors="strict")
         except (ValueError, UnicodeDecodeError) as exc:
             raise VerificationError("Git AIMS tree entry is malformed") from exc
@@ -205,9 +224,33 @@ def _git_aims_entries(repo_root: Path, commit: str) -> dict[str, bytes]:
             )
         ):
             raise VerificationError(f"unsafe Git AIMS path: {relative}")
-        if relative in entries:
+        if relative in paths:
             raise VerificationError(f"duplicate Git AIMS path: {relative}")
-        entries[relative] = _git(repo_root, ["show", f"{commit}:{relative}"])
+        paths.add(relative)
+        if not size_text.isascii() or not size_text.isdecimal():
+            raise VerificationError(f"Git AIMS blob size is malformed: {relative}")
+        object_size = int(size_text)
+        maximum = (
+            MAX_MANIFEST_BYTES
+            if relative == "governance/aims/manifest.json"
+            else MAX_DOCUMENT_BYTES
+        )
+        if object_size > maximum:
+            raise VerificationError(f"Git AIMS blob exceeds {maximum} bytes: {relative}")
+        if relative != "governance/aims/manifest.json":
+            record_bytes += object_size
+            if record_bytes > MAX_TOTAL_DOCUMENT_BYTES:
+                raise VerificationError(
+                    f"Git AIMS record blobs exceed {MAX_TOTAL_DOCUMENT_BYTES} aggregate bytes"
+                )
+        metadata_entries.append((relative, object_id, object_size))
+
+    entries: dict[str, bytes] = {}
+    for relative, object_id, object_size in metadata_entries:
+        data = _git(repo_root, ["cat-file", "blob", object_id])
+        if len(data) != object_size:
+            raise VerificationError(f"Git AIMS blob size changed while reading: {relative}")
+        entries[relative] = data
     if entries and "governance/aims/manifest.json" not in entries:
         raise VerificationError(f"AIMS records exist without a manifest at commit {commit}")
     return entries
@@ -377,19 +420,20 @@ def readiness_report(
         and document["status"] == "APPROVED"
         and datetime.strptime(document["review_due"], "%Y-%m-%d").date() < assessment_at.date()
     )
+    governed_decisions = {
+        document["id"]: document
+        for document in documents
+        if document["status"] in {"APPROVED", "RETIRED"}
+    }
     postdated = sorted(
         document_id
-        for document_id, document in effective.items()
-        if document is not None
-        and document["status"] == "APPROVED"
-        and datetime.strptime(document["approved_at"], "%Y-%m-%dT%H:%M:%SZ") > assessment_at
+        for document_id, document in governed_decisions.items()
+        if datetime.strptime(document["approved_at"], "%Y-%m-%dT%H:%M:%SZ") > assessment_at
     )
     postdated_source_commit = sorted(
         document_id
-        for document_id, document in effective.items()
-        if document is not None
-        and document["status"] == "APPROVED"
-        and commit_at is not None
+        for document_id, document in governed_decisions.items()
+        if commit_at is not None
         and datetime.strptime(document["approved_at"], "%Y-%m-%dT%H:%M:%SZ") > commit_at
     )
     blockers: list[str] = []

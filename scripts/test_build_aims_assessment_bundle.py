@@ -18,6 +18,7 @@ from unittest.mock import patch
 from scripts.build_aims_assessment_bundle import (
     REQUIRED_APPROVED_DOCUMENTS,
     _git,
+    _git_aims_entries,
     _verified_commit_at,
     _verify_aims_history,
     _verify_captured_aims_snapshot,
@@ -25,7 +26,7 @@ from scripts.build_aims_assessment_bundle import (
     build,
     readiness_report,
 )
-from scripts.verify_aims_documents import VerificationError
+from scripts.verify_aims_documents import MAX_DOCUMENT_BYTES, VerificationError
 
 
 class BuildAIMSAssessmentBundleTest(unittest.TestCase):
@@ -228,6 +229,7 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
                         "id": "aims.ai-policy",
                         "status": "RETIRED",
                         "superseded_by": "aims.ai-policy-v2",
+                        "approved_at": "2026-08-27T10:00:00Z",
                         "review_due": "2027-08-27",
                     },
                     {
@@ -243,6 +245,40 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
             datetime(2026, 8, 27, 12),
         )
         self.assertNotIn("aims.ai-policy", report["not_approved_required_document_ids"])
+
+    def test_readiness_rejects_future_retirement_decision(self) -> None:
+        report = readiness_report(
+            {
+                "schema_version": 1,
+                "documents": [
+                    {
+                        "id": "aims.ai-policy",
+                        "status": "RETIRED",
+                        "superseded_by": "aims.ai-policy-v2",
+                        "approved_at": "2026-08-27T12:00:01Z",
+                        "review_due": "2027-08-27",
+                    },
+                    {
+                        "id": "aims.ai-policy-v2",
+                        "status": "APPROVED",
+                        "superseded_by": None,
+                        "approved_at": "2026-08-27T10:00:00Z",
+                        "review_due": "2027-08-27",
+                    },
+                ],
+            },
+            "a" * 40,
+            datetime(2026, 8, 27, 12),
+            commit_at=datetime(2026, 8, 27, 11),
+            source_verified=True,
+        )
+        self.assertIn("aims.ai-policy", report["postdated_approval_document_ids"])
+        self.assertIn(
+            "aims.ai-policy",
+            report["source_commit_postdated_approval_document_ids"],
+        )
+        self.assertIn("APPROVALS_POSTDATE_ASSESSMENT", report["blockers"])
+        self.assertIn("APPROVALS_POSTDATE_SOURCE_COMMIT", report["blockers"])
 
     def test_readiness_rejects_overdue_approved_record(self) -> None:
         report = readiness_report(
@@ -677,6 +713,19 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
 
         with self.assertRaisesRegex(VerificationError, "regular non-executable"):
             _verify_aims_history(self.root, baseline, commit, source_entries)
+
+    def test_git_snapshot_rejects_oversized_blob_before_materializing_it(self) -> None:
+        object_id = "a" * 40
+        listing = (
+            f"100644 blob {object_id} {MAX_DOCUMENT_BYTES + 1}"
+            "\tgovernance/aims/records/oversized.md\0"
+        ).encode()
+        with patch(
+            "scripts.build_aims_assessment_bundle._git", return_value=listing
+        ) as git:
+            with self.assertRaisesRegex(VerificationError, "blob exceeds"):
+                _git_aims_entries(self.root, "b" * 40)
+        git.assert_called_once()
 
     def test_rejects_controlled_file_hidden_from_captured_worktree(self) -> None:
         manifest = (self.root / "governance" / "aims" / "manifest.json").read_bytes()
