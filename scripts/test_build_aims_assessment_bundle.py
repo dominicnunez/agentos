@@ -17,9 +17,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.build_aims_assessment_bundle import (
+    MAX_SOURCE_FILE_BYTES,
     REQUIRED_APPROVED_DOCUMENTS,
     _git,
     _git_aims_entries,
+    _read_public_file,
     _verify_governed_commit_order,
     _verified_commit_at,
     _verify_aims_history,
@@ -65,6 +67,13 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
         (self.root / "governance" / "aims" / "manifest.json").write_text(
             json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n"
         )
+
+    def test_public_evidence_read_is_bounded_before_materialization(self) -> None:
+        source = self.root / "README.md"
+        source.write_bytes(b"x" * (MAX_SOURCE_FILE_BYTES + 1))
+        with patch.object(Path, "read_bytes", side_effect=AssertionError("unbounded read")):
+            with self.assertRaisesRegex(VerificationError, "assessment evidence exceeds"):
+                _read_public_file(self.root, "README.md")
 
     def approved_readiness_manifest(self, outcomes: dict[str, object] | None) -> dict[str, object]:
         documents = [
@@ -898,4 +907,3 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

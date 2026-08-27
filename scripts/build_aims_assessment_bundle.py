@@ -100,7 +100,13 @@ def _read_public_file(repo_root: Path, relative: str) -> bytes:
         raise VerificationError(f"assessment evidence is missing or escapes the repository: {relative}") from exc
     if not path.is_file():
         raise VerificationError(f"assessment evidence is not a regular file: {relative}")
-    data = path.read_bytes()
+    try:
+        if path.stat().st_size > MAX_SOURCE_FILE_BYTES:
+            raise VerificationError(f"assessment evidence exceeds {MAX_SOURCE_FILE_BYTES} bytes: {relative}")
+        with path.open("rb") as source:
+            data = source.read(MAX_SOURCE_FILE_BYTES + 1)
+    except OSError as exc:
+        raise VerificationError(f"assessment evidence cannot be read: {relative}") from exc
     if len(data) > MAX_SOURCE_FILE_BYTES:
         raise VerificationError(f"assessment evidence exceeds {MAX_SOURCE_FILE_BYTES} bytes: {relative}")
     return data
@@ -861,4 +867,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
