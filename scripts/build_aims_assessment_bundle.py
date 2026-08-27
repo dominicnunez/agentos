@@ -13,6 +13,7 @@ import re
 import subprocess
 import tarfile
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -43,6 +44,7 @@ MAX_SOURCE_FILE_BYTES = 512 * 1024
 MAX_SOURCE_TOTAL_BYTES = 4 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 5 * 1024 * 1024
 MAX_HISTORY_COMMITS = 512
+MAX_GIT_TREE_LISTING_BYTES = 128 * 1024
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 EVIDENCE_FILES = {
     "README.md": "product-purpose-and-use",
@@ -104,7 +106,12 @@ def _read_public_file(repo_root: Path, relative: str) -> bytes:
     return data
 
 
-def _git(repo_root: Path, arguments: list[str]) -> bytes:
+def _git(
+    repo_root: Path,
+    arguments: list[str],
+    *,
+    max_output_bytes: int | None = None,
+) -> bytes:
     environment = os.environ.copy()
     environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     for name in (
@@ -115,9 +122,14 @@ def _git(repo_root: Path, arguments: list[str]) -> bytes:
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     ):
         environment.pop(name, None)
+    command = ["git", "--no-optional-locks", "-C", str(repo_root), *arguments]
+    if max_output_bytes is not None:
+        if max_output_bytes < 1:
+            raise VerificationError("Git output limit must be positive")
+        return _git_bounded(command, environment, max_output_bytes)
     try:
         result = subprocess.run(
-            ["git", "--no-optional-locks", "-C", str(repo_root), *arguments],
+            command,
             check=False,
             env=environment,
             stdin=subprocess.DEVNULL,
@@ -131,6 +143,65 @@ def _git(repo_root: Path, arguments: list[str]) -> bytes:
         detail = result.stderr.decode("utf-8", errors="replace").strip()
         raise VerificationError(f"Git source verification failed: {detail}")
     return result.stdout
+
+
+def _git_bounded(
+    command: list[str], environment: dict[str, str], max_output_bytes: int
+) -> bytes:
+    try:
+        process = subprocess.Popen(
+            command,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    except OSError as exc:
+        raise VerificationError(f"cannot verify assessment source with Git: {exc}") from exc
+    if process.stdout is None:
+        process.kill()
+        process.wait()
+        raise VerificationError("cannot capture bounded Git output")
+
+    output = bytearray()
+    exceeded = False
+
+    def read_output() -> None:
+        nonlocal exceeded
+        while True:
+            chunk = process.stdout.read(8192)
+            if not chunk:
+                return
+            if len(output) + len(chunk) > max_output_bytes:
+                exceeded = True
+                process.kill()
+                return
+            output.extend(chunk)
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+    reader.join(30)
+    if reader.is_alive():
+        process.kill()
+        reader.join(5)
+        process.stdout.close()
+        process.wait()
+        raise VerificationError("cannot verify assessment source with Git: command timed out")
+    process.stdout.close()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        process.wait()
+        raise VerificationError(
+            "cannot verify assessment source with Git: command did not terminate"
+        ) from exc
+    if exceeded:
+        raise VerificationError(f"Git output exceeds {max_output_bytes} bytes")
+    if process.returncode != 0:
+        detail = bytes(output).decode("utf-8", errors="replace").strip()
+        raise VerificationError(f"Git source verification failed: {detail}")
+    return bytes(output)
 
 
 def _verify_git_sources(repo_root: Path, commit: str, source_entries: dict[str, bytes]) -> None:
@@ -195,6 +266,7 @@ def _git_aims_entries(repo_root: Path, commit: str) -> dict[str, bytes]:
             "governance/aims/manifest.json",
             "governance/aims/records",
         ],
+        max_output_bytes=MAX_GIT_TREE_LISTING_BYTES,
     )
     metadata_entries: list[tuple[str, str, int]] = []
     paths: set[str] = set()

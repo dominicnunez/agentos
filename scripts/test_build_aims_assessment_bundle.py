@@ -766,6 +766,10 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
                 _git_aims_entries(self.root, "b" * 40)
         git.assert_called_once()
 
+    def test_git_output_is_bounded_while_the_process_runs(self) -> None:
+        with self.assertRaisesRegex(VerificationError, "Git output exceeds"):
+            _git(self.root, ["--version"], max_output_bytes=1)
+
     def test_git_snapshot_rejects_excess_entries_before_materializing_them(self) -> None:
         listing = b"".join(
             (
