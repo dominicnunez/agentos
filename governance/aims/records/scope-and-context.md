@@ -1,6 +1,6 @@
 # AIMS scope and organizational context
 
-Status: **DRAFT — proposed scope, not approved**
+Status: **DRAFT**
 
 ## Proposed scope
 

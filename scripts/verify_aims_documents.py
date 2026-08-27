@@ -41,6 +41,7 @@ PATH_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")
 TIMESTAMP_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 UNRESOLVED_MARKERS = ("TODO", "TBD", "{{", "}}", "<INSERT", "[INSERT")
 FORBIDDEN_METADATA_CLAIMS = ("CERTIFIED", "CONFORMANT")
+DISPLAYED_STATUS_PATTERN = re.compile(r"^Status: \*\*(DRAFT|APPROVED|RETIRED)\*\*$", re.MULTILINE)
 
 
 class VerificationError(ValueError):
@@ -58,6 +59,25 @@ def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _reject_json_constant(value: str) -> None:
     raise VerificationError(f"non-standard JSON constant: {value}")
+
+
+def _parse_manifest_bytes(data: bytes, label: str) -> dict[str, Any]:
+    try:
+        manifest = json.loads(
+            data,
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (json.JSONDecodeError, VerificationError) as exc:
+        raise VerificationError(f"invalid {label} JSON: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise VerificationError(f"{label} must be a JSON object")
+    _require_exact_keys(manifest, MANIFEST_KEYS, label)
+    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1:
+        raise VerificationError(f"{label}.schema_version must equal 1")
+    if not isinstance(manifest["documents"], list) or len(manifest["documents"]) > MAX_DOCUMENTS:
+        raise VerificationError(f"{label}.documents must be an array of at most {MAX_DOCUMENTS} entries")
+    return manifest
 
 
 def _read_controlled_bytes(path: Path, limit: int, label: str) -> bytes:
@@ -145,26 +165,66 @@ def _validate_document_path(repo_root: Path, raw_path: Any, label: str) -> Path:
     return candidate
 
 
-def verify(repo_root: Path, manifest_path: Path | None = None) -> dict[str, Any]:
+def _version_tuple(value: Any, label: str) -> tuple[int, int]:
+    version = _require_string(value, label, 32)
+    if not VERSION_PATTERN.fullmatch(version) or version == "0.0":
+        raise VerificationError(f"{label} must be a nonzero major.minor version")
+    major, minor = version.split(".")
+    return int(major), int(minor)
+
+
+def verify_history(prior_manifest: dict[str, Any], manifest: dict[str, Any]) -> None:
+    prior_by_id: dict[str, dict[str, Any]] = {}
+    for index, document in enumerate(prior_manifest["documents"]):
+        label = f"prior manifest.documents[{index}]"
+        if not isinstance(document, dict):
+            raise VerificationError(f"{label} must be an object")
+        _require_exact_keys(document, DOCUMENT_KEYS, label)
+        document_id = _require_string(document["id"], f"{label}.id", 64)
+        if not ID_PATTERN.fullmatch(document_id) or document_id in prior_by_id:
+            raise VerificationError(f"{label}.id is invalid or duplicated")
+        if document["status"] not in STATUSES:
+            raise VerificationError(f"{label}.status is invalid")
+        _version_tuple(document["version"], f"{label}.version")
+        prior_by_id[document_id] = document
+
+    current_by_id = {document["id"]: document for document in manifest["documents"]}
+    for document_id, prior in prior_by_id.items():
+        current = current_by_id.get(document_id)
+        prior_status = prior["status"]
+        if current is None:
+            if prior_status in {"APPROVED", "RETIRED"}:
+                raise VerificationError(f"approved controlled history was removed: {document_id}")
+            continue
+        current_status = current["status"]
+        prior_version = _version_tuple(prior["version"], f"prior {document_id}.version")
+        current_version = _version_tuple(current["version"], f"current {document_id}.version")
+        if prior_status == "RETIRED" and current != prior:
+            raise VerificationError(f"retired controlled history was changed: {document_id}")
+        if prior_status == "APPROVED" and current_status == "DRAFT":
+            raise VerificationError(f"approved controlled document regressed to DRAFT: {document_id}")
+        if prior_status == "DRAFT" and current_status == "RETIRED":
+            raise VerificationError(f"draft controlled document cannot be retired directly: {document_id}")
+        versioned_change = current != prior and not (
+            prior_status == "DRAFT" and current_status == "DRAFT"
+        )
+        if versioned_change and current_version <= prior_version:
+            raise VerificationError(f"changed controlled document did not increment its version: {document_id}")
+        if current == prior and current_version != prior_version:
+            raise VerificationError(f"unchanged controlled document has inconsistent version history: {document_id}")
+
+
+def verify(
+    repo_root: Path,
+    manifest_path: Path | None = None,
+    prior_manifest_path: Path | None = None,
+    prior_manifest_bytes: bytes | None = None,
+) -> dict[str, Any]:
     repo_root = repo_root.resolve(strict=True)
     manifest_path = manifest_path or repo_root / "governance" / "aims" / "manifest.json"
     manifest_bytes = _read_controlled_bytes(manifest_path, MAX_MANIFEST_BYTES, "AIMS manifest")
-    try:
-        manifest = json.loads(
-            manifest_bytes,
-            object_pairs_hook=_strict_object,
-            parse_constant=_reject_json_constant,
-        )
-    except (json.JSONDecodeError, VerificationError) as exc:
-        raise VerificationError(f"invalid AIMS manifest JSON: {exc}") from exc
-    if not isinstance(manifest, dict):
-        raise VerificationError("AIMS manifest must be a JSON object")
-    _require_exact_keys(manifest, MANIFEST_KEYS, "manifest")
-    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1:
-        raise VerificationError("manifest.schema_version must equal 1")
+    manifest = _parse_manifest_bytes(manifest_bytes, "AIMS manifest")
     documents = manifest["documents"]
-    if not isinstance(documents, list) or len(documents) > MAX_DOCUMENTS:
-        raise VerificationError(f"manifest.documents must be an array of at most {MAX_DOCUMENTS} entries")
 
     ids: set[str] = set()
     paths: set[str] = set()
@@ -192,9 +252,7 @@ def verify(repo_root: Path, manifest_path: Path | None = None) -> dict[str, Any]
             raise VerificationError(f"duplicate controlled document path: {path_text}")
         paths.add(path_text)
 
-        version = _require_string(document["version"], f"{label}.version", 32)
-        if not VERSION_PATTERN.fullmatch(version) or version == "0.0":
-            raise VerificationError(f"{label}.version must be a nonzero major.minor version")
+        _version_tuple(document["version"], f"{label}.version")
         status = document["status"]
         if status not in STATUSES:
             raise VerificationError(f"{label}.status must be one of {sorted(STATUSES)}")
@@ -249,6 +307,9 @@ def verify(repo_root: Path, manifest_path: Path | None = None) -> dict[str, Any]
         actual_sha = hashlib.sha256(data).hexdigest()
         if actual_sha != expected_sha:
             raise VerificationError(f"{label}.sha256 does not match {path_text}")
+        displayed_statuses = DISPLAYED_STATUS_PATTERN.findall(data.decode("utf-8"))
+        if displayed_statuses != [status]:
+            raise VerificationError(f"{label} displayed lifecycle status does not match the manifest")
         if status in {"APPROVED", "RETIRED"}:
             text = data.decode("utf-8").upper()
             if any(marker in text for marker in UNRESOLVED_MARKERS):
@@ -274,6 +335,11 @@ def verify(repo_root: Path, manifest_path: Path | None = None) -> dict[str, Any]
                 raise VerificationError(f"manifest.documents[{index}].supersedes references an unknown document")
             if superseded_id not in retired_ids:
                 raise VerificationError(f"manifest.documents[{index}].supersedes must reference a RETIRED document")
+            retired_document = next(entry for entry in documents if entry["id"] == superseded_id)
+            if retired_document["superseded_by"] != document["id"]:
+                raise VerificationError(
+                    f"manifest.documents[{index}].supersedes is not owned by this successor"
+                )
 
     records_root = repo_root / "governance" / "aims" / "records"
     if records_root.exists():
@@ -284,6 +350,16 @@ def verify(repo_root: Path, manifest_path: Path | None = None) -> dict[str, Any]
                 relative = candidate.relative_to(repo_root).as_posix()
                 if relative not in paths:
                     raise VerificationError(f"controlled records directory contains an unlisted file: {relative}")
+    if prior_manifest_path is not None and prior_manifest_bytes is not None:
+        raise VerificationError("provide at most one prior AIMS manifest source")
+    if prior_manifest_path is not None:
+        prior_manifest_bytes = _read_controlled_bytes(
+            prior_manifest_path, MAX_MANIFEST_BYTES, "prior AIMS manifest"
+        )
+    if prior_manifest_bytes is not None:
+        if len(prior_manifest_bytes) > MAX_MANIFEST_BYTES:
+            raise VerificationError(f"prior AIMS manifest exceeds {MAX_MANIFEST_BYTES} bytes")
+        verify_history(_parse_manifest_bytes(prior_manifest_bytes, "prior AIMS manifest"), manifest)
     return manifest
 
 
@@ -291,9 +367,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--prior-manifest", type=Path)
     args = parser.parse_args()
     try:
-        verify(args.root, args.manifest)
+        verify(args.root, args.manifest, args.prior_manifest)
     except VerificationError as exc:
         print(f"AIMS document verification failed: {exc}", file=sys.stderr)
         return 1

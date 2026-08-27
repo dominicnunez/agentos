@@ -1,6 +1,6 @@
 # Artificial intelligence policy
 
-Status: **DRAFT — no approval authority**
+Status: **DRAFT**
 
 ## Purpose
 

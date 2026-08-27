@@ -1,6 +1,6 @@
 # AIMS management review
 
-Status: **DRAFT — no management review has occurred**
+Status: **DRAFT**
 
 The accountable executive conducts management review at least annually, before
 seeking certification assessment, and after a material incident or change when

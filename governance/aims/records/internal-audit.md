@@ -1,6 +1,6 @@
 # AIMS internal audit program
 
-Status: **DRAFT — no audit has been performed by this document**
+Status: **DRAFT**
 
 ## Objective and scope
 

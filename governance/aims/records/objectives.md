@@ -1,6 +1,6 @@
 # AIMS objectives and measures
 
-Status: **DRAFT — no approval authority**
+Status: **DRAFT**
 
 These proposed objectives apply to the Agent OS project AIMS. Baselines begin
 only after approval. A metric is evidence, not proof by itself that a control is

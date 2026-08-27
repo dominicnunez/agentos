@@ -1,6 +1,6 @@
 # AIMS roles and accountability
 
-Status: **DRAFT — role assignments are not approved**
+Status: **DRAFT**
 
 One person may initially hold several roles, but responsibilities remain
 distinct so a role holder can identify conflicts and obtain independent review

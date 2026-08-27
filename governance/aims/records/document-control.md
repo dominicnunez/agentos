@@ -1,6 +1,6 @@
 # Documented information control and retention
 
-Status: **DRAFT — retention and approval rules are not approved**
+Status: **DRAFT**
 
 ## Creation and identification
 

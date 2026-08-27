@@ -1,6 +1,6 @@
 # AI incident, nonconformity, and corrective action
 
-Status: **DRAFT — process not approved or operated**
+Status: **DRAFT**
 
 ## Classification and intake
 

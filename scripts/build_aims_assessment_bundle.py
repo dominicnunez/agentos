@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import tarfile
+from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -87,6 +88,7 @@ def _read_public_file(repo_root: Path, relative: str) -> bytes:
 
 def _git(repo_root: Path, arguments: list[str]) -> bytes:
     environment = os.environ.copy()
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     for name in (
         "GIT_DIR",
         "GIT_WORK_TREE",
@@ -123,20 +125,46 @@ def _verify_git_sources(repo_root: Path, commit: str, source_entries: dict[str, 
             raise VerificationError(f"assessment evidence does not match declared commit: {relative}")
 
 
-def readiness_report(manifest: dict[str, Any], repository: str, commit: str) -> dict[str, Any]:
+def _effective_document(document_id: str, documents_by_id: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    seen: set[str] = set()
+    current = documents_by_id.get(document_id)
+    while current is not None and current["status"] == "RETIRED":
+        if current["id"] in seen:
+            raise VerificationError(f"controlled successor cycle: {document_id}")
+        seen.add(current["id"])
+        current = documents_by_id.get(current["superseded_by"])
+    return current
+
+
+def readiness_report(
+    manifest: dict[str, Any], repository: str, commit: str, assessment_date: date
+) -> dict[str, Any]:
     documents = manifest["documents"]
-    status_by_id = {entry["id"]: entry["status"] for entry in documents}
-    missing = sorted(REQUIRED_APPROVED_DOCUMENTS - set(status_by_id))
+    documents_by_id = {entry["id"]: entry for entry in documents}
+    missing = sorted(REQUIRED_APPROVED_DOCUMENTS - set(documents_by_id))
+    effective = {
+        document_id: _effective_document(document_id, documents_by_id)
+        for document_id in REQUIRED_APPROVED_DOCUMENTS & set(documents_by_id)
+    }
     not_approved = sorted(
         document_id
-        for document_id in REQUIRED_APPROVED_DOCUMENTS & set(status_by_id)
-        if status_by_id[document_id] != "APPROVED"
+        for document_id, document in effective.items()
+        if document is None or document["status"] != "APPROVED"
+    )
+    overdue = sorted(
+        document_id
+        for document_id, document in effective.items()
+        if document is not None
+        and document["status"] == "APPROVED"
+        and date.fromisoformat(document["review_due"]) < assessment_date
     )
     blockers: list[str] = []
     if missing:
         blockers.append("REQUIRED_GOVERNANCE_RECORDS_MISSING")
     if not_approved:
         blockers.append("REQUIRED_GOVERNANCE_RECORDS_NOT_APPROVED")
+    if overdue:
+        blockers.append("CONTROLLED_REVIEWS_OVERDUE")
     if any(entry["status"] == "DRAFT" for entry in documents):
         blockers.append("CONTROLLED_DRAFTS_REMAIN")
     if "aims.audit-result" in missing:
@@ -152,6 +180,7 @@ def readiness_report(manifest: dict[str, Any], repository: str, commit: str) -> 
         "schema_version": 1,
         "project": "Agent OS",
         "source": {"repository": repository, "commit": commit},
+        "assessment_date": assessment_date.isoformat(),
         "claim": "READINESS_WORK_IN_PROGRESS",
         "conformity_determined": False,
         "certified": False,
@@ -163,6 +192,7 @@ def readiness_report(manifest: dict[str, Any], repository: str, commit: str) -> 
         "required_approved_document_ids": sorted(REQUIRED_APPROVED_DOCUMENTS),
         "missing_required_document_ids": missing,
         "not_approved_required_document_ids": not_approved,
+        "overdue_required_document_ids": overdue,
         "blockers": blockers,
         "limitations": [
             "This automated report validates bounded repository evidence and controlled-document state only.",
@@ -174,21 +204,24 @@ def readiness_report(manifest: dict[str, Any], repository: str, commit: str) -> 
 
 def _tar_bytes(entries: dict[str, bytes]) -> bytes:
     tar_buffer = io.BytesIO()
-    with tarfile.open(fileobj=tar_buffer, mode="w", format=tarfile.USTAR_FORMAT) as archive:
-        for name in sorted(entries):
-            path = PurePosixPath(name)
-            if path.is_absolute() or ".." in path.parts or name != path.as_posix():
-                raise VerificationError(f"unsafe assessment archive path: {name}")
-            data = entries[name]
-            info = tarfile.TarInfo(name)
-            info.size = len(data)
-            info.mode = 0o644
-            info.uid = 0
-            info.gid = 0
-            info.uname = ""
-            info.gname = ""
-            info.mtime = 0
-            archive.addfile(info, io.BytesIO(data))
+    try:
+        with tarfile.open(fileobj=tar_buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
+            for name in sorted(entries):
+                path = PurePosixPath(name)
+                if path.is_absolute() or ".." in path.parts or name != path.as_posix():
+                    raise VerificationError(f"unsafe assessment archive path: {name}")
+                data = entries[name]
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                info.mode = 0o644
+                info.uid = 0
+                info.gid = 0
+                info.uname = ""
+                info.gname = ""
+                info.mtime = 0
+                archive.addfile(info, io.BytesIO(data))
+    except (tarfile.TarError, ValueError) as exc:
+        raise VerificationError(f"cannot encode assessment archive: {exc}") from exc
     gzip_buffer = io.BytesIO()
     with gzip.GzipFile(filename="", mode="wb", fileobj=gzip_buffer, compresslevel=9, mtime=0) as compressed:
         compressed.write(tar_buffer.getvalue())
@@ -199,6 +232,7 @@ def build(
     repo_root: Path,
     repository: str,
     commit: str,
+    assessment_date: date,
     output: Path,
     *,
     verify_source: bool = True,
@@ -239,6 +273,11 @@ def build(
 
     if verify_source:
         _verify_git_sources(repo_root, commit, source_entries)
+        prior_name = "governance/aims/manifest.json"
+        prior_listing = _git(repo_root, ["ls-tree", "--name-only", f"{commit}^", "--", prior_name])
+        if prior_listing.strip():
+            prior_manifest = _git(repo_root, ["show", f"{commit}^:{prior_name}"])
+            manifest = verify(repo_root, prior_manifest_bytes=prior_manifest)
 
     entries["assessment/evidence-index.json"] = _canonical_json(
         {
@@ -247,7 +286,9 @@ def build(
             "entries": evidence_index,
         }
     )
-    entries["assessment/readiness.json"] = _canonical_json(readiness_report(manifest, repository, commit))
+    entries["assessment/readiness.json"] = _canonical_json(
+        readiness_report(manifest, repository, commit, assessment_date)
+    )
     entries["ASSESSMENT_README.txt"] = (
         "Agent OS public AIMS assessment-evidence bundle\n\n"
         "This deterministic bundle contains bounded public repository evidence for the exact source commit.\n"
@@ -260,8 +301,28 @@ def build(
     archive = _tar_bytes(entries)
     if len(archive) > MAX_ARCHIVE_BYTES:
         raise VerificationError(f"assessment archive exceeds {MAX_ARCHIVE_BYTES} bytes")
+    output = output if output.is_absolute() else repo_root / output
+    output = output.resolve(strict=False)
+    allowed_root = (repo_root / "work").resolve(strict=False)
+    try:
+        output.relative_to(allowed_root)
+    except ValueError as exc:
+        raise VerificationError("assessment output must be below the repository work directory") from exc
+    if output.suffixes[-2:] != [".tar", ".gz"]:
+        raise VerificationError("assessment output must use a .tar.gz filename")
+    if output.exists() or output.is_symlink():
+        raise VerificationError("assessment output already exists and will not be overwritten")
+    current = repo_root
+    for part in output.relative_to(repo_root).parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            raise VerificationError("assessment output path traverses a symbolic link")
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(archive)
+    try:
+        with output.open("xb") as destination:
+            destination.write(archive)
+    except FileExistsError as exc:
+        raise VerificationError("assessment output already exists and will not be overwritten") from exc
     return hashlib.sha256(archive).hexdigest(), len(archive)
 
 
@@ -270,10 +331,13 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--repository", default="https://github.com/dominicnunez/agentos")
     parser.add_argument("--commit", required=True)
+    parser.add_argument("--assessment-date", type=date.fromisoformat, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
-        digest, size = build(args.root, args.repository, args.commit, args.output)
+        digest, size = build(
+            args.root, args.repository, args.commit, args.assessment_date, args.output
+        )
     except VerificationError as exc:
         print(f"AIMS assessment bundle failed: {exc}")
         return 1

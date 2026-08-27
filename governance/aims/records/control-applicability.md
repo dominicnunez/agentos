@@ -1,6 +1,6 @@
 # Control applicability register
 
-Status: **DRAFT — not a Statement of Applicability**
+Status: **DRAFT**
 
 This project-specific register organizes existing and proposed controls without
 reproducing the copyrighted ISO/IEC 42001 control catalogue. It is not a final

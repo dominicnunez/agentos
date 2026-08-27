@@ -14,7 +14,7 @@
       "review_due": null,
       "supersedes": [],
       "superseded_by": null,
-      "sha256": "98c3162f5dea7f0e37e818ee145e216c703f1da917dfb12e0f9ba1ebb2112ee1"
+      "sha256": "5f29edb4a1878bc4a86a8a5702519fb974d11be9169c96faa9184949593c0df9"
     },
     {
       "id": "aims.competence-communication",
@@ -29,7 +29,7 @@
       "review_due": null,
       "supersedes": [],
       "superseded_by": null,
-      "sha256": "a1c28866f2dbef0e1667ecba2e5de33692295267bcf465629e817774b9fc7352"
+      "sha256": "8f91f4b71cbec6eb8d824a08e96c0b23360dc571ca8900adf80f71678bd4926c"
     },
     {
       "id": "aims.control-applicability",
@@ -44,7 +44,7 @@
       "review_due": null,
       "supersedes": [],
       "superseded_by": null,
-      "sha256": "d0bce7f4cd31839406e1c09ef52e09090bc2bff1d7a222a1fae94037d1484176"
+      "sha256": "5d4db7b352cc6ddcef89b770598fabc2a5a2c6516f012411acce398d869c5438"
     },
     {
       "id": "aims.document-control",
@@ -59,7 +59,7 @@
       "review_due": null,
       "supersedes": [],
       "superseded_by": null,
-      "sha256": "a94524df919eeedcd56b152d011279c04d56a843da8df963e90aeecdddf68934"
+      "sha256": "e0753decebda6431717e36c250bac7fa918e3ce6f6eeea0e9714b304bdbc0a10"
     },
     {
       "id": "aims.incident-corrective-action",
@@ -74,7 +74,7 @@
       "review_due": null,
       "supersedes": [],
       "superseded_by": null,
-      "sha256": "f186a215b902157e20daf76071825198d0f0ecb79d64284e09e1bf131433a12d"
+      "sha256": "34715e7956eea98d98765bff7c41e5416a7939c880cfdc611dbae8fb2e1dbdf5"
     },
     {
       "id": "aims.internal-audit",
@@ -89,7 +89,7 @@
       "review_due": null,
       "supersedes": [],
       "superseded_by": null,
-      "sha256": "345d405cb549f10913a3dcacb644b94a840c50f19c72dd237039fc2e28843ed7"
+      "sha256": "688d37b6c3ba481c5a2743849d830525b35696b0c60964684029b1f0a0691421"
     },
     {
       "id": "aims.management-review",
@@ -104,7 +104,7 @@
       "review_due": null,
       "supersedes": [],
       "superseded_by": null,
-      "sha256": "ce78711f17f25029044818a98c2c9b3d0c7105d66a2ef1381ff5f119c25790cc"
+      "sha256": "cba6d8d4d4e120e7e5b05dd3ea950727491a17f2b94e5a59ecf196686e5b8c25"
     },
     {
       "id": "aims.objectives",
@@ -119,7 +119,7 @@
       "review_due": null,
       "supersedes": [],
       "superseded_by": null,
-      "sha256": "f8ee1ef53d5ee29ae95c690d0eacde25f53da7fd596acde8c2d90d3aaedf48ff"
+      "sha256": "6bc094aff4d53df42a697e20f641ad3e59e053cf0424daa9c1ab2ecbbb0e6b89"
     },
     {
       "id": "aims.risk-impact",
@@ -134,7 +134,7 @@
       "review_due": null,
       "supersedes": [],
       "superseded_by": null,
-      "sha256": "dceeeb1c3f675de6f939f868528ded127f522954e7ff1a17f6fed577556f5dba"
+      "sha256": "f23d9f1c57f12225e25e2d2070846cf867aeaa09e3825b2e4b93a6e35bf763a9"
     },
     {
       "id": "aims.roles-accountability",
@@ -149,7 +149,7 @@
       "review_due": null,
       "supersedes": [],
       "superseded_by": null,
-      "sha256": "a615fecac6e367dddf12e076e6d92dc7c5c0cd351dc4c37c29d66a5af30fe705"
+      "sha256": "31a120d3454f2bfba25469e69eefddfd3ff30ee8e49619a1b524fa8f89351803"
     },
     {
       "id": "aims.scope-context",
@@ -164,7 +164,7 @@
       "review_due": null,
       "supersedes": [],
       "superseded_by": null,
-      "sha256": "cec4488ec452307fa6bad3bd614db6b3f771155c5d1b690419bcd08a632e3038"
+      "sha256": "da53ce79ce2ec98c46516d0b4e9726607fcfd55b3a39f4e805c0683a13433564"
     },
     {
       "id": "aims.supplier-management",
@@ -179,7 +179,7 @@
       "review_due": null,
       "supersedes": [],
       "superseded_by": null,
-      "sha256": "f4752b7dbece40d267f7182699f2bcd30ae863909539b05dead542600862c283"
+      "sha256": "5ebfbaf353b7ddd441a348e42758399fbcd6d62c768bd077a98a582f5e8a8564"
     }
   ]
 }

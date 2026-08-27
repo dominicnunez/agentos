@@ -54,15 +54,20 @@ judgment.
 ## Public assessment bundle
 
 `scripts/build_aims_assessment_bundle.py` creates a deterministic, bounded
-source-commit-specific archive containing the controlled public records, a
-curated technical evidence set, exact checksums, and a machine-readable
-readiness report. The builder requires the declared commit to equal checked-out
-`HEAD` and compares every bundled byte with the corresponding Git object. CI
-builds it twice and requires identical bytes. The report
+archive for one exact source commit and assessment date containing the
+controlled public records, a curated technical evidence set, exact checksums,
+and a machine-readable readiness report. The builder requires the declared
+commit to equal checked-out `HEAD`, disables Git replacement objects, compares
+every bundled byte with the corresponding Git object, and validates governed
+history against the first parent when an earlier manifest exists. CI builds it
+twice for the same assessment date and requires identical bytes. The report
 fails the assessment-readiness state while required approved audit, management
-review, applicability, and accountable decision records are absent.
+review, applicability, and accountable decision records are absent or their
+review date is overdue.
 
 The bundle deliberately excludes confidential operating evidence and cannot
 authenticate a governance decision merely because approval text appears in a
 manifest. Repository protection, review, the exact approval reference, and the
 approved confidential evidence system remain part of that trust boundary.
+The builder writes only a new `.tar.gz` below `work/` and refuses to overwrite
+an existing file or repository evidence.

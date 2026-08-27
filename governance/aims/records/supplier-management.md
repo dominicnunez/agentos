@@ -1,6 +1,6 @@
 # AI and technology supplier management
 
-Status: **DRAFT — no supplier is approved by this record**
+Status: **DRAFT**
 
 Suppliers include model and embedding providers, cloud and hosting services,
 source and CI platforms, build and provenance services, Go and JavaScript

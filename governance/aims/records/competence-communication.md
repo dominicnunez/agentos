@@ -1,6 +1,6 @@
 # Competence, awareness, resources, and communication
 
-Status: **DRAFT — no competence or resource decision is approved**
+Status: **DRAFT**
 
 ## Competence
 

@@ -1,6 +1,6 @@
 # AI risk and impact management
 
-Status: **DRAFT — no approval or residual-risk acceptance**
+Status: **DRAFT**
 
 ## Method
 
