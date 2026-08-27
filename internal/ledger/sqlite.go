@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 60350)
-Total output lines: 4587
-
 package ledger
 
 import (
@@ -2220,7 +2217,33 @@ func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedPro
 	for _, ref := range knowledge.DerivedKnowledgeRefs {
 		version, err := strconv.Atoi(ref.Version)
 		if err != nil || version < 1 || strconv.Itoa(version) != ref.Version || ref.ID == item.draft.RecordID {
-			return fmt.Errorf("knowledge derived reference is invali…350 tokens truncated…t reference the current active revision")
+			return fmt.Errorf("knowledge derived reference is invalid")
+		}
+		body, found, err := recordBodyAtVersion(ctx, tx, "knowledge", ref.ID, version)
+		if err != nil {
+			return fmt.Errorf("read derived knowledge reference: %w", err)
+		}
+		var record events.ProjectionRecord
+		var derived core.KnowledgeRecord
+		if !found || decodeExactJSONBytes(body, &record) != nil || decodeExactJSONBytes(record.Value, &derived) != nil ||
+			record.ProjectionKind != "knowledge" || record.RecordID != ref.ID || record.Version != version ||
+			derived.OrganizationID != knowledge.OrganizationID || derived.Status != core.KnowledgeActive {
+			return fmt.Errorf("derived knowledge must reference an exact active revision in the same organization")
+		}
+		if !core.KnowledgeDerivedScopeAllowed(derived, knowledge) {
+			return fmt.Errorf("derived knowledge scope exceeds its source scope")
+		}
+		derivedAdmittedAt, err := projectionAdmissionTime(ctx, tx, "knowledge", ref.ID, version)
+		if err != nil {
+			return fmt.Errorf("read derived knowledge admission time: %w", err)
+		}
+		if derivedAdmittedAt.After(latestSourceAt) {
+			latestSourceAt = derivedAdmittedAt
+		}
+		if requiresCurrentLineage {
+			currentRecord, current, currentFound, err := latestProjectionRevision[core.KnowledgeRecord](ctx, tx, "knowledge", ref.ID)
+			if err != nil || !currentFound || currentRecord.Version != version || current.Status != core.KnowledgeActive {
+				return fmt.Errorf("derived knowledge must reference the current active revision")
 			}
 		}
 	}
