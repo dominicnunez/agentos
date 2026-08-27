@@ -383,6 +383,10 @@ def verify(
 
         path_text = document["path"]
         path = _validate_document_path(repo_root, path_text, label)
+        if manifest["schema_version"] == 1 and PurePosixPath(path_text).suffix != ".md":
+            raise VerificationError(
+                f"{label}.path requires manifest schema 2 for structured JSON: {path_text}"
+            )
         if path_text in paths:
             raise VerificationError(f"duplicate controlled document path: {path_text}")
         paths.add(path_text)

@@ -200,6 +200,19 @@ class VerifyAIMSDocumentsTest(unittest.TestCase):
     def test_accepts_exact_draft(self) -> None:
         verify(self.root, self.write_manifest(self.manifest()))
 
+    def test_rejects_structured_json_before_schema_two(self) -> None:
+        structured = self.records / "scope.json"
+        structured.write_text(
+            '{"schema_version":1,"lifecycle_status":"DRAFT","outcome":{}}\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        manifest = self.manifest(
+            path="governance/aims/records/scope.json",
+            sha256=hashlib.sha256(structured.read_bytes()).hexdigest(),
+        )
+        self.assert_rejected(manifest, "requires manifest schema 2")
+
     def test_accepts_closed_machine_readable_outcome_schema(self) -> None:
         manifest = {
             "schema_version": 2,
