@@ -224,6 +224,27 @@ class VerifyAIMSDocumentsTest(unittest.TestCase):
         with self.assertRaisesRegex(VerificationError, "lacks new approval evidence"):
             verify(self.root, path, prior_manifest_bytes=(json.dumps(prior) + "\n").encode())
 
+    def test_rejects_approved_document_demotion_to_draft(self) -> None:
+        self.write_document("APPROVED", "Approved bytes.\n")
+        prior = self.manifest(
+            status="APPROVED",
+            version="1.0",
+            approval_ref="decision-approved",
+            approved_by="project-owner",
+            approved_at="2026-08-27T12:00:00Z",
+            review_due="2027-08-27",
+            sha256=hashlib.sha256(self.document.read_bytes()).hexdigest(),
+        )
+        self.write_document("DRAFT", "Replacement draft bytes.\n")
+        current = self.manifest(
+            status="DRAFT",
+            version="1.1",
+            sha256=hashlib.sha256(self.document.read_bytes()).hexdigest(),
+        )
+        path = self.write_manifest(current)
+        with self.assertRaisesRegex(VerificationError, "cannot return to draft"):
+            verify(self.root, path, prior_manifest_bytes=(json.dumps(prior) + "\n").encode())
+
     def test_rejects_malformed_prior_approval_timestamp_as_verification_error(self) -> None:
         self.write_document("APPROVED", "Changed bytes.\n")
         current = self.manifest(

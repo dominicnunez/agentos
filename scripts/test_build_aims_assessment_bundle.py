@@ -225,6 +225,60 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
             self.assertEqual(_git(self.root, ["rev-parse", "HEAD"]), b"ok")
         self.assertEqual(run.call_args.kwargs["env"]["GIT_NO_REPLACE_OBJECTS"], "1")
 
+    def test_readiness_uses_captured_git_verified_snapshot(self) -> None:
+        output = self.root / "work" / "snapshot.tar.gz"
+
+        def mutate_worktree(*_args: object) -> None:
+            document = self.root / "governance" / "aims" / "records" / "policy.md"
+            document.parent.mkdir(parents=True)
+            document.write_text(
+                "# Policy\n\nStatus: **DRAFT**\n\nChanged after capture.\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            manifest = {
+                "schema_version": 1,
+                "documents": [
+                    {
+                        "id": "aims.policy",
+                        "path": "governance/aims/records/policy.md",
+                        "version": "0.1",
+                        "status": "DRAFT",
+                        "owner": "aims-manager",
+                        "classification": "PUBLIC",
+                        "approval_ref": None,
+                        "approved_by": None,
+                        "approved_at": None,
+                        "review_due": None,
+                        "supersedes": [],
+                        "superseded_by": None,
+                        "sha256": hashlib.sha256(document.read_bytes()).hexdigest(),
+                    }
+                ],
+            }
+            (self.root / "governance" / "aims" / "manifest.json").write_text(
+                json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n"
+            )
+
+        with (
+            patch(
+                "scripts.build_aims_assessment_bundle._verify_git_sources",
+                side_effect=mutate_worktree,
+            ),
+            patch("scripts.build_aims_assessment_bundle._git", return_value=b""),
+        ):
+            build(self.root, "a" * 40, datetime(2026, 8, 27, 12), output)
+
+        with tarfile.open(output, "r:gz") as archive:
+            bundled_manifest = json.load(
+                archive.extractfile("repository/governance/aims/manifest.json")  # type: ignore[arg-type]
+            )
+            readiness = json.load(
+                archive.extractfile("assessment/readiness.json")  # type: ignore[arg-type]
+            )
+        self.assertEqual(bundled_manifest["documents"], [])
+        self.assertEqual(readiness["controlled_document_counts"]["DRAFT"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -204,6 +204,8 @@ def verify_history(prior_manifest: dict[str, Any], manifest: dict[str, Any]) -> 
         current_version = _version_tuple(current["version"], f"current {document_id}.version")
         if prior_status == "RETIRED" and current != prior:
             raise VerificationError(f"retired controlled history was changed: {document_id}")
+        if prior_status == "APPROVED" and current_status == "DRAFT":
+            raise VerificationError(f"approved controlled document cannot return to draft: {document_id}")
         if prior_status == "DRAFT" and current_status == "RETIRED":
             raise VerificationError(f"draft controlled document cannot be retired directly: {document_id}")
         if current != prior and current_version <= prior_version:

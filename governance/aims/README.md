@@ -47,6 +47,10 @@ not copy confidential evidence into the repository.
 5. Preserve supersession links so an assessor can follow document history.
 6. Run `python3 scripts/verify_aims_documents.py` and its unit tests.
 
+An approved record cannot return to draft under the same stable identifier.
+Prepare its replacement as a new controlled record, then retire the approved
+record only through an approved, reciprocal supersession decision.
+
 Git history provides reviewable change history, but it does not replace the
 manifest lifecycle, operating evidence, effectiveness review, or an assessor's
 judgment.

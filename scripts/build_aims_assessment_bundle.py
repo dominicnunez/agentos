@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import tarfile
+import tempfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -123,6 +124,29 @@ def _verify_git_sources(repo_root: Path, commit: str, source_entries: dict[str, 
         committed = _git(repo_root, ["show", f"{commit}:{relative}"])
         if committed != data:
             raise VerificationError(f"assessment evidence does not match declared commit: {relative}")
+
+
+def _verify_captured_aims_snapshot(
+    source_entries: dict[str, bytes], prior_manifest: bytes | None
+) -> dict[str, Any]:
+    controlled_prefix = "governance/aims/records/"
+    controlled_paths = {
+        path: data
+        for path, data in source_entries.items()
+        if path == "governance/aims/manifest.json" or path.startswith(controlled_prefix)
+    }
+    if "governance/aims/manifest.json" not in controlled_paths:
+        raise VerificationError("captured assessment source lacks the AIMS manifest")
+    with tempfile.TemporaryDirectory(prefix="agentos-aims-snapshot-") as directory:
+        snapshot_root = Path(directory)
+        for relative, data in controlled_paths.items():
+            path = PurePosixPath(relative)
+            if path.is_absolute() or ".." in path.parts or relative != path.as_posix():
+                raise VerificationError(f"unsafe captured AIMS path: {relative}")
+            destination = snapshot_root.joinpath(*path.parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+        return verify(snapshot_root, prior_manifest_bytes=prior_manifest)
 
 
 def _effective_document(document_id: str, documents_by_id: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
@@ -287,9 +311,10 @@ def build(
         _verify_git_sources(repo_root, commit, source_entries)
         prior_name = "governance/aims/manifest.json"
         prior_listing = _git(repo_root, ["ls-tree", "--name-only", f"{commit}^", "--", prior_name])
+        prior_manifest = None
         if prior_listing.strip():
             prior_manifest = _git(repo_root, ["show", f"{commit}^:{prior_name}"])
-            manifest = verify(repo_root, prior_manifest_bytes=prior_manifest)
+        manifest = _verify_captured_aims_snapshot(source_entries, prior_manifest)
 
     entries["assessment/evidence-index.json"] = _canonical_json(
         {
