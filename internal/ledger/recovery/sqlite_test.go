@@ -24,6 +24,58 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestVerifyMigratesPreBindingAuthoritySnapshotWithoutChangingSource(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "pre-binding-authority.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", Action: "read", Resource: "record-1", Scope: "org-1", OriginTaskID: "task-1"}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preBindingVersion := ledger.AuthorityAdmissionBindingStorageVersion - 1
+	if _, err := db.ExecContext(ctx, `UPDATE records SET admission_event_id='' WHERE kind='capability_lease'; UPDATE agentos_storage SET storage_version=? WHERE singleton=1; PRAGMA user_version=`+fmt.Sprint(preBindingVersion), preBindingVersion); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := Verify(ctx, path)
+	if err != nil {
+		t.Fatalf("verify pre-binding authority snapshot: %v", err)
+	}
+	if verified.StorageVersion != preBindingVersion || verified.EventSchemaVersion != events.SchemaVersion {
+		t.Fatalf("verification changed reported source contract: %+v", verified)
+	}
+	db, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var storageVersion int
+	var admissionEventID string
+	if err := db.QueryRowContext(ctx, `SELECT storage_version FROM agentos_storage WHERE singleton=1`).Scan(&storageVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT admission_event_id FROM records WHERE kind='capability_lease' AND record_id='lease-1' AND version=1`).Scan(&admissionEventID); err != nil {
+		t.Fatal(err)
+	}
+	if storageVersion != preBindingVersion || admissionEventID != "" {
+		t.Fatalf("verification mutated source: storage=%d admission=%q", storageVersion, admissionEventID)
+	}
+}
+
 func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	ctx := context.Background()
 	directory := t.TempDir()

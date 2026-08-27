@@ -26,6 +26,9 @@ const (
 	OldestSupportedStorageVersion = 1
 	// CurrentStorageVersion is the only layout accepted after runtime startup.
 	CurrentStorageVersion = 7
+	// AuthorityAdmissionBindingStorageVersion is the first storage contract in
+	// which every capability and freeze record names its exact admitting event.
+	AuthorityAdmissionBindingStorageVersion = 7
 	// LegacyEventSchemaVersion identifies the immediately preceding Event
 	// Contract. Its payload semantics already included Intent mode; migration
 	// validates review evidence and reseals schema-bound projection admissions.

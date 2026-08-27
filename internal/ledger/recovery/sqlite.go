@@ -118,7 +118,7 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	}
 	result.StorageVersion = contract.StorageVersion
 	result.EventSchemaVersion = contract.EventSchemaVersion
-	if contract.EventSchemaVersion == events.SchemaVersion {
+	if contract.EventSchemaVersion == events.SchemaVersion && contract.StorageVersion >= ledgerstore.AuthorityAdmissionBindingStorageVersion {
 		if err := verifyProjectionAdmissions(ctx, db); err != nil {
 			return Result{}, err
 		}
