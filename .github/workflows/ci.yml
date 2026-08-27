@@ -10,10 +10,12 @@ permissions:
 
 jobs:
   verify:
+    if: github.event_name != 'push' || github.event.deleted != true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -53,6 +55,44 @@ jobs:
 
       - name: Module consistency
         run: go mod tidy -diff
+
+      - name: Controlled AIMS documented information
+        run: |
+          test -x .githooks/pre-commit
+          python3 scripts/verify_aims_documents.py
+          python3 -m unittest scripts/test_verify_aims_documents.py
+          python3 -m unittest scripts/test_build_aims_assessment_bundle.py
+          mkdir -p work/aims-first work/aims-second
+          assessment_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          baseline_before_commit() {
+            parent_line=$(git rev-list --parents -n 1 "$1")
+            set -- $parent_line
+            shift
+            if [ "$#" -eq 0 ]; then
+              echo "AIMS history verification requires a commit with at least one parent." >&2
+              return 1
+            fi
+            # A direct parent bounds routine merge-tag verification while
+            # `rev-list <merge> --not <parent>` still traverses every merged
+            # lineage introduced by that merge.
+            printf '%s\n' "$1"
+          }
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            history_baseline="${{ github.event.pull_request.base.sha }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            history_baseline=$(baseline_before_commit "${GITHUB_SHA}")
+          else
+            history_baseline="${{ github.event.before }}"
+            if [ "$history_baseline" = "0000000000000000000000000000000000000000" ]; then
+              history_baseline=$(git merge-base "origin/${{ github.event.repository.default_branch }}" "${GITHUB_SHA}")
+              if [ "$history_baseline" = "${GITHUB_SHA}" ]; then
+                history_baseline=$(baseline_before_commit "${GITHUB_SHA}")
+              fi
+            fi
+          fi
+          python3 scripts/build_aims_assessment_bundle.py --commit "${GITHUB_SHA}" --assessment-at "$assessment_at" --history-baseline "$history_baseline" --output work/aims-first/agentos-aims-assessment.tar.gz
+          python3 scripts/build_aims_assessment_bundle.py --commit "${GITHUB_SHA}" --assessment-at "$assessment_at" --history-baseline "$history_baseline" --output work/aims-second/agentos-aims-assessment.tar.gz
+          cmp work/aims-first/agentos-aims-assessment.tar.gz work/aims-second/agentos-aims-assessment.tar.gz
 
       - name: Build
         run: go build ./...

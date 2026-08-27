@@ -3,14 +3,76 @@ set -eu
 
 GO_BIN="${AGENTOS_GO:-go}"
 GOFMT_BIN="${AGENTOS_GOFMT:-gofmt}"
+PYTHON_BIN="${AGENTOS_PYTHON:-python3}"
 
 if ! command -v "$GO_BIN" >/dev/null 2>&1; then
   echo "Go is required by the Agent OS pre-commit hook. Set AGENTOS_GO to its executable if it is not on PATH."
   exit 1
 fi
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  echo "Python 3 is required by the Agent OS pre-commit hook. Set AGENTOS_PYTHON to its executable if it is not on PATH."
+  exit 1
+fi
 
 echo "==> staged diff integrity"
 git diff --cached --check
+
+echo "==> controlled AIMS documented information"
+staged_root="$(mktemp -d)"
+prior_manifest="$(mktemp)"
+trap 'rm -rf "$staged_root"; rm -f "$prior_manifest"' EXIT HUP INT TERM
+"$PYTHON_BIN" scripts/materialize_staged_aims.py --root . --output "$staged_root"
+
+verify_staged_aims_against() {
+  parent="$1"
+  if git cat-file -e "$parent:governance/aims/manifest.json" 2>/dev/null; then
+    prior_size="$(git cat-file -s "$parent:governance/aims/manifest.json")"
+    case "$prior_size" in
+      ''|*[!0-9]*)
+        echo "Unable to determine prior AIMS manifest size for $parent."
+        exit 1
+        ;;
+    esac
+    if [ "$prior_size" -gt 262144 ]; then
+      echo "Prior AIMS manifest exceeds 262144 bytes for $parent."
+      exit 1
+    fi
+    git show "$parent:governance/aims/manifest.json" >"$prior_manifest"
+    "$PYTHON_BIN" "$staged_root/scripts/verify_aims_documents.py" \
+      --root "$staged_root" --prior-manifest "$prior_manifest"
+  else
+    "$PYTHON_BIN" "$staged_root/scripts/verify_aims_documents.py" --root "$staged_root"
+  fi
+}
+
+if head="$(git rev-parse --verify HEAD 2>/dev/null)"; then
+  verify_staged_aims_against "$head"
+else
+  "$PYTHON_BIN" "$staged_root/scripts/verify_aims_documents.py" --root "$staged_root"
+fi
+
+merge_head_path="$(git rev-parse --git-path MERGE_HEAD)"
+if [ -f "$merge_head_path" ]; then
+  while IFS= read -r parent || [ -n "$parent" ]; do
+    if [ "${#parent}" -ne 40 ]; then
+      echo "MERGE_HEAD contains an invalid parent commit."
+      exit 1
+    fi
+    case "$parent" in
+      *[!0-9a-f]*)
+        echo "MERGE_HEAD contains an invalid parent commit."
+        exit 1
+        ;;
+    esac
+    git cat-file -e "$parent^{commit}"
+    verify_staged_aims_against "$parent"
+  done <"$merge_head_path"
+fi
+(
+  cd "$staged_root"
+  "$PYTHON_BIN" -m unittest scripts/test_verify_aims_documents.py
+  "$PYTHON_BIN" -m unittest scripts/test_build_aims_assessment_bundle.py
+)
 
 staged_go="$(git diff --cached --name-only --diff-filter=ACMR -- '*.go')"
 if [ -n "$staged_go" ]; then
