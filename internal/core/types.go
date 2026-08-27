@@ -524,6 +524,10 @@ type EffectObligation struct {
 	CreatedAt                  time.Time         `json:"created_at"`
 }
 
+// MaximumEffectAuthorizationRefs bounds the immutable capability set carried
+// by one effect from preparation through transactional authorization.
+const MaximumEffectAuthorizationRefs = 64
+
 type ApprovalStatus string
 
 const (

@@ -3,6 +3,7 @@ package effects
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -75,6 +76,30 @@ func setEffectFingerprint(t *testing.T, obligation *core.EffectObligation) strin
 	}
 	obligation.EffectFingerprint = fingerprint
 	return fingerprint
+}
+
+func TestPrepareRejectsUnexecutableAuthorizationReferenceSet(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	refs := make([]string, core.MaximumEffectAuthorizationRefs+1)
+	for index := range refs {
+		refs[index] = fmt.Sprintf("lease-%d", index)
+	}
+	obligation := core.EffectObligation{
+		ID: "effect-overbound", OrganizationID: "org", TaskID: "task", ActorID: "actor",
+		Action: "cache", Resource: "record", Scope: "org", AuthorizationRefs: refs,
+		EffectFingerprint: "not-reached", IdempotencyKey: "key",
+	}
+	if _, err := New(l, &adapter{}, nil).Prepare(context.Background(), obligation); err == nil {
+		t.Fatal("over-bound authority set was persisted as a pending effect")
+	}
+	rows, err := l.Records(context.Background(), "effect", string(obligation.ID))
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("rejected effect was persisted: records=%d err=%v", len(rows), err)
+	}
 }
 
 func TestPersistBeforeEffectAndFingerprintApproval(t *testing.T) {

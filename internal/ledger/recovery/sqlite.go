@@ -118,7 +118,7 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	}
 	result.StorageVersion = contract.StorageVersion
 	result.EventSchemaVersion = contract.EventSchemaVersion
-	if contract.EventSchemaVersion == events.SchemaVersion {
+	if contract.EventSchemaVersion == events.SchemaVersion && contract.StorageVersion >= ledgerstore.AuthorityAdmissionBindingStorageVersion {
 		if err := verifyProjectionAdmissions(ctx, db); err != nil {
 			return Result{}, err
 		}
@@ -143,6 +143,14 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 			result.EventChainAlgorithm = integrity.Algorithm
 		}
 	} else {
+		if contract.StorageVersion >= ledgerstore.EventIntegrityStorageVersion {
+			integrity, err := ledgerstore.ValidateEventIntegrity(ctx, db)
+			if err != nil {
+				return Result{}, fmt.Errorf("verify legacy event integrity chain: %w", err)
+			}
+			result.EventChainSHA256 = integrity.SHA256
+			result.EventChainAlgorithm = integrity.Algorithm
+		}
 		if err := verifyLegacyAdmissionsAfterMigration(ctx, db); err != nil {
 			return Result{}, err
 		}
@@ -310,6 +318,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	lastMissions := map[core.ID]core.Mission{}
 	lastGoals := map[core.ID]core.Goal{}
 	lastWorks := map[core.ID]core.Work{}
+	authorityRecords := make([]events.AuthorityRecord, 0)
 	for recordRows.Next() {
 		var kind, recordID, admissionEventID, admissionFingerprint string
 		var version int
@@ -324,7 +333,13 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("record %s/%s/%d body: %w", kind, recordID, version, err)
 		}
 		if !events.ProjectionKindRequiresAdmission(kind) {
-			if admissionEventID != "" || admissionFingerprint != "" {
+			if kind == "capability_lease" || kind == "organization_freeze" {
+				if admissionEventID == "" || admissionFingerprint != "" {
+					_ = recordRows.Close()
+					return fmt.Errorf("authority record %s/%s/%d lacks its exact admission event", kind, recordID, version)
+				}
+				authorityRecords = append(authorityRecords, events.AuthorityRecord{Kind: kind, RecordID: recordID, Version: version, Body: append([]byte(nil), body...), AdmissionEventID: admissionEventID})
+			} else if admissionEventID != "" || admissionFingerprint != "" {
 				_ = recordRows.Close()
 				return fmt.Errorf("generic record %s/%s/%d carries projection authority", kind, recordID, version)
 			}
@@ -379,6 +394,9 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	}
 	if err := recordRows.Close(); err != nil {
 		return fmt.Errorf("close projection admission records: %w", err)
+	}
+	if _, _, err := events.ResolveAuthorityAdmissions(stream, authorityRecords); err != nil {
+		return fmt.Errorf("validate authority record admissions: %w", err)
 	}
 	for eventID := range admitted {
 		if _, found := used[eventID]; !found {

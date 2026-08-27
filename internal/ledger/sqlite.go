@@ -144,8 +144,42 @@ func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, ac
 	if err != nil {
 		return fmt.Errorf("encode record: %w", err)
 	}
+	draft := events.TrustedDraft{OrganizationID: organizationID, EventType: eventType, SourceActorID: actorID, TaskID: taskID, AuthorizationRefs: authorizationRefs, ArtifactRefs: artifactRefs, Payload: value}
+	if kind == "capability_lease" || kind == "organization_freeze" || events.RequiresAuthorityRecordAdmission(eventType) {
+		if err := events.ValidateAuthorityRecordDraft(draft, kind, id, version, body); err != nil {
+			return err
+		}
+		// Use the already validated canonical bytes as the Event Contract
+		// payload. A caller-controlled json.Marshaler must not be able to return
+		// different authority on the record and event serialization passes.
+		draft.Payload = json.RawMessage(append([]byte(nil), body...))
+	}
 	return l.withTx(ctx, func(tx *sql.Tx) error {
-		draft := events.TrustedDraft{OrganizationID: organizationID, EventType: eventType, SourceActorID: actorID, TaskID: taskID, AuthorizationRefs: authorizationRefs, ArtifactRefs: artifactRefs, Payload: value}
+		if kind == "capability_lease" || kind == "organization_freeze" {
+			var priorVersion int
+			var priorBody []byte
+			var priorAdmissionEventID string
+			err := tx.QueryRowContext(ctx, `SELECT version,body,admission_event_id FROM records WHERE kind=? AND record_id=? ORDER BY version DESC LIMIT 1`, kind, id).Scan(&priorVersion, &priorBody, &priorAdmissionEventID)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("read prior authority record: %w", err)
+			}
+			if errors.Is(err, sql.ErrNoRows) {
+				priorVersion = 0
+				priorBody = nil
+			}
+			if version != priorVersion+1 {
+				return fmt.Errorf("authority record version is noncontiguous")
+			}
+			if priorVersion > 0 {
+				var priorOrganizationID string
+				if priorAdmissionEventID == "" || tx.QueryRowContext(ctx, `SELECT organization_id FROM events WHERE event_id=?`, priorAdmissionEventID).Scan(&priorOrganizationID) != nil || priorOrganizationID != organizationID {
+					return fmt.Errorf("authority record revision crosses its original organization")
+				}
+			}
+			if err := events.ValidateAuthorityRecordTransition(kind, id, version, body, priorBody); err != nil {
+				return err
+			}
+		}
 		return appendRecord(ctx, tx, draft, kind, id, version, body)
 	})
 }
@@ -2628,36 +2662,29 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, obligation
 				return fmt.Errorf("decode approval %s: %w", obligation.ApprovalRef, err)
 			}
 		}
-		freezeBody, found, err := latestRecordBody(ctx, tx, "organization_freeze", string(obligation.OrganizationID))
+		leaseAdmissions, freezeAdmissions, err := authorityAdmissionsForEffect(ctx, tx, string(obligation.OrganizationID), obligation.AuthorizationRefs)
 		if err != nil {
-			return err
+			return fmt.Errorf("validate durable authority state: %w", err)
 		}
 		frozen := false
-		if found {
-			var state authority.FreezeState
-			if err := json.Unmarshal(freezeBody, &state); err != nil {
-				return fmt.Errorf("decode organization freeze: %w", err)
+		var freezeSequence int64
+		for _, admission := range freezeAdmissions {
+			if admission.OrganizationID == obligation.OrganizationID && admission.Sequence > freezeSequence {
+				frozen = admission.Frozen
+				freezeSequence = admission.Sequence
 			}
-			if state.OrganizationID != obligation.OrganizationID {
-				return fmt.Errorf("organization freeze identity mismatch")
+		}
+		leaseByID := make(map[core.ID]core.CapabilityLease)
+		for _, admission := range leaseAdmissions {
+			if admission.OrganizationID == obligation.OrganizationID {
+				leaseByID[admission.Lease.ID] = admission.Lease
 			}
-			frozen = state.Frozen
 		}
 		leases := make([]core.CapabilityLease, 0, len(obligation.AuthorizationRefs))
 		for _, ref := range obligation.AuthorizationRefs {
-			leaseBody, found, err := latestRecordBody(ctx, tx, "capability_lease", ref)
-			if err != nil {
-				return err
-			}
+			lease, found := leaseByID[core.ID(ref)]
 			if !found {
 				continue
-			}
-			var lease core.CapabilityLease
-			if err := json.Unmarshal(leaseBody, &lease); err != nil {
-				return fmt.Errorf("decode capability lease %s: %w", ref, err)
-			}
-			if string(lease.ID) != ref {
-				return fmt.Errorf("capability lease identity mismatch for %s", ref)
 			}
 			leases = append(leases, lease)
 		}
@@ -2724,6 +2751,95 @@ func latestRecordBody(ctx context.Context, tx *sql.Tx, kind, id string) ([]byte,
 	return body, true, nil
 }
 
+// authorityAdmissionsForEffect validates only the authority identities that
+// can affect one obligation. Every current record names its exact admission
+// event, so reads use the records primary key and unique event indexes instead
+// of replaying any tenant's lifetime authority history.
+func authorityAdmissionsForEffect(ctx context.Context, queryer *sql.Tx, organizationID string, authorizationRefs []string) ([]events.CapabilityLeaseAdmission, []events.OrganizationFreezeAdmission, error) {
+	if organizationID == "" || len(authorizationRefs) == 0 || len(authorizationRefs) > core.MaximumEffectAuthorizationRefs {
+		return nil, nil, fmt.Errorf("organization and between 1 and %d authorization references are required", core.MaximumEffectAuthorizationRefs)
+	}
+	seenRefs := make(map[string]struct{}, len(authorizationRefs))
+	leasing := make([]events.CapabilityLeaseAdmission, 0, len(authorizationRefs))
+	for _, ref := range authorizationRefs {
+		if ref == "" {
+			return nil, nil, fmt.Errorf("authorization reference is empty")
+		}
+		if _, duplicate := seenRefs[ref]; duplicate {
+			return nil, nil, fmt.Errorf("authorization reference %s is duplicated", ref)
+		}
+		seenRefs[ref] = struct{}{}
+		record, admission, found, err := latestAuthorityAdmission(ctx, queryer, "capability_lease", ref)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !found || admission.OrganizationID != organizationID {
+			continue
+		}
+		var lease core.CapabilityLease
+		if decodeExactJSONBytes(record.Body, &lease) != nil {
+			return nil, nil, fmt.Errorf("decode admitted capability lease %s", ref)
+		}
+		leasing = append(leasing, events.CapabilityLeaseAdmission{Lease: lease, OrganizationID: core.ID(admission.OrganizationID), Sequence: admission.Sequence})
+	}
+	freezeRecord, freezeEvent, found, err := latestAuthorityAdmission(ctx, queryer, "organization_freeze", organizationID)
+	if err != nil {
+		return nil, nil, err
+	}
+	freezes := make([]events.OrganizationFreezeAdmission, 0, 1)
+	if found {
+		if freezeEvent.OrganizationID != organizationID {
+			return nil, nil, fmt.Errorf("organization freeze admission crosses its tenant")
+		}
+		var state authority.FreezeState
+		if decodeExactJSONBytes(freezeRecord.Body, &state) != nil || string(state.OrganizationID) != organizationID {
+			return nil, nil, fmt.Errorf("decode admitted organization freeze")
+		}
+		freezes = append(freezes, events.OrganizationFreezeAdmission{OrganizationID: state.OrganizationID, Frozen: state.Frozen, Sequence: freezeEvent.Sequence})
+	}
+	return leasing, freezes, nil
+}
+
+func latestAuthorityAdmission(ctx context.Context, queryer *sql.Tx, kind, recordID string) (events.AuthorityRecord, events.Event, bool, error) {
+	var record events.AuthorityRecord
+	err := queryer.QueryRowContext(ctx, `SELECT kind,record_id,version,body,admission_event_id FROM records WHERE kind=? AND record_id=? ORDER BY version DESC LIMIT 1`, kind, recordID).
+		Scan(&record.Kind, &record.RecordID, &record.Version, &record.Body, &record.AdmissionEventID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return events.AuthorityRecord{}, events.Event{}, false, nil
+	}
+	if err != nil {
+		return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("read current authority record: %w", err)
+	}
+	var count int
+	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*) FROM records WHERE kind=? AND record_id=?`, kind, recordID).Scan(&count); err != nil || count != record.Version {
+		return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("authority record %s/%s history is noncontiguous", kind, recordID)
+	}
+	var priorBody []byte
+	if record.Version > 1 {
+		if err := queryer.QueryRowContext(ctx, `SELECT body FROM records WHERE kind=? AND record_id=? AND version=?`, kind, recordID, record.Version-1).Scan(&priorBody); err != nil {
+			return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("read prior authority record: %w", err)
+		}
+	}
+	if err := events.ValidateAuthorityRecordTransition(kind, recordID, record.Version, record.Body, priorBody); err != nil {
+		return events.AuthorityRecord{}, events.Event{}, false, err
+	}
+	matched, err := collectEvents(queryer.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_id=?`, record.AdmissionEventID))
+	if err != nil || len(matched) != 1 {
+		return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("authority record %s/%s lacks its exact admission event", kind, recordID)
+	}
+	admission := matched[0]
+	draft := events.TrustedDraft{
+		OrganizationID: admission.OrganizationID, EventType: admission.EventType, SourceActorID: admission.SourceActorID,
+		SourceExecutionID: admission.SourceExecutionID, RecipientScope: admission.RecipientScope, RecipientID: admission.RecipientID,
+		TaskID: admission.TaskID, AuthorizationRefs: admission.AuthorizationRefs, ArtifactRefs: admission.ArtifactRefs, Payload: json.RawMessage(record.Body), CorrelationID: admission.CorrelationID,
+	}
+	if record.AdmissionEventID == "" || admission.EventID != record.AdmissionEventID || admission.Sequence < 1 || admission.CreatedAt.IsZero() || admission.SchemaVersion != events.SchemaVersion || !bytes.Equal(admission.Payload, record.Body) || events.ValidateAuthorityRecordDraft(draft, kind, recordID, record.Version, record.Body) != nil {
+		return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("authority record %s/%s admission binding is invalid", kind, recordID)
+	}
+	record.Body = append([]byte(nil), record.Body...)
+	return record, admission, true, nil
+}
+
 func recordBodyAtVersion(ctx context.Context, queryer rowsQueryer, kind, id string, version int) ([]byte, bool, error) {
 	if kind == "" || id == "" || version < 1 {
 		return nil, false, fmt.Errorf("complete record version identity is required")
@@ -2757,10 +2873,15 @@ func nextRecordVersion(ctx context.Context, tx *sql.Tx, kind, id string) (int, e
 }
 
 func appendRecord(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft, kind, id string, version int, body []byte) error {
-	if _, err := appendEvent(ctx, tx, draft); err != nil {
+	admission, err := appendEvent(ctx, tx, draft)
+	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES(?,?,?,?,?)`, kind, id, version, body, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	admissionEventID := ""
+	if kind == "capability_lease" || kind == "organization_freeze" {
+		admissionEventID = admission.EventID
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,admission_event_id,created_at) VALUES(?,?,?,?,?,?)`, kind, id, version, body, admissionEventID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("append record: %w", err)
 	}
 	if kind == "approval" {
@@ -2947,6 +3068,9 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 	}
 	if events.RequiresProjectionAdmission(d.EventType, d.SourceActorID) {
 		return events.Event{}, fmt.Errorf("projection lifecycle events require typed admission")
+	}
+	if events.RequiresAuthorityRecordAdmission(d.EventType) {
+		return events.Event{}, fmt.Errorf("authority lifecycle events require atomic record admission")
 	}
 	if d.EventType == "EVIDENCE_PUBLISHED" {
 		return events.Event{}, fmt.Errorf("agent evidence requires typed execution-bound admission")

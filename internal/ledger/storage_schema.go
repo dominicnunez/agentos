@@ -25,7 +25,10 @@ const (
 	// not identify or publish an Agent OS release.
 	OldestSupportedStorageVersion = 1
 	// CurrentStorageVersion is the only layout accepted after runtime startup.
-	CurrentStorageVersion = 6
+	CurrentStorageVersion = 7
+	// AuthorityAdmissionBindingStorageVersion is the first storage contract in
+	// which every capability and freeze record names its exact admitting event.
+	AuthorityAdmissionBindingStorageVersion = 7
 	// LegacyEventSchemaVersion identifies the immediately preceding Event
 	// Contract. Its payload semantics already included Intent mode; migration
 	// validates review evidence and reseals schema-bound projection admissions.
@@ -276,9 +279,64 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 			return err
 		}
 		return advanceProjectionStorageContract(ctx, tx, from, to, "event-integrity")
+	case from == 6 && to == 7:
+		if _, err := ValidateEventIntegrity(ctx, tx); err != nil {
+			return fmt.Errorf("validate event integrity before authority admission binding: %w", err)
+		}
+		if err := bindAuthorityAdmissionEvents(ctx, tx); err != nil {
+			return err
+		}
+		return advanceProjectionStorageContract(ctx, tx, from, to, "authority-admission-binding")
 	default:
 		return fmt.Errorf("no reviewed storage migration exists")
 	}
+}
+
+func bindAuthorityAdmissionEvents(ctx context.Context, tx *sql.Tx) (finalErr error) {
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE event_type IN ('CAPABILITY_GRANTED','CAPABILITY_REVOKED','FREEZE_SET') ORDER BY sequence`))
+	if err != nil {
+		return fmt.Errorf("read authority Event Contracts for migration: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT kind,record_id,version,body,admission_event_id FROM records
+WHERE kind IN ('capability_lease','organization_freeze') ORDER BY kind,record_id,version`)
+	if err != nil {
+		return fmt.Errorf("read authority records for migration: %w", err)
+	}
+	defer func() { finalErr = errors.Join(finalErr, rows.Close()) }()
+	var records []events.AuthorityRecord
+	for rows.Next() {
+		var record events.AuthorityRecord
+		if err := rows.Scan(&record.Kind, &record.RecordID, &record.Version, &record.Body, &record.AdmissionEventID); err != nil {
+			return fmt.Errorf("scan authority migration record: %w", err)
+		}
+		if record.AdmissionEventID != "" {
+			return fmt.Errorf("pre-binding authority record %s/%s/%d already names an admission event", record.Kind, record.RecordID, record.Version)
+		}
+		record.Body = append([]byte(nil), record.Body...)
+		records = append(records, record)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close authority migration records: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate authority migration records: %w", err)
+	}
+	bound, err := events.BindAuthorityAdmissions(stream, records)
+	if err != nil {
+		return fmt.Errorf("bind authority migration history: %w", err)
+	}
+	for _, record := range bound {
+		result, err := tx.ExecContext(ctx, `UPDATE records SET admission_event_id=? WHERE kind=? AND record_id=? AND version=? AND admission_event_id=''`, record.AdmissionEventID, record.Kind, record.RecordID, record.Version)
+		if err != nil {
+			return fmt.Errorf("persist authority admission binding %s/%s/%d: %w", record.Kind, record.RecordID, record.Version, err)
+		}
+		changed, err := result.RowsAffected()
+		if err != nil || changed != 1 {
+			return fmt.Errorf("authority admission binding %s/%s/%d changed across migration", record.Kind, record.RecordID, record.Version)
+		}
+	}
+	return nil
 }
 
 func advanceProjectionStorageContract(ctx context.Context, tx *sql.Tx, from, to int, boundary string) error {
