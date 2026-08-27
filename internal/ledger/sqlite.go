@@ -1233,13 +1233,13 @@ func validateExecutionStartManifest(ctx context.Context, tx *sql.Tx, task core.T
 		manifest.Provider == "" || manifest.Model == "" || manifest.TaskContractVersion == "" || manifest.PromptVersion == "" ||
 		manifest.PolicyVersion == "" || manifest.ContextBuilderVersion == "" || manifest.CreatedAt.IsZero() || offset != 0 ||
 		!manifest.CreatedAt.Equal(started.CreatedAt) || len(manifest.ExecutionInputSHA256) != sha256.Size*2 {
-		return fmt.Errorf("Agent execution manifest identity and pinned runtime are invalid")
+		return fmt.Errorf("agent execution manifest identity and pinned runtime are invalid")
 	}
 	if _, err := hex.DecodeString(manifest.ExecutionInputSHA256); err != nil {
-		return fmt.Errorf("Agent execution manifest input fingerprint is invalid")
+		return fmt.Errorf("agent execution manifest input fingerprint is invalid")
 	}
 	if !slices.Equal(manifest.AdditionalContextRefs, requested.StrategicContextRefs) {
-		return fmt.Errorf("Agent execution manifest changes its strategic context")
+		return fmt.Errorf("agent execution manifest changes its strategic context")
 	}
 	expectedKnowledge := make([]core.VersionedRef, 0, len(selection.Knowledge))
 	for _, selected := range selection.Knowledge {
@@ -1248,23 +1248,23 @@ func validateExecutionStartManifest(ctx context.Context, tx *sql.Tx, task core.T
 		})
 	}
 	if !slices.Equal(manifest.KnowledgeRefs, expectedKnowledge) {
-		return fmt.Errorf("Agent execution manifest changes its transaction-selected knowledge")
+		return fmt.Errorf("agent execution manifest changes its transaction-selected knowledge")
 	}
 	if len(manifest.EventRefs) > 1024 {
-		return fmt.Errorf("Agent execution manifest has too many event references")
+		return fmt.Errorf("agent execution manifest has too many event references")
 	}
 	seen := make(map[string]struct{}, len(manifest.EventRefs))
 	for _, ref := range manifest.EventRefs {
 		if ref == "" {
-			return fmt.Errorf("Agent execution manifest has an empty event reference")
+			return fmt.Errorf("agent execution manifest has an empty event reference")
 		}
 		if _, duplicate := seen[ref]; duplicate {
-			return fmt.Errorf("Agent execution manifest duplicates event reference %s", ref)
+			return fmt.Errorf("agent execution manifest duplicates event reference %s", ref)
 		}
 		seen[ref] = struct{}{}
 		matched, err := exactEventsByID(ctx, tx, started.OrganizationID, ref)
 		if err != nil || len(matched) != 1 || matched[0].Sequence >= started.Sequence {
-			return fmt.Errorf("Agent execution manifest event reference %s is not durable before execution start", ref)
+			return fmt.Errorf("agent execution manifest event reference %s is not durable before execution start", ref)
 		}
 	}
 	required := make(map[string]struct{}, len(requested.StrategicEventRefs)+len(selection.Inbox))
@@ -1278,7 +1278,7 @@ func validateExecutionStartManifest(ctx context.Context, tx *sql.Tx, task core.T
 	}
 	for ref := range required {
 		if _, bound := seen[ref]; !bound {
-			return fmt.Errorf("Agent execution manifest omits transaction-selected event %s", ref)
+			return fmt.Errorf("agent execution manifest omits transaction-selected event %s", ref)
 		}
 	}
 	return nil
