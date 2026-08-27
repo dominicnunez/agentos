@@ -118,7 +118,7 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	}
 	result.StorageVersion = contract.StorageVersion
 	result.EventSchemaVersion = contract.EventSchemaVersion
-	if contract.EventSchemaVersion == events.SchemaVersion && contract.StorageVersion == ledgerstore.CurrentStorageVersion {
+	if contract.EventSchemaVersion == events.SchemaVersion && contract.StorageVersion >= ledgerstore.AuthorityAdmissionBindingStorageVersion {
 		if err := verifyProjectionAdmissions(ctx, db); err != nil {
 			return Result{}, err
 		}
@@ -395,8 +395,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	if err := recordRows.Close(); err != nil {
 		return fmt.Errorf("close projection admission records: %w", err)
 	}
-	capabilityAdmissions, freezeAdmissions, err := events.ResolveAuthorityAdmissions(stream, authorityRecords)
-	if err != nil {
+	if _, _, err := events.ResolveAuthorityAdmissions(stream, authorityRecords); err != nil {
 		return fmt.Errorf("validate authority record admissions: %w", err)
 	}
 	for eventID := range admitted {
@@ -404,7 +403,7 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("projection admission event %s has no materialized record", eventID)
 		}
 	}
-	if err := validateProjectionOrganizationBindings(orderedAdmissions, stream, capabilityAdmissions, freezeAdmissions); err != nil {
+	if err := validateProjectionOrganizationBindings(orderedAdmissions, stream); err != nil {
 		return err
 	}
 	return validateRecoveryAgentEvidence(stream)
@@ -507,29 +506,23 @@ func validateRecoveryIntentConfirmations(stream []events.Event) error {
 	return nil
 }
 
-func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, stream []events.Event, capabilityAdmissions []events.CapabilityLeaseAdmission, freezeAdmissions []events.OrganizationFreezeAdmission) error {
+func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, stream []events.Event) error {
 	sort.Slice(admitted, func(left, right int) bool {
 		return admitted[left].event.Sequence < admitted[right].event.Sequence
 	})
 	snapshot := core.DurableGraph{
-		Organizations:       map[core.ID]core.DurableState[core.Organization]{},
-		Missions:            map[core.ID]core.DurableState[core.Mission]{},
-		Goals:               map[core.ID]core.DurableState[core.Goal]{},
-		Teams:               map[core.ID]core.DurableState[core.Team]{},
-		AgentBlueprints:     map[core.ID]core.DurableState[core.AgentBlueprint]{},
-		ExecutionProfiles:   map[core.ID]core.DurableState[core.ExecutionProfile]{},
-		Agents:              map[core.ID]core.DurableState[core.Agent]{},
-		Intents:             map[core.ID]core.DurableState[core.Intent]{},
-		Works:               map[core.ID]core.DurableState[core.Work]{},
-		Tasks:               map[core.ID]core.DurableState[core.Task]{},
-		Experiments:         map[core.ID]core.DurableState[core.Experiment]{},
-		PromotionCandidates: map[core.ID]core.DurableState[core.PromotionCandidate]{},
-		Knowledge:           map[core.ID]core.DurableState[core.KnowledgeRecord]{},
+		Organizations:     map[core.ID]core.DurableState[core.Organization]{},
+		Missions:          map[core.ID]core.DurableState[core.Mission]{},
+		Goals:             map[core.ID]core.DurableState[core.Goal]{},
+		Teams:             map[core.ID]core.DurableState[core.Team]{},
+		AgentBlueprints:   map[core.ID]core.DurableState[core.AgentBlueprint]{},
+		ExecutionProfiles: map[core.ID]core.DurableState[core.ExecutionProfile]{},
+		Agents:            map[core.ID]core.DurableState[core.Agent]{},
+		Intents:           map[core.ID]core.DurableState[core.Intent]{},
+		Works:             map[core.ID]core.DurableState[core.Work]{},
+		Tasks:             map[core.ID]core.DurableState[core.Task]{},
 	}
 	reviewEvidence := events.IndexReviewedIntentEvidence(stream)
-	knowledgeAdmissions := events.NewKnowledgeAdmissionValidator(stream)
-	knowledgeAdmissions.UseCapabilityLeaseAdmissions(capabilityAdmissions)
-	knowledgeAdmissions.UseOrganizationFreezeAdmissions(freezeAdmissions)
 	for _, admission := range admitted {
 		event, record := admission.event, admission.payload.Projection
 		var organizationID core.ID
@@ -670,18 +663,6 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, 
 				return fmt.Errorf("event %s contains invalid Task history: %w", event.EventID, err)
 			}
 			continue
-		case "knowledge":
-			var value core.KnowledgeRecord
-			if decodeExactJSON(record.Value, &value) != nil || value.KnowledgeID != core.ID(record.RecordID) {
-				return fmt.Errorf("event %s contains an invalid knowledge projection", event.EventID)
-			}
-			organizationID = value.OrganizationID
-			if err := knowledgeAdmissions.Validate(value, event, record, snapshot); err != nil {
-				return fmt.Errorf("event %s contains invalid knowledge admission: %w", event.EventID, err)
-			}
-			if err := setRecoveryProjection(snapshot.Knowledge, record, value, true, core.ValidKnowledgeRevision); err != nil {
-				return fmt.Errorf("event %s contains invalid knowledge history: %w", event.EventID, err)
-			}
 		default:
 			return fmt.Errorf("event %s contains unsupported projection kind %s", event.EventID, record.ProjectionKind)
 		}

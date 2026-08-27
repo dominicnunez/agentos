@@ -95,7 +95,7 @@ func (s *ReconciliationService) Recover(ctx context.Context, resolver Reconciler
 		if obligation.Status != core.EffectAttempted {
 			continue
 		}
-		if err := validateReconciliationObligation(obligation); err != nil {
+		if err := validateObligation(obligation); err != nil {
 			return nil, fmt.Errorf("validate attempted effect %s: %w", obligation.ID, err)
 		}
 		item, err := s.reconcileOne(ctx, obligation, resolver)

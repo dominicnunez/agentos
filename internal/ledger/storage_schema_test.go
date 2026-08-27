@@ -29,67 +29,14 @@ func TestOpenBootstrapsCurrentStorageContract(t *testing.T) {
 	}
 }
 
-func TestStorageV9MigrationAddsTenantKnowledgeIndex(t *testing.T) {
+func TestStorageV7MigrationBindsAuthorityRecordsToExactEvents(t *testing.T) {
 	ctx := t.Context()
-	path := filepath.Join(t.TempDir(), "storage-v8.db")
+	path := filepath.Join(t.TempDir(), "storage-v6-authority.db")
 	store, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `DROP INDEX records_knowledge_organization_idx`); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	fingerprint, err := storageSchemaFingerprint(ctx, db)
-	if err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=8,schema_fingerprint=? WHERE singleton=1`, fingerprint); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `PRAGMA user_version=8`); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	migrated, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = migrated.Close() })
-	var count int
-	if err := migrated.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name='records_knowledge_organization_idx' AND tbl_name='records'`).Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	if count != 1 {
-		t.Fatalf("tenant knowledge index count=%d", count)
-	}
-	contract, err := ValidateStorageContract(ctx, migrated.db)
-	if err != nil || contract.StorageVersion != CurrentStorageVersion {
-		t.Fatalf("migrated storage contract=%+v err=%v", contract, err)
-	}
-}
-
-func TestStorageV7UpgradePreservesAuthorityAndAddsKnowledgeAdmission(t *testing.T) {
-	ctx := t.Context()
-	path := filepath.Join(t.TempDir(), "storage-v7-authority.db")
-	store, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", ActorKind: core.PrincipalAgent, Action: "read", Resource: "record-1", Scope: "org-1", OriginTaskID: "task-1"}
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", Action: "read", Resource: "record-1", Scope: "org-1", OriginTaskID: "task-1"}
 	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
 		_ = store.Close()
 		t.Fatal(err)
@@ -101,16 +48,7 @@ func TestStorageV7UpgradePreservesAuthorityAndAddsKnowledgeAdmission(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP INDEX records_knowledge_organization_idx; DROP TABLE legacy_knowledge_quarantine`); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	fingerprint, err := storageSchemaFingerprint(ctx, db)
-	if err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=7,schema_fingerprint=? WHERE singleton=1; PRAGMA user_version=7`, fingerprint); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE records SET admission_event_id='' WHERE kind='capability_lease'; UPDATE agentos_storage SET storage_version=6 WHERE singleton=1; PRAGMA user_version=6;`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -124,69 +62,11 @@ func TestStorageV7UpgradePreservesAuthorityAndAddsKnowledgeAdmission(t *testing.
 	defer func() { _ = store.Close() }()
 	var admissionEventID, eventID string
 	if err := store.db.QueryRowContext(ctx, `SELECT r.admission_event_id,e.event_id FROM records r JOIN events e ON e.event_id=r.admission_event_id WHERE r.kind='capability_lease' AND r.record_id='lease-1' AND r.version=1`).Scan(&admissionEventID, &eventID); err != nil || admissionEventID == "" || admissionEventID != eventID {
-		t.Fatalf("preserved authority binding event=%q matched=%q err=%v", admissionEventID, eventID, err)
-	}
-	var quarantineTable int
-	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='legacy_knowledge_quarantine'`).Scan(&quarantineTable); err != nil || quarantineTable != 1 {
-		t.Fatalf("knowledge admission table count=%d err=%v", quarantineTable, err)
+		t.Fatalf("migrated authority binding event=%q matched=%q err=%v", admissionEventID, eventID, err)
 	}
 	contract, err := ValidateStorageContract(ctx, store.db)
 	if err != nil || contract.StorageVersion != CurrentStorageVersion {
 		t.Fatalf("migrated authority storage contract=%+v err=%v", contract, err)
-	}
-}
-
-func TestStorageV8QuarantinesLegacyUnsealedKnowledge(t *testing.T) {
-	ctx := t.Context()
-	path := filepath.Join(t.TempDir(), "storage-v6-legacy-knowledge.db")
-	store, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyBody := []byte(`{"knowledge_id":"legacy-1","version":1,"status":"CANDIDATE","content":"unsealed"}`)
-	if _, err := db.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,created_at) VALUES('knowledge','legacy-1',1,?,'2026-08-26T00:00:00Z')`, legacyBody); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE legacy_knowledge_quarantine; DROP INDEX records_knowledge_organization_idx`); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	fingerprint, err := storageSchemaFingerprint(ctx, db)
-	if err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=6,schema_fingerprint=?; PRAGMA user_version=6`, fingerprint); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	migrated, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = migrated.Close() })
-	var authoritative, quarantined int
-	var gotBody []byte
-	var reason string
-	if err := migrated.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM records WHERE kind='knowledge'`).Scan(&authoritative); err != nil {
-		t.Fatal(err)
-	}
-	if err := migrated.db.QueryRowContext(ctx, `SELECT COUNT(*),body,reason FROM legacy_knowledge_quarantine WHERE record_id='legacy-1' AND version=1`).Scan(&quarantined, &gotBody, &reason); err != nil {
-		t.Fatal(err)
-	}
-	if authoritative != 0 || quarantined != 1 || string(gotBody) != string(legacyBody) || reason != "PRE_EVENT_COUPLED_KNOWLEDGE_REQUIRES_REVIEW" {
-		t.Fatalf("legacy migration authoritative=%d quarantined=%d body=%s reason=%s", authoritative, quarantined, gotBody, reason)
 	}
 }
 
@@ -361,7 +241,7 @@ func TestStorageV2MigrationPreservesReviewedIntentEvidence(t *testing.T) {
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE legacy_knowledge_quarantine; DROP TABLE event_integrity; DROP TABLE pending_completion_reviews; DROP INDEX records_knowledge_organization_idx; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE event_integrity; DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -443,7 +323,7 @@ func TestStorageV4MigrationRebuildsBoundedGovernanceQueues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE legacy_knowledge_quarantine; DROP TABLE event_integrity; DROP TABLE pending_completion_reviews; DROP INDEX records_knowledge_organization_idx; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE event_integrity; DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -500,15 +380,15 @@ func TestStorageMigrationFailsAtomicallyOnAmbiguousV1Layout(t *testing.T) {
 	}
 }
 
-func TestAuthorityBindingMigrationRejectsTamperedChainWithoutMutation(t *testing.T) {
+func TestStorageV7MigrationRejectsTamperedV6ChainWithoutMutation(t *testing.T) {
 	ctx := t.Context()
-	path := filepath.Join(t.TempDir(), "tampered-pre-binding.db")
+	path := filepath.Join(t.TempDir(), "tampered-v6.db")
 	store, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	lease := core.CapabilityLease{
-		ID: "lease-1", ActorID: "actor-1", ActorKind: core.PrincipalAgent, Action: "read", Resource: "record-1",
+		ID: "lease-1", ActorID: "actor-1", Action: "read", Resource: "record-1",
 		Scope: "org-1", OriginTaskID: "task-1",
 	}
 	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
@@ -532,7 +412,7 @@ func TestAuthorityBindingMigrationRejectsTamperedChainWithoutMutation(t *testing
 		t.Fatal(err)
 	}
 	preBindingVersion := AuthorityAdmissionBindingStorageVersion - 1
-	if _, err := db.ExecContext(ctx, `DROP INDEX records_knowledge_organization_idx; DROP TABLE legacy_knowledge_quarantine; UPDATE records SET admission_event_id='' WHERE kind='capability_lease'`); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE records SET admission_event_id='' WHERE kind='capability_lease'`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -540,12 +420,7 @@ func TestAuthorityBindingMigrationRejectsTamperedChainWithoutMutation(t *testing
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	fingerprint, err := storageSchemaFingerprint(ctx, db)
-	if err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=?,schema_fingerprint=? WHERE singleton=1`, preBindingVersion, fingerprint); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=? WHERE singleton=1`, preBindingVersion); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -558,7 +433,7 @@ func TestAuthorityBindingMigrationRejectsTamperedChainWithoutMutation(t *testing
 	}
 
 	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "integrity hash does not match") {
-		t.Fatalf("tampered chain reached authority binding: %v", err)
+		t.Fatalf("tampered v6 chain reached authority binding: %v", err)
 	}
 	db, err = sql.Open("sqlite", path)
 	if err != nil {

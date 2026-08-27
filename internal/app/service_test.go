@@ -248,16 +248,7 @@ func saveTestVerifiedTask(ctx context.Context, gateway *events.Gateway, reposito
 	task.Status = core.TaskRunning
 	startVersion := state.Version + 1
 	if task.ExecutionKind == core.ExecutionAgent {
-		_, selections, err := repository.StartAgentExecution(ctx, organizationID, correlationID, startVersion, task, "", nil, nil, nil, actionBoundaryRoutes(snapshot, task), func(selection events.ExecutionStartSelection) (core.ExecutionContextManifest, error) {
-			return core.ExecutionContextManifest{
-				ExecutionID: core.ID(fmt.Sprintf("execution-%s-v%d", task.ID, startVersion)), AgentID: task.AssigneeID,
-				AgentBlueprintVersion: task.AgentConfig.BlueprintVersion, ExecutionProfileVersion: task.AgentConfig.ProfileVersion,
-				RuntimeAdapter: task.AgentConfig.RuntimeAdapter, Provider: "fake", Model: "fake-model/v1",
-				TaskID: task.ID, TaskContractVersion: task.TaskContractVersion, PromptVersion: "v1",
-				PolicyVersion: "v1", ContextBuilderVersion: "v2",
-				ExecutionInputSHA256: core.FingerprintExecutionInput(executionInput), CreatedAt: selection.Started.CreatedAt,
-			}, nil
-		})
+		_, selections, err := repository.StartAgentExecution(ctx, organizationID, correlationID, startVersion, task, "", nil, nil, actionBoundaryRoutes(snapshot, task), func([]events.InboxSelection) error { return nil })
 		if err != nil {
 			return err
 		}
@@ -277,6 +268,22 @@ func saveTestVerifiedTask(ctx context.Context, gateway *events.Gateway, reposito
 	}
 	outcome := core.ToolOutcome{ToolInvocationID: core.ID("test-outcome-" + string(task.ID)), ToolID: toolID, ToolVersion: "v1", Status: core.OutcomeSucceeded, ObservedEffect: observed, PostconditionStatus: core.PostconditionVerified, Retryability: core.NotRetryable, StartedAt: now, FinishedAt: now}
 	executionID := fmt.Sprintf("execution-%s-v%d", task.ID, startVersion)
+	if task.ExecutionKind == core.ExecutionAgent {
+		manifest := core.ExecutionContextManifest{
+			ExecutionID: core.ID(executionID), AgentID: task.AssigneeID,
+			AgentBlueprintVersion: task.AgentConfig.BlueprintVersion, ExecutionProfileVersion: task.AgentConfig.ProfileVersion,
+			RuntimeAdapter: task.AgentConfig.RuntimeAdapter, Provider: "fake", Model: toolID,
+			TaskID: task.ID, TaskContractVersion: task.TaskContractVersion, PromptVersion: "v1",
+			PolicyVersion: "v1", ContextBuilderVersion: "v1",
+			ExecutionInputSHA256: core.FingerprintExecutionInput(executionInput), CreatedAt: now,
+		}
+		if _, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
+			OrganizationID: string(organizationID), EventType: "EXECUTION_CONTEXT_MANIFESTED",
+			SourceExecutionID: executionID, TaskID: string(task.ID), Payload: manifest, CorrelationID: correlationID,
+		}); err != nil {
+			return err
+		}
+	}
 	outcomeEvent, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
 		OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime",
 		SourceExecutionID: executionID, TaskID: string(task.ID), Payload: outcome, CorrelationID: correlationID,
@@ -3557,15 +3564,7 @@ func TestRecoveryIsDeterministicFirst(t *testing.T) {
 					if err != nil {
 						return err
 					}
-					_, _, err = repository.StartAgentExecution(ctx, organization.ID, requestID, 2, task, "", nil, nil, nil, actionBoundaryRoutes(snapshot, task), func(selection events.ExecutionStartSelection) (core.ExecutionContextManifest, error) {
-						return core.ExecutionContextManifest{
-							ExecutionID: "execution-" + task.ID + "-v2", AgentID: task.AssigneeID,
-							AgentBlueprintVersion: task.AgentConfig.BlueprintVersion, ExecutionProfileVersion: task.AgentConfig.ProfileVersion,
-							RuntimeAdapter: task.AgentConfig.RuntimeAdapter, Provider: "fake", Model: "fake-model/v1",
-							TaskID: task.ID, TaskContractVersion: task.TaskContractVersion, PromptVersion: "v1", PolicyVersion: "v1",
-							ContextBuilderVersion: "v2", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
-						}, nil
-					})
+					_, _, err = repository.StartAgentExecution(ctx, organization.ID, requestID, 2, task, "", nil, nil, actionBoundaryRoutes(snapshot, task), func([]events.InboxSelection) error { return nil })
 					return err
 				}
 				_, err := repository.StartTaskExecution(ctx, organization.ID, requestID, 2, task, "", "", nil, nil)
@@ -3611,7 +3610,7 @@ func TestRecoveryIsDeterministicFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, event := range agentEvents {
-		if event.EventType == "TOOL_OUTCOME_RECORDED" {
+		if event.EventType == "EXECUTION_CONTEXT_MANIFESTED" || event.EventType == "TOOL_OUTCOME_RECORDED" {
 			t.Fatalf("uncertain adaptive execution was blindly replayed: %+v", event)
 		}
 	}

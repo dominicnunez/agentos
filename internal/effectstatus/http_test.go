@@ -162,7 +162,7 @@ func withReconcilerStatus(binding HTTPReconcilerBinding, status ReconcilerBindin
 func attemptedEffect(id core.ID) core.EffectObligation {
 	now := time.Now().UTC()
 	return core.EffectObligation{
-		ID: id, OrganizationID: "org-1", TaskID: "task-1", ActorID: "agent-1", ActorKind: core.PrincipalAgent,
+		ID: id, OrganizationID: "org-1", TaskID: "task-1", ActorID: "agent-1",
 		Action: "send", Resource: "destination-1", Scope: "org-1", Descriptor: "send message",
 		EffectFingerprint: "fingerprint-1", AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1",
 		IdempotencyKey: "idempotency-" + string(id), ReplayContext: map[string]string{"body": "hello"},

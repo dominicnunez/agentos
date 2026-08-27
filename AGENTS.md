@@ -8,9 +8,6 @@ Agent OS is a Go modular monolith for operating persistent AI-assisted organizat
 - Treat [`docs/handoff/IMPLEMENTATION_SCOPE.yaml`](docs/handoff/IMPLEMENTATION_SCOPE.yaml) as the scope authority.
 - Use [`docs/handoff/docs/29_V1_BUILD_CONTRACT.md`](docs/handoff/docs/29_V1_BUILD_CONTRACT.md) for implementation requirements.
 - Consult the remaining preserved handoff only when the current work needs its detail.
-- Preserve `docs/handoff/` as the immutable architecture source. Publish any
-  strengthened active runtime contract outside that tree instead of silently
-  rewriting the handoff snapshot.
 
 ## Project-wide boundaries
 

@@ -200,9 +200,6 @@ func approvalRequest(t *testing.T, handler http.Handler, method, path, token, bo
 
 func setGatewayEffectFingerprint(t *testing.T, obligation *core.EffectObligation) string {
 	t.Helper()
-	if obligation.ActorKind == "" {
-		obligation.ActorKind = core.PrincipalAgent
-	}
 	fingerprint, err := effects.Fingerprint(*obligation)
 	if err != nil {
 		t.Fatal(err)

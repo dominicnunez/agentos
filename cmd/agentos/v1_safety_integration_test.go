@@ -11,10 +11,8 @@ import (
 	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/effects"
-	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/knowledge"
 	"github.com/dominicnunez/agentos/internal/ledger"
-	"github.com/dominicnunez/agentos/internal/projections"
 	"github.com/dominicnunez/agentos/internal/secrets"
 )
 
@@ -55,10 +53,10 @@ func TestV1SafetyServicesEnforceAndRecordContracts(t *testing.T) {
 	}
 
 	lease := core.CapabilityLease{
-		ID: "lease-1", ActorID: "actor-1", ActorKind: core.PrincipalAgent, OriginTaskID: "task-1",
+		ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1",
 		Action: "send", Resource: "customer-1", Scope: "org-1",
 	}
-	trace := authority.Check(now, "actor-1", core.PrincipalAgent, "task-1", "send", "customer-1", "org-1", []core.CapabilityLease{lease}, false)
+	trace := authority.Check(now, "actor-1", "task-1", "send", "customer-1", "org-1", []core.CapabilityLease{lease}, false)
 	if !trace.Allowed || trace.LeaseID != lease.ID {
 		t.Fatalf("expected exact capability lease to authorize action: %+v", trace)
 	}
@@ -66,35 +64,16 @@ func TestV1SafetyServicesEnforceAndRecordContracts(t *testing.T) {
 		t.Fatalf("persist capability lease: %v", err)
 	}
 
-	gateway := events.NewGateway(l)
-	organizationEvent, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
-		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup-org-1"},
-		ProjectionKind: "organization", RecordID: "org-1", Version: 1,
-		Value: core.Organization{ID: "org-1", Name: "Safety Test", PolicyVersion: "policy-1", CreatedAt: now},
-	})
-	if err != nil {
-		t.Fatalf("persist knowledge parent organization: %v", err)
-	}
 	record := core.KnowledgeRecord{
-		KnowledgeID: "knowledge-1", OrganizationID: "org-1", Version: 1, Type: core.KnowledgeLesson,
-		Scope: core.KnowledgeScopeOrganization, ScopeID: "org-1", Status: core.KnowledgeCandidate,
-		Title: "Exact authority", Content: "Require exact authority before effects.", Basis: core.KnowledgeBasisHumanInput,
-		ProvenanceEventRefs: []string{organizationEvent.EventID}, CreatedBy: "runtime", CreatedByKind: core.PrincipalRuntime,
-		CreatedAt: time.Now().UTC(), ValidationMethod: core.KnowledgeValidationUnvalidated,
+		KnowledgeID: "knowledge-1", Version: 1, Type: "LESSON", Scope: "ORGANIZATION",
+		Status: core.KnowledgeCandidate, Content: "Require exact authority before effects.",
+		ProvenanceEventRefs: []string{"source-event-1"}, CreatedBy: "human-1", CreatedAt: now,
 	}
-	knowledgeStore := knowledge.New(gateway)
-	if _, err := knowledgeStore.Propose(ctx, record); err != nil {
+	knowledgeStore := knowledge.New(l)
+	if err := knowledgeStore.Propose(ctx, record); err != nil {
 		t.Fatalf("propose versioned knowledge: %v", err)
 	}
-	snapshot, err := projections.New(gateway).Rebuild(ctx)
-	if err != nil {
-		t.Fatalf("rebuild versioned knowledge: %v", err)
-	}
-	rebuilt, found := snapshot.Knowledge[record.KnowledgeID]
-	if !found || rebuilt.Version != 1 || rebuilt.Value.Status != core.KnowledgeCandidate {
-		t.Fatalf("rebuild lost candidate knowledge: %+v", rebuilt)
-	}
-	matches, err := knowledgeStore.Search(ctx, "org-1", core.KnowledgeScopeOrganization, "org-1", "authority", 10)
+	matches, err := knowledgeStore.Search(ctx, "ORGANIZATION", "authority")
 	if err != nil {
 		t.Fatalf("search versioned knowledge: %v", err)
 	}
@@ -105,7 +84,7 @@ func TestV1SafetyServicesEnforceAndRecordContracts(t *testing.T) {
 	expiresAt := now.Add(time.Hour)
 	approvalService := approvals.New(l, conformanceNotifier{}, approvals.StaticAuthorizer{{OrganizationID: "org-1", HumanID: "human-1", Boundary: core.BoundaryPublicExternal, Risk: "HIGH"}})
 	obligation := core.EffectObligation{
-		ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", ActorKind: core.PrincipalAgent, Action: "send", Resource: "customer-1", Scope: "org-1",
+		ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", Action: "send", Resource: "customer-1", Scope: "org-1",
 		ConsequenceBoundary: core.BoundaryPublicExternal,
 		Descriptor:          "send greeting", AuthorizationRefs: []string{"lease-1"},
 		ApprovalRef: "approval-1", IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"body": "hello"},

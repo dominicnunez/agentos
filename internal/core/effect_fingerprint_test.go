@@ -4,7 +4,7 @@ import "testing"
 
 func TestEffectFingerprintBindsEveryImmutableEffectField(t *testing.T) {
 	base := EffectObligation{
-		ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", ActorKind: PrincipalAgent,
+		ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1",
 		Action: "send", Resource: "customer-1", Scope: "org-1", ConsequenceBoundary: BoundaryPublicExternal,
 		Descriptor: "send exact message", AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1",
 		IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"body": "hello", "format": "plain"},
@@ -18,7 +18,6 @@ func TestEffectFingerprintBindsEveryImmutableEffectField(t *testing.T) {
 		"organization":            func(effect *EffectObligation) { effect.OrganizationID = "org-2" },
 		"task":                    func(effect *EffectObligation) { effect.TaskID = "task-2" },
 		"actor":                   func(effect *EffectObligation) { effect.ActorID = "actor-2" },
-		"actor kind":              func(effect *EffectObligation) { effect.ActorKind = PrincipalExternalAgent },
 		"action":                  func(effect *EffectObligation) { effect.Action = "publish" },
 		"resource":                func(effect *EffectObligation) { effect.Resource = "customer-2" },
 		"scope":                   func(effect *EffectObligation) { effect.Scope = "expanded" },

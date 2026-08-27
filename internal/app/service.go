@@ -2743,21 +2743,12 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		if remediation {
 			mode = "BLOCKED_DEPENDENCY_REMEDIATION"
 		}
-		inputEventRefs := append([]string(nil), dependencyRefs...)
-		if hasRevision {
-			inputEventRefs = append(inputEventRefs, revisionEvent.EventID)
-		}
 		var executionInput string
-		var knowledgeSelections []events.KnowledgeSelection
-		validateInput := func(selection events.ExecutionStartSelection) (core.ExecutionContextManifest, error) {
-			inboxBatches = inboxBatchesFromSelections(selection.Inbox)
-			knowledgeSelections = append([]events.KnowledgeSelection(nil), selection.Knowledge...)
+		validateInput := func(selections []events.InboxSelection) error {
+			inboxBatches = inboxBatchesFromSelections(selections)
 			inputContext := core.AgentExecutionInputContext{
 				Blueprint: selected.Blueprint, Task: task, Strategy: strategy,
 				DependencyResults: dependencyResults, BlockedDependencies: blockedDependencies,
-			}
-			for _, selectedKnowledge := range knowledgeSelections {
-				inputContext.Knowledge = append(inputContext.Knowledge, selectedKnowledge.Record)
 			}
 			for _, event := range sortedInboxEvents(inboxBatches) {
 				inputContext.InboxEvents = append(inputContext.InboxEvents, core.AgentExecutionInboxEvent{
@@ -2772,44 +2763,9 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 				}
 			}
 			executionTask, executionInput, err = core.MaterializeAgentExecutionInput(inputContext)
-			if err != nil {
-				return core.ExecutionContextManifest{}, err
-			}
-			inboxRefs := inboxEventRefs(inboxBatches)
-			eventRefs := append([]string(nil), strategyEventRefs...)
-			eventRefs = append(eventRefs, inboxRefs...)
-			eventRefs = append(eventRefs, inputEventRefs...)
-			knowledgeRefs := make([]core.VersionedRef, 0, len(knowledgeSelections))
-			for _, selectedKnowledge := range knowledgeSelections {
-				knowledgeRefs = append(knowledgeRefs, core.VersionedRef{
-					ID: string(selectedKnowledge.Record.KnowledgeID), Version: strconv.Itoa(selectedKnowledge.Record.Version), MaterializationState: core.MaterializedFull,
-				})
-			}
-			manifest = core.ExecutionContextManifest{
-				ExecutionID:             executionID,
-				AgentID:                 task.AssigneeID,
-				AgentBlueprintVersion:   selected.Blueprint.Version,
-				ExecutionProfileVersion: selected.ExecutionProfile.Version,
-				RuntimeAdapter:          task.AgentConfig.RuntimeAdapter,
-				Provider:                selected.ExecutionProfile.ModelProvider,
-				Model:                   selected.ExecutionProfile.Model,
-				TaskID:                  task.ID,
-				TaskContractVersion:     task.TaskContractVersion,
-				PromptVersion:           selected.ExecutionProfile.PromptVersion,
-				PolicyVersion:           "v1",
-				EventRefs:               eventRefs,
-				KnowledgeRefs:           knowledgeRefs,
-				SkillRefs:               []core.VersionedRef{},
-				ToolDefinitions:         []core.VersionedRef{},
-				ArtifactRefs:            []core.VersionedRef{},
-				AdditionalContextRefs:   strategyContextRefs,
-				ContextBuilderVersion:   "v2",
-				CreatedAt:               selection.Started.CreatedAt,
-			}
-			manifest.ExecutionInputSHA256 = core.FingerprintExecutionInput(executionInput)
-			return manifest, nil
+			return err
 		}
-		_, _, err = s.state.StartAgentExecution(ctx, organizationID, state.CorrelationID, state.Version+1, task, mode, inputEventRefs, strategyEventRefs, strategyContextRefs, actionBoundaryRoutes(snapshot, task), validateInput)
+		_, _, err = s.state.StartAgentExecution(ctx, organizationID, state.CorrelationID, state.Version+1, task, mode, strategyEventRefs, strategyContextRefs, actionBoundaryRoutes(snapshot, task), validateInput)
 		if err != nil {
 			if errors.Is(err, events.ErrStrategicContextChanged) {
 				if failErr := s.failStrategicTask(ctx, organizationID, state); failErr != nil {
@@ -2826,6 +2782,38 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 				return taskRun{}, nil
 			}
 			return taskRun{}, fmt.Errorf("persist Agent execution start and inbox boundary for task %s: %w", task.ID, err)
+		}
+		inboxRefs := inboxEventRefs(inboxBatches)
+		eventRefs := append([]string(nil), strategyEventRefs...)
+		eventRefs = append(eventRefs, inboxRefs...)
+		eventRefs = append(eventRefs, dependencyRefs...)
+		if hasRevision {
+			eventRefs = append(eventRefs, revisionEvent.EventID)
+		}
+		manifest = core.ExecutionContextManifest{
+			ExecutionID:             executionID,
+			AgentID:                 task.AssigneeID,
+			AgentBlueprintVersion:   selected.Blueprint.Version,
+			ExecutionProfileVersion: selected.ExecutionProfile.Version,
+			RuntimeAdapter:          task.AgentConfig.RuntimeAdapter,
+			Provider:                selected.ExecutionProfile.ModelProvider,
+			Model:                   selected.ExecutionProfile.Model,
+			TaskID:                  task.ID,
+			TaskContractVersion:     task.TaskContractVersion,
+			PromptVersion:           selected.ExecutionProfile.PromptVersion,
+			PolicyVersion:           "v1",
+			EventRefs:               eventRefs,
+			KnowledgeRefs:           []core.VersionedRef{},
+			SkillRefs:               []core.VersionedRef{},
+			ToolDefinitions:         []core.VersionedRef{},
+			ArtifactRefs:            []core.VersionedRef{},
+			AdditionalContextRefs:   strategyContextRefs,
+			ContextBuilderVersion:   "v1",
+		}
+		manifest.ExecutionInputSHA256 = core.FingerprintExecutionInput(executionInput)
+		manifest.CreatedAt = time.Now().UTC()
+		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "EXECUTION_CONTEXT_MANIFESTED", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: manifest, CorrelationID: state.CorrelationID}); err != nil {
+			return taskRun{}, fmt.Errorf("persist execution context for task %s: %w", task.ID, err)
 		}
 	} else if _, err := s.state.StartTaskExecution(ctx, organizationID, state.CorrelationID, state.Version+1, task, "", "", strategyEventRefs, strategyContextRefs); err != nil {
 		if errors.Is(err, events.ErrStrategicContextChanged) {
