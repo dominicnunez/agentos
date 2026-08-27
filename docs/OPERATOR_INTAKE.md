@@ -117,6 +117,8 @@ The initial views are:
   inspect its narrow Task view.
 - Approvals: inspect the exact prepared effect and approve or deny it.
 - Reviews: judge exact candidate results and completion evidence.
+- Governance: inspect deterministic runtime findings backed by exact Event
+  Contract references and the verified ledger head.
 - System: inspect the dashboard session and use the read-only `agentos doctor`
   report.
 

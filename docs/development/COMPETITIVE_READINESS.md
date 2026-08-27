@@ -24,6 +24,7 @@ Agent OS is a different implementation shape: one governed runtime owns durable 
 | Multi-provider operator experience | Codex subscription and OpenAI API paths | Five AI CLIs | High after provider requirements |
 | Bilingual documentation | i18n-ready direction only | English and Chinese docs | Medium |
 | ISO/IEC 42001 evidence program | Readiness register started | ISO positioned as anchor; compliance plane planned | Critical |
+| Governance-specific inspection | Deterministic runtime rules over tenant-scoped, chain-verified Event Contracts; local read-only dashboard report | Inspect provides a generic static workspace rule host | High |
 
 ## Product rules
 
@@ -35,6 +36,7 @@ Agent OS is a different implementation shape: one governed runtime owns durable 
 ## Near-term competitive path
 
 1. Validate the five-minute governed workflow on a clean user-mode Linux installation after the provider live-test approvals are satisfied.
-2. Add AIMS inventory/evidence export and operator-owned management records.
+2. Extend the shipped AIMS inventory and governance inspection with
+   operator-owned management records.
 3. Add keyless/managed-secret provider adapters behind current credential and policy boundaries.
 4. Validate the installed Linux binary, quickstart, backup/restore, and full dashboard workflow before any Agent OS release decision.

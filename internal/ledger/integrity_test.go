@@ -147,3 +147,40 @@ func TestVerifiedReplayEventsUsesOneTenantScopedIntegritySnapshot(t *testing.T) 
 		t.Fatalf("tampered replay error=%v", err)
 	}
 }
+
+func TestVerifiedOrganizationEventsUsesOneBoundedTenantIntegritySnapshot(t *testing.T) {
+	ctx := t.Context()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	for _, draft := range []events.TrustedDraft{
+		{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "work-1", Payload: map[string]int{"step": 1}},
+		{OrganizationID: "org-2", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "work-other", Payload: map[string]int{"step": 2}},
+		{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "work-2", Payload: map[string]int{"step": 3}},
+	} {
+		if _, err := store.Append(ctx, draft); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := store.VerifiedOrganizationEvents(ctx, "org-1", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.OrganizationID != "org-1" || snapshot.CorrelationID != "" || snapshot.Algorithm != EventIntegrityAlgorithm || snapshot.LedgerEvents != 3 || snapshot.LedgerSequence != 3 || snapshot.LedgerSHA256 == "" || len(snapshot.Events) != 2 || snapshot.Events[0].Sequence != 1 || snapshot.Events[1].Sequence != 3 {
+		t.Fatalf("verified organization snapshot=%+v", snapshot)
+	}
+	if _, err := store.VerifiedOrganizationEvents(ctx, "org-1", 1); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("unbounded organization snapshot error=%v", err)
+	}
+	if _, err := store.VerifiedOrganizationEvents(ctx, "", 2); err == nil {
+		t.Fatal("tenantless organization snapshot was accepted")
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE events SET payload='{"step":99}' WHERE sequence=1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.VerifiedOrganizationEvents(ctx, "org-1", 2); err == nil || !strings.Contains(err.Error(), "integrity hash does not match") {
+		t.Fatalf("tampered organization snapshot error=%v", err)
+	}
+}

@@ -97,3 +97,28 @@ export type OrganizationSnapshot = {
   teams: { id: string; name: string; mission?: string; member_agent_ids: string[]; status: string; version: number; created_at: string }[];
   agents: { id: string; role: string; status: string; blueprint_status: string; execution_profile_status: string; available: boolean; runtime_adapter: string; model_provider: string; model: string; version: number }[];
 };
+
+export type GovernanceFinding = {
+  id: string;
+  rule_id: string;
+  severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
+  category: string;
+  scope_kind: string;
+  scope_id: string;
+  message: string;
+  evidence_refs: string[];
+  status: string;
+  observed_at: string;
+};
+
+export type GovernanceInspection = {
+  schema_version: string;
+  observed_at: string;
+  organization_id: string;
+  boundary: { assessment: string; certified: false; authority: string };
+  integrity: { algorithm: string; verification: string; ledger_events: number; ledger_sequence: number; ledger_event_id: string; ledger_sha256: string };
+  rules: { id: string; category: string; severity: string; title: string; description: string }[];
+  findings: GovernanceFinding[];
+  summary: { rules_executed: number; findings: number; critical: number; high: number; medium: number; low: number };
+  sha256: string;
+};

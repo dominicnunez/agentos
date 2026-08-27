@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/dominicnunez/agentos/internal/core"
@@ -92,6 +93,9 @@ type ResultPublishedPayload struct {
 	ArtifactRefs []string `json:"artifact_refs,omitempty"`
 }
 
+// EvidencePublishedPayload is the closed Agent-authored evidence contract.
+// Its summary is an untrusted claim; artifact references only identify
+// separately governed evidence and grant no authority.
 type EvidencePublishedPayload struct {
 	Summary      string   `json:"summary"`
 	ArtifactRefs []string `json:"artifact_refs"`
@@ -137,6 +141,46 @@ func ValidateAgentEvidencePublished(event Event, task core.Task, taskVersion int
 		return fmt.Errorf("published Agent evidence lacks exact dispatch admission: %w", err)
 	}
 	return nil
+}
+
+const KnowledgeJudgmentValidated = "VALIDATED"
+
+// KnowledgeJudgmentPayload is the closed statement contract for one exact
+// candidate revision. CapabilityCheckEventID authorizes this statement but is
+// not itself the judgment.
+type KnowledgeJudgmentPayload struct {
+	KnowledgeID            core.ID  `json:"knowledge_id"`
+	CandidateVersion       int      `json:"candidate_version"`
+	Decision               string   `json:"decision"`
+	Statement              string   `json:"statement"`
+	CapabilityCheckEventID string   `json:"capability_check_event_id"`
+	SourcePrincipalID      string   `json:"source_principal_id"`
+	SourcePrincipalKind    string   `json:"source_principal_kind"`
+	SourceChannel          string   `json:"source_channel"`
+	ArtifactRefs           []string `json:"artifact_refs"`
+}
+
+// KnowledgeDeterministicValidationPayload binds a registered deterministic
+// outcome from an admitted execution to one exact candidate revision.
+type KnowledgeDeterministicValidationPayload struct {
+	KnowledgeID      core.ID  `json:"knowledge_id"`
+	CandidateVersion int      `json:"candidate_version"`
+	OutcomeEventRef  string   `json:"outcome_event_ref"`
+	ArtifactRefs     []string `json:"artifact_refs"`
+}
+
+// KnowledgeProposedPayload is the closed Agent-authored proposal contract.
+// Optional fields remain optional at publication, but creator attribution may
+// require them to bind the proposal to an exact curated candidate.
+type KnowledgeProposedPayload struct {
+	KnowledgeID          *core.ID             `json:"knowledge_id,omitempty"`
+	KnowledgeType        core.KnowledgeType   `json:"knowledge_type"`
+	Title                *string              `json:"title,omitempty"`
+	Content              string               `json:"content"`
+	BasisType            *core.KnowledgeBasis `json:"basis_type,omitempty"`
+	OccurrenceEventRefs  []string             `json:"occurrence_event_refs,omitempty"`
+	EvidenceArtifactRefs []string             `json:"evidence_artifact_refs,omitempty"`
+	Applicability        *string              `json:"applicability,omitempty"`
 }
 
 type CandidateCompletePayload struct {
@@ -654,6 +698,7 @@ type InboxObservationBinding struct {
 type ExecutionStartDetail struct {
 	Mode                 string                `json:"mode,omitempty"`
 	InputEventRef        string                `json:"input_event_ref,omitempty"`
+	InputEventRefs       []string              `json:"input_event_refs,omitempty"`
 	InboxCutoffSequence  int64                 `json:"inbox_cutoff_sequence"`
 	DispatchBinding      *AgentDispatchBinding `json:"dispatch_binding,omitempty"`
 	StrategicEventRefs   []string              `json:"strategic_event_refs,omitempty"`
@@ -692,7 +737,31 @@ type InboxSelection struct {
 	Events []Event
 }
 
-type ExecutionStartValidator func([]InboxSelection) error
+// KnowledgeSelection is an exact ACTIVE knowledge revision selected inside
+// the execution-start transaction. The record is untrusted work context and
+// cannot grant authority, approval, capability, or effect permission.
+type KnowledgeSelection struct {
+	Record core.KnowledgeRecord
+}
+
+// CurrentKnowledgeRevision is one exact current event-coupled knowledge
+// projection selected inside the execution-start transaction.
+type CurrentKnowledgeRevision struct {
+	Record            core.KnowledgeRecord
+	AdmissionSequence int64
+	EventType         string
+}
+
+type ExecutionStartSelection struct {
+	Started   Event
+	Inbox     []InboxSelection
+	Knowledge []KnowledgeSelection
+}
+
+// ExecutionStartValidator materializes the exact Agent input selected inside
+// the execution-start transaction. Its manifest is admitted in that same
+// transaction; returning an error persists neither boundary.
+type ExecutionStartValidator func(ExecutionStartSelection) (core.ExecutionContextManifest, error)
 
 type WorkCompletionBinding struct {
 	OrganizationID    string
@@ -1526,8 +1595,8 @@ func completionExecutionModel(binding WorkCompletionBinding, task core.Task, exe
 	profile, profileFound := binding.ExecutionProfiles[config.ProfileID]
 	_, createdOffset := manifest.CreatedAt.Zone()
 	if found.EventID == "" || !profileFound || profile.ID != config.ProfileID || profile.OrganizationID != core.ID(binding.OrganizationID) || profile.Version != config.ProfileVersion ||
-		manifest.ExecutionID != core.ID(executionID) || manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID || manifest.AgentBlueprintVersion != config.BlueprintVersion || manifest.ExecutionProfileVersion != profile.Version || manifest.RuntimeAdapter != config.RuntimeAdapter || manifest.Provider != profile.ModelProvider || manifest.Model != profile.Model || manifest.TaskContractVersion != task.TaskContractVersion || manifest.PromptVersion != profile.PromptVersion || manifest.PolicyVersion != "v1" || manifest.ContextBuilderVersion != "v1" || manifest.CreatedAt.IsZero() || createdOffset != 0 ||
-		len(manifest.KnowledgeRefs) != 0 || len(manifest.SkillRefs) != 0 || len(manifest.ToolDefinitions) != 0 || len(manifest.ArtifactRefs) != 0 || !validSHA256(manifest.ExecutionInputSHA256) {
+		manifest.ExecutionID != core.ID(executionID) || manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID || manifest.AgentBlueprintVersion != config.BlueprintVersion || manifest.ExecutionProfileVersion != profile.Version || manifest.RuntimeAdapter != config.RuntimeAdapter || manifest.Provider != profile.ModelProvider || manifest.Model != profile.Model || manifest.TaskContractVersion != task.TaskContractVersion || manifest.PromptVersion != profile.PromptVersion || manifest.PolicyVersion != "v1" || !validExecutionContextBuilderVersion(manifest.ContextBuilderVersion) || manifest.CreatedAt.IsZero() || createdOffset != 0 ||
+		len(manifest.SkillRefs) != 0 || len(manifest.ToolDefinitions) != 0 || len(manifest.ArtifactRefs) != 0 || !validSHA256(manifest.ExecutionInputSHA256) {
 		return executionModel{}, fmt.Errorf("work completion Agent manifest does not match its immutable Task")
 	}
 	expectedInput, err := expectedAgentExecutionInput(binding, task, startEvent, found, manifest, stream)
@@ -1552,6 +1621,24 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 	if !slices.Equal(manifest.AdditionalContextRefs, strategyContextRefs) {
 		return "", fmt.Errorf("execution manifest does not bind the planned strategic context")
 	}
+	var knowledge []core.KnowledgeRecord
+	switch manifest.ContextBuilderVersion {
+	case "v1":
+		if len(manifest.KnowledgeRefs) != 0 {
+			return "", fmt.Errorf("version 1 execution manifest contains knowledge references")
+		}
+	case "v2":
+		knowledgeRefs, selected, err := executionKnowledge(binding, task, startEvent, stream)
+		if err != nil {
+			return "", err
+		}
+		if !slices.Equal(manifest.KnowledgeRefs, knowledgeRefs) {
+			return "", fmt.Errorf("execution knowledge references do not match durable runtime selection")
+		}
+		knowledge = selected
+	default:
+		return "", fmt.Errorf("execution context builder version is unsupported")
+	}
 	dependencyRefs, dependencies, err := executionDependencies(binding, task, manifestEvent, stream)
 	if err != nil {
 		return "", err
@@ -1574,9 +1661,29 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 		return "", fmt.Errorf("execution context references do not match durable runtime selection")
 	}
 	_, input, err := core.MaterializeAgentExecutionInput(core.AgentExecutionInputContext{
-		Blueprint: blueprint, Task: task, Strategy: strategy, DependencyResults: dependencies, InboxEvents: inbox, Revision: revision,
+		Blueprint: blueprint, Task: task, Strategy: strategy, Knowledge: knowledge, DependencyResults: dependencies, InboxEvents: inbox, Revision: revision,
 	})
 	return input, err
+}
+
+func validExecutionContextBuilderVersion(version string) bool {
+	return version == "v1" || version == "v2"
+}
+
+func executionKnowledge(binding WorkCompletionBinding, task core.Task, startEvent Event, stream []Event) ([]core.VersionedRef, []core.KnowledgeRecord, error) {
+	selected, err := ResolveExecutionKnowledge(binding.OrganizationID, task, startEvent.Sequence, binding.TeamRevisions, stream)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve execution knowledge: %w", err)
+	}
+	refs := make([]core.VersionedRef, 0, len(selected))
+	records := make([]core.KnowledgeRecord, 0, len(selected))
+	for _, selection := range selected {
+		refs = append(refs, core.VersionedRef{
+			ID: string(selection.Record.KnowledgeID), Version: strconv.Itoa(selection.Record.Version), MaterializationState: core.MaterializedFull,
+		})
+		records = append(records, selection.Record)
+	}
+	return refs, records, nil
 }
 
 func executionStrategicContext(binding WorkCompletionBinding, startEvent Event, stream []Event) (*core.StrategicContext, []string, []core.VersionedRef, error) {
@@ -1894,6 +2001,191 @@ func AgentExecutionRoutes(teamRevisions map[core.ID][]TeamRevisionBinding, task 
 	return routes
 }
 
+const (
+	maximumExecutionKnowledgeRecords = 16
+	maximumExecutionKnowledgeBytes   = 96 << 10
+)
+
+type executionKnowledgeRevision struct {
+	record   core.KnowledgeRecord
+	sequence int64
+}
+
+// ResolveExecutionKnowledge deterministically reconstructs the exact current
+// ACTIVE knowledge visible to an Agent immediately before execution start.
+// It uses only sealed projection Event Contracts and admits knowledge from the
+// Organization, assigned Agent, and Teams that contained that Agent at the
+// start boundary. Selection is bounded and requires task-text relevance.
+func ResolveExecutionKnowledge(organizationID string, task core.Task, startSequence int64, teamRevisions map[core.ID][]TeamRevisionBinding, stream []Event) ([]KnowledgeSelection, error) {
+	if organizationID == "" || task.ExecutionKind != core.ExecutionAgent || task.AssigneeID == "" || startSequence < 1 {
+		return nil, fmt.Errorf("complete Agent execution knowledge boundary is required")
+	}
+	history := make(map[core.ID]executionKnowledgeRevision)
+	for _, event := range stream {
+		if event.Sequence >= startSequence || event.OrganizationID != organizationID {
+			continue
+		}
+		payload, present, err := AdmittedProjection(event)
+		if err != nil {
+			return nil, fmt.Errorf("execution knowledge projection is invalid: %w", err)
+		}
+		if !present || payload.Projection.ProjectionKind != "knowledge" {
+			continue
+		}
+		var record core.KnowledgeRecord
+		if decodeExactEventJSON(payload.Projection.Value, &record) != nil || record.KnowledgeID != core.ID(payload.Projection.RecordID) ||
+			record.Version != payload.Projection.Version || string(record.OrganizationID) != organizationID ||
+			core.ValidateKnowledgeProjectionTarget(event.EventType, payload.Projection.Version, record) != nil {
+			return nil, fmt.Errorf("execution knowledge revision is invalid")
+		}
+		previous, found := history[record.KnowledgeID]
+		if !found {
+			if record.Version != 1 {
+				return nil, fmt.Errorf("execution knowledge history is incomplete")
+			}
+		} else if previous.sequence >= event.Sequence || core.ValidateKnowledgeTransition(event.EventType, previous.record, record) != nil {
+			return nil, fmt.Errorf("execution knowledge history is noncontiguous")
+		}
+		history[record.KnowledgeID] = executionKnowledgeRevision{record: record, sequence: event.Sequence}
+	}
+
+	return selectExecutionKnowledge(organizationID, task, startSequence, teamRevisions, history)
+}
+
+// SelectCurrentExecutionKnowledge applies the same deterministic selection to
+// exact current projection revisions. It avoids replaying a tenant's lifetime
+// knowledge history during every execution start; full replay remains the
+// completion and recovery proof boundary.
+func SelectCurrentExecutionKnowledge(organizationID string, task core.Task, startSequence int64, teamRevisions map[core.ID][]TeamRevisionBinding, revisions []CurrentKnowledgeRevision) ([]KnowledgeSelection, error) {
+	if organizationID == "" || task.ExecutionKind != core.ExecutionAgent || task.AssigneeID == "" || startSequence < 1 {
+		return nil, fmt.Errorf("complete Agent execution knowledge boundary is required")
+	}
+	history := make(map[core.ID]executionKnowledgeRevision, len(revisions))
+	for _, revision := range revisions {
+		record := revision.Record
+		if revision.AdmissionSequence < 1 || revision.AdmissionSequence >= startSequence || !core.ValidKnowledgeRecord(record) ||
+			record.KnowledgeID == "" || string(record.OrganizationID) != organizationID ||
+			core.ValidateKnowledgeProjectionTarget(revision.EventType, record.Version, record) != nil {
+			return nil, fmt.Errorf("current execution knowledge revision is invalid")
+		}
+		if _, duplicate := history[record.KnowledgeID]; duplicate {
+			return nil, fmt.Errorf("current execution knowledge identity is duplicated")
+		}
+		history[record.KnowledgeID] = executionKnowledgeRevision{record: record, sequence: revision.AdmissionSequence}
+	}
+	return selectExecutionKnowledge(organizationID, task, startSequence, teamRevisions, history)
+}
+
+func selectExecutionKnowledge(organizationID string, task core.Task, startSequence int64, teamRevisions map[core.ID][]TeamRevisionBinding, history map[core.ID]executionKnowledgeRevision) ([]KnowledgeSelection, error) {
+	candidates := make([]executionKnowledgeRevision, 0, len(history))
+	lineageMemo := make(map[core.ID]bool, len(history))
+	for _, revision := range history {
+		if revision.record.Status != core.KnowledgeActive || !executionKnowledgeScopeAllowed(organizationID, task, startSequence, teamRevisions, revision.record) ||
+			!executionKnowledgeLineageActive(revision.record.KnowledgeID, history, make(map[core.ID]struct{}), lineageMemo) || !executionKnowledgeRelevant(task, revision.record) {
+			continue
+		}
+		candidates = append(candidates, revision)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].sequence == candidates[j].sequence {
+			return candidates[i].record.KnowledgeID < candidates[j].record.KnowledgeID
+		}
+		return candidates[i].sequence > candidates[j].sequence
+	})
+	selected := make([]KnowledgeSelection, 0, min(len(candidates), maximumExecutionKnowledgeRecords))
+	materializedBytes := 2 // JSON array delimiters.
+	for _, candidate := range candidates {
+		body, err := json.Marshal(candidate.record)
+		if err != nil {
+			return nil, fmt.Errorf("encode execution knowledge: %w", err)
+		}
+		separatorBytes := 0
+		if len(selected) > 0 {
+			separatorBytes = 1
+		}
+		if materializedBytes+separatorBytes+len(body) > maximumExecutionKnowledgeBytes {
+			continue
+		}
+		selected = append(selected, KnowledgeSelection{Record: candidate.record})
+		materializedBytes += separatorBytes + len(body)
+		if len(selected) == maximumExecutionKnowledgeRecords {
+			break
+		}
+	}
+	return selected, nil
+}
+
+func executionKnowledgeLineageActive(knowledgeID core.ID, history map[core.ID]executionKnowledgeRevision, visiting map[core.ID]struct{}, memo map[core.ID]bool) bool {
+	if active, resolved := memo[knowledgeID]; resolved {
+		return active
+	}
+	revision, found := history[knowledgeID]
+	if !found || revision.record.Status != core.KnowledgeActive {
+		memo[knowledgeID] = false
+		return false
+	}
+	if _, cycle := visiting[knowledgeID]; cycle {
+		memo[knowledgeID] = false
+		return false
+	}
+	visiting[knowledgeID] = struct{}{}
+	defer delete(visiting, knowledgeID)
+	for _, ref := range revision.record.DerivedKnowledgeRefs {
+		version, err := strconv.Atoi(ref.Version)
+		source, sourceFound := history[core.ID(ref.ID)]
+		if err != nil || !sourceFound || source.record.Version != version || source.record.Status != core.KnowledgeActive ||
+			!executionKnowledgeLineageActive(source.record.KnowledgeID, history, visiting, memo) {
+			memo[knowledgeID] = false
+			return false
+		}
+	}
+	memo[knowledgeID] = true
+	return true
+}
+
+func executionKnowledgeScopeAllowed(organizationID string, task core.Task, startSequence int64, teamRevisions map[core.ID][]TeamRevisionBinding, record core.KnowledgeRecord) bool {
+	switch record.Scope {
+	case core.KnowledgeScopeOrganization:
+		return record.ScopeID == core.ID(organizationID)
+	case core.KnowledgeScopeAgent:
+		return record.ScopeID == task.AssigneeID
+	case core.KnowledgeScopeTeam:
+		return ExecutionRecipientAllowed(teamRevisions, task, startSequence, RecipientTeam, string(record.ScopeID))
+	default:
+		return false
+	}
+}
+
+func executionKnowledgeRelevant(task core.Task, record core.KnowledgeRecord) bool {
+	query := executionKnowledgeTokens(task.Description + " " + task.ExecutionBrief)
+	haystack := executionKnowledgeTokens(record.Title + " " + record.Content + " " + record.Applicability + " " + strings.Join(record.Tags, " "))
+	for token := range query {
+		if _, found := haystack[token]; found {
+			return true
+		}
+	}
+	return false
+}
+
+func executionKnowledgeTokens(value string) map[string]struct{} {
+	result := make(map[string]struct{})
+	for _, token := range strings.FieldsFunc(strings.ToLower(value), func(value rune) bool { return !unicode.IsLetter(value) && !unicode.IsNumber(value) }) {
+		if len(token) >= 3 && !executionKnowledgeStopword(token) {
+			result[token] = struct{}{}
+		}
+	}
+	return result
+}
+
+func executionKnowledgeStopword(value string) bool {
+	switch value {
+	case "agent", "and", "are", "but", "create", "for", "from", "has", "have", "into", "make", "not", "only", "perform", "prepare", "runtime", "task", "that", "the", "their", "then", "this", "use", "using", "was", "were", "will", "with", "work", "you", "your":
+		return true
+	default:
+		return false
+	}
+}
+
 func recipientKey(scope, id string) string {
 	return scope + "\x00" + id
 }
@@ -2058,11 +2350,14 @@ func executionStartDetail(event Event) (ExecutionStartDetail, error) {
 	var payload ProjectionEventPayload
 	var detail ExecutionStartDetail
 	var fields map[string]json.RawMessage
-	if event.EventType != "EXECUTION_STARTED" || json.Unmarshal(event.Payload, &payload) != nil || decodeExactEventJSON(payload.Detail, &detail) != nil || json.Unmarshal(payload.Detail, &fields) != nil || fields["inbox_cutoff_sequence"] == nil || fields["dispatch_binding"] == nil || detail.DispatchBinding == nil || detail.InboxCutoffSequence < 0 || detail.InboxCutoffSequence >= event.Sequence || detail.Mode != "" && detail.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" || !validStrategicStartRefs(detail.StrategicEventRefs, detail.StrategicContextRefs) {
+	if event.EventType != "EXECUTION_STARTED" || json.Unmarshal(event.Payload, &payload) != nil || decodeExactEventJSON(payload.Detail, &detail) != nil || json.Unmarshal(payload.Detail, &fields) != nil || fields["inbox_cutoff_sequence"] == nil || fields["dispatch_binding"] == nil || detail.DispatchBinding == nil || detail.InboxCutoffSequence < 0 || detail.InboxCutoffSequence >= event.Sequence || detail.Mode != "" && detail.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" || !validInputEventRefs(detail.InputEventRefs) || !validStrategicStartRefs(detail.StrategicEventRefs, detail.StrategicContextRefs) {
 		return ExecutionStartDetail{}, fmt.Errorf("agent execution-start detail is invalid")
 	}
 	expectedFields := 2
 	if detail.Mode != "" {
+		expectedFields++
+	}
+	if len(detail.InputEventRefs) != 0 {
 		expectedFields++
 	}
 	if len(detail.StrategicEventRefs) != 0 {
@@ -2078,7 +2373,7 @@ func nonAgentExecutionStartDetail(event Event, kind core.ExecutionKind) (Executi
 	var payload ProjectionEventPayload
 	var detail ExecutionStartDetail
 	var fields map[string]json.RawMessage
-	if event.EventType != "EXECUTION_STARTED" || json.Unmarshal(event.Payload, &payload) != nil || decodeExactEventJSON(payload.Detail, &detail) != nil || json.Unmarshal(payload.Detail, &fields) != nil || fields["inbox_cutoff_sequence"] == nil || detail.InboxCutoffSequence != 0 || detail.DispatchBinding != nil || !validStrategicStartRefs(detail.StrategicEventRefs, detail.StrategicContextRefs) {
+	if event.EventType != "EXECUTION_STARTED" || json.Unmarshal(event.Payload, &payload) != nil || decodeExactEventJSON(payload.Detail, &detail) != nil || json.Unmarshal(payload.Detail, &fields) != nil || fields["inbox_cutoff_sequence"] == nil || detail.InboxCutoffSequence != 0 || detail.DispatchBinding != nil || len(detail.InputEventRefs) != 0 || !validStrategicStartRefs(detail.StrategicEventRefs, detail.StrategicContextRefs) {
 		return ExecutionStartDetail{}, fmt.Errorf("non-Agent execution-start detail is invalid")
 	}
 	expectedFields := 1
@@ -2113,6 +2408,23 @@ func validStrategicStartRefs(eventRefs []string, contextRefs []core.VersionedRef
 	return len(eventRefs) == 2 && eventRefs[0] != "" && eventRefs[1] != "" && eventRefs[0] != eventRefs[1] &&
 		len(contextRefs) == 2 && contextRefs[0].ID != "" && contextRefs[0].Version != "" && contextRefs[0].MaterializationState == core.MaterializedFull &&
 		contextRefs[1].ID != "" && contextRefs[1].Version != "" && contextRefs[1].MaterializationState == core.MaterializedFull
+}
+
+func validInputEventRefs(refs []string) bool {
+	if len(refs) > 1024 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		if ref == "" {
+			return false
+		}
+		if _, duplicate := seen[ref]; duplicate {
+			return false
+		}
+		seen[ref] = struct{}{}
+	}
+	return true
 }
 
 // ValidateAgentDispatchStart proves that an execution started against the
@@ -2396,6 +2708,96 @@ type PlanningContextPayload struct {
 
 func (p ResultPublishedPayload) ValidFor(artifactRefs []string) bool {
 	return p.Summary != "" && sameStrings(p.ArtifactRefs, artifactRefs)
+}
+
+func (p KnowledgeJudgmentPayload) ValidFor(event Event, knowledgeID core.ID, candidateVersion int, capabilityCheckEventID string, artifactRefs []string) bool {
+	if p.KnowledgeID != knowledgeID || p.CandidateVersion != candidateVersion || p.Decision != KnowledgeJudgmentValidated ||
+		strings.TrimSpace(p.Statement) == "" || !utf8.ValidString(p.Statement) || len(p.Statement) > 16<<10 ||
+		p.CapabilityCheckEventID == "" || p.CapabilityCheckEventID != capabilityCheckEventID ||
+		p.SourcePrincipalID == "" || p.SourcePrincipalID != event.SourceActorID || !sameStrings(p.ArtifactRefs, artifactRefs) {
+		return false
+	}
+	switch event.EventType {
+	case "HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED":
+		return p.SourcePrincipalKind == string(core.PrincipalHuman) && p.SourceChannel == "HUMAN_DIRECT"
+	case "A2A_KNOWLEDGE_JUDGMENT_RECEIVED":
+		return p.SourcePrincipalKind == string(core.PrincipalExternalAgent) && p.SourceChannel == "A2A"
+	case "KNOWLEDGE_JUDGMENT_PUBLISHED":
+		return p.SourcePrincipalKind == string(core.PrincipalAgent) && p.SourceChannel == "INTERNAL_AGENT"
+	default:
+		return false
+	}
+}
+
+func (p KnowledgeDeterministicValidationPayload) ValidFor(knowledgeID core.ID, candidateVersion int, artifactRefs []string) bool {
+	return p.KnowledgeID == knowledgeID && p.CandidateVersion == candidateVersion && p.OutcomeEventRef != "" &&
+		sameStrings(p.ArtifactRefs, artifactRefs)
+}
+
+func (p KnowledgeProposedPayload) ValidFor(artifactRefs []string) bool {
+	if strings.TrimSpace(p.Content) == "" || !utf8.ValidString(p.Content) || len(p.Content) > core.MaximumKnowledgeContentBytes ||
+		!validKnowledgeProposalType(p.KnowledgeType) || !sameStrings(p.EvidenceArtifactRefs, artifactRefs) ||
+		len(p.OccurrenceEventRefs) > core.MaximumKnowledgeReferences || len(p.EvidenceArtifactRefs) > core.MaximumKnowledgeReferences {
+		return false
+	}
+	if p.KnowledgeID != nil && !core.ValidGoalReferenceID(string(*p.KnowledgeID)) {
+		return false
+	}
+	if p.Title != nil && (strings.TrimSpace(*p.Title) == "" || !utf8.ValidString(*p.Title) || len(*p.Title) > core.MaximumKnowledgeTitleBytes) {
+		return false
+	}
+	if p.BasisType != nil && !validKnowledgeProposalBasis(*p.BasisType) {
+		return false
+	}
+	if p.Applicability != nil && (len(*p.Applicability) > core.MaximumKnowledgeApplicabilityBytes || !utf8.ValidString(*p.Applicability)) {
+		return false
+	}
+	return validUniqueEventRefs(p.OccurrenceEventRefs) && validUniqueEventRefs(p.EvidenceArtifactRefs) &&
+		(p.BasisType == nil || *p.BasisType != core.KnowledgeBasisRepeatedPattern || len(p.OccurrenceEventRefs) >= 3)
+}
+
+func decodeKnowledgeProposedPayload(payload any, target *KnowledgeProposedPayload) error {
+	if decodeExactPayload(payload, target) != nil {
+		return fmt.Errorf("knowledge proposal payload is not exact")
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return err
+	}
+	for _, name := range []string{"occurrence_event_refs", "evidence_artifact_refs"} {
+		if value, present := fields[name]; present && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return fmt.Errorf("knowledge proposal %s must be an array when present", name)
+		}
+	}
+	return nil
+}
+
+func validKnowledgeProposalType(value core.KnowledgeType) bool {
+	return value == core.KnowledgeExperience || value == core.KnowledgeLesson || value == core.KnowledgeClaim || value == core.KnowledgeProcedure
+}
+
+func validKnowledgeProposalBasis(value core.KnowledgeBasis) bool {
+	return value == core.KnowledgeBasisSingleExperience || value == core.KnowledgeBasisRepeatedPattern ||
+		value == core.KnowledgeBasisExperiment || value == core.KnowledgeBasisHumanInput ||
+		value == core.KnowledgeBasisExternalEvidence || value == core.KnowledgeBasisDerived || value == core.KnowledgeBasisMixed
+}
+
+func validUniqueEventRefs(values []string) bool {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value == "" || strings.TrimSpace(value) != value || len(value) > core.MaximumKnowledgeReferenceBytes || !utf8.ValidString(value) {
+			return false
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return false
+		}
+		seen[value] = struct{}{}
+	}
+	return true
 }
 
 type InferenceUsageRecordedPayload struct {
@@ -2692,6 +3094,7 @@ var projectionLifecycleContracts = map[string]projectionLifecycleContract{
 	"work":                    {initial: []string{"WORK_CREATED"}, revision: []string{"WORK_COMPLETED", "WORK_FAILED", "WORK_PLANNING_FAILED"}},
 	"lab_experiment":          {initial: []string{"LAB_EXPERIMENT_STARTED"}, revision: []string{"LAB_EXPERIMENT_COMPLETED", "LAB_EXPERIMENT_FAILED"}},
 	"lab_promotion_candidate": {initial: []string{"LAB_PROMOTION_CANDIDATE_CREATED"}},
+	"knowledge":               {initial: []string{"KNOWLEDGE_PROPOSED"}, revision: []string{"KNOWLEDGE_PROPOSED", "KNOWLEDGE_ACTIVATED", "KNOWLEDGE_SUPERSEDED", "KNOWLEDGE_STALE", "KNOWLEDGE_QUARANTINED"}},
 	"task": {
 		initial:  []string{"TASK_CREATED", "TASK_BLOCKED"},
 		revision: []string{"TASK_ASSIGNMENT_REVALIDATED", "TASK_BLOCKED", "TASK_RECOVERED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED"},
@@ -2720,7 +3123,7 @@ func ProjectionLifecycleEventTypes(kind string) []string {
 // the authenticated source is an Agent execution, but runtime lifecycle state
 // always requires the sealed event/record transaction.
 func RequiresProjectionAdmission(eventType, sourceActorID string) bool {
-	if eventType == "TASK_BLOCKED" && sourceActorID != "runtime" {
+	if (eventType == "TASK_BLOCKED" || eventType == "KNOWLEDGE_PROPOSED") && sourceActorID != "runtime" {
 		return false
 	}
 	for _, contract := range projectionLifecycleContracts {
@@ -2742,7 +3145,8 @@ func ProjectionKindRequiresAdmission(kind string) bool {
 // runtime-owned label and routing envelope reserved for its kind and version.
 func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload) error {
 	record := payload.Projection
-	if event.OrganizationID == "" || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.SchemaVersion != SchemaVersion {
+	if event.OrganizationID == "" || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || len(event.AuthorizationRefs) != 0 ||
+		(record.ProjectionKind != "knowledge" && len(event.ArtifactRefs) != 0) || event.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("projection event crosses its runtime-owned envelope")
 	}
 	if !validProjectionEventType(record.ProjectionKind, record.Version, event.EventType) {
@@ -2811,6 +3215,18 @@ func ValidateProjectionEventBoundary(event Event, payload ProjectionEventPayload
 			return fmt.Errorf("lab promotion-candidate projection value is invalid or lacks its correlation boundary")
 		}
 		if err := ValidatePromotionCandidateProjectionTarget(event.EventType, record.Version, candidate); err != nil {
+			return err
+		}
+	}
+	if record.ProjectionKind == "knowledge" {
+		var knowledge core.KnowledgeRecord
+		if decodeExactEventJSON(record.Value, &knowledge) != nil || knowledge.KnowledgeID != core.ID(record.RecordID) || string(knowledge.OrganizationID) != event.OrganizationID || record.CorrelationID == "" || record.CorrelationID != event.CorrelationID {
+			return fmt.Errorf("knowledge projection value is invalid or lacks its correlation boundary")
+		}
+		if !slices.Equal(event.ArtifactRefs, knowledge.EvidenceArtifactRefs) {
+			return fmt.Errorf("knowledge projection evidence does not match its event envelope")
+		}
+		if err := core.ValidateKnowledgeProjectionTarget(event.EventType, record.Version, knowledge); err != nil {
 			return err
 		}
 	}
@@ -3346,6 +3762,9 @@ type VerifiedEventSnapshot struct {
 type VerifiedReplayReader interface {
 	VerifiedReplayEvents(context.Context, string, string, int) (VerifiedEventSnapshot, error)
 }
+type VerifiedOrganizationEventReader interface {
+	VerifiedOrganizationEvents(context.Context, string, int) (VerifiedEventSnapshot, error)
+}
 type RecentEventReader interface {
 	RecentEvents(context.Context, string, string, int) ([]Event, error)
 }
@@ -3386,6 +3805,12 @@ type ExecutionStartAppender interface {
 }
 type ProjectionReader interface {
 	Records(context.Context, string, string) ([][]byte, error)
+}
+type CurrentKnowledgeReader interface {
+	CurrentKnowledgeRecords(context.Context, string, int) ([][]byte, error)
+}
+type KnowledgeAuthorityAdmissionReader interface {
+	KnowledgeAuthorityAdmissions(context.Context) ([]CapabilityLeaseAdmission, []OrganizationFreezeAdmission, error)
 }
 type IntentConfirmer interface {
 	AppendIntentConfirmation(context.Context, TrustedDraft, core.ID, core.ID) (Event, error)
@@ -3499,7 +3924,7 @@ func (g *Gateway) ReserveExternalWork(ctx context.Context, organizationID, reque
 	return allocator.ReserveExternalWork(ctx, organizationID, requestID)
 }
 
-var agentTypes = map[string]bool{"MESSAGE": true, "TASK_BLOCKED": true, "EVIDENCE_PUBLISHED": true, "RESULT_PUBLISHED": true, "CANDIDATE_COMPLETE": true, "KNOWLEDGE_PROPOSED": true, "SKILL_PROPOSED": true}
+var agentTypes = map[string]bool{"MESSAGE": true, "TASK_BLOCKED": true, "EVIDENCE_PUBLISHED": true, "RESULT_PUBLISHED": true, "CANDIDATE_COMPLETE": true, "KNOWLEDGE_PROPOSED": true, "KNOWLEDGE_JUDGMENT_PUBLISHED": true, "SKILL_PROPOSED": true}
 
 func (g *Gateway) PublishAgentDraft(ctx context.Context, organizationID, actorID, executionID, correlationID string, draft Draft) (Event, error) {
 	if !agentTypes[draft.EventType] {
@@ -3520,6 +3945,20 @@ func (g *Gateway) PublishAgentDraft(ctx context.Context, organizationID, actorID
 			draft.RecipientScope != "" || draft.RecipientID != "" || decodeExactPayload(draft.Payload, &evidence) != nil ||
 			!evidence.ValidFor(draft.ArtifactRefs) {
 			return Event{}, fmt.Errorf("evidence published draft requires a running Task execution, bounded summary, and matching non-empty artifact refs")
+		}
+	}
+	if draft.EventType == "KNOWLEDGE_PROPOSED" {
+		var proposal KnowledgeProposedPayload
+		if draft.TaskID == "" || decodeKnowledgeProposedPayload(draft.Payload, &proposal) != nil || !proposal.ValidFor(draft.ArtifactRefs) {
+			return Event{}, fmt.Errorf("knowledge proposal draft requires a canonical bounded payload and matching artifact refs")
+		}
+	}
+	if draft.EventType == "KNOWLEDGE_JUDGMENT_PUBLISHED" {
+		var judgment KnowledgeJudgmentPayload
+		judgmentEvent := Event{EventType: draft.EventType, SourceActorID: actorID}
+		if draft.TaskID == "" || decodeExactPayload(draft.Payload, &judgment) != nil || judgment.KnowledgeID == "" || judgment.CandidateVersion < 1 ||
+			!judgment.ValidFor(judgmentEvent, judgment.KnowledgeID, judgment.CandidateVersion, judgment.CapabilityCheckEventID, draft.ArtifactRefs) {
+			return Event{}, fmt.Errorf("knowledge judgment draft requires an exact candidate, authorization, statement, and matching artifact refs")
 		}
 	}
 	trusted := TrustedDraft{OrganizationID: organizationID, EventType: draft.EventType, SourceActorID: actorID, SourceExecutionID: executionID, RecipientScope: draft.RecipientScope, RecipientID: draft.RecipientID, TaskID: draft.TaskID, ArtifactRefs: draft.ArtifactRefs, Payload: draft.Payload, CorrelationID: correlationID}
@@ -3553,6 +3992,22 @@ func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event
 		var outcome core.ToolOutcome
 		if draft.TaskID == "" || draft.SourceActorID != "runtime" || draft.SourceExecutionID == "" || decodeExactPayload(draft.Payload, &outcome) != nil || !outcome.Valid() || !slices.Equal(draft.ArtifactRefs, outcome.ArtifactRefs) {
 			return Event{}, fmt.Errorf("tool outcome requires a valid runtime execution, task, and matching artifact refs")
+		}
+	case "KNOWLEDGE_VALIDATION_RECORDED":
+		var validation KnowledgeDeterministicValidationPayload
+		if draft.TaskID == "" || draft.CorrelationID == "" || draft.SourceActorID != "runtime" || draft.SourceExecutionID == "" ||
+			decodeExactPayload(draft.Payload, &validation) != nil || validation.KnowledgeID == "" || validation.CandidateVersion < 1 ||
+			validation.OutcomeEventRef == "" || !sameStrings(validation.ArtifactRefs, draft.ArtifactRefs) {
+			return Event{}, fmt.Errorf("knowledge validation requires an exact candidate and deterministic outcome reference")
+		}
+	case "HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED", "A2A_KNOWLEDGE_JUDGMENT_RECEIVED":
+		var judgment KnowledgeJudgmentPayload
+		judgmentEvent := Event{EventType: draft.EventType, SourceActorID: draft.SourceActorID}
+		if draft.TaskID == "" || draft.CorrelationID == "" || draft.SourceActorID == "" || draft.SourceExecutionID != "" ||
+			len(draft.AuthorizationRefs) != 0 || decodeExactPayload(draft.Payload, &judgment) != nil ||
+			judgment.KnowledgeID == "" || judgment.CandidateVersion < 1 ||
+			!judgment.ValidFor(judgmentEvent, judgment.KnowledgeID, judgment.CandidateVersion, judgment.CapabilityCheckEventID, draft.ArtifactRefs) {
+			return Event{}, fmt.Errorf("knowledge judgment requires an exact authenticated candidate statement")
 		}
 	case "WORK_COMPLETION_EVALUATED", "WORK_COMPLETED", "GOAL_PROGRESS_EVALUATED", "GOAL_ACHIEVED":
 		return Event{}, fmt.Errorf("terminal evidence requires its typed admission")
@@ -3656,15 +4111,15 @@ func (g *Gateway) PublishExecutionStart(ctx context.Context, draft ProjectionDra
 	}
 	switch task.ExecutionKind {
 	case core.ExecutionAgent:
-		if task.AssigneeType != "AGENT" || task.AssigneeID == "" || len(routes) < 2 || validate == nil || detail.InputEventRef != "" || detail.Mode != "" && detail.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
+		if task.AssigneeType != "AGENT" || task.AssigneeID == "" || len(routes) < 2 || validate == nil || detail.InputEventRef != "" || !validInputEventRefs(detail.InputEventRefs) || detail.Mode != "" && detail.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
 			return Event{}, nil, fmt.Errorf("agent execution-start task or inbox boundary is invalid")
 		}
 	case core.ExecutionDeterministic:
-		if len(routes) != 0 || validate != nil || detail.Mode != "" || detail.InputEventRef != "" {
+		if len(routes) != 0 || validate != nil || detail.Mode != "" || detail.InputEventRef != "" || len(detail.InputEventRefs) != 0 {
 			return Event{}, nil, fmt.Errorf("deterministic execution-start boundary is invalid")
 		}
 	case core.ExecutionHuman:
-		if len(routes) != 0 || validate != nil || detail.Mode != "OPERATOR_HUMAN_INPUT" && detail.Mode != "STRUCTURED_HUMAN_COMPLETION" || detail.InputEventRef == "" {
+		if len(routes) != 0 || validate != nil || detail.Mode != "OPERATOR_HUMAN_INPUT" && detail.Mode != "STRUCTURED_HUMAN_COMPLETION" || detail.InputEventRef == "" || len(detail.InputEventRefs) != 0 {
 			return Event{}, nil, fmt.Errorf("user execution-start boundary is invalid")
 		}
 	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
@@ -3777,6 +4232,21 @@ func (g *Gateway) ProjectionRecords(ctx context.Context, kind, id string) ([][]b
 	}
 	return store.Records(ctx, kind, id)
 }
+func (g *Gateway) CurrentKnowledgeRecords(ctx context.Context, organizationID string, limit int) ([][]byte, error) {
+	store, ok := g.ledger.(CurrentKnowledgeReader)
+	if !ok {
+		return nil, fmt.Errorf("event ledger does not support bounded current knowledge reads")
+	}
+	return store.CurrentKnowledgeRecords(ctx, organizationID, limit)
+}
+
+func (g *Gateway) KnowledgeAuthorityAdmissions(ctx context.Context) ([]CapabilityLeaseAdmission, []OrganizationFreezeAdmission, error) {
+	reader, ok := g.ledger.(KnowledgeAuthorityAdmissionReader)
+	if !ok {
+		return nil, nil, fmt.Errorf("record-backed knowledge authority admission reader is unavailable")
+	}
+	return reader.KnowledgeAuthorityAdmissions(ctx)
+}
 func (g *Gateway) Events(ctx context.Context, correlationID string) ([]Event, error) {
 	return g.ledger.Events(ctx, correlationID)
 }
@@ -3790,6 +4260,17 @@ func (g *Gateway) VerifiedReplayEvents(ctx context.Context, organizationID, corr
 		return VerifiedEventSnapshot{}, fmt.Errorf("event ledger does not support verified replay reads")
 	}
 	return reader.VerifiedReplayEvents(ctx, organizationID, correlationID, limit)
+}
+
+// VerifiedOrganizationEvents reads one bounded tenant slice and verifies the
+// complete event-integrity chain in the same database snapshot. It is an
+// observation boundary only and cannot publish events or invoke work.
+func (g *Gateway) VerifiedOrganizationEvents(ctx context.Context, organizationID string, limit int) (VerifiedEventSnapshot, error) {
+	reader, ok := g.ledger.(VerifiedOrganizationEventReader)
+	if !ok {
+		return VerifiedEventSnapshot{}, fmt.Errorf("event ledger does not support verified organization reads")
+	}
+	return reader.VerifiedOrganizationEvents(ctx, organizationID, limit)
 }
 
 // StrategyCreationEvents returns only the bounded immutable creation

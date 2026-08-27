@@ -9,6 +9,8 @@
 - [Completion review](COMPLETION_REVIEW.md) - user review of model-backed completion candidates.
 - [Planning and Task DAGs](PLANNING_AND_TASK_DAGS.md) - bounded planning, atomic graph admission, dependency evidence, and external root isolation.
 - [Governed Lab](LAB.md) - contained experiments, unverified results, and nomination-only promotion candidates.
+- [Organizational knowledge](ORGANIZATIONAL_KNOWLEDGE.md) - evidence-backed versioned learning, lifecycle controls, and retrieval boundaries.
+- [Governance inspection](GOVERNANCE_INSPECTION.md) - deterministic tenant-scoped runtime findings over chain-verified Event Contracts.
 - [SQLite recovery](SQLITE_RECOVERY.md) - backup, verification, restore, and rollback.
 - [Effect reconciliation](EFFECT_RECONCILIATION.md) - evidence-based recovery of uncertain external effects.
 - [AI management system](AI_MANAGEMENT_SYSTEM.md) - ISO/IEC 42001 readiness and the boundary between product controls and organizational conformity.
