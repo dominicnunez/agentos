@@ -1269,7 +1269,7 @@ OR (json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scop
 	records, err := admittedProjectionRecordsBounded(ctx, tx, maximumCurrentExecutionKnowledgeBytes, query, args...)
 	if err != nil {
 		if errors.Is(err, errProjectionAdmissionScanLimit) {
-			return nil, fmt.Errorf("%w: %v", core.ErrExecutionContextLimitExceeded, err)
+			return nil, fmt.Errorf("%w: %w", core.ErrExecutionContextLimitExceeded, err)
 		}
 		return nil, err
 	}
