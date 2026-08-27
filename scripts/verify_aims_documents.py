@@ -59,6 +59,7 @@ DATE_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 UNRESOLVED_MARKERS = ("TODO", "TBD", "{{", "}}", "<INSERT", "[INSERT")
 FORBIDDEN_METADATA_CLAIMS = ("CERTIFIED", "CONFORMANT")
 DISPLAYED_STATUS_PATTERN = re.compile(r"^Status: \*\*(DRAFT|APPROVED|RETIRED)\*\*$", re.MULTILINE)
+VERSIONED_ROLE_PATTERN = re.compile(r"^(?P<role>[a-z][a-z0-9.-]*)-v[1-9][0-9]*$")
 
 
 class VerificationError(ValueError):
@@ -233,6 +234,11 @@ def _validate_date(value: str, label: str) -> None:
         date.fromisoformat(value)
     except ValueError as exc:
         raise VerificationError(f"{label} must be a valid YYYY-MM-DD date") from exc
+
+
+def _document_role(document_id: str) -> str:
+    match = VERSIONED_ROLE_PATTERN.fullmatch(document_id)
+    return match.group("role") if match is not None else document_id
 
 
 def _validate_document_path(repo_root: Path, raw_path: Any, label: str) -> Path:
@@ -465,6 +471,10 @@ def verify(
             raise VerificationError(f"manifest.documents[{index}].superseded_by references an unknown document")
         if successor is not None:
             successor_document = documents_by_id[successor]
+            if _document_role(document["id"]) != _document_role(successor):
+                raise VerificationError(
+                    f"manifest.documents[{index}].superseded_by must preserve the governance-record role"
+                )
             if successor_document["status"] not in {"APPROVED", "RETIRED"}:
                 raise VerificationError(
                     f"manifest.documents[{index}].superseded_by must identify a governed successor"

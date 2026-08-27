@@ -554,6 +554,41 @@ class VerifyAIMSDocumentsTest(unittest.TestCase):
         manifest = {"schema_version": 1, "documents": records}
         self.assert_rejected(manifest, "is not owned by this successor")
 
+    def test_rejects_successor_from_different_governance_record_role(self) -> None:
+        records: list[dict[str, object]] = []
+        specifications = (
+            ("aims.ai-policy", "policy.md", "RETIRED", [], "aims.audit-result"),
+            ("aims.audit-result", "audit.md", "APPROVED", ["aims.ai-policy"], None),
+        )
+        for document_id, filename, status, supersedes, superseded_by in specifications:
+            path = self.records / filename
+            path.write_text(
+                f"# Record\n\nStatus: **{status}**\n\nControlled.\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            records.append(
+                {
+                    "id": document_id,
+                    "path": f"governance/aims/records/{filename}",
+                    "version": "1.0",
+                    "status": status,
+                    "owner": "project-leadership",
+                    "classification": "PUBLIC",
+                    "approval_ref": f"decision-{document_id}",
+                    "approved_by": "project-owner",
+                    "approved_at": "2026-08-27T12:00:00Z",
+                    "review_due": "2027-08-27",
+                    "supersedes": supersedes,
+                    "superseded_by": superseded_by,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            )
+        self.assert_rejected(
+            {"schema_version": 1, "documents": records},
+            "preserve the governance-record role",
+        )
+
     def test_accepts_multi_generation_successor_chain(self) -> None:
         records: list[dict[str, object]] = []
         specifications = (

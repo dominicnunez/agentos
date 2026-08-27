@@ -19,6 +19,7 @@ from scripts.build_aims_assessment_bundle import (
     REQUIRED_APPROVED_DOCUMENTS,
     _git,
     _git_aims_entries,
+    _verify_governed_commit_order,
     _verified_commit_at,
     _verify_aims_history,
     _verify_captured_aims_snapshot,
@@ -477,6 +478,15 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
                 _verified_commit_at(
                     self.root, "a" * 40, datetime(2026, 8, 27, 12)
                 )
+
+    def test_rejects_governance_decision_after_containing_commit(self) -> None:
+        manifest = self.approved_readiness_manifest(None)
+        with self.assertRaisesRegex(VerificationError, "postdate their containing commit"):
+            _verify_governed_commit_order(
+                manifest,
+                datetime(2026, 8, 27, 10, 59, 59),
+                "a" * 40,
+            )
 
     def test_history_walk_rejects_violation_hidden_before_final_commit(self) -> None:
         document = self.root / "governance" / "aims" / "records" / "policy.md"

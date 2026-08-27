@@ -306,8 +306,11 @@ def _verify_aims_history(
         entries = _git_aims_entries(repo_root, parent)
         entries_by_commit[parent] = entries
         if "governance/aims/manifest.json" in entries:
-            _verify_captured_aims_snapshot(
+            parent_manifest = _verify_captured_aims_snapshot(
                 entries, None, enforce_display_status=False
+            )
+            _verify_governed_commit_order(
+                parent_manifest, _commit_at(repo_root, parent), parent
             )
 
     final_manifest: dict[str, Any] | None = None
@@ -335,6 +338,9 @@ def _verify_aims_history(
             entries,
             None,
             enforce_display_status=revision == commit,
+        )
+        _verify_governed_commit_order(
+            final_manifest, _commit_at(repo_root, revision), revision
         )
         for parent in parents:
             prior_manifest = entries_by_commit[parent].get(
@@ -366,7 +372,7 @@ def _verify_controlled_commit_snapshot(
             raise VerificationError(f"captured AIMS bytes differ from the assessed commit: {path}")
 
 
-def _verified_commit_at(repo_root: Path, commit: str, assessment_at: datetime) -> datetime:
+def _commit_at(repo_root: Path, commit: str) -> datetime:
     value = _git(repo_root, ["show", "-s", "--format=%cI", commit]).decode(
         "ascii", errors="strict"
     ).strip()
@@ -376,10 +382,30 @@ def _verified_commit_at(repo_root: Path, commit: str, assessment_at: datetime) -
         raise VerificationError("source commit has an invalid committer timestamp") from exc
     if parsed.tzinfo is None:
         raise VerificationError("source commit timestamp lacks a UTC offset")
-    commit_at = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _verified_commit_at(repo_root: Path, commit: str, assessment_at: datetime) -> datetime:
+    commit_at = _commit_at(repo_root, commit)
     if commit_at > assessment_at:
         raise VerificationError("source commit postdates the assessment instant")
     return commit_at
+
+
+def _verify_governed_commit_order(
+    manifest: dict[str, Any], commit_at: datetime, commit: str
+) -> None:
+    postdated = sorted(
+        document["id"]
+        for document in manifest["documents"]
+        if document["status"] in {"APPROVED", "RETIRED"}
+        and datetime.strptime(document["approved_at"], "%Y-%m-%dT%H:%M:%SZ")
+        > commit_at
+    )
+    if postdated:
+        raise VerificationError(
+            f"governance decisions postdate their containing commit {commit}: {postdated}"
+        )
 
 
 def _effective_document(document_id: str, documents_by_id: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
