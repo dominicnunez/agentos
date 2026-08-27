@@ -1257,7 +1257,11 @@ ORDER BY e.sequence`, draft.Event.OrganizationID, route.Scope, route.ID, cutoff)
 		if err != nil {
 			return fmt.Errorf("select Agent execution knowledge: %w", err)
 		}
-		selection := events.ExecutionStartSelection{Started: started, Inbox: selections, Knowledge: knowledge}
+		coordination, err := currentExecutionCoordination(ctx, tx, draft.Event.OrganizationID, draft.Event.CorrelationID, task.WorkID, task.ID, started.Sequence)
+		if err != nil {
+			return fmt.Errorf("select Agent execution peer coordination: %w", err)
+		}
+		selection := events.ExecutionStartSelection{Started: started, Inbox: selections, Knowledge: knowledge, Coordination: coordination}
 		manifest, err := validate(selection)
 		if err != nil {
 			return fmt.Errorf("validate bounded Agent execution input: %w", err)
@@ -1281,6 +1285,8 @@ const (
 	maximumCurrentExecutionKnowledgeScan  = 1024
 	maximumExecutionKnowledgeTeamScopes   = 256
 	maximumCurrentExecutionKnowledgeBytes = 8 << 20
+	maximumExecutionCoordinationPeers     = 15
+	maximumExecutionCoordinationBytes     = 2 << 20
 )
 
 var errProjectionAdmissionScanLimit = errors.New("projection admission scan limit exceeded")
@@ -1336,12 +1342,53 @@ OR (json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scop
 	return records, nil
 }
 
+func currentExecutionCoordination(ctx context.Context, tx *sql.Tx, organizationID, correlationID string, workID, taskID core.ID, startSequence int64) ([]events.CoordinationSelection, error) {
+	if organizationID == "" || correlationID == "" || workID == "" || taskID == "" || startSequence < 1 {
+		return nil, fmt.Errorf("complete Agent execution coordination boundary is required")
+	}
+	records, err := admittedProjectionRecordsBounded(ctx, tx, maximumExecutionCoordinationBytes, `JOIN (
+	SELECT candidate.record_id,MAX(candidate.version) AS version
+	FROM records AS candidate
+	JOIN events AS admission ON admission.event_id=candidate.admission_event_id
+	WHERE candidate.kind='task' AND admission.organization_id=? AND admission.correlation_id=? AND admission.sequence<?
+	AND json_extract(candidate.body,'$.value.work_id')=?
+	GROUP BY candidate.record_id
+) AS latest ON latest.record_id=r.record_id AND latest.version=r.version
+WHERE r.kind='task' AND r.record_id<>? AND e.organization_id=? AND e.correlation_id=? AND e.sequence<?
+AND json_extract(r.body,'$.value.work_id')=?
+ORDER BY r.record_id LIMIT ?`, organizationID, correlationID, startSequence, string(workID), string(taskID), organizationID, correlationID, startSequence, string(workID), maximumExecutionCoordinationPeers+1)
+	if err != nil {
+		if errors.Is(err, errProjectionAdmissionScanLimit) {
+			return nil, fmt.Errorf("%w: %w", core.ErrExecutionContextLimitExceeded, err)
+		}
+		return nil, err
+	}
+	if len(records) > maximumExecutionCoordinationPeers {
+		return nil, fmt.Errorf("%w: Agent execution has more than %d peer Tasks", core.ErrExecutionContextLimitExceeded, maximumExecutionCoordinationPeers)
+	}
+	selected := make([]events.CoordinationSelection, 0, len(records))
+	for _, admitted := range records {
+		var record events.ProjectionRecord
+		var task core.Task
+		if decodeExactJSONBytes(admitted.body, &record) != nil || decodeExactJSONBytes(record.Value, &task) != nil ||
+			record.ProjectionKind != "task" || record.RecordID != string(task.ID) || record.Version < 1 ||
+			record.CorrelationID != correlationID || task.ID == taskID || task.WorkID != workID ||
+			admitted.event.OrganizationID != organizationID || admitted.event.CorrelationID != correlationID ||
+			admitted.event.TaskID != string(task.ID) || admitted.event.Sequence >= startSequence ||
+			events.ValidateTaskProjectionTarget(admitted.event.EventType, record.Version, task) != nil {
+			return nil, fmt.Errorf("current Agent execution peer Task projection is invalid")
+		}
+		selected = append(selected, events.CoordinationSelection{Task: task, Version: record.Version, EventRef: admitted.event.EventID})
+	}
+	return selected, nil
+}
+
 func validateExecutionStartManifest(ctx context.Context, tx *sql.Tx, task core.Task, started events.Event, requested events.ExecutionStartDetail, selection events.ExecutionStartSelection, manifest core.ExecutionContextManifest) error {
 	_, offset := manifest.CreatedAt.Zone()
 	if manifest.ExecutionID == "" || manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID ||
 		manifest.AgentBlueprintVersion == "" || manifest.ExecutionProfileVersion == "" || manifest.RuntimeAdapter == "" ||
 		manifest.Provider == "" || manifest.Model == "" || manifest.TaskContractVersion == "" || manifest.PromptVersion == "" ||
-		manifest.PolicyVersion == "" || manifest.ContextBuilderVersion != "v2" || manifest.CreatedAt.IsZero() || offset != 0 ||
+		manifest.PolicyVersion == "" || manifest.ContextBuilderVersion != "v3" || manifest.CreatedAt.IsZero() || offset != 0 ||
 		!manifest.CreatedAt.Equal(started.CreatedAt) || len(manifest.ExecutionInputSHA256) != sha256.Size*2 {
 		return fmt.Errorf("agent execution manifest identity and pinned runtime are invalid")
 	}
@@ -1359,6 +1406,15 @@ func validateExecutionStartManifest(ctx context.Context, tx *sql.Tx, task core.T
 	}
 	if !slices.Equal(manifest.KnowledgeRefs, expectedKnowledge) {
 		return fmt.Errorf("agent execution manifest changes its transaction-selected knowledge")
+	}
+	expectedCoordination := make([]core.VersionedRef, 0, len(selection.Coordination))
+	for _, selected := range selection.Coordination {
+		expectedCoordination = append(expectedCoordination, core.VersionedRef{
+			ID: string(selected.Task.ID), Version: strconv.Itoa(selected.Version), MaterializationState: core.MaterializedFull,
+		})
+	}
+	if !slices.Equal(manifest.CoordinationRefs, expectedCoordination) {
+		return fmt.Errorf("agent execution manifest changes its transaction-selected peer coordination")
 	}
 	if len(manifest.EventRefs) > 1024 {
 		return fmt.Errorf("%w: agent execution manifest has more than 1024 event references", core.ErrExecutionContextLimitExceeded)

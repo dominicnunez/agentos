@@ -1018,12 +1018,16 @@ func testAgentStartManifest(task core.Task, selection events.ExecutionStartSelec
 	for _, knowledge := range selection.Knowledge {
 		knowledgeRefs = append(knowledgeRefs, core.VersionedRef{ID: string(knowledge.Record.KnowledgeID), Version: strconv.Itoa(knowledge.Record.Version), MaterializationState: core.MaterializedFull})
 	}
+	coordinationRefs := make([]core.VersionedRef, 0, len(selection.Coordination))
+	for _, peer := range selection.Coordination {
+		coordinationRefs = append(coordinationRefs, core.VersionedRef{ID: string(peer.Task.ID), Version: strconv.Itoa(peer.Version), MaterializationState: core.MaterializedFull})
+	}
 	return core.ExecutionContextManifest{
 		ExecutionID: "execution-" + task.ID + "-v2", AgentID: task.AssigneeID,
 		AgentBlueprintVersion: blueprintVersion, ExecutionProfileVersion: profileVersion, RuntimeAdapter: runtimeAdapter,
 		Provider: "test", Model: "test", TaskID: task.ID, TaskContractVersion: task.TaskContractVersion,
-		PromptVersion: "test", PolicyVersion: "v1", EventRefs: eventRefs, KnowledgeRefs: knowledgeRefs,
-		ContextBuilderVersion: "v2", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
+		PromptVersion: "test", PolicyVersion: "v1", EventRefs: eventRefs, KnowledgeRefs: knowledgeRefs, CoordinationRefs: coordinationRefs,
+		ContextBuilderVersion: "v3", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
 	}
 }
 
@@ -1066,6 +1070,101 @@ func TestAgentExecutionStartRollsBackRejectedAggregateInput(t *testing.T) {
 	}
 }
 
+func TestAgentExecutionStartBindsExactSameWorkPeerCoordination(t *testing.T) {
+	ctx := t.Context()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	correlationID := "peer-coordination"
+	appendTaskProjectionParents(t, ctx, store, "org-1", correlationID, "work-1")
+	agent, config := appendTaskAssignmentAgent(t, ctx, store, "org-1", correlationID, false)
+	peer := core.Task{
+		ID: "task-peer", WorkID: "work-1", Description: "prepare evidence", ExecutionKind: core.ExecutionDeterministic,
+		ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending,
+	}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(peer.ID), CorrelationID: correlationID},
+		ProjectionKind: "task", RecordID: string(peer.ID), Version: 1, Value: peer,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	peer.Status = core.TaskBlocked
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_BLOCKED", SourceActorID: "runtime", TaskID: string(peer.ID), CorrelationID: correlationID},
+		ProjectionKind: "task", RecordID: string(peer.ID), Version: 2, Value: peer,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task := appendPendingAgentExecutionTask(t, ctx, store, correlationID, "task-own", agent, config)
+	task.Status = core.TaskRunning
+	var selected []events.CoordinationSelection
+	if _, _, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: correlationID},
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
+	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: string(task.ID)}, {Scope: events.RecipientAgent, ID: string(task.AssigneeID)}}, func(selection events.ExecutionStartSelection) (core.ExecutionContextManifest, error) {
+		selected = append([]events.CoordinationSelection(nil), selection.Coordination...)
+		return testAgentStartManifest(task, selection), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != 1 || selected[0].Task.ID != peer.ID || selected[0].Task.Status != core.TaskBlocked || selected[0].Version != 2 || selected[0].EventRef == "" {
+		t.Fatalf("execution did not select the exact current peer revision: %+v", selected)
+	}
+	stream, err := store.Events(ctx, correlationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest core.ExecutionContextManifest
+	for _, event := range stream {
+		if event.EventType == "EXECUTION_CONTEXT_MANIFESTED" && event.TaskID == string(task.ID) {
+			if err := json.Unmarshal(event.Payload, &manifest); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	expected := []core.VersionedRef{{ID: string(peer.ID), Version: "2", MaterializationState: core.MaterializedFull}}
+	if !slices.Equal(manifest.CoordinationRefs, expected) || manifest.ContextBuilderVersion != "v3" {
+		t.Fatalf("execution manifest did not bind peer coordination: %+v", manifest)
+	}
+}
+
+func TestAgentExecutionStartRollsBackSubstitutedPeerCoordination(t *testing.T) {
+	ctx := t.Context()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	correlationID := "substituted-peer-coordination"
+	appendTaskProjectionParents(t, ctx, store, "org-1", correlationID, "work-1")
+	agent, config := appendTaskAssignmentAgent(t, ctx, store, "org-1", correlationID, false)
+	peer := core.Task{ID: "task-peer", WorkID: "work-1", Description: "prepare evidence", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
+	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(peer.ID), CorrelationID: correlationID},
+		ProjectionKind: "task", RecordID: string(peer.ID), Version: 1, Value: peer,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task := appendPendingAgentExecutionTask(t, ctx, store, correlationID, "task-own", agent, config)
+	task.Status = core.TaskRunning
+	if _, _, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: correlationID},
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
+	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: string(task.ID)}, {Scope: events.RecipientAgent, ID: string(task.AssigneeID)}}, func(selection events.ExecutionStartSelection) (core.ExecutionContextManifest, error) {
+		manifest := testAgentStartManifest(task, selection)
+		manifest.CoordinationRefs[0].Version = "2"
+		return manifest, nil
+	}); err == nil {
+		t.Fatal("substituted peer coordination reference was accepted")
+	}
+	_, persisted := latestTestProjection[core.Task](t, ctx, store, "task", task.ID)
+	if persisted.Status != core.TaskPending {
+		t.Fatalf("rejected peer context changed Task state: %+v", persisted)
+	}
+}
+
 func TestAgentExecutionManifestReferenceLimitIsTerminalizable(t *testing.T) {
 	now := time.Now().UTC()
 	task := core.Task{ID: "task-reference-limit", AssigneeID: "agent-1", TaskContractVersion: "1"}
@@ -1073,7 +1172,7 @@ func TestAgentExecutionManifestReferenceLimitIsTerminalizable(t *testing.T) {
 		ExecutionID: "execution-reference-limit", AgentID: task.AssigneeID,
 		AgentBlueprintVersion: "blueprint-v1", ExecutionProfileVersion: "profile-v1", RuntimeAdapter: "runtime-v1",
 		Provider: "provider", Model: "model", TaskID: task.ID, TaskContractVersion: task.TaskContractVersion,
-		PromptVersion: "prompt-v1", PolicyVersion: "v1", ContextBuilderVersion: "v2",
+		PromptVersion: "prompt-v1", PolicyVersion: "v1", ContextBuilderVersion: "v3",
 		ExecutionInputSHA256: core.FingerprintExecutionInput("bounded input"), CreatedAt: now,
 		EventRefs: make([]string, 1025),
 	}
@@ -2727,9 +2826,9 @@ func TestExecutionStartRequiresCurrentContextBuilderVersion(t *testing.T) {
 	if err := validateExecutionStartManifest(context.Background(), nil, task, started, events.ExecutionStartDetail{}, events.ExecutionStartSelection{}, manifest); err == nil {
 		t.Fatal("new execution admitted the historical v1 context-builder contract")
 	}
-	manifest.ContextBuilderVersion = "v2"
+	manifest.ContextBuilderVersion = "v3"
 	if err := validateExecutionStartManifest(context.Background(), nil, task, started, events.ExecutionStartDetail{}, events.ExecutionStartSelection{}, manifest); err != nil {
-		t.Fatalf("current v2 context-builder contract was rejected: %v", err)
+		t.Fatalf("current v3 context-builder contract was rejected: %v", err)
 	}
 }
 
