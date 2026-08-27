@@ -69,6 +69,16 @@ func (s *Service) RunAt(ctx context.Context, now time.Time) ([]Finding, error) {
 	if err != nil {
 		return nil, err
 	}
+	return s.RunEventsAt(stream, now)
+}
+
+// RunEventsAt audits one caller-provided, already bounded event snapshot. It
+// permits governance inspection to retain its tenant and integrity boundary
+// without giving the audit package access to broader ledger state.
+func (s *Service) RunEventsAt(stream []events.Event, now time.Time) ([]Finding, error) {
+	if s == nil || now.IsZero() {
+		return nil, fmt.Errorf("audit timestamp is required")
+	}
 	findings := auditEventIntegrity(stream, now)
 	return append(findings, s.auditKnowledge(stream, now)...), nil
 }

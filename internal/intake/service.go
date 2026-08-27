@@ -16,6 +16,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/inference"
+	"github.com/dominicnunez/agentos/internal/inspection"
 	"github.com/dominicnunez/agentos/internal/replay"
 )
 
@@ -32,6 +33,7 @@ const (
 	CapabilityReviewCompletion     = "review_completion"
 	CapabilityManageStrategy       = "manage_strategy"
 	CapabilityExportAIMSEvidence   = "export_aims_evidence"
+	CapabilityInspectGovernance    = "inspect_governance"
 	MaximumReviewFeedbackBytes     = 64 << 10
 	MaximumIntentTurns             = 32
 	MaximumIntentConversationBytes = 128 << 10
@@ -509,6 +511,26 @@ func (s *Service) AIMSEvidence(ctx context.Context, principal Principal) (app.AI
 		return app.AIMSEvidencePackage{}, ErrNotFound
 	}
 	return export, nil
+}
+
+// GovernanceInspection exposes one bounded verified report only to the
+// authenticated local installation owner. It is not available through A2A and
+// does not grant approval, authority, capability, or certification status.
+func (s *Service) GovernanceInspection(ctx context.Context, principal Principal) (inspection.Report, error) {
+	if err := validatePrincipal(principal); err != nil {
+		return inspection.Report{}, err
+	}
+	if principal.Kind != core.PrincipalHuman || principal.Channel != ChannelHumanDirect || principal.WorkScope != WorkScopeOrganization || !principal.Allowed(CapabilityInspectGovernance) {
+		return inspection.Report{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityInspectGovernance)
+	}
+	report, found, err := s.app.GovernanceInspection(ctx, core.ID(principal.OrganizationID), time.Now().UTC())
+	if err != nil {
+		return inspection.Report{}, fmt.Errorf("%w: inspect governance", ErrUnavailable)
+	}
+	if !found {
+		return inspection.Report{}, ErrNotFound
+	}
+	return report, nil
 }
 
 // IncidentReplay exposes a bounded, payload-free reconstruction only to the

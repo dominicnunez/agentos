@@ -3762,6 +3762,9 @@ type VerifiedEventSnapshot struct {
 type VerifiedReplayReader interface {
 	VerifiedReplayEvents(context.Context, string, string, int) (VerifiedEventSnapshot, error)
 }
+type VerifiedOrganizationEventReader interface {
+	VerifiedOrganizationEvents(context.Context, string, int) (VerifiedEventSnapshot, error)
+}
 type RecentEventReader interface {
 	RecentEvents(context.Context, string, string, int) ([]Event, error)
 }
@@ -4257,6 +4260,17 @@ func (g *Gateway) VerifiedReplayEvents(ctx context.Context, organizationID, corr
 		return VerifiedEventSnapshot{}, fmt.Errorf("event ledger does not support verified replay reads")
 	}
 	return reader.VerifiedReplayEvents(ctx, organizationID, correlationID, limit)
+}
+
+// VerifiedOrganizationEvents reads one bounded tenant slice and verifies the
+// complete event-integrity chain in the same database snapshot. It is an
+// observation boundary only and cannot publish events or invoke work.
+func (g *Gateway) VerifiedOrganizationEvents(ctx context.Context, organizationID string, limit int) (VerifiedEventSnapshot, error) {
+	reader, ok := g.ledger.(VerifiedOrganizationEventReader)
+	if !ok {
+		return VerifiedEventSnapshot{}, fmt.Errorf("event ledger does not support verified organization reads")
+	}
+	return reader.VerifiedOrganizationEvents(ctx, organizationID, limit)
 }
 
 // StrategyCreationEvents returns only the bounded immutable creation

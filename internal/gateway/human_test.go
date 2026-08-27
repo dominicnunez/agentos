@@ -101,6 +101,29 @@ func TestHumanOrganizationViewIsReadOnlyAndTenantScoped(t *testing.T) {
 	if response := serveHuman(first, http.MethodPost, "/v1/user/aims/evidence", testOwnerMarker, `{}`); response.Code != http.StatusNotFound {
 		t.Fatalf("AIMS mutation=%d %s", response.Code, response.Body.String())
 	}
+	inspection := serveHuman(first, http.MethodGet, "/v1/user/governance/inspection", testOwnerMarker, "")
+	if inspection.Code != http.StatusOK || inspection.Header().Get("Cache-Control") != "no-store" ||
+		!strings.Contains(inspection.Body.String(), `"schema_version":"agentos.governance.inspection.v1"`) ||
+		!strings.Contains(inspection.Body.String(), `"assessment":"RUNTIME_GOVERNANCE_INSPECTION_ONLY"`) ||
+		!strings.Contains(inspection.Body.String(), `"certified":false`) ||
+		!strings.Contains(inspection.Body.String(), `"verification":"COMPLETE_LEDGER_CHAIN"`) {
+		t.Fatalf("governance inspection=%d headers=%v body=%s", inspection.Code, inspection.Header(), inspection.Body.String())
+	}
+	inspectionDigest := sha256.Sum256(inspection.Body.Bytes())
+	if got, want := inspection.Header().Get("X-AgentOS-SHA256"), hex.EncodeToString(inspectionDigest[:]); got != want {
+		t.Fatalf("governance inspection checksum=%q want=%q", got, want)
+	}
+	for _, forbidden := range []string{"org-2", "second tenant objective", "first tenant objective", "operating_instructions", "tool_refs", "payload", "authorization_refs"} {
+		if strings.Contains(inspection.Body.String(), forbidden) {
+			t.Fatalf("governance inspection leaked %q: %s", forbidden, inspection.Body.String())
+		}
+	}
+	if response := serveHuman(first, http.MethodGet, "/v1/user/governance/inspection?scope=all", testOwnerMarker, ""); response.Code != http.StatusNotFound {
+		t.Fatalf("governance inspection query expansion=%d %s", response.Code, response.Body.String())
+	}
+	if response := serveHuman(first, http.MethodPost, "/v1/user/governance/inspection", testOwnerMarker, `{}`); response.Code != http.StatusNotFound {
+		t.Fatalf("governance inspection mutation=%d %s", response.Code, response.Body.String())
+	}
 }
 
 func TestHumanIncidentReplayIsVerifiedPayloadFreeAndTenantScoped(t *testing.T) {

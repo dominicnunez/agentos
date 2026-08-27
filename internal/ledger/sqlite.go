@@ -4477,26 +4477,64 @@ func (l *SQLite) VerifiedReplayEvents(ctx context.Context, organizationID, corre
 	if organizationID == "" || correlationID == "" || limit < 1 || limit > 256 {
 		return events.VerifiedEventSnapshot{}, fmt.Errorf("verified replay requires organization, correlation, and a limit from 1 to 256")
 	}
+	return l.verifiedEventSnapshot(ctx, organizationID, correlationID, limit, 256, 2<<20)
+}
+
+// VerifiedOrganizationEvents returns a bounded tenant slice and the verified
+// complete-ledger head from one read transaction. The payload bytes remain
+// private inputs to governance inspection and are never returned by its public
+// report.
+func (l *SQLite) VerifiedOrganizationEvents(ctx context.Context, organizationID string, limit int) (events.VerifiedEventSnapshot, error) {
+	if organizationID == "" || limit < 1 || limit > 10_000 {
+		return events.VerifiedEventSnapshot{}, fmt.Errorf("verified organization read requires an organization and a limit from 1 to 10000")
+	}
+	return l.verifiedEventSnapshot(ctx, organizationID, "", limit, 10_000, 32<<20)
+}
+
+func (l *SQLite) verifiedEventSnapshot(ctx context.Context, organizationID, correlationID string, limit, maximumLimit, maximumBytes int) (events.VerifiedEventSnapshot, error) {
+	if organizationID == "" || limit < 1 || limit > maximumLimit || maximumBytes < 1 {
+		return events.VerifiedEventSnapshot{}, fmt.Errorf("verified event snapshot boundary is invalid")
+	}
 	tx, err := l.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return events.VerifiedEventSnapshot{}, fmt.Errorf("begin verified replay snapshot: %w", err)
+		return events.VerifiedEventSnapshot{}, fmt.Errorf("begin verified event snapshot: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	head, err := ValidateEventIntegrity(ctx, tx)
 	if err != nil {
-		return events.VerifiedEventSnapshot{}, fmt.Errorf("verify replay ledger snapshot: %w", err)
+		return events.VerifiedEventSnapshot{}, fmt.Errorf("verify event ledger snapshot: %w", err)
 	}
-	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
-FROM events WHERE organization_id=? AND correlation_id=? ORDER BY sequence LIMIT ?`, organizationID, correlationID, limit+1))
+	query := `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? AND correlation_id=? ORDER BY sequence LIMIT ?`
+	var stream []events.Event
+	if correlationID == "" {
+		stream, err = collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? ORDER BY sequence LIMIT ?`, organizationID, limit+1))
+	} else {
+		stream, err = collectEvents(tx.QueryContext(ctx, query, organizationID, correlationID, limit+1))
+	}
 	if err != nil {
-		return events.VerifiedEventSnapshot{}, fmt.Errorf("read verified replay stream: %w", err)
+		return events.VerifiedEventSnapshot{}, fmt.Errorf("read verified event stream: %w", err)
 	}
 	if len(stream) > limit {
-		return events.VerifiedEventSnapshot{}, fmt.Errorf("verified replay stream exceeds its %d event limit", limit)
+		return events.VerifiedEventSnapshot{}, fmt.Errorf("verified event stream exceeds its %d event limit", limit)
+	}
+	bytes := 0
+	for _, event := range stream {
+		bytes += len(event.EventID) + len(event.OrganizationID) + len(event.EventType) + len(event.SourceActorID) + len(event.SourceExecutionID) + len(event.RecipientScope) + len(event.RecipientID) + len(event.TaskID) + len(event.CorrelationID) + len(event.Payload)
+		for _, ref := range event.AuthorizationRefs {
+			bytes += len(ref)
+		}
+		for _, ref := range event.ArtifactRefs {
+			bytes += len(ref)
+		}
+		if bytes > maximumBytes {
+			return events.VerifiedEventSnapshot{}, fmt.Errorf("verified event stream exceeds its %d byte limit", maximumBytes)
+		}
 	}
 	if err := tx.Commit(); err != nil {
-		return events.VerifiedEventSnapshot{}, fmt.Errorf("finish verified replay snapshot: %w", err)
+		return events.VerifiedEventSnapshot{}, fmt.Errorf("finish verified event snapshot: %w", err)
 	}
 	return events.VerifiedEventSnapshot{
 		OrganizationID: organizationID,

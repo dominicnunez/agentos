@@ -47,6 +47,23 @@ func TestAIMSEvidenceRequiresAuthenticatedLocalExportCapability(t *testing.T) {
 	}
 }
 
+func TestGovernanceInspectionRequiresAuthenticatedLocalInspectionCapability(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := New(app.New(events.NewGateway(store)))
+	for _, principal := range []Principal{
+		{ID: "local-user-1", Kind: core.PrincipalHuman, OrganizationID: "org-1", Channel: ChannelHumanDirect, Capabilities: []string{CapabilityReadStatus}, WorkScope: WorkScopeOrganization},
+		{ID: "external-agent-1", Kind: core.PrincipalExternalAgent, OrganizationID: "org-1", Channel: ChannelA2A, Capabilities: []string{CapabilityInspectGovernance}, WorkScope: WorkScopeOrganization},
+	} {
+		if _, err := service.GovernanceInspection(context.Background(), principal); !errors.Is(err, ErrForbidden) {
+			t.Fatalf("principal %s governance inspection error=%v", principal.ID, err)
+		}
+	}
+}
+
 func TestIncidentReplayRejectsA2AAndUnprivilegedPrincipals(t *testing.T) {
 	store, err := ledger.Open(":memory:")
 	if err != nil {

@@ -170,6 +170,17 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAIMSEvidence(w, export)
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/user/governance/inspection" && r.URL.RawQuery == "" {
+		report, err := h.service.GovernanceInspection(r.Context(), principal)
+		if err != nil {
+			h.writeIntakeError(w, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		writeChecksummedJSON(w, report, "governance inspection")
+		return
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/user/incidents/replay" {
 		query, err := url.ParseQuery(r.URL.RawQuery)
 		conversations := query["conversation_id"]
@@ -268,9 +279,13 @@ func (h *Human) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeAIMSEvidence(w http.ResponseWriter, export any) {
-	body, err := json.Marshal(export)
+	writeChecksummedJSON(w, export, "AIMS evidence")
+}
+
+func writeChecksummedJSON(w http.ResponseWriter, value any, label string) {
+	body, err := json.Marshal(value)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "AIMS evidence encoding failed"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": label + " encoding failed"})
 		return
 	}
 	body = append(body, '\n')
@@ -445,6 +460,7 @@ func (h *Human) principal() intake.Principal {
 	return operatorPrincipal(string(h.owner.ID), core.PrincipalHuman, string(h.owner.OrganizationID), intake.ChannelHumanDirect, []string{
 		intake.CapabilitySubmitWork, intake.CapabilityConfirmIntent, intake.CapabilityAbandonIntent, intake.CapabilityReadStatus, intake.CapabilityReadResult,
 		intake.CapabilityProvideInput, intake.CapabilityReviewCompletion, intake.CapabilityManageStrategy, intake.CapabilityExportAIMSEvidence,
+		intake.CapabilityInspectGovernance,
 	}, intake.WorkScopeOrganization)
 }
 

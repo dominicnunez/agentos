@@ -40,6 +40,8 @@ modules:
     path: internal/gateway
   - name: inference
     path: internal/inference
+  - name: inspection
+    path: internal/inspection
   - name: intake
     path: internal/intake
   - name: knowledge
@@ -80,7 +82,7 @@ policy:
       from:
         module: app
       to:
-        modules: [assignment, completion, core, events, execution, inference, lab, planning, projections, replay, telemetry, workflow]
+        modules: [assignment, completion, core, events, execution, inference, inspection, lab, planning, projections, replay, telemetry, workflow]
 
     - name: assignment-domain
       from:
@@ -164,7 +166,7 @@ policy:
       from:
         module: intake
       to:
-        modules: [app, core, events, inference, modeloutput, replay]
+        modules: [app, core, events, inference, inspection, modeloutput, replay]
 
     - name: knowledge-domain
       from:
@@ -196,6 +198,12 @@ policy:
         module: inference
       to:
         modules: [events, execution]
+
+    - name: governance-inspection
+      from:
+        module: inspection
+      to:
+        modules: [audit, core, events, projections]
 
     - name: event-contract-domain
       from:
