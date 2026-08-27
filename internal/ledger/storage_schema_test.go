@@ -3,6 +3,7 @@ package ledger
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -376,6 +377,82 @@ func TestStorageMigrationFailsAtomicallyOnAmbiguousV1Layout(t *testing.T) {
 	}
 	if version != 1 || metadataTables != 0 {
 		t.Fatalf("failed migration partially mutated storage: version=%d metadata=%d", version, metadataTables)
+	}
+}
+
+func TestStorageV7MigrationRejectsTamperedV6ChainWithoutMutation(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "tampered-v6.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := core.CapabilityLease{
+		ID: "lease-1", ActorID: "actor-1", Action: "read", Resource: "record-1",
+		Scope: "org-1", OriginTaskID: "task-1",
+	}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	audit, err := store.Append(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime",
+		Payload: map[string]string{"state": "original"},
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preBindingVersion := AuthorityAdmissionBindingStorageVersion - 1
+	if _, err := db.ExecContext(ctx, `UPDATE records SET admission_event_id='' WHERE kind='capability_lease'`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE events SET payload='{"state":"tampered"}' WHERE event_id=?`, audit.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=? WHERE singleton=1`, preBindingVersion); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA user_version=`+fmt.Sprint(preBindingVersion)); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "integrity hash does not match") {
+		t.Fatalf("tampered v6 chain reached authority binding: %v", err)
+	}
+	db, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var userVersion, storageVersion int
+	var admissionEventID string
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&userVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT storage_version FROM agentos_storage WHERE singleton=1`).Scan(&storageVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT admission_event_id FROM records WHERE kind='capability_lease' AND record_id='lease-1' AND version=1`).Scan(&admissionEventID); err != nil {
+		t.Fatal(err)
+	}
+	if userVersion != preBindingVersion || storageVersion != preBindingVersion || admissionEventID != "" {
+		t.Fatalf("failed migration mutated source: user_version=%d storage_version=%d admission=%q", userVersion, storageVersion, admissionEventID)
 	}
 }
 

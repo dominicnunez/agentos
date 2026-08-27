@@ -36,6 +36,11 @@ func TestVerifyMigratesPreBindingAuthoritySnapshotWithoutChangingSource(t *testi
 		_ = store.Close()
 		t.Fatal(err)
 	}
+	integrity, err := store.Integrity(ctx)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +62,9 @@ func TestVerifyMigratesPreBindingAuthoritySnapshotWithoutChangingSource(t *testi
 	}
 	if verified.StorageVersion != preBindingVersion || verified.EventSchemaVersion != events.SchemaVersion {
 		t.Fatalf("verification changed reported source contract: %+v", verified)
+	}
+	if verified.EventChainSHA256 != integrity.SHA256 || verified.EventChainAlgorithm != integrity.Algorithm {
+		t.Fatalf("verification lost source event-chain identity: verified=%+v integrity=%+v", verified, integrity)
 	}
 	db, err = sql.Open("sqlite", path)
 	if err != nil {

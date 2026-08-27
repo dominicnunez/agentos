@@ -280,6 +280,9 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 		}
 		return advanceProjectionStorageContract(ctx, tx, from, to, "event-integrity")
 	case from == 6 && to == 7:
+		if _, err := ValidateEventIntegrity(ctx, tx); err != nil {
+			return fmt.Errorf("validate event integrity before authority admission binding: %w", err)
+		}
 		if err := bindAuthorityAdmissionEvents(ctx, tx); err != nil {
 			return err
 		}

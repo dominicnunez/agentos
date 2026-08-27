@@ -143,6 +143,14 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 			result.EventChainAlgorithm = integrity.Algorithm
 		}
 	} else {
+		if contract.StorageVersion >= ledgerstore.EventIntegrityStorageVersion {
+			integrity, err := ledgerstore.ValidateEventIntegrity(ctx, db)
+			if err != nil {
+				return Result{}, fmt.Errorf("verify legacy event integrity chain: %w", err)
+			}
+			result.EventChainSHA256 = integrity.SHA256
+			result.EventChainAlgorithm = integrity.Algorithm
+		}
 		if err := verifyLegacyAdmissionsAfterMigration(ctx, db); err != nil {
 			return Result{}, err
 		}
