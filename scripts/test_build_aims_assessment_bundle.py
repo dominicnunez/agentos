@@ -23,6 +23,7 @@ from scripts.build_aims_assessment_bundle import (
     _git,
     _git_aims_entries,
     _read_public_file,
+    _verify_git_sources,
     _verify_governed_commit_order,
     _verified_commit_at,
     _verify_aims_history,
@@ -31,6 +32,7 @@ from scripts.build_aims_assessment_bundle import (
     build,
     readiness_report,
 )
+from scripts.materialize_staged_aims import materialize
 from scripts.verify_aims_documents import (
     MAX_DOCUMENT_BYTES,
     MAX_DOCUMENTS,
@@ -83,6 +85,65 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
         self.assertIn('prior_manifest="$(mktemp)"', hook)
         self.assertIn('--prior-manifest "$prior_manifest"', hook)
         self.assertNotIn('>"$staged_root/prior-aims-manifest.json"', hook)
+        self.assertNotIn("checkout-index", hook)
+        self.assertIn("scripts/materialize_staged_aims.py", hook)
+        self.assertIn('done <"$merge_head_path"', hook)
+
+    def test_staged_materialization_preserves_exact_index_bytes(self) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "config", "core.autocrlf", "true"], cwd=self.root, check=True
+        )
+        manifest_path = self.root / "governance" / "aims" / "manifest.json"
+        manifest_path.write_bytes(b'{"schema_version":1,"documents":[]}\n')
+        subprocess.run(
+            ["git", "add", "governance/aims/manifest.json"], cwd=self.root, check=True
+        )
+        expected = subprocess.check_output(
+            ["git", "show", ":governance/aims/manifest.json"], cwd=self.root
+        )
+        staged_root = self.root / "staged"
+        staged_root.mkdir()
+
+        materialize(self.root, staged_root)
+
+        actual = (staged_root / "governance" / "aims" / "manifest.json").read_bytes()
+        self.assertEqual(actual, expected)
+        self.assertNotIn(b"\r", actual)
+
+    def test_staged_materialization_rejects_non_regular_index_entries(self) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        object_id = subprocess.check_output(
+            ["git", "hash-object", "-w", "--stdin"], cwd=self.root, input=b"target"
+        ).decode().strip()
+        subprocess.run(
+            [
+                "git",
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"120000,{object_id},governance/aims/records/link.md",
+            ],
+            cwd=self.root,
+            check=True,
+        )
+        staged_root = self.root / "staged"
+        staged_root.mkdir()
+        with self.assertRaisesRegex(VerificationError, "not a regular file"):
+            materialize(self.root, staged_root)
+
+    def test_committed_curated_source_read_is_bounded(self) -> None:
+        commit = "a" * 40
+        with patch("scripts.build_aims_assessment_bundle._git") as git:
+            git.side_effect = [
+                (commit + "\n").encode(),
+                VerificationError("Git output exceeds source limit"),
+            ]
+            with self.assertRaisesRegex(VerificationError, "exceeds source limit"):
+                _verify_git_sources(self.root, commit, {"README.md": b"small\n"})
+        self.assertEqual(
+            git.call_args_list[1].kwargs["max_output_bytes"], MAX_SOURCE_FILE_BYTES
+        )
 
     def test_ci_uses_the_tested_pull_request_base_as_history_baseline(self) -> None:
         workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(

@@ -216,7 +216,11 @@ def _verify_git_sources(repo_root: Path, commit: str, source_entries: dict[str, 
     if head != commit:
         raise VerificationError(f"declared commit {commit} does not equal checked-out HEAD {head}")
     for relative, data in source_entries.items():
-        committed = _git(repo_root, ["show", f"{commit}:{relative}"])
+        committed = _git(
+            repo_root,
+            ["show", f"{commit}:{relative}"],
+            max_output_bytes=MAX_SOURCE_FILE_BYTES,
+        )
         if committed != data:
             raise VerificationError(f"assessment evidence does not match declared commit: {relative}")
 
