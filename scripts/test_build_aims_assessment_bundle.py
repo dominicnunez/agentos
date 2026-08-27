@@ -15,7 +15,14 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.build_aims_assessment_bundle import _git, build, readiness_report
+from scripts.build_aims_assessment_bundle import (
+    _git,
+    _verified_commit_at,
+    _verify_aims_history,
+    _verify_captured_aims_snapshot,
+    build,
+    readiness_report,
+)
 from scripts.verify_aims_documents import VerificationError
 
 
@@ -75,6 +82,7 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
                 self.assertFalse(report["conformity_determined"])
                 self.assertFalse(report["certified"])
                 self.assertIsNone(report["source"]["repository"])
+                self.assertIsNone(report["source"]["history_baseline"])
                 self.assertIn("UNAUTHENTICATED", report["source"]["binding"])
 
     def test_readiness_requires_approved_governance_records(self) -> None:
@@ -265,9 +273,24 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
                 "scripts.build_aims_assessment_bundle._verify_git_sources",
                 side_effect=mutate_worktree,
             ),
-            patch("scripts.build_aims_assessment_bundle._git", return_value=b""),
+            patch(
+                "scripts.build_aims_assessment_bundle._verified_commit_at",
+                return_value=datetime(2026, 8, 27, 11),
+            ),
+            patch(
+                "scripts.build_aims_assessment_bundle._verify_aims_history",
+                side_effect=lambda _root, _baseline, _commit, entries: (
+                    _verify_captured_aims_snapshot(entries, None)
+                ),
+            ),
         ):
-            build(self.root, "a" * 40, datetime(2026, 8, 27, 12), output)
+            build(
+                self.root,
+                "a" * 40,
+                datetime(2026, 8, 27, 12),
+                output,
+                history_baseline="b" * 40,
+            )
 
         with tarfile.open(output, "r:gz") as archive:
             bundled_manifest = json.load(
@@ -278,6 +301,88 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
             )
         self.assertEqual(bundled_manifest["documents"], [])
         self.assertEqual(readiness["controlled_document_counts"]["DRAFT"], 0)
+        self.assertEqual(readiness["source"]["history_baseline"], "b" * 40)
+        self.assertEqual(readiness["source"]["commit_at"], "2026-08-27T11:00:00Z")
+
+    def test_rejects_commit_after_assessment_instant(self) -> None:
+        with patch(
+            "scripts.build_aims_assessment_bundle._git",
+            return_value=b"2026-08-27T13:00:00+00:00\n",
+        ):
+            with self.assertRaisesRegex(VerificationError, "postdates"):
+                _verified_commit_at(
+                    self.root, "a" * 40, datetime(2026, 8, 27, 12)
+                )
+
+    def test_history_walk_rejects_violation_hidden_before_final_commit(self) -> None:
+        document = self.root / "governance" / "aims" / "records" / "policy.md"
+        document.parent.mkdir(parents=True)
+
+        def write_approved(body: str, version: str) -> None:
+            document.write_text(
+                f"# Policy\n\nStatus: **APPROVED**\n\n{body}\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            manifest = {
+                "schema_version": 1,
+                "documents": [
+                    {
+                        "id": "aims.policy",
+                        "path": "governance/aims/records/policy.md",
+                        "version": version,
+                        "status": "APPROVED",
+                        "owner": "aims-manager",
+                        "classification": "PUBLIC",
+                        "approval_ref": "decision-original",
+                        "approved_by": "project-owner",
+                        "approved_at": "2026-08-27T10:00:00Z",
+                        "review_due": "2027-08-27",
+                        "supersedes": [],
+                        "superseded_by": None,
+                        "sha256": hashlib.sha256(document.read_bytes()).hexdigest(),
+                    }
+                ],
+            }
+            (self.root / "governance" / "aims" / "manifest.json").write_text(
+                json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n"
+            )
+
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "config", "core.autocrlf", "false"], cwd=self.root, check=True
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "tests@agentos.invalid"],
+            cwd=self.root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Agent OS Tests"], cwd=self.root, check=True
+        )
+        write_approved("Original approved bytes.", "1.0")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "baseline"], cwd=self.root, check=True)
+        baseline = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.root).decode().strip()
+
+        write_approved("Unapproved replacement bytes.", "1.1")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "violation"], cwd=self.root, check=True)
+        (self.root / "README.md").write_text(
+            "unrelated final commit\n", encoding="utf-8", newline="\n"
+        )
+        subprocess.run(["git", "add", "README.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "final"], cwd=self.root, check=True)
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.root).decode().strip()
+        source_entries = {
+            "governance/aims/manifest.json": (
+                self.root / "governance" / "aims" / "manifest.json"
+            ).read_bytes(),
+            "governance/aims/records/policy.md": document.read_bytes(),
+        }
+
+        with self.assertRaisesRegex(VerificationError, "lacks new approval evidence"):
+            _verify_aims_history(self.root, baseline, commit, source_entries)
 
 
 if __name__ == "__main__":

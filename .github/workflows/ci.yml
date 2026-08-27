@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -63,8 +63,16 @@ jobs:
           python3 -m unittest scripts/test_build_aims_assessment_bundle.py
           mkdir -p work/aims-first work/aims-second
           assessment_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          python3 scripts/build_aims_assessment_bundle.py --commit "${GITHUB_SHA}" --assessment-at "$assessment_at" --output work/aims-first/agentos-aims-assessment.tar.gz
-          python3 scripts/build_aims_assessment_bundle.py --commit "${GITHUB_SHA}" --assessment-at "$assessment_at" --output work/aims-second/agentos-aims-assessment.tar.gz
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            history_baseline=$(git merge-base "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
+          else
+            history_baseline="${{ github.event.before }}"
+            if [ "$history_baseline" = "0000000000000000000000000000000000000000" ]; then
+              history_baseline=$(git rev-list --max-parents=0 HEAD | head -n 1)
+            fi
+          fi
+          python3 scripts/build_aims_assessment_bundle.py --commit "${GITHUB_SHA}" --assessment-at "$assessment_at" --history-baseline "$history_baseline" --output work/aims-first/agentos-aims-assessment.tar.gz
+          python3 scripts/build_aims_assessment_bundle.py --commit "${GITHUB_SHA}" --assessment-at "$assessment_at" --history-baseline "$history_baseline" --output work/aims-second/agentos-aims-assessment.tar.gz
           cmp work/aims-first/agentos-aims-assessment.tar.gz work/aims-second/agentos-aims-assessment.tar.gz
 
       - name: Build

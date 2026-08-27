@@ -66,8 +66,14 @@ every bundled byte with the corresponding Git object, and validates governed
 history against the first parent when an earlier manifest exists. This proves
 the bundled bytes came from the declared local Git commit; it does not
 authenticate which repository owns that commit. Trusted provenance or an
-attestation must establish repository identity separately. CI builds the bundle
-twice for the same assessment instant and requires identical bytes. The report
+attestation must establish repository identity separately. The builder also
+requires a trusted history baseline, validates every intervening AIMS manifest
+transition against its first parent, and rejects a source commit newer than the
+assessment instant. CI uses the pull-request merge base or pre-push commit as
+that baseline, builds the bundle twice for the same assessment instant, and
+requires identical bytes. Branch protection or separate attestation must make
+the selected baseline trustworthy. Git committer time is a fail-closed ordering
+check, not an independently trusted timestamp. The report
 fails the assessment-readiness state while required approved audit, management
 review, applicability, and accountable decision records are absent or their
 review date is overdue.

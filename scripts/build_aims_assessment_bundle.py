@@ -13,7 +13,7 @@ import re
 import subprocess
 import tarfile
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -26,6 +26,7 @@ except ModuleNotFoundError:
 MAX_SOURCE_FILE_BYTES = 512 * 1024
 MAX_SOURCE_TOTAL_BYTES = 4 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 5 * 1024 * 1024
+MAX_HISTORY_COMMITS = 4096
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 EVIDENCE_FILES = {
     "README.md": "product-purpose-and-use",
@@ -149,6 +150,130 @@ def _verify_captured_aims_snapshot(
         return verify(snapshot_root, prior_manifest_bytes=prior_manifest)
 
 
+def _captured_aims_entries(source_entries: dict[str, bytes]) -> dict[str, bytes]:
+    return {
+        path: data
+        for path, data in source_entries.items()
+        if path == "governance/aims/manifest.json"
+        or path.startswith("governance/aims/records/")
+    }
+
+
+def _git_aims_entries(repo_root: Path, commit: str) -> dict[str, bytes]:
+    listing = _git(
+        repo_root,
+        [
+            "ls-tree",
+            "-r",
+            "--name-only",
+            commit,
+            "--",
+            "governance/aims/manifest.json",
+            "governance/aims/records",
+        ],
+    )
+    try:
+        paths = listing.decode("utf-8", errors="strict").splitlines()
+    except UnicodeDecodeError as exc:
+        raise VerificationError("Git AIMS path listing is not valid UTF-8") from exc
+    entries: dict[str, bytes] = {}
+    for relative in paths:
+        path = PurePosixPath(relative)
+        if (
+            not relative
+            or path.is_absolute()
+            or ".." in path.parts
+            or relative != path.as_posix()
+            or (
+                relative != "governance/aims/manifest.json"
+                and not relative.startswith("governance/aims/records/")
+            )
+        ):
+            raise VerificationError(f"unsafe Git AIMS path: {relative}")
+        entries[relative] = _git(repo_root, ["show", f"{commit}:{relative}"])
+    if entries and "governance/aims/manifest.json" not in entries:
+        raise VerificationError(f"AIMS records exist without a manifest at commit {commit}")
+    return entries
+
+
+def _verify_aims_history(
+    repo_root: Path,
+    baseline: str,
+    commit: str,
+    source_entries: dict[str, bytes],
+) -> dict[str, Any]:
+    if not COMMIT_PATTERN.fullmatch(baseline):
+        raise VerificationError("history baseline must be an exact lowercase 40-character Git commit SHA")
+    merge_base = _git(repo_root, ["merge-base", baseline, commit]).decode(
+        "ascii", errors="strict"
+    ).strip()
+    if merge_base != baseline:
+        raise VerificationError("history baseline is not an ancestor of the assessed commit")
+    revisions = _git(
+        repo_root,
+        [
+            "rev-list",
+            "--ancestry-path",
+            "--topo-order",
+            "--reverse",
+            f"{baseline}..{commit}",
+        ],
+    ).decode("ascii", errors="strict").splitlines()
+    if not revisions or revisions[-1] != commit:
+        raise VerificationError("assessed commit is not reachable after the history baseline")
+    if len(revisions) > MAX_HISTORY_COMMITS:
+        raise VerificationError(f"AIMS history exceeds {MAX_HISTORY_COMMITS} commits")
+
+    entries_by_commit = {baseline: _git_aims_entries(repo_root, baseline)}
+    baseline_manifest = entries_by_commit[baseline].get("governance/aims/manifest.json")
+    if baseline_manifest is not None:
+        _verify_captured_aims_snapshot(entries_by_commit[baseline], None)
+
+    final_manifest: dict[str, Any] | None = None
+    for revision in revisions:
+        first_parent = _git(repo_root, ["rev-parse", f"{revision}^1"]).decode(
+            "ascii", errors="strict"
+        ).strip()
+        if first_parent not in entries_by_commit:
+            raise VerificationError(
+                f"first parent falls outside the trusted AIMS history walk: {revision}"
+            )
+        entries = (
+            _captured_aims_entries(source_entries)
+            if revision == commit
+            else _git_aims_entries(repo_root, revision)
+        )
+        entries_by_commit[revision] = entries
+        prior_manifest = entries_by_commit[first_parent].get(
+            "governance/aims/manifest.json"
+        )
+        manifest_bytes = entries.get("governance/aims/manifest.json")
+        if manifest_bytes is None:
+            if prior_manifest is not None:
+                raise VerificationError(f"AIMS manifest was removed at commit {revision}")
+            continue
+        final_manifest = _verify_captured_aims_snapshot(entries, prior_manifest)
+    if final_manifest is None:
+        raise VerificationError("assessed history does not contain an AIMS manifest")
+    return final_manifest
+
+
+def _verified_commit_at(repo_root: Path, commit: str, assessment_at: datetime) -> datetime:
+    value = _git(repo_root, ["show", "-s", "--format=%cI", commit]).decode(
+        "ascii", errors="strict"
+    ).strip()
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise VerificationError("source commit has an invalid committer timestamp") from exc
+    if parsed.tzinfo is None:
+        raise VerificationError("source commit timestamp lacks a UTC offset")
+    commit_at = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    if commit_at > assessment_at:
+        raise VerificationError("source commit postdates the assessment instant")
+    return commit_at
+
+
 def _effective_document(document_id: str, documents_by_id: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
     seen: set[str] = set()
     current = documents_by_id.get(document_id)
@@ -161,7 +286,11 @@ def _effective_document(document_id: str, documents_by_id: dict[str, dict[str, A
 
 
 def readiness_report(
-    manifest: dict[str, Any], commit: str, assessment_at: datetime
+    manifest: dict[str, Any],
+    commit: str,
+    assessment_at: datetime,
+    commit_at: datetime | None = None,
+    history_baseline: str | None = None,
 ) -> dict[str, Any]:
     documents = manifest["documents"]
     documents_by_id = {entry["id"]: entry for entry in documents}
@@ -215,6 +344,12 @@ def readiness_report(
         "source": {
             "repository": None,
             "commit": commit,
+            "commit_at": (
+                commit_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+                if commit_at is not None
+                else None
+            ),
+            "history_baseline": history_baseline,
             "binding": "LOCAL_GIT_OBJECTS_VERIFIED_REPOSITORY_IDENTITY_UNAUTHENTICATED",
         },
         "assessment_at": assessment_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -236,6 +371,8 @@ def readiness_report(
             "This automated report validates bounded repository evidence and controlled-document state only.",
             "It does not evaluate confidential operating evidence or reproduce ISO/IEC 42001 requirements.",
             "Repository identity requires separately authenticated provenance or attestation.",
+            "The history baseline must be trusted through reviewed branch controls or separate attestation.",
+            "A Git committer timestamp is not an independently trusted time source.",
             "A true readiness state still does not determine conformity or certification.",
         ],
     }
@@ -274,6 +411,7 @@ def build(
     output: Path,
     *,
     verify_source: bool = True,
+    history_baseline: str | None = None,
 ) -> tuple[str, int]:
     repo_root = repo_root.resolve(strict=True)
     if not COMMIT_PATTERN.fullmatch(commit):
@@ -308,13 +446,15 @@ def build(
         )
 
     if verify_source:
+        if history_baseline is None:
+            raise VerificationError("history baseline is required for Git-verified assessment bundles")
         _verify_git_sources(repo_root, commit, source_entries)
-        prior_name = "governance/aims/manifest.json"
-        prior_listing = _git(repo_root, ["ls-tree", "--name-only", f"{commit}^", "--", prior_name])
-        prior_manifest = None
-        if prior_listing.strip():
-            prior_manifest = _git(repo_root, ["show", f"{commit}^:{prior_name}"])
-        manifest = _verify_captured_aims_snapshot(source_entries, prior_manifest)
+        commit_at = _verified_commit_at(repo_root, commit, assessment_at)
+        manifest = _verify_aims_history(
+            repo_root, history_baseline, commit, source_entries
+        )
+    else:
+        commit_at = None
 
     entries["assessment/evidence-index.json"] = _canonical_json(
         {
@@ -322,13 +462,25 @@ def build(
             "source": {
                 "repository": None,
                 "commit": commit,
+                "commit_at": (
+                    commit_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    if commit_at is not None
+                    else None
+                ),
+                "history_baseline": history_baseline,
                 "binding": "LOCAL_GIT_OBJECTS_VERIFIED_REPOSITORY_IDENTITY_UNAUTHENTICATED",
             },
             "entries": evidence_index,
         }
     )
     entries["assessment/readiness.json"] = _canonical_json(
-        readiness_report(manifest, commit, assessment_at)
+        readiness_report(
+            manifest,
+            commit,
+            assessment_at,
+            commit_at,
+            history_baseline,
+        )
     )
     entries["ASSESSMENT_README.txt"] = (
         "Agent OS public AIMS assessment-evidence bundle\n\n"
@@ -373,6 +525,7 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--commit", required=True)
     parser.add_argument("--assessment-at", required=True)
+    parser.add_argument("--history-baseline", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
@@ -383,7 +536,11 @@ def main() -> int:
             raise VerificationError("assessment-at must use exact RFC 3339 UTC whole-second syntax")
         assessment_at = datetime.strptime(args.assessment_at, "%Y-%m-%dT%H:%M:%SZ")
         digest, size = build(
-            args.root, args.commit, assessment_at, args.output
+            args.root,
+            args.commit,
+            assessment_at,
+            args.output,
+            history_baseline=args.history_baseline,
         )
     except VerificationError as exc:
         print(f"AIMS assessment bundle failed: {exc}")
