@@ -29,6 +29,7 @@ const (
 	KindTask                  = "task"
 	KindLabExperiment         = "lab_experiment"
 	KindLabPromotionCandidate = "lab_promotion_candidate"
+	KindKnowledge             = "knowledge"
 )
 
 var projectionKinds = [...]string{
@@ -44,6 +45,7 @@ var projectionKinds = [...]string{
 	KindTask,
 	KindLabExperiment,
 	KindLabPromotionCandidate,
+	KindKnowledge,
 }
 
 type Versioned[T any] = core.DurableState[T]
@@ -61,6 +63,7 @@ type Snapshot struct {
 	Tasks               map[core.ID]Versioned[core.Task]
 	Experiments         map[core.ID]Versioned[core.Experiment]
 	PromotionCandidates map[core.ID]Versioned[core.PromotionCandidate]
+	Knowledge           map[core.ID]Versioned[core.KnowledgeRecord]
 }
 
 type Repository struct{ gateway *events.Gateway }
@@ -302,14 +305,14 @@ func (r *Repository) SaveReplacementSubmission(ctx context.Context, correlationI
 	return err
 }
 
-func (r *Repository) StartAgentExecution(ctx context.Context, organizationID core.ID, correlationID string, version int, value core.Task, mode string, strategicEventRefs []string, strategicContextRefs []core.VersionedRef, routes []events.InboxRoute, validate events.ExecutionStartValidator) (events.Event, []events.InboxSelection, error) {
+func (r *Repository) StartAgentExecution(ctx context.Context, organizationID core.ID, correlationID string, version int, value core.Task, mode string, inputEventRefs, strategicEventRefs []string, strategicContextRefs []core.VersionedRef, routes []events.InboxRoute, validate events.ExecutionStartValidator) (events.Event, []events.InboxSelection, error) {
 	if r == nil || r.gateway == nil || organizationID == "" || correlationID == "" || value.ID == "" || value.ExecutionKind != core.ExecutionAgent || value.Status != core.TaskRunning || version < 2 {
 		return events.Event{}, nil, fmt.Errorf("complete Agent execution-start projection is required")
 	}
 	return r.gateway.PublishExecutionStart(ctx, events.ProjectionDraft{
 		Event: events.TrustedDraft{
 			OrganizationID: string(organizationID), EventType: "EXECUTION_STARTED", SourceActorID: "runtime",
-			TaskID: string(value.ID), CorrelationID: correlationID, Payload: events.ExecutionStartDetail{Mode: mode, StrategicEventRefs: strategicEventRefs, StrategicContextRefs: strategicContextRefs},
+			TaskID: string(value.ID), CorrelationID: correlationID, Payload: events.ExecutionStartDetail{Mode: mode, InputEventRefs: inputEventRefs, StrategicEventRefs: strategicEventRefs, StrategicContextRefs: strategicContextRefs},
 		},
 		ProjectionKind: KindTask, RecordID: string(value.ID), Version: version, Value: value,
 	}, routes, validate)
@@ -418,7 +421,11 @@ func (r *Repository) ValidateCompletionAdmissions(ctx context.Context, snapshot 
 	if err != nil {
 		return err
 	}
-	if err := validateProjectionEventAdmissions(stream, inboxObservations); err != nil {
+	leaseAdmissions, freezeAdmissions, err := projectionKnowledgeAuthorityAdmissions(ctx, r.gateway, stream)
+	if err != nil {
+		return err
+	}
+	if err := validateProjectionEventAdmissions(stream, inboxObservations, leaseAdmissions, freezeAdmissions); err != nil {
 		return err
 	}
 	records, err := r.readProjectionRecords(ctx)
@@ -451,7 +458,11 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if err := validateProjectionEventAdmissions(stream, inboxObservations); err != nil {
+	leaseAdmissions, freezeAdmissions, err := projectionKnowledgeAuthorityAdmissions(ctx, r.gateway, stream)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if err := validateProjectionEventAdmissions(stream, inboxObservations, leaseAdmissions, freezeAdmissions); err != nil {
 		return Snapshot{}, err
 	}
 	records := make(map[string][][]byte)
@@ -489,8 +500,18 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 	return snapshot, nil
 }
 
-func validateProjectionEventAdmissions(stream []events.Event, inboxObservations map[string]events.InboxObservationBinding) error {
+func projectionKnowledgeAuthorityAdmissions(ctx context.Context, gateway *events.Gateway, stream []events.Event) ([]events.CapabilityLeaseAdmission, []events.OrganizationFreezeAdmission, error) {
+	for _, event := range stream {
+		if events.RequiresAuthorityRecordAdmission(event.EventType) {
+			return gateway.KnowledgeAuthorityAdmissions(ctx)
+		}
+	}
+	return nil, nil, nil
+}
+
+func validateProjectionEventAdmissions(stream []events.Event, inboxObservations map[string]events.InboxObservationBinding, leaseAdmissions []events.CapabilityLeaseAdmission, freezeAdmissions []events.OrganizationFreezeAdmission) error {
 	eventIDs := make(map[string]struct{}, len(stream))
+	eventIndex := make(map[string]events.Event, len(stream))
 	sequences := make(map[int64]struct{}, len(stream))
 	ordered := append([]events.Event(nil), stream...)
 	sort.Slice(ordered, func(left, right int) bool { return ordered[left].Sequence < ordered[right].Sequence })
@@ -501,6 +522,9 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 	goals := make(map[core.ID]Versioned[core.Goal])
 	works := make(map[core.ID]Versioned[core.Work])
 	experiments := make(map[core.ID]Versioned[core.Experiment])
+	knowledgeAdmissions := events.NewKnowledgeAdmissionValidator(ordered)
+	knowledgeAdmissions.UseCapabilityLeaseAdmissions(leaseAdmissions)
+	knowledgeAdmissions.UseOrganizationFreezeAdmissions(freezeAdmissions)
 	graph := core.DurableGraph{
 		Organizations: map[core.ID]core.DurableState[core.Organization]{}, Missions: map[core.ID]core.DurableState[core.Mission]{},
 		Goals: map[core.ID]core.DurableState[core.Goal]{}, Teams: map[core.ID]core.DurableState[core.Team]{},
@@ -508,6 +532,7 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 		Agents: map[core.ID]core.DurableState[core.Agent]{}, Intents: map[core.ID]core.DurableState[core.Intent]{},
 		Works: map[core.ID]core.DurableState[core.Work]{}, Tasks: map[core.ID]core.DurableState[core.Task]{},
 		Experiments: map[core.ID]core.DurableState[core.Experiment]{}, PromotionCandidates: map[core.ID]core.DurableState[core.PromotionCandidate]{},
+		Knowledge: map[core.ID]core.DurableState[core.KnowledgeRecord]{},
 	}
 	confirmations := make(map[string][]events.Event)
 	replacementConfirmations := make(map[core.ID]string)
@@ -528,6 +553,7 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 			return fmt.Errorf("event stream contains duplicate sequence %d at %s", event.Sequence, event.EventType)
 		}
 		eventIDs[event.EventID] = struct{}{}
+		eventIndex[event.EventID] = event
 		sequences[event.Sequence] = struct{}{}
 		payload, present, err := events.AdmittedProjection(event)
 		if err != nil {
@@ -686,6 +712,17 @@ func validateProjectionEventAdmissions(stream []events.Event, inboxObservations 
 			}
 			if err == nil {
 				err = core.AdmitDurableRevision(graph.PromotionCandidates, value.ID, record.Version, record.CorrelationID, value, true, nil)
+			}
+		case KindKnowledge:
+			var value core.KnowledgeRecord
+			if decodeExactProjectionJSON(record.Value, &value) != nil || value.KnowledgeID != core.ID(record.RecordID) ||
+				!core.ValidKnowledgeRecord(value) || value.Version != record.Version {
+				err = fmt.Errorf("contains an invalid knowledge projection")
+			} else {
+				err = knowledgeAdmissions.Validate(value, event, record, graph)
+			}
+			if err == nil {
+				err = core.AdmitDurableRevision(graph.Knowledge, value.KnowledgeID, record.Version, record.CorrelationID, value, true, core.ValidKnowledgeRevision)
 			}
 		default:
 			err = fmt.Errorf("contains unsupported projection kind %s", record.ProjectionKind)
@@ -1087,6 +1124,8 @@ func validateProjectionEventOrganizationBindings(snapshot Snapshot, stream []eve
 			organizationID, err = projectionOrganizationID[core.Experiment](event, payload.Projection, "Lab experiment", func(value core.Experiment) core.ID { return value.OrganizationID })
 		case KindLabPromotionCandidate:
 			organizationID, err = projectionOrganizationID[core.PromotionCandidate](event, payload.Projection, "Lab promotion candidate", func(value core.PromotionCandidate) core.ID { return value.OrganizationID })
+		case KindKnowledge:
+			organizationID, err = projectionOrganizationID[core.KnowledgeRecord](event, payload.Projection, "knowledge", func(value core.KnowledgeRecord) core.ID { return value.OrganizationID })
 		case KindTask:
 			var value core.Task
 			if decodeExactProjectionJSON(payload.Projection.Value, &value) != nil {
@@ -1465,6 +1504,7 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 		Tasks:               make(map[core.ID]Versioned[core.Task]),
 		Experiments:         make(map[core.ID]Versioned[core.Experiment]),
 		PromotionCandidates: make(map[core.ID]Versioned[core.PromotionCandidate]),
+		Knowledge:           make(map[core.ID]Versioned[core.KnowledgeRecord]),
 	}
 	if err := decodeKind(records[KindOrganization], snapshot.Organizations, false, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode organizations: %w", err)
@@ -1502,10 +1542,29 @@ func decodeSnapshot(records map[string][][]byte) (Snapshot, error) {
 	if err := decodeKind(records[KindLabPromotionCandidate], snapshot.PromotionCandidates, true, nil); err != nil {
 		return Snapshot{}, fmt.Errorf("decode Lab promotion candidates: %w", err)
 	}
+	if err := decodeKnowledgeKind(records[KindKnowledge], snapshot.Knowledge); err != nil {
+		return Snapshot{}, fmt.Errorf("decode knowledge: %w", err)
+	}
 	if err := ValidateSnapshot(snapshot); err != nil {
 		return Snapshot{}, err
 	}
 	return snapshot, nil
+}
+
+func decodeKnowledgeKind(bodies [][]byte, target map[core.ID]Versioned[core.KnowledgeRecord]) error {
+	for _, body := range bodies {
+		var record events.ProjectionRecord
+		var value core.KnowledgeRecord
+		if decodeExactProjectionJSON(body, &record) != nil || decodeExactProjectionJSON(record.Value, &value) != nil ||
+			record.ProjectionKind != KindKnowledge || record.RecordID != string(value.KnowledgeID) ||
+			record.Version != value.Version || !core.ValidKnowledgeRecord(value) {
+			return fmt.Errorf("knowledge record is invalid")
+		}
+		if err := core.AdmitDurableRevision(target, value.KnowledgeID, record.Version, record.CorrelationID, value, true, core.ValidKnowledgeRevision); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func decodeKind[T any](bodies [][]byte, target map[core.ID]Versioned[T], correlationStable bool, sameRecordConfiguration func(T, T) bool) error {
@@ -1579,5 +1638,6 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		Tasks:               snapshot.Tasks,
 		Experiments:         snapshot.Experiments,
 		PromotionCandidates: snapshot.PromotionCandidates,
+		Knowledge:           snapshot.Knowledge,
 	})
 }

@@ -86,7 +86,7 @@ func TestApprovalWaitsAcrossRestart(t *testing.T) {
 		ReplayContext:       map[string]string{"body": "hello"},
 	}
 	fingerprint := setApprovalTestFingerprint(t, &obligation)
-	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1", Action: "send", Resource: "customer-1", Scope: "org-1"}
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", ActorKind: obligation.ActorKind, OriginTaskID: "task-1", Action: "send", Resource: "customer-1", Scope: "org-1"}
 	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "human-approver", "task-1", nil, nil, "capability_lease", "lease-1", 1, lease); err != nil {
 		_ = l.Close()
 		t.Fatal(err)
@@ -374,6 +374,9 @@ func assertEffectWaiting(t *testing.T, ctx context.Context, coordinator *effects
 
 func setApprovalTestFingerprint(t *testing.T, obligation *core.EffectObligation) string {
 	t.Helper()
+	if obligation.ActorKind == "" {
+		obligation.ActorKind = core.PrincipalAgent
+	}
 	fingerprint, err := effects.Fingerprint(*obligation)
 	if err != nil {
 		t.Fatal(err)

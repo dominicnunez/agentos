@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -128,6 +130,7 @@ type preparedProjection struct {
 	work               *core.Work
 	experiment         *core.Experiment
 	promotionCandidate *core.PromotionCandidate
+	knowledge          *core.KnowledgeRecord
 }
 
 // AppendRecord is retained for non-projection domain records whose bounded
@@ -186,7 +189,7 @@ func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, ac
 
 func genericRecordKindAllowed(kind string) bool {
 	switch kind {
-	case "approval", "authorization_trace", "capability_lease", "effect", "knowledge", "organization_freeze":
+	case "approval", "authorization_trace", "capability_lease", "effect", "organization_freeze":
 		return true
 	default:
 		return false
@@ -1074,15 +1077,15 @@ func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.Projecti
 	}
 	switch task.ExecutionKind {
 	case core.ExecutionAgent:
-		if task.AssigneeType != "AGENT" || task.AssigneeID == "" || len(routes) < 2 || validate == nil || requested.InputEventRef != "" || requested.Mode != "" && requested.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
+		if task.AssigneeType != "AGENT" || task.AssigneeID == "" || len(routes) < 2 || validate == nil || requested.InputEventRef != "" || len(requested.InputEventRefs) > 1024 || requested.Mode != "" && requested.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
 			return events.Event{}, nil, fmt.Errorf("agent execution-start boundary is invalid")
 		}
 	case core.ExecutionDeterministic:
-		if len(routes) != 0 || validate != nil || requested.Mode != "" || requested.InputEventRef != "" {
+		if len(routes) != 0 || validate != nil || requested.Mode != "" || requested.InputEventRef != "" || len(requested.InputEventRefs) != 0 {
 			return events.Event{}, nil, fmt.Errorf("deterministic execution-start boundary is invalid")
 		}
 	case core.ExecutionHuman:
-		if len(routes) != 0 || validate != nil || requested.Mode != "OPERATOR_HUMAN_INPUT" && requested.Mode != "STRUCTURED_HUMAN_COMPLETION" || requested.InputEventRef == "" {
+		if len(routes) != 0 || validate != nil || requested.Mode != "OPERATOR_HUMAN_INPUT" && requested.Mode != "STRUCTURED_HUMAN_COMPLETION" || requested.InputEventRef == "" || len(requested.InputEventRefs) != 0 {
 			return events.Event{}, nil, fmt.Errorf("user execution-start boundary is invalid")
 		}
 	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
@@ -1134,7 +1137,7 @@ func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.Projecti
 		}
 		draft.Event.Payload = events.ExecutionStartDetail{
 			Mode: requested.Mode, InputEventRef: requested.InputEventRef, InboxCutoffSequence: cutoff, DispatchBinding: dispatch,
-			StrategicEventRefs: append([]string(nil), requested.StrategicEventRefs...), StrategicContextRefs: append([]core.VersionedRef(nil), requested.StrategicContextRefs...),
+			InputEventRefs: append([]string(nil), requested.InputEventRefs...), StrategicEventRefs: append([]string(nil), requested.StrategicEventRefs...), StrategicContextRefs: append([]core.VersionedRef(nil), requested.StrategicContextRefs...),
 		}
 		item, err := prepareProjection(draft, false, false)
 		if err != nil {
@@ -1179,12 +1182,153 @@ ORDER BY e.sequence`, draft.Event.OrganizationID, route.Scope, route.ID, cutoff)
 			}
 			selections = append(selections, events.InboxSelection{Route: route, Events: selected})
 		}
-		if err := validate(selections); err != nil {
+		knowledgeRecords, err := currentExecutionKnowledgeRecords(ctx, tx, draft.Event.OrganizationID, task, started.Sequence, expectedRoutes)
+		if err != nil {
+			return fmt.Errorf("read current Agent execution knowledge: %w", err)
+		}
+		currentKnowledge := make([]events.CurrentKnowledgeRevision, 0, len(knowledgeRecords))
+		for _, admitted := range knowledgeRecords {
+			var record events.ProjectionRecord
+			var knowledge core.KnowledgeRecord
+			if decodeExactJSONBytes(admitted.body, &record) != nil || decodeExactJSONBytes(record.Value, &knowledge) != nil ||
+				record.ProjectionKind != "knowledge" || record.RecordID != string(knowledge.KnowledgeID) || record.Version != knowledge.Version {
+				return fmt.Errorf("current Agent execution knowledge projection is invalid")
+			}
+			currentKnowledge = append(currentKnowledge, events.CurrentKnowledgeRevision{Record: knowledge, AdmissionSequence: admitted.event.Sequence, EventType: admitted.event.EventType})
+		}
+		knowledge, err := events.SelectCurrentExecutionKnowledge(draft.Event.OrganizationID, task, started.Sequence, teamRevisions, currentKnowledge)
+		if err != nil {
+			return fmt.Errorf("select Agent execution knowledge: %w", err)
+		}
+		selection := events.ExecutionStartSelection{Started: started, Inbox: selections, Knowledge: knowledge}
+		manifest, err := validate(selection)
+		if err != nil {
 			return fmt.Errorf("validate bounded Agent execution input: %w", err)
+		}
+		if err := validateExecutionStartManifest(ctx, tx, task, started, requested, selection, manifest); err != nil {
+			return err
+		}
+		if _, err := appendEvent(ctx, tx, events.TrustedDraft{
+			OrganizationID: draft.Event.OrganizationID, EventType: "EXECUTION_CONTEXT_MANIFESTED",
+			SourceExecutionID: string(manifest.ExecutionID), TaskID: string(task.ID),
+			Payload: manifest, CorrelationID: draft.Event.CorrelationID,
+		}); err != nil {
+			return fmt.Errorf("append atomic Agent execution manifest: %w", err)
 		}
 		return nil
 	})
 	return started, selections, err
+}
+
+const (
+	maximumCurrentExecutionKnowledgeScan  = 1024
+	maximumExecutionKnowledgeTeamScopes   = 256
+	maximumCurrentExecutionKnowledgeBytes = 8 << 20
+)
+
+func currentExecutionKnowledgeRecords(ctx context.Context, tx *sql.Tx, organizationID string, task core.Task, startSequence int64, routes []events.InboxRoute) ([]admittedProjectionRecord, error) {
+	teamIDs := make([]string, 0, len(routes))
+	for _, route := range routes {
+		if route.Scope == events.RecipientTeam {
+			teamIDs = append(teamIDs, route.ID)
+		}
+	}
+	if len(teamIDs) > maximumExecutionKnowledgeTeamScopes {
+		return nil, fmt.Errorf("agent execution knowledge crosses too many Team scopes")
+	}
+	query := `JOIN (
+	SELECT record_id,MAX(version) AS version FROM records
+	WHERE kind='knowledge' AND json_extract(body,'$.value.organization_id')=?
+	GROUP BY record_id
+) AS latest ON latest.record_id=r.record_id AND latest.version=r.version
+WHERE r.kind='knowledge' AND e.organization_id=? AND e.sequence<?
+AND json_extract(r.body,'$.value.status')=?
+AND ((json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scope_id')=?)
+OR (json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scope_id')=?)`
+	args := []any{
+		organizationID, organizationID, startSequence, string(core.KnowledgeActive),
+		string(core.KnowledgeScopeOrganization), organizationID,
+		string(core.KnowledgeScopeAgent), string(task.AssigneeID),
+	}
+	if len(teamIDs) > 0 {
+		query += ` OR (json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scope_id') IN (`
+		args = append(args, string(core.KnowledgeScopeTeam))
+		for index, teamID := range teamIDs {
+			if index > 0 {
+				query += ","
+			}
+			query += "?"
+			args = append(args, teamID)
+		}
+		query += "))"
+	}
+	query += ") ORDER BY e.sequence DESC,r.record_id LIMIT ?"
+	args = append(args, maximumCurrentExecutionKnowledgeScan+1)
+	records, err := admittedProjectionRecordsBounded(ctx, tx, maximumCurrentExecutionKnowledgeBytes, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) > maximumCurrentExecutionKnowledgeScan {
+		return nil, fmt.Errorf("agent execution knowledge candidate scan exceeds %d current records", maximumCurrentExecutionKnowledgeScan)
+	}
+	return records, nil
+}
+
+func validateExecutionStartManifest(ctx context.Context, tx *sql.Tx, task core.Task, started events.Event, requested events.ExecutionStartDetail, selection events.ExecutionStartSelection, manifest core.ExecutionContextManifest) error {
+	_, offset := manifest.CreatedAt.Zone()
+	if manifest.ExecutionID == "" || manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID ||
+		manifest.AgentBlueprintVersion == "" || manifest.ExecutionProfileVersion == "" || manifest.RuntimeAdapter == "" ||
+		manifest.Provider == "" || manifest.Model == "" || manifest.TaskContractVersion == "" || manifest.PromptVersion == "" ||
+		manifest.PolicyVersion == "" || manifest.ContextBuilderVersion != "v2" || manifest.CreatedAt.IsZero() || offset != 0 ||
+		!manifest.CreatedAt.Equal(started.CreatedAt) || len(manifest.ExecutionInputSHA256) != sha256.Size*2 {
+		return fmt.Errorf("agent execution manifest identity and pinned runtime are invalid")
+	}
+	if _, err := hex.DecodeString(manifest.ExecutionInputSHA256); err != nil {
+		return fmt.Errorf("agent execution manifest input fingerprint is invalid")
+	}
+	if !slices.Equal(manifest.AdditionalContextRefs, requested.StrategicContextRefs) {
+		return fmt.Errorf("agent execution manifest changes its strategic context")
+	}
+	expectedKnowledge := make([]core.VersionedRef, 0, len(selection.Knowledge))
+	for _, selected := range selection.Knowledge {
+		expectedKnowledge = append(expectedKnowledge, core.VersionedRef{
+			ID: string(selected.Record.KnowledgeID), Version: strconv.Itoa(selected.Record.Version), MaterializationState: core.MaterializedFull,
+		})
+	}
+	if !slices.Equal(manifest.KnowledgeRefs, expectedKnowledge) {
+		return fmt.Errorf("agent execution manifest changes its transaction-selected knowledge")
+	}
+	if len(manifest.EventRefs) > 1024 {
+		return fmt.Errorf("agent execution manifest has too many event references")
+	}
+	expectedEventRefs := append([]string(nil), requested.StrategicEventRefs...)
+	var inboxEvents []events.Event
+	for _, inbox := range selection.Inbox {
+		inboxEvents = append(inboxEvents, inbox.Events...)
+	}
+	sort.Slice(inboxEvents, func(i, j int) bool { return inboxEvents[i].Sequence < inboxEvents[j].Sequence })
+	for _, event := range inboxEvents {
+		expectedEventRefs = append(expectedEventRefs, event.EventID)
+	}
+	expectedEventRefs = append(expectedEventRefs, requested.InputEventRefs...)
+	if !slices.Equal(manifest.EventRefs, expectedEventRefs) {
+		return fmt.Errorf("agent execution manifest changes its exact event context")
+	}
+	seen := make(map[string]struct{}, len(manifest.EventRefs))
+	for _, ref := range manifest.EventRefs {
+		if ref == "" {
+			return fmt.Errorf("agent execution manifest has an empty event reference")
+		}
+		if _, duplicate := seen[ref]; duplicate {
+			return fmt.Errorf("agent execution manifest duplicates event reference %s", ref)
+		}
+		seen[ref] = struct{}{}
+		matched, err := exactEventsByID(ctx, tx, started.OrganizationID, ref)
+		if err != nil || len(matched) != 1 || matched[0].Sequence >= started.Sequence {
+			return fmt.Errorf("agent execution manifest event reference %s is not durable before execution start", ref)
+		}
+	}
+	return nil
 }
 
 func validateStrategicExecutionStart(ctx context.Context, tx *sql.Tx, draft events.ProjectionDraft, task core.Task, requested events.ExecutionStartDetail) ([]events.Event, error) {
@@ -1488,6 +1632,12 @@ func prepareProjection(draft events.ProjectionDraft, allowWorkCompletion, allowG
 			return preparedProjection{}, fmt.Errorf("decode Lab promotion-candidate projection: %w", err)
 		}
 		item.promotionCandidate = &candidate
+	case "knowledge":
+		var knowledge core.KnowledgeRecord
+		if err := decodeExactJSONBytes(value, &knowledge); err != nil {
+			return preparedProjection{}, fmt.Errorf("decode knowledge projection: %w", err)
+		}
+		item.knowledge = &knowledge
 	}
 	return item, nil
 }
@@ -1637,70 +1787,17 @@ func loadTaskAssignmentProfile(ctx context.Context, tx *sql.Tx, target map[core.
 }
 
 func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProjection) (events.Event, error) {
-	if item.intent != nil {
-		if err := validateIntentRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
+	admissionAt := time.Now().UTC()
+	if err := validatePreparedProjectionRevision(ctx, tx, item, admissionAt); err != nil {
+		return events.Event{}, err
 	}
-	if item.mission != nil {
-		if err := validateMissionRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.goal != nil {
-		if err := validateGoalRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.team != nil {
-		if err := validateTeamRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.blueprint != nil {
-		if err := validateAgentBlueprintRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.profile != nil {
-		if err := validateExecutionProfileRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.agent != nil {
-		if err := validateAgentRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.task != nil {
-		if err := validateTaskRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-		if err := validateTaskWorkBinding(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.work != nil {
-		if err := validateWorkRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-		if err := validateWorkIntentBinding(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.experiment != nil {
-		if err := validateLabExperimentRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	if item.promotionCandidate != nil {
-		if err := validateLabPromotionCandidateRevision(ctx, tx, item); err != nil {
-			return events.Event{}, err
-		}
-	}
-	event, payload, err := appendProjectionEvent(ctx, tx, item.eventDraft, item.record, item.detail)
+	event, payload, err := appendProjectionEventAt(ctx, tx, item.eventDraft, item.record, item.detail, admissionAt)
 	if err != nil {
 		return events.Event{}, err
+	}
+	if item.knowledge != nil && (item.knowledge.CreatedAt.After(event.CreatedAt) ||
+		(item.knowledge.LastVerifiedAt != nil && item.knowledge.LastVerifiedAt.After(event.CreatedAt))) {
+		return events.Event{}, fmt.Errorf("knowledge timestamps postdate their admitting event")
 	}
 	if item.task != nil && item.draft.Event.EventType == "TASK_VERIFIED_COMPLETE" {
 		if err := validateTaskCompletionTransition(ctx, tx, item, event); err != nil {
@@ -1737,6 +1834,45 @@ func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProj
 		}
 	}
 	return event, nil
+}
+
+func validatePreparedProjectionRevision(ctx context.Context, tx *sql.Tx, item preparedProjection, admissionAt time.Time) error {
+	switch item.draft.ProjectionKind {
+	case "organization":
+		return nil
+	case "intent":
+		return validateIntentRevision(ctx, tx, item)
+	case "mission":
+		return validateMissionRevision(ctx, tx, item)
+	case "goal":
+		return validateGoalRevision(ctx, tx, item)
+	case "team":
+		return validateTeamRevision(ctx, tx, item)
+	case "agent_blueprint":
+		return validateAgentBlueprintRevision(ctx, tx, item)
+	case "execution_profile":
+		return validateExecutionProfileRevision(ctx, tx, item)
+	case "agent":
+		return validateAgentRevision(ctx, tx, item)
+	case "task":
+		if err := validateTaskRevision(ctx, tx, item); err != nil {
+			return err
+		}
+		return validateTaskWorkBinding(ctx, tx, item)
+	case "work":
+		if err := validateWorkRevision(ctx, tx, item); err != nil {
+			return err
+		}
+		return validateWorkIntentBinding(ctx, tx, item)
+	case "lab_experiment":
+		return validateLabExperimentRevision(ctx, tx, item)
+	case "lab_promotion_candidate":
+		return validateLabPromotionCandidateRevision(ctx, tx, item)
+	case "knowledge":
+		return validateKnowledgeRevision(ctx, tx, item, admissionAt)
+	default:
+		return fmt.Errorf("projection kind has no typed revision validator")
+	}
 }
 
 func validateTaskCompletionTransition(ctx context.Context, tx *sql.Tx, item preparedProjection, transition events.Event) error {
@@ -2077,6 +2213,471 @@ func validateGoalRevision(ctx context.Context, tx *sql.Tx, item preparedProjecti
 		return fmt.Errorf("goal version %d follows %d", item.draft.Version, record.Version)
 	}
 	return events.ValidateGoalProjectionTransition(item.draft.Event.EventType, item.draft.Version, &previous, goal)
+}
+
+func validateKnowledgeRevision(ctx context.Context, tx *sql.Tx, item preparedProjection, admissionAt time.Time) error {
+	knowledge := *item.knowledge
+	if knowledge.KnowledgeID != core.ID(item.draft.RecordID) || string(knowledge.OrganizationID) != item.draft.Event.OrganizationID ||
+		item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" ||
+		item.draft.Event.RecipientScope != "" || item.draft.Event.RecipientID != "" || item.draft.Event.CorrelationID == "" ||
+		!slices.Equal(item.draft.Event.ArtifactRefs, knowledge.EvidenceArtifactRefs) {
+		return fmt.Errorf("knowledge projection crosses its runtime-owned identity, tenant, route, or evidence boundary")
+	}
+	if err := validateRosterParentOrganization(ctx, tx, knowledge.OrganizationID); err != nil {
+		return fmt.Errorf("knowledge: %w", err)
+	}
+	if err := validateKnowledgeScopeBinding(ctx, tx, knowledge); err != nil {
+		return err
+	}
+	evidenceArtifacts := make(map[string]struct{})
+	var latestSourceAt time.Time
+	var latestValidationAt time.Time
+	for index, refs := range [][]string{knowledge.ProvenanceEventRefs, knowledge.OccurrenceEventRefs, knowledge.ValidationRefs} {
+		for _, eventRef := range refs {
+			artifactRefs, createdAt, err := validateKnowledgeEventReference(ctx, tx, knowledge.OrganizationID, eventRef)
+			if err != nil {
+				return err
+			}
+			for _, artifactRef := range artifactRefs {
+				evidenceArtifacts[artifactRef] = struct{}{}
+			}
+			if index == 2 && createdAt.After(latestValidationAt) {
+				latestValidationAt = createdAt
+			}
+			if index < 2 && createdAt.After(latestSourceAt) {
+				latestSourceAt = createdAt
+			}
+		}
+	}
+	if knowledge.LastVerifiedAt != nil && knowledge.LastVerifiedAt.Before(latestValidationAt) {
+		return fmt.Errorf("knowledge verification predates its validation evidence")
+	}
+	for _, artifactRef := range knowledge.EvidenceArtifactRefs {
+		if _, evidenced := evidenceArtifacts[artifactRef]; !evidenced {
+			return fmt.Errorf("knowledge artifact is absent from its referenced evidence events")
+		}
+	}
+	if err := validateKnowledgeCreatorEvidence(ctx, tx, knowledge); err != nil {
+		return err
+	}
+	requiresCurrentLineage := item.draft.Event.EventType == "KNOWLEDGE_PROPOSED" || item.draft.Event.EventType == "KNOWLEDGE_ACTIVATED"
+	for _, ref := range knowledge.DerivedKnowledgeRefs {
+		version, err := strconv.Atoi(ref.Version)
+		if err != nil || version < 1 || strconv.Itoa(version) != ref.Version || ref.ID == item.draft.RecordID {
+			return fmt.Errorf("knowledge derived reference is invalid")
+		}
+		body, found, err := recordBodyAtVersion(ctx, tx, "knowledge", ref.ID, version)
+		if err != nil {
+			return fmt.Errorf("read derived knowledge reference: %w", err)
+		}
+		var record events.ProjectionRecord
+		var derived core.KnowledgeRecord
+		if !found || decodeExactJSONBytes(body, &record) != nil || decodeExactJSONBytes(record.Value, &derived) != nil ||
+			record.ProjectionKind != "knowledge" || record.RecordID != ref.ID || record.Version != version ||
+			derived.OrganizationID != knowledge.OrganizationID || derived.Status != core.KnowledgeActive {
+			return fmt.Errorf("derived knowledge must reference an exact active revision in the same organization")
+		}
+		if !core.KnowledgeDerivedScopeAllowed(derived, knowledge) {
+			return fmt.Errorf("derived knowledge scope exceeds its source scope")
+		}
+		derivedAdmittedAt, err := projectionAdmissionTime(ctx, tx, "knowledge", ref.ID, version)
+		if err != nil {
+			return fmt.Errorf("read derived knowledge admission time: %w", err)
+		}
+		if derivedAdmittedAt.After(latestSourceAt) {
+			latestSourceAt = derivedAdmittedAt
+		}
+		if requiresCurrentLineage {
+			currentRecord, current, currentFound, err := latestProjectionRevision[core.KnowledgeRecord](ctx, tx, "knowledge", ref.ID)
+			if err != nil || !currentFound || currentRecord.Version != version || current.Status != core.KnowledgeActive {
+				return fmt.Errorf("derived knowledge must reference the current active revision")
+			}
+		}
+	}
+	if knowledge.CreatedAt.Before(latestSourceAt) {
+		return fmt.Errorf("knowledge creation predates its provenance, occurrence, or derived source evidence")
+	}
+	record, previous, found, err := latestProjectionRevision[core.KnowledgeRecord](ctx, tx, "knowledge", item.draft.RecordID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		if item.draft.Event.EventType != "KNOWLEDGE_PROPOSED" || item.draft.Version != 1 || knowledge.Status != core.KnowledgeCandidate ||
+			item.draft.Event.CorrelationID != "knowledge-"+item.draft.RecordID {
+			return fmt.Errorf("knowledge history must begin with a deterministic version-1 candidate proposal")
+		}
+		return nil
+	}
+	if record.CorrelationID != item.draft.Event.CorrelationID || item.draft.Version != record.Version+1 {
+		return fmt.Errorf("knowledge revision crosses its correlation or version boundary")
+	}
+	if err := core.ValidateKnowledgeTransition(item.draft.Event.EventType, previous, knowledge); err != nil {
+		return fmt.Errorf("knowledge revision: %w", err)
+	}
+	if item.draft.Event.EventType == "KNOWLEDGE_ACTIVATED" {
+		proposalSequence, err := projectionAdmissionSequence(ctx, tx, "knowledge", item.draft.RecordID, record.Version)
+		if err != nil {
+			return err
+		}
+		if err := validatePostProposalKnowledgeEvidence(ctx, tx, proposalSequence, knowledge); err != nil {
+			return err
+		}
+		if knowledge.ValidatedByKind == core.PrincipalHuman || knowledge.ValidatedByKind == core.PrincipalAgent || knowledge.ValidatedByKind == core.PrincipalExternalAgent {
+			if err := validateKnowledgeJudgmentAuthorization(ctx, tx, knowledge, proposalSequence, admissionAt); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateKnowledgeCreatorEvidence(ctx context.Context, tx *sql.Tx, knowledge core.KnowledgeRecord) error {
+	if knowledge.CreatedByKind == core.PrincipalRuntime {
+		if knowledge.CreatedBy == "runtime" {
+			return nil
+		}
+		return fmt.Errorf("runtime knowledge creator identity is invalid")
+	}
+	for _, ref := range knowledge.ProvenanceEventRefs {
+		evidence, found, err := eventByID(ctx, tx, ref)
+		if err != nil {
+			return fmt.Errorf("read knowledge creator evidence: %w", err)
+		}
+		if !found {
+			continue
+		}
+		if knowledge.CreatedByKind == core.PrincipalAgent {
+			valid, err := validateAgentKnowledgeCreatorExecution(ctx, tx, evidence, knowledge)
+			if err != nil {
+				return err
+			}
+			if valid {
+				return nil
+			}
+		} else if events.ValidKnowledgeCreatorEvidence(evidence, knowledge) {
+			return nil
+		}
+	}
+	return fmt.Errorf("knowledge creator kind is not bound to authenticated provenance")
+}
+
+func validateAgentKnowledgeCreatorExecution(ctx context.Context, tx *sql.Tx, proposal events.Event, knowledge core.KnowledgeRecord) (bool, error) {
+	return validateAgentExecutionEvidence(ctx, tx, proposal, knowledge.CreatedBy, func(stream []events.Event) bool {
+		return events.ValidAgentKnowledgeCreatorEvidence(proposal, knowledge, stream)
+	})
+}
+
+func validateAgentExecutionEvidence(ctx context.Context, tx *sql.Tx, emitted events.Event, actorID core.ID, validate func([]events.Event) bool) (bool, error) {
+	if emitted.TaskID == "" || emitted.CorrelationID == "" || actorID == "" || validate == nil {
+		return false, nil
+	}
+	starts, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND event_type='EXECUTION_STARTED' AND sequence<?
+AND json_extract(CAST(payload AS TEXT),'$.detail.dispatch_binding.dispatch_id')=? ORDER BY sequence DESC LIMIT 2`,
+		emitted.OrganizationID, emitted.TaskID, emitted.CorrelationID, emitted.Sequence, emitted.SourceExecutionID))
+	if err != nil {
+		return false, fmt.Errorf("read Agent evidence execution starts: %w", err)
+	}
+	if len(starts) > 1 {
+		return false, fmt.Errorf("agent evidence execution identity is ambiguous")
+	}
+	for _, start := range starts {
+		payload, present, err := events.AdmittedProjection(start)
+		if err != nil || !present {
+			continue
+		}
+		var detail events.ExecutionStartDetail
+		if decodeExactJSONBytes(payload.Detail, &detail) != nil || detail.DispatchBinding == nil {
+			continue
+		}
+		closed, err := agentKnowledgeExecutionClosedBeforeProposal(ctx, tx, start, payload.Projection.Version, emitted)
+		if err != nil {
+			return false, err
+		}
+		if closed {
+			continue
+		}
+		stream := []events.Event{start}
+		for _, ref := range []string{detail.DispatchBinding.AgentEventRef, detail.DispatchBinding.BlueprintEventRef, detail.DispatchBinding.ExecutionProfileEventRef} {
+			bound, found, err := eventByID(ctx, tx, ref)
+			if err != nil {
+				return false, fmt.Errorf("read Agent evidence dispatch binding: %w", err)
+			}
+			if !found {
+				stream = nil
+				break
+			}
+			stream = append(stream, bound)
+		}
+		if stream != nil && validate(stream) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func agentKnowledgeExecutionClosedBeforeProposal(ctx context.Context, tx *sql.Tx, start events.Event, startVersion int, proposal events.Event) (bool, error) {
+	if start.EventID == "" || start.Sequence < 1 || startVersion < 1 || proposal.Sequence <= start.Sequence ||
+		start.OrganizationID != proposal.OrganizationID || start.TaskID != proposal.TaskID || start.CorrelationID != proposal.CorrelationID || proposal.SourceExecutionID == "" {
+		return false, fmt.Errorf("agent knowledge execution lifetime boundary is invalid")
+	}
+	var closed bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1 FROM events e
+LEFT JOIN records r ON r.admission_event_id=e.event_id AND r.kind='task' AND r.record_id=?
+WHERE e.organization_id=? AND e.task_id=? AND e.correlation_id=? AND e.sequence>? AND e.sequence<?
+AND ((e.event_type='EXECUTION_FINISHED' AND e.source_execution_id=?) OR r.version>?))`,
+		start.TaskID, start.OrganizationID, start.TaskID, start.CorrelationID, start.Sequence, proposal.Sequence, proposal.SourceExecutionID, startVersion).Scan(&closed)
+	if err != nil {
+		return false, fmt.Errorf("inspect Agent knowledge execution lifetime: %w", err)
+	}
+	return closed, nil
+}
+
+func validateKnowledgeJudgmentAuthorization(ctx context.Context, tx *sql.Tx, knowledge core.KnowledgeRecord, proposalSequence int64, admissionAt time.Time) error {
+	foundAuthorization := false
+	for _, ref := range knowledge.ValidationRefs {
+		judgment, found, err := eventByID(ctx, tx, ref)
+		if err != nil {
+			return fmt.Errorf("read knowledge judgment authorization: %w", err)
+		}
+		if !found || judgment.EventType != "CAPABILITY_CHECKED" {
+			continue
+		}
+		if judgment.Sequence <= proposalSequence ||
+			judgment.OrganizationID != string(knowledge.OrganizationID) || judgment.SourceActorID != string(knowledge.ValidatedBy) ||
+			judgment.RecipientScope != "" || judgment.RecipientID != "" || judgment.TaskID == "" || len(judgment.AuthorizationRefs) == 0 ||
+			len(judgment.ArtifactRefs) != 0 || judgment.SchemaVersion != events.SchemaVersion {
+			return fmt.Errorf("knowledge judgment references an invalid capability check")
+		}
+		var recorded core.AuthorizationTrace
+		if decodeExactJSONBytes(judgment.Payload, &recorded) != nil || !recorded.Allowed || recorded.LeaseID == "" ||
+			recorded.ActorID != knowledge.ValidatedBy || recorded.ActorKind != knowledge.ValidatedByKind || recorded.TaskID != core.ID(judgment.TaskID) || recorded.Action != "knowledge.validate" ||
+			recorded.Resource != string(knowledge.KnowledgeID) || recorded.Scope != string(knowledge.OrganizationID) ||
+			len(judgment.AuthorizationRefs) != 1 || judgment.AuthorizationRefs[0] != string(recorded.LeaseID) {
+			return fmt.Errorf("knowledge judgment capability check is not bound to its exact candidate")
+		}
+		atJudgment, err := authorizationTraceAtSequence(ctx, tx, knowledge.OrganizationID, recorded.ActorID, recorded.ActorKind, recorded.TaskID, recorded.Action, recorded.Resource, recorded.Scope, judgment.AuthorizationRefs, judgment.Sequence, judgment.CreatedAt)
+		if err != nil {
+			return err
+		}
+		current, err := currentAuthorizationTrace(ctx, tx, knowledge.OrganizationID, recorded.ActorID, recorded.ActorKind, recorded.TaskID, recorded.Action, recorded.Resource, recorded.Scope, judgment.AuthorizationRefs, admissionAt)
+		if err != nil {
+			return err
+		}
+		if !atJudgment.Allowed || atJudgment.LeaseID != recorded.LeaseID || atJudgment.ActorKind != recorded.ActorKind ||
+			!current.Allowed || current.LeaseID != recorded.LeaseID || current.ActorKind != recorded.ActorKind {
+			return fmt.Errorf("knowledge judgment capability is not valid at admission")
+		}
+		foundStatement, err := hasAuthorizedKnowledgeStatement(ctx, tx, knowledge, proposalSequence, judgment)
+		if err != nil {
+			return err
+		}
+		if !foundStatement {
+			return fmt.Errorf("knowledge judgment capability check lacks its exact statement")
+		}
+		foundAuthorization = true
+	}
+	if foundAuthorization {
+		return nil
+	}
+	return fmt.Errorf("knowledge judgment lacks an authenticated, currently authorized validator admission")
+}
+
+func hasAuthorizedKnowledgeStatement(ctx context.Context, tx *sql.Tx, knowledge core.KnowledgeRecord, proposalSequence int64, authorization events.Event) (bool, error) {
+	for _, ref := range knowledge.ValidationRefs {
+		statement, found, err := eventByID(ctx, tx, ref)
+		if err != nil {
+			return false, fmt.Errorf("read knowledge judgment statement: %w", err)
+		}
+		if !found || statement.EventType == "CAPABILITY_CHECKED" || statement.Sequence <= authorization.Sequence ||
+			statement.TaskID != authorization.TaskID {
+			continue
+		}
+		frozen, err := organizationFrozenAtSequence(ctx, tx, knowledge.OrganizationID, statement.Sequence)
+		if err != nil {
+			return false, err
+		}
+		if frozen {
+			continue
+		}
+		valid := events.ValidKnowledgeJudgmentStatement(statement, knowledge, authorization.EventID, nil)
+		if knowledge.ValidationMethod == core.KnowledgeValidationIndependentAgent && knowledge.ValidatedByKind == core.PrincipalAgent {
+			valid, err = validateAgentExecutionEvidence(ctx, tx, statement, knowledge.ValidatedBy, func(stream []events.Event) bool {
+				return events.ValidKnowledgeJudgmentStatement(statement, knowledge, authorization.EventID, stream)
+			})
+			if err != nil {
+				return false, err
+			}
+		}
+		if valid {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func projectionAdmissionSequence(ctx context.Context, tx *sql.Tx, kind, recordID string, version int) (int64, error) {
+	var sequence int64
+	if err := tx.QueryRowContext(ctx, `SELECT e.sequence FROM records r
+JOIN events e ON e.event_id=r.admission_event_id
+WHERE r.kind=? AND r.record_id=? AND r.version=?`, kind, recordID, version).Scan(&sequence); err != nil {
+		return 0, fmt.Errorf("read prior %s admission sequence: %w", kind, err)
+	}
+	if sequence < 1 {
+		return 0, fmt.Errorf("prior %s admission sequence is invalid", kind)
+	}
+	return sequence, nil
+}
+
+func projectionAdmissionTime(ctx context.Context, tx *sql.Tx, kind, recordID string, version int) (time.Time, error) {
+	var encoded string
+	if err := tx.QueryRowContext(ctx, `SELECT e.created_at FROM records r
+JOIN events e ON e.event_id=r.admission_event_id
+WHERE r.kind=? AND r.record_id=? AND r.version=?`, kind, recordID, version).Scan(&encoded); err != nil {
+		return time.Time{}, fmt.Errorf("read prior %s admission time: %w", kind, err)
+	}
+	admittedAt, err := time.Parse(time.RFC3339Nano, encoded)
+	if err != nil || admittedAt.IsZero() {
+		return time.Time{}, fmt.Errorf("prior %s admission time is invalid", kind)
+	}
+	return admittedAt, nil
+}
+
+func validateKnowledgeScopeBinding(ctx context.Context, tx *sql.Tx, knowledge core.KnowledgeRecord) error {
+	if knowledge.Scope == core.KnowledgeScopeOrganization {
+		return nil
+	}
+	kind := "agent"
+	if knowledge.Scope == core.KnowledgeScopeTeam {
+		kind = "team"
+	}
+	body, found, err := latestRecordBody(ctx, tx, kind, string(knowledge.ScopeID))
+	if err != nil {
+		return fmt.Errorf("read knowledge scope binding: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("knowledge scope is not a durable %s", kind)
+	}
+	var record events.ProjectionRecord
+	if decodeExactJSONBytes(body, &record) != nil || record.ProjectionKind != kind || record.RecordID != string(knowledge.ScopeID) {
+		return fmt.Errorf("knowledge scope projection is invalid")
+	}
+	var organizationID core.ID
+	if kind == "agent" {
+		var agent core.Agent
+		if decodeExactJSONBytes(record.Value, &agent) != nil || agent.ID != knowledge.ScopeID {
+			return fmt.Errorf("knowledge Agent scope projection is invalid")
+		}
+		organizationID = agent.OrganizationID
+	} else {
+		var team core.Team
+		if decodeExactJSONBytes(record.Value, &team) != nil || team.ID != knowledge.ScopeID {
+			return fmt.Errorf("knowledge Team scope projection is invalid")
+		}
+		organizationID = team.OrganizationID
+	}
+	if organizationID != knowledge.OrganizationID {
+		return fmt.Errorf("knowledge scope crosses its organization boundary")
+	}
+	return nil
+}
+
+func validateKnowledgeEventReference(ctx context.Context, tx *sql.Tx, organizationID core.ID, eventRef string) ([]string, time.Time, error) {
+	var actualOrganization string
+	var encodedArtifactRefs []byte
+	var encodedCreatedAt string
+	if err := tx.QueryRowContext(ctx, `SELECT organization_id,artifact_refs,created_at FROM events WHERE event_id=?`, eventRef).Scan(&actualOrganization, &encodedArtifactRefs, &encodedCreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, time.Time{}, fmt.Errorf("knowledge references an unavailable event")
+		}
+		return nil, time.Time{}, fmt.Errorf("read knowledge event reference: %w", err)
+	}
+	if actualOrganization != string(organizationID) {
+		return nil, time.Time{}, fmt.Errorf("knowledge event reference crosses its organization boundary")
+	}
+	var artifactRefs []string
+	if decodeExactJSONBytes(encodedArtifactRefs, &artifactRefs) != nil {
+		return nil, time.Time{}, fmt.Errorf("knowledge evidence event artifact references are invalid")
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, encodedCreatedAt)
+	if err != nil || createdAt.IsZero() {
+		return nil, time.Time{}, fmt.Errorf("knowledge evidence event timestamp is invalid")
+	}
+	return artifactRefs, createdAt, nil
+}
+
+func validatePostProposalKnowledgeEvidence(ctx context.Context, tx *sql.Tx, proposalSequence int64, knowledge core.KnowledgeRecord) error {
+	occurrences := make(map[string]struct{}, len(knowledge.OccurrenceEventRefs))
+	executions := make(map[string]struct{}, len(knowledge.ValidationRefs))
+	hasStatement := false
+	for _, ref := range knowledge.OccurrenceEventRefs {
+		occurrences[ref] = struct{}{}
+	}
+	for _, ref := range knowledge.ValidationRefs {
+		evidence, found, err := eventByID(ctx, tx, ref)
+		if err != nil {
+			return fmt.Errorf("read knowledge validation event: %w", err)
+		}
+		valid := found && events.ValidKnowledgeValidationEvidence(evidence, knowledge, proposalSequence, nil)
+		if found && knowledge.ValidationMethod == core.KnowledgeValidationDeterministic {
+			valid, err = validateKnowledgeExecutionEvidence(ctx, tx, evidence, func(stream []events.Event) bool {
+				return events.ValidKnowledgeValidationEvidence(evidence, knowledge, proposalSequence, stream)
+			})
+			if err != nil {
+				return err
+			}
+		}
+		if found && (knowledge.ValidationMethod == core.KnowledgeValidationRepeatedObservation ||
+			knowledge.ValidationMethod == core.KnowledgeValidationIndependentAgent && knowledge.ValidatedByKind == core.PrincipalAgent && evidence.EventType != "CAPABILITY_CHECKED") {
+			valid, err = validateAgentExecutionEvidence(ctx, tx, evidence, core.ID(evidence.SourceActorID), func(stream []events.Event) bool {
+				return events.ValidKnowledgeValidationEvidence(evidence, knowledge, proposalSequence, stream)
+			})
+			if err != nil {
+				return err
+			}
+		}
+		if !valid {
+			return fmt.Errorf("knowledge activation requires validation evidence admitted after its candidate proposal")
+		}
+		if knowledge.Basis == core.KnowledgeBasisRepeatedPattern {
+			if _, repeated := occurrences[ref]; repeated {
+				return fmt.Errorf("repeated-pattern validation must be independent of its occurrence evidence")
+			}
+		}
+		if knowledge.ValidationMethod == core.KnowledgeValidationRepeatedObservation {
+			if _, duplicate := executions[evidence.SourceExecutionID]; duplicate {
+				return fmt.Errorf("repeated-observation validation requires distinct execution evidence")
+			}
+			executions[evidence.SourceExecutionID] = struct{}{}
+		}
+		if (knowledge.ValidationMethod == core.KnowledgeValidationHuman || knowledge.ValidationMethod == core.KnowledgeValidationIndependentAgent) && evidence.EventType != "CAPABILITY_CHECKED" {
+			hasStatement = true
+		}
+	}
+	if len(knowledge.ValidationRefs) == 0 {
+		return fmt.Errorf("knowledge activation requires validation evidence")
+	}
+	if (knowledge.ValidationMethod == core.KnowledgeValidationHuman || knowledge.ValidationMethod == core.KnowledgeValidationIndependentAgent) && !hasStatement {
+		return fmt.Errorf("knowledge judgment requires a separate authenticated statement")
+	}
+	return nil
+}
+
+func validateKnowledgeExecutionEvidence(ctx context.Context, tx *sql.Tx, emitted events.Event, validate func([]events.Event) bool) (bool, error) {
+	if emitted.OrganizationID == "" || emitted.TaskID == "" || emitted.CorrelationID == "" || emitted.Sequence < 1 || validate == nil {
+		return false, nil
+	}
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND sequence<=? ORDER BY sequence LIMIT 1025`,
+		emitted.OrganizationID, emitted.TaskID, emitted.CorrelationID, emitted.Sequence))
+	if err != nil {
+		return false, fmt.Errorf("read knowledge validation execution: %w", err)
+	}
+	if len(stream) > 1024 {
+		return false, fmt.Errorf("knowledge validation execution exceeds its event bound")
+	}
+	return validate(stream), nil
 }
 
 func latestProjectionRevision[T any](ctx context.Context, tx *sql.Tx, kind, recordID string) (events.ProjectionRecord, T, bool, error) {
@@ -2694,7 +3295,7 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, obligation
 				return err
 			}
 		}
-		trace = authority.Check(authorizedAt, obligation.ActorID, obligation.TaskID, obligation.Action, obligation.Resource, obligation.Scope, leases, frozen)
+		trace = authority.Check(authorizedAt, obligation.ActorID, obligation.ActorKind, obligation.TaskID, obligation.Action, obligation.Resource, obligation.Scope, leases, frozen)
 		traceBody, err := json.Marshal(trace)
 		if err != nil {
 			return err
@@ -2729,6 +3330,57 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, obligation
 	return trace, err
 }
 
+func currentAuthorizationTrace(ctx context.Context, tx *sql.Tx, organizationID, actorID core.ID, actorKind core.PrincipalKind, taskID core.ID, action, resource, scope string, authorizationRefs []string, now time.Time) (core.AuthorizationTrace, error) {
+	leases, frozen, err := authorityStateAtSequence(ctx, tx, organizationID, authorizationRefs, 0)
+	if err != nil {
+		return core.AuthorizationTrace{}, err
+	}
+	return authority.Check(now, actorID, actorKind, taskID, action, resource, scope, leases, frozen), nil
+}
+
+func authorizationTraceAtSequence(ctx context.Context, tx *sql.Tx, organizationID, actorID core.ID, actorKind core.PrincipalKind, taskID core.ID, action, resource, scope string, authorizationRefs []string, beforeSequence int64, at time.Time) (core.AuthorizationTrace, error) {
+	leases, frozen, err := authorityStateAtSequence(ctx, tx, organizationID, authorizationRefs, beforeSequence)
+	if err != nil {
+		return core.AuthorizationTrace{}, err
+	}
+	return authority.Check(at, actorID, actorKind, taskID, action, resource, scope, leases, frozen), nil
+}
+
+func authorityStateAtSequence(ctx context.Context, tx *sql.Tx, organizationID core.ID, authorizationRefs []string, beforeSequence int64) ([]core.CapabilityLease, bool, error) {
+	if organizationID == "" || beforeSequence < 0 || len(authorizationRefs) > core.MaximumKnowledgeReferences {
+		return nil, false, fmt.Errorf("bounded authority snapshot identity is invalid")
+	}
+	leaseAdmissions, err := capabilityLeaseAdmissionsAtBoundary(ctx, tx, string(organizationID), authorizationRefs, beforeSequence)
+	if err != nil {
+		return nil, false, err
+	}
+	leases := make([]core.CapabilityLease, 0, len(leaseAdmissions))
+	for _, admission := range leaseAdmissions {
+		leases = append(leases, admission.Lease)
+	}
+	freezeRecord, freezeEvent, found, err := authorityAdmissionAtBoundary(ctx, tx, "organization_freeze", string(organizationID), beforeSequence)
+	if err != nil {
+		return nil, false, err
+	}
+	frozen := false
+	if found {
+		var state authority.FreezeState
+		if freezeEvent.OrganizationID != string(organizationID) || decodeExactJSONBytes(freezeRecord.Body, &state) != nil || state.OrganizationID != organizationID {
+			return nil, false, fmt.Errorf("decode admitted organization freeze")
+		}
+		frozen = state.Frozen
+	}
+	return leases, frozen, nil
+}
+
+func organizationFrozenAtSequence(ctx context.Context, tx *sql.Tx, organizationID core.ID, beforeSequence int64) (bool, error) {
+	_, frozen, err := authorityStateAtSequence(ctx, tx, organizationID, nil, beforeSequence)
+	if err != nil {
+		return false, err
+	}
+	return frozen, nil
+}
+
 func latestRecordBody(ctx context.Context, tx *sql.Tx, kind, id string) ([]byte, bool, error) {
 	if !genericRecordKindAllowed(kind) {
 		bodies, err := admittedProjectionRecordBodies(ctx, tx, `WHERE r.kind=? AND r.record_id=? ORDER BY r.version DESC LIMIT 1`, kind, id)
@@ -2751,6 +3403,33 @@ func latestRecordBody(ctx context.Context, tx *sql.Tx, kind, id string) ([]byte,
 	return body, true, nil
 }
 
+func authorityAdmissionsSnapshot(ctx context.Context, queryer rowsQueryer) ([]events.CapabilityLeaseAdmission, []events.OrganizationFreezeAdmission, error) {
+	stream, err := collectEvents(queryer.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
+FROM events WHERE event_type IN ('CAPABILITY_GRANTED','CAPABILITY_REVOKED','FREEZE_SET') ORDER BY sequence`))
+	if err != nil {
+		return nil, nil, fmt.Errorf("read authority Event Contracts: %w", err)
+	}
+	rows, err := queryer.QueryContext(ctx, `SELECT kind,record_id,version,body,admission_event_id FROM records
+WHERE kind IN ('capability_lease','organization_freeze') ORDER BY kind,record_id,version`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read authority records: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	records := make([]events.AuthorityRecord, 0)
+	for rows.Next() {
+		var record events.AuthorityRecord
+		if err := rows.Scan(&record.Kind, &record.RecordID, &record.Version, &record.Body, &record.AdmissionEventID); err != nil {
+			return nil, nil, fmt.Errorf("scan authority record: %w", err)
+		}
+		record.Body = append([]byte(nil), record.Body...)
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterate authority records: %w", err)
+	}
+	return events.ResolveAuthorityAdmissions(stream, records)
+}
+
 // authorityAdmissionsForEffect validates only the authority identities that
 // can affect one obligation. Every current record names its exact admission
 // event, so reads use the records primary key and unique event indexes instead
@@ -2759,28 +3438,9 @@ func authorityAdmissionsForEffect(ctx context.Context, queryer *sql.Tx, organiza
 	if organizationID == "" || len(authorizationRefs) == 0 || len(authorizationRefs) > core.MaximumEffectAuthorizationRefs {
 		return nil, nil, fmt.Errorf("organization and between 1 and %d authorization references are required", core.MaximumEffectAuthorizationRefs)
 	}
-	seenRefs := make(map[string]struct{}, len(authorizationRefs))
-	leasing := make([]events.CapabilityLeaseAdmission, 0, len(authorizationRefs))
-	for _, ref := range authorizationRefs {
-		if ref == "" {
-			return nil, nil, fmt.Errorf("authorization reference is empty")
-		}
-		if _, duplicate := seenRefs[ref]; duplicate {
-			return nil, nil, fmt.Errorf("authorization reference %s is duplicated", ref)
-		}
-		seenRefs[ref] = struct{}{}
-		record, admission, found, err := latestAuthorityAdmission(ctx, queryer, "capability_lease", ref)
-		if err != nil {
-			return nil, nil, err
-		}
-		if !found || admission.OrganizationID != organizationID {
-			continue
-		}
-		var lease core.CapabilityLease
-		if decodeExactJSONBytes(record.Body, &lease) != nil {
-			return nil, nil, fmt.Errorf("decode admitted capability lease %s", ref)
-		}
-		leasing = append(leasing, events.CapabilityLeaseAdmission{Lease: lease, OrganizationID: core.ID(admission.OrganizationID), Sequence: admission.Sequence})
+	leasing, err := capabilityLeaseAdmissionsAtBoundary(ctx, queryer, organizationID, authorizationRefs, 0)
+	if err != nil {
+		return nil, nil, err
 	}
 	freezeRecord, freezeEvent, found, err := latestAuthorityAdmission(ctx, queryer, "organization_freeze", organizationID)
 	if err != nil {
@@ -2800,6 +3460,43 @@ func authorityAdmissionsForEffect(ctx context.Context, queryer *sql.Tx, organiza
 	return leasing, freezes, nil
 }
 
+func capabilityLeaseAdmissionsAtBoundary(ctx context.Context, queryer *sql.Tx, organizationID string, authorizationRefs []string, beforeSequence int64) ([]events.CapabilityLeaseAdmission, error) {
+	seen := make(map[string]struct{}, len(authorizationRefs))
+	admissions := make([]events.CapabilityLeaseAdmission, 0, len(authorizationRefs))
+	for _, ref := range authorizationRefs {
+		if ref == "" {
+			return nil, fmt.Errorf("authority snapshot reference is empty")
+		}
+		if _, duplicate := seen[ref]; duplicate {
+			return nil, fmt.Errorf("authority snapshot reference %s is duplicated", ref)
+		}
+		seen[ref] = struct{}{}
+		lease, admission, found, err := capabilityLeaseAtBoundary(ctx, queryer, organizationID, ref, beforeSequence)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			admissions = append(admissions, events.CapabilityLeaseAdmission{Lease: lease, OrganizationID: core.ID(admission.OrganizationID), Sequence: admission.Sequence})
+		}
+	}
+	return admissions, nil
+}
+
+func capabilityLeaseAtBoundary(ctx context.Context, queryer *sql.Tx, organizationID, recordID string, beforeSequence int64) (core.CapabilityLease, events.Event, bool, error) {
+	record, admission, found, err := authorityAdmissionAtBoundary(ctx, queryer, "capability_lease", recordID, beforeSequence)
+	if err != nil {
+		return core.CapabilityLease{}, events.Event{}, false, err
+	}
+	if !found || admission.OrganizationID != organizationID {
+		return core.CapabilityLease{}, events.Event{}, false, nil
+	}
+	var lease core.CapabilityLease
+	if decodeExactJSONBytes(record.Body, &lease) != nil {
+		return core.CapabilityLease{}, events.Event{}, false, fmt.Errorf("decode admitted capability lease %s", recordID)
+	}
+	return lease, admission, true, nil
+}
+
 func latestAuthorityAdmission(ctx context.Context, queryer *sql.Tx, kind, recordID string) (events.AuthorityRecord, events.Event, bool, error) {
 	var record events.AuthorityRecord
 	err := queryer.QueryRowContext(ctx, `SELECT kind,record_id,version,body,admission_event_id FROM records WHERE kind=? AND record_id=? ORDER BY version DESC LIMIT 1`, kind, recordID).
@@ -2810,22 +3507,57 @@ func latestAuthorityAdmission(ctx context.Context, queryer *sql.Tx, kind, record
 	if err != nil {
 		return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("read current authority record: %w", err)
 	}
+	return validateSelectedAuthorityAdmission(ctx, queryer, record, false)
+}
+
+func authorityAdmissionAtBoundary(ctx context.Context, queryer *sql.Tx, kind, recordID string, beforeSequence int64) (events.AuthorityRecord, events.Event, bool, error) {
+	if beforeSequence == 0 {
+		return latestAuthorityAdmission(ctx, queryer, kind, recordID)
+	}
+	var record events.AuthorityRecord
+	err := queryer.QueryRowContext(ctx, `SELECT r.kind,r.record_id,r.version,r.body,r.admission_event_id
+FROM records r JOIN events e ON e.event_id=r.admission_event_id
+WHERE r.kind=? AND r.record_id=? AND e.sequence<?
+ORDER BY e.sequence DESC LIMIT 1`, kind, recordID, beforeSequence).
+		Scan(&record.Kind, &record.RecordID, &record.Version, &record.Body, &record.AdmissionEventID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return events.AuthorityRecord{}, events.Event{}, false, nil
+	}
+	if err != nil {
+		return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("read historical authority record: %w", err)
+	}
+	record, admission, found, err := validateSelectedAuthorityAdmission(ctx, queryer, record, true)
+	if err != nil || !found {
+		return record, admission, found, err
+	}
+	if admission.Sequence >= beforeSequence {
+		return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("historical authority admission crosses its sequence boundary")
+	}
+	return record, admission, true, nil
+}
+
+func validateSelectedAuthorityAdmission(ctx context.Context, queryer *sql.Tx, record events.AuthorityRecord, allowLaterVersions bool) (events.AuthorityRecord, events.Event, bool, error) {
 	var count int
-	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*) FROM records WHERE kind=? AND record_id=?`, kind, recordID).Scan(&count); err != nil || count != record.Version {
-		return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("authority record %s/%s history is noncontiguous", kind, recordID)
+	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*) FROM records WHERE kind=? AND record_id=? AND version<=?`, record.Kind, record.RecordID, record.Version).Scan(&count); err != nil || count != record.Version {
+		return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("authority record %s/%s history is noncontiguous", record.Kind, record.RecordID)
+	}
+	if !allowLaterVersions {
+		if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*) FROM records WHERE kind=? AND record_id=?`, record.Kind, record.RecordID).Scan(&count); err != nil || count != record.Version {
+			return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("authority record %s/%s history is noncontiguous", record.Kind, record.RecordID)
+		}
 	}
 	var priorBody []byte
 	if record.Version > 1 {
-		if err := queryer.QueryRowContext(ctx, `SELECT body FROM records WHERE kind=? AND record_id=? AND version=?`, kind, recordID, record.Version-1).Scan(&priorBody); err != nil {
+		if err := queryer.QueryRowContext(ctx, `SELECT body FROM records WHERE kind=? AND record_id=? AND version=?`, record.Kind, record.RecordID, record.Version-1).Scan(&priorBody); err != nil {
 			return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("read prior authority record: %w", err)
 		}
 	}
-	if err := events.ValidateAuthorityRecordTransition(kind, recordID, record.Version, record.Body, priorBody); err != nil {
+	if err := events.ValidateAuthorityRecordTransition(record.Kind, record.RecordID, record.Version, record.Body, priorBody); err != nil {
 		return events.AuthorityRecord{}, events.Event{}, false, err
 	}
 	matched, err := collectEvents(queryer.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_id=?`, record.AdmissionEventID))
 	if err != nil || len(matched) != 1 {
-		return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("authority record %s/%s lacks its exact admission event", kind, recordID)
+		return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("authority record %s/%s lacks its exact admission event", record.Kind, record.RecordID)
 	}
 	admission := matched[0]
 	draft := events.TrustedDraft{
@@ -2833,8 +3565,8 @@ func latestAuthorityAdmission(ctx context.Context, queryer *sql.Tx, kind, record
 		SourceExecutionID: admission.SourceExecutionID, RecipientScope: admission.RecipientScope, RecipientID: admission.RecipientID,
 		TaskID: admission.TaskID, AuthorizationRefs: admission.AuthorizationRefs, ArtifactRefs: admission.ArtifactRefs, Payload: json.RawMessage(record.Body), CorrelationID: admission.CorrelationID,
 	}
-	if record.AdmissionEventID == "" || admission.EventID != record.AdmissionEventID || admission.Sequence < 1 || admission.CreatedAt.IsZero() || admission.SchemaVersion != events.SchemaVersion || !bytes.Equal(admission.Payload, record.Body) || events.ValidateAuthorityRecordDraft(draft, kind, recordID, record.Version, record.Body) != nil {
-		return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("authority record %s/%s admission binding is invalid", kind, recordID)
+	if record.AdmissionEventID == "" || admission.EventID != record.AdmissionEventID || admission.Sequence < 1 || admission.CreatedAt.IsZero() || admission.SchemaVersion != events.SchemaVersion || !bytes.Equal(admission.Payload, record.Body) || events.ValidateAuthorityRecordDraft(draft, record.Kind, record.RecordID, record.Version, record.Body) != nil {
+		return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("authority record %s/%s admission binding is invalid", record.Kind, record.RecordID)
 	}
 	record.Body = append([]byte(nil), record.Body...)
 	return record, admission, true, nil
@@ -2965,6 +3697,33 @@ func (l *SQLite) Records(ctx context.Context, kind, id string) ([][]byte, error)
 	return collectRecordBodies(l.db.QueryContext(ctx, `SELECT body FROM records WHERE kind=? AND (?='' OR record_id=?) ORDER BY record_id,version`, kind, id, id))
 }
 
+// CurrentKnowledgeRecords returns one deterministic, bounded snapshot of every
+// current event-admitted knowledge identity in one exact tenant. Consumers
+// need terminal source revisions as well as active results to reject stale or
+// superseded derived lineage.
+func (l *SQLite) CurrentKnowledgeRecords(ctx context.Context, organizationID string, limit int) ([][]byte, error) {
+	if organizationID == "" || limit < 1 || limit > 4097 {
+		return nil, fmt.Errorf("organization and limit from 1 through 4097 are required")
+	}
+	records, err := admittedProjectionRecordsBounded(ctx, l.db, 32<<20, `JOIN (
+	SELECT record_id, MAX(version) AS version
+	FROM records
+	WHERE kind='knowledge'
+	GROUP BY record_id
+) AS latest ON latest.record_id=r.record_id AND latest.version=r.version
+WHERE r.kind='knowledge' AND e.organization_id=?
+ORDER BY e.sequence DESC,r.record_id
+LIMIT ?`, organizationID, limit)
+	if err != nil {
+		return nil, err
+	}
+	bodies := make([][]byte, 0, len(records))
+	for _, record := range records {
+		bodies = append(bodies, record.body)
+	}
+	return bodies, nil
+}
+
 // LatestRecords returns the current durable version of every record of a kind,
 // ordered by record identity. Callers still re-read a specific record before a
 // state transition so discovery never becomes a stale write authorization.
@@ -3002,7 +3761,31 @@ WHERE current.kind=?
 ORDER BY current.record_id`, kind, kind))
 }
 
+type admittedProjectionRecord struct {
+	body  []byte
+	event events.Event
+}
+
 func admittedProjectionRecordBodies(ctx context.Context, queryer rowsQueryer, suffix string, args ...any) ([][]byte, error) {
+	records, err := admittedProjectionRecords(ctx, queryer, suffix, args...)
+	if err != nil {
+		return nil, err
+	}
+	bodies := make([][]byte, 0, len(records))
+	for _, record := range records {
+		bodies = append(bodies, record.body)
+	}
+	return bodies, nil
+}
+
+func admittedProjectionRecords(ctx context.Context, queryer rowsQueryer, suffix string, args ...any) ([]admittedProjectionRecord, error) {
+	return admittedProjectionRecordsBounded(ctx, queryer, 0, suffix, args...)
+}
+
+func admittedProjectionRecordsBounded(ctx context.Context, queryer rowsQueryer, maximumBytes int, suffix string, args ...any) ([]admittedProjectionRecord, error) {
+	if maximumBytes < 0 {
+		return nil, fmt.Errorf("projection admission byte limit is invalid")
+	}
 	query := `SELECT r.body,r.kind,r.record_id,r.version,r.admission_event_id,r.admission_fingerprint,
 e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version
 FROM records AS r
@@ -3012,7 +3795,8 @@ LEFT JOIN events AS e ON e.event_id=r.admission_event_id ` + suffix
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var bodies [][]byte
+	var records []admittedProjectionRecord
+	loadedBytes := 0
 	for rows.Next() {
 		var body []byte
 		var kind, recordID, admissionEventID, admissionFingerprint string
@@ -3024,6 +3808,13 @@ LEFT JOIN events AS e ON e.event_id=r.admission_event_id ` + suffix
 			&event.EventID, &event.Sequence, &event.OrganizationID, &event.EventType, &event.SourceActorID, &event.SourceExecutionID, &event.RecipientScope, &event.RecipientID, &event.TaskID,
 			&authorizationRefs, &artifactRefs, &event.Payload, &event.CorrelationID, &createdAt, &event.SchemaVersion); err != nil {
 			return nil, err
+		}
+		loadedBytes += len(body) + len(kind) + len(recordID) + len(admissionEventID) + len(admissionFingerprint) +
+			len(event.EventID) + len(event.OrganizationID) + len(event.EventType) + len(event.SourceActorID) + len(event.SourceExecutionID) +
+			len(event.RecipientScope) + len(event.RecipientID) + len(event.TaskID) + len(authorizationRefs) + len(artifactRefs) + len(event.Payload) +
+			len(event.CorrelationID) + len(createdAt)
+		if maximumBytes > 0 && loadedBytes > maximumBytes {
+			return nil, fmt.Errorf("projection admission scan exceeds %d bytes", maximumBytes)
 		}
 		if json.Unmarshal(authorizationRefs, &event.AuthorizationRefs) != nil || json.Unmarshal(artifactRefs, &event.ArtifactRefs) != nil {
 			return nil, fmt.Errorf("projection admission event references are invalid")
@@ -3039,9 +3830,9 @@ LEFT JOIN events AS e ON e.event_id=r.admission_event_id ` + suffix
 		if err != nil || !present || canonicalErr != nil || !bytes.Equal(body, canonical) || decodeExactJSONBytes(body, &record) != nil || record.ProjectionKind != kind || record.RecordID != recordID || record.Version != version || !reflect.DeepEqual(record, payload.Projection) || admissionEventID != event.EventID || admissionEventID != payload.Admission.EventRef || admissionFingerprint != payload.Admission.Fingerprint {
 			return nil, fmt.Errorf("projection record %s/%s/%d lacks its exact event-coupled admission", kind, recordID, version)
 		}
-		bodies = append(bodies, body)
+		records = append(records, admittedProjectionRecord{body: append([]byte(nil), body...), event: event})
 	}
-	return bodies, rows.Err()
+	return records, rows.Err()
 }
 
 func collectRecordBodies(rows *sql.Rows, err error) ([][]byte, error) {
@@ -3549,11 +4340,15 @@ func appendEventWithID(ctx context.Context, db sqlExecutor, d events.TrustedDraf
 }
 
 func appendProjectionEvent(ctx context.Context, db sqlExecutor, draft events.TrustedDraft, record events.ProjectionRecord, detail json.RawMessage) (events.Event, events.ProjectionEventPayload, error) {
+	return appendProjectionEventAt(ctx, db, draft, record, detail, time.Now().UTC())
+}
+
+func appendProjectionEventAt(ctx context.Context, db sqlExecutor, draft events.TrustedDraft, record events.ProjectionRecord, detail json.RawMessage, admissionAt time.Time) (events.Event, events.ProjectionEventPayload, error) {
 	id, err := newEventID()
 	if err != nil {
 		return events.Event{}, events.ProjectionEventPayload{}, err
 	}
-	event, err := insertEvent(ctx, db, draft, id, []byte(`{}`), time.Now().UTC(), false)
+	event, err := insertEvent(ctx, db, draft, id, []byte(`{}`), admissionAt, false)
 	if err != nil {
 		return events.Event{}, events.ProjectionEventPayload{}, err
 	}
@@ -3654,6 +4449,25 @@ WHERE pending_completion_reviews.request_sequence<excluded.request_sequence`, ev
 }
 func (l *SQLite) Events(ctx context.Context, correlationID string) ([]events.Event, error) {
 	return collectEvents(l.db.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE (?='' OR correlation_id=?) ORDER BY sequence`, correlationID, correlationID))
+}
+
+// KnowledgeAuthorityAdmissions resolves capability and freeze history from an
+// exact event-and-record snapshot. Event labels alone never grant replay
+// authority.
+func (l *SQLite) KnowledgeAuthorityAdmissions(ctx context.Context) ([]events.CapabilityLeaseAdmission, []events.OrganizationFreezeAdmission, error) {
+	tx, err := l.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, fmt.Errorf("begin knowledge authority snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	leases, freezes, err := authorityAdmissionsSnapshot(ctx, tx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("validate knowledge authority snapshot: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, fmt.Errorf("finish knowledge authority snapshot: %w", err)
+	}
+	return leases, freezes, nil
 }
 
 // VerifiedReplayEvents returns a bounded tenant/correlation slice and the
