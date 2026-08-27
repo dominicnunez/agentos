@@ -1233,7 +1233,7 @@ func currentExecutionKnowledgeRecords(ctx context.Context, tx *sql.Tx, organizat
 		}
 	}
 	if len(teamIDs) > maximumExecutionKnowledgeTeamScopes {
-		return nil, fmt.Errorf("Agent execution knowledge crosses too many Team scopes")
+		return nil, fmt.Errorf("agent execution knowledge crosses too many Team scopes")
 	}
 	query := `JOIN (
 	SELECT record_id,MAX(version) AS version FROM records
@@ -1268,7 +1268,7 @@ OR (json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scop
 		return nil, err
 	}
 	if len(records) > maximumCurrentExecutionKnowledgeScan {
-		return nil, fmt.Errorf("Agent execution knowledge candidate scan exceeds %d current records", maximumCurrentExecutionKnowledgeScan)
+		return nil, fmt.Errorf("agent execution knowledge candidate scan exceeds %d current records", maximumCurrentExecutionKnowledgeScan)
 	}
 	return records, nil
 }

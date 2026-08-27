@@ -799,7 +799,7 @@ func TestKnowledgeJudgmentRejectsEveryUnboundCapabilityReference(t *testing.T) {
 	}
 	unbound := capability
 	unbound.EventID = "capability-unbound"
-	var unboundTrace core.AuthorizationTrace = trace
+	unboundTrace := trace
 	unboundTrace.Resource = "knowledge-other"
 	unbound.Payload, err = json.Marshal(unboundTrace)
 	if err != nil {
