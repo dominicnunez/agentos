@@ -71,6 +71,8 @@ def materialize(repo_root: Path, output_root: Path) -> None:
             raise VerificationError(f"staged AIMS path is unresolved: {relative}")
         if mode not in {"100644", "100755"}:
             raise VerificationError(f"staged AIMS path is not a regular file: {relative}")
+        if relative.startswith(CONTROLLED_PREFIX) and mode != "100644":
+            raise VerificationError(f"controlled AIMS path must use mode 100644: {relative}")
         path = PurePosixPath(relative)
         if (
             path.is_absolute()

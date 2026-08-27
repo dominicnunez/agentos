@@ -132,6 +132,21 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
         with self.assertRaisesRegex(VerificationError, "not a regular file"):
             materialize(self.root, staged_root)
 
+    def test_staged_materialization_rejects_executable_controlled_files(self) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "add", "governance/aims/manifest.json"], cwd=self.root, check=True
+        )
+        subprocess.run(
+            ["git", "update-index", "--chmod=+x", "governance/aims/manifest.json"],
+            cwd=self.root,
+            check=True,
+        )
+        staged_root = self.root / "staged"
+        staged_root.mkdir()
+        with self.assertRaisesRegex(VerificationError, "must use mode 100644"):
+            materialize(self.root, staged_root)
+
     def test_committed_curated_source_read_is_bounded(self) -> None:
         commit = "a" * 40
         with patch("scripts.build_aims_assessment_bundle._git") as git:

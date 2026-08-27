@@ -74,8 +74,8 @@ bytes came from the declared local Git commit; it does not
 authenticate which repository owns that commit. Trusted provenance or an
 attestation must establish repository identity separately. The builder also
 requires a trusted history baseline and rejects a source commit newer than the
-assessment instant. CI uses the pull-request merge base or pre-push commit as
-that baseline, builds the bundle twice for the same assessment instant, and
+assessment instant. CI uses the tested pull-request base SHA or pre-push commit
+as that baseline, builds the bundle twice for the same assessment instant, and
 requires identical bytes. Branch protection or separate attestation must make
 the selected baseline trustworthy. Git committer time is a fail-closed ordering
 check, not an independently trusted timestamp. The report
