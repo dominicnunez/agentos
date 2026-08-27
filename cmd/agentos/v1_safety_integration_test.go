@@ -55,10 +55,10 @@ func TestV1SafetyServicesEnforceAndRecordContracts(t *testing.T) {
 	}
 
 	lease := core.CapabilityLease{
-		ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1",
+		ID: "lease-1", ActorID: "actor-1", ActorKind: core.PrincipalAgent, OriginTaskID: "task-1",
 		Action: "send", Resource: "customer-1", Scope: "org-1",
 	}
-	trace := authority.Check(now, "actor-1", "task-1", "send", "customer-1", "org-1", []core.CapabilityLease{lease}, false)
+	trace := authority.Check(now, "actor-1", core.PrincipalAgent, "task-1", "send", "customer-1", "org-1", []core.CapabilityLease{lease}, false)
 	if !trace.Allowed || trace.LeaseID != lease.ID {
 		t.Fatalf("expected exact capability lease to authorize action: %+v", trace)
 	}
@@ -105,7 +105,7 @@ func TestV1SafetyServicesEnforceAndRecordContracts(t *testing.T) {
 	expiresAt := now.Add(time.Hour)
 	approvalService := approvals.New(l, conformanceNotifier{}, approvals.StaticAuthorizer{{OrganizationID: "org-1", HumanID: "human-1", Boundary: core.BoundaryPublicExternal, Risk: "HIGH"}})
 	obligation := core.EffectObligation{
-		ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", Action: "send", Resource: "customer-1", Scope: "org-1",
+		ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", ActorKind: core.PrincipalAgent, Action: "send", Resource: "customer-1", Scope: "org-1",
 		ConsequenceBoundary: core.BoundaryPublicExternal,
 		Descriptor:          "send greeting", AuthorizationRefs: []string{"lease-1"},
 		ApprovalRef: "approval-1", IdempotencyKey: "effect-key-1", ReplayContext: map[string]string{"body": "hello"},

@@ -2457,11 +2457,11 @@ func validateKnowledgeJudgmentAuthorization(ctx context.Context, tx *sql.Tx, kno
 			len(judgment.AuthorizationRefs) != 1 || judgment.AuthorizationRefs[0] != string(recorded.LeaseID) {
 			return fmt.Errorf("knowledge judgment capability check is not bound to its exact candidate")
 		}
-		atJudgment, err := authorizationTraceAtSequence(ctx, tx, knowledge.OrganizationID, recorded.ActorID, recorded.TaskID, recorded.Action, recorded.Resource, recorded.Scope, judgment.AuthorizationRefs, judgment.Sequence, judgment.CreatedAt)
+		atJudgment, err := authorizationTraceAtSequence(ctx, tx, knowledge.OrganizationID, recorded.ActorID, recorded.ActorKind, recorded.TaskID, recorded.Action, recorded.Resource, recorded.Scope, judgment.AuthorizationRefs, judgment.Sequence, judgment.CreatedAt)
 		if err != nil {
 			return err
 		}
-		current, err := currentAuthorizationTrace(ctx, tx, knowledge.OrganizationID, recorded.ActorID, recorded.TaskID, recorded.Action, recorded.Resource, recorded.Scope, judgment.AuthorizationRefs, admissionAt)
+		current, err := currentAuthorizationTrace(ctx, tx, knowledge.OrganizationID, recorded.ActorID, recorded.ActorKind, recorded.TaskID, recorded.Action, recorded.Resource, recorded.Scope, judgment.AuthorizationRefs, admissionAt)
 		if err != nil {
 			return err
 		}
@@ -3295,7 +3295,7 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, obligation
 				return err
 			}
 		}
-		trace = authority.Check(authorizedAt, obligation.ActorID, obligation.TaskID, obligation.Action, obligation.Resource, obligation.Scope, leases, frozen)
+		trace = authority.Check(authorizedAt, obligation.ActorID, obligation.ActorKind, obligation.TaskID, obligation.Action, obligation.Resource, obligation.Scope, leases, frozen)
 		traceBody, err := json.Marshal(trace)
 		if err != nil {
 			return err
@@ -3330,20 +3330,20 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, obligation
 	return trace, err
 }
 
-func currentAuthorizationTrace(ctx context.Context, tx *sql.Tx, organizationID, actorID, taskID core.ID, action, resource, scope string, authorizationRefs []string, now time.Time) (core.AuthorizationTrace, error) {
+func currentAuthorizationTrace(ctx context.Context, tx *sql.Tx, organizationID, actorID core.ID, actorKind core.PrincipalKind, taskID core.ID, action, resource, scope string, authorizationRefs []string, now time.Time) (core.AuthorizationTrace, error) {
 	leases, frozen, err := authorityStateAtSequence(ctx, tx, organizationID, authorizationRefs, 0)
 	if err != nil {
 		return core.AuthorizationTrace{}, err
 	}
-	return authority.Check(now, actorID, taskID, action, resource, scope, leases, frozen), nil
+	return authority.Check(now, actorID, actorKind, taskID, action, resource, scope, leases, frozen), nil
 }
 
-func authorizationTraceAtSequence(ctx context.Context, tx *sql.Tx, organizationID, actorID, taskID core.ID, action, resource, scope string, authorizationRefs []string, beforeSequence int64, at time.Time) (core.AuthorizationTrace, error) {
+func authorizationTraceAtSequence(ctx context.Context, tx *sql.Tx, organizationID, actorID core.ID, actorKind core.PrincipalKind, taskID core.ID, action, resource, scope string, authorizationRefs []string, beforeSequence int64, at time.Time) (core.AuthorizationTrace, error) {
 	leases, frozen, err := authorityStateAtSequence(ctx, tx, organizationID, authorizationRefs, beforeSequence)
 	if err != nil {
 		return core.AuthorizationTrace{}, err
 	}
-	return authority.Check(at, actorID, taskID, action, resource, scope, leases, frozen), nil
+	return authority.Check(at, actorID, actorKind, taskID, action, resource, scope, leases, frozen), nil
 }
 
 func authorityStateAtSequence(ctx context.Context, tx *sql.Tx, organizationID core.ID, authorizationRefs []string, beforeSequence int64) ([]core.CapabilityLease, bool, error) {

@@ -79,7 +79,7 @@ func (r *approvalReader) Get(context.Context, core.ID) (core.HumanApproval, erro
 
 func persistCapability(t *testing.T, l *ledger.SQLite, obligation core.EffectObligation) {
 	t.Helper()
-	lease := core.CapabilityLease{ID: core.ID(obligation.AuthorizationRefs[0]), ActorID: obligation.ActorID, OriginTaskID: obligation.TaskID, Action: obligation.Action, Resource: obligation.Resource, Scope: obligation.Scope}
+	lease := core.CapabilityLease{ID: core.ID(obligation.AuthorizationRefs[0]), ActorID: obligation.ActorID, ActorKind: obligation.ActorKind, OriginTaskID: obligation.TaskID, Action: obligation.Action, Resource: obligation.Resource, Scope: obligation.Scope}
 	if err := l.AppendRecord(context.Background(), string(obligation.OrganizationID), "CAPABILITY_GRANTED", "human", string(obligation.TaskID), nil, nil, "capability_lease", obligation.AuthorizationRefs[0], 1, lease); err != nil {
 		t.Fatal(err)
 	}
@@ -94,6 +94,9 @@ func persistApproval(t *testing.T, l *ledger.SQLite, approval core.HumanApproval
 
 func setEffectFingerprint(t *testing.T, obligation *core.EffectObligation) string {
 	t.Helper()
+	if obligation.ActorKind == "" {
+		obligation.ActorKind = core.PrincipalAgent
+	}
 	fingerprint, err := Fingerprint(*obligation)
 	if err != nil {
 		t.Fatal(err)

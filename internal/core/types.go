@@ -13,6 +13,12 @@ const (
 	PrincipalExternalAgent PrincipalKind = "EXTERNAL_AGENT"
 )
 
+// ValidPrincipalKind keeps durable authority identities on the closed set of
+// principals the runtime can authenticate and distinguish.
+func ValidPrincipalKind(kind PrincipalKind) bool {
+	return kind == PrincipalRuntime || kind == PrincipalHuman || kind == PrincipalAgent || kind == PrincipalExternalAgent
+}
+
 type Organization struct {
 	ID            ID        `json:"id"`
 	Name          string    `json:"name"`
@@ -555,6 +561,7 @@ type EffectObligation struct {
 	OrganizationID             ID                `json:"organization_id"`
 	TaskID                     ID                `json:"task_id"`
 	ActorID                    ID                `json:"actor_id"`
+	ActorKind                  PrincipalKind     `json:"actor_kind"`
 	Action                     string            `json:"action"`
 	Resource                   string            `json:"resource"`
 	Scope                      string            `json:"scope"`

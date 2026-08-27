@@ -2073,7 +2073,7 @@ func TestApprovalConsumptionAndAttemptTransitionAreAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = l.Close() })
-	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1", Action: "send", Resource: "customer-1", Scope: "org-1"}
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", ActorKind: core.PrincipalAgent, OriginTaskID: "task-1", Action: "send", Resource: "customer-1", Scope: "org-1"}
 	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "human-1", "task-1", nil, nil, "capability_lease", "lease-1", 1, lease); err != nil {
 		t.Fatal(err)
 	}
@@ -2081,7 +2081,7 @@ func TestApprovalConsumptionAndAttemptTransitionAreAtomic(t *testing.T) {
 	if err := l.AppendRecord(ctx, "org-1", "EFFECT_OBLIGATION_TRANSITIONED", "", "task-1", nil, nil, "effect", "effect-1", 1, pending); err != nil {
 		t.Fatal(err)
 	}
-	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", Action: "send", Resource: "customer-1", Scope: "org-1", ConsequenceBoundary: core.BoundaryPublicExternal, AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1"}
+	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", ActorKind: core.PrincipalAgent, Action: "send", Resource: "customer-1", Scope: "org-1", ConsequenceBoundary: core.BoundaryPublicExternal, AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1"}
 	fingerprint, err := core.FingerprintEffect(obligation)
 	if err != nil {
 		t.Fatal(err)
@@ -2126,12 +2126,12 @@ func TestEffectAuthorizationCannotUseAnotherOrganizationsLease(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	lease := core.CapabilityLease{ID: "lease-shared", ActorID: "actor-1", OriginTaskID: "task-1", Action: "cache", Resource: "record-1", Scope: "org-1"}
+	lease := core.CapabilityLease{ID: "lease-shared", ActorID: "actor-1", ActorKind: core.PrincipalAgent, OriginTaskID: "task-1", Action: "cache", Resource: "record-1", Scope: "org-1"}
 	if err := store.AppendRecord(ctx, "org-2", "CAPABILITY_GRANTED", "user-2", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
 		t.Fatal(err)
 	}
 	obligation := core.EffectObligation{
-		ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1",
+		ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", ActorKind: core.PrincipalAgent,
 		Action: "cache", Resource: "record-1", Scope: "org-1", AuthorizationRefs: []string{"lease-shared"},
 	}
 	trace, err := store.AuthorizeAndAppendEffectAttempt(ctx, obligation, 1, map[string]string{"status": "ATTEMPTED"})
@@ -2147,6 +2147,37 @@ func TestEffectAuthorizationCannotUseAnotherOrganizationsLease(t *testing.T) {
 	}
 }
 
+func TestEffectAuthorizationSeparatesPrincipalKindsSharingOneID(t *testing.T) {
+	ctx := t.Context()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	lease := core.CapabilityLease{
+		ID: "lease-external", ActorID: "shared", ActorKind: core.PrincipalExternalAgent, OriginTaskID: "task-1",
+		Action: "cache", Resource: "record-1", Scope: "org-1",
+	}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+		t.Fatal(err)
+	}
+	obligation := core.EffectObligation{
+		ID: "effect-internal", OrganizationID: "org-1", TaskID: "task-1", ActorID: "shared", ActorKind: core.PrincipalAgent,
+		Action: "cache", Resource: "record-1", Scope: "org-1", AuthorizationRefs: []string{string(lease.ID)},
+	}
+	trace, err := store.AuthorizeAndAppendEffectAttempt(ctx, obligation, 1, map[string]string{"status": "ATTEMPTED"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trace.Allowed || trace.LeaseID != "" || trace.ActorKind != core.PrincipalAgent {
+		t.Fatalf("internal Agent used external Agent effect authority: %+v", trace)
+	}
+	records, err := store.Records(ctx, "effect", string(obligation.ID))
+	if err != nil || len(records) != 0 {
+		t.Fatalf("kind-confused effect reached durable attempt: records=%d err=%v", len(records), err)
+	}
+}
+
 func TestEffectAuthorizationIgnoresOtherOrganizationsMalformedAuthorityHistory(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(":memory:")
@@ -2155,7 +2186,7 @@ func TestEffectAuthorizationIgnoresOtherOrganizationsMalformedAuthorityHistory(t
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	other := core.CapabilityLease{ID: "lease-other", ActorID: "actor-other", OriginTaskID: "task-other", Action: "cache", Resource: "record-other", Scope: "org-2"}
+	other := core.CapabilityLease{ID: "lease-other", ActorID: "actor-other", ActorKind: core.PrincipalAgent, OriginTaskID: "task-other", Action: "cache", Resource: "record-other", Scope: "org-2"}
 	if err := store.AppendRecord(ctx, "org-2", "CAPABILITY_GRANTED", "user-2", "task-other", nil, nil, "capability_lease", string(other.ID), 1, other); err != nil {
 		t.Fatal(err)
 	}
@@ -2169,12 +2200,12 @@ func TestEffectAuthorizationIgnoresOtherOrganizationsMalformedAuthorityHistory(t
 		t.Fatal(err)
 	}
 
-	local := core.CapabilityLease{ID: "lease-local", ActorID: "actor-1", OriginTaskID: "task-1", Action: "cache", Resource: "record-1", Scope: "org-1"}
+	local := core.CapabilityLease{ID: "lease-local", ActorID: "actor-1", ActorKind: core.PrincipalAgent, OriginTaskID: "task-1", Action: "cache", Resource: "record-1", Scope: "org-1"}
 	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(local.ID), 1, local); err != nil {
 		t.Fatal(err)
 	}
 	obligation := core.EffectObligation{
-		ID: "effect-local", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1",
+		ID: "effect-local", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", ActorKind: core.PrincipalAgent,
 		Action: "cache", Resource: "record-1", Scope: "org-1", AuthorizationRefs: []string{string(local.ID)},
 	}
 	trace, err := store.AuthorizeAndAppendEffectAttempt(ctx, obligation, 1, map[string]string{"status": "ATTEMPTED"})
@@ -2208,7 +2239,7 @@ func TestKnowledgeAuthorityBoundaryUsesExactTenantHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	local := core.CapabilityLease{ID: "lease-local", ActorID: "validator-1", OriginTaskID: "task-1", Action: "knowledge.validate", Resource: "knowledge-1", Scope: "org-1"}
+	local := core.CapabilityLease{ID: "lease-local", ActorID: "validator-1", ActorKind: core.PrincipalHuman, OriginTaskID: "task-1", Action: "knowledge.validate", Resource: "knowledge-1", Scope: "org-1"}
 	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(local.ID), 1, local); err != nil {
 		t.Fatal(err)
 	}
@@ -2223,14 +2254,14 @@ func TestKnowledgeAuthorityBoundaryUsesExactTenantHistory(t *testing.T) {
 	}
 
 	if err := store.withTx(ctx, func(tx *sql.Tx) error {
-		historical, err := authorizationTraceAtSequence(ctx, tx, "org-1", "validator-1", "task-1", "knowledge.validate", "knowledge-1", "org-1", []string{string(local.ID)}, boundary.Sequence, boundary.CreatedAt)
+		historical, err := authorizationTraceAtSequence(ctx, tx, "org-1", "validator-1", core.PrincipalHuman, "task-1", "knowledge.validate", "knowledge-1", "org-1", []string{string(local.ID)}, boundary.Sequence, boundary.CreatedAt)
 		if err != nil {
 			return err
 		}
 		if !historical.Allowed || historical.LeaseID != local.ID {
 			return fmt.Errorf("historical knowledge authority=%+v", historical)
 		}
-		current, err := currentAuthorizationTrace(ctx, tx, "org-1", "validator-1", "task-1", "knowledge.validate", "knowledge-1", "org-1", []string{string(local.ID)}, time.Now().UTC())
+		current, err := currentAuthorizationTrace(ctx, tx, "org-1", "validator-1", core.PrincipalHuman, "task-1", "knowledge.validate", "knowledge-1", "org-1", []string{string(local.ID)}, time.Now().UTC())
 		if err != nil {
 			return err
 		}

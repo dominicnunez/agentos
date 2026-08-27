@@ -201,7 +201,7 @@ func loadEffect(ctx context.Context, records recordReader, effectID core.ID) (co
 }
 
 func validateObligation(obligation core.EffectObligation) error {
-	if obligation.ID == "" || obligation.OrganizationID == "" || obligation.TaskID == "" || obligation.ActorID == "" || obligation.Action == "" || obligation.Resource == "" || obligation.Scope == "" || obligation.EffectFingerprint == "" || obligation.IdempotencyKey == "" || len(obligation.AuthorizationRefs) == 0 || len(obligation.AuthorizationRefs) > core.MaximumEffectAuthorizationRefs {
+	if obligation.ID == "" || obligation.OrganizationID == "" || obligation.TaskID == "" || obligation.ActorID == "" || !core.ValidPrincipalKind(obligation.ActorKind) || obligation.Action == "" || obligation.Resource == "" || obligation.Scope == "" || obligation.EffectFingerprint == "" || obligation.IdempotencyKey == "" || len(obligation.AuthorizationRefs) == 0 || len(obligation.AuthorizationRefs) > core.MaximumEffectAuthorizationRefs {
 		return fmt.Errorf("effect identity, organization, task, actor, action, resource, scope, authorization, fingerprint, and idempotency key are required")
 	}
 	seen := make(map[string]struct{}, len(obligation.AuthorizationRefs))
@@ -239,6 +239,7 @@ func sameEffectIntent(stored, requested core.EffectObligation) bool {
 		stored.OrganizationID == requested.OrganizationID &&
 		stored.TaskID == requested.TaskID &&
 		stored.ActorID == requested.ActorID &&
+		stored.ActorKind == requested.ActorKind &&
 		stored.Action == requested.Action &&
 		stored.Resource == requested.Resource &&
 		stored.Scope == requested.Scope &&
