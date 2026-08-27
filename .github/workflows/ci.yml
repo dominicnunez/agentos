@@ -54,6 +54,16 @@ jobs:
       - name: Module consistency
         run: go mod tidy -diff
 
+      - name: Controlled AIMS documented information
+        run: |
+          python3 scripts/verify_aims_documents.py
+          python3 -m unittest scripts/test_verify_aims_documents.py
+          python3 -m unittest scripts/test_build_aims_assessment_bundle.py
+          mkdir -p work/aims-first work/aims-second
+          python3 scripts/build_aims_assessment_bundle.py --commit "${GITHUB_SHA}" --output work/aims-first/agentos-aims-assessment.tar.gz
+          python3 scripts/build_aims_assessment_bundle.py --commit "${GITHUB_SHA}" --output work/aims-second/agentos-aims-assessment.tar.gz
+          cmp work/aims-first/agentos-aims-assessment.tar.gz work/aims-second/agentos-aims-assessment.tar.gz
+
       - name: Build
         run: go build ./...
 

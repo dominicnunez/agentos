@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""Build a deterministic, public Agent OS AIMS assessment-evidence bundle."""
+
+from __future__ import annotations
+
+import argparse
+import gzip
+import hashlib
+import io
+import json
+import os
+import re
+import subprocess
+import tarfile
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+try:
+    from scripts.verify_aims_documents import VerificationError, verify
+except ModuleNotFoundError:
+    from verify_aims_documents import VerificationError, verify
+
+
+MAX_SOURCE_FILE_BYTES = 512 * 1024
+MAX_SOURCE_TOTAL_BYTES = 4 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 5 * 1024 * 1024
+COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+EVIDENCE_FILES = {
+    "README.md": "product-purpose-and-use",
+    "SECURITY.md": "security-reporting",
+    "docs/AI_MANAGEMENT_SYSTEM.md": "aims-technical-evidence-boundary",
+    "docs/APPROVAL_CONTROL.md": "user-authority",
+    "docs/EVENT_LEDGER_INTEGRITY.md": "evidence-integrity",
+    "docs/GOVERNANCE_INSPECTION.md": "monitoring-and-inspection",
+    "docs/INCIDENT_REPLAY.md": "incident-investigation",
+    "docs/LAB.md": "governed-experimentation",
+    "docs/ORGANIZATIONAL_KNOWLEDGE.md": "organizational-memory",
+    "docs/SHARED_COORDINATION.md": "shared-coordination",
+    "docs/SQLITE_RECOVERY.md": "resilience-and-recovery",
+    "docs/THREAT_MODEL.md": "ai-and-security-risk",
+    "docs/development/BUILD_CONTRACT.md": "lifecycle-controls",
+    "docs/development/ISO_IEC_42001_READINESS.md": "readiness-register",
+    "docs/development/V1_ACCEPTANCE_STATUS.md": "acceptance-evidence",
+}
+REQUIRED_APPROVED_DOCUMENTS = {
+    "aims.ai-policy",
+    "aims.assessment-readiness-decision",
+    "aims.audit-result",
+    "aims.competence-communication",
+    "aims.control-applicability",
+    "aims.document-control",
+    "aims.incident-corrective-action",
+    "aims.internal-audit",
+    "aims.management-review",
+    "aims.management-review-result",
+    "aims.objectives",
+    "aims.risk-impact",
+    "aims.roles-accountability",
+    "aims.scope-context",
+    "aims.statement-of-applicability",
+    "aims.supplier-management",
+}
+
+
+def _canonical_json(value: Any) -> bytes:
+    return (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _read_public_file(repo_root: Path, relative: str) -> bytes:
+    path = repo_root.joinpath(*PurePosixPath(relative).parts)
+    current = repo_root
+    for part in PurePosixPath(relative).parts:
+        current = current / part
+        if current.is_symlink():
+            raise VerificationError(f"assessment evidence traverses a symbolic link: {relative}")
+    try:
+        path.resolve(strict=True).relative_to(repo_root.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise VerificationError(f"assessment evidence is missing or escapes the repository: {relative}") from exc
+    if not path.is_file():
+        raise VerificationError(f"assessment evidence is not a regular file: {relative}")
+    data = path.read_bytes()
+    if len(data) > MAX_SOURCE_FILE_BYTES:
+        raise VerificationError(f"assessment evidence exceeds {MAX_SOURCE_FILE_BYTES} bytes: {relative}")
+    return data
+
+
+def _git(repo_root: Path, arguments: list[str]) -> bytes:
+    environment = os.environ.copy()
+    for name in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ):
+        environment.pop(name, None)
+    try:
+        result = subprocess.run(
+            ["git", "--no-optional-locks", "-C", str(repo_root), *arguments],
+            check=False,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise VerificationError(f"cannot verify assessment source with Git: {exc}") from exc
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise VerificationError(f"Git source verification failed: {detail}")
+    return result.stdout
+
+
+def _verify_git_sources(repo_root: Path, commit: str, source_entries: dict[str, bytes]) -> None:
+    head = _git(repo_root, ["rev-parse", "HEAD"]).decode("ascii", errors="strict").strip()
+    if head != commit:
+        raise VerificationError(f"declared commit {commit} does not equal checked-out HEAD {head}")
+    for relative, data in source_entries.items():
+        committed = _git(repo_root, ["show", f"{commit}:{relative}"])
+        if committed != data:
+            raise VerificationError(f"assessment evidence does not match declared commit: {relative}")
+
+
+def readiness_report(manifest: dict[str, Any], repository: str, commit: str) -> dict[str, Any]:
+    documents = manifest["documents"]
+    status_by_id = {entry["id"]: entry["status"] for entry in documents}
+    missing = sorted(REQUIRED_APPROVED_DOCUMENTS - set(status_by_id))
+    not_approved = sorted(
+        document_id
+        for document_id in REQUIRED_APPROVED_DOCUMENTS & set(status_by_id)
+        if status_by_id[document_id] != "APPROVED"
+    )
+    blockers: list[str] = []
+    if missing:
+        blockers.append("REQUIRED_GOVERNANCE_RECORDS_MISSING")
+    if not_approved:
+        blockers.append("REQUIRED_GOVERNANCE_RECORDS_NOT_APPROVED")
+    if any(entry["status"] == "DRAFT" for entry in documents):
+        blockers.append("CONTROLLED_DRAFTS_REMAIN")
+    if "aims.audit-result" in missing:
+        blockers.append("INTERNAL_AUDIT_RESULT_NOT_RECORDED")
+    if "aims.management-review-result" in missing:
+        blockers.append("MANAGEMENT_REVIEW_RESULT_NOT_RECORDED")
+    if "aims.statement-of-applicability" in missing:
+        blockers.append("AUTHORIZED_STANDARD_CONTROL_REVIEW_NOT_RECORDED")
+    if "aims.assessment-readiness-decision" in missing:
+        blockers.append("ACCOUNTABLE_READINESS_DECISION_NOT_RECORDED")
+
+    return {
+        "schema_version": 1,
+        "project": "Agent OS",
+        "source": {"repository": repository, "commit": commit},
+        "claim": "READINESS_WORK_IN_PROGRESS",
+        "conformity_determined": False,
+        "certified": False,
+        "certification_assessment_ready": not blockers,
+        "controlled_document_counts": {
+            status: sum(entry["status"] == status for entry in documents)
+            for status in ("DRAFT", "APPROVED", "RETIRED")
+        },
+        "required_approved_document_ids": sorted(REQUIRED_APPROVED_DOCUMENTS),
+        "missing_required_document_ids": missing,
+        "not_approved_required_document_ids": not_approved,
+        "blockers": blockers,
+        "limitations": [
+            "This automated report validates bounded repository evidence and controlled-document state only.",
+            "It does not evaluate confidential operating evidence or reproduce ISO/IEC 42001 requirements.",
+            "A true readiness state still does not determine conformity or certification.",
+        ],
+    }
+
+
+def _tar_bytes(entries: dict[str, bytes]) -> bytes:
+    tar_buffer = io.BytesIO()
+    with tarfile.open(fileobj=tar_buffer, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        for name in sorted(entries):
+            path = PurePosixPath(name)
+            if path.is_absolute() or ".." in path.parts or name != path.as_posix():
+                raise VerificationError(f"unsafe assessment archive path: {name}")
+            data = entries[name]
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mode = 0o644
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            info.mtime = 0
+            archive.addfile(info, io.BytesIO(data))
+    gzip_buffer = io.BytesIO()
+    with gzip.GzipFile(filename="", mode="wb", fileobj=gzip_buffer, compresslevel=9, mtime=0) as compressed:
+        compressed.write(tar_buffer.getvalue())
+    return gzip_buffer.getvalue()
+
+
+def build(
+    repo_root: Path,
+    repository: str,
+    commit: str,
+    output: Path,
+    *,
+    verify_source: bool = True,
+) -> tuple[str, int]:
+    repo_root = repo_root.resolve(strict=True)
+    if repository != "https://github.com/dominicnunez/agentos":
+        raise VerificationError("repository must identify the canonical Agent OS repository")
+    if not COMMIT_PATTERN.fullmatch(commit):
+        raise VerificationError("commit must be an exact lowercase 40-character Git commit SHA")
+    manifest = verify(repo_root)
+
+    source_paths = dict(EVIDENCE_FILES)
+    source_paths["governance/aims/README.md"] = "controlled-documentation-boundary"
+    source_paths["governance/aims/manifest.json"] = "controlled-document-manifest"
+    for entry in manifest["documents"]:
+        source_paths[entry["path"]] = "controlled-aims-document"
+
+    entries: dict[str, bytes] = {}
+    source_entries: dict[str, bytes] = {}
+    evidence_index: list[dict[str, Any]] = []
+    source_total = 0
+    for relative in sorted(source_paths):
+        data = _read_public_file(repo_root, relative)
+        source_total += len(data)
+        if source_total > MAX_SOURCE_TOTAL_BYTES:
+            raise VerificationError(f"assessment source evidence exceeds {MAX_SOURCE_TOTAL_BYTES} aggregate bytes")
+        archive_name = f"repository/{relative}"
+        entries[archive_name] = data
+        source_entries[relative] = data
+        evidence_index.append(
+            {
+                "path": relative,
+                "category": source_paths[relative],
+                "bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+        )
+
+    if verify_source:
+        _verify_git_sources(repo_root, commit, source_entries)
+
+    entries["assessment/evidence-index.json"] = _canonical_json(
+        {
+            "schema_version": 1,
+            "source": {"repository": repository, "commit": commit},
+            "entries": evidence_index,
+        }
+    )
+    entries["assessment/readiness.json"] = _canonical_json(readiness_report(manifest, repository, commit))
+    entries["ASSESSMENT_README.txt"] = (
+        "Agent OS public AIMS assessment-evidence bundle\n\n"
+        "This deterministic bundle contains bounded public repository evidence for the exact source commit.\n"
+        "It does not contain confidential operating evidence, determine conformity, or establish certification.\n"
+        "Use an approved AIMS scope, an authorized ISO/IEC 42001 copy, and competent independent assessment.\n"
+    ).encode("utf-8")
+
+    checksum_lines = [f"{hashlib.sha256(entries[name]).hexdigest()}  {name}" for name in sorted(entries)]
+    entries["SHA256SUMS"] = ("\n".join(checksum_lines) + "\n").encode("ascii")
+    archive = _tar_bytes(entries)
+    if len(archive) > MAX_ARCHIVE_BYTES:
+        raise VerificationError(f"assessment archive exceeds {MAX_ARCHIVE_BYTES} bytes")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(archive)
+    return hashlib.sha256(archive).hexdigest(), len(archive)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--repository", default="https://github.com/dominicnunez/agentos")
+    parser.add_argument("--commit", required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    try:
+        digest, size = build(args.root, args.repository, args.commit, args.output)
+    except VerificationError as exc:
+        print(f"AIMS assessment bundle failed: {exc}")
+        return 1
+    print(f"{digest}  {args.output} ({size} bytes)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

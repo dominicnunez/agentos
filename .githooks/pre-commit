@@ -12,6 +12,11 @@ fi
 echo "==> staged diff integrity"
 git diff --cached --check
 
+echo "==> controlled AIMS documented information"
+python3 scripts/verify_aims_documents.py
+python3 -m unittest scripts/test_verify_aims_documents.py
+python3 -m unittest scripts/test_build_aims_assessment_bundle.py
+
 staged_go="$(git diff --cached --name-only --diff-filter=ACMR -- '*.go')"
 if [ -n "$staged_go" ]; then
   if ! command -v "$GOFMT_BIN" >/dev/null 2>&1; then

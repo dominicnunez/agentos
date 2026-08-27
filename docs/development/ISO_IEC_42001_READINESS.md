@@ -20,24 +20,24 @@ Operator deployments have their own scope and evidence. Product features may sup
 
 | Area | Current evidence | State | Next evidence required |
 |---|---|---:|---|
-| Context and scope | Product boundary, architecture, threat model, build contract | PARTIAL | Approve the AIMS scope, interested parties, internal/external issues, and applicable obligations |
-| Leadership and accountability | Approval policy and security-first development rules | PARTIAL | Approve AI policy, accountable owner, delegated roles, and review cadence |
-| AI risks and opportunities | Threat model, adversarial tests, fail-closed authority and completion controls | PARTIAL | Versioned AI risk register, acceptance criteria, treatment owners, and residual-risk decisions |
-| Objectives and planning | Durable Mission, Goal, Work, and Task model; evidence-backed Goal progress | PARTIAL | Approved AIMS objectives, measures, owners, target dates, and change plans |
-| Resources and competence | Build contract, project guidance, CI, reviewed provider configuration | PARTIAL | Competence requirements, training/awareness evidence, communication plan, and resource review |
-| Documented information | Versioned repository, release source/provenance controls, immutable handoff, and startup/recovery-verified cryptographic event-chain evidence | PARTIAL | Document owner, approval, retention, review, supersession, external-document controls, and an approved external checkpoint/retention procedure |
+| Context and scope | Product boundary, architecture, threat model, build contract, and hash-bound scope/context draft | PARTIAL | Approve the AIMS scope, interested parties, internal/external issues, and applicable-obligations process |
+| Leadership and accountability | Approval policy, security-first development rules, and draft AI policy and role definitions | PARTIAL | Approve AI policy, accountable owner, named/delegated roles, conflicts, and review cadence |
+| AI risks and opportunities | Threat model, adversarial tests, fail-closed authority/completion controls, and draft scoring method and initial register | PARTIAL | Review ratings and affected parties; approve treatments, owners, due conditions, and residual-risk decisions |
+| Objectives and planning | Durable Mission, Goal, Work, and Task model; evidence-backed Goal progress; ten measurable draft AIMS objectives | PARTIAL | Approve objectives, measures, owners, evaluation timing, resources, and change plans; retain operating results |
+| Resources and competence | Build contract, project guidance, CI, reviewed provider configuration, and draft competence/resource/communication procedure | PARTIAL | Approve role competence and resource criteria; perform assessments, awareness, communication, and resource review |
+| Documented information | Versioned repository, release source/provenance controls, immutable handoff, startup/recovery-verified cryptographic event-chain evidence, and a closed hash-bound public AIMS document manifest with fail-closed CI verification | PARTIAL | Approve the draft records, establish confidential evidence and external-document controls, operate retention and review, and approve an external checkpoint/retention procedure |
 | AI system inventory | Authenticated bounded JSON export of durable Agents, roles, lifecycle and configuration state, providers, models, runtime adapters, aggregate operations, closed projection-lifecycle Event Contract sources, explicit gaps, and an exact-byte detached SHA-256 checksum | PARTIAL | Operator-owned intended-purpose, accountable-owner, intended-user, data, dependency-risk, deployment, retention, and review records |
-| Impact assessment | Consequence candidates and user approval boundaries | NOT STARTED | Repeatable AI impact assessment with affected-party, misuse, safety, rights, and residual-impact evidence |
+| Impact assessment | Consequence candidates, user approval boundaries, and draft repeatable impact method and initial affected-party risks | PARTIAL | Approve the method; perform and retain context-specific assessments, consultation where appropriate, treatments, and residual-impact decisions |
 | Responsible lifecycle | Reviewed Intent, bounded planning, Task DAGs, assignment, execution manifests, completion verification, Lab | PARTIAL | Lifecycle control mapping, acceptance criteria, monitored operation, retirement, and change-management records |
 | Data and information | Input limits, untrusted-content treatment, artifact inspection, tenant isolation | PARTIAL | Data inventory, provenance, quality, access, retention, deletion, and privacy-impact procedures |
-| Suppliers and third parties | Pinned Go modules, license bundle, provider policy, dependency and security CI | PARTIAL | Supplier evaluation, service-risk review, contract requirements, monitoring, and exit plans |
-| Transparency and stakeholder information | README, operator docs, task/result views, completion and approval records | PARTIAL | Approved disclosure rules, user notices, limitations, escalation, and external reporting process |
+| Suppliers and third parties | Pinned Go modules, license bundle, provider policy, dependency/security CI, and draft selection/register/monitoring/exit procedure | PARTIAL | Approve criteria and operate supplier/provider evaluations, contract/data review, monitoring, incident notice, and exit evidence |
+| Transparency and stakeholder information | README, operator docs, task/result views, completion/approval records, and draft communication plan | PARTIAL | Approve intended-use, disclosure, accessibility, feedback, contestability, remedy, escalation, and external reporting rules; retain communications |
 | Security and resilience | Threat model, authentication/authorization, private user socket, A2A isolation, backup/recovery tests, and bounded deterministic incident replay from a verified snapshot | PARTIAL | Operational security baselines, incident exercises, recovery objectives, and deployment evidence |
 | Monitoring and measurement | Run telemetry, inference usage, durable outcomes, CI, acceptance status, and deterministic tenant-scoped runtime governance inspection | PARTIAL | Approved metrics, thresholds, monitoring ownership, evaluation schedule, and effectiveness records |
-| Internal audit | Independent PR review, security-first final review, and payload-free runtime inspection findings with exact Event Contract references | PARTIAL | AIMS audit program, auditor independence/competence, findings, evidence samples, and closure tracking; runtime inspection is evidence input, not the audit itself |
-| Management review | No formal record | NOT STARTED | Scheduled review inputs, decisions, actions, owners, and follow-up evidence |
-| Incident and corrective action | Fail-closed runtime behavior, issue tracking, tamper-evident event evidence, and payload-free deterministic Work replay | PARTIAL | Operator-owned AI incident/nonconformity record, containment, root cause, corrective action, effectiveness review, and lessons learned |
-| Control applicability | Architecture and governance controls exist | NOT STARTED | Approved Statement of Applicability with inclusion/exclusion rationale and evidence links |
+| Internal audit | Independent PR review, security-first final review, payload-free runtime inspection, and draft audit program | PARTIAL | Approve and operate the program using an authorized standard copy; record independence, samples, findings, corrections, and effectiveness closure |
+| Management review | Draft input/output and readiness procedure | PARTIAL | Approve the procedure, operate a review over approved AIMS evidence, and retain decisions, owners, due conditions, and follow-up effectiveness |
+| Incident and corrective action | Fail-closed runtime behavior, issue tracking, tamper-evident event evidence, deterministic Work replay, and draft incident/nonconformity procedure | PARTIAL | Approve and exercise intake, containment, cause, notification, correction, corrective action, effectiveness review, and lessons records |
+| Control applicability | Architecture/governance controls and a draft project-specific control-theme register | PARTIAL | Use an authorized standard copy to approve a complete Statement of Applicability with exact inclusion/exclusion rationale and effectiveness evidence |
 | Certification | None | EXTERNAL | Readiness assessment, internal audit, management review, corrective-action closure, then independent certification audit |
 
 States mean:
@@ -71,6 +71,12 @@ does not attest to ledger integrity, control effectiveness, or conformity.
 3. Add operator-owned impact, risk, incident, corrective-action, audit, and management-review records without allowing models to approve them.
 4. Add document-control and Statement-of-Applicability workflows.
 5. Run an internal readiness audit against an authorized standard copy, close findings, then obtain an independent certification assessment.
+
+The repository now contains hash-bound public drafts for steps 3 and 4 plus a
+deterministic bounded assessment bundle. Draft existence does not complete
+either step: approval, operation, effectiveness evidence, internal audit,
+management review, and the authorized-standard applicability decision remain
+required.
 
 ## Authoritative public references
 
