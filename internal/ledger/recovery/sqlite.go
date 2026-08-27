@@ -25,8 +25,6 @@ import (
 	"modernc.org/sqlite"
 )
 
-const maximumRecoveryAuthorityAdmissions = 4096
-
 type Result struct {
 	Path                string `json:"path"`
 	SHA256              string `json:"sha256"`
@@ -385,9 +383,6 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	}
 	if err := recordRows.Close(); err != nil {
 		return fmt.Errorf("close projection admission records: %w", err)
-	}
-	if len(authorityRecords) > maximumRecoveryAuthorityAdmissions {
-		return fmt.Errorf("authority record history exceeds the supported recovery bound")
 	}
 	if _, _, err := events.ResolveAuthorityAdmissions(stream, authorityRecords); err != nil {
 		return fmt.Errorf("validate authority record admissions: %w", err)

@@ -168,8 +168,10 @@ func ResolveAuthorityAdmissions(stream []Event, records []AuthorityRecord) ([]Ca
 	})
 
 	usedEvents := make(map[string]struct{})
+	eventIndex := indexAuthorityEvents(stream)
 	priorBodies := make(map[string][]byte)
 	priorSequences := make(map[string]int64)
+	organizations := make(map[string]string)
 	versions := make(map[string]int)
 	leasing := make([]CapabilityLeaseAdmission, 0)
 	freezes := make([]OrganizationFreezeAdmission, 0)
@@ -181,13 +183,14 @@ func ResolveAuthorityAdmissions(stream []Event, records []AuthorityRecord) ([]Ca
 		if err := ValidateAuthorityRecordTransition(record.Kind, record.RecordID, record.Version, record.Body, priorBodies[key]); err != nil {
 			return nil, nil, fmt.Errorf("authority record %s/%s/%d: %w", record.Kind, record.RecordID, record.Version, err)
 		}
-		event, err := matchAuthorityEvent(stream, record, priorSequences[key], usedEvents)
+		event, err := matchAuthorityEvent(eventIndex, record, organizations[key], priorSequences[key], usedEvents)
 		if err != nil {
 			return nil, nil, err
 		}
 		versions[key] = record.Version
 		priorBodies[key] = append([]byte(nil), record.Body...)
 		priorSequences[key] = event.Sequence
+		organizations[key] = event.OrganizationID
 		usedEvents[event.EventID] = struct{}{}
 		switch record.Kind {
 		case authorityKindLease:
@@ -211,7 +214,25 @@ func ResolveAuthorityAdmissions(stream []Event, records []AuthorityRecord) ([]Ca
 	return leasing, freezes, nil
 }
 
-func matchAuthorityEvent(stream []Event, record AuthorityRecord, after int64, used map[string]struct{}) (Event, error) {
+type authorityEventIndex map[string][]Event
+
+func indexAuthorityEvents(stream []Event) authorityEventIndex {
+	indexed := make(authorityEventIndex)
+	for _, event := range stream {
+		if !RequiresAuthorityRecordAdmission(event.EventType) {
+			continue
+		}
+		taskID := event.TaskID
+		if event.EventType == "FREEZE_SET" {
+			taskID = ""
+		}
+		key := event.EventType + "\x00" + taskID + "\x00" + string(event.Payload)
+		indexed[key] = append(indexed[key], event)
+	}
+	return indexed
+}
+
+func matchAuthorityEvent(index authorityEventIndex, record AuthorityRecord, organizationID string, after int64, used map[string]struct{}) (Event, error) {
 	expectedType := "FREEZE_SET"
 	var lease core.CapabilityLease
 	if record.Kind == authorityKindLease {
@@ -223,15 +244,17 @@ func matchAuthorityEvent(stream []Event, record AuthorityRecord, after int64, us
 			expectedType = "CAPABILITY_REVOKED"
 		}
 	}
+	taskID := ""
+	if record.Kind == authorityKindLease {
+		taskID = string(lease.OriginTaskID)
+	}
+	candidates := index[expectedType+"\x00"+taskID+"\x00"+string(record.Body)]
 	var matched Event
-	for _, event := range stream {
+	for _, event := range candidates {
 		if _, alreadyUsed := used[event.EventID]; alreadyUsed || event.EventType != expectedType ||
-			event.Sequence <= after || event.OrganizationID == "" || event.SourceActorID == "" ||
+			event.EventID == "" || event.Sequence <= after || event.OrganizationID == "" || organizationID != "" && event.OrganizationID != organizationID || event.SourceActorID == "" || event.CreatedAt.IsZero() ||
 			event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" ||
 			len(event.ArtifactRefs) != 0 || event.SchemaVersion != SchemaVersion || !bytes.Equal(event.Payload, record.Body) {
-			continue
-		}
-		if record.Kind == authorityKindLease && event.TaskID != string(lease.OriginTaskID) {
 			continue
 		}
 		if record.Kind == authorityKindFreeze && event.OrganizationID != record.RecordID {

@@ -2744,19 +2744,14 @@ func latestRecordBody(ctx context.Context, tx *sql.Tx, kind, id string) ([]byte,
 	return body, true, nil
 }
 
-const maximumAuthorityAdmissions = 4096
-
 func authorityAdmissionsSnapshot(ctx context.Context, queryer rowsQueryer) ([]events.CapabilityLeaseAdmission, []events.OrganizationFreezeAdmission, error) {
 	stream, err := collectEvents(queryer.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
-FROM events WHERE event_type IN ('CAPABILITY_GRANTED','CAPABILITY_REVOKED','FREEZE_SET') ORDER BY sequence LIMIT ?`, maximumAuthorityAdmissions+1))
+FROM events WHERE event_type IN ('CAPABILITY_GRANTED','CAPABILITY_REVOKED','FREEZE_SET') ORDER BY sequence`))
 	if err != nil {
 		return nil, nil, fmt.Errorf("read authority Event Contracts: %w", err)
 	}
-	if len(stream) > maximumAuthorityAdmissions {
-		return nil, nil, fmt.Errorf("authority Event Contract history exceeds the supported bound")
-	}
 	rows, err := queryer.QueryContext(ctx, `SELECT kind,record_id,version,body FROM records
-WHERE kind IN ('capability_lease','organization_freeze') ORDER BY kind,record_id,version LIMIT ?`, maximumAuthorityAdmissions+1)
+WHERE kind IN ('capability_lease','organization_freeze') ORDER BY kind,record_id,version`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read authority records: %w", err)
 	}
@@ -2772,9 +2767,6 @@ WHERE kind IN ('capability_lease','organization_freeze') ORDER BY kind,record_id
 	}
 	if err := rows.Err(); err != nil {
 		return nil, nil, fmt.Errorf("iterate authority records: %w", err)
-	}
-	if len(records) > maximumAuthorityAdmissions {
-		return nil, nil, fmt.Errorf("authority record history exceeds the supported bound")
 	}
 	return events.ResolveAuthorityAdmissions(stream, records)
 }
