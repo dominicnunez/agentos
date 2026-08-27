@@ -3,14 +3,33 @@ set -eu
 
 GO_BIN="${AGENTOS_GO:-go}"
 GOFMT_BIN="${AGENTOS_GOFMT:-gofmt}"
+PYTHON_BIN="${AGENTOS_PYTHON:-python3}"
 
 if ! command -v "$GO_BIN" >/dev/null 2>&1; then
   echo "Go is required by the Agent OS pre-commit hook. Set AGENTOS_GO to its executable if it is not on PATH."
   exit 1
 fi
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  echo "Python 3 is required by the Agent OS pre-commit hook. Set AGENTOS_PYTHON to its executable if it is not on PATH."
+  exit 1
+fi
 
 echo "==> staged diff integrity"
 git diff --cached --check
+
+echo "==> controlled AIMS documented information"
+staged_root="$(mktemp -d)"
+trap 'rm -rf "$staged_root"' EXIT HUP INT TERM
+git checkout-index --all --prefix="$staged_root/"
+if git cat-file -e HEAD:governance/aims/manifest.json 2>/dev/null; then
+  git show HEAD:governance/aims/manifest.json >"$staged_root/prior-aims-manifest.json"
+  "$PYTHON_BIN" "$staged_root/scripts/verify_aims_documents.py" \
+    --root "$staged_root" --prior-manifest "$staged_root/prior-aims-manifest.json"
+else
+  "$PYTHON_BIN" "$staged_root/scripts/verify_aims_documents.py" --root "$staged_root"
+fi
+"$PYTHON_BIN" -m unittest scripts/test_verify_aims_documents.py
+"$PYTHON_BIN" -m unittest scripts/test_build_aims_assessment_bundle.py
 
 staged_go="$(git diff --cached --name-only --diff-filter=ACMR -- '*.go')"
 if [ -n "$staged_go" ]; then
