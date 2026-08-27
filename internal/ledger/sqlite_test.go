@@ -1943,6 +1943,67 @@ func TestEffectAuthorizationCannotUseAnotherOrganizationsLease(t *testing.T) {
 	}
 }
 
+func TestEffectAuthorizationIgnoresOtherOrganizationsMalformedAuthorityHistory(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	other := core.CapabilityLease{ID: "lease-other", ActorID: "actor-other", OriginTaskID: "task-other", Action: "cache", Resource: "record-other", Scope: "org-2"}
+	if err := store.AppendRecord(ctx, "org-2", "CAPABILITY_GRANTED", "user-2", "task-other", nil, nil, "capability_lease", string(other.ID), 1, other); err != nil {
+		t.Fatal(err)
+	}
+	revokedAt := time.Now().UTC()
+	other.RevokedAt = &revokedAt
+	if err := store.AppendRecord(ctx, "org-3", "CAPABILITY_REVOKED", "user-3", "task-other", nil, nil, "capability_lease", string(other.ID), 2, other); err != nil {
+		t.Fatal(err)
+	}
+
+	local := core.CapabilityLease{ID: "lease-local", ActorID: "actor-1", OriginTaskID: "task-1", Action: "cache", Resource: "record-1", Scope: "org-1"}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(local.ID), 1, local); err != nil {
+		t.Fatal(err)
+	}
+	obligation := core.EffectObligation{
+		ID: "effect-local", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1",
+		Action: "cache", Resource: "record-1", Scope: "org-1", AuthorizationRefs: []string{string(local.ID)},
+	}
+	trace, err := store.AuthorizeAndAppendEffectAttempt(ctx, obligation, 1, map[string]string{"status": "ATTEMPTED"})
+	if err != nil {
+		t.Fatalf("another tenant's malformed authority history entered the decision: %v", err)
+	}
+	if !trace.Allowed || trace.LeaseID != local.ID {
+		t.Fatalf("local authority was not applied: %+v", trace)
+	}
+}
+
+func TestEffectAuthorizationRejectsCrossOrganizationRevisionOfReferencedLease(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1", Action: "cache", Resource: "record-1", Scope: "org-1"}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+		t.Fatal(err)
+	}
+	revokedAt := time.Now().UTC()
+	lease.RevokedAt = &revokedAt
+	if err := store.AppendRecord(ctx, "org-2", "CAPABILITY_REVOKED", "user-2", "task-1", nil, nil, "capability_lease", string(lease.ID), 2, lease); err != nil {
+		t.Fatal(err)
+	}
+	obligation := core.EffectObligation{
+		ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1",
+		Action: "cache", Resource: "record-1", Scope: "org-1", AuthorizationRefs: []string{string(lease.ID)},
+	}
+	if _, err := store.AuthorizeAndAppendEffectAttempt(ctx, obligation, 1, map[string]string{"status": "ATTEMPTED"}); err == nil {
+		t.Fatal("cross-organization revocation left the referenced grant usable")
+	}
+}
+
 func TestAppendRecordRejectsMalformedAuthorityHistoryAtomically(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(":memory:")

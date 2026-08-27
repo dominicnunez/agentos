@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 50658)
+Total output lines: 3845
+
 package ledger
 
 import (
@@ -1887,53 +1890,7 @@ func validateTaskWorkBinding(ctx context.Context, tx *sql.Tx, item preparedProje
 
 func validateWorkRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
 	work := *item.work
-	if work.ID != core.ID(item.draft.RecordID) || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" || item.draft.Event.RecipientScope != "" || item.draft.Event.RecipientID != "" {
-		return fmt.Errorf("work projection is incomplete or crosses its runtime-owned lifecycle boundary")
-	}
-	record, previous, found, err := latestProjectionRevision[core.Work](ctx, tx, "work", item.draft.RecordID)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return events.ValidateWorkProjectionTransition(item.draft.Event.EventType, item.draft.Version, nil, work)
-	}
-	if record.CorrelationID == "" || record.CorrelationID != item.draft.Event.CorrelationID {
-		return fmt.Errorf("prior work revision is invalid or crosses its correlation boundary")
-	}
-	if item.draft.Version != record.Version+1 {
-		return fmt.Errorf("work version %d follows %d", item.draft.Version, record.Version)
-	}
-	return events.ValidateWorkProjectionTransition(item.draft.Event.EventType, item.draft.Version, &previous, work)
-}
-
-func validateLabExperimentRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
-	experiment := *item.experiment
-	if experiment.ID != core.ID(item.draft.RecordID) || string(experiment.OrganizationID) != item.draft.Event.OrganizationID || item.draft.Event.CorrelationID == "" {
-		return fmt.Errorf("lab experiment crosses its durable identity boundary")
-	}
-	record, previous, found, err := latestProjectionRevision[core.Experiment](ctx, tx, "lab_experiment", item.draft.RecordID)
-	if err != nil {
-		return err
-	}
-	if !found {
-		if err := events.ValidateExperimentProjectionTransition(item.draft.Event.EventType, item.draft.Version, nil, experiment); err != nil {
-			return err
-		}
-	} else {
-		if item.draft.Version != record.Version+1 || record.CorrelationID != item.draft.Event.CorrelationID {
-			return fmt.Errorf("lab experiment revision is noncontiguous or crosses its correlation boundary")
-		}
-		if err := events.ValidateExperimentProjectionTransition(item.draft.Event.EventType, item.draft.Version, &previous, experiment); err != nil {
-			return err
-		}
-	}
-	workRecord, work, workFound, err := latestProjectionRevision[core.Work](ctx, tx, "work", string(experiment.WorkID))
-	if err != nil || !workFound || workRecord.CorrelationID != item.draft.Event.CorrelationID || experiment.Objective != work.Objective {
-		return fmt.Errorf("lab experiment requires its exact bounded Work")
-	}
-	intentRecord, intent, intentFound, err := latestProjectionRevision[core.Intent](ctx, tx, "intent", string(work.IntentID))
-	if err != nil || !intentFound || intentRecord.CorrelationID != item.draft.Event.CorrelationID || intent.OrganizationID != experiment.OrganizationID {
-		return fmt.Errorf("lab experiment crosses its Work organization boundary")
+	if work.ID != core.ID(item.draft.RecordID) || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionI…658 tokens truncated…xperiment crosses its Work organization boundary")
 	}
 	switch experiment.Status {
 	case core.ExperimentRunning:
@@ -2655,7 +2612,7 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, obligation
 				return fmt.Errorf("decode approval %s: %w", obligation.ApprovalRef, err)
 			}
 		}
-		leaseAdmissions, freezeAdmissions, err := authorityAdmissionsSnapshot(ctx, tx)
+		leaseAdmissions, freezeAdmissions, err := authorityAdmissionsForEffect(ctx, tx, string(obligation.OrganizationID), obligation.AuthorizationRefs)
 		if err != nil {
 			return fmt.Errorf("validate durable authority state: %w", err)
 		}
@@ -2744,31 +2701,102 @@ func latestRecordBody(ctx context.Context, tx *sql.Tx, kind, id string) ([]byte,
 	return body, true, nil
 }
 
-func authorityAdmissionsSnapshot(ctx context.Context, queryer rowsQueryer) ([]events.CapabilityLeaseAdmission, []events.OrganizationFreezeAdmission, error) {
+const maximumEffectAuthorizationRefs = 64
+
+// authorityAdmissionsForEffect validates only the authority identities that
+// can affect one obligation. Event reads are constrained by the obligation's
+// Organization through events_recent_commit_idx, and record reads use the
+// records primary key. A different tenant's authority history therefore cannot
+// increase this effect's authorization cost or enter its decision.
+func authorityAdmissionsForEffect(ctx context.Context, queryer rowsQueryer, organizationID string, authorizationRefs []string) ([]events.CapabilityLeaseAdmission, []events.OrganizationFreezeAdmission, error) {
+	if organizationID == "" || len(authorizationRefs) == 0 || len(authorizationRefs) > maximumEffectAuthorizationRefs {
+		return nil, nil, fmt.Errorf("organization and between 1 and %d authorization references are required", maximumEffectAuthorizationRefs)
+	}
+	seenRefs := make(map[string]struct{}, len(authorizationRefs))
+	records := make([]events.AuthorityRecord, 0, len(authorizationRefs)+1)
+	for _, ref := range authorizationRefs {
+		if ref == "" {
+			return nil, nil, fmt.Errorf("authorization reference is empty")
+		}
+		if _, duplicate := seenRefs[ref]; duplicate {
+			return nil, nil, fmt.Errorf("authorization reference %s is duplicated", ref)
+		}
+		seenRefs[ref] = struct{}{}
+		selected, err := authorityRecords(ctx, queryer, "capability_lease", ref)
+		if err != nil {
+			return nil, nil, err
+		}
+		records = append(records, selected...)
+	}
+	freezeRecords, err := authorityRecords(ctx, queryer, "organization_freeze", organizationID)
+	if err != nil {
+		return nil, nil, err
+	}
+	records = append(records, freezeRecords...)
+
 	stream, err := collectEvents(queryer.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
-FROM events WHERE event_type IN ('CAPABILITY_GRANTED','CAPABILITY_REVOKED','FREEZE_SET') ORDER BY sequence`))
+FROM events WHERE organization_id=? AND event_type IN ('CAPABILITY_GRANTED','CAPABILITY_REVOKED','FREEZE_SET') ORDER BY sequence`, organizationID))
 	if err != nil {
 		return nil, nil, fmt.Errorf("read authority Event Contracts: %w", err)
 	}
-	rows, err := queryer.QueryContext(ctx, `SELECT kind,record_id,version,body FROM records
-WHERE kind IN ('capability_lease','organization_freeze') ORDER BY kind,record_id,version`)
-	if err != nil {
-		return nil, nil, fmt.Errorf("read authority records: %w", err)
+
+	// A reference whose grant belongs to another Organization is unavailable,
+	// not malformed authority in this Organization. Once version 1 is rooted in
+	// this Organization, every later revision must also have an exact local
+	// Event Contract; ResolveAuthorityAdmissions enforces that invariant.
+	localRecords := make([]events.AuthorityRecord, 0, len(records))
+	localBodies := make(map[string]struct{}, len(records))
+	localLeases := make(map[string]struct{}, len(authorizationRefs))
+	for _, record := range records {
+		if record.Kind == "capability_lease" && record.Version == 1 && hasAuthorityEvent(stream, "CAPABILITY_GRANTED", record.Body) {
+			localLeases[record.RecordID] = struct{}{}
+		}
 	}
-	defer func() { _ = rows.Close() }()
-	records := make([]events.AuthorityRecord, 0)
+	for _, record := range records {
+		if record.Kind == "capability_lease" {
+			if _, local := localLeases[record.RecordID]; !local {
+				continue
+			}
+		}
+		localRecords = append(localRecords, record)
+		localBodies[string(record.Body)] = struct{}{}
+	}
+	localStream := make([]events.Event, 0, len(stream))
+	for _, event := range stream {
+		if _, selected := localBodies[string(event.Payload)]; selected {
+			localStream = append(localStream, event)
+		}
+	}
+	return events.ResolveAuthorityAdmissions(localStream, localRecords)
+}
+
+func authorityRecords(ctx context.Context, queryer rowsQueryer, kind, recordID string) (records []events.AuthorityRecord, finalErr error) {
+	rows, err := queryer.QueryContext(ctx, `SELECT kind,record_id,version,body FROM records WHERE kind=? AND record_id=? ORDER BY version`, kind, recordID)
+	if err != nil {
+		return nil, fmt.Errorf("read authority records: %w", err)
+	}
+	defer func() { finalErr = errors.Join(finalErr, rows.Close()) }()
 	for rows.Next() {
 		var record events.AuthorityRecord
 		if err := rows.Scan(&record.Kind, &record.RecordID, &record.Version, &record.Body); err != nil {
-			return nil, nil, fmt.Errorf("scan authority record: %w", err)
+			return nil, fmt.Errorf("scan authority record: %w", err)
 		}
 		record.Body = append([]byte(nil), record.Body...)
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("iterate authority records: %w", err)
+		return nil, fmt.Errorf("iterate authority records: %w", err)
 	}
-	return events.ResolveAuthorityAdmissions(stream, records)
+	return records, nil
+}
+
+func hasAuthorityEvent(stream []events.Event, eventType string, body []byte) bool {
+	for _, event := range stream {
+		if event.EventType == eventType && bytes.Equal(event.Payload, body) {
+			return true
+		}
+	}
+	return false
 }
 
 func recordBodyAtVersion(ctx context.Context, queryer rowsQueryer, kind, id string, version int) ([]byte, bool, error) {
