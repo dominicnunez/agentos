@@ -1077,15 +1077,15 @@ func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.Projecti
 	}
 	switch task.ExecutionKind {
 	case core.ExecutionAgent:
-		if task.AssigneeType != "AGENT" || task.AssigneeID == "" || len(routes) < 2 || validate == nil || requested.InputEventRef != "" || requested.Mode != "" && requested.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
+		if task.AssigneeType != "AGENT" || task.AssigneeID == "" || len(routes) < 2 || validate == nil || requested.InputEventRef != "" || len(requested.InputEventRefs) > 1024 || requested.Mode != "" && requested.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
 			return events.Event{}, nil, fmt.Errorf("agent execution-start boundary is invalid")
 		}
 	case core.ExecutionDeterministic:
-		if len(routes) != 0 || validate != nil || requested.Mode != "" || requested.InputEventRef != "" {
+		if len(routes) != 0 || validate != nil || requested.Mode != "" || requested.InputEventRef != "" || len(requested.InputEventRefs) != 0 {
 			return events.Event{}, nil, fmt.Errorf("deterministic execution-start boundary is invalid")
 		}
 	case core.ExecutionHuman:
-		if len(routes) != 0 || validate != nil || requested.Mode != "OPERATOR_HUMAN_INPUT" && requested.Mode != "STRUCTURED_HUMAN_COMPLETION" || requested.InputEventRef == "" {
+		if len(routes) != 0 || validate != nil || requested.Mode != "OPERATOR_HUMAN_INPUT" && requested.Mode != "STRUCTURED_HUMAN_COMPLETION" || requested.InputEventRef == "" || len(requested.InputEventRefs) != 0 {
 			return events.Event{}, nil, fmt.Errorf("user execution-start boundary is invalid")
 		}
 	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
@@ -1137,7 +1137,7 @@ func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.Projecti
 		}
 		draft.Event.Payload = events.ExecutionStartDetail{
 			Mode: requested.Mode, InputEventRef: requested.InputEventRef, InboxCutoffSequence: cutoff, DispatchBinding: dispatch,
-			StrategicEventRefs: append([]string(nil), requested.StrategicEventRefs...), StrategicContextRefs: append([]core.VersionedRef(nil), requested.StrategicContextRefs...),
+			InputEventRefs: append([]string(nil), requested.InputEventRefs...), StrategicEventRefs: append([]string(nil), requested.StrategicEventRefs...), StrategicContextRefs: append([]core.VersionedRef(nil), requested.StrategicContextRefs...),
 		}
 		item, err := prepareProjection(draft, false, false)
 		if err != nil {
@@ -1301,6 +1301,19 @@ func validateExecutionStartManifest(ctx context.Context, tx *sql.Tx, task core.T
 	if len(manifest.EventRefs) > 1024 {
 		return fmt.Errorf("agent execution manifest has too many event references")
 	}
+	expectedEventRefs := append([]string(nil), requested.StrategicEventRefs...)
+	var inboxEvents []events.Event
+	for _, inbox := range selection.Inbox {
+		inboxEvents = append(inboxEvents, inbox.Events...)
+	}
+	sort.Slice(inboxEvents, func(i, j int) bool { return inboxEvents[i].Sequence < inboxEvents[j].Sequence })
+	for _, event := range inboxEvents {
+		expectedEventRefs = append(expectedEventRefs, event.EventID)
+	}
+	expectedEventRefs = append(expectedEventRefs, requested.InputEventRefs...)
+	if !slices.Equal(manifest.EventRefs, expectedEventRefs) {
+		return fmt.Errorf("agent execution manifest changes its exact event context")
+	}
 	seen := make(map[string]struct{}, len(manifest.EventRefs))
 	for _, ref := range manifest.EventRefs {
 		if ref == "" {
@@ -1313,20 +1326,6 @@ func validateExecutionStartManifest(ctx context.Context, tx *sql.Tx, task core.T
 		matched, err := exactEventsByID(ctx, tx, started.OrganizationID, ref)
 		if err != nil || len(matched) != 1 || matched[0].Sequence >= started.Sequence {
 			return fmt.Errorf("agent execution manifest event reference %s is not durable before execution start", ref)
-		}
-	}
-	required := make(map[string]struct{}, len(requested.StrategicEventRefs)+len(selection.Inbox))
-	for _, ref := range requested.StrategicEventRefs {
-		required[ref] = struct{}{}
-	}
-	for _, inbox := range selection.Inbox {
-		for _, event := range inbox.Events {
-			required[event.EventID] = struct{}{}
-		}
-	}
-	for ref := range required {
-		if _, bound := seen[ref]; !bound {
-			return fmt.Errorf("agent execution manifest omits transaction-selected event %s", ref)
 		}
 	}
 	return nil
@@ -3698,25 +3697,29 @@ func (l *SQLite) Records(ctx context.Context, kind, id string) ([][]byte, error)
 	return collectRecordBodies(l.db.QueryContext(ctx, `SELECT body FROM records WHERE kind=? AND (?='' OR record_id=?) ORDER BY record_id,version`, kind, id, id))
 }
 
-// ActiveKnowledgeRecords returns one deterministic, transactionally consistent
-// snapshot of current event-admitted knowledge in one exact tenant and scope.
-func (l *SQLite) ActiveKnowledgeRecords(ctx context.Context, organizationID, scope, scopeID string, limit int) ([][]byte, error) {
-	if organizationID == "" || scopeID == "" || limit < 1 || limit > 4097 ||
-		(scope != string(core.KnowledgeScopeAgent) && scope != string(core.KnowledgeScopeTeam) && scope != string(core.KnowledgeScopeOrganization)) {
-		return nil, fmt.Errorf("organization, closed knowledge scope, scope identity, and limit from 1 through 4097 are required")
+// CurrentKnowledgeRecords returns one deterministic, bounded snapshot of every
+// current event-admitted knowledge identity in one exact tenant. Consumers
+// need terminal source revisions as well as active results to reject stale or
+// superseded derived lineage.
+func (l *SQLite) CurrentKnowledgeRecords(ctx context.Context, organizationID string, limit int) ([][]byte, error) {
+	if organizationID == "" || limit < 1 || limit > 4097 {
+		return nil, fmt.Errorf("organization and limit from 1 through 4097 are required")
 	}
-	bodies, err := admittedProjectionRecordBodies(ctx, l.db, `JOIN (
+	records, err := admittedProjectionRecordsBounded(ctx, l.db, 32<<20, `JOIN (
 	SELECT record_id, MAX(version) AS version
 	FROM records
 	WHERE kind='knowledge'
 	GROUP BY record_id
 ) AS latest ON latest.record_id=r.record_id AND latest.version=r.version
-WHERE r.kind='knowledge' AND e.organization_id=? AND json_extract(r.body,'$.value.status')=?
-AND json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scope_id')=?
+WHERE r.kind='knowledge' AND e.organization_id=?
 ORDER BY e.sequence DESC,r.record_id
-LIMIT ?`, organizationID, string(core.KnowledgeActive), scope, scopeID, limit)
+LIMIT ?`, organizationID, limit)
 	if err != nil {
 		return nil, err
+	}
+	bodies := make([][]byte, 0, len(records))
+	for _, record := range records {
+		bodies = append(bodies, record.body)
 	}
 	return bodies, nil
 }

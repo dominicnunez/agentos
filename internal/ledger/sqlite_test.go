@@ -29,7 +29,7 @@ func (value *changingAuthorityJSON) MarshalJSON() ([]byte, error) {
 	if value.calls > 1 {
 		id = "lease-substituted"
 	}
-	return []byte(fmt.Sprintf(`{"id":%q,"actor_id":"actor-1","action":"write","resource":"record-1","scope":"org-1","origin_task_id":"task-1"}`, id)), nil
+	return []byte(fmt.Sprintf(`{"id":%q,"actor_id":"actor-1","actor_kind":"AGENT","action":"write","resource":"record-1","scope":"org-1","origin_task_id":"task-1"}`, id)), nil
 }
 
 func appendTaskProjectionParents(t *testing.T, ctx context.Context, store *SQLite, organizationID, correlationID, workID string) {
@@ -1063,6 +1063,37 @@ func TestAgentExecutionStartRollsBackRejectedAggregateInput(t *testing.T) {
 		if event.EventType == "EXECUTION_STARTED" {
 			t.Fatal("rejected aggregate input persisted execution start")
 		}
+	}
+}
+
+func TestAgentExecutionStartRejectsUnboundManifestEvent(t *testing.T) {
+	ctx := t.Context()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	appendTaskProjectionParents(t, ctx, store, "org-1", "unbound-manifest-event", "work-1")
+	agent, config := appendTaskAssignmentAgent(t, ctx, store, "org-1", "unbound-manifest-event", false)
+	task := appendPendingAgentExecutionTask(t, ctx, store, "unbound-manifest-event", "task-unbound-manifest-event", agent, config)
+	unrelated, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "RESULT_PUBLISHED", SourceActorID: "runtime", CorrelationID: "unbound-manifest-event", Payload: map[string]string{"status": "unrelated"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Status = core.TaskRunning
+	if _, _, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "unbound-manifest-event"},
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
+	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: string(task.ID)}, {Scope: events.RecipientAgent, ID: string(task.AssigneeID)}}, func(selection events.ExecutionStartSelection) (core.ExecutionContextManifest, error) {
+		manifest := testAgentStartManifest(task, selection)
+		manifest.EventRefs = append(manifest.EventRefs, unrelated.EventID)
+		return manifest, nil
+	}); err == nil {
+		t.Fatal("manifest bound an unrelated event")
+	}
+	_, persisted := latestTestProjection[core.Task](t, ctx, store, "task", task.ID)
+	if persisted.Status != core.TaskPending {
+		t.Fatalf("rejected manifest changed Task state: %+v", persisted)
 	}
 }
 
@@ -2225,7 +2256,7 @@ func TestKnowledgeAuthorityBoundaryUsesExactTenantHistory(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	other := core.CapabilityLease{ID: "lease-other", ActorID: "actor-other", OriginTaskID: "task-other", Action: "knowledge.validate", Resource: "knowledge-1", Scope: "org-2"}
+	other := core.CapabilityLease{ID: "lease-other", ActorID: "actor-other", ActorKind: core.PrincipalAgent, OriginTaskID: "task-other", Action: "knowledge.validate", Resource: "knowledge-1", Scope: "org-2"}
 	if err := store.AppendRecord(ctx, "org-2", "CAPABILITY_GRANTED", "user-2", "task-other", nil, nil, "capability_lease", string(other.ID), 1, other); err != nil {
 		t.Fatal(err)
 	}
@@ -2347,7 +2378,7 @@ func TestEffectAuthorizationRejectsCrossOrganizationRevisionOfReferencedLease(t 
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1", Action: "cache", Resource: "record-1", Scope: "org-1"}
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", ActorKind: core.PrincipalAgent, OriginTaskID: "task-1", Action: "cache", Resource: "record-1", Scope: "org-1"}
 	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
 		t.Fatal(err)
 	}
@@ -2370,7 +2401,7 @@ func TestAppendRecordRejectsMalformedAuthorityHistoryAtomically(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1", Action: "write", Resource: "record-1", Scope: "org-1"}
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", ActorKind: core.PrincipalAgent, OriginTaskID: "task-1", Action: "write", Resource: "record-1", Scope: "org-1"}
 	if _, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "CAPABILITY_GRANTED", SourceActorID: "user-1", TaskID: "task-1", Payload: lease}); err == nil {
 		t.Fatal("bare capability event bypassed atomic authority admission")
 	}

@@ -698,6 +698,7 @@ type InboxObservationBinding struct {
 type ExecutionStartDetail struct {
 	Mode                 string                `json:"mode,omitempty"`
 	InputEventRef        string                `json:"input_event_ref,omitempty"`
+	InputEventRefs       []string              `json:"input_event_refs,omitempty"`
 	InboxCutoffSequence  int64                 `json:"inbox_cutoff_sequence"`
 	DispatchBinding      *AgentDispatchBinding `json:"dispatch_binding,omitempty"`
 	StrategicEventRefs   []string              `json:"strategic_event_refs,omitempty"`
@@ -2349,11 +2350,14 @@ func executionStartDetail(event Event) (ExecutionStartDetail, error) {
 	var payload ProjectionEventPayload
 	var detail ExecutionStartDetail
 	var fields map[string]json.RawMessage
-	if event.EventType != "EXECUTION_STARTED" || json.Unmarshal(event.Payload, &payload) != nil || decodeExactEventJSON(payload.Detail, &detail) != nil || json.Unmarshal(payload.Detail, &fields) != nil || fields["inbox_cutoff_sequence"] == nil || fields["dispatch_binding"] == nil || detail.DispatchBinding == nil || detail.InboxCutoffSequence < 0 || detail.InboxCutoffSequence >= event.Sequence || detail.Mode != "" && detail.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" || !validStrategicStartRefs(detail.StrategicEventRefs, detail.StrategicContextRefs) {
+	if event.EventType != "EXECUTION_STARTED" || json.Unmarshal(event.Payload, &payload) != nil || decodeExactEventJSON(payload.Detail, &detail) != nil || json.Unmarshal(payload.Detail, &fields) != nil || fields["inbox_cutoff_sequence"] == nil || fields["dispatch_binding"] == nil || detail.DispatchBinding == nil || detail.InboxCutoffSequence < 0 || detail.InboxCutoffSequence >= event.Sequence || detail.Mode != "" && detail.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" || !validInputEventRefs(detail.InputEventRefs) || !validStrategicStartRefs(detail.StrategicEventRefs, detail.StrategicContextRefs) {
 		return ExecutionStartDetail{}, fmt.Errorf("agent execution-start detail is invalid")
 	}
 	expectedFields := 2
 	if detail.Mode != "" {
+		expectedFields++
+	}
+	if len(detail.InputEventRefs) != 0 {
 		expectedFields++
 	}
 	if len(detail.StrategicEventRefs) != 0 {
@@ -2369,7 +2373,7 @@ func nonAgentExecutionStartDetail(event Event, kind core.ExecutionKind) (Executi
 	var payload ProjectionEventPayload
 	var detail ExecutionStartDetail
 	var fields map[string]json.RawMessage
-	if event.EventType != "EXECUTION_STARTED" || json.Unmarshal(event.Payload, &payload) != nil || decodeExactEventJSON(payload.Detail, &detail) != nil || json.Unmarshal(payload.Detail, &fields) != nil || fields["inbox_cutoff_sequence"] == nil || detail.InboxCutoffSequence != 0 || detail.DispatchBinding != nil || !validStrategicStartRefs(detail.StrategicEventRefs, detail.StrategicContextRefs) {
+	if event.EventType != "EXECUTION_STARTED" || json.Unmarshal(event.Payload, &payload) != nil || decodeExactEventJSON(payload.Detail, &detail) != nil || json.Unmarshal(payload.Detail, &fields) != nil || fields["inbox_cutoff_sequence"] == nil || detail.InboxCutoffSequence != 0 || detail.DispatchBinding != nil || len(detail.InputEventRefs) != 0 || !validStrategicStartRefs(detail.StrategicEventRefs, detail.StrategicContextRefs) {
 		return ExecutionStartDetail{}, fmt.Errorf("non-Agent execution-start detail is invalid")
 	}
 	expectedFields := 1
@@ -2404,6 +2408,23 @@ func validStrategicStartRefs(eventRefs []string, contextRefs []core.VersionedRef
 	return len(eventRefs) == 2 && eventRefs[0] != "" && eventRefs[1] != "" && eventRefs[0] != eventRefs[1] &&
 		len(contextRefs) == 2 && contextRefs[0].ID != "" && contextRefs[0].Version != "" && contextRefs[0].MaterializationState == core.MaterializedFull &&
 		contextRefs[1].ID != "" && contextRefs[1].Version != "" && contextRefs[1].MaterializationState == core.MaterializedFull
+}
+
+func validInputEventRefs(refs []string) bool {
+	if len(refs) > 1024 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		if ref == "" {
+			return false
+		}
+		if _, duplicate := seen[ref]; duplicate {
+			return false
+		}
+		seen[ref] = struct{}{}
+	}
+	return true
 }
 
 // ValidateAgentDispatchStart proves that an execution started against the
@@ -3782,8 +3803,8 @@ type ExecutionStartAppender interface {
 type ProjectionReader interface {
 	Records(context.Context, string, string) ([][]byte, error)
 }
-type ActiveKnowledgeReader interface {
-	ActiveKnowledgeRecords(context.Context, string, string, string, int) ([][]byte, error)
+type CurrentKnowledgeReader interface {
+	CurrentKnowledgeRecords(context.Context, string, int) ([][]byte, error)
 }
 type KnowledgeAuthorityAdmissionReader interface {
 	KnowledgeAuthorityAdmissions(context.Context) ([]CapabilityLeaseAdmission, []OrganizationFreezeAdmission, error)
@@ -4087,15 +4108,15 @@ func (g *Gateway) PublishExecutionStart(ctx context.Context, draft ProjectionDra
 	}
 	switch task.ExecutionKind {
 	case core.ExecutionAgent:
-		if task.AssigneeType != "AGENT" || task.AssigneeID == "" || len(routes) < 2 || validate == nil || detail.InputEventRef != "" || detail.Mode != "" && detail.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
+		if task.AssigneeType != "AGENT" || task.AssigneeID == "" || len(routes) < 2 || validate == nil || detail.InputEventRef != "" || !validInputEventRefs(detail.InputEventRefs) || detail.Mode != "" && detail.Mode != "BLOCKED_DEPENDENCY_REMEDIATION" {
 			return Event{}, nil, fmt.Errorf("agent execution-start task or inbox boundary is invalid")
 		}
 	case core.ExecutionDeterministic:
-		if len(routes) != 0 || validate != nil || detail.Mode != "" || detail.InputEventRef != "" {
+		if len(routes) != 0 || validate != nil || detail.Mode != "" || detail.InputEventRef != "" || len(detail.InputEventRefs) != 0 {
 			return Event{}, nil, fmt.Errorf("deterministic execution-start boundary is invalid")
 		}
 	case core.ExecutionHuman:
-		if len(routes) != 0 || validate != nil || detail.Mode != "OPERATOR_HUMAN_INPUT" && detail.Mode != "STRUCTURED_HUMAN_COMPLETION" || detail.InputEventRef == "" {
+		if len(routes) != 0 || validate != nil || detail.Mode != "OPERATOR_HUMAN_INPUT" && detail.Mode != "STRUCTURED_HUMAN_COMPLETION" || detail.InputEventRef == "" || len(detail.InputEventRefs) != 0 {
 			return Event{}, nil, fmt.Errorf("user execution-start boundary is invalid")
 		}
 	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
@@ -4208,12 +4229,12 @@ func (g *Gateway) ProjectionRecords(ctx context.Context, kind, id string) ([][]b
 	}
 	return store.Records(ctx, kind, id)
 }
-func (g *Gateway) ActiveKnowledgeRecords(ctx context.Context, organizationID, scope, scopeID string, limit int) ([][]byte, error) {
-	store, ok := g.ledger.(ActiveKnowledgeReader)
+func (g *Gateway) CurrentKnowledgeRecords(ctx context.Context, organizationID string, limit int) ([][]byte, error) {
+	store, ok := g.ledger.(CurrentKnowledgeReader)
 	if !ok {
-		return nil, fmt.Errorf("event ledger does not support bounded active knowledge reads")
+		return nil, fmt.Errorf("event ledger does not support bounded current knowledge reads")
 	}
-	return store.ActiveKnowledgeRecords(ctx, organizationID, scope, scopeID, limit)
+	return store.CurrentKnowledgeRecords(ctx, organizationID, limit)
 }
 
 func (g *Gateway) KnowledgeAuthorityAdmissions(ctx context.Context) ([]CapabilityLeaseAdmission, []OrganizationFreezeAdmission, error) {

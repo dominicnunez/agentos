@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -99,28 +100,37 @@ func (s *Store) Search(ctx context.Context, organizationID core.ID, scope core.K
 		return nil, fmt.Errorf("organization knowledge scope crosses its tenant boundary")
 	}
 	needle := strings.ToLower(text)
-	rows, err := s.gateway.ActiveKnowledgeRecords(ctx, string(organizationID), string(scope), string(scopeID), maximumSearchScan+1)
+	rows, err := s.gateway.CurrentKnowledgeRecords(ctx, string(organizationID), maximumSearchScan+1)
 	if err != nil {
 		return nil, err
 	}
 	if len(rows) > maximumSearchScan {
 		return nil, fmt.Errorf("active knowledge scope exceeds the deterministic search bound")
 	}
-	results := make([]core.KnowledgeRecord, 0, limit)
-	seenRecordIDs := make(map[string]struct{}, len(rows))
+	history := make(map[core.ID]core.KnowledgeRecord, len(rows))
+	order := make([]core.ID, 0, len(rows))
 	for _, body := range rows {
 		var projection events.ProjectionRecord
 		var record core.KnowledgeRecord
 		if json.Unmarshal(body, &projection) != nil || json.Unmarshal(projection.Value, &record) != nil ||
 			projection.ProjectionKind != "knowledge" || projection.RecordID != string(record.KnowledgeID) || projection.Version != record.Version ||
-			record.OrganizationID != organizationID || record.Scope != scope || record.ScopeID != scopeID || record.Status != core.KnowledgeActive ||
-			!core.ValidKnowledgeRecord(record) {
-			return nil, fmt.Errorf("active knowledge projection is invalid")
+			record.OrganizationID != organizationID || !core.ValidKnowledgeRecord(record) {
+			return nil, fmt.Errorf("current knowledge projection is invalid")
 		}
-		if _, duplicate := seenRecordIDs[projection.RecordID]; duplicate {
-			return nil, fmt.Errorf("active knowledge projection is duplicated")
+		if _, duplicate := history[record.KnowledgeID]; duplicate {
+			return nil, fmt.Errorf("current knowledge projection is duplicated")
 		}
-		seenRecordIDs[projection.RecordID] = struct{}{}
+		history[record.KnowledgeID] = record
+		order = append(order, record.KnowledgeID)
+	}
+	results := make([]core.KnowledgeRecord, 0, limit)
+	lineageMemo := make(map[core.ID]bool, len(history))
+	for _, knowledgeID := range order {
+		record := history[knowledgeID]
+		if record.Scope != scope || record.ScopeID != scopeID || record.Status != core.KnowledgeActive ||
+			!searchKnowledgeLineageActive(knowledgeID, history, make(map[core.ID]struct{}), lineageMemo) {
+			continue
+		}
 		if knowledgeContains(record, needle) {
 			results = append(results, record)
 			if len(results) == limit {
@@ -129,6 +139,34 @@ func (s *Store) Search(ctx context.Context, organizationID core.ID, scope core.K
 		}
 	}
 	return results, nil
+}
+
+func searchKnowledgeLineageActive(knowledgeID core.ID, history map[core.ID]core.KnowledgeRecord, visiting map[core.ID]struct{}, memo map[core.ID]bool) bool {
+	if active, resolved := memo[knowledgeID]; resolved {
+		return active
+	}
+	record, found := history[knowledgeID]
+	if !found || record.Status != core.KnowledgeActive {
+		memo[knowledgeID] = false
+		return false
+	}
+	if _, cycle := visiting[knowledgeID]; cycle {
+		memo[knowledgeID] = false
+		return false
+	}
+	visiting[knowledgeID] = struct{}{}
+	defer delete(visiting, knowledgeID)
+	for _, ref := range record.DerivedKnowledgeRefs {
+		version, err := strconv.Atoi(ref.Version)
+		source, sourceFound := history[core.ID(ref.ID)]
+		if err != nil || !sourceFound || source.Version != version || source.Status != core.KnowledgeActive ||
+			!searchKnowledgeLineageActive(source.KnowledgeID, history, visiting, memo) {
+			memo[knowledgeID] = false
+			return false
+		}
+	}
+	memo[knowledgeID] = true
+	return true
 }
 
 func knowledgeContains(record core.KnowledgeRecord, needle string) bool {

@@ -144,7 +144,8 @@ that contained the Agent at that start boundary. Relevance uses bounded
 deterministic text matching against the durable Task; it does not use a model,
 embedding, or semantic index. Derived knowledge is eligible only while every
 exact source version and its transitive lineage remain current and `ACTIVE` at
-the same boundary; invalidated lineage fails closed before model execution.
+the same boundary; invalidated lineage fails closed before model execution and
+is also excluded from deterministic knowledge search.
 
 At most 16 full records and 96 KiB of knowledge are selected, newest activation
 first with stable identity as the tie-breaker. The aggregate Agent input remains

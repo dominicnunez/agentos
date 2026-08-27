@@ -248,7 +248,7 @@ func saveTestVerifiedTask(ctx context.Context, gateway *events.Gateway, reposito
 	task.Status = core.TaskRunning
 	startVersion := state.Version + 1
 	if task.ExecutionKind == core.ExecutionAgent {
-		_, selections, err := repository.StartAgentExecution(ctx, organizationID, correlationID, startVersion, task, "", nil, nil, actionBoundaryRoutes(snapshot, task), func(selection events.ExecutionStartSelection) (core.ExecutionContextManifest, error) {
+		_, selections, err := repository.StartAgentExecution(ctx, organizationID, correlationID, startVersion, task, "", nil, nil, nil, actionBoundaryRoutes(snapshot, task), func(selection events.ExecutionStartSelection) (core.ExecutionContextManifest, error) {
 			return core.ExecutionContextManifest{
 				ExecutionID: core.ID(fmt.Sprintf("execution-%s-v%d", task.ID, startVersion)), AgentID: task.AssigneeID,
 				AgentBlueprintVersion: task.AgentConfig.BlueprintVersion, ExecutionProfileVersion: task.AgentConfig.ProfileVersion,
@@ -3557,7 +3557,7 @@ func TestRecoveryIsDeterministicFirst(t *testing.T) {
 					if err != nil {
 						return err
 					}
-					_, _, err = repository.StartAgentExecution(ctx, organization.ID, requestID, 2, task, "", nil, nil, actionBoundaryRoutes(snapshot, task), func(selection events.ExecutionStartSelection) (core.ExecutionContextManifest, error) {
+					_, _, err = repository.StartAgentExecution(ctx, organization.ID, requestID, 2, task, "", nil, nil, nil, actionBoundaryRoutes(snapshot, task), func(selection events.ExecutionStartSelection) (core.ExecutionContextManifest, error) {
 						return core.ExecutionContextManifest{
 							ExecutionID: "execution-" + task.ID + "-v2", AgentID: task.AssigneeID,
 							AgentBlueprintVersion: task.AgentConfig.BlueprintVersion, ExecutionProfileVersion: task.AgentConfig.ProfileVersion,

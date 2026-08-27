@@ -501,6 +501,9 @@ func TestStoreCanInvalidateDerivedKnowledgeAfterItsSourceBecomesStale(t *testing
 	if _, err := service.MarkStale(ctx, staleSource); err != nil {
 		t.Fatalf("mark source stale: %v", err)
 	}
+	if rows, err := service.Search(ctx, "org-1", core.KnowledgeScopeOrganization, "org-1", "rollback", 10); err != nil || len(rows) != 0 {
+		t.Fatalf("derived knowledge with stale source remained searchable: rows=%+v err=%v", rows, err)
+	}
 	staleDependent := dependent
 	staleDependent.Version = 3
 	staleDependent.Status = core.KnowledgeStale

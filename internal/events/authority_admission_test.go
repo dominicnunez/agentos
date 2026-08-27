@@ -62,6 +62,32 @@ func TestValidateAuthorityRecordTransitionPreservesActorKindAtRevocation(t *test
 	}
 }
 
+func TestNewCapabilityAdmissionRequiresPrincipalKind(t *testing.T) {
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "agent-1", Action: "write", Resource: "record-1", Scope: "org-1", OriginTaskID: "task-1"}
+	body, err := json.Marshal(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft := TrustedDraft{OrganizationID: "org-1", EventType: "CAPABILITY_GRANTED", SourceActorID: "user-1", TaskID: "task-1"}
+	if err := ValidateAuthorityRecordDraft(draft, authorityKindLease, "lease-1", 1, body); err == nil {
+		t.Fatal("principal-less capability draft was admitted")
+	}
+	if err := ValidateAuthorityRecordTransition(authorityKindLease, "lease-1", 1, body, nil); err == nil {
+		t.Fatal("principal-less initial capability transition was admitted")
+	}
+	lease.ActorKind = core.PrincipalAgent
+	body, err = json.Marshal(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAuthorityRecordDraft(draft, authorityKindLease, "lease-1", 1, body); err != nil {
+		t.Fatalf("closed principal capability draft was rejected: %v", err)
+	}
+	if err := ValidateAuthorityRecordTransition(authorityKindLease, "lease-1", 1, body, nil); err != nil {
+		t.Fatalf("closed principal capability transition was rejected: %v", err)
+	}
+}
+
 func TestResolveAuthorityAdmissionsHasNoLifetimeEventLimit(t *testing.T) {
 	const count = 4097
 	stream := make([]Event, 0, count)

@@ -89,7 +89,7 @@ func TestStorageV7UpgradePreservesAuthorityAndAddsKnowledgeAdmission(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", Action: "read", Resource: "record-1", Scope: "org-1", OriginTaskID: "task-1"}
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", ActorKind: core.PrincipalAgent, Action: "read", Resource: "record-1", Scope: "org-1", OriginTaskID: "task-1"}
 	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
 		_ = store.Close()
 		t.Fatal(err)
@@ -508,7 +508,7 @@ func TestAuthorityBindingMigrationRejectsTamperedChainWithoutMutation(t *testing
 		t.Fatal(err)
 	}
 	lease := core.CapabilityLease{
-		ID: "lease-1", ActorID: "actor-1", Action: "read", Resource: "record-1",
+		ID: "lease-1", ActorID: "actor-1", ActorKind: core.PrincipalAgent, Action: "read", Resource: "record-1",
 		Scope: "org-1", OriginTaskID: "task-1",
 	}
 	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {

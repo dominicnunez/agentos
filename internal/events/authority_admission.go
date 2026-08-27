@@ -73,7 +73,7 @@ func ValidateAuthorityRecordDraft(draft TrustedDraft, kind, recordID string, ver
 	case authorityKindLease:
 		var lease core.CapabilityLease
 		if decodeExactEventJSON(body, &lease) != nil || lease.ID == "" || string(lease.ID) != recordID ||
-			lease.ActorID == "" || lease.Action == "" || lease.Resource == "" || lease.Scope == "" ||
+			lease.ActorID == "" || !core.ValidPrincipalKind(lease.ActorKind) || lease.Action == "" || lease.Resource == "" || lease.Scope == "" ||
 			lease.OriginTaskID == "" || draft.TaskID != string(lease.OriginTaskID) {
 			return fmt.Errorf("capability lease record admission is invalid")
 		}
@@ -109,13 +109,22 @@ func ValidateAuthorityRecordDraft(draft TrustedDraft, kind, recordID string, ver
 // ValidateAuthorityRecordTransition enforces the complete, closed revision
 // history for authority-bearing generic records.
 func ValidateAuthorityRecordTransition(kind, recordID string, version int, body, priorBody []byte) error {
+	return validateAuthorityRecordTransition(kind, recordID, version, body, priorBody, true)
+}
+
+// validateAuthorityRecordTransition permits principal-less leases only while
+// replaying durable authority written before principal kinds existed. New
+// admissions always use ValidateAuthorityRecordTransition and fail closed.
+func validateAuthorityRecordTransition(kind, recordID string, version int, body, priorBody []byte, requirePrincipalKind bool) error {
 	if recordID == "" || version < 1 || version != 1 && len(priorBody) == 0 || version == 1 && len(priorBody) != 0 {
 		return fmt.Errorf("authority record version is noncontiguous")
 	}
 	switch kind {
 	case authorityKindLease:
 		var current core.CapabilityLease
-		if decodeExactEventJSON(body, &current) != nil || current.ID == "" || string(current.ID) != recordID {
+		if decodeExactEventJSON(body, &current) != nil || current.ID == "" || string(current.ID) != recordID ||
+			requirePrincipalKind && !core.ValidPrincipalKind(current.ActorKind) ||
+			!requirePrincipalKind && current.ActorKind != "" && !core.ValidPrincipalKind(current.ActorKind) {
 			return fmt.Errorf("capability lease state is invalid")
 		}
 		if version == 1 {
@@ -196,7 +205,7 @@ func resolveAuthorityAdmissions(stream []Event, records []AuthorityRecord, requi
 		if record.Version != versions[key]+1 {
 			return nil, nil, nil, fmt.Errorf("authority record %s/%s/%d is noncontiguous", record.Kind, record.RecordID, record.Version)
 		}
-		if err := ValidateAuthorityRecordTransition(record.Kind, record.RecordID, record.Version, record.Body, priorBodies[key]); err != nil {
+		if err := validateAuthorityRecordTransition(record.Kind, record.RecordID, record.Version, record.Body, priorBodies[key], false); err != nil {
 			return nil, nil, nil, fmt.Errorf("authority record %s/%s/%d: %w", record.Kind, record.RecordID, record.Version, err)
 		}
 		if requireBound && record.AdmissionEventID == "" {

@@ -2743,6 +2743,10 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		if remediation {
 			mode = "BLOCKED_DEPENDENCY_REMEDIATION"
 		}
+		inputEventRefs := append([]string(nil), dependencyRefs...)
+		if hasRevision {
+			inputEventRefs = append(inputEventRefs, revisionEvent.EventID)
+		}
 		var executionInput string
 		var knowledgeSelections []events.KnowledgeSelection
 		validateInput := func(selection events.ExecutionStartSelection) (core.ExecutionContextManifest, error) {
@@ -2774,10 +2778,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			inboxRefs := inboxEventRefs(inboxBatches)
 			eventRefs := append([]string(nil), strategyEventRefs...)
 			eventRefs = append(eventRefs, inboxRefs...)
-			eventRefs = append(eventRefs, dependencyRefs...)
-			if hasRevision {
-				eventRefs = append(eventRefs, revisionEvent.EventID)
-			}
+			eventRefs = append(eventRefs, inputEventRefs...)
 			knowledgeRefs := make([]core.VersionedRef, 0, len(knowledgeSelections))
 			for _, selectedKnowledge := range knowledgeSelections {
 				knowledgeRefs = append(knowledgeRefs, core.VersionedRef{
@@ -2808,7 +2809,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			manifest.ExecutionInputSHA256 = core.FingerprintExecutionInput(executionInput)
 			return manifest, nil
 		}
-		_, _, err = s.state.StartAgentExecution(ctx, organizationID, state.CorrelationID, state.Version+1, task, mode, strategyEventRefs, strategyContextRefs, actionBoundaryRoutes(snapshot, task), validateInput)
+		_, _, err = s.state.StartAgentExecution(ctx, organizationID, state.CorrelationID, state.Version+1, task, mode, inputEventRefs, strategyEventRefs, strategyContextRefs, actionBoundaryRoutes(snapshot, task), validateInput)
 		if err != nil {
 			if errors.Is(err, events.ErrStrategicContextChanged) {
 				if failErr := s.failStrategicTask(ctx, organizationID, state); failErr != nil {
