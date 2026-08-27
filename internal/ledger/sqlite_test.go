@@ -2739,8 +2739,62 @@ func TestExecutionKnowledgeRejectsUnboundedTeamScopes(t *testing.T) {
 		routes = append(routes, events.InboxRoute{Scope: events.RecipientTeam, ID: fmt.Sprintf("team-%d", index)})
 	}
 	_, err := currentExecutionKnowledgeRecords(context.Background(), nil, "org-1", core.Task{AssigneeID: "agent-1"}, 10, routes)
-	if err == nil {
-		t.Fatal("unbounded Team-scoped knowledge query was accepted")
+	if !errors.Is(err, core.ErrExecutionContextLimitExceeded) {
+		t.Fatalf("unbounded Team-scoped knowledge query was not terminalizable: %v", err)
+	}
+}
+
+func TestExecutionKnowledgeCandidateLimitIsTerminalizable(t *testing.T) {
+	ctx := t.Context()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	createdAt := time.Now().UTC()
+	for index := 1; index <= maximumCurrentExecutionKnowledgeScan+1; index++ {
+		recordID := fmt.Sprintf("knowledge-%04d", index)
+		value, err := json.Marshal(core.KnowledgeRecord{
+			KnowledgeID: core.ID(recordID), OrganizationID: "org-1", Version: 1,
+			Scope: core.KnowledgeScopeOrganization, ScopeID: "org-1", Status: core.KnowledgeActive,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := events.ProjectionRecord{ProjectionKind: "knowledge", RecordID: recordID, Version: 1, CorrelationID: recordID, Value: value}
+		event := events.Event{
+			EventID: fmt.Sprintf("event-%04d", index), Sequence: int64(index), OrganizationID: "org-1",
+			EventType: "KNOWLEDGE_ACTIVATED", SourceActorID: "runtime", CorrelationID: recordID,
+			AuthorizationRefs: []string{}, ArtifactRefs: []string{}, CreatedAt: createdAt, SchemaVersion: events.SchemaVersion,
+		}
+		payload, err := events.SealProjectionEvent(event, record, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		event.Payload, err = json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO events(sequence,event_id,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, event.Sequence, event.EventID, event.OrganizationID, event.EventType, event.SourceActorID, "", "", "", "", "[]", "[]", event.Payload, event.CorrelationID, event.CreatedAt.Format(time.RFC3339Nano), event.SchemaVersion); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO records(kind,record_id,version,body,admission_event_id,admission_fingerprint,created_at) VALUES('knowledge',?,?,?,?,?,?)`, recordID, 1, body, event.EventID, payload.Admission.Fingerprint, event.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = currentExecutionKnowledgeRecords(ctx, tx, "org-1", core.Task{AssigneeID: "agent-1"}, maximumCurrentExecutionKnowledgeScan+2, nil)
+	if !errors.Is(err, core.ErrExecutionContextLimitExceeded) {
+		t.Fatalf("knowledge candidate overflow was not terminalizable: %v", err)
 	}
 }
 

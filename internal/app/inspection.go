@@ -12,8 +12,8 @@ import (
 // GovernanceInspection returns a bounded, deterministic, tenant-scoped report
 // tied to one verified ledger head. It is read-only and cannot schedule work,
 // repair findings, or grant authority.
-func (s *Service) GovernanceInspection(ctx context.Context, organizationID core.ID, observedAt time.Time) (inspection.Report, bool, error) {
-	if s == nil || s.state == nil || s.gateway == nil || organizationID == "" || observedAt.IsZero() {
+func (s *Service) GovernanceInspection(ctx context.Context, organizationID core.ID) (inspection.Report, bool, error) {
+	if s == nil || s.state == nil || s.gateway == nil || organizationID == "" {
 		return inspection.Report{}, false, fmt.Errorf("governance inspection boundary is required")
 	}
 	snapshot, err := s.state.Load(ctx)
@@ -27,6 +27,7 @@ func (s *Service) GovernanceInspection(ctx context.Context, organizationID core.
 	if err != nil {
 		return inspection.Report{}, false, err
 	}
+	observedAt := time.Now().UTC()
 	report, err := inspection.Project(snapshot, verified, organizationID, observedAt, 0)
 	return report, true, err
 }

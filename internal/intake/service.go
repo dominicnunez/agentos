@@ -523,7 +523,7 @@ func (s *Service) GovernanceInspection(ctx context.Context, principal Principal)
 	if principal.Kind != core.PrincipalHuman || principal.Channel != ChannelHumanDirect || principal.WorkScope != WorkScopeOrganization || !principal.Allowed(CapabilityInspectGovernance) {
 		return inspection.Report{}, fmt.Errorf("%w: %s", ErrForbidden, CapabilityInspectGovernance)
 	}
-	report, found, err := s.app.GovernanceInspection(ctx, core.ID(principal.OrganizationID), time.Now().UTC())
+	report, found, err := s.app.GovernanceInspection(ctx, core.ID(principal.OrganizationID))
 	if err != nil {
 		return inspection.Report{}, fmt.Errorf("%w: inspect governance", ErrUnavailable)
 	}

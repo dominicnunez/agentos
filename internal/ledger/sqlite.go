@@ -1226,6 +1226,8 @@ const (
 	maximumCurrentExecutionKnowledgeBytes = 8 << 20
 )
 
+var errProjectionAdmissionScanLimit = errors.New("projection admission scan limit exceeded")
+
 func currentExecutionKnowledgeRecords(ctx context.Context, tx *sql.Tx, organizationID string, task core.Task, startSequence int64, routes []events.InboxRoute) ([]admittedProjectionRecord, error) {
 	teamIDs := make([]string, 0, len(routes))
 	for _, route := range routes {
@@ -1234,7 +1236,7 @@ func currentExecutionKnowledgeRecords(ctx context.Context, tx *sql.Tx, organizat
 		}
 	}
 	if len(teamIDs) > maximumExecutionKnowledgeTeamScopes {
-		return nil, fmt.Errorf("agent execution knowledge crosses too many Team scopes")
+		return nil, fmt.Errorf("%w: agent execution knowledge crosses more than %d Team scopes", core.ErrExecutionContextLimitExceeded, maximumExecutionKnowledgeTeamScopes)
 	}
 	query := `JOIN (
 	SELECT record_id,MAX(version) AS version FROM records
@@ -1266,10 +1268,13 @@ OR (json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scop
 	args = append(args, maximumCurrentExecutionKnowledgeScan+1)
 	records, err := admittedProjectionRecordsBounded(ctx, tx, maximumCurrentExecutionKnowledgeBytes, query, args...)
 	if err != nil {
+		if errors.Is(err, errProjectionAdmissionScanLimit) {
+			return nil, fmt.Errorf("%w: %v", core.ErrExecutionContextLimitExceeded, err)
+		}
 		return nil, err
 	}
 	if len(records) > maximumCurrentExecutionKnowledgeScan {
-		return nil, fmt.Errorf("agent execution knowledge candidate scan exceeds %d current records", maximumCurrentExecutionKnowledgeScan)
+		return nil, fmt.Errorf("%w: agent execution knowledge candidate scan exceeds %d current records", core.ErrExecutionContextLimitExceeded, maximumCurrentExecutionKnowledgeScan)
 	}
 	return records, nil
 }
@@ -3814,7 +3819,7 @@ LEFT JOIN events AS e ON e.event_id=r.admission_event_id ` + suffix
 			len(event.RecipientScope) + len(event.RecipientID) + len(event.TaskID) + len(authorizationRefs) + len(artifactRefs) + len(event.Payload) +
 			len(event.CorrelationID) + len(createdAt)
 		if maximumBytes > 0 && loadedBytes > maximumBytes {
-			return nil, fmt.Errorf("projection admission scan exceeds %d bytes", maximumBytes)
+			return nil, fmt.Errorf("%w: projection admission scan exceeds %d bytes", errProjectionAdmissionScanLimit, maximumBytes)
 		}
 		if json.Unmarshal(authorizationRefs, &event.AuthorizationRefs) != nil || json.Unmarshal(artifactRefs, &event.ArtifactRefs) != nil {
 			return nil, fmt.Errorf("projection admission event references are invalid")
