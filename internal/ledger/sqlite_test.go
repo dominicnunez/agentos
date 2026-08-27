@@ -2243,6 +2243,71 @@ func TestKnowledgeAuthorityBoundaryUsesExactTenantHistory(t *testing.T) {
 	}
 }
 
+func TestKnowledgeJudgmentAdmissionRejectsEveryUnboundCapabilityReference(t *testing.T) {
+	ctx := t.Context()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	lease := core.CapabilityLease{
+		ID: "lease-1", ActorID: "validator-1", ActorKind: core.PrincipalHuman, OriginTaskID: "task-1",
+		Action: "knowledge.validate", Resource: "knowledge-1", Scope: "org-1",
+	}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+		t.Fatal(err)
+	}
+	proposal, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", Payload: map[string]string{"boundary": "proposal"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := core.AuthorizationTrace{Allowed: true, LeaseID: lease.ID, ActorID: lease.ActorID, ActorKind: lease.ActorKind, TaskID: lease.OriginTaskID, Action: lease.Action, Resource: lease.Resource, Scope: lease.Scope}
+	capability, err := store.Append(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "CAPABILITY_CHECKED", SourceActorID: "validator-1", TaskID: "task-1",
+		AuthorizationRefs: []string{string(lease.ID)}, Payload: trace,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateVersion := 1
+	statement, err := store.Append(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED", SourceActorID: "validator-1", TaskID: "task-1", CorrelationID: "work-1",
+		Payload: events.KnowledgeJudgmentPayload{
+			KnowledgeID: "knowledge-1", CandidateVersion: candidateVersion, Decision: events.KnowledgeJudgmentValidated,
+			Statement: "I independently validate this candidate.", CapabilityCheckEventID: capability.EventID,
+			SourcePrincipalID: "validator-1", SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", ArtifactRefs: []string{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	knowledge := core.KnowledgeRecord{
+		KnowledgeID: "knowledge-1", OrganizationID: "org-1", Version: 2, SupersedesVersion: &candidateVersion,
+		ValidationMethod: core.KnowledgeValidationHuman, ValidationRefs: []string{capability.EventID, statement.EventID},
+		ValidatedBy: "validator-1", ValidatedByKind: core.PrincipalHuman,
+	}
+	if err := store.withTx(ctx, func(tx *sql.Tx) error {
+		return validateKnowledgeJudgmentAuthorization(ctx, tx, knowledge, proposal.Sequence, time.Now().UTC())
+	}); err != nil {
+		t.Fatalf("exact knowledge judgment authorization was rejected: %v", err)
+	}
+	unboundTrace := trace
+	unboundTrace.Resource = "knowledge-other"
+	unbound, err := store.Append(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "CAPABILITY_CHECKED", SourceActorID: "validator-1", TaskID: "task-1",
+		AuthorizationRefs: []string{string(lease.ID)}, Payload: unboundTrace,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	knowledge.ValidationRefs = append(knowledge.ValidationRefs, unbound.EventID)
+	if err := store.withTx(ctx, func(tx *sql.Tx) error {
+		return validateKnowledgeJudgmentAuthorization(ctx, tx, knowledge, proposal.Sequence, time.Now().UTC())
+	}); err == nil {
+		t.Fatal("live admission accepted an unrelated capability check as permanent validation evidence")
+	}
+}
+
 func TestEffectAuthorizationRejectsCrossOrganizationRevisionOfReferencedLease(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(":memory:")

@@ -2435,23 +2435,27 @@ AND ((e.event_type='EXECUTION_FINISHED' AND e.source_execution_id=?) OR r.versio
 }
 
 func validateKnowledgeJudgmentAuthorization(ctx context.Context, tx *sql.Tx, knowledge core.KnowledgeRecord, proposalSequence int64, admissionAt time.Time) error {
+	foundAuthorization := false
 	for _, ref := range knowledge.ValidationRefs {
 		judgment, found, err := eventByID(ctx, tx, ref)
 		if err != nil {
 			return fmt.Errorf("read knowledge judgment authorization: %w", err)
 		}
-		if !found || judgment.Sequence <= proposalSequence || judgment.EventType != "CAPABILITY_CHECKED" ||
+		if !found || judgment.EventType != "CAPABILITY_CHECKED" {
+			continue
+		}
+		if judgment.Sequence <= proposalSequence ||
 			judgment.OrganizationID != string(knowledge.OrganizationID) || judgment.SourceActorID != string(knowledge.ValidatedBy) ||
 			judgment.RecipientScope != "" || judgment.RecipientID != "" || judgment.TaskID == "" || len(judgment.AuthorizationRefs) == 0 ||
 			len(judgment.ArtifactRefs) != 0 || judgment.SchemaVersion != events.SchemaVersion {
-			continue
+			return fmt.Errorf("knowledge judgment references an invalid capability check")
 		}
 		var recorded core.AuthorizationTrace
 		if decodeExactJSONBytes(judgment.Payload, &recorded) != nil || !recorded.Allowed || recorded.LeaseID == "" ||
 			recorded.ActorID != knowledge.ValidatedBy || recorded.ActorKind != knowledge.ValidatedByKind || recorded.TaskID != core.ID(judgment.TaskID) || recorded.Action != "knowledge.validate" ||
 			recorded.Resource != string(knowledge.KnowledgeID) || recorded.Scope != string(knowledge.OrganizationID) ||
-			!slices.Contains(judgment.AuthorizationRefs, string(recorded.LeaseID)) {
-			continue
+			len(judgment.AuthorizationRefs) != 1 || judgment.AuthorizationRefs[0] != string(recorded.LeaseID) {
+			return fmt.Errorf("knowledge judgment capability check is not bound to its exact candidate")
 		}
 		atJudgment, err := authorizationTraceAtSequence(ctx, tx, knowledge.OrganizationID, recorded.ActorID, recorded.TaskID, recorded.Action, recorded.Resource, recorded.Scope, judgment.AuthorizationRefs, judgment.Sequence, judgment.CreatedAt)
 		if err != nil {
@@ -2461,16 +2465,21 @@ func validateKnowledgeJudgmentAuthorization(ctx context.Context, tx *sql.Tx, kno
 		if err != nil {
 			return err
 		}
-		if atJudgment.Allowed && atJudgment.LeaseID == recorded.LeaseID && atJudgment.ActorKind == recorded.ActorKind &&
-			current.Allowed && current.LeaseID == recorded.LeaseID && current.ActorKind == recorded.ActorKind {
-			foundStatement, err := hasAuthorizedKnowledgeStatement(ctx, tx, knowledge, proposalSequence, judgment)
-			if err != nil {
-				return err
-			}
-			if foundStatement {
-				return nil
-			}
+		if !atJudgment.Allowed || atJudgment.LeaseID != recorded.LeaseID || atJudgment.ActorKind != recorded.ActorKind ||
+			!current.Allowed || current.LeaseID != recorded.LeaseID || current.ActorKind != recorded.ActorKind {
+			return fmt.Errorf("knowledge judgment capability is not valid at admission")
 		}
+		foundStatement, err := hasAuthorizedKnowledgeStatement(ctx, tx, knowledge, proposalSequence, judgment)
+		if err != nil {
+			return err
+		}
+		if !foundStatement {
+			return fmt.Errorf("knowledge judgment capability check lacks its exact statement")
+		}
+		foundAuthorization = true
+	}
+	if foundAuthorization {
+		return nil
 	}
 	return fmt.Errorf("knowledge judgment lacks an authenticated, currently authorized validator admission")
 }
