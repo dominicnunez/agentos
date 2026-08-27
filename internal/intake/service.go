@@ -1150,8 +1150,8 @@ func validatePrincipal(principal Principal) error {
 		if principal.Channel != ChannelA2A || (principal.WorkScope != WorkScopeOwn && principal.WorkScope != WorkScopeOrganization) {
 			return fmt.Errorf("%w: external-agent principal channel mismatch", ErrInvalid)
 		}
-	case core.PrincipalAgent, core.PrincipalRuntime:
-		return fmt.Errorf("%w: internal principals are not operator principals", ErrInvalid)
+	case core.PrincipalRuntime:
+		return fmt.Errorf("%w: runtime is not an operator principal", ErrInvalid)
 	default:
 		return fmt.Errorf("%w: principal kind is unsupported", ErrInvalid)
 	}

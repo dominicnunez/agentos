@@ -13,30 +13,6 @@ import (
 	"github.com/dominicnunez/agentos/internal/ledger"
 )
 
-func TestPrepareRejectsUnexecutableAuthorizationReferenceSet(t *testing.T) {
-	l, err := ledger.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = l.Close() })
-	refs := make([]string, core.MaximumEffectAuthorizationRefs+1)
-	for index := range refs {
-		refs[index] = fmt.Sprintf("lease-%d", index)
-	}
-	obligation := core.EffectObligation{
-		ID: "effect-overbound", OrganizationID: "org", TaskID: "task", ActorID: "actor",
-		Action: "cache", Resource: "record", Scope: "org", AuthorizationRefs: refs,
-		EffectFingerprint: "not-reached", IdempotencyKey: "key",
-	}
-	if _, err := New(l, &adapter{}, nil).Prepare(context.Background(), obligation); err == nil {
-		t.Fatal("over-bound authority set was persisted as a pending effect")
-	}
-	rows, err := l.Records(context.Background(), "effect", string(obligation.ID))
-	if err != nil || len(rows) != 0 {
-		t.Fatalf("rejected effect was persisted: records=%d err=%v", len(rows), err)
-	}
-}
-
 type adapter struct {
 	called   bool
 	evidence []string
@@ -79,7 +55,7 @@ func (r *approvalReader) Get(context.Context, core.ID) (core.HumanApproval, erro
 
 func persistCapability(t *testing.T, l *ledger.SQLite, obligation core.EffectObligation) {
 	t.Helper()
-	lease := core.CapabilityLease{ID: core.ID(obligation.AuthorizationRefs[0]), ActorID: obligation.ActorID, ActorKind: obligation.ActorKind, OriginTaskID: obligation.TaskID, Action: obligation.Action, Resource: obligation.Resource, Scope: obligation.Scope}
+	lease := core.CapabilityLease{ID: core.ID(obligation.AuthorizationRefs[0]), ActorID: obligation.ActorID, OriginTaskID: obligation.TaskID, Action: obligation.Action, Resource: obligation.Resource, Scope: obligation.Scope}
 	if err := l.AppendRecord(context.Background(), string(obligation.OrganizationID), "CAPABILITY_GRANTED", "human", string(obligation.TaskID), nil, nil, "capability_lease", obligation.AuthorizationRefs[0], 1, lease); err != nil {
 		t.Fatal(err)
 	}
@@ -94,15 +70,36 @@ func persistApproval(t *testing.T, l *ledger.SQLite, approval core.HumanApproval
 
 func setEffectFingerprint(t *testing.T, obligation *core.EffectObligation) string {
 	t.Helper()
-	if obligation.ActorKind == "" {
-		obligation.ActorKind = core.PrincipalAgent
-	}
 	fingerprint, err := Fingerprint(*obligation)
 	if err != nil {
 		t.Fatal(err)
 	}
 	obligation.EffectFingerprint = fingerprint
 	return fingerprint
+}
+
+func TestPrepareRejectsUnexecutableAuthorizationReferenceSet(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	refs := make([]string, core.MaximumEffectAuthorizationRefs+1)
+	for index := range refs {
+		refs[index] = fmt.Sprintf("lease-%d", index)
+	}
+	obligation := core.EffectObligation{
+		ID: "effect-overbound", OrganizationID: "org", TaskID: "task", ActorID: "actor",
+		Action: "cache", Resource: "record", Scope: "org", AuthorizationRefs: refs,
+		EffectFingerprint: "not-reached", IdempotencyKey: "key",
+	}
+	if _, err := New(l, &adapter{}, nil).Prepare(context.Background(), obligation); err == nil {
+		t.Fatal("over-bound authority set was persisted as a pending effect")
+	}
+	rows, err := l.Records(context.Background(), "effect", string(obligation.ID))
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("rejected effect was persisted: records=%d err=%v", len(rows), err)
+	}
 }
 
 func TestPersistBeforeEffectAndFingerprintApproval(t *testing.T) {
@@ -338,11 +335,11 @@ func TestRevocationBlocksEffect(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = l.Close() })
-	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", ActorKind: core.PrincipalAgent, OriginTaskID: "task-1", Action: "send", Resource: "customer-1", Scope: "org-1"}
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1", Action: "send", Resource: "customer-1", Scope: "org-1"}
 	if err := l.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "human-1", "task-1", []string{"approval-capability-1"}, nil, "capability_lease", "lease-1", 1, lease); err != nil {
 		t.Fatal(err)
 	}
-	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", ActorKind: core.PrincipalAgent, Action: "send", Resource: "customer-1", Scope: "org-1", ConsequenceBoundary: core.BoundaryPublicExternal, Descriptor: "send message", AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1", IdempotencyKey: "key-1", ReplayContext: map[string]string{"body": "hello"}}
+	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: "task-1", ActorID: "actor-1", Action: "send", Resource: "customer-1", Scope: "org-1", ConsequenceBoundary: core.BoundaryPublicExternal, Descriptor: "send message", AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1", IdempotencyKey: "key-1", ReplayContext: map[string]string{"body": "hello"}}
 	fingerprint := setEffectFingerprint(t, &obligation)
 	reader := &approvalReader{approval: core.HumanApproval{ID: "approval-1", OrganizationID: "org-1", TaskID: "task-1", EffectObligationID: "effect-1", Action: "send", Resource: "customer-1", Boundary: core.BoundaryPublicExternal, Status: core.ApprovalApproved, EffectFingerprint: fingerprint, SingleUse: true}}
 	adapter := &adapter{}

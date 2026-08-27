@@ -31,7 +31,7 @@ func TestVerifyMigratesPreBindingAuthoritySnapshotWithoutChangingSource(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", ActorKind: core.PrincipalAgent, Action: "read", Resource: "record-1", Scope: "org-1", OriginTaskID: "task-1"}
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", Action: "read", Resource: "record-1", Scope: "org-1", OriginTaskID: "task-1"}
 	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
 		_ = store.Close()
 		t.Fatal(err)
@@ -49,20 +49,7 @@ func TestVerifyMigratesPreBindingAuthoritySnapshotWithoutChangingSource(t *testi
 		t.Fatal(err)
 	}
 	preBindingVersion := ledger.AuthorityAdmissionBindingStorageVersion - 1
-	if _, err := db.ExecContext(ctx, `DROP INDEX records_knowledge_organization_idx; DROP TABLE legacy_knowledge_quarantine; UPDATE records SET admission_event_id='' WHERE kind='capability_lease'`); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	fingerprint, err := testStorageSchemaFingerprint(ctx, db)
-	if err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=?,schema_fingerprint=? WHERE singleton=1`, preBindingVersion, fingerprint); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `PRAGMA user_version=`+fmt.Sprint(preBindingVersion)); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE records SET admission_event_id='' WHERE kind='capability_lease'; UPDATE agentos_storage SET storage_version=? WHERE singleton=1; PRAGMA user_version=`+fmt.Sprint(preBindingVersion), preBindingVersion); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -94,59 +81,6 @@ func TestVerifyMigratesPreBindingAuthoritySnapshotWithoutChangingSource(t *testi
 	}
 	if storageVersion != preBindingVersion || admissionEventID != "" {
 		t.Fatalf("verification mutated source: storage=%d admission=%q", storageVersion, admissionEventID)
-	}
-}
-
-func TestVerifyMigratesV7KnowledgeIntoIsolatedQuarantine(t *testing.T) {
-	ctx := t.Context()
-	path := filepath.Join(t.TempDir(), "storage-v7-knowledge.db")
-	store, err := ledger.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	created := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.ExecContext(ctx, `DROP INDEX records_knowledge_organization_idx; DROP TABLE legacy_knowledge_quarantine;
-INSERT INTO records(kind,record_id,version,body,admission_event_id,admission_fingerprint,created_at)
-VALUES('knowledge','legacy-knowledge',1,'{"legacy":"unsealed"}','','',?)`, created); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	fingerprint, err := testStorageSchemaFingerprint(ctx, db)
-	if err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	version := ledger.AuthorityAdmissionBindingStorageVersion
-	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=?,schema_fingerprint=? WHERE singleton=1`, version, fingerprint); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `PRAGMA user_version=`+fmt.Sprint(version)); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	verified, err := Verify(ctx, path)
-	if err != nil || verified.StorageVersion != version {
-		t.Fatalf("verify storage-v7 knowledge snapshot: result=%+v err=%v", verified, err)
-	}
-	db, err = sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = db.Close() }()
-	var sourceRows int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM records WHERE kind='knowledge' AND record_id='legacy-knowledge'`).Scan(&sourceRows); err != nil || sourceRows != 1 {
-		t.Fatalf("offline verification mutated the v7 source: rows=%d err=%v", sourceRows, err)
 	}
 }
 
@@ -225,98 +159,50 @@ func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	}
 }
 
-func TestVerifyReplaysEventAdmittedKnowledge(t *testing.T) {
-	ctx := t.Context()
-	path := filepath.Join(t.TempDir(), "knowledge.db")
+func TestVerifyRejectsAgentEvidenceDetachedFromItsExecution(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "agent-evidence.db")
 	store, err := ledger.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	gateway := events.NewGateway(store)
-	now := time.Now().UTC().Add(-time.Minute)
-	organization := core.Organization{ID: "org-1", Name: "Knowledge Recovery", PolicyVersion: "v1", CreatedAt: now}
-	organizationEvent, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
-		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"},
-		ProjectionKind: "organization", RecordID: "org-1", Version: 1, Value: organization,
-	})
-	if err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
-	candidate := core.KnowledgeRecord{
-		KnowledgeID: "knowledge-1", OrganizationID: "org-1", Version: 1,
-		Type: core.KnowledgeLesson, Scope: core.KnowledgeScopeOrganization, ScopeID: "org-1",
-		Status: core.KnowledgeCandidate, Title: "Recoverable knowledge", Content: "Offline verification replays this admission.",
-		Basis: core.KnowledgeBasisHumanInput, ProvenanceEventRefs: []string{organizationEvent.EventID},
-		CreatedBy: "runtime", CreatedByKind: core.PrincipalRuntime, CreatedAt: time.Now().UTC(),
-		ValidationMethod: core.KnowledgeValidationUnvalidated,
-	}
-	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
-		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_PROPOSED", SourceActorID: "runtime", CorrelationID: "knowledge-knowledge-1"},
-		ProjectionKind: "knowledge", RecordID: "knowledge-1", Version: 1, Value: candidate,
-	}); err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
-	validationAt := time.Now().UTC()
-	intent := core.Intent{ID: "intent-knowledge-validation", OrganizationID: "org-1", OriginalInstruction: "echo validated", NormalizedObjective: "echo validated", CreatedAt: validationAt}
-	work := core.Work{ID: "work-knowledge-validation", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: validationAt}
-	task := core.Task{ID: "task-knowledge-validation", WorkID: work.ID, Description: "echo validated", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, RuntimeHandlerRef: "builtin.echo", TaskContractVersion: "1", Status: core.TaskPending}
+	now := time.Now().UTC()
+	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "publish evidence", NormalizedObjective: "publish evidence", CreatedAt: now}
+	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
+	blueprint := core.AgentBlueprint{ID: "blueprint-1", OrganizationID: organization.ID, Version: "v1", Role: "worker", OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE", CreatedAt: now}
+	profile := core.ExecutionProfile{ID: "profile-1", OrganizationID: organization.ID, Version: "v1", ModelProvider: "provider", Model: "model", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE", CreatedAt: now}
+	agent := core.Agent{ID: "agent-1", OrganizationID: organization.ID, BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "local", Status: "ACTIVE"}
+	config := core.AgentConfig{BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ProfileID: profile.ID, ProfileVersion: profile.Version, RuntimeAdapter: agent.RuntimeAdapter}
+	task := core.Task{ID: "task-1", WorkID: work.ID, Description: "publish evidence", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: &config, TaskContractVersion: "1", Status: core.TaskPending}
 	for _, draft := range []events.ProjectionDraft{
-		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "work-knowledge-validation"}, ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent},
-		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "work-knowledge-validation"}, ProjectionKind: "work", RecordID: string(work.ID), Version: 1, Value: work},
-		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-knowledge-validation"}, ProjectionKind: "task", RecordID: string(task.ID), Version: 1, Value: task},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: string(organization.ID), Version: 1, Value: organization},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"}, ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "work-1"}, ProjectionKind: "work", RecordID: string(work.ID), Version: 1, Value: work},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_BLUEPRINT_CREATED", SourceActorID: "runtime", CorrelationID: "roster"}, ProjectionKind: "agent_blueprint", RecordID: string(blueprint.ID), Version: 1, Value: blueprint},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_PROFILE_CREATED", SourceActorID: "runtime", CorrelationID: "roster"}, ProjectionKind: "execution_profile", RecordID: string(profile.ID), Version: 1, Value: profile},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_CREATED", SourceActorID: "runtime", CorrelationID: "roster"}, ProjectionKind: "agent", RecordID: string(agent.ID), Version: 1, Value: agent},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1"}, ProjectionKind: "task", RecordID: string(task.ID), Version: 1, Value: task},
 	} {
-		if _, err := gateway.PublishProjection(ctx, draft); err != nil {
+		if _, err := store.AppendProjection(ctx, draft); err != nil {
 			_ = store.Close()
 			t.Fatal(err)
 		}
 	}
-	running := task
-	running.Status = core.TaskRunning
+	task.Status = core.TaskRunning
 	if _, _, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
-		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-knowledge-validation", Payload: events.ExecutionStartDetail{InboxCutoffSequence: 0}},
-		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: running,
-	}, nil, nil); err != nil {
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1"},
+		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
+	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: string(task.ID)}, {Scope: events.RecipientAgent, ID: string(agent.ID)}}, func([]events.InboxSelection) error { return nil }); err != nil {
 		_ = store.Close()
 		t.Fatal(err)
 	}
-	validationOutcome := core.ToolOutcome{
-		ToolInvocationID: "knowledge-validation-1", ToolID: "builtin.echo", ToolVersion: "1", ObservedEffect: "validated",
-		Status: core.OutcomeSucceeded, PostconditionStatus: core.PostconditionVerified, Retryability: core.NotRetryable,
-		StartedAt: validationAt, FinishedAt: validationAt,
-	}
-	outcomeEvent, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
-		OrganizationID: "org-1", EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: "execution-task-knowledge-validation-v2",
-		TaskID: "task-knowledge-validation", CorrelationID: "work-knowledge-validation", Payload: validationOutcome,
+	evidence, err := store.AppendAgentEvidence(ctx, events.TrustedDraft{
+		OrganizationID: "org-1", EventType: "EVIDENCE_PUBLISHED", SourceActorID: string(agent.ID), SourceExecutionID: "execution-task-1-v2",
+		TaskID: string(task.ID), ArtifactRefs: []string{"artifact-1"}, CorrelationID: "work-1",
+		Payload: events.EvidencePublishedPayload{Summary: "bounded evidence", ArtifactRefs: []string{"artifact-1"}},
 	})
 	if err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
-	validationEvent, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
-		OrganizationID: "org-1", EventType: "KNOWLEDGE_VALIDATION_RECORDED", SourceActorID: "runtime", SourceExecutionID: "execution-task-knowledge-validation-v2",
-		TaskID: "task-knowledge-validation", CorrelationID: "work-knowledge-validation",
-		Payload: events.KnowledgeDeterministicValidationPayload{KnowledgeID: candidate.KnowledgeID, CandidateVersion: 1, OutcomeEventRef: outcomeEvent.EventID, ArtifactRefs: []string{}},
-	})
-	if err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
-	active := candidate
-	active.Version = 2
-	active.Status = core.KnowledgeActive
-	active.ValidationMethod = core.KnowledgeValidationDeterministic
-	active.ValidationRefs = []string{validationEvent.EventID}
-	active.ValidatedBy = "runtime"
-	active.ValidatedByKind = core.PrincipalRuntime
-	verifiedAt := time.Now().UTC()
-	active.LastVerifiedAt = &verifiedAt
-	active.SupersedesVersion = recoveryIntPointer(1)
-	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
-		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_ACTIVATED", SourceActorID: "runtime", CorrelationID: "knowledge-knowledge-1"},
-		ProjectionKind: "knowledge", RecordID: "knowledge-1", Version: 2, Value: active,
-	}); err != nil {
 		_ = store.Close()
 		t.Fatal(err)
 	}
@@ -324,100 +210,58 @@ func TestVerifyReplaysEventAdmittedKnowledge(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := Verify(ctx, path); err != nil {
-		t.Fatalf("verify event-admitted knowledge: %v", err)
+		t.Fatalf("valid Agent evidence failed recovery: %v", err)
 	}
-}
 
-func TestVerifyRejectsKnowledgeWhenValidatorLeaseRecordIsMissing(t *testing.T) {
-	ctx := t.Context()
-	path := filepath.Join(t.TempDir(), "missing-validator-lease.db")
-	store, err := ledger.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	gateway := events.NewGateway(store)
-	now := time.Now().UTC().Add(-time.Minute)
-	organization := core.Organization{ID: "org-1", Name: "Lease Recovery", PolicyVersion: "v1", CreatedAt: now}
-	organizationEvent, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
-		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"},
-		ProjectionKind: "organization", RecordID: "org-1", Version: 1, Value: organization,
-	})
-	if err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
-	candidate := core.KnowledgeRecord{
-		KnowledgeID: "knowledge-human", OrganizationID: "org-1", Version: 1,
-		Type: core.KnowledgeLesson, Scope: core.KnowledgeScopeOrganization, ScopeID: "org-1",
-		Status: core.KnowledgeCandidate, Title: "Reviewed knowledge", Content: "This requires exact validator authority.",
-		Basis: core.KnowledgeBasisHumanInput, ProvenanceEventRefs: []string{organizationEvent.EventID},
-		CreatedBy: "runtime", CreatedByKind: core.PrincipalRuntime, CreatedAt: time.Now().UTC(), ValidationMethod: core.KnowledgeValidationUnvalidated,
-	}
-	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
-		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_PROPOSED", SourceActorID: "runtime", CorrelationID: "knowledge-knowledge-human"},
-		ProjectionKind: "knowledge", RecordID: "knowledge-human", Version: 1, Value: candidate,
-	}); err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
-	lease := core.CapabilityLease{ID: "lease-human", ActorID: "user-1", ActorKind: core.PrincipalHuman, Action: "knowledge.validate", Resource: "knowledge-human", Scope: "org-1", OriginTaskID: "task-validation"}
-	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "runtime", "task-validation", []string{"approval-capability"}, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
-	trace := core.AuthorizationTrace{Allowed: true, LeaseID: lease.ID, ActorID: lease.ActorID, ActorKind: lease.ActorKind, TaskID: lease.OriginTaskID, Action: lease.Action, Resource: lease.Resource, Scope: lease.Scope, Reason: "exact capability lease matched"}
-	judgment, err := gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "CAPABILITY_CHECKED", SourceActorID: "user-1", TaskID: "task-validation", AuthorizationRefs: []string{"lease-human"}, Payload: trace})
-	if err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
-	statement, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
-		OrganizationID: "org-1", EventType: "HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED", SourceActorID: "user-1", TaskID: "task-validation", CorrelationID: "knowledge-human-validation",
-		Payload: events.KnowledgeJudgmentPayload{KnowledgeID: "knowledge-human", CandidateVersion: 1, Decision: events.KnowledgeJudgmentValidated, Statement: "I independently validate this knowledge candidate.", CapabilityCheckEventID: judgment.EventID, SourcePrincipalID: "user-1", SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", ArtifactRefs: []string{}},
-	})
-	if err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
-	freeze := recoveryFreezeState("org-1", true, "incident")
-	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", "task-validation", nil, nil, "organization_freeze", "org-1", 1, freeze); err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
-	freeze.Frozen = false
-	freeze.UpdatedAt = time.Now().UTC()
-	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", "task-validation", nil, nil, "organization_freeze", "org-1", 2, freeze); err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
-	active := candidate
-	active.Version = 2
-	active.Status = core.KnowledgeActive
-	active.ValidationMethod = core.KnowledgeValidationHuman
-	active.ValidationRefs = []string{judgment.EventID, statement.EventID}
-	active.ValidatedBy = "user-1"
-	active.ValidatedByKind = core.PrincipalHuman
-	verifiedAt := time.Now().UTC()
-	active.LastVerifiedAt = &verifiedAt
-	active.SupersedesVersion = recoveryIntPointer(1)
-	if _, err := gateway.PublishProjection(ctx, events.ProjectionDraft{
-		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_ACTIVATED", SourceActorID: "runtime", CorrelationID: "knowledge-knowledge-human"},
-		ProjectionKind: "knowledge", RecordID: "knowledge-human", Version: 2, Value: active,
-	}); err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Verify(ctx, path); err != nil {
-		t.Fatalf("verify complete validator lease: %v", err)
-	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM records WHERE kind='capability_lease'`); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE events SET task_id='task-other' WHERE event_id=?; DROP TABLE event_integrity`, evidence.EventID); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	fingerprint, err := testStorageSchemaFingerprint(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE agentos_storage SET storage_version=5,schema_fingerprint=?; PRAGMA user_version=5`, fingerprint); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "Agent evidence") {
+		t.Fatalf("execution-detached Agent evidence passed recovery: %v", err)
+	}
+}
+
+func TestVerifyRejectsAuthorityEventWithoutItsExactRecord(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "orphaned-authority.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1", Action: "write", Resource: "record-1", Scope: "org-1"}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(ctx, path); err != nil {
+		t.Fatalf("valid authority history failed recovery: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM records WHERE kind='capability_lease' AND record_id='lease-1'`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -425,58 +269,120 @@ func TestVerifyRejectsKnowledgeWhenValidatorLeaseRecordIsMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "authority admission event") {
-		t.Fatalf("missing validator lease record was certified: %v", err)
+		t.Fatalf("orphaned authority event passed recovery: %v", err)
 	}
 }
 
-func TestVerifyRejectsFreezeEventWithoutDurableState(t *testing.T) {
-	ctx := t.Context()
-	path := filepath.Join(t.TempDir(), "missing-freeze-state.db")
+func TestVerifyRejectsMalformedAuthorityRevisions(t *testing.T) {
+	ctx := context.Background()
+	for _, test := range []struct {
+		name   string
+		mutate func(*sql.DB) error
+	}{
+		{
+			name: "noncontiguous lease",
+			mutate: func(db *sql.DB) error {
+				_, err := db.ExecContext(ctx, `UPDATE records SET version=3 WHERE kind='capability_lease' AND record_id='lease-1' AND version=2`)
+				return err
+			},
+		},
+		{
+			name: "changed revocation",
+			mutate: func(db *sql.DB) error {
+				var body []byte
+				if err := db.QueryRowContext(ctx, `SELECT body FROM records WHERE kind='capability_lease' AND record_id='lease-1' AND version=2`).Scan(&body); err != nil {
+					return err
+				}
+				var lease core.CapabilityLease
+				if err := json.Unmarshal(body, &lease); err != nil {
+					return err
+				}
+				lease.Resource = "expanded-resource"
+				body, err := json.Marshal(lease)
+				if err != nil {
+					return err
+				}
+				_, err = db.ExecContext(ctx, `UPDATE records SET body=? WHERE kind='capability_lease' AND record_id='lease-1' AND version=2`, body)
+				return err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "authority.db")
+			store, err := ledger.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lease := core.CapabilityLease{ID: "lease-1", ActorID: "actor-1", OriginTaskID: "task-1", Action: "write", Resource: "record-1", Scope: "org-1"}
+			if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
+				_ = store.Close()
+				t.Fatal(err)
+			}
+			revokedAt := time.Now().UTC()
+			lease.RevokedAt = &revokedAt
+			if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_REVOKED", "user-1", "task-1", nil, nil, "capability_lease", string(lease.ID), 2, lease); err != nil {
+				_ = store.Close()
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Verify(ctx, path); err != nil {
+				t.Fatalf("valid authority history failed recovery: %v", err)
+			}
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := test.mutate(db); err != nil {
+				_ = db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "authority record") {
+				t.Fatalf("malformed authority history passed recovery: %v", err)
+			}
+		})
+	}
+}
+
+func TestVerifyRejectsOrganizationMismatchedFreezeRecord(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "freeze.db")
 	store, err := ledger.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := recoveryFreezeState("org-1", true, "incident")
-	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", "task-incident", nil, nil, "organization_freeze", "org-1", 1, state); err != nil {
+	state := map[string]any{"organization_id": "org-1", "frozen": true, "reason": "incident", "updated_at": time.Now().UTC()}
+	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "task-1", nil, nil, "organization_freeze", "org-1", 1, state); err != nil {
 		_ = store.Close()
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Verify(ctx, path); err != nil {
-		t.Fatalf("verify exact freeze admission: %v", err)
-	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM records WHERE kind='organization_freeze'`); err != nil {
+	state["organization_id"] = "org-2"
+	body, err := json.Marshal(state)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE records SET body=? WHERE kind='organization_freeze' AND record_id='org-1'`, body); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "authority admission event") {
-		t.Fatalf("orphaned freeze event was certified: %v", err)
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "authority record") {
+		t.Fatalf("organization-mismatched freeze passed recovery: %v", err)
 	}
-}
-
-func recoveryIntPointer(value int) *int { return &value }
-
-func recoveryFreezeState(organizationID core.ID, frozen bool, reason string) struct {
-	OrganizationID core.ID   `json:"organization_id"`
-	Frozen         bool      `json:"frozen"`
-	Reason         string    `json:"reason,omitempty"`
-	UpdatedAt      time.Time `json:"updated_at"`
-} {
-	return struct {
-		OrganizationID core.ID   `json:"organization_id"`
-		Frozen         bool      `json:"frozen"`
-		Reason         string    `json:"reason,omitempty"`
-		UpdatedAt      time.Time `json:"updated_at"`
-	}{OrganizationID: organizationID, Frozen: frozen, Reason: reason, UpdatedAt: time.Now().UTC()}
 }
 
 func TestVerifyRejectsSemanticallyValidEventPayloadTampering(t *testing.T) {
@@ -625,7 +531,7 @@ func TestLegacyVerificationRejectsTamperedAdmissionsAfterMigration(t *testing.T)
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE legacy_knowledge_quarantine; DROP TABLE event_integrity; DROP TABLE pending_completion_reviews; DROP INDEX records_knowledge_organization_idx; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE event_integrity; DROP TABLE pending_completion_reviews; DROP INDEX events_recent_commit_idx; DROP INDEX pending_approvals_expiry_idx`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -2726,9 +2632,7 @@ func TestRecoveryRejectsSupersededAgentDispatchBinding(t *testing.T) {
 	started, _, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1"},
 		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
-	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: string(task.ID)}, {Scope: events.RecipientAgent, ID: string(agent.ID)}}, func(selection events.ExecutionStartSelection) (core.ExecutionContextManifest, error) {
-		return recoveryTestManifest(task, selection), nil
-	})
+	}, []events.InboxRoute{{Scope: events.RecipientTask, ID: string(task.ID)}, {Scope: events.RecipientAgent, ID: string(agent.ID)}}, func([]events.InboxSelection) error { return nil })
 	if err != nil {
 		_ = store.Close()
 		t.Fatal(err)

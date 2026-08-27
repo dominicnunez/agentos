@@ -224,7 +224,7 @@ func TestA2ACannotApproveEffects(t *testing.T) {
 
 	obligation := core.EffectObligation{ID: "effect-1", OrganizationID: "org-1", TaskID: core.ID(taskID), ActorID: "agent-local-org-1", Action: "deploy", Resource: "agent-os", Scope: "org-1", ConsequenceBoundary: core.BoundaryDeployment, Descriptor: "deploy Agent OS", AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1", IdempotencyKey: "deploy-1", ReplayContext: map[string]string{"version": "1"}}
 	fingerprint := setGatewayEffectFingerprint(t, &obligation)
-	lease := core.CapabilityLease{ID: "lease-1", ActorID: obligation.ActorID, ActorKind: obligation.ActorKind, OriginTaskID: obligation.TaskID, Action: obligation.Action, Resource: obligation.Resource, Scope: obligation.Scope}
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: obligation.ActorID, OriginTaskID: obligation.TaskID, Action: obligation.Action, Resource: obligation.Resource, Scope: obligation.Scope}
 	if err := ledgerStore.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "human-approver", taskID, nil, nil, "capability_lease", "lease-1", 1, lease); err != nil {
 		t.Fatal(err)
 	}

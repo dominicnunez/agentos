@@ -16,7 +16,6 @@ func FingerprintEffect(obligation EffectObligation) (string, error) {
 		OrganizationID      ID                `json:"organization_id"`
 		TaskID              ID                `json:"task_id"`
 		ActorID             ID                `json:"actor_id"`
-		ActorKind           PrincipalKind     `json:"actor_kind"`
 		Action              string            `json:"action"`
 		Resource            string            `json:"resource"`
 		Scope               string            `json:"scope"`
@@ -28,7 +27,7 @@ func FingerprintEffect(obligation EffectObligation) (string, error) {
 		ReplayContext       map[string]string `json:"replay_context"`
 	}{
 		ID: obligation.ID, OrganizationID: obligation.OrganizationID, TaskID: obligation.TaskID,
-		ActorID: obligation.ActorID, ActorKind: obligation.ActorKind, Action: obligation.Action, Resource: obligation.Resource,
+		ActorID: obligation.ActorID, Action: obligation.Action, Resource: obligation.Resource,
 		Scope: obligation.Scope, ConsequenceBoundary: obligation.ConsequenceBoundary,
 		Descriptor: obligation.Descriptor, AuthorizationRefs: obligation.AuthorizationRefs,
 		ApprovalRef: obligation.ApprovalRef, IdempotencyKey: obligation.IdempotencyKey,

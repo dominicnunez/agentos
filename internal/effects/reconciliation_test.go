@@ -67,32 +67,6 @@ func TestRecoveryConfirmsAttemptedEffectAfterRestartWithoutResend(t *testing.T) 
 	}
 }
 
-func TestRecoveryChecksLegacyAttemptWithoutGrantingNewAuthority(t *testing.T) {
-	store, err := ledger.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	legacy := attemptedEffect("legacy-effect")
-	legacy.ActorKind = ""
-	legacy.EffectFingerprint = "legacy-fingerprint"
-	persistAttemptedEffect(t, store, legacy)
-	calls := 0
-	items, err := NewReconciliationService(store).Recover(t.Context(), ReconcilerResolverFunc(func(obligation core.EffectObligation) (Reconciler, bool) {
-		return reconcilerFunc(func(context.Context, core.EffectObligation) (ReconciliationObservation, error) {
-			calls++
-			return ReconciliationObservation{State: ReconciliationUnknown}, nil
-		}), true
-	}))
-	if err != nil || calls != 1 || len(items) != 1 || items[0].Disposition != RecoveryUncertain {
-		t.Fatalf("legacy read-only reconciliation items=%+v calls=%d err=%v", items, calls, err)
-	}
-	latest, _, err := loadEffect(t.Context(), store, legacy.ID)
-	if err != nil || latest.Status != core.EffectAttempted || latest.ActorKind != "" {
-		t.Fatalf("legacy reconciliation mutated or authorized the attempt: %+v err=%v", latest, err)
-	}
-}
-
 func TestRecoveryFailsClosedWhenStatusIsUnavailableOrUnsupported(t *testing.T) {
 	ctx := context.Background()
 	store, err := ledger.Open(":memory:")
@@ -174,7 +148,7 @@ func (f reconcilerFunc) Check(ctx context.Context, obligation core.EffectObligat
 func attemptedEffect(id core.ID) core.EffectObligation {
 	now := time.Now().UTC()
 	return core.EffectObligation{
-		ID: id, OrganizationID: "org-1", TaskID: "task-1", ActorID: "agent-1", ActorKind: core.PrincipalAgent,
+		ID: id, OrganizationID: "org-1", TaskID: "task-1", ActorID: "agent-1",
 		Action: "send", Resource: "destination-1", Scope: "org-1", Descriptor: "send message",
 		EffectFingerprint: "fingerprint-1", AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1",
 		IdempotencyKey: "idempotency-" + string(id), ReplayContext: map[string]string{"body": "hello"},
