@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 50658)
-Total output lines: 3845
-
 package ledger
 
 import (
@@ -1890,7 +1887,53 @@ func validateTaskWorkBinding(ctx context.Context, tx *sql.Tx, item preparedProje
 
 func validateWorkRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
 	work := *item.work
-	if work.ID != core.ID(item.draft.RecordID) || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionI…658 tokens truncated…xperiment crosses its Work organization boundary")
+	if work.ID != core.ID(item.draft.RecordID) || item.draft.Event.SourceActorID != "runtime" || item.draft.Event.SourceExecutionID != "" || item.draft.Event.TaskID != "" || item.draft.Event.RecipientScope != "" || item.draft.Event.RecipientID != "" {
+		return fmt.Errorf("work projection is incomplete or crosses its runtime-owned lifecycle boundary")
+	}
+	record, previous, found, err := latestProjectionRevision[core.Work](ctx, tx, "work", item.draft.RecordID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return events.ValidateWorkProjectionTransition(item.draft.Event.EventType, item.draft.Version, nil, work)
+	}
+	if record.CorrelationID == "" || record.CorrelationID != item.draft.Event.CorrelationID {
+		return fmt.Errorf("prior work revision is invalid or crosses its correlation boundary")
+	}
+	if item.draft.Version != record.Version+1 {
+		return fmt.Errorf("work version %d follows %d", item.draft.Version, record.Version)
+	}
+	return events.ValidateWorkProjectionTransition(item.draft.Event.EventType, item.draft.Version, &previous, work)
+}
+
+func validateLabExperimentRevision(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+	experiment := *item.experiment
+	if experiment.ID != core.ID(item.draft.RecordID) || string(experiment.OrganizationID) != item.draft.Event.OrganizationID || item.draft.Event.CorrelationID == "" {
+		return fmt.Errorf("lab experiment crosses its durable identity boundary")
+	}
+	record, previous, found, err := latestProjectionRevision[core.Experiment](ctx, tx, "lab_experiment", item.draft.RecordID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		if err := events.ValidateExperimentProjectionTransition(item.draft.Event.EventType, item.draft.Version, nil, experiment); err != nil {
+			return err
+		}
+	} else {
+		if item.draft.Version != record.Version+1 || record.CorrelationID != item.draft.Event.CorrelationID {
+			return fmt.Errorf("lab experiment revision is noncontiguous or crosses its correlation boundary")
+		}
+		if err := events.ValidateExperimentProjectionTransition(item.draft.Event.EventType, item.draft.Version, &previous, experiment); err != nil {
+			return err
+		}
+	}
+	workRecord, work, workFound, err := latestProjectionRevision[core.Work](ctx, tx, "work", string(experiment.WorkID))
+	if err != nil || !workFound || workRecord.CorrelationID != item.draft.Event.CorrelationID || experiment.Objective != work.Objective {
+		return fmt.Errorf("lab experiment requires its exact bounded Work")
+	}
+	intentRecord, intent, intentFound, err := latestProjectionRevision[core.Intent](ctx, tx, "intent", string(work.IntentID))
+	if err != nil || !intentFound || intentRecord.CorrelationID != item.draft.Event.CorrelationID || intent.OrganizationID != experiment.OrganizationID {
+		return fmt.Errorf("lab experiment crosses its Work organization boundary")
 	}
 	switch experiment.Status {
 	case core.ExperimentRunning:
