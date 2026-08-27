@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -506,6 +507,61 @@ func TestStoreCanInvalidateDerivedKnowledgeAfterItsSourceBecomesStale(t *testing
 	staleDependent.SupersedesVersion = integerPointer(2)
 	if _, err := service.MarkStale(ctx, staleDependent); err != nil {
 		t.Fatalf("mark dependent stale after source invalidation: %v", err)
+	}
+}
+
+func TestStoreRejectsDerivedKnowledgeScopeWidening(t *testing.T) {
+	ctx := context.Background()
+	store, gateway := newKnowledgeTestStore(t)
+	evidence := seedKnowledgeOrganization(t, ctx, gateway, "org-1")
+	now := time.Now().UTC()
+	blueprint := core.AgentBlueprint{
+		ID: "blueprint-source", OrganizationID: "org-1", Version: "v1", Role: "source",
+		OperatingInstructions: "Produce scoped knowledge.", RequiredCapabilityClasses: []string{}, Status: "ACTIVE", CreatedAt: now,
+	}
+	profile := core.ExecutionProfile{
+		ID: "profile-source", OrganizationID: "org-1", Version: "v1", ModelProvider: "fake", Model: "model",
+		PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE", CreatedAt: now,
+	}
+	agent := core.Agent{
+		ID: "agent-source", OrganizationID: "org-1", BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version,
+		ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "fake", Status: "ACTIVE",
+	}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_BLUEPRINT_CREATED", SourceActorID: "runtime", CorrelationID: "scope-setup"}, ProjectionKind: "agent_blueprint", RecordID: string(blueprint.ID), Version: 1, Value: blueprint},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_PROFILE_CREATED", SourceActorID: "runtime", CorrelationID: "scope-setup"}, ProjectionKind: "execution_profile", RecordID: string(profile.ID), Version: 1, Value: profile},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "AGENT_CREATED", SourceActorID: "runtime", CorrelationID: "scope-setup"}, ProjectionKind: "agent", RecordID: string(agent.ID), Version: 1, Value: agent},
+	} {
+		if _, err := gateway.PublishProjection(ctx, draft); err != nil {
+			t.Fatalf("seed scoped knowledge Agent: %v", err)
+		}
+	}
+	service := New(gateway)
+	source := knowledgeCandidate("k-agent-source", "org-1", evidence.EventID)
+	source.Scope = core.KnowledgeScopeAgent
+	source.ScopeID = agent.ID
+	if _, err := service.Propose(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+	active := source
+	active.Version = 2
+	active.Status = core.KnowledgeActive
+	active.ValidationMethod = core.KnowledgeValidationDeterministic
+	active.ValidationRefs = []string{appendKnowledgeValidation(t, ctx, store, gateway, source.KnowledgeID, 1).EventID}
+	active.ValidatedBy = "runtime"
+	active.ValidatedByKind = core.PrincipalRuntime
+	verifiedAt := time.Now().UTC()
+	active.LastVerifiedAt = &verifiedAt
+	active.SupersedesVersion = integerPointer(1)
+	if _, err := service.Activate(ctx, active); err != nil {
+		t.Fatal(err)
+	}
+	derived := knowledgeCandidate("k-organization-derived", "org-1", evidence.EventID)
+	derived.Basis = core.KnowledgeBasisDerived
+	derived.DerivedKnowledgeRefs = []core.VersionedRef{{ID: string(active.KnowledgeID), Version: "2", MaterializationState: core.MaterializedFull}}
+	derived.CreatedAt = time.Now().UTC()
+	if _, err := service.Propose(ctx, derived); err == nil || !strings.Contains(err.Error(), "scope exceeds") {
+		t.Fatalf("Agent-scoped source widened to Organization knowledge: %v", err)
 	}
 }
 

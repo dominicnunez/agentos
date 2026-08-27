@@ -123,7 +123,8 @@ func ValidateKnowledgeTransition(eventType string, prior, next KnowledgeRecord) 
 		if prior.Status != KnowledgeCandidate || next.Status != KnowledgeActive || !sameKnowledgeCandidate(prior, next) {
 			return fmt.Errorf("only a candidate may be activated")
 		}
-		if knowledgeAgentPrincipal(prior.CreatedByKind) && knowledgeAgentPrincipal(next.ValidatedByKind) && prior.CreatedBy == next.ValidatedBy {
+		if knowledgeAgentPrincipal(prior.CreatedByKind) && knowledgeAgentPrincipal(next.ValidatedByKind) &&
+			prior.CreatedBy == next.ValidatedBy && prior.CreatedByKind == next.ValidatedByKind {
 			return fmt.Errorf("an Agent cannot activate its own proposed knowledge")
 		}
 	case "KNOWLEDGE_SUPERSEDED":
@@ -241,6 +242,26 @@ func validKnowledgePrincipal(id ID, kind PrincipalKind) bool {
 
 func knowledgeAgentPrincipal(kind PrincipalKind) bool {
 	return kind == PrincipalAgent || kind == PrincipalExternalAgent
+}
+
+// KnowledgeDerivedScopeAllowed prevents derived knowledge from exposing a
+// source beyond the audience that could already receive it. Organization
+// knowledge may be narrowed. Team- and Agent-scoped knowledge remains within
+// the same exact scope until a separately governed promotion contract exists.
+func KnowledgeDerivedScopeAllowed(source, derived KnowledgeRecord) bool {
+	if source.OrganizationID == "" || source.OrganizationID != derived.OrganizationID {
+		return false
+	}
+	switch source.Scope {
+	case KnowledgeScopeOrganization:
+		return source.ScopeID == source.OrganizationID
+	case KnowledgeScopeTeam:
+		return derived.Scope == KnowledgeScopeTeam && derived.ScopeID == source.ScopeID
+	case KnowledgeScopeAgent:
+		return derived.Scope == KnowledgeScopeAgent && derived.ScopeID == source.ScopeID
+	default:
+		return false
+	}
 }
 
 // ValidKnowledgeRevision applies the same lifecycle transition used by online

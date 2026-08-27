@@ -138,6 +138,9 @@ func (v *KnowledgeAdmissionValidator) Validate(value core.KnowledgeRecord, event
 			requiresCurrentLineage && (!currentFound || current.version != version || current.value.Status != core.KnowledgeActive) {
 			return fmt.Errorf("knowledge derived reference lacks an exact prior active revision")
 		}
+		if !core.KnowledgeDerivedScopeAllowed(derived, value) {
+			return fmt.Errorf("knowledge derived scope exceeds its source scope")
+		}
 		if derivedAdmittedAt.After(latestSourceAt) {
 			latestSourceAt = derivedAdmittedAt
 		}

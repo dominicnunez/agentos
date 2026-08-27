@@ -122,6 +122,36 @@ func TestKnowledgeActivationRejectsAgentSelfValidation(t *testing.T) {
 	if err := ValidateKnowledgeTransition("KNOWLEDGE_ACTIVATED", prior, next); err != nil {
 		t.Fatalf("independent Agent validation rejected: %v", err)
 	}
+	next.ValidatedBy = prior.CreatedBy
+	next.ValidatedByKind = PrincipalExternalAgent
+	if err := ValidateKnowledgeTransition("KNOWLEDGE_ACTIVATED", prior, next); err != nil {
+		t.Fatalf("distinct external Agent principal with the same textual ID was rejected: %v", err)
+	}
+}
+
+func TestDerivedKnowledgeCannotWidenSourceScope(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  KnowledgeRecord
+		derived KnowledgeRecord
+		allowed bool
+	}{
+		{name: "organization to organization", source: KnowledgeRecord{OrganizationID: "org-1", Scope: KnowledgeScopeOrganization, ScopeID: "org-1"}, derived: KnowledgeRecord{OrganizationID: "org-1", Scope: KnowledgeScopeOrganization, ScopeID: "org-1"}, allowed: true},
+		{name: "organization to team", source: KnowledgeRecord{OrganizationID: "org-1", Scope: KnowledgeScopeOrganization, ScopeID: "org-1"}, derived: KnowledgeRecord{OrganizationID: "org-1", Scope: KnowledgeScopeTeam, ScopeID: "team-1"}, allowed: true},
+		{name: "team remains in team", source: KnowledgeRecord{OrganizationID: "org-1", Scope: KnowledgeScopeTeam, ScopeID: "team-1"}, derived: KnowledgeRecord{OrganizationID: "org-1", Scope: KnowledgeScopeTeam, ScopeID: "team-1"}, allowed: true},
+		{name: "team to organization", source: KnowledgeRecord{OrganizationID: "org-1", Scope: KnowledgeScopeTeam, ScopeID: "team-1"}, derived: KnowledgeRecord{OrganizationID: "org-1", Scope: KnowledgeScopeOrganization, ScopeID: "org-1"}},
+		{name: "team to another team", source: KnowledgeRecord{OrganizationID: "org-1", Scope: KnowledgeScopeTeam, ScopeID: "team-1"}, derived: KnowledgeRecord{OrganizationID: "org-1", Scope: KnowledgeScopeTeam, ScopeID: "team-2"}},
+		{name: "agent to organization", source: KnowledgeRecord{OrganizationID: "org-1", Scope: KnowledgeScopeAgent, ScopeID: "agent-1"}, derived: KnowledgeRecord{OrganizationID: "org-1", Scope: KnowledgeScopeOrganization, ScopeID: "org-1"}},
+		{name: "agent to another agent", source: KnowledgeRecord{OrganizationID: "org-1", Scope: KnowledgeScopeAgent, ScopeID: "agent-1"}, derived: KnowledgeRecord{OrganizationID: "org-1", Scope: KnowledgeScopeAgent, ScopeID: "agent-2"}},
+		{name: "cross organization", source: KnowledgeRecord{OrganizationID: "org-1", Scope: KnowledgeScopeOrganization, ScopeID: "org-1"}, derived: KnowledgeRecord{OrganizationID: "org-2", Scope: KnowledgeScopeOrganization, ScopeID: "org-2"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := KnowledgeDerivedScopeAllowed(test.source, test.derived); got != test.allowed {
+				t.Fatalf("allowed=%t want %t", got, test.allowed)
+			}
+		})
+	}
 }
 
 func TestKnowledgeDistinguishesInternalAndExternalAgentPrincipals(t *testing.T) {

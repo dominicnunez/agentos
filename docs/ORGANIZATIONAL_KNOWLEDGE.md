@@ -52,7 +52,10 @@ Event Contract, not only a decodable payload. Internal-Agent proposals must
 also occur before the bound execution finishes or advances to another Task
 revision. Every activation requires validation evidence admitted after the
 current candidate proposal; repeated-pattern evidence additionally cannot
-reuse an occurrence as its validation. No Agent may activate its own proposal.
+reuse an occurrence as its validation. No Agent may activate its own proposal;
+self-validation compares both principal kind and identity, so an internal
+Agent and an authenticated external Agent with the same textual ID remain
+distinct principals.
 Later terminal revisions, including direct candidate quarantine, preserve the
 prior validation state and cannot mint a judgment while invalidating a record.
 
@@ -89,6 +92,9 @@ least one lineage reference and every reference must identify an exact earlier
 that source version to remain current, and the derived record's creation time
 cannot predate the cited source revision's activation; terminal invalidation preserves the
 already-admitted historical lineage so dependent knowledge can fail closed.
+Derived scope cannot expose a source to a broader audience: Organization
+knowledge may be narrowed, while Team- and Agent-scoped sources remain inside
+the same exact scope until a separately governed promotion contract exists.
 User or Agent judgments require the typed exact-candidate statement described
 above; internal-Agent statements must also be tied to the exact admitted
 execution. Every statement names an exact `knowledge.validate` capability
