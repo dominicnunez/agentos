@@ -20,6 +20,7 @@ from scripts.build_aims_assessment_bundle import (
     _verified_commit_at,
     _verify_aims_history,
     _verify_captured_aims_snapshot,
+    _verify_controlled_commit_snapshot,
     build,
     readiness_report,
 )
@@ -278,6 +279,9 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
                 return_value=datetime(2026, 8, 27, 11),
             ),
             patch(
+                "scripts.build_aims_assessment_bundle._verify_controlled_commit_snapshot"
+            ),
+            patch(
                 "scripts.build_aims_assessment_bundle._verify_aims_history",
                 side_effect=lambda _root, _baseline, _commit, entries: (
                     _verify_captured_aims_snapshot(entries, None)
@@ -318,7 +322,9 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
         document = self.root / "governance" / "aims" / "records" / "policy.md"
         document.parent.mkdir(parents=True)
 
-        def write_approved(body: str, version: str) -> None:
+        def write_approved(
+            body: str, version: str, approval_ref: str, approved_at: str
+        ) -> None:
             document.write_text(
                 f"# Policy\n\nStatus: **APPROVED**\n\n{body}\n",
                 encoding="utf-8",
@@ -334,9 +340,9 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
                         "status": "APPROVED",
                         "owner": "aims-manager",
                         "classification": "PUBLIC",
-                        "approval_ref": "decision-original",
+                        "approval_ref": approval_ref,
                         "approved_by": "project-owner",
-                        "approved_at": "2026-08-27T10:00:00Z",
+                        "approved_at": approved_at,
                         "review_due": "2027-08-27",
                         "supersedes": [],
                         "superseded_by": None,
@@ -360,12 +366,30 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
         subprocess.run(
             ["git", "config", "user.name", "Agent OS Tests"], cwd=self.root, check=True
         )
-        write_approved("Original approved bytes.", "1.0")
+        write_approved(
+            "Original approved bytes.",
+            "1.0",
+            "decision-original",
+            "2026-08-27T10:00:00Z",
+        )
         subprocess.run(["git", "add", "."], cwd=self.root, check=True)
         subprocess.run(["git", "commit", "-q", "-m", "baseline"], cwd=self.root, check=True)
         baseline = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.root).decode().strip()
 
-        write_approved("Unapproved replacement bytes.", "1.1")
+        write_approved(
+            "Legitimately approved v2 bytes.",
+            "1.1",
+            "decision-v2",
+            "2026-08-27T11:00:00Z",
+        )
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "approved-v2"], cwd=self.root, check=True)
+        write_approved(
+            "Unapproved v3 bytes reusing v2 evidence.",
+            "1.2",
+            "decision-v2",
+            "2026-08-27T11:00:00Z",
+        )
         subprocess.run(["git", "add", "."], cwd=self.root, check=True)
         subprocess.run(["git", "commit", "-q", "-m", "violation"], cwd=self.root, check=True)
         (self.root / "README.md").write_text(
@@ -383,6 +407,116 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
 
         with self.assertRaisesRegex(VerificationError, "lacks new approval evidence"):
             _verify_aims_history(self.root, baseline, commit, source_entries)
+
+    def test_history_walk_rejects_approval_reuse_in_merge_resolution(self) -> None:
+        document = self.root / "governance" / "aims" / "records" / "policy.md"
+        document.parent.mkdir(parents=True)
+
+        def write_approved(
+            body: str, version: str, approval_ref: str, approved_at: str
+        ) -> None:
+            document.write_text(
+                f"# Policy\n\nStatus: **APPROVED**\n\n{body}\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            manifest = {
+                "schema_version": 1,
+                "documents": [
+                    {
+                        "id": "aims.policy",
+                        "path": "governance/aims/records/policy.md",
+                        "version": version,
+                        "status": "APPROVED",
+                        "owner": "aims-manager",
+                        "classification": "PUBLIC",
+                        "approval_ref": approval_ref,
+                        "approved_by": "project-owner",
+                        "approved_at": approved_at,
+                        "review_due": "2027-08-27",
+                        "supersedes": [],
+                        "superseded_by": None,
+                        "sha256": hashlib.sha256(document.read_bytes()).hexdigest(),
+                    }
+                ],
+            }
+            (self.root / "governance" / "aims" / "manifest.json").write_text(
+                json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n"
+            )
+
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "config", "core.autocrlf", "false"], cwd=self.root, check=True
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "tests@agentos.invalid"],
+            cwd=self.root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Agent OS Tests"], cwd=self.root, check=True
+        )
+        write_approved(
+            "Original approved bytes.",
+            "1.0",
+            "decision-original",
+            "2026-08-27T10:00:00Z",
+        )
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "baseline"], cwd=self.root, check=True)
+        baseline = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.root).decode().strip()
+        baseline_branch = subprocess.check_output(
+            ["git", "branch", "--show-current"], cwd=self.root
+        ).decode().strip()
+        subprocess.run(["git", "checkout", "-q", "-b", "approved-v2"], cwd=self.root, check=True)
+        write_approved(
+            "Legitimately approved v2 bytes.",
+            "1.1",
+            "decision-v2",
+            "2026-08-27T11:00:00Z",
+        )
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "approved-v2"], cwd=self.root, check=True)
+        subprocess.run(["git", "checkout", "-q", baseline_branch], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "merge", "-q", "--no-ff", "--no-commit", "approved-v2"],
+            cwd=self.root,
+            check=True,
+        )
+        write_approved(
+            "Unapproved merge bytes reusing v2 evidence.",
+            "1.2",
+            "decision-v2",
+            "2026-08-27T11:00:00Z",
+        )
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "merge-resolution"], cwd=self.root, check=True)
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.root).decode().strip()
+        source_entries = {
+            "governance/aims/manifest.json": (
+                self.root / "governance" / "aims" / "manifest.json"
+            ).read_bytes(),
+            "governance/aims/records/policy.md": document.read_bytes(),
+        }
+
+        with self.assertRaisesRegex(VerificationError, "lacks new approval evidence"):
+            _verify_aims_history(self.root, baseline, commit, source_entries)
+
+    def test_rejects_controlled_file_hidden_from_captured_worktree(self) -> None:
+        manifest = (self.root / "governance" / "aims" / "manifest.json").read_bytes()
+        captured = {"governance/aims/manifest.json": manifest}
+        committed = {
+            **captured,
+            "governance/aims/records/unlisted.md": b"# Unlisted\n",
+        }
+        with patch(
+            "scripts.build_aims_assessment_bundle._git_aims_entries",
+            return_value=committed,
+        ):
+            with self.assertRaisesRegex(VerificationError, "missing=.*unlisted"):
+                _verify_controlled_commit_snapshot(
+                    self.root, "a" * 40, captured
+                )
 
 
 if __name__ == "__main__":

@@ -176,7 +176,12 @@ def _version_tuple(value: Any, label: str) -> tuple[int, int]:
     return int(major), int(minor)
 
 
-def verify_history(prior_manifest: dict[str, Any], manifest: dict[str, Any]) -> None:
+def verify_history(
+    prior_manifest: dict[str, Any],
+    manifest: dict[str, Any],
+    *,
+    enforce_draft_version: bool = True,
+) -> None:
     prior_by_id: dict[str, dict[str, Any]] = {}
     for index, document in enumerate(prior_manifest["documents"]):
         label = f"prior manifest.documents[{index}]"
@@ -208,7 +213,12 @@ def verify_history(prior_manifest: dict[str, Any], manifest: dict[str, Any]) -> 
             raise VerificationError(f"approved controlled document cannot return to draft: {document_id}")
         if prior_status == "DRAFT" and current_status == "RETIRED":
             raise VerificationError(f"draft controlled document cannot be retired directly: {document_id}")
-        if current != prior and current_version <= prior_version:
+        relaxed_draft_transition = (
+            not enforce_draft_version
+            and prior_status == "DRAFT"
+            and current_status == "DRAFT"
+        )
+        if current != prior and current_version <= prior_version and not relaxed_draft_transition:
             raise VerificationError(f"changed controlled document did not increment its version: {document_id}")
         if current == prior and current_version != prior_version:
             raise VerificationError(f"unchanged controlled document has inconsistent version history: {document_id}")
@@ -235,6 +245,8 @@ def verify(
     manifest_path: Path | None = None,
     prior_manifest_path: Path | None = None,
     prior_manifest_bytes: bytes | None = None,
+    *,
+    enforce_display_status: bool = True,
 ) -> dict[str, Any]:
     repo_root = repo_root.resolve(strict=True)
     manifest_path = manifest_path or repo_root / "governance" / "aims" / "manifest.json"
@@ -324,7 +336,7 @@ def verify(
         if actual_sha != expected_sha:
             raise VerificationError(f"{label}.sha256 does not match {path_text}")
         displayed_statuses = DISPLAYED_STATUS_PATTERN.findall(data.decode("utf-8"))
-        if displayed_statuses != [status]:
+        if enforce_display_status and displayed_statuses != [status]:
             raise VerificationError(f"{label} displayed lifecycle status does not match the manifest")
         if status in {"APPROVED", "RETIRED"}:
             text = data.decode("utf-8").upper()
@@ -391,6 +403,22 @@ def verify(
         if len(prior_manifest_bytes) > MAX_MANIFEST_BYTES:
             raise VerificationError(f"prior AIMS manifest exceeds {MAX_MANIFEST_BYTES} bytes")
         verify_history(_parse_manifest_bytes(prior_manifest_bytes, "prior AIMS manifest"), manifest)
+    return manifest
+
+
+def verify_history_bytes(
+    prior_manifest_bytes: bytes,
+    manifest_bytes: bytes,
+    *,
+    enforce_draft_version: bool = True,
+) -> dict[str, Any]:
+    prior_manifest = _parse_manifest_bytes(prior_manifest_bytes, "prior AIMS manifest")
+    manifest = _parse_manifest_bytes(manifest_bytes, "AIMS manifest")
+    verify_history(
+        prior_manifest,
+        manifest,
+        enforce_draft_version=enforce_draft_version,
+    )
     return manifest
 
 

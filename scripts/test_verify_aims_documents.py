@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.verify_aims_documents import VerificationError, verify
+from scripts.verify_aims_documents import VerificationError, verify, verify_history_bytes
 
 
 class VerifyAIMSDocumentsTest(unittest.TestCase):
@@ -58,6 +58,34 @@ class VerifyAIMSDocumentsTest(unittest.TestCase):
 
     def test_accepts_exact_draft(self) -> None:
         verify(self.root, self.write_manifest(self.manifest()))
+
+    def test_historical_snapshot_accepts_legacy_status_presentation_only_when_requested(self) -> None:
+        self.document.write_text(
+            "# Scope\n\nLifecycle state: DRAFT\n\nDraft.\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        manifest = self.manifest(
+            sha256=hashlib.sha256(self.document.read_bytes()).hexdigest()
+        )
+        path = self.write_manifest(manifest)
+        with self.assertRaisesRegex(VerificationError, "displayed lifecycle status"):
+            verify(self.root, path)
+        verify(self.root, path, enforce_display_status=False)
+
+    def test_historical_transition_relaxes_only_draft_version_increment(self) -> None:
+        prior = self.manifest(sha256="1" * 64)
+        current = self.manifest(sha256="2" * 64)
+        with self.assertRaisesRegex(VerificationError, "did not increment"):
+            verify_history_bytes(
+                (json.dumps(prior) + "\n").encode(),
+                (json.dumps(current) + "\n").encode(),
+            )
+        verify_history_bytes(
+            (json.dumps(prior) + "\n").encode(),
+            (json.dumps(current) + "\n").encode(),
+            enforce_draft_version=False,
+        )
 
     def test_rejects_hash_mismatch(self) -> None:
         self.assert_rejected(self.manifest(sha256="0" * 64), "does not match")

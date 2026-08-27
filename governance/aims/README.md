@@ -63,14 +63,14 @@ controlled public records, a curated technical evidence set, exact checksums,
 and a machine-readable readiness report. The builder requires the declared
 commit to equal checked-out `HEAD`, disables Git replacement objects, compares
 every bundled byte with the corresponding Git object, and validates governed
-history against the first parent when an earlier manifest exists. This proves
+history from a trusted baseline through every commit transition. Historical
+snapshots retain closed-index, hash, metadata, and immutable approval-history
+checks; the final snapshot must satisfy the complete current contract. This proves
 the bundled bytes came from the declared local Git commit; it does not
 authenticate which repository owns that commit. Trusted provenance or an
 attestation must establish repository identity separately. The builder also
-requires a trusted history baseline, protects the full proposed commit range by
-comparing its final governed state directly with that baseline, and rejects a
-source commit newer than the assessment instant. CI uses the
-pull-request merge base or pre-push commit as
+requires a trusted history baseline and rejects a source commit newer than the
+assessment instant. CI uses the pull-request merge base or pre-push commit as
 that baseline, builds the bundle twice for the same assessment instant, and
 requires identical bytes. Branch protection or separate attestation must make
 the selected baseline trustworthy. Git committer time is a fail-closed ordering

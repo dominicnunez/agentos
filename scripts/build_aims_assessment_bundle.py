@@ -18,14 +18,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 try:
-    from scripts.verify_aims_documents import VerificationError, verify
+    from scripts.verify_aims_documents import VerificationError, verify, verify_history_bytes
 except ModuleNotFoundError:
-    from verify_aims_documents import VerificationError, verify
+    from verify_aims_documents import VerificationError, verify, verify_history_bytes
 
 
 MAX_SOURCE_FILE_BYTES = 512 * 1024
 MAX_SOURCE_TOTAL_BYTES = 4 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 5 * 1024 * 1024
+MAX_HISTORY_COMMITS = 512
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 EVIDENCE_FILES = {
     "README.md": "product-purpose-and-use",
@@ -127,7 +128,10 @@ def _verify_git_sources(repo_root: Path, commit: str, source_entries: dict[str, 
 
 
 def _verify_captured_aims_snapshot(
-    source_entries: dict[str, bytes], prior_manifest: bytes | None
+    source_entries: dict[str, bytes],
+    prior_manifest: bytes | None,
+    *,
+    enforce_display_status: bool = True,
 ) -> dict[str, Any]:
     controlled_prefix = "governance/aims/records/"
     controlled_paths = {
@@ -146,7 +150,11 @@ def _verify_captured_aims_snapshot(
             destination = snapshot_root.joinpath(*path.parts)
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(data)
-        return verify(snapshot_root, prior_manifest_bytes=prior_manifest)
+        return verify(
+            snapshot_root,
+            prior_manifest_bytes=prior_manifest,
+            enforce_display_status=enforce_display_status,
+        )
 
 
 def _captured_aims_entries(source_entries: dict[str, bytes]) -> dict[str, bytes]:
@@ -208,13 +216,88 @@ def _verify_aims_history(
     ).strip()
     if merge_base != baseline:
         raise VerificationError("history baseline is not an ancestor of the assessed commit")
-    baseline_entries = _git_aims_entries(repo_root, baseline)
-    baseline_manifest = baseline_entries.get("governance/aims/manifest.json")
+    revisions = _git(
+        repo_root,
+        [
+            "rev-list",
+            "--ancestry-path",
+            "--topo-order",
+            "--reverse",
+            f"{baseline}..{commit}",
+        ],
+    ).decode("ascii", errors="strict").splitlines()
+    if not revisions or revisions[-1] != commit:
+        raise VerificationError("assessed commit is not reachable after the history baseline")
+    if len(revisions) > MAX_HISTORY_COMMITS:
+        raise VerificationError(f"AIMS history exceeds {MAX_HISTORY_COMMITS} commits")
+
+    entries_by_commit = {baseline: _git_aims_entries(repo_root, baseline)}
+    baseline_manifest = entries_by_commit[baseline].get("governance/aims/manifest.json")
     if baseline_manifest is not None:
-        _verify_captured_aims_snapshot(baseline_entries, None)
-    return _verify_captured_aims_snapshot(
-        _captured_aims_entries(source_entries), baseline_manifest
-    )
+        _verify_captured_aims_snapshot(
+            entries_by_commit[baseline], None, enforce_display_status=False
+        )
+
+    final_manifest: dict[str, Any] | None = None
+    for revision in revisions:
+        parents = _git(repo_root, ["rev-list", "--parents", "-n", "1", revision]).decode(
+            "ascii", errors="strict"
+        ).split()
+        if not parents or parents[0] != revision:
+            raise VerificationError(f"invalid parent listing in trusted AIMS history: {revision}")
+        trusted_parents = [parent for parent in parents[1:] if parent in entries_by_commit]
+        if not trusted_parents:
+            raise VerificationError(
+                f"no parent falls inside the trusted AIMS history walk: {revision}"
+            )
+        entries = (
+            _captured_aims_entries(source_entries)
+            if revision == commit
+            else _git_aims_entries(repo_root, revision)
+        )
+        entries_by_commit[revision] = entries
+        manifest_bytes = entries.get("governance/aims/manifest.json")
+        if manifest_bytes is None:
+            if any(
+                entries_by_commit[parent].get("governance/aims/manifest.json") is not None
+                for parent in trusted_parents
+            ):
+                raise VerificationError(f"AIMS manifest was removed at commit {revision}")
+            continue
+        final_manifest = _verify_captured_aims_snapshot(
+            entries,
+            None,
+            enforce_display_status=revision == commit,
+        )
+        for parent in trusted_parents:
+            prior_manifest = entries_by_commit[parent].get(
+                "governance/aims/manifest.json"
+            )
+            if prior_manifest is not None:
+                verify_history_bytes(
+                    prior_manifest,
+                    manifest_bytes,
+                    enforce_draft_version=revision == commit,
+                )
+    if final_manifest is None:
+        raise VerificationError("assessed history does not contain an AIMS manifest")
+    return final_manifest
+
+
+def _verify_controlled_commit_snapshot(
+    repo_root: Path, commit: str, source_entries: dict[str, bytes]
+) -> None:
+    committed = _git_aims_entries(repo_root, commit)
+    captured = _captured_aims_entries(source_entries)
+    if set(committed) != set(captured):
+        missing = sorted(set(committed) - set(captured))
+        extra = sorted(set(captured) - set(committed))
+        raise VerificationError(
+            f"captured AIMS paths differ from the assessed commit; missing={missing}, extra={extra}"
+        )
+    for path, data in captured.items():
+        if committed[path] != data:
+            raise VerificationError(f"captured AIMS bytes differ from the assessed commit: {path}")
 
 
 def _verified_commit_at(repo_root: Path, commit: str, assessment_at: datetime) -> datetime:
@@ -408,6 +491,7 @@ def build(
         if history_baseline is None:
             raise VerificationError("history baseline is required for Git-verified assessment bundles")
         _verify_git_sources(repo_root, commit, source_entries)
+        _verify_controlled_commit_snapshot(repo_root, commit, source_entries)
         commit_at = _verified_commit_at(repo_root, commit, assessment_at)
         manifest = _verify_aims_history(
             repo_root, history_baseline, commit, source_entries
