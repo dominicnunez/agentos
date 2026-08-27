@@ -28,7 +28,7 @@ const (
 	CurrentStorageVersion = 9
 	// AuthorityAdmissionBindingStorageVersion is the first storage contract in
 	// which every capability and freeze record names its exact admitting event.
-	AuthorityAdmissionBindingStorageVersion = 8
+	AuthorityAdmissionBindingStorageVersion = 7
 	// LegacyEventSchemaVersion identifies the immediately preceding Event
 	// Contract. Its payload semantics already included Intent mode; migration
 	// validates review evidence and reseals schema-bound projection admissions.
@@ -67,7 +67,7 @@ var storageColumnsV6 = map[string][]string{
 	"event_integrity": {"sequence", "event_id", "algorithm", "previous_hash", "event_hash"},
 }
 
-var storageColumnsV7 = map[string][]string{
+var storageColumnsV8 = map[string][]string{
 	"legacy_knowledge_quarantine": {"record_id", "version", "body", "source_created_at", "reason"},
 }
 
@@ -168,7 +168,7 @@ const storageSchemaV6SQL = `CREATE TABLE event_integrity (
 sequence INTEGER PRIMARY KEY, event_id TEXT NOT NULL UNIQUE,
 algorithm TEXT NOT NULL, previous_hash TEXT NOT NULL, event_hash TEXT NOT NULL UNIQUE);`
 
-const storageSchemaV7SQL = `CREATE TABLE legacy_knowledge_quarantine (
+const storageSchemaV8SQL = `CREATE TABLE legacy_knowledge_quarantine (
 record_id TEXT NOT NULL, version INTEGER NOT NULL, body BLOB NOT NULL,
 source_created_at TEXT NOT NULL, reason TEXT NOT NULL,
 PRIMARY KEY(record_id,version));`
@@ -297,14 +297,6 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 		}
 		return advanceProjectionStorageContract(ctx, tx, from, to, "event-integrity")
 	case from == 6 && to == 7:
-		if _, err := tx.ExecContext(ctx, storageSchemaV7SQL); err != nil {
-			return err
-		}
-		if err := quarantineLegacyKnowledgeRecords(ctx, tx); err != nil {
-			return err
-		}
-		return advanceProjectionStorageContract(ctx, tx, from, to, "knowledge-admission")
-	case from == 7 && to == 8:
 		if _, err := ValidateEventIntegrity(ctx, tx); err != nil {
 			return fmt.Errorf("validate event integrity before authority admission binding: %w", err)
 		}
@@ -312,6 +304,14 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 			return err
 		}
 		return advanceProjectionStorageContract(ctx, tx, from, to, "authority-admission-binding")
+	case from == 7 && to == 8:
+		if _, err := tx.ExecContext(ctx, storageSchemaV8SQL); err != nil {
+			return err
+		}
+		if err := quarantineLegacyKnowledgeRecords(ctx, tx); err != nil {
+			return err
+		}
+		return advanceProjectionStorageContract(ctx, tx, from, to, "knowledge-admission")
 	case from == 8 && to == 9:
 		if _, err := tx.ExecContext(ctx, storageSchemaV9SQL); err != nil {
 			return err
@@ -589,8 +589,8 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 			expected[table] = columns
 		}
 	}
-	if version >= 7 {
-		for table, columns := range storageColumnsV7 {
+	if version >= 8 {
+		for table, columns := range storageColumnsV8 {
 			expected[table] = columns
 		}
 	}

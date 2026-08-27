@@ -1594,7 +1594,7 @@ func completionExecutionModel(binding WorkCompletionBinding, task core.Task, exe
 	profile, profileFound := binding.ExecutionProfiles[config.ProfileID]
 	_, createdOffset := manifest.CreatedAt.Zone()
 	if found.EventID == "" || !profileFound || profile.ID != config.ProfileID || profile.OrganizationID != core.ID(binding.OrganizationID) || profile.Version != config.ProfileVersion ||
-		manifest.ExecutionID != core.ID(executionID) || manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID || manifest.AgentBlueprintVersion != config.BlueprintVersion || manifest.ExecutionProfileVersion != profile.Version || manifest.RuntimeAdapter != config.RuntimeAdapter || manifest.Provider != profile.ModelProvider || manifest.Model != profile.Model || manifest.TaskContractVersion != task.TaskContractVersion || manifest.PromptVersion != profile.PromptVersion || manifest.PolicyVersion != "v1" || manifest.ContextBuilderVersion != "v2" || manifest.CreatedAt.IsZero() || createdOffset != 0 ||
+		manifest.ExecutionID != core.ID(executionID) || manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID || manifest.AgentBlueprintVersion != config.BlueprintVersion || manifest.ExecutionProfileVersion != profile.Version || manifest.RuntimeAdapter != config.RuntimeAdapter || manifest.Provider != profile.ModelProvider || manifest.Model != profile.Model || manifest.TaskContractVersion != task.TaskContractVersion || manifest.PromptVersion != profile.PromptVersion || manifest.PolicyVersion != "v1" || !validExecutionContextBuilderVersion(manifest.ContextBuilderVersion) || manifest.CreatedAt.IsZero() || createdOffset != 0 ||
 		len(manifest.SkillRefs) != 0 || len(manifest.ToolDefinitions) != 0 || len(manifest.ArtifactRefs) != 0 || !validSHA256(manifest.ExecutionInputSHA256) {
 		return executionModel{}, fmt.Errorf("work completion Agent manifest does not match its immutable Task")
 	}
@@ -1620,12 +1620,23 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 	if !slices.Equal(manifest.AdditionalContextRefs, strategyContextRefs) {
 		return "", fmt.Errorf("execution manifest does not bind the planned strategic context")
 	}
-	knowledgeRefs, knowledge, err := executionKnowledge(binding, task, startEvent, stream)
-	if err != nil {
-		return "", err
-	}
-	if !slices.Equal(manifest.KnowledgeRefs, knowledgeRefs) {
-		return "", fmt.Errorf("execution knowledge references do not match durable runtime selection")
+	var knowledge []core.KnowledgeRecord
+	switch manifest.ContextBuilderVersion {
+	case "v1":
+		if len(manifest.KnowledgeRefs) != 0 {
+			return "", fmt.Errorf("version 1 execution manifest contains knowledge references")
+		}
+	case "v2":
+		knowledgeRefs, selected, err := executionKnowledge(binding, task, startEvent, stream)
+		if err != nil {
+			return "", err
+		}
+		if !slices.Equal(manifest.KnowledgeRefs, knowledgeRefs) {
+			return "", fmt.Errorf("execution knowledge references do not match durable runtime selection")
+		}
+		knowledge = selected
+	default:
+		return "", fmt.Errorf("execution context builder version is unsupported")
 	}
 	dependencyRefs, dependencies, err := executionDependencies(binding, task, manifestEvent, stream)
 	if err != nil {
@@ -1652,6 +1663,10 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 		Blueprint: blueprint, Task: task, Strategy: strategy, Knowledge: knowledge, DependencyResults: dependencies, InboxEvents: inbox, Revision: revision,
 	})
 	return input, err
+}
+
+func validExecutionContextBuilderVersion(version string) bool {
+	return version == "v1" || version == "v2"
 }
 
 func executionKnowledge(binding WorkCompletionBinding, task core.Task, startEvent Event, stream []Event) ([]core.VersionedRef, []core.KnowledgeRecord, error) {

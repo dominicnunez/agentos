@@ -76,11 +76,12 @@ the storage version, Agent OS application ID, current Event Contract schema,
 and a fingerprint of the reviewed SQLite layout. The ordered migrations then
 reseal Event Contract v4 projection admissions, add bounded pending-approval
 and completion-review projections, add the stored-byte event-integrity chain,
-quarantine legacy knowledge that predates event-coupled admission, and bind
-every capability/freeze record to its exact admission event. The v8 binding
-migration first validates the complete pre-binding authority history and fails
+bind every capability/freeze record to its exact admission event, and
+quarantine legacy knowledge that predates event-coupled admission. The v7
+authority-binding migration first validates the complete pre-binding authority history and fails
 without partial updates when a record or event is missing, ambiguous,
-cross-tenant, or malformed. Storage v9 adds the reviewed tenant-scoped index
+cross-tenant, or malformed. Storage v8 adds the quarantine boundary without
+reusing the already deployed v7 contract. Storage v9 adds the reviewed tenant-scoped index
 used to select current knowledge for an Agent execution without scanning other
 Organizations' knowledge records.
 

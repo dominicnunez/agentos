@@ -82,7 +82,7 @@ func TestStorageV9MigrationAddsTenantKnowledgeIndex(t *testing.T) {
 	}
 }
 
-func TestStorageV8MigrationBindsAuthorityRecordsToExactEvents(t *testing.T) {
+func TestStorageV7UpgradePreservesAuthorityAndAddsKnowledgeAdmission(t *testing.T) {
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "storage-v7-authority.db")
 	store, err := Open(path)
@@ -101,7 +101,7 @@ func TestStorageV8MigrationBindsAuthorityRecordsToExactEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP INDEX records_knowledge_organization_idx; UPDATE records SET admission_event_id='' WHERE kind='capability_lease'`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP INDEX records_knowledge_organization_idx; DROP TABLE legacy_knowledge_quarantine`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -124,7 +124,11 @@ func TestStorageV8MigrationBindsAuthorityRecordsToExactEvents(t *testing.T) {
 	defer func() { _ = store.Close() }()
 	var admissionEventID, eventID string
 	if err := store.db.QueryRowContext(ctx, `SELECT r.admission_event_id,e.event_id FROM records r JOIN events e ON e.event_id=r.admission_event_id WHERE r.kind='capability_lease' AND r.record_id='lease-1' AND r.version=1`).Scan(&admissionEventID, &eventID); err != nil || admissionEventID == "" || admissionEventID != eventID {
-		t.Fatalf("migrated authority binding event=%q matched=%q err=%v", admissionEventID, eventID, err)
+		t.Fatalf("preserved authority binding event=%q matched=%q err=%v", admissionEventID, eventID, err)
+	}
+	var quarantineTable int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='legacy_knowledge_quarantine'`).Scan(&quarantineTable); err != nil || quarantineTable != 1 {
+		t.Fatalf("knowledge admission table count=%d err=%v", quarantineTable, err)
 	}
 	contract, err := ValidateStorageContract(ctx, store.db)
 	if err != nil || contract.StorageVersion != CurrentStorageVersion {
@@ -132,7 +136,7 @@ func TestStorageV8MigrationBindsAuthorityRecordsToExactEvents(t *testing.T) {
 	}
 }
 
-func TestStorageV7QuarantinesLegacyUnsealedKnowledge(t *testing.T) {
+func TestStorageV8QuarantinesLegacyUnsealedKnowledge(t *testing.T) {
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "storage-v6-legacy-knowledge.db")
 	store, err := Open(path)
@@ -528,7 +532,7 @@ func TestAuthorityBindingMigrationRejectsTamperedChainWithoutMutation(t *testing
 		t.Fatal(err)
 	}
 	preBindingVersion := AuthorityAdmissionBindingStorageVersion - 1
-	if _, err := db.ExecContext(ctx, `DROP INDEX records_knowledge_organization_idx; UPDATE records SET admission_event_id='' WHERE kind='capability_lease'`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP INDEX records_knowledge_organization_idx; DROP TABLE legacy_knowledge_quarantine; UPDATE records SET admission_event_id='' WHERE kind='capability_lease'`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}

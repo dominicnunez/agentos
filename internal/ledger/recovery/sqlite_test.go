@@ -49,7 +49,7 @@ func TestVerifyMigratesPreBindingAuthoritySnapshotWithoutChangingSource(t *testi
 		t.Fatal(err)
 	}
 	preBindingVersion := ledger.AuthorityAdmissionBindingStorageVersion - 1
-	if _, err := db.ExecContext(ctx, `DROP INDEX records_knowledge_organization_idx; UPDATE records SET admission_event_id='' WHERE kind='capability_lease'`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP INDEX records_knowledge_organization_idx; DROP TABLE legacy_knowledge_quarantine; UPDATE records SET admission_event_id='' WHERE kind='capability_lease'`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
