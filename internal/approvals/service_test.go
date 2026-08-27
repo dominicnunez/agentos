@@ -47,22 +47,6 @@ func (s latestInboxStore) PendingApprovalRecords(context.Context, string, time.T
 	return s.bodies, nil
 }
 
-type legacyApprovalStore struct{ records map[string][][]byte }
-
-func (s *legacyApprovalStore) AppendRecord(_ context.Context, _, _, _, _ string, _, _ []string, kind, id string, _ int, value any) error {
-	body, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	key := kind + "/" + id
-	s.records[key] = append(s.records[key], body)
-	return nil
-}
-
-func (s *legacyApprovalStore) Records(_ context.Context, kind, id string) ([][]byte, error) {
-	return s.records[kind+"/"+id], nil
-}
-
 func TestApprovalInboxLimitExcludesHistoricalRecords(t *testing.T) {
 	bodies := make([][]byte, 0, 1001)
 	for index := range 1001 {
@@ -340,6 +324,11 @@ func TestApprovalMutationsRevalidateAuthorityAndCurrentEffect(t *testing.T) {
 }
 
 func TestLegacyActorlessPendingApprovalCanOnlyBeInspectedAndDenied(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
 	obligation := core.EffectObligation{
 		ID: "effect-legacy", OrganizationID: "org-1", TaskID: "task-1", ActorID: "agent-1",
 		Action: "deploy", Resource: "agent-os", Scope: "org-1", ConsequenceBoundary: core.BoundaryDeployment,
@@ -358,18 +347,12 @@ func TestLegacyActorlessPendingApprovalCanOnlyBeInspectedAndDenied(t *testing.T)
 	if err := approvals.ValidateForEffect(approvedLegacy, obligation, time.Now().UTC()); err == nil {
 		t.Fatal("legacy actorless approval was accepted at the effect boundary")
 	}
-	effectBody, err := json.Marshal(obligation)
-	if err != nil {
+	if err := store.AppendRecord(t.Context(), "org-1", "EFFECT_OBLIGATION_PREPARED", "agent-1", "task-1", obligation.AuthorizationRefs, nil, "effect", string(obligation.ID), 1, obligation); err != nil {
 		t.Fatal(err)
 	}
-	approvalBody, err := json.Marshal(approval)
-	if err != nil {
+	if err := store.AppendRecord(t.Context(), "org-1", "APPROVAL_DECISION_STARTED", "approver-1", "task-1", nil, nil, "approval", string(approval.ID), 1, approval); err != nil {
 		t.Fatal(err)
 	}
-	store := &legacyApprovalStore{records: map[string][][]byte{
-		"effect/effect-legacy":     {effectBody},
-		"approval/approval-legacy": {approvalBody},
-	}}
 	service := approvals.New(store, nil, approvals.StaticAuthorizer{{
 		OrganizationID: "org-1", HumanID: "approver-1", Boundary: core.BoundaryDeployment, Risk: "HIGH",
 	}})
@@ -387,6 +370,14 @@ func TestLegacyActorlessPendingApprovalCanOnlyBeInspectedAndDenied(t *testing.T)
 	})
 	if err != nil || denied.Status != core.ApprovalDenied {
 		t.Fatalf("legacy pending approval could not be denied: approval=%+v err=%v", denied, err)
+	}
+	effectRecords, err := store.Records(t.Context(), "effect", string(obligation.ID))
+	if err != nil || len(effectRecords) != 2 {
+		t.Fatalf("legacy effect was not terminalized: versions=%d err=%v", len(effectRecords), err)
+	}
+	var cancelled core.EffectObligation
+	if err := json.Unmarshal(effectRecords[1], &cancelled); err != nil || cancelled.Status != core.EffectCancelled {
+		t.Fatalf("legacy effect was not cancelled: effect=%+v err=%v", cancelled, err)
 	}
 }
 

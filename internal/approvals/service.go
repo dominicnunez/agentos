@@ -93,6 +93,10 @@ type Store interface {
 	Records(context.Context, string, string) ([][]byte, error)
 }
 
+type recoveredActorlessDenialStore interface {
+	AppendRecoveredActorlessDenial(context.Context, core.HumanApproval, core.EffectObligation) error
+}
+
 type pendingApprovalStore interface {
 	PendingApprovalRecords(context.Context, string, time.Time, int) ([][]byte, error)
 }
@@ -297,6 +301,17 @@ func (s *Service) Decide(ctx context.Context, decision Decision) (core.HumanAppr
 	}
 	approval.DecisionAt = &now
 	approval.DecidedBy = decision.HumanID
+	if approvalMatchesLegacyActorlessEffect(approval, obligation) {
+		store, ok := s.store.(recoveredActorlessDenialStore)
+		if !ok {
+			return core.HumanApproval{}, fmt.Errorf("legacy approval denial requires atomic effect cancellation")
+		}
+		obligation.Status = core.EffectCancelled
+		if err := store.AppendRecoveredActorlessDenial(ctx, approval, obligation); err != nil {
+			return core.HumanApproval{}, err
+		}
+		return approval, nil
+	}
 	if err := s.append(ctx, "APPROVAL_DECIDED", string(decision.HumanID), version+1, approval); err != nil {
 		return core.HumanApproval{}, err
 	}
@@ -550,6 +565,22 @@ func approvalMatchesLegacyActorlessEffect(approval core.HumanApproval, obligatio
 		approval.Boundary == obligation.ConsequenceBoundary
 	legacyFingerprint, err := legacyActorlessEffectFingerprint(obligation)
 	return sameWork && sameEffect && err == nil && obligation.EffectFingerprint == legacyFingerprint && approval.EffectFingerprint == legacyFingerprint
+}
+
+// ValidateRecoveredActorlessDenial admits only the terminal pair used to
+// retire an already-durable actorless approval/effect binding after upgrade.
+// It cannot validate an approval or an executable effect.
+func ValidateRecoveredActorlessDenial(approval core.HumanApproval, obligation core.EffectObligation) error {
+	if approval.Status != core.ApprovalDenied || approval.DecisionAt == nil || approval.DecisionAt.IsZero() || approval.DecidedBy == "" {
+		return fmt.Errorf("recovered legacy approval must be an attributed denial")
+	}
+	if obligation.Status != core.EffectCancelled {
+		return fmt.Errorf("recovered legacy effect must be cancelled")
+	}
+	if !approvalMatchesLegacyActorlessEffect(approval, obligation) {
+		return fmt.Errorf("recovered denial does not match an exact actorless legacy effect")
+	}
+	return nil
 }
 
 func legacyActorlessEffectFingerprint(obligation core.EffectObligation) (string, error) {

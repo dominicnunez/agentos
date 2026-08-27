@@ -196,6 +196,63 @@ func genericRecordKindAllowed(kind string) bool {
 	}
 }
 
+// AppendRecoveredActorlessDenial atomically terminalizes the one legacy state
+// that cannot pass the current effect boundary: an already-durable actorless
+// effect paired with an exact pending approval. This path can only deny and
+// cancel; it cannot approve, authorize, or attempt an effect.
+func (l *SQLite) AppendRecoveredActorlessDenial(ctx context.Context, denied core.HumanApproval, cancelled core.EffectObligation) error {
+	if err := approvals.ValidateRecoveredActorlessDenial(denied, cancelled); err != nil {
+		return err
+	}
+	deniedBody, err := json.Marshal(denied)
+	if err != nil {
+		return fmt.Errorf("encode recovered approval denial: %w", err)
+	}
+	cancelledBody, err := json.Marshal(cancelled)
+	if err != nil {
+		return fmt.Errorf("encode recovered effect cancellation: %w", err)
+	}
+	return l.withTx(ctx, func(tx *sql.Tx) error {
+		var approvalVersion, effectVersion int
+		var approvalBody, effectBody []byte
+		if err := tx.QueryRowContext(ctx, `SELECT version,body FROM records WHERE kind='approval' AND record_id=? ORDER BY version DESC LIMIT 1`, denied.ID).Scan(&approvalVersion, &approvalBody); err != nil {
+			return fmt.Errorf("read legacy approval: %w", err)
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT version,body FROM records WHERE kind='effect' AND record_id=? ORDER BY version DESC LIMIT 1`, cancelled.ID).Scan(&effectVersion, &effectBody); err != nil {
+			return fmt.Errorf("read legacy effect: %w", err)
+		}
+		var currentApproval core.HumanApproval
+		if err := decodeExactJSONBytes(approvalBody, &currentApproval); err != nil {
+			return fmt.Errorf("decode legacy approval: %w", err)
+		}
+		var currentEffect core.EffectObligation
+		if err := decodeExactJSONBytes(effectBody, &currentEffect); err != nil {
+			return fmt.Errorf("decode legacy effect: %w", err)
+		}
+		if currentApproval.Status != core.ApprovalPendingDecision || currentEffect.Status != core.EffectPending {
+			return fmt.Errorf("legacy denial requires pending decision and effect")
+		}
+		expectedApproval := currentApproval
+		expectedApproval.Status = core.ApprovalDenied
+		expectedApproval.DecisionAt = denied.DecisionAt
+		expectedApproval.DecidedBy = denied.DecidedBy
+		expectedEffect := currentEffect
+		expectedEffect.Status = core.EffectCancelled
+		if !reflect.DeepEqual(expectedApproval, denied) || !reflect.DeepEqual(expectedEffect, cancelled) {
+			return fmt.Errorf("legacy denial changes fields outside the terminal transition")
+		}
+		if err := approvals.ValidateRecoveredActorlessDenial(expectedApproval, expectedEffect); err != nil {
+			return err
+		}
+		approvalDraft := events.TrustedDraft{OrganizationID: string(denied.OrganizationID), EventType: "APPROVAL_DECIDED", SourceActorID: string(denied.DecidedBy), TaskID: string(denied.TaskID), Payload: denied}
+		if err := appendRecord(ctx, tx, approvalDraft, "approval", string(denied.ID), approvalVersion+1, deniedBody); err != nil {
+			return err
+		}
+		effectDraft := events.TrustedDraft{OrganizationID: string(cancelled.OrganizationID), EventType: "EFFECT_OBLIGATION_TRANSITIONED", TaskID: string(cancelled.TaskID), AuthorizationRefs: cancelled.AuthorizationRefs, ArtifactRefs: cancelled.ConfirmationEvidenceRefs, Payload: cancelled}
+		return appendRecord(ctx, tx, effectDraft, "effect", string(cancelled.ID), effectVersion+1, cancelledBody)
+	})
+}
+
 // AppendProjection atomically appends a trusted transition and its versioned,
 // rebuildable projection record. The event payload includes the full record so
 // the records table can be regenerated from the append-only ledger.
