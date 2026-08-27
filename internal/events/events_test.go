@@ -759,6 +759,60 @@ func TestKnowledgeJudgmentRequiresStatementSeparateFromAuthorization(t *testing.
 	}
 }
 
+func TestKnowledgeJudgmentRejectsEveryUnboundCapabilityReference(t *testing.T) {
+	now := time.Unix(30, 0).UTC()
+	candidateVersion := 1
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "reviewer-1", ActorKind: core.PrincipalHuman, Action: "knowledge.validate", Resource: "knowledge-1", Scope: "org-1", OriginTaskID: "task-validation"}
+	trace := core.AuthorizationTrace{Allowed: true, LeaseID: lease.ID, ActorID: lease.ActorID, ActorKind: lease.ActorKind, TaskID: lease.OriginTaskID, Action: lease.Action, Resource: lease.Resource, Scope: lease.Scope}
+	traceBody, err := json.Marshal(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability := Event{
+		EventID: "capability-checked", Sequence: 20, OrganizationID: "org-1", EventType: "CAPABILITY_CHECKED",
+		SourceActorID: "reviewer-1", TaskID: "task-validation", AuthorizationRefs: []string{"lease-1"}, Payload: traceBody,
+		CreatedAt: now, SchemaVersion: SchemaVersion,
+	}
+	judgmentBody, err := json.Marshal(KnowledgeJudgmentPayload{
+		KnowledgeID: "knowledge-1", CandidateVersion: candidateVersion, Decision: KnowledgeJudgmentValidated,
+		Statement: "I independently validate this candidate.", CapabilityCheckEventID: capability.EventID,
+		SourcePrincipalID: "reviewer-1", SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", ArtifactRefs: []string{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement := Event{
+		EventID: "judgment-1", Sequence: 21, OrganizationID: "org-1", EventType: "HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED",
+		SourceActorID: "reviewer-1", TaskID: "task-validation", CorrelationID: "work-validation", Payload: judgmentBody,
+		CreatedAt: now.Add(time.Second), SchemaVersion: SchemaVersion,
+	}
+	activation := Event{Sequence: 30, OrganizationID: "org-1", CreatedAt: now.Add(2 * time.Second)}
+	knowledge := core.KnowledgeRecord{
+		KnowledgeID: "knowledge-1", OrganizationID: "org-1", Version: 2, SupersedesVersion: &candidateVersion,
+		ValidationMethod: core.KnowledgeValidationHuman, ValidationRefs: []string{capability.EventID, statement.EventID},
+		ValidatedBy: "reviewer-1", ValidatedByKind: core.PrincipalHuman,
+	}
+	validator := NewKnowledgeAdmissionValidator([]Event{capability, statement})
+	validator.UseCapabilityLeaseAdmissions([]CapabilityLeaseAdmission{{OrganizationID: "org-1", Lease: lease, Sequence: 10}})
+	if !validator.hasAuthorizedJudgment(knowledge, 10, activation) {
+		t.Fatal("exact capability and judgment pair was rejected")
+	}
+	unbound := capability
+	unbound.EventID = "capability-unbound"
+	var unboundTrace core.AuthorizationTrace = trace
+	unboundTrace.Resource = "knowledge-other"
+	unbound.Payload, err = json.Marshal(unboundTrace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	knowledge.ValidationRefs = append(knowledge.ValidationRefs, unbound.EventID)
+	validator = NewKnowledgeAdmissionValidator([]Event{capability, statement, unbound})
+	validator.UseCapabilityLeaseAdmissions([]CapabilityLeaseAdmission{{OrganizationID: "org-1", Lease: lease, Sequence: 10}})
+	if validator.hasAuthorizedJudgment(knowledge, 10, activation) {
+		t.Fatal("an unrelated capability check was admitted as permanent validation evidence")
+	}
+}
+
 func TestKnowledgeEvidenceArtifactsMustBelongToCandidate(t *testing.T) {
 	if !knowledgeEvidenceArtifactsBound([]string{"artifact-1"}, []string{"artifact-1", "artifact-2"}) {
 		t.Fatal("candidate-bound evidence artifact was rejected")

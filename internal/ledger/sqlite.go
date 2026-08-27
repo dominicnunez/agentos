@@ -1182,13 +1182,7 @@ ORDER BY e.sequence`, draft.Event.OrganizationID, route.Scope, route.ID, cutoff)
 			}
 			selections = append(selections, events.InboxSelection{Route: route, Events: selected})
 		}
-		knowledgeRecords, err := admittedProjectionRecords(ctx, tx, `JOIN (
-	SELECT record_id,MAX(version) AS version FROM records
-	WHERE kind='knowledge' AND json_extract(body,'$.value.organization_id')=?
-	GROUP BY record_id
-) AS latest ON latest.record_id=r.record_id AND latest.version=r.version
-WHERE r.kind='knowledge' AND e.organization_id=? AND e.sequence<?
-ORDER BY e.sequence DESC,r.record_id`, draft.Event.OrganizationID, draft.Event.OrganizationID, started.Sequence)
+		knowledgeRecords, err := currentExecutionKnowledgeRecords(ctx, tx, draft.Event.OrganizationID, task, started.Sequence, expectedRoutes)
 		if err != nil {
 			return fmt.Errorf("read current Agent execution knowledge: %w", err)
 		}
@@ -1226,12 +1220,65 @@ ORDER BY e.sequence DESC,r.record_id`, draft.Event.OrganizationID, draft.Event.O
 	return started, selections, err
 }
 
+const (
+	maximumCurrentExecutionKnowledgeScan = 1024
+	maximumExecutionKnowledgeTeamScopes  = 256
+)
+
+func currentExecutionKnowledgeRecords(ctx context.Context, tx *sql.Tx, organizationID string, task core.Task, startSequence int64, routes []events.InboxRoute) ([]admittedProjectionRecord, error) {
+	teamIDs := make([]string, 0, len(routes))
+	for _, route := range routes {
+		if route.Scope == events.RecipientTeam {
+			teamIDs = append(teamIDs, route.ID)
+		}
+	}
+	if len(teamIDs) > maximumExecutionKnowledgeTeamScopes {
+		return nil, fmt.Errorf("Agent execution knowledge crosses too many Team scopes")
+	}
+	query := `JOIN (
+	SELECT record_id,MAX(version) AS version FROM records
+	WHERE kind='knowledge' AND json_extract(body,'$.value.organization_id')=?
+	GROUP BY record_id
+) AS latest ON latest.record_id=r.record_id AND latest.version=r.version
+WHERE r.kind='knowledge' AND e.organization_id=? AND e.sequence<?
+AND json_extract(r.body,'$.value.status')=?
+AND ((json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scope_id')=?)
+OR (json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scope_id')=?)`
+	args := []any{
+		organizationID, organizationID, startSequence, string(core.KnowledgeActive),
+		string(core.KnowledgeScopeOrganization), organizationID,
+		string(core.KnowledgeScopeAgent), string(task.AssigneeID),
+	}
+	if len(teamIDs) > 0 {
+		query += ` OR (json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scope_id') IN (`
+		args = append(args, string(core.KnowledgeScopeTeam))
+		for index, teamID := range teamIDs {
+			if index > 0 {
+				query += ","
+			}
+			query += "?"
+			args = append(args, teamID)
+		}
+		query += "))"
+	}
+	query += ") ORDER BY e.sequence DESC,r.record_id LIMIT ?"
+	args = append(args, maximumCurrentExecutionKnowledgeScan+1)
+	records, err := admittedProjectionRecords(ctx, tx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) > maximumCurrentExecutionKnowledgeScan {
+		return nil, fmt.Errorf("Agent execution knowledge candidate scan exceeds %d current records", maximumCurrentExecutionKnowledgeScan)
+	}
+	return records, nil
+}
+
 func validateExecutionStartManifest(ctx context.Context, tx *sql.Tx, task core.Task, started events.Event, requested events.ExecutionStartDetail, selection events.ExecutionStartSelection, manifest core.ExecutionContextManifest) error {
 	_, offset := manifest.CreatedAt.Zone()
 	if manifest.ExecutionID == "" || manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID ||
 		manifest.AgentBlueprintVersion == "" || manifest.ExecutionProfileVersion == "" || manifest.RuntimeAdapter == "" ||
 		manifest.Provider == "" || manifest.Model == "" || manifest.TaskContractVersion == "" || manifest.PromptVersion == "" ||
-		manifest.PolicyVersion == "" || manifest.ContextBuilderVersion == "" || manifest.CreatedAt.IsZero() || offset != 0 ||
+		manifest.PolicyVersion == "" || manifest.ContextBuilderVersion != "v2" || manifest.CreatedAt.IsZero() || offset != 0 ||
 		!manifest.CreatedAt.Equal(started.CreatedAt) || len(manifest.ExecutionInputSHA256) != sha256.Size*2 {
 		return fmt.Errorf("agent execution manifest identity and pinned runtime are invalid")
 	}

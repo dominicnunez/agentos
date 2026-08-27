@@ -174,9 +174,8 @@ func auditActiveKnowledge(knowledgeID core.ID, revision auditedKnowledgeRevision
 	for _, ref := range value.DerivedKnowledgeRefs {
 		version, err := strconv.Atoi(ref.Version)
 		source, found := revisions[core.ID(ref.ID)][version]
-		current, currentFound := latest[core.ID(ref.ID)]
 		if err != nil || !found || source.value.OrganizationID != value.OrganizationID || source.value.Status != core.KnowledgeActive ||
-			!currentFound || current.value.Version != version || current.value.Status != core.KnowledgeActive {
+			!auditedKnowledgeLineageActive(core.ID(ref.ID), version, revisions, latest, make(map[auditedKnowledgeLineageKey]struct{}), make(map[auditedKnowledgeLineageKey]bool)) {
 			evidenceRefs := []string{revision.admission.EventID}
 			if source.admission.EventID != "" {
 				evidenceRefs = append(evidenceRefs, source.admission.EventID)
@@ -192,6 +191,39 @@ func auditActiveKnowledge(knowledgeID core.ID, revision auditedKnowledgeRevision
 		findings = append(findings, newFinding("knowledge-revalidation-"+string(knowledgeID), "knowledge_revalidation_due", string(knowledgeID), []string{revision.admission.EventID}, now))
 	}
 	return findings
+}
+
+type auditedKnowledgeLineageKey struct {
+	knowledgeID core.ID
+	version     int
+}
+
+func auditedKnowledgeLineageActive(knowledgeID core.ID, version int, revisions map[core.ID]map[int]auditedKnowledgeRevision, latest map[core.ID]auditedKnowledgeRevision, visiting map[auditedKnowledgeLineageKey]struct{}, memo map[auditedKnowledgeLineageKey]bool) bool {
+	key := auditedKnowledgeLineageKey{knowledgeID: knowledgeID, version: version}
+	if active, resolved := memo[key]; resolved {
+		return active
+	}
+	revision, found := revisions[knowledgeID][version]
+	current, currentFound := latest[knowledgeID]
+	if !found || !currentFound || revision.value.Status != core.KnowledgeActive || current.value.Version != version || current.value.Status != core.KnowledgeActive {
+		memo[key] = false
+		return false
+	}
+	if _, cycle := visiting[key]; cycle {
+		memo[key] = false
+		return false
+	}
+	visiting[key] = struct{}{}
+	defer delete(visiting, key)
+	for _, ref := range revision.value.DerivedKnowledgeRefs {
+		sourceVersion, err := strconv.Atoi(ref.Version)
+		if err != nil || !auditedKnowledgeLineageActive(core.ID(ref.ID), sourceVersion, revisions, latest, visiting, memo) {
+			memo[key] = false
+			return false
+		}
+	}
+	memo[key] = true
+	return true
 }
 
 func newFinding(id, rule, scope string, refs []string, now time.Time) Finding {

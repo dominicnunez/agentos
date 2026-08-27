@@ -2570,6 +2570,36 @@ func TestTaskCompletionBindingUsesWorkAtCompletionSequence(t *testing.T) {
 	}
 }
 
+func TestExecutionStartRequiresCurrentContextBuilderVersion(t *testing.T) {
+	created := time.Unix(10, 0).UTC()
+	task := core.Task{ID: "task-1", AssigneeID: "agent-1", ExecutionKind: core.ExecutionAgent}
+	started := events.Event{OrganizationID: "org-1", Sequence: 10, CreatedAt: created}
+	manifest := core.ExecutionContextManifest{
+		ExecutionID: "execution-1", TaskID: task.ID, AgentID: task.AssigneeID,
+		AgentBlueprintVersion: "v1", ExecutionProfileVersion: "v1", RuntimeAdapter: "fake", Provider: "fake", Model: "fake",
+		TaskContractVersion: "v1", PromptVersion: "v1", PolicyVersion: "v1", ContextBuilderVersion: "v1",
+		ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: created,
+	}
+	if err := validateExecutionStartManifest(context.Background(), nil, task, started, events.ExecutionStartDetail{}, events.ExecutionStartSelection{}, manifest); err == nil {
+		t.Fatal("new execution admitted the historical v1 context-builder contract")
+	}
+	manifest.ContextBuilderVersion = "v2"
+	if err := validateExecutionStartManifest(context.Background(), nil, task, started, events.ExecutionStartDetail{}, events.ExecutionStartSelection{}, manifest); err != nil {
+		t.Fatalf("current v2 context-builder contract was rejected: %v", err)
+	}
+}
+
+func TestExecutionKnowledgeRejectsUnboundedTeamScopes(t *testing.T) {
+	routes := make([]events.InboxRoute, 0, maximumExecutionKnowledgeTeamScopes+1)
+	for index := 0; index <= maximumExecutionKnowledgeTeamScopes; index++ {
+		routes = append(routes, events.InboxRoute{Scope: events.RecipientTeam, ID: fmt.Sprintf("team-%d", index)})
+	}
+	_, err := currentExecutionKnowledgeRecords(context.Background(), nil, "org-1", core.Task{AssigneeID: "agent-1"}, 10, routes)
+	if err == nil {
+		t.Fatal("unbounded Team-scoped knowledge query was accepted")
+	}
+}
+
 func TestGoalProgressWitnessSelectionCrossesFormerEvidenceWindow(t *testing.T) {
 	ctx := context.Background()
 	l, err := Open(":memory:")

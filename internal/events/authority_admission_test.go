@@ -43,6 +43,25 @@ func TestResolveAuthorityAdmissionsKeepsLeaseRevisionsInGrantOrganization(t *tes
 	}
 }
 
+func TestValidateAuthorityRecordTransitionPreservesActorKindAtRevocation(t *testing.T) {
+	grantedAt := time.Unix(1, 0).UTC()
+	revokedAt := grantedAt.Add(time.Second)
+	lease := core.CapabilityLease{ID: "lease-1", ActorID: "agent-1", ActorKind: core.PrincipalAgent, Action: "write", Resource: "record-1", Scope: "org-1", OriginTaskID: "task-1"}
+	grantBody, err := json.Marshal(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.ActorKind = core.PrincipalExternalAgent
+	lease.RevokedAt = &revokedAt
+	revocationBody, err := json.Marshal(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAuthorityRecordTransition(authorityKindLease, "lease-1", 2, revocationBody, grantBody); err == nil {
+		t.Fatal("lease revocation changed the durable principal kind")
+	}
+}
+
 func TestResolveAuthorityAdmissionsHasNoLifetimeEventLimit(t *testing.T) {
 	const count = 4097
 	stream := make([]Event, 0, count)

@@ -129,7 +129,7 @@ func ValidateAuthorityRecordTransition(kind, recordID string, version int, body,
 		}
 		var prior core.CapabilityLease
 		if decodeExactEventJSON(priorBody, &prior) != nil || prior.RevokedAt != nil ||
-			prior.ID != current.ID || prior.ActorID != current.ActorID || prior.Action != current.Action ||
+			prior.ID != current.ID || prior.ActorID != current.ActorID || prior.ActorKind != current.ActorKind || prior.Action != current.Action ||
 			prior.Resource != current.Resource || prior.Scope != current.Scope ||
 			prior.OriginTaskID != current.OriginTaskID || !sameOptionalTime(prior.ExpiresAt, current.ExpiresAt) {
 			return fmt.Errorf("capability revocation changes its granted authority")

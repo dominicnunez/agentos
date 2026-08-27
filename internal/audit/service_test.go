@@ -72,6 +72,42 @@ func TestAuditsActiveKnowledgeAgainstCurrentDerivedLineage(t *testing.T) {
 	}
 }
 
+func TestAuditsTransitiveDerivedKnowledgeLineage(t *testing.T) {
+	created := time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)
+	verified := created.Add(time.Hour)
+	stream := []events.Event{
+		{EventID: "source", Sequence: 1, OrganizationID: "org-1", EventType: "RESULT_PUBLISHED", CreatedAt: created, SchemaVersion: events.SchemaVersion},
+		{EventID: "validation", Sequence: 2, OrganizationID: "org-1", EventType: "TOOL_OUTCOME_RECORDED", CreatedAt: verified, SchemaVersion: events.SchemaVersion},
+	}
+	source := activeKnowledge("knowledge-source", created, verified, []string{"source"}, []string{"validation"})
+	middle := activeKnowledge("knowledge-middle", created, verified, []string{"source"}, []string{"validation"})
+	middle.Basis = core.KnowledgeBasisDerived
+	middle.DerivedKnowledgeRefs = []core.VersionedRef{{ID: string(source.KnowledgeID), Version: "2", MaterializationState: core.MaterializedFull}}
+	leaf := activeKnowledge("knowledge-leaf", created, verified, []string{"source"}, []string{"validation"})
+	leaf.Basis = core.KnowledgeBasisDerived
+	leaf.DerivedKnowledgeRefs = []core.VersionedRef{{ID: string(middle.KnowledgeID), Version: "2", MaterializationState: core.MaterializedFull}}
+	stream = append(stream, knowledgeProjectionEvent(t, 3, source), knowledgeProjectionEvent(t, 4, middle), knowledgeProjectionEvent(t, 5, leaf))
+	stale := source
+	stale.Version = 3
+	stale.Status = core.KnowledgeStale
+	stale.SupersedesVersion = intPointer(2)
+	stream = append(stream, knowledgeProjectionEvent(t, 6, stale))
+
+	findings, err := New(reader{stream}).WithKnowledgeVerificationMaxAge(24*time.Hour).RunAt(context.Background(), verified.Add(2*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundLeaf := false
+	for _, finding := range findings {
+		if finding.Rule == "knowledge_lineage_invalidated" && finding.Scope == string(leaf.KnowledgeID) {
+			foundLeaf = true
+		}
+	}
+	if !foundLeaf {
+		t.Fatalf("transitively invalid leaf knowledge was not reported: %+v", findings)
+	}
+}
+
 func activeKnowledge(id core.ID, created, verified time.Time, provenance, validation []string) core.KnowledgeRecord {
 	return core.KnowledgeRecord{
 		KnowledgeID: id, OrganizationID: "org-1", Version: 2, Type: core.KnowledgeLesson,

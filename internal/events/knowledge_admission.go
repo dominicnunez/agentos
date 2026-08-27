@@ -313,26 +313,31 @@ func governedKnowledgeValidator(kind core.PrincipalKind) bool {
 }
 
 func (v *KnowledgeAdmissionValidator) hasAuthorizedJudgment(value core.KnowledgeRecord, proposalSequence int64, activation Event) bool {
+	foundAuthorization := false
 	for _, ref := range value.ValidationRefs {
 		judgment, found := v.events[ref]
-		if !found || judgment.Sequence <= proposalSequence || judgment.EventType != "CAPABILITY_CHECKED" ||
+		if !found || judgment.EventType != "CAPABILITY_CHECKED" {
+			continue
+		}
+		if judgment.Sequence <= proposalSequence ||
 			judgment.OrganizationID != string(value.OrganizationID) || judgment.SourceActorID != string(value.ValidatedBy) ||
 			judgment.RecipientScope != "" || judgment.RecipientID != "" || judgment.TaskID == "" ||
 			len(judgment.AuthorizationRefs) == 0 || len(judgment.ArtifactRefs) != 0 || judgment.SchemaVersion != SchemaVersion {
-			continue
+			return false
 		}
 		var trace core.AuthorizationTrace
 		if decodeExactPayload(judgment.Payload, &trace) != nil || !trace.Allowed || trace.LeaseID == "" ||
 			trace.ActorID != value.ValidatedBy || trace.ActorKind != value.ValidatedByKind || trace.TaskID != core.ID(judgment.TaskID) ||
 			trace.Action != "knowledge.validate" || trace.Resource != string(value.KnowledgeID) || trace.Scope != string(value.OrganizationID) ||
-			!slices.Contains(judgment.AuthorizationRefs, string(trace.LeaseID)) {
-			continue
+			len(judgment.AuthorizationRefs) != 1 || judgment.AuthorizationRefs[0] != string(trace.LeaseID) {
+			return false
 		}
-		if v.leaseAllowsAt(trace, value, judgment, activation) && v.hasJudgmentStatementAfter(value, proposalSequence, judgment) {
-			return true
+		if !v.leaseAllowsAt(trace, value, judgment, activation) || !v.hasJudgmentStatementAfter(value, proposalSequence, judgment) {
+			return false
 		}
+		foundAuthorization = true
 	}
-	return false
+	return foundAuthorization
 }
 
 func (v *KnowledgeAdmissionValidator) hasJudgmentStatementAfter(value core.KnowledgeRecord, proposalSequence int64, authorization Event) bool {
