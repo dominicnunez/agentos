@@ -48,6 +48,8 @@ not copy confidential evidence into the repository.
 6. Run `python3 scripts/verify_aims_documents.py` and its unit tests.
 
 An approved record cannot return to draft under the same stable identifier.
+Once any stable record identifier enters controlled history, it cannot be
+deleted and later reintroduced with reset version history.
 Prepare its replacement as a new controlled record, then retire the approved
 record only through an approved, reciprocal supersession decision.
 
@@ -81,9 +83,12 @@ fails the assessment-readiness state while required approved audit, management
 review, applicability, and accountable decision records are absent or their
 review date is overdue. Approval alone is not an affirmative result. Manifest
 schema 2 binds closed machine-readable audit, management-review, applicability,
-and readiness dispositions to newly approved controlled evidence; readiness
-also requires a passing audit with zero open blocking findings, a decision to
+and readiness dispositions to the exact hash-bound contents of structured JSON
+outcome records and follows their approved successor chains. Readiness also
+requires a passing audit with zero open blocking findings, a decision to
 proceed, a complete applicability review, and an explicit ready decision.
+Bundles built through the test-only source-unverified path label both metadata
+records `SOURCE_UNVERIFIED` and cannot report readiness.
 
 The bundle deliberately excludes confidential operating evidence and cannot
 authenticate a governance decision merely because approval text appears in a

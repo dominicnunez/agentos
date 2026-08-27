@@ -121,12 +121,17 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
                 self.assertIn("SHA256SUMS", names)
                 self.assertTrue(all(not name.startswith("/") and ".." not in name.split("/") for name in names))
                 report = json.load(archive.extractfile("assessment/readiness.json"))  # type: ignore[arg-type]
+                evidence_index = json.load(
+                    archive.extractfile("assessment/evidence-index.json")  # type: ignore[arg-type]
+                )
                 self.assertFalse(report["certification_assessment_ready"])
                 self.assertFalse(report["conformity_determined"])
                 self.assertFalse(report["certified"])
                 self.assertIsNone(report["source"]["repository"])
                 self.assertIsNone(report["source"]["history_baseline"])
-                self.assertIn("UNAUTHENTICATED", report["source"]["binding"])
+                self.assertEqual(report["source"]["binding"], "SOURCE_UNVERIFIED")
+                self.assertIn("SOURCE_NOT_GIT_VERIFIED", report["blockers"])
+                self.assertEqual(evidence_index["source"]["binding"], "SOURCE_UNVERIFIED")
 
     def test_readiness_requires_approved_governance_records(self) -> None:
         report = readiness_report(
@@ -153,6 +158,7 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
             self.approved_readiness_manifest(outcomes),
             "a" * 40,
             datetime(2026, 8, 27, 12),
+            source_verified=True,
         )
         self.assertFalse(report["certification_assessment_ready"])
         self.assertIn("MANAGEMENT_REVIEW_BLOCKS_READINESS", report["blockers"])
@@ -164,6 +170,7 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
             self.approved_readiness_manifest(outcomes),
             "a" * 40,
             datetime(2026, 8, 27, 12),
+            source_verified=True,
         )
         self.assertFalse(report["certification_assessment_ready"])
         self.assertIn("INTERNAL_AUDIT_OUTCOME_BLOCKS_READINESS", report["blockers"])
@@ -174,6 +181,7 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
             self.approved_readiness_manifest(outcomes),
             "a" * 40,
             datetime(2026, 8, 27, 12),
+            source_verified=True,
         )
         self.assertTrue(report["certification_assessment_ready"])
         self.assertEqual(report["assessment_outcomes"], outcomes)

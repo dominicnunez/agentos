@@ -73,6 +73,120 @@ class VerifyAIMSDocumentsTest(unittest.TestCase):
             },
         }
 
+    def write_schema_two_outcomes(
+        self,
+        *,
+        audit_record_result: str = "PASS",
+        audit_successor: bool = False,
+    ) -> Path:
+        self.document.unlink()
+        outcomes = self.affirmative_outcomes()
+        records = {
+            "aims.audit-result": ("audit", outcomes["audit"]),
+            "aims.management-review-result": (
+                "management_review",
+                outcomes["management_review"],
+            ),
+            "aims.statement-of-applicability": (
+                "statement_of_applicability",
+                outcomes["statement_of_applicability"],
+            ),
+            "aims.assessment-readiness-decision": (
+                "readiness_decision",
+                outcomes["readiness_decision"],
+            ),
+        }
+        documents: list[dict[str, object]] = []
+        for document_id, (outcome_name, outcome) in records.items():
+            record_outcome = json.loads(json.dumps(outcome))
+            if outcome_name == "audit":
+                record_outcome["result"] = audit_record_result
+            path = f"governance/aims/records/{document_id.removeprefix('aims.')}.json"
+            data = (
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "lifecycle_status": "APPROVED",
+                        "outcome": record_outcome,
+                    },
+                    indent=2,
+                )
+                + "\n"
+            ).encode()
+            self.root.joinpath(*path.split("/")).write_bytes(data)
+            documents.append(
+                {
+                    "id": document_id,
+                    "path": path,
+                    "version": "1.0",
+                    "status": "APPROVED",
+                    "owner": "aims-manager",
+                    "classification": "PUBLIC",
+                    "approval_ref": f"decision-{document_id}",
+                    "approved_by": "project-owner",
+                    "approved_at": "2026-08-27T10:00:00Z",
+                    "review_due": "2027-08-27",
+                    "supersedes": [],
+                    "superseded_by": None,
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+            )
+        if audit_successor:
+            root = next(document for document in documents if document["id"] == "aims.audit-result")
+            root["version"] = "1.1"
+            root["status"] = "RETIRED"
+            root["approval_ref"] = "decision-retire-audit-v1"
+            root["approved_at"] = "2026-08-27T11:00:00Z"
+            root["superseded_by"] = "aims.audit-result-v2"
+            root_record = {
+                "schema_version": 1,
+                "lifecycle_status": "RETIRED",
+                "outcome": outcomes["audit"],
+            }
+            root_data = (json.dumps(root_record, indent=2) + "\n").encode()
+            self.root.joinpath(*str(root["path"]).split("/")).write_bytes(root_data)
+            root["sha256"] = hashlib.sha256(root_data).hexdigest()
+
+            successor_outcome = json.loads(json.dumps(outcomes["audit"]))
+            successor_outcome["document_id"] = "aims.audit-result-v2"
+            outcomes["audit"] = successor_outcome
+            successor_path = "governance/aims/records/audit-result-v2.json"
+            successor_data = (
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "lifecycle_status": "APPROVED",
+                        "outcome": successor_outcome,
+                    },
+                    indent=2,
+                )
+                + "\n"
+            ).encode()
+            self.root.joinpath(*successor_path.split("/")).write_bytes(successor_data)
+            documents.append(
+                {
+                    "id": "aims.audit-result-v2",
+                    "path": successor_path,
+                    "version": "1.0",
+                    "status": "APPROVED",
+                    "owner": "aims-manager",
+                    "classification": "PUBLIC",
+                    "approval_ref": "decision-audit-v2",
+                    "approved_by": "project-owner",
+                    "approved_at": "2026-08-27T11:00:00Z",
+                    "review_due": "2027-08-27",
+                    "supersedes": ["aims.audit-result"],
+                    "superseded_by": None,
+                    "sha256": hashlib.sha256(successor_data).hexdigest(),
+                }
+            )
+        manifest = {
+            "schema_version": 2,
+            "documents": sorted(documents, key=lambda document: str(document["id"])),
+            "assessment_outcomes": outcomes,
+        }
+        return self.write_manifest(manifest)
+
     def write_manifest(self, manifest: dict[str, object]) -> Path:
         path = self.root / "governance" / "aims" / "manifest.json"
         path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n")
@@ -96,6 +210,17 @@ class VerifyAIMSDocumentsTest(unittest.TestCase):
             (json.dumps(manifest) + "\n").encode(), "test manifest"
         )
         self.assertEqual(parsed["assessment_outcomes"], manifest["assessment_outcomes"])
+
+    def test_accepts_outcomes_bound_to_structured_approved_records(self) -> None:
+        verify(self.root, self.write_schema_two_outcomes())
+
+    def test_rejects_outcome_that_disagrees_with_hash_bound_record(self) -> None:
+        path = self.write_schema_two_outcomes(audit_record_result="FAIL")
+        with self.assertRaisesRegex(VerificationError, "does not match its hash-bound"):
+            verify(self.root, path)
+
+    def test_accepts_outcome_bound_to_current_approved_successor(self) -> None:
+        verify(self.root, self.write_schema_two_outcomes(audit_successor=True))
 
     def test_rejects_boolean_blocking_finding_count(self) -> None:
         outcomes = self.affirmative_outcomes()
@@ -282,7 +407,15 @@ class VerifyAIMSDocumentsTest(unittest.TestCase):
         self.document.unlink()
         current = {"schema_version": 1, "documents": []}
         path = self.write_manifest(current)
-        with self.assertRaisesRegex(VerificationError, "approved controlled history was removed"):
+        with self.assertRaisesRegex(VerificationError, "controlled history was removed"):
+            verify(self.root, path, prior_manifest_bytes=(json.dumps(prior) + "\n").encode())
+
+    def test_rejects_removal_of_draft_history(self) -> None:
+        prior = self.manifest()
+        self.document.unlink()
+        current = {"schema_version": 1, "documents": []}
+        path = self.write_manifest(current)
+        with self.assertRaisesRegex(VerificationError, "controlled history was removed"):
             verify(self.root, path, prior_manifest_bytes=(json.dumps(prior) + "\n").encode())
 
     def test_rejects_changed_approved_history_without_version_increment(self) -> None:

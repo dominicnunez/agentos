@@ -356,6 +356,7 @@ def readiness_report(
     assessment_at: datetime,
     commit_at: datetime | None = None,
     history_baseline: str | None = None,
+    source_verified: bool = False,
 ) -> dict[str, Any]:
     documents = manifest["documents"]
     documents_by_id = {entry["id"]: entry for entry in documents}
@@ -415,6 +416,14 @@ def readiness_report(
             blockers.append("CONTROL_APPLICABILITY_REVIEW_INCOMPLETE")
         if outcomes["readiness_decision"]["disposition"] != "READY":
             blockers.append("ACCOUNTABLE_DECISION_IS_NOT_READY")
+    if not source_verified:
+        blockers.append("SOURCE_NOT_GIT_VERIFIED")
+
+    source_binding = (
+        "LOCAL_GIT_OBJECTS_VERIFIED_REPOSITORY_IDENTITY_UNAUTHENTICATED"
+        if source_verified
+        else "SOURCE_UNVERIFIED"
+    )
 
     return {
         "schema_version": 1,
@@ -428,7 +437,7 @@ def readiness_report(
                 else None
             ),
             "history_baseline": history_baseline,
-            "binding": "LOCAL_GIT_OBJECTS_VERIFIED_REPOSITORY_IDENTITY_UNAUTHENTICATED",
+            "binding": source_binding,
         },
         "assessment_at": assessment_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "claim": "READINESS_WORK_IN_PROGRESS",
@@ -548,7 +557,11 @@ def build(
                     else None
                 ),
                 "history_baseline": history_baseline,
-                "binding": "LOCAL_GIT_OBJECTS_VERIFIED_REPOSITORY_IDENTITY_UNAUTHENTICATED",
+                "binding": (
+                    "LOCAL_GIT_OBJECTS_VERIFIED_REPOSITORY_IDENTITY_UNAUTHENTICATED"
+                    if verify_source
+                    else "SOURCE_UNVERIFIED"
+                ),
             },
             "entries": evidence_index,
         }
@@ -560,6 +573,7 @@ def build(
             assessment_at,
             commit_at,
             history_baseline,
+            verify_source,
         )
     )
     entries["ASSESSMENT_README.txt"] = (

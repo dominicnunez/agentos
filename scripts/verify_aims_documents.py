@@ -49,6 +49,7 @@ OUTCOME_DOCUMENT_IDS = {
     "statement_of_applicability": "aims.statement-of-applicability",
     "readiness_decision": "aims.assessment-readiness-decision",
 }
+OUTCOME_RECORD_KEYS = {"schema_version", "lifecycle_status", "outcome"}
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9.-]{2,63}$")
 VERSION_PATTERN = re.compile(r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -157,8 +158,9 @@ def _validate_assessment_outcomes(value: Any, label: str) -> None:
         if not isinstance(outcome, dict):
             raise VerificationError(f"{outcome_label} must be an object")
         _require_exact_keys(outcome, keys, outcome_label)
-        if outcome["document_id"] != OUTCOME_DOCUMENT_IDS[outcome_name]:
-            raise VerificationError(f"{outcome_label}.document_id is not the required controlled record")
+        document_id = _require_string(outcome["document_id"], f"{outcome_label}.document_id", 64)
+        if not ID_PATTERN.fullmatch(document_id):
+            raise VerificationError(f"{outcome_label}.document_id is not a stable controlled-record id")
         if outcome[result_key] not in allowed:
             raise VerificationError(f"{outcome_label}.{result_key} must be one of {sorted(allowed)}")
         if outcome_name == "audit":
@@ -167,6 +169,52 @@ def _validate_assessment_outcomes(value: Any, label: str) -> None:
                 raise VerificationError(
                     f"{outcome_label}.open_blocking_findings must be an integer from 0 through 10000"
                 )
+
+
+def _parse_outcome_record_bytes(
+    data: bytes, outcome_name: str, document_id: str
+) -> dict[str, Any]:
+    try:
+        record = json.loads(
+            data,
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (json.JSONDecodeError, VerificationError) as exc:
+        raise VerificationError(f"invalid structured outcome record JSON: {document_id}: {exc}") from exc
+    if not isinstance(record, dict):
+        raise VerificationError(f"structured outcome record must be an object: {document_id}")
+    _require_exact_keys(record, OUTCOME_RECORD_KEYS, f"outcome record {document_id}")
+    if type(record["schema_version"]) is not int or record["schema_version"] != 1:
+        raise VerificationError(f"outcome record {document_id}.schema_version must equal 1")
+    if record["lifecycle_status"] not in STATUSES:
+        raise VerificationError(f"outcome record {document_id}.lifecycle_status is invalid")
+    defaults: dict[str, dict[str, Any]] = {
+        "audit": {
+            "document_id": OUTCOME_DOCUMENT_IDS["audit"],
+            "result": "FAIL",
+            "open_blocking_findings": 0,
+        },
+        "management_review": {
+            "document_id": OUTCOME_DOCUMENT_IDS["management_review"],
+            "disposition": "DO_NOT_PROCEED",
+        },
+        "statement_of_applicability": {
+            "document_id": OUTCOME_DOCUMENT_IDS["statement_of_applicability"],
+            "result": "INCOMPLETE",
+        },
+        "readiness_decision": {
+            "document_id": OUTCOME_DOCUMENT_IDS["readiness_decision"],
+            "disposition": "NOT_READY",
+        },
+    }
+    defaults[outcome_name] = record["outcome"]
+    _validate_assessment_outcomes(defaults, f"outcome record {document_id}")
+    if record["outcome"]["document_id"] != document_id:
+        raise VerificationError(
+            f"structured outcome record document_id does not match its manifest id: {document_id}"
+        )
+    return record
 
 
 def _validate_timestamp(value: str, label: str) -> None:
@@ -197,9 +245,9 @@ def _validate_document_path(repo_root: Path, raw_path: Any, label: str) -> Path:
         or path_text != path_text.lower()
         or not PATH_PATTERN.fullmatch(path_text)
         or not path_text.startswith("governance/aims/records/")
-        or posix_path.suffix != ".md"
+        or posix_path.suffix not in {".md", ".json"}
     ):
-        raise VerificationError(f"{label}.path is outside the controlled Markdown allowlist: {path_text}")
+        raise VerificationError(f"{label}.path is outside the controlled file allowlist: {path_text}")
 
     candidate = repo_root.joinpath(*posix_path.parts)
     current = repo_root
@@ -256,17 +304,16 @@ def verify_history(
             prior_outcome = None if prior_outcomes is None else prior_outcomes[outcome_name]
             if current_outcomes[outcome_name] == prior_outcome:
                 continue
-            if current_by_id.get(document_id) == prior_by_id.get(document_id):
+            current_document_id = current_outcomes[outcome_name]["document_id"]
+            if current_by_id.get(current_document_id) == prior_by_id.get(current_document_id):
                 raise VerificationError(
-                    f"assessment outcome changed without newly approved evidence: {document_id}"
+                    f"assessment outcome changed without newly approved evidence: {current_document_id}"
                 )
     for document_id, prior in prior_by_id.items():
         current = current_by_id.get(document_id)
         prior_status = prior["status"]
         if current is None:
-            if prior_status in {"APPROVED", "RETIRED"}:
-                raise VerificationError(f"approved controlled history was removed: {document_id}")
-            continue
+            raise VerificationError(f"controlled history was removed: {document_id}")
         current_status = current["status"]
         prior_version = _version_tuple(prior["version"], f"prior {document_id}.version")
         current_version = _version_tuple(current["version"], f"current {document_id}.version")
@@ -316,6 +363,8 @@ def verify(
     paths: set[str] = set()
     prior_id = ""
     total_bytes = 0
+    document_bytes_by_id: dict[str, bytes] = {}
+    document_paths_by_id: dict[str, str] = {}
     for index, document in enumerate(documents):
         label = f"manifest.documents[{index}]"
         if not isinstance(document, dict):
@@ -387,28 +436,24 @@ def verify(
         if not isinstance(expected_sha, str) or not SHA256_PATTERN.fullmatch(expected_sha):
             raise VerificationError(f"{label}.sha256 must be a lowercase SHA-256 digest")
         data = _read_controlled_bytes(path, MAX_DOCUMENT_BYTES, "controlled AIMS document")
+        document_bytes_by_id[document_id] = data
+        document_paths_by_id[document_id] = path_text
         total_bytes += len(data)
         if total_bytes > MAX_TOTAL_DOCUMENT_BYTES:
             raise VerificationError(f"controlled AIMS documents exceed {MAX_TOTAL_DOCUMENT_BYTES} aggregate bytes")
         actual_sha = hashlib.sha256(data).hexdigest()
         if actual_sha != expected_sha:
             raise VerificationError(f"{label}.sha256 does not match {path_text}")
-        displayed_statuses = DISPLAYED_STATUS_PATTERN.findall(data.decode("utf-8"))
-        if enforce_display_status and displayed_statuses != [status]:
-            raise VerificationError(f"{label} displayed lifecycle status does not match the manifest")
+        if path.suffix == ".md":
+            displayed_statuses = DISPLAYED_STATUS_PATTERN.findall(data.decode("utf-8"))
+            if enforce_display_status and displayed_statuses != [status]:
+                raise VerificationError(f"{label} displayed lifecycle status does not match the manifest")
         if status in {"APPROVED", "RETIRED"}:
             text = data.decode("utf-8").upper()
             if any(marker in text for marker in UNRESOLVED_MARKERS):
                 raise VerificationError(f"{label} contains an unresolved placeholder marker")
 
     documents_by_id = {entry["id"]: entry for entry in documents}
-    if manifest["schema_version"] == 2:
-        for outcome_name, document_id in OUTCOME_DOCUMENT_IDS.items():
-            document = documents_by_id.get(document_id)
-            if document is None or document["status"] != "APPROVED":
-                raise VerificationError(
-                    f"assessment_outcomes.{outcome_name} must reference an APPROVED controlled record"
-                )
     retired_ids = {entry["id"] for entry in documents if entry["status"] == "RETIRED"}
     for index, document in enumerate(documents):
         successor = document["superseded_by"]
@@ -448,6 +493,53 @@ def verify(
             current = documents_by_id[successor_id]
         if current["status"] != "APPROVED":
             raise VerificationError(f"controlled successor chain does not terminate in APPROVED: {document_id}")
+
+    if manifest["schema_version"] == 2:
+        outcome_chain_ids: set[str] = set()
+        for outcome_name, root_document_id in OUTCOME_DOCUMENT_IDS.items():
+            current = documents_by_id.get(root_document_id)
+            if current is None:
+                raise VerificationError(
+                    f"assessment_outcomes.{outcome_name} is missing its controlled root record"
+                )
+            chain: list[dict[str, Any]] = []
+            while current["status"] == "RETIRED":
+                chain.append(current)
+                current = documents_by_id[current["superseded_by"]]
+            chain.append(current)
+            outcome_chain_ids.update(document["id"] for document in chain)
+            declared_outcome = manifest["assessment_outcomes"][outcome_name]
+            if current["status"] != "APPROVED" or declared_outcome["document_id"] != current["id"]:
+                raise VerificationError(
+                    f"assessment_outcomes.{outcome_name} must identify the current APPROVED successor"
+                )
+            for document in chain:
+                document_id = document["id"]
+                path_text = document_paths_by_id[document_id]
+                if PurePosixPath(path_text).suffix != ".json":
+                    raise VerificationError(
+                        f"assessment outcome record must use structured JSON: {document_id}"
+                    )
+                record = _parse_outcome_record_bytes(
+                    document_bytes_by_id[document_id], outcome_name, document_id
+                )
+                if record["lifecycle_status"] != document["status"]:
+                    raise VerificationError(
+                        f"assessment outcome record lifecycle does not match the manifest: {document_id}"
+                    )
+                if document_id == current["id"] and record["outcome"] != declared_outcome:
+                    raise VerificationError(
+                        f"assessment outcome does not match its hash-bound approved record: {document_id}"
+                    )
+        unexpected_json = sorted(
+            document_id
+            for document_id, path_text in document_paths_by_id.items()
+            if PurePosixPath(path_text).suffix == ".json" and document_id not in outcome_chain_ids
+        )
+        if unexpected_json:
+            raise VerificationError(
+                f"structured AIMS JSON records are outside the outcome allowlist: {unexpected_json}"
+            )
 
     records_root = repo_root / "governance" / "aims" / "records"
     if records_root.exists():
