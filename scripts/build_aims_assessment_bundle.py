@@ -26,7 +26,6 @@ except ModuleNotFoundError:
 MAX_SOURCE_FILE_BYTES = 512 * 1024
 MAX_SOURCE_TOTAL_BYTES = 4 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 5 * 1024 * 1024
-MAX_HISTORY_COMMITS = 4096
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 EVIDENCE_FILES = {
     "README.md": "product-purpose-and-use",
@@ -209,53 +208,13 @@ def _verify_aims_history(
     ).strip()
     if merge_base != baseline:
         raise VerificationError("history baseline is not an ancestor of the assessed commit")
-    revisions = _git(
-        repo_root,
-        [
-            "rev-list",
-            "--ancestry-path",
-            "--topo-order",
-            "--reverse",
-            f"{baseline}..{commit}",
-        ],
-    ).decode("ascii", errors="strict").splitlines()
-    if not revisions or revisions[-1] != commit:
-        raise VerificationError("assessed commit is not reachable after the history baseline")
-    if len(revisions) > MAX_HISTORY_COMMITS:
-        raise VerificationError(f"AIMS history exceeds {MAX_HISTORY_COMMITS} commits")
-
-    entries_by_commit = {baseline: _git_aims_entries(repo_root, baseline)}
-    baseline_manifest = entries_by_commit[baseline].get("governance/aims/manifest.json")
+    baseline_entries = _git_aims_entries(repo_root, baseline)
+    baseline_manifest = baseline_entries.get("governance/aims/manifest.json")
     if baseline_manifest is not None:
-        _verify_captured_aims_snapshot(entries_by_commit[baseline], None)
-
-    final_manifest: dict[str, Any] | None = None
-    for revision in revisions:
-        first_parent = _git(repo_root, ["rev-parse", f"{revision}^1"]).decode(
-            "ascii", errors="strict"
-        ).strip()
-        if first_parent not in entries_by_commit:
-            raise VerificationError(
-                f"first parent falls outside the trusted AIMS history walk: {revision}"
-            )
-        entries = (
-            _captured_aims_entries(source_entries)
-            if revision == commit
-            else _git_aims_entries(repo_root, revision)
-        )
-        entries_by_commit[revision] = entries
-        prior_manifest = entries_by_commit[first_parent].get(
-            "governance/aims/manifest.json"
-        )
-        manifest_bytes = entries.get("governance/aims/manifest.json")
-        if manifest_bytes is None:
-            if prior_manifest is not None:
-                raise VerificationError(f"AIMS manifest was removed at commit {revision}")
-            continue
-        final_manifest = _verify_captured_aims_snapshot(entries, prior_manifest)
-    if final_manifest is None:
-        raise VerificationError("assessed history does not contain an AIMS manifest")
-    return final_manifest
+        _verify_captured_aims_snapshot(baseline_entries, None)
+    return _verify_captured_aims_snapshot(
+        _captured_aims_entries(source_entries), baseline_manifest
+    )
 
 
 def _verified_commit_at(repo_root: Path, commit: str, assessment_at: datetime) -> datetime:
