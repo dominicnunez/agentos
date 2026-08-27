@@ -19,12 +19,13 @@ git diff --cached --check
 
 echo "==> controlled AIMS documented information"
 staged_root="$(mktemp -d)"
-trap 'rm -rf "$staged_root"' EXIT HUP INT TERM
+prior_manifest="$(mktemp)"
+trap 'rm -rf "$staged_root"; rm -f "$prior_manifest"' EXIT HUP INT TERM
 git checkout-index --all --prefix="$staged_root/"
 if git cat-file -e HEAD:governance/aims/manifest.json 2>/dev/null; then
-  git show HEAD:governance/aims/manifest.json >"$staged_root/prior-aims-manifest.json"
+  git show HEAD:governance/aims/manifest.json >"$prior_manifest"
   "$PYTHON_BIN" "$staged_root/scripts/verify_aims_documents.py" \
-    --root "$staged_root" --prior-manifest "$staged_root/prior-aims-manifest.json"
+    --root "$staged_root" --prior-manifest "$prior_manifest"
 else
   "$PYTHON_BIN" "$staged_root/scripts/verify_aims_documents.py" --root "$staged_root"
 fi

@@ -44,6 +44,7 @@ MAX_SOURCE_FILE_BYTES = 512 * 1024
 MAX_SOURCE_TOTAL_BYTES = 4 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 5 * 1024 * 1024
 MAX_HISTORY_COMMITS = 512
+MAX_PARENT_LISTING_BYTES = MAX_HISTORY_COMMITS * 41
 MAX_GIT_TREE_LISTING_BYTES = 128 * 1024
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 EVIDENCE_FILES = {
@@ -377,7 +378,9 @@ def _verify_aims_history(
     boundary_parents: set[str] = set()
     for revision in revisions:
         parent_line = _git(
-            repo_root, ["rev-list", "--parents", "-n", "1", revision]
+            repo_root,
+            ["rev-list", "--parents", "-n", "1", revision],
+            max_output_bytes=MAX_PARENT_LISTING_BYTES,
         ).decode("ascii", errors="strict").split()
         if not parent_line or parent_line[0] != revision:
             raise VerificationError(f"invalid parent listing in trusted AIMS history: {revision}")

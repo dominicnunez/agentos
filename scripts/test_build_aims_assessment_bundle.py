@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.build_aims_assessment_bundle import (
+    MAX_PARENT_LISTING_BYTES,
     MAX_SOURCE_FILE_BYTES,
     REQUIRED_APPROVED_DOCUMENTS,
     _git,
@@ -74,6 +75,26 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
         with patch.object(Path, "read_bytes", side_effect=AssertionError("unbounded read")):
             with self.assertRaisesRegex(VerificationError, "assessment evidence exceeds"):
                 _read_public_file(self.root, "README.md")
+
+    def test_precommit_keeps_prior_manifest_outside_staged_checkout(self) -> None:
+        hook = (Path(__file__).resolve().parents[1] / ".githooks" / "pre-commit").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('prior_manifest="$(mktemp)"', hook)
+        self.assertIn('--prior-manifest "$prior_manifest"', hook)
+        self.assertNotIn('>"$staged_root/prior-aims-manifest.json"', hook)
+
+    def test_ci_uses_the_tested_pull_request_base_as_history_baseline(self) -> None:
+        workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'history_baseline="${{ github.event.pull_request.base.sha }}"', workflow
+        )
+        self.assertNotIn(
+            'history_baseline=$(git merge-base "${{ github.event.pull_request.base.sha }}"',
+            workflow,
+        )
 
     def approved_readiness_manifest(self, outcomes: dict[str, object] | None) -> dict[str, object]:
         documents = [
@@ -855,6 +876,35 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
                 baseline,
             ],
         )
+
+    def test_history_walk_bounds_each_parent_listing_before_materializing_it(self) -> None:
+        baseline = "a" * 40
+        commit = "b" * 40
+
+        def bounded_git(
+            _root: Path, arguments: list[str], *, max_output_bytes: int | None = None
+        ) -> bytes:
+            if arguments[0] == "merge-base":
+                return (baseline + "\n").encode()
+            if arguments[0:1] == ["rev-list"] and "--parents" not in arguments:
+                return (commit + "\n").encode()
+            self.assertEqual(
+                arguments, ["rev-list", "--parents", "-n", "1", commit]
+            )
+            self.assertEqual(max_output_bytes, MAX_PARENT_LISTING_BYTES)
+            raise VerificationError("bounded parent listing")
+
+        with patch(
+            "scripts.build_aims_assessment_bundle._git", side_effect=bounded_git
+        ):
+            with self.assertRaisesRegex(VerificationError, "bounded parent listing"):
+                _verify_aims_history(
+                    self.root,
+                    baseline,
+                    commit,
+                    {},
+                    datetime(2100, 1, 1),
+                )
 
     def test_git_snapshot_rejects_oversized_blob_before_materializing_it(self) -> None:
         object_id = "a" * 40

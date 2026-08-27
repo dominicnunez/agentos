@@ -78,7 +78,7 @@ jobs:
             printf '%s\n' "$1"
           }
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            history_baseline=$(git merge-base "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
+            history_baseline="${{ github.event.pull_request.base.sha }}"
           elif [ "${{ github.ref_type }}" = "tag" ]; then
             history_baseline=$(baseline_before_commit "${GITHUB_SHA}")
           else
