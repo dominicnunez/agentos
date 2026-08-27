@@ -11,7 +11,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,7 +27,11 @@ from scripts.build_aims_assessment_bundle import (
     build,
     readiness_report,
 )
-from scripts.verify_aims_documents import MAX_DOCUMENT_BYTES, VerificationError
+from scripts.verify_aims_documents import (
+    MAX_DOCUMENT_BYTES,
+    MAX_DOCUMENTS,
+    VerificationError,
+)
 
 
 class BuildAIMSAssessmentBundleTest(unittest.TestCase):
@@ -146,6 +150,31 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
         )
         self.assertFalse(report["certification_assessment_ready"])
         self.assertIn("REQUIRED_GOVERNANCE_RECORDS_MISSING", report["blockers"])
+
+    def test_build_normalizes_aware_assessment_instant_to_utc(self) -> None:
+        output = self.root / "work" / "aware.tar.gz"
+        build(
+            self.root,
+            "a" * 40,
+            datetime(2026, 8, 27, 7, tzinfo=timezone(timedelta(hours=-5))),
+            output,
+            verify_source=False,
+        )
+        with tarfile.open(output, "r:gz") as archive:
+            report = json.load(
+                archive.extractfile("assessment/readiness.json")  # type: ignore[arg-type]
+            )
+        self.assertEqual(report["assessment_at"], "2026-08-27T12:00:00Z")
+
+    def test_build_rejects_fractional_assessment_instant(self) -> None:
+        with self.assertRaisesRegex(VerificationError, "whole seconds"):
+            build(
+                self.root,
+                "a" * 40,
+                datetime(2026, 8, 27, 12, 0, 0, 1),
+                self.root / "work" / "fractional.tar.gz",
+                verify_source=False,
+            )
 
     def test_readiness_requires_machine_readable_affirmative_outcomes(self) -> None:
         report = readiness_report(
@@ -734,6 +763,21 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
             "scripts.build_aims_assessment_bundle._git", return_value=listing
         ) as git:
             with self.assertRaisesRegex(VerificationError, "blob exceeds"):
+                _git_aims_entries(self.root, "b" * 40)
+        git.assert_called_once()
+
+    def test_git_snapshot_rejects_excess_entries_before_materializing_them(self) -> None:
+        listing = b"".join(
+            (
+                f"100644 blob {index:040x} 0"
+                f"\tgovernance/aims/records/record-{index:03d}.md\0"
+            ).encode()
+            for index in range(MAX_DOCUMENTS + 2)
+        )
+        with patch(
+            "scripts.build_aims_assessment_bundle._git", return_value=listing
+        ) as git:
+            with self.assertRaisesRegex(VerificationError, "tree exceeds"):
                 _git_aims_entries(self.root, "b" * 40)
         git.assert_called_once()
 

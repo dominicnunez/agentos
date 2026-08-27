@@ -20,6 +20,7 @@ from typing import Any
 try:
     from scripts.verify_aims_documents import (
         MAX_DOCUMENT_BYTES,
+        MAX_DOCUMENTS,
         MAX_MANIFEST_BYTES,
         MAX_TOTAL_DOCUMENT_BYTES,
         VerificationError,
@@ -29,6 +30,7 @@ try:
 except ModuleNotFoundError:
     from verify_aims_documents import (
         MAX_DOCUMENT_BYTES,
+        MAX_DOCUMENTS,
         MAX_MANIFEST_BYTES,
         MAX_TOTAL_DOCUMENT_BYTES,
         VerificationError,
@@ -244,6 +246,10 @@ def _git_aims_entries(repo_root: Path, commit: str) -> dict[str, bytes]:
                     f"Git AIMS record blobs exceed {MAX_TOTAL_DOCUMENT_BYTES} aggregate bytes"
                 )
         metadata_entries.append((relative, object_id, object_size))
+        if len(metadata_entries) > MAX_DOCUMENTS + 1:
+            raise VerificationError(
+                f"Git AIMS tree exceeds {MAX_DOCUMENTS} controlled records plus its manifest"
+            )
 
     entries: dict[str, bytes] = {}
     for relative, object_id, object_size in metadata_entries:
@@ -294,7 +300,14 @@ def _verify_aims_history(
     if len(revisions) + len(boundary_parents) > MAX_HISTORY_COMMITS:
         raise VerificationError(f"AIMS history exceeds {MAX_HISTORY_COMMITS} commits")
 
-    entries_by_commit: dict[str, dict[str, bytes]] = {}
+    remaining_children = {
+        revision: 0 for revision in revision_set | boundary_parents
+    }
+    for parents in parents_by_commit.values():
+        for parent in parents:
+            remaining_children[parent] += 1
+
+    manifest_by_commit: dict[str, bytes | None] = {}
     for parent in sorted(boundary_parents):
         trusted_ancestor = _git(repo_root, ["merge-base", parent, baseline]).decode(
             "ascii", errors="strict"
@@ -304,8 +317,9 @@ def _verify_aims_history(
                 f"history boundary parent is not an ancestor of the trusted baseline: {parent}"
             )
         entries = _git_aims_entries(repo_root, parent)
-        entries_by_commit[parent] = entries
-        if "governance/aims/manifest.json" in entries:
+        manifest_bytes = entries.get("governance/aims/manifest.json")
+        manifest_by_commit[parent] = manifest_bytes
+        if manifest_bytes is not None:
             parent_manifest = _verify_captured_aims_snapshot(
                 entries, None, enforce_display_status=False
             )
@@ -316,7 +330,7 @@ def _verify_aims_history(
     final_manifest: dict[str, Any] | None = None
     for revision in revisions:
         parents = parents_by_commit[revision]
-        if not parents or any(parent not in entries_by_commit for parent in parents):
+        if not parents or any(parent not in manifest_by_commit for parent in parents):
             raise VerificationError(
                 f"parent falls outside the bounded AIMS history walk: {revision}"
             )
@@ -325,14 +339,18 @@ def _verify_aims_history(
             if revision == commit
             else _git_aims_entries(repo_root, revision)
         )
-        entries_by_commit[revision] = entries
         manifest_bytes = entries.get("governance/aims/manifest.json")
         if manifest_bytes is None:
             if any(
-                entries_by_commit[parent].get("governance/aims/manifest.json") is not None
+                manifest_by_commit[parent] is not None
                 for parent in parents
             ):
                 raise VerificationError(f"AIMS manifest was removed at commit {revision}")
+            manifest_by_commit[revision] = None
+            for parent in parents:
+                remaining_children[parent] -= 1
+                if remaining_children[parent] == 0:
+                    manifest_by_commit.pop(parent, None)
             continue
         final_manifest = _verify_captured_aims_snapshot(
             entries,
@@ -343,14 +361,17 @@ def _verify_aims_history(
             final_manifest, _commit_at(repo_root, revision), revision
         )
         for parent in parents:
-            prior_manifest = entries_by_commit[parent].get(
-                "governance/aims/manifest.json"
-            )
+            prior_manifest = manifest_by_commit[parent]
             if prior_manifest is not None:
                 verify_history_bytes(
                     prior_manifest,
                     manifest_bytes,
                 )
+        manifest_by_commit[revision] = manifest_bytes
+        for parent in parents:
+            remaining_children[parent] -= 1
+            if remaining_children[parent] == 0:
+                manifest_by_commit.pop(parent, None)
     if final_manifest is None:
         raise VerificationError("assessed history does not contain an AIMS manifest")
     return final_manifest
@@ -385,7 +406,20 @@ def _commit_at(repo_root: Path, commit: str) -> datetime:
     return parsed.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def _normalize_assessment_at(assessment_at: datetime) -> datetime:
+    if not isinstance(assessment_at, datetime):
+        raise VerificationError("assessment instant must be a datetime")
+    if assessment_at.microsecond != 0:
+        raise VerificationError("assessment instant must use whole seconds")
+    if assessment_at.tzinfo is None:
+        return assessment_at
+    if assessment_at.utcoffset() is None:
+        raise VerificationError("assessment instant timezone lacks a UTC offset")
+    return assessment_at.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def _verified_commit_at(repo_root: Path, commit: str, assessment_at: datetime) -> datetime:
+    assessment_at = _normalize_assessment_at(assessment_at)
     commit_at = _commit_at(repo_root, commit)
     if commit_at > assessment_at:
         raise VerificationError("source commit postdates the assessment instant")
@@ -427,6 +461,7 @@ def readiness_report(
     history_baseline: str | None = None,
     source_verified: bool = False,
 ) -> dict[str, Any]:
+    assessment_at = _normalize_assessment_at(assessment_at)
     documents = manifest["documents"]
     documents_by_id = {entry["id"]: entry for entry in documents}
     missing = sorted(REQUIRED_APPROVED_DOCUMENTS - set(documents_by_id))
@@ -585,6 +620,7 @@ def build(
     history_baseline: str | None = None,
 ) -> tuple[str, int]:
     repo_root = repo_root.resolve(strict=True)
+    assessment_at = _normalize_assessment_at(assessment_at)
     if not COMMIT_PATTERN.fullmatch(commit):
         raise VerificationError("commit must be an exact lowercase 40-character Git commit SHA")
     manifest = verify(repo_root)
