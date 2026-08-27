@@ -4,6 +4,8 @@ package approvals
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,7 +79,7 @@ func ValidateForEffect(approval core.HumanApproval, obligation core.EffectObliga
 	default:
 		return fmt.Errorf("unknown approval status %q", approval.Status)
 	}
-	if !approvalMatchesEffect(approval, obligation) {
+	if !approvalExactlyMatchesEffect(approval, obligation) {
 		return fmt.Errorf("approval does not authorize exact effect")
 	}
 	if approval.ExpiresAt != nil && !now.Before(*approval.ExpiresAt) {
@@ -156,7 +158,7 @@ func (s *Service) Request(ctx context.Context, approval core.HumanApproval) (cor
 	if s == nil || s.store == nil {
 		return core.HumanApproval{}, fmt.Errorf("durable approval store is required")
 	}
-	if err := s.validatePreparedEffect(ctx, approval); err != nil {
+	if err := s.validateExactPreparedEffect(ctx, approval); err != nil {
 		return core.HumanApproval{}, err
 	}
 	if _, err := s.Get(ctx, approval.ID); err == nil {
@@ -217,7 +219,7 @@ func (s *Service) Acknowledge(ctx context.Context, approvalID, humanID core.ID) 
 	if err := s.validateUnexpired(approval); err != nil {
 		return approval, err
 	}
-	if err := s.validatePreparedEffect(ctx, approval); err != nil {
+	if err := s.validateRecoverablePreparedEffect(ctx, approval); err != nil {
 		return approval, err
 	}
 	if approval.Status != core.ApprovalPending && approval.Status != core.ApprovalNotified {
@@ -244,7 +246,7 @@ func (s *Service) BeginDecision(ctx context.Context, approvalID, humanID core.ID
 	if err := s.validateUnexpired(approval); err != nil {
 		return approval, err
 	}
-	if err := s.validatePreparedEffect(ctx, approval); err != nil {
+	if err := s.validateRecoverablePreparedEffect(ctx, approval); err != nil {
 		return approval, err
 	}
 	if approval.Status != core.ApprovalAcknowledged {
@@ -278,8 +280,12 @@ func (s *Service) Decide(ctx context.Context, decision Decision) (core.HumanAppr
 	if decision.EffectFingerprint == "" || decision.EffectFingerprint != approval.EffectFingerprint {
 		return approval, fmt.Errorf("decision does not match the exact effect fingerprint")
 	}
-	if err := s.validatePreparedEffect(ctx, approval); err != nil {
+	obligation, err := s.recoverablePreparedEffect(ctx, approval)
+	if err != nil {
 		return approval, err
+	}
+	if decision.Approve && !approvalExactlyMatchesEffect(approval, obligation) {
+		return approval, fmt.Errorf("legacy approval binding may be denied but cannot authorize an effect")
 	}
 	now := s.now()
 	if decision.Approve && approval.ExpiresAt != nil && !now.Before(*approval.ExpiresAt) {
@@ -321,7 +327,7 @@ func (s *Service) DecisionContext(ctx context.Context, approvalID, humanID core.
 	if err := s.validateUnexpired(approval); err != nil {
 		return DecisionContext{}, err
 	}
-	obligation, err := s.preparedEffect(ctx, approval)
+	obligation, err := s.recoverablePreparedEffect(ctx, approval)
 	if err != nil {
 		return DecisionContext{}, err
 	}
@@ -345,7 +351,7 @@ func (s *Service) ReadContext(ctx context.Context, approvalID, humanID core.ID) 
 			return DecisionContext{}, err
 		}
 	}
-	obligation, err := s.effectForApproval(ctx, approval, !terminal)
+	obligation, err := s.effectForApproval(ctx, approval, !terminal, true)
 	if err != nil {
 		return DecisionContext{}, err
 	}
@@ -391,7 +397,7 @@ func (s *Service) PendingDecisionContexts(ctx context.Context, organizationID, h
 		if err := s.validateUnexpired(approval); err != nil {
 			continue
 		}
-		effect, err := s.preparedEffect(ctx, approval)
+		effect, err := s.recoverablePreparedEffect(ctx, approval)
 		if err != nil {
 			return nil, err
 		}
@@ -431,7 +437,7 @@ func (s *Service) RecentDecisionContexts(ctx context.Context, organizationID, hu
 		if err := s.authorizeDecision(ctx, humanID, approval); err != nil {
 			continue
 		}
-		effect, err := s.effectForApproval(ctx, approval, false)
+		effect, err := s.effectForApproval(ctx, approval, false, true)
 		if err != nil {
 			return nil, err
 		}
@@ -476,16 +482,21 @@ func (s *Service) append(ctx context.Context, eventType, actorID string, version
 	return s.store.AppendRecord(ctx, string(approval.OrganizationID), eventType, actorID, string(approval.TaskID), nil, nil, "approval", string(approval.ID), version, approval)
 }
 
-func (s *Service) validatePreparedEffect(ctx context.Context, approval core.HumanApproval) error {
-	_, err := s.preparedEffect(ctx, approval)
+func (s *Service) validateExactPreparedEffect(ctx context.Context, approval core.HumanApproval) error {
+	_, err := s.effectForApproval(ctx, approval, true, false)
 	return err
 }
 
-func (s *Service) preparedEffect(ctx context.Context, approval core.HumanApproval) (core.EffectObligation, error) {
-	return s.effectForApproval(ctx, approval, true)
+func (s *Service) validateRecoverablePreparedEffect(ctx context.Context, approval core.HumanApproval) error {
+	_, err := s.recoverablePreparedEffect(ctx, approval)
+	return err
 }
 
-func (s *Service) effectForApproval(ctx context.Context, approval core.HumanApproval, requirePending bool) (core.EffectObligation, error) {
+func (s *Service) recoverablePreparedEffect(ctx context.Context, approval core.HumanApproval) (core.EffectObligation, error) {
+	return s.effectForApproval(ctx, approval, true, true)
+}
+
+func (s *Service) effectForApproval(ctx context.Context, approval core.HumanApproval, requirePending, allowLegacyRecovery bool) (core.EffectObligation, error) {
 	body, _, err := latestRecord(ctx, s.store, "effect", string(approval.EffectObligationID))
 	if errors.Is(err, errRecordNotFound) {
 		return core.EffectObligation{}, fmt.Errorf("approval requires a prepared effect obligation")
@@ -497,13 +508,16 @@ func (s *Service) effectForApproval(ctx context.Context, approval core.HumanAppr
 	if err := json.Unmarshal(body, &obligation); err != nil {
 		return core.EffectObligation{}, fmt.Errorf("decode prepared effect %s: %w", approval.EffectObligationID, err)
 	}
-	if (requirePending && obligation.Status != core.EffectPending) || !approvalMatchesEffect(approval, obligation) {
+	if requirePending && obligation.Status != core.EffectPending {
+		return core.EffectObligation{}, fmt.Errorf("approval does not match the prepared effect obligation")
+	}
+	if !approvalExactlyMatchesEffect(approval, obligation) && (!allowLegacyRecovery || !approvalMatchesLegacyActorlessEffect(approval, obligation)) {
 		return core.EffectObligation{}, fmt.Errorf("approval does not match the prepared effect obligation")
 	}
 	return obligation, nil
 }
 
-func approvalMatchesEffect(approval core.HumanApproval, obligation core.EffectObligation) bool {
+func approvalExactlyMatchesEffect(approval core.HumanApproval, obligation core.EffectObligation) bool {
 	if approval.ID == "" || string(approval.ID) != obligation.ApprovalRef {
 		return false
 	}
@@ -517,6 +531,55 @@ func approvalMatchesEffect(approval core.HumanApproval, obligation core.EffectOb
 	exactFingerprint := err == nil && obligation.EffectFingerprint == expectedFingerprint &&
 		approval.EffectFingerprint == expectedFingerprint
 	return sameWork && sameEffect && exactFingerprint
+}
+
+// approvalMatchesLegacyActorlessEffect recognizes only the actorless effect
+// fingerprint emitted before PrincipalKind became part of the canonical
+// effect identity. It exists solely so an already-pending approval can be
+// inspected and denied after upgrade. Effect execution and affirmative
+// decisions always require approvalExactlyMatchesEffect.
+func approvalMatchesLegacyActorlessEffect(approval core.HumanApproval, obligation core.EffectObligation) bool {
+	if obligation.ActorKind != "" || approval.ID == "" || string(approval.ID) != obligation.ApprovalRef {
+		return false
+	}
+	sameWork := approval.OrganizationID == obligation.OrganizationID &&
+		approval.TaskID == obligation.TaskID &&
+		approval.EffectObligationID == obligation.ID
+	sameEffect := approval.Action == obligation.Action &&
+		approval.Resource == obligation.Resource &&
+		approval.Boundary == obligation.ConsequenceBoundary
+	legacyFingerprint, err := legacyActorlessEffectFingerprint(obligation)
+	return sameWork && sameEffect && err == nil && obligation.EffectFingerprint == legacyFingerprint && approval.EffectFingerprint == legacyFingerprint
+}
+
+func legacyActorlessEffectFingerprint(obligation core.EffectObligation) (string, error) {
+	canonical, err := json.Marshal(struct {
+		ID                  core.ID           `json:"effect_obligation_id"`
+		OrganizationID      core.ID           `json:"organization_id"`
+		TaskID              core.ID           `json:"task_id"`
+		ActorID             core.ID           `json:"actor_id"`
+		Action              string            `json:"action"`
+		Resource            string            `json:"resource"`
+		Scope               string            `json:"scope"`
+		ConsequenceBoundary string            `json:"consequence_boundary"`
+		Descriptor          string            `json:"canonical_effect_descriptor"`
+		AuthorizationRefs   []string          `json:"authorization_refs"`
+		ApprovalRef         string            `json:"approval_ref"`
+		IdempotencyKey      string            `json:"idempotency_key"`
+		ReplayContext       map[string]string `json:"replay_context"`
+	}{
+		ID: obligation.ID, OrganizationID: obligation.OrganizationID, TaskID: obligation.TaskID,
+		ActorID: obligation.ActorID, Action: obligation.Action, Resource: obligation.Resource,
+		Scope: obligation.Scope, ConsequenceBoundary: obligation.ConsequenceBoundary,
+		Descriptor: obligation.Descriptor, AuthorizationRefs: obligation.AuthorizationRefs,
+		ApprovalRef: obligation.ApprovalRef, IdempotencyKey: obligation.IdempotencyKey,
+		ReplayContext: obligation.ReplayContext,
+	})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func latestRecord(ctx context.Context, store Store, kind, id string) ([]byte, int, error) {

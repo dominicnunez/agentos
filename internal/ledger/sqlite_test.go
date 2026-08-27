@@ -1066,6 +1066,23 @@ func TestAgentExecutionStartRollsBackRejectedAggregateInput(t *testing.T) {
 	}
 }
 
+func TestAgentExecutionManifestReferenceLimitIsTerminalizable(t *testing.T) {
+	now := time.Now().UTC()
+	task := core.Task{ID: "task-reference-limit", AssigneeID: "agent-1", TaskContractVersion: "1"}
+	manifest := core.ExecutionContextManifest{
+		ExecutionID: "execution-reference-limit", AgentID: task.AssigneeID,
+		AgentBlueprintVersion: "blueprint-v1", ExecutionProfileVersion: "profile-v1", RuntimeAdapter: "runtime-v1",
+		Provider: "provider", Model: "model", TaskID: task.ID, TaskContractVersion: task.TaskContractVersion,
+		PromptVersion: "prompt-v1", PolicyVersion: "v1", ContextBuilderVersion: "v2",
+		ExecutionInputSHA256: core.FingerprintExecutionInput("bounded input"), CreatedAt: now,
+		EventRefs: make([]string, 1025),
+	}
+	err := validateExecutionStartManifest(t.Context(), nil, task, events.Event{CreatedAt: now}, events.ExecutionStartDetail{}, events.ExecutionStartSelection{}, manifest)
+	if !errors.Is(err, core.ErrExecutionContextLimitExceeded) {
+		t.Fatalf("manifest reference overflow was not terminalizable: %v", err)
+	}
+}
+
 func TestAgentExecutionStartRejectsUnboundManifestEvent(t *testing.T) {
 	ctx := t.Context()
 	store, err := Open(":memory:")
