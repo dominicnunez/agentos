@@ -72,11 +72,10 @@ jobs:
               echo "AIMS history verification requires a commit with at least one parent." >&2
               return 1
             fi
-            if [ "$#" -eq 1 ]; then
-              printf '%s\n' "$1"
-            else
-              git merge-base --octopus "$@"
-            fi
+            # A direct parent bounds routine merge-tag verification while
+            # `rev-list <merge> --not <parent>` still traverses every merged
+            # lineage introduced by that merge.
+            printf '%s\n' "$1"
           }
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             history_baseline=$(git merge-base "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
