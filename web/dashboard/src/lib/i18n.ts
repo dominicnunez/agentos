@@ -326,6 +326,8 @@ export function formatDisplayMessage(
   }
   return template.replace(placeholderPattern, (_placeholder, key: string) => {
     if (!Object.hasOwn(values, key)) throw new Error(`missing display message value for ${id}`);
-    return String(values[key]);
+    return String(values[key]).replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
+      character === '\n' || character === '\r' || character === '\t' ? character : ''
+    );
   });
 }

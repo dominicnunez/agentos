@@ -72,6 +72,14 @@ test('formats typed display messages with exact interpolation values', () => {
     formatDisplayMessage('zh-CN', 'error.artifactCount', { role: '报告', minimum: 1, maximum: 2 }),
     '报告 需要 1 至 2 个文件。'
   );
+  assert.equal(
+    formatDisplayMessage('en', 'error.unexpectedCompletionField', { name: 'safe\u202Ehidden\0' }),
+    'Unexpected completion field: safehidden.'
+  );
+  assert.equal(
+    formatDisplayMessage('es', 'notice.reviewMarked', { decision: 'APPROVE' }),
+    'La evidencia de finalización se marcó como APPROVE.'
+  );
 });
 
 test('fails closed when interpolation values are missing or unexpected', () => {

@@ -680,7 +680,7 @@
         clearPendingReviewDecision();
         reviewPhrase = '';
         reviewFeedback = '';
-        notice = ui('notice.reviewAlreadyMarked', { decision: decision.toLowerCase() });
+        notice = ui('notice.reviewAlreadyMarked', { decision });
         await refresh();
         return;
       }
@@ -688,7 +688,7 @@
       clearPendingReviewDecision();
       reviewPhrase = '';
       reviewFeedback = '';
-      notice = ui('notice.reviewMarked', { decision: decision.toLowerCase() });
+      notice = ui('notice.reviewMarked', { decision });
       await refresh();
     });
   }
