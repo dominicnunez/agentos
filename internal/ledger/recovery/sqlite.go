@@ -529,7 +529,7 @@ func newRecoveryDispatchIndex(stream []events.Event) (*recoveryDispatchIndex, er
 // events instead of repeatedly scanning the complete ledger.
 func (index *recoveryDispatchIndex) boundedStreamForStart(start events.Event) ([]events.Event, error) {
 	if index == nil {
-		return nil, fmt.Errorf("Agent dispatch recovery index is required")
+		return nil, fmt.Errorf("agent dispatch recovery index is required")
 	}
 	payload, present, err := events.AdmittedProjection(start)
 	if err != nil || !present {
