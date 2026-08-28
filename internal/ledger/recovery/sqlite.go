@@ -470,58 +470,157 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("projection admission event %s has no materialized record", eventID)
 		}
 	}
-	if err := validateProjectionOrganizationBindings(orderedAdmissions, stream, capabilityAdmissions, freezeAdmissions); err != nil {
+	dispatchIndex, err := newRecoveryDispatchIndex(stream)
+	if err != nil {
+		return fmt.Errorf("index Agent dispatch recovery evidence: %w", err)
+	}
+	if err := validateProjectionOrganizationBindings(orderedAdmissions, stream, capabilityAdmissions, freezeAdmissions, dispatchIndex); err != nil {
 		return err
 	}
-	return validateRecoveryAgentEvidence(stream)
+	return validateRecoveryAgentEvidence(stream, dispatchIndex)
 }
 
-func validateRecoveryAgentEvidence(stream []events.Event) error {
-	for evidenceIndex, evidence := range stream {
+type recoveryProjectionKey struct {
+	organizationID string
+	kind           string
+	recordID       string
+}
+
+type recoveryDispatchIndex struct {
+	eventsByID              map[string]events.Event
+	nextProjectionByEventID map[string]events.Event
+}
+
+const maximumRecoveryDispatchEvidence = 6
+
+func newRecoveryDispatchIndex(stream []events.Event) (*recoveryDispatchIndex, error) {
+	index := &recoveryDispatchIndex{
+		eventsByID:              make(map[string]events.Event, len(stream)),
+		nextProjectionByEventID: make(map[string]events.Event),
+	}
+	lastProjection := make(map[recoveryProjectionKey]events.Event)
+	var priorSequence int64
+	for _, event := range stream {
+		if event.Sequence <= priorSequence {
+			return nil, fmt.Errorf("event stream is not in strict sequence order")
+		}
+		priorSequence = event.Sequence
+		if _, duplicate := index.eventsByID[event.EventID]; duplicate {
+			return nil, fmt.Errorf("event %s is duplicated", event.EventID)
+		}
+		index.eventsByID[event.EventID] = event
+		payload, present, err := events.AdmittedProjection(event)
+		if err != nil {
+			return nil, err
+		}
+		if !present {
+			continue
+		}
+		switch payload.Projection.ProjectionKind {
+		case "agent", "agent_blueprint", "execution_profile":
+			key := recoveryProjectionKey{
+				organizationID: event.OrganizationID,
+				kind:           payload.Projection.ProjectionKind,
+				recordID:       payload.Projection.RecordID,
+			}
+			if prior, found := lastProjection[key]; found {
+				index.nextProjectionByEventID[prior.EventID] = event
+			}
+			lastProjection[key] = event
+		}
+	}
+	return index, nil
+}
+
+// boundedStreamForStart returns only the exact roster revisions named by one
+// dispatch plus, when present, the first superseding revision before start.
+// Existing Event Contract validation then applies unchanged to at most six
+// events instead of repeatedly scanning the complete ledger.
+func (index *recoveryDispatchIndex) boundedStreamForStart(start events.Event) ([]events.Event, error) {
+	if index == nil {
+		return nil, fmt.Errorf("agent dispatch recovery index is required")
+	}
+	payload, present, err := events.AdmittedProjection(start)
+	if err != nil || !present {
+		return nil, fmt.Errorf("execution start lacks its admitted Task projection")
+	}
+	var detail events.ExecutionStartDetail
+	if decodeExactJSON(payload.Detail, &detail) != nil || detail.DispatchBinding == nil {
+		return nil, fmt.Errorf("execution start lacks its dispatch binding")
+	}
+	binding := detail.DispatchBinding
+	references := []string{binding.AgentEventRef, binding.BlueprintEventRef, binding.ExecutionProfileEventRef}
+	bounded := make([]events.Event, 0, maximumRecoveryDispatchEvidence)
+	for _, eventRef := range references {
+		referenced, found := index.eventsByID[eventRef]
+		if found {
+			bounded = append(bounded, referenced)
+		}
+		if successor, superseded := index.nextProjectionByEventID[eventRef]; found && superseded &&
+			successor.Sequence < start.Sequence {
+			bounded = append(bounded, successor)
+		}
+	}
+	if len(bounded) > maximumRecoveryDispatchEvidence {
+		return nil, fmt.Errorf("bounded Agent dispatch recovery evidence exceeded %d events", maximumRecoveryDispatchEvidence)
+	}
+	return bounded, nil
+}
+
+type recoveryTaskKey struct {
+	organizationID string
+	correlationID  string
+	taskID         string
+}
+
+type recoveryTaskRevision struct {
+	task   core.Task
+	record events.ProjectionRecord
+}
+
+type recoveryTaskStartKey struct {
+	recoveryTaskKey
+	version int
+}
+
+func validateRecoveryAgentEvidence(stream []events.Event, dispatchIndex *recoveryDispatchIndex) error {
+	tasks := make(map[recoveryTaskKey]recoveryTaskRevision)
+	starts := make(map[recoveryTaskStartKey][]events.Event)
+	for _, evidence := range stream {
+		payload, present, err := events.AdmittedProjection(evidence)
+		if err != nil {
+			return fmt.Errorf("event %s: inspect Agent evidence projection admission: %w", evidence.EventID, err)
+		}
+		if present && payload.Projection.ProjectionKind == "task" {
+			var task core.Task
+			if decodeExactJSON(payload.Projection.Value, &task) != nil {
+				return fmt.Errorf("event %s has an invalid Agent evidence Task projection", evidence.EventID)
+			}
+			key := recoveryTaskKey{organizationID: evidence.OrganizationID, correlationID: evidence.CorrelationID, taskID: payload.Projection.RecordID}
+			tasks[key] = recoveryTaskRevision{task: task, record: payload.Projection}
+			if evidence.EventType == "EXECUTION_STARTED" {
+				startKey := recoveryTaskStartKey{recoveryTaskKey: key, version: payload.Projection.Version}
+				starts[startKey] = append(starts[startKey], evidence)
+			}
+		}
 		if evidence.EventType != "EVIDENCE_PUBLISHED" {
 			continue
 		}
-		var task core.Task
-		var taskRecord events.ProjectionRecord
-		var taskVersion int
-		for _, candidate := range stream[:evidenceIndex] {
-			if candidate.OrganizationID != evidence.OrganizationID || candidate.CorrelationID != evidence.CorrelationID {
-				continue
-			}
-			payload, present, err := events.AdmittedProjection(candidate)
-			if err != nil {
-				return fmt.Errorf("event %s: inspect Agent evidence Task admission: %w", evidence.EventID, err)
-			}
-			if !present || payload.Projection.ProjectionKind != "task" || payload.Projection.RecordID != evidence.TaskID {
-				continue
-			}
-			var candidateTask core.Task
-			if decodeExactJSON(payload.Projection.Value, &candidateTask) != nil {
-				return fmt.Errorf("event %s has an invalid Agent evidence Task projection", evidence.EventID)
-			}
-			task = candidateTask
-			taskRecord = payload.Projection
-			taskVersion = payload.Projection.Version
+		key := recoveryTaskKey{organizationID: evidence.OrganizationID, correlationID: evidence.CorrelationID, taskID: evidence.TaskID}
+		taskRevision, found := tasks[key]
+		if !found {
+			return fmt.Errorf("event %s lacks its Agent evidence Task admission", evidence.EventID)
 		}
-		var start events.Event
-		for _, candidate := range stream[:evidenceIndex] {
-			if candidate.EventType != "EXECUTION_STARTED" || candidate.OrganizationID != evidence.OrganizationID ||
-				candidate.TaskID != evidence.TaskID || candidate.CorrelationID != evidence.CorrelationID {
-				continue
-			}
-			payload, present, err := events.AdmittedProjection(candidate)
-			if err != nil {
-				return fmt.Errorf("event %s: inspect Agent evidence execution admission: %w", evidence.EventID, err)
-			}
-			if !present || !reflect.DeepEqual(payload.Projection, taskRecord) {
-				continue
-			}
-			if start.EventID != "" {
-				return fmt.Errorf("event %s has multiple exact Agent execution starts", evidence.EventID)
-			}
-			start = candidate
+		startCandidates := starts[recoveryTaskStartKey{recoveryTaskKey: key, version: taskRevision.record.Version}]
+		if len(startCandidates) != 1 {
+			return fmt.Errorf("event %s has %d exact Agent execution starts", evidence.EventID, len(startCandidates))
 		}
-		if err := events.ValidateAgentEvidencePublished(evidence, task, taskVersion, start, stream[:evidenceIndex+1]); err != nil {
+		start := startCandidates[0]
+		bounded, err := dispatchIndex.boundedStreamForStart(start)
+		if err != nil {
+			return fmt.Errorf("event %s: index Agent dispatch admission: %w", evidence.EventID, err)
+		}
+		if err := events.ValidateAgentEvidencePublished(evidence, taskRevision.task, taskRevision.record.Version, start, bounded); err != nil {
 			return fmt.Errorf("event %s: %w", evidence.EventID, err)
 		}
 	}
@@ -573,7 +672,7 @@ func validateRecoveryIntentConfirmations(stream []events.Event) error {
 	return nil
 }
 
-func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, stream []events.Event, capabilityAdmissions []events.CapabilityLeaseAdmission, freezeAdmissions []events.OrganizationFreezeAdmission) error {
+func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, stream []events.Event, capabilityAdmissions []events.CapabilityLeaseAdmission, freezeAdmissions []events.OrganizationFreezeAdmission, dispatchIndex *recoveryDispatchIndex) error {
 	sort.Slice(admitted, func(left, right int) bool {
 		return admitted[left].event.Sequence < admitted[right].event.Sequence
 	})
@@ -720,7 +819,11 @@ func validateProjectionOrganizationBindings(admitted []admittedProjectionEvent, 
 				return fmt.Errorf("event %s contains an invalid Task projection", event.EventID)
 			}
 			if event.EventType == "EXECUTION_STARTED" && value.ExecutionKind == core.ExecutionAgent {
-				if err := events.ValidateAgentDispatchStart(event, value, record.Version, stream); err != nil {
+				bounded, err := dispatchIndex.boundedStreamForStart(event)
+				if err != nil {
+					return fmt.Errorf("event %s contains invalid Agent dispatch index: %w", event.EventID, err)
+				}
+				if err := events.ValidateAgentDispatchStart(event, value, record.Version, bounded); err != nil {
 					return fmt.Errorf("event %s contains invalid Agent dispatch admission: %w", event.EventID, err)
 				}
 			}

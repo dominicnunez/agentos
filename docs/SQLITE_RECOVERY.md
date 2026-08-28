@@ -77,6 +77,16 @@ state captured by SQLite—not the live main database file and not a standalone
 logical ledger identity. A concurrent append is either inside or outside that
 snapshot; diagnostic fields never mix the two states.
 
+Agent evidence recovery builds one ledger-wide index for exact Task revisions,
+execution starts, and Agent/blueprint/execution-profile projection history.
+Each `EVIDENCE_PUBLISHED` event then uses constant-time Task/start lookup and
+the existing closed dispatch validator over at most six events: the three
+referenced roster revisions plus the first superseding revision for each when
+present. The Agent-evidence recovery path is therefore linear in event count
+and linear in retained index memory; it does not rescan a growing ledger prefix
+for each evidence event. Live admission and recovery still use the same exact
+Event Contract validator and tenant, revision, sequence, and dispatch rules.
+
 ## Storage and Event Contract versions
 
 SQLite storage versions are independent of the Agent OS binary version. The
