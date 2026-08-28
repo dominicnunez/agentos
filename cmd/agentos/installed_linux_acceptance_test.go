@@ -562,4 +562,3 @@ func assertProductionRejectsUnsupportedProvider(t *testing.T, binary string, rea
 		t.Fatalf("invalid provider reached runtime storage: %v", statErr)
 	}
 }
-
