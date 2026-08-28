@@ -57,7 +57,11 @@ func TestInstalledLinuxSystemLifecycle(t *testing.T) {
 		t.Fatalf("install packaged system runtime: %v", err)
 	}
 	installOfflineTestConfinement(t)
-	runSystemctl(t, "enable", "--now", "agentos-user.socket", "agentos.service")
+	runSystemctl(t, "enable", "agentos-user.socket", "agentos.service")
+	runSystemctl(t, "start", "agentos-user.socket")
+	waitForSystemUnit(t, "agentos-user.socket", config.Paths.UserSocket)
+	runSystemctl(t, "start", "agentos.service")
+	waitForSystemUnit(t, "agentos.service", config.Paths.UserSocket)
 	t.Cleanup(func() {
 		cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -523,6 +527,22 @@ func runSystemctl(t *testing.T, arguments ...string) {
 	if err != nil {
 		t.Fatalf("systemctl %s: %v\n%s", strings.Join(arguments, " "), err, output)
 	}
+}
+
+func waitForSystemUnit(t *testing.T, unit, socket string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		active := exec.CommandContext(t.Context(), "/usr/bin/systemctl", "is-active", "--quiet", unit).Run() == nil
+		_, socketErr := os.Lstat(socket)
+		if active && socketErr == nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	status, _ := exec.CommandContext(t.Context(), "/usr/bin/systemctl", "status", "--no-pager", unit).CombinedOutput()
+	journal, _ := exec.CommandContext(t.Context(), "/usr/bin/journalctl", "--no-pager", "--unit", unit, "--lines", "50").CombinedOutput()
+	t.Fatalf("systemd unit %s did not become ready with %s\nstatus:\n%s\njournal:\n%s", unit, socket, status, journal)
 }
 
 func runRecovery(t *testing.T, binary string, arguments ...string) {
