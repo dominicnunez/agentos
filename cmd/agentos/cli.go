@@ -280,14 +280,14 @@ func runDoctor(ctx context.Context, args []string, output io.Writer) error {
 		checks = append(checks, doctorCheck{Name: "event ledger", Status: "BLOCKED", Detail: ledgerErr.Error()})
 	} else if config.Mode == bootstrap.ModeSystem && effectiveUID() != 0 {
 		checks = append(checks, doctorCheck{Name: "event ledger", Status: "INFO", Detail: "administrator access is required to verify private storage"})
-	} else if result, verifyErr := ledgerrecovery.Verify(ctx, config.Paths.Database); verifyErr != nil {
+	} else if result, verifyErr := ledgerrecovery.VerifyLive(ctx, config.Paths.Database); verifyErr != nil {
 		checks = append(checks, doctorCheck{Name: "event ledger", Status: "BLOCKED", Detail: verifyErr.Error()})
 	} else {
 		chain := "empty"
 		if result.EventChainSHA256 != "" {
 			chain = result.EventChainSHA256[:12]
 		}
-		checks = append(checks, doctorCheck{Name: "event ledger", Status: "PASS", Detail: fmt.Sprintf("storage v%d; events v%d; %d events; file sha256 %s; chain sha256 %s", result.StorageVersion, result.EventSchemaVersion, result.EventCount, result.SHA256[:12], chain)})
+		checks = append(checks, doctorCheck{Name: "event ledger", Status: "PASS", Detail: fmt.Sprintf("storage v%d; events v%d; %d events; snapshot sha256 %s; chain sha256 %s", result.StorageVersion, result.EventSchemaVersion, result.EventCount, result.SHA256[:12], chain)})
 	}
 	credentialErr := error(nil)
 	if config.Mode == bootstrap.ModeSystem && effectiveUID() != 0 {

@@ -27,9 +27,12 @@ backfills the chain in the same storage transaction. A missing or noncontiguous
 event prevents migration.
 
 `agentos doctor` and the SQLite recovery commands report the verified chain
-algorithm and head hash. The recovery result also retains the SHA-256 checksum
-of the complete database file; the file checksum and event-chain head answer
-different questions and neither replaces the other.
+algorithm and head hash. Offline recovery results also retain the SHA-256
+checksum of the complete database file. Live diagnostics instead checksum one
+native online-backup snapshot and label that scope explicitly; they never call
+the live WAL main-file bytes a logical ledger identity. The snapshot checksum
+and event-chain head answer different questions and neither replaces the
+other.
 
 ## Security boundary
 

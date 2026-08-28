@@ -179,7 +179,7 @@ func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if backup.Path != backupPath || backup.EventCount != 1 || backup.MaxSequence != 1 || backup.StorageVersion != ledger.CurrentStorageVersion || backup.EventSchemaVersion != events.SchemaVersion || backup.SHA256 == "" || backup.EventChainSHA256 == "" || backup.EventChainAlgorithm != ledger.EventIntegrityAlgorithm || backup.SizeBytes == 0 {
+	if backup.Path != backupPath || backup.ChecksumScope != ChecksumOfflineDatabaseFile || backup.EventCount != 1 || backup.MaxSequence != 1 || backup.StorageVersion != ledger.CurrentStorageVersion || backup.EventSchemaVersion != events.SchemaVersion || backup.SHA256 == "" || backup.EventChainSHA256 == "" || backup.EventChainAlgorithm != ledger.EventIntegrityAlgorithm || backup.SizeBytes == 0 {
 		t.Fatalf("backup=%+v", backup)
 	}
 	if _, err := live.ExecContext(ctx, `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,authorization_refs,artifact_refs,payload,created_at,schema_version) VALUES('event-2','org-1','MESSAGE','agent-1','[]','[]','{}','2026-08-13T12:01:00Z',?)`, events.SchemaVersion); err != nil {
@@ -222,6 +222,37 @@ func TestBackupAndRestorePreserveSnapshotWithoutOverwriting(t *testing.T) {
 	var eventCount int
 	if err := restoredDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events`).Scan(&eventCount); err != nil || eventCount != 1 {
 		t.Fatalf("restored event count=%d err=%v", eventCount, err)
+	}
+}
+
+func TestVerifyLiveReportsOneConsistentOnlineSnapshot(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "live-verification.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "agent-1", Payload: map[string]string{"state": "snapshot"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := verifyLiveSnapshot(ctx, path, func() error {
+		_, appendErr := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "agent-1", Payload: map[string]string{"state": "after-snapshot"}})
+		return appendErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Path != path || result.ChecksumScope != ChecksumOnlineBackupSnapshot || result.EventCount != 1 || result.MaxSequence != 1 || result.EventChainSHA256 == "" || result.SHA256 == "" {
+		t.Fatalf("live verification mixed source states: %+v", result)
+	}
+	current, err := VerifyLive(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.EventCount != 2 || current.MaxSequence != 2 || current.ChecksumScope != ChecksumOnlineBackupSnapshot || current.EventChainSHA256 == result.EventChainSHA256 {
+		t.Fatalf("later snapshot did not observe the committed append independently: first=%+v current=%+v", result, current)
 	}
 }
 

@@ -28,6 +28,7 @@ import (
 type Result struct {
 	Path                string `json:"path"`
 	SHA256              string `json:"sha256"`
+	ChecksumScope       string `json:"checksum_scope"`
 	EventChainSHA256    string `json:"event_chain_sha256,omitempty"`
 	EventChainAlgorithm string `json:"event_chain_algorithm,omitempty"`
 	SizeBytes           int64  `json:"size_bytes"`
@@ -36,6 +37,11 @@ type Result struct {
 	StorageVersion      int    `json:"storage_version"`
 	EventSchemaVersion  int    `json:"event_schema_version"`
 }
+
+const (
+	ChecksumOfflineDatabaseFile  = "OFFLINE_DATABASE_FILE"
+	ChecksumOnlineBackupSnapshot = "ONLINE_BACKUP_SNAPSHOT"
+)
 
 type backuper interface {
 	NewBackup(string) (*sqlite.Backup, error)
@@ -168,6 +174,66 @@ func Verify(ctx context.Context, path string) (result Result, finalErr error) {
 	verified.EventChainSHA256 = result.EventChainSHA256
 	verified.EventChainAlgorithm = result.EventChainAlgorithm
 	return verified, err
+}
+
+// VerifyLive verifies one SQLite online-backup snapshot of a potentially live
+// database. Its checksum identifies the snapshot file, including committed WAL
+// state captured by SQLite, and is not presented as the live main-file hash or
+// as a logical ledger identity.
+func VerifyLive(ctx context.Context, path string) (Result, error) {
+	return verifyLiveSnapshot(ctx, path, nil)
+}
+
+func verifyLiveSnapshot(ctx context.Context, path string, afterSnapshot func() error) (result Result, finalErr error) {
+	if ctx == nil {
+		return Result{}, fmt.Errorf("context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	resolved, err := sourcePath(path)
+	if err != nil {
+		return Result{}, err
+	}
+	temporary, err := os.CreateTemp("", "agentos-live-verification-*.db")
+	if err != nil {
+		return Result{}, fmt.Errorf("create live verification snapshot: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	if err := temporary.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return Result{}, fmt.Errorf("close live verification snapshot: %w", err)
+	}
+	defer func() {
+		for _, candidate := range []string{temporaryPath, temporaryPath + "-journal", temporaryPath + "-shm", temporaryPath + "-wal"} {
+			if removeErr := os.Remove(candidate); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				finalErr = errors.Join(finalErr, fmt.Errorf("remove live verification snapshot: %w", removeErr))
+			}
+		}
+	}()
+
+	db, err := openReadOnlySQLite(ctx, resolved)
+	if err != nil {
+		return Result{}, fmt.Errorf("open live verification source read-only: %w", err)
+	}
+	if err := backupSQLiteSnapshot(ctx, db, temporaryPath); err != nil {
+		return Result{}, errors.Join(fmt.Errorf("create live SQLite verification snapshot: %w", err), db.Close())
+	}
+	if err := db.Close(); err != nil {
+		return Result{}, fmt.Errorf("close live verification source: %w", err)
+	}
+	if afterSnapshot != nil {
+		if err := afterSnapshot(); err != nil {
+			return Result{}, fmt.Errorf("run post-snapshot verification hook: %w", err)
+		}
+	}
+	result, err = Verify(ctx, temporaryPath)
+	if err != nil {
+		return Result{}, fmt.Errorf("verify live SQLite snapshot: %w", err)
+	}
+	result.Path = resolved
+	result.ChecksumScope = ChecksumOnlineBackupSnapshot
+	return result, nil
 }
 
 // verifyLegacyAdmissionsAfterMigration audits the exact migration result in an
@@ -1137,7 +1203,7 @@ func fileResult(path string, eventCount, maxSequence int64) (Result, error) {
 	if closeErr != nil {
 		return Result{}, fmt.Errorf("close recovery file after checksum: %w", closeErr)
 	}
-	return Result{Path: path, SHA256: hex.EncodeToString(hash.Sum(nil)), SizeBytes: info.Size(), EventCount: eventCount, MaxSequence: maxSequence}, nil
+	return Result{Path: path, SHA256: hex.EncodeToString(hash.Sum(nil)), ChecksumScope: ChecksumOfflineDatabaseFile, SizeBytes: info.Size(), EventCount: eventCount, MaxSequence: maxSequence}, nil
 }
 
 func syncFile(path string) error {
