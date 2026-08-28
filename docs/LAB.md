@@ -1,5 +1,13 @@
 # Governed Lab
 
+The Lab's deterministic no-effects containment is not a hostile-code sandbox.
+It does not attest filesystem, process, network, credential, or resource
+isolation and cannot authorize package installation, external-code execution,
+untrusted repository builds, containers, MCP servers, plugins, or executable
+Skills. Those capabilities remain fail-closed until the effective-environment
+and staged-promotion prerequisites in [Execution authority](EXECUTION_AUTHORITY.md)
+are implemented by a real isolated runtime.
+
 The Lab lets the organization try a bounded approach without treating the
 result as trusted operating knowledge. It composes the ordinary
 Intent -> Work -> Task path with explicit containment, resource ceilings, and

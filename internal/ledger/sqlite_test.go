@@ -2294,6 +2294,73 @@ func TestEffectAuthorizationCannotUseAnotherOrganizationsLease(t *testing.T) {
 	}
 }
 
+func TestProtectedEffectChecksConsequentialCapabilityClosure(t *testing.T) {
+	ctx := t.Context()
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	source, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "HUMAN_INPUT_RECEIVED", SourceActorID: "user-1", TaskID: "task-1", Payload: map[string]string{"text": "update the build configuration"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	top := core.CapabilityLease{ID: "lease-surface", ActorID: "user-1", ActorKind: core.PrincipalHuman, OriginTaskID: "task-1", Action: core.ActionExecutionSurfaceMutate, Resource: "repo-1/go.mod", Scope: "org-1"}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(top.ID), 1, top); err != nil {
+		t.Fatal(err)
+	}
+	digest := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	resultDigest := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	obligation := core.EffectObligation{
+		ID: "effect-surface", OrganizationID: "org-1", TaskID: "task-1", ActorID: "user-1", ActorKind: core.PrincipalHuman,
+		Action: top.Action, Resource: top.Resource, Scope: top.Scope, ConsequenceBoundary: core.BoundaryExecutionSurfaceMutation,
+		Descriptor: "promote exact go.mod change", AuthorizationRefs: []string{"lease-surface", "lease-network"}, ApprovalRef: "approval-surface", IdempotencyKey: "key-surface", ReplayContext: map[string]string{"path": "go.mod"},
+		RequiredCapabilities: []core.CapabilityRequirement{
+			{Action: top.Action, Resource: top.Resource, Scope: top.Scope},
+			{Action: "network.fetch", Resource: "proxy.golang.org", Scope: "org-1"},
+		},
+		Influence:                &core.ActionInfluenceBinding{SourceEventRefs: []string{source.EventID}},
+		Trajectory:               &core.EffectTrajectory{ProtectedEffectCount: 1, ApprovalRequestCount: 1, ConsequenceBoundaries: []string{core.BoundaryExecutionSurfaceMutation}, Destinations: []string{top.Resource}},
+		ExecutionSurfaceMutation: &core.ExecutionSurfaceMutationBinding{Path: "go.mod", Kind: core.ExecutionSurfaceModify, BeforeSHA256: digest, AfterSHA256: resultDigest, Promotion: core.StagedPromotionBinding{WorkspaceID: "workspace-1", TrustedTarget: "repo-1", BaseTreeSHA256: digest, ResultTreeSHA256: resultDigest, DiffSHA256: digest, VerificationSHA256: digest}},
+	}
+	if err := core.ValidateExecutionAuthorityEffect(obligation); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := core.FingerprintEffect(obligation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obligation.EffectFingerprint = fingerprint
+	obligation.Status = core.EffectPending
+	if err := store.AppendRecord(ctx, "org-1", "EFFECT_OBLIGATION_TRANSITIONED", "", "task-1", obligation.AuthorizationRefs, nil, "effect", string(obligation.ID), 1, obligation); err != nil {
+		t.Fatal(err)
+	}
+	approval := core.HumanApproval{ID: "approval-surface", OrganizationID: "org-1", TaskID: "task-1", EffectObligationID: obligation.ID, Action: obligation.Action, Resource: obligation.Resource, Boundary: obligation.ConsequenceBoundary, EffectFingerprint: fingerprint, Status: core.ApprovalApproved}
+	if err := store.AppendRecord(ctx, "org-1", "APPROVAL_DECIDED", "user-1", "task-1", nil, nil, "approval", string(approval.ID), 1, approval); err != nil {
+		t.Fatal(err)
+	}
+
+	trace, err := store.AuthorizeAndAppendEffectAttempt(ctx, obligation, 2, obligation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trace.Allowed || len(trace.Consequential) != 1 || trace.Consequential[0].Action != "network.fetch" || trace.Consequential[0].Allowed {
+		t.Fatalf("tool operation laundered unavailable network authority: %+v", trace)
+	}
+
+	network := core.CapabilityLease{ID: "lease-network", ActorID: top.ActorID, ActorKind: top.ActorKind, OriginTaskID: top.OriginTaskID, Action: "network.fetch", Resource: "proxy.golang.org", Scope: "org-1"}
+	if err := store.AppendRecord(ctx, "org-1", "CAPABILITY_GRANTED", "user-1", "task-1", nil, nil, "capability_lease", string(network.ID), 1, network); err != nil {
+		t.Fatal(err)
+	}
+	trace, err = store.AuthorizeAndAppendEffectAttempt(ctx, obligation, 2, obligation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !trace.Allowed || len(trace.Consequential) != 1 || trace.Consequential[0].LeaseID != network.ID {
+		t.Fatalf("exact capability closure was not admitted: %+v", trace)
+	}
+}
+
 func TestEffectAuthorizationSeparatesPrincipalKindsSharingOneID(t *testing.T) {
 	ctx := t.Context()
 	store, err := Open(":memory:")

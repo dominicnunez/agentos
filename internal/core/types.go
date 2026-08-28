@@ -447,15 +447,25 @@ type CapabilityLease struct {
 }
 
 type AuthorizationTrace struct {
-	Allowed   bool          `json:"allowed"`
-	LeaseID   ID            `json:"lease_id,omitempty"`
-	ActorID   ID            `json:"actor_id"`
-	ActorKind PrincipalKind `json:"actor_kind,omitempty"`
-	TaskID    ID            `json:"task_id"`
-	Action    string        `json:"action"`
-	Resource  string        `json:"resource"`
-	Scope     string        `json:"scope"`
-	Reason    string        `json:"reason"`
+	Allowed       bool                 `json:"allowed"`
+	LeaseID       ID                   `json:"lease_id,omitempty"`
+	ActorID       ID                   `json:"actor_id"`
+	ActorKind     PrincipalKind        `json:"actor_kind,omitempty"`
+	TaskID        ID                   `json:"task_id"`
+	Action        string               `json:"action"`
+	Resource      string               `json:"resource"`
+	Scope         string               `json:"scope"`
+	Reason        string               `json:"reason"`
+	Consequential []CapabilityDecision `json:"consequential,omitempty"`
+}
+
+type CapabilityDecision struct {
+	Allowed  bool   `json:"allowed"`
+	LeaseID  ID     `json:"lease_id,omitempty"`
+	Action   string `json:"action"`
+	Resource string `json:"resource"`
+	Scope    string `json:"scope"`
+	Reason   string `json:"reason"`
 }
 
 type KnowledgeStatus string
@@ -558,28 +568,34 @@ const (
 )
 
 type EffectObligation struct {
-	ID                         ID                `json:"effect_obligation_id"`
-	OrganizationID             ID                `json:"organization_id"`
-	TaskID                     ID                `json:"task_id"`
-	ActorID                    ID                `json:"actor_id"`
-	ActorKind                  PrincipalKind     `json:"actor_kind"`
-	Action                     string            `json:"action"`
-	Resource                   string            `json:"resource"`
-	Scope                      string            `json:"scope"`
-	ConsequenceBoundary        string            `json:"consequence_boundary,omitempty"`
-	Descriptor                 string            `json:"canonical_effect_descriptor"`
-	EffectFingerprint          string            `json:"effect_fingerprint"`
-	AuthorizationRefs          []string          `json:"authorization_refs"`
-	ApprovalRef                string            `json:"approval_ref,omitempty"`
-	IdempotencyKey             string            `json:"idempotency_key"`
-	ReplayContext              map[string]string `json:"replay_context"`
-	Status                     EffectStatus      `json:"status"`
-	AttemptCount               int               `json:"attempt_count"`
-	LastAttemptAt              *time.Time        `json:"last_attempt_at,omitempty"`
-	ConfirmationEvidenceRefs   []string          `json:"confirmation_evidence_refs"`
-	ReconciliationEvidenceRefs []string          `json:"reconciliation_evidence_refs,omitempty"`
-	ReconciledAt               *time.Time        `json:"reconciled_at,omitempty"`
-	CreatedAt                  time.Time         `json:"created_at"`
+	ID                         ID                               `json:"effect_obligation_id"`
+	OrganizationID             ID                               `json:"organization_id"`
+	TaskID                     ID                               `json:"task_id"`
+	ActorID                    ID                               `json:"actor_id"`
+	ActorKind                  PrincipalKind                    `json:"actor_kind"`
+	Action                     string                           `json:"action"`
+	Resource                   string                           `json:"resource"`
+	Scope                      string                           `json:"scope"`
+	ConsequenceBoundary        string                           `json:"consequence_boundary,omitempty"`
+	Descriptor                 string                           `json:"canonical_effect_descriptor"`
+	EffectFingerprint          string                           `json:"effect_fingerprint"`
+	AuthorizationRefs          []string                         `json:"authorization_refs"`
+	ApprovalRef                string                           `json:"approval_ref,omitempty"`
+	IdempotencyKey             string                           `json:"idempotency_key"`
+	ReplayContext              map[string]string                `json:"replay_context"`
+	RequiredCapabilities       []CapabilityRequirement          `json:"required_capabilities,omitempty"`
+	ToolDefinition             *ToolDefinitionBinding           `json:"tool_definition,omitempty"`
+	Influence                  *ActionInfluenceBinding          `json:"influence,omitempty"`
+	Trajectory                 *EffectTrajectory                `json:"effect_trajectory,omitempty"`
+	CodeIntroduction           *CodeIntroductionBinding         `json:"code_introduction,omitempty"`
+	ExecutionSurfaceMutation   *ExecutionSurfaceMutationBinding `json:"execution_surface_mutation,omitempty"`
+	Status                     EffectStatus                     `json:"status"`
+	AttemptCount               int                              `json:"attempt_count"`
+	LastAttemptAt              *time.Time                       `json:"last_attempt_at,omitempty"`
+	ConfirmationEvidenceRefs   []string                         `json:"confirmation_evidence_refs"`
+	ReconciliationEvidenceRefs []string                         `json:"reconciliation_evidence_refs,omitempty"`
+	ReconciledAt               *time.Time                       `json:"reconciled_at,omitempty"`
+	CreatedAt                  time.Time                        `json:"created_at"`
 }
 
 // MaximumEffectAuthorizationRefs bounds the immutable capability set carried
@@ -598,15 +614,17 @@ const (
 )
 
 const (
-	BoundaryFinancial              = "FINANCIAL"
-	BoundaryPhysicalWorld          = "PHYSICAL_WORLD"
-	BoundaryPublicExternal         = "PUBLIC_EXTERNAL"
-	BoundaryDestructive            = "DESTRUCTIVE_IRREVERSIBLE"
-	BoundarySensitiveDataExpansion = "SENSITIVE_DATA_BOUNDARY_EXPANSION"
-	BoundaryPrivilegeExpansion     = "PRIVILEGE_TRUST_EXPANSION"
-	BoundaryLegalBinding           = "LEGAL_BINDING"
-	BoundaryDeployment             = "AGENT_OS_DEPLOYMENT"
-	BoundaryTrustedCore            = "TRUSTED_CORE_SECURITY"
+	BoundaryFinancial                = "FINANCIAL"
+	BoundaryPhysicalWorld            = "PHYSICAL_WORLD"
+	BoundaryPublicExternal           = "PUBLIC_EXTERNAL"
+	BoundaryDestructive              = "DESTRUCTIVE_IRREVERSIBLE"
+	BoundarySensitiveDataExpansion   = "SENSITIVE_DATA_BOUNDARY_EXPANSION"
+	BoundaryPrivilegeExpansion       = "PRIVILEGE_TRUST_EXPANSION"
+	BoundaryLegalBinding             = "LEGAL_BINDING"
+	BoundaryDeployment               = "AGENT_OS_DEPLOYMENT"
+	BoundaryTrustedCore              = "TRUSTED_CORE_SECURITY"
+	BoundaryCodeIntroduction         = "CODE_INTRODUCTION"
+	BoundaryExecutionSurfaceMutation = "EXECUTION_SURFACE_MUTATION"
 )
 
 type HumanApproval struct {

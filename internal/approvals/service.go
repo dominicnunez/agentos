@@ -26,15 +26,17 @@ var (
 )
 
 var humanBoundaries = map[string]struct{}{
-	core.BoundaryFinancial:              {},
-	core.BoundaryPhysicalWorld:          {},
-	core.BoundaryPublicExternal:         {},
-	core.BoundaryDestructive:            {},
-	core.BoundarySensitiveDataExpansion: {},
-	core.BoundaryPrivilegeExpansion:     {},
-	core.BoundaryLegalBinding:           {},
-	core.BoundaryDeployment:             {},
-	core.BoundaryTrustedCore:            {},
+	core.BoundaryFinancial:                {},
+	core.BoundaryPhysicalWorld:            {},
+	core.BoundaryPublicExternal:           {},
+	core.BoundaryDestructive:              {},
+	core.BoundarySensitiveDataExpansion:   {},
+	core.BoundaryPrivilegeExpansion:       {},
+	core.BoundaryLegalBinding:             {},
+	core.BoundaryDeployment:               {},
+	core.BoundaryTrustedCore:              {},
+	core.BoundaryCodeIntroduction:         {},
+	core.BoundaryExecutionSurfaceMutation: {},
 }
 
 var decisionLevels = map[string]struct{}{
@@ -519,8 +521,8 @@ func (s *Service) effectForApproval(ctx context.Context, approval core.HumanAppr
 	if err != nil {
 		return core.EffectObligation{}, err
 	}
-	var obligation core.EffectObligation
-	if err := json.Unmarshal(body, &obligation); err != nil {
+	obligation, err := core.DecodeEffectObligation(body)
+	if err != nil {
 		return core.EffectObligation{}, fmt.Errorf("decode prepared effect %s: %w", approval.EffectObligationID, err)
 	}
 	if requirePending && obligation.Status != core.EffectPending {

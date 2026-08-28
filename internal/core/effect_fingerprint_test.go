@@ -55,3 +55,12 @@ func TestEffectFingerprintBindsEveryImmutableEffectField(t *testing.T) {
 		t.Fatal("map insertion order changed the canonical fingerprint")
 	}
 }
+
+func TestEffectObligationDecoderRejectsUnknownSecurityState(t *testing.T) {
+	if _, err := DecodeEffectObligation([]byte(`{"effect_obligation_id":"effect-1","unknown_authority":true}`)); err == nil {
+		t.Fatal("unknown authority-bearing effect state was ignored")
+	}
+	if _, err := DecodeEffectObligation([]byte(`{} {}`)); err == nil {
+		t.Fatal("trailing effect contract was ignored")
+	}
+}

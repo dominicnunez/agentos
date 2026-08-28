@@ -2,7 +2,6 @@ package effects
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"slices"
 	"time"
@@ -88,8 +87,8 @@ func (s *ReconciliationService) Recover(ctx context.Context, resolver Reconciler
 	}
 	items := make([]RecoveryItem, 0)
 	for _, body := range bodies {
-		var obligation core.EffectObligation
-		if err := json.Unmarshal(body, &obligation); err != nil {
+		obligation, err := core.DecodeEffectObligation(body)
+		if err != nil {
 			return nil, fmt.Errorf("decode latest effect obligation: %w", err)
 		}
 		if obligation.Status != core.EffectAttempted {

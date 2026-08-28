@@ -223,6 +223,18 @@ freeze, and lease records, revalidates them at a shared time-of-use boundary,
 records the authorization trace, and fails closed if authority is missing,
 expired, revoked, frozen, corrupt, or unavailable.
 
+Executable material uses two separate closed consequences.
+`CODE_INTRODUCTION` binds the exact third-party artifact and is denied before
+any adapter while effective hostile-code isolation is unavailable.
+`EXECUTION_SURFACE_MUTATION` binds an exact protected path, before/after bytes,
+and staged promotion. Generic shell and file-write leases satisfy neither.
+Both reuse `EffectObligation`, approval fingerprinting, observable execution
+influence, Task-local effect trajectories, and recovery validation. Tool-backed
+effects additionally require an exact lease for every declared consequential
+capability; the top-level tool lease cannot launder network, credential, write,
+or other downstream authority. See
+[Execution authority](../EXECUTION_AUTHORITY.md).
+
 Startup discovers durable `ATTEMPTED` obligations before serving. Reconciliation
 uses a separate read-only destination-status interface and never invokes the
 effect-writing adapter. A reviewed registry binds each HTTPS checker to an

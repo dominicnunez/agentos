@@ -39,3 +39,29 @@ func Check(now time.Time, actorID core.ID, actorKind core.PrincipalKind, taskID 
 	trace.Reason = "no exact active capability lease"
 	return trace
 }
+
+// CheckClosure verifies both the requested operation and every consequential
+// capability declared for the Agent-controlled tool path. The downstream
+// capabilities are not granted or inherited; each needs its own exact lease.
+func CheckClosure(now time.Time, actorID core.ID, actorKind core.PrincipalKind, taskID core.ID, action, resource, scope string, requirements []core.CapabilityRequirement, leases []core.CapabilityLease, frozen bool) core.AuthorizationTrace {
+	trace := Check(now, actorID, actorKind, taskID, action, resource, scope, leases, frozen)
+	if !trace.Allowed {
+		return trace
+	}
+	for _, requirement := range requirements {
+		if requirement.Action == action && requirement.Resource == resource && requirement.Scope == scope {
+			continue
+		}
+		decisionTrace := Check(now, actorID, actorKind, taskID, requirement.Action, requirement.Resource, requirement.Scope, leases, frozen)
+		trace.Consequential = append(trace.Consequential, core.CapabilityDecision{
+			Allowed: decisionTrace.Allowed, LeaseID: decisionTrace.LeaseID, Action: requirement.Action,
+			Resource: requirement.Resource, Scope: requirement.Scope, Reason: decisionTrace.Reason,
+		})
+		if !decisionTrace.Allowed {
+			trace.Allowed = false
+			trace.Reason = "consequential capability closure denied"
+			return trace
+		}
+	}
+	return trace
+}

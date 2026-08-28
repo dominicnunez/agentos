@@ -25,6 +25,8 @@ Agent OS requires the appropriate approval for actions involving:
 - legal or binding commitments
 - ordinary Agent OS deployment
 - trusted-core or security changes
+- introducing third-party executable or potentially executable code
+- mutating protected manifests, workflows, hooks, or other execution surfaces
 
 Approval is checked again at the consequential-effect boundary. Missing, expired, mismatched, or unanswered approval fails closed.
 

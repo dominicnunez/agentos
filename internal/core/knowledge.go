@@ -76,6 +76,29 @@ func ValidKnowledgeRecord(record KnowledgeRecord) bool {
 	}
 }
 
+// ValidateKnowledgeForProtectedConsequence deliberately applies a narrower
+// rule than ordinary organizational knowledge use. V1 has no external-source
+// identity attestation capable of proving that two Agent judgments are rooted
+// in independent sources, so Agent-validated knowledge fails closed at an
+// execution-authority boundary. Deterministic validation or explicit user
+// judgment remains eligible; neither grants the effect itself.
+func ValidateKnowledgeForProtectedConsequence(record KnowledgeRecord) error {
+	if !ValidKnowledgeRecord(record) || record.Status != KnowledgeActive {
+		return fmt.Errorf("protected consequence knowledge is not an active valid revision")
+	}
+	switch record.ValidationMethod {
+	case KnowledgeValidationDeterministic:
+		return nil
+	case KnowledgeValidationHuman:
+		if record.ValidatedByKind == PrincipalHuman {
+			return nil
+		}
+	case KnowledgeValidationUnvalidated, KnowledgeValidationExperimental, KnowledgeValidationRepeatedObservation,
+		KnowledgeValidationIndependentAgent, KnowledgeValidationMixed:
+	}
+	return fmt.Errorf("protected consequence knowledge lacks deterministically established provenance independence or explicit user judgment")
+}
+
 func ValidateKnowledgeProjectionTarget(eventType string, version int, record KnowledgeRecord) error {
 	if !ValidKnowledgeRecord(record) || record.Version != version {
 		return fmt.Errorf("knowledge projection value is invalid")

@@ -165,6 +165,34 @@ func TestRecoveryDoesNotApplyStaleObservationToChangedAttempt(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsProtectedEffectBindingSubstitution(t *testing.T) {
+	digest := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	resultDigest := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	now := time.Now().UTC()
+	effect := core.EffectObligation{
+		ID: "effect-surface", OrganizationID: "org-1", TaskID: "task-1", ActorID: "user-1", ActorKind: core.PrincipalHuman,
+		Action: core.ActionExecutionSurfaceMutate, Resource: "repo-1/go.mod", Scope: "org-1", ConsequenceBoundary: core.BoundaryExecutionSurfaceMutation,
+		Descriptor: "promote exact go.mod change", AuthorizationRefs: []string{"lease-surface"}, ApprovalRef: "approval-surface", IdempotencyKey: "key-surface", ReplayContext: map[string]string{"path": "go.mod"},
+		RequiredCapabilities:     []core.CapabilityRequirement{{Action: core.ActionExecutionSurfaceMutate, Resource: "repo-1/go.mod", Scope: "org-1"}},
+		Influence:                &core.ActionInfluenceBinding{SourceEventRefs: []string{"source-1"}},
+		Trajectory:               &core.EffectTrajectory{ProtectedEffectCount: 1, ApprovalRequestCount: 1, ConsequenceBoundaries: []string{core.BoundaryExecutionSurfaceMutation}, Destinations: []string{"repo-1/go.mod"}},
+		ExecutionSurfaceMutation: &core.ExecutionSurfaceMutationBinding{Path: "go.mod", Kind: core.ExecutionSurfaceModify, BeforeSHA256: digest, AfterSHA256: resultDigest, Promotion: core.StagedPromotionBinding{WorkspaceID: "workspace-1", TrustedTarget: "repo-1", BaseTreeSHA256: digest, ResultTreeSHA256: resultDigest, DiffSHA256: digest, VerificationSHA256: digest}},
+		Status:                   core.EffectAttempted, AttemptCount: 1, LastAttemptAt: &now, CreatedAt: now.Add(-time.Minute),
+	}
+	fingerprint, err := core.FingerprintEffect(effect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	effect.EffectFingerprint = fingerprint
+	if err := validateReconciliationObligation(effect); err != nil {
+		t.Fatalf("exact protected effect was not recoverable: %v", err)
+	}
+	effect.ExecutionSurfaceMutation.AfterSHA256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	if err := validateReconciliationObligation(effect); err == nil {
+		t.Fatal("recovery accepted substituted protected bytes under the old fingerprint")
+	}
+}
+
 type reconcilerFunc func(context.Context, core.EffectObligation) (ReconciliationObservation, error)
 
 func (f reconcilerFunc) Check(ctx context.Context, obligation core.EffectObligation) (ReconciliationObservation, error) {
@@ -173,13 +201,19 @@ func (f reconcilerFunc) Check(ctx context.Context, obligation core.EffectObligat
 
 func attemptedEffect(id core.ID) core.EffectObligation {
 	now := time.Now().UTC()
-	return core.EffectObligation{
+	effect := core.EffectObligation{
 		ID: id, OrganizationID: "org-1", TaskID: "task-1", ActorID: "agent-1", ActorKind: core.PrincipalAgent,
 		Action: "send", Resource: "destination-1", Scope: "org-1", Descriptor: "send message",
-		EffectFingerprint: "fingerprint-1", AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1",
+		AuthorizationRefs: []string{"lease-1"}, ApprovalRef: "approval-1",
 		IdempotencyKey: "idempotency-" + string(id), ReplayContext: map[string]string{"body": "hello"},
 		Status: core.EffectAttempted, AttemptCount: 1, LastAttemptAt: &now, CreatedAt: now.Add(-time.Minute),
 	}
+	fingerprint, err := core.FingerprintEffect(effect)
+	if err != nil {
+		panic(err)
+	}
+	effect.EffectFingerprint = fingerprint
+	return effect
 }
 
 func persistAttemptedEffect(t *testing.T, store *ledger.SQLite, attempted core.EffectObligation) {

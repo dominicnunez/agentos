@@ -35,7 +35,8 @@ does not claim to defend against a compromised operating-system administrator.
    establish the exact principal, tenant, role, scope, expiry, and limits.
 5. **Content to authority.** Conversation, model, and artifact content remain
    untrusted. They cannot create approval, capability, policy, or completion
-   authority.
+   authority. Content also cannot create execution authority, and trust does
+   not propagate through a reference to another source or artifact.
 6. **User decision to effect.** Approval and subjective completion bind exact
    ledger evidence and are separate from natural-language work.
 7. **Runtime to provider.** Only the configured model adapter receives bounded
@@ -70,11 +71,28 @@ does not claim to defend against a compromised operating-system administrator.
 | SQLite and recovery | corruption, partial event alteration/deletion/insertion/reordering, wrong-database confusion, unsupported or partial migration, Event Contract drift, forged projection-shaped events, copied or orphaned admission, identity or tenant substitution, mislabeled Agent, Mission, Goal, Work, or Task state, missing terminal evidence, lost input response, unsafe overwrite, unauthorized access | Agent OS SQLite application ID; exact versioned layouts; source validation before one-transaction ordered migration; storage/Event schema metadata and layout fingerprint; frozen oldest-supported fixture; no inferred unversioned compatibility; append-only events and versioned records; one-to-one stored-byte SHA-256 event chain checked during startup, verification, backup, and restore; one-to-one event-coupled projection fingerprints; exact identity, parent, correlation, prior/resulting state, and terminal Work/Goal evidence validation during write, replay, startup, backup, restore, and explicit bodyless recovery from durable completion or user-input events; read-only verification; no-overwrite backup and restore; private data paths; service umask `0077` | host file access can reveal data; deletion of the final event with its integrity record or a privileged full-database replacement can leave or recompute an internally consistent chain because the head is not yet signed, timestamped, or externally anchored; storage encryption remains external |
 | Incident replay | cross-tenant history or activity disclosure, raw prompt/result disclosure, private-correlation exposure, unbounded history reads or response amplification, false causal or root-cause claims, replay confused with re-execution | authenticated local-user organization scope only; durable public-conversation mapping; one read transaction with complete event-chain verification; global head hash and positions withheld; 256-event, 1,024-reference-per-event, 4 KiB envelope-field, and 2 MiB JSON fail-closed bounds; payload digests instead of raw payloads; stream-local order; only explicit stream, Task, and execution predecessor links; no A2A route and no mutation or execution dependency | predecessor order is evidence, not root-cause analysis; operator incident decisions remain external |
 | Consequential effects | duplicate action, cross-tenant or malformed lease use, principal-kind confusion under a shared text ID, malformed freeze/revocation history, unbounded authority replay, crash after send, false success | persist-before-effect obligation with fingerprinted actor ID and principal kind; exact kind-bound lease matching; closed capability/freeze Event Contracts with atomic records bound to exact admission event IDs; original-tenant checks before every revision; indexed current-state reads limited to at most 64 distinct referenced leases plus the tenant freeze; contiguous immutable grant-to-revocation history; deterministic read-only recovery validation for legacy uncertain effects; exact approval checks; single-use consumption; idempotency key; evidence-required confirmation; no blind resend | production effect-writing adapters remain absent |
+| Executable-code boundaries | trusted-content instruction laundering, package substitution, download-and-run, generic shell/file authority reuse, malicious workflow or manifest mutation, hidden tool capability, cumulative approval chain | separate closed `CODE_INTRODUCTION` and `EXECUTION_SURFACE_MUTATION` bindings; exact artifact and before/after digests; exact staged promotion; observable runtime-owned influence refs; fingerprinted Task-local effect trajectory; exact top-level and consequential capability closure; protected path classifier; code introduction denied before adapters while hostile-code isolation is unavailable | no package/code/container/plugin execution or staged coding runtime is supported; external publisher and source-root attestation remain unavailable |
+| Adaptive execution environment | configured sandbox differs from host reality, ambient secrets, writable cross-execution channels, untrusted project metadata triggers implicit execution | requested/effective environment contract; exact profile digests, roots, egress, brokers, credential classes, runtime/isolation identity, resources, and verification refs; writable adaptive state restricted to an exact execution-private workspace; tool definitions bind all model-visible content and consequential capabilities | production environment attestation and hostile-code isolation are prerequisites, not implemented controls; low-bandwidth covert channels are out of scope |
 | Release pipeline | dependency substitution, missing source/license, unreproducible archive, artifact mix-up | pinned Go, Node, pnpm, Python, and actions; lockfile, module hash, and compiled Go/browser license checks; reproducible embedded dashboard; embedded AGPL and source identity; vendored Go corresponding source; offline Linux source tests; independent byte comparison; checksums, SBOMs, and provenance | provenance is unsigned and publication remains separately approved |
 
 ## Security invariants
 
 - Model, user, Agent, and artifact content never become trusted state directly.
+- Content cannot create execution authority, and introducing executable code is
+  itself a protected consequence.
+- Trust does not propagate through references. Authentication of an instruction
+  does not authenticate the third-party artifact it names.
+- Generic shell or file-write capability does not authorize code introduction
+  or protected execution-surface mutation; those remain distinct consequences.
+- An allowed tool cannot launder consequential capabilities unavailable to the
+  requesting principal.
+- Configured containment is not proof of effective containment. Arbitrary
+  external-code execution remains unavailable until runtime verification can
+  prove filesystem, process, network, credential, identity, and resource bounds.
+- Shared writable execution infrastructure is not an Agent communication
+  channel. Adaptive mutation requires exact execution-private staged state.
+- Approval of individual effects does not imply approval of their cumulative
+  trajectory.
 - A model-proposed Plan is coordination data only; it cannot grant authority,
   approve an effect, add an execution mechanism, or make its children public.
 - A principal cannot expand its own capability or inherit authority through a

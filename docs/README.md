@@ -25,6 +25,7 @@
 ## Security and releases
 
 - [Threat model](THREAT_MODEL.md) - protected assets, attack surfaces, controls, and residual risks.
+- [Execution authority](EXECUTION_AUTHORITY.md) - supply-chain boundaries, consequential tool capabilities, containment prerequisites, and staged promotion.
 - [Release artifacts](RELEASE.md) - reproducible Linux packages, corresponding source, and publication controls.
 - [Security policy](../SECURITY.md) - private vulnerability reporting.
 
