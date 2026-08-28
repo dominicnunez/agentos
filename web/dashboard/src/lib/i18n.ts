@@ -1,4 +1,7 @@
-const english = {
+import { spanish } from './i18n/es.ts';
+import { simplifiedChinese } from './i18n/zh-CN.ts';
+
+export const english = {
   'app.title': 'Agent OS',
   'app.description': 'Agent OS organization dashboard',
   'app.brandSubtitle': 'Organization control',
@@ -253,12 +256,15 @@ const english = {
   'notice.reviewAlreadyMarked': 'Completion evidence is already marked {decision}.'
 } as const;
 
-export type DisplayLocale = 'en';
+export type DisplayLocale = 'en' | 'es' | 'zh-CN';
 export type DisplayMessageID = keyof typeof english;
 export type DisplayMessageValues = Readonly<Record<string, string | number>>;
+export type DisplayCatalog = Readonly<Record<DisplayMessageID, string>>;
 
-const catalogs: Readonly<Record<DisplayLocale, Readonly<Record<DisplayMessageID, string>>>> = {
-  en: english
+const catalogs: Readonly<Record<DisplayLocale, DisplayCatalog>> = {
+  en: english,
+  es: spanish,
+  'zh-CN': simplifiedChinese
 };
 
 const localePattern = /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i;
@@ -268,6 +274,10 @@ export function resolveDisplayLocale(candidates: readonly string[]): DisplayLoca
   for (const candidate of candidates) {
     const normalized = candidate.trim().toLowerCase();
     if (!localePattern.test(normalized)) continue;
+    if (normalized === 'zh' || normalized === 'zh-cn' || normalized === 'zh-sg' || normalized.startsWith('zh-hans')) {
+      return 'zh-CN';
+    }
+    if (normalized === 'es' || normalized.startsWith('es-')) return 'es';
     if (normalized === 'en' || normalized.startsWith('en-')) return 'en';
   }
   return 'en';
