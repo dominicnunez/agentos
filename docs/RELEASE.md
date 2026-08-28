@@ -33,7 +33,7 @@ Each package contains:
 
 - `agentos`;
 - `agentos-recovery`;
-- the complete `AGPL-3.0-only` `LICENSE`;
+- the complete `Apache-2.0` `LICENSE` and Agent OS `NOTICE`;
 - `SOURCE.md`, identifying the repository, exact commit, and immutable release
   tag;
 - `THIRD_PARTY_LICENSES/`, containing a deterministic manifest and root license
@@ -54,7 +54,7 @@ metadata, not a signature or GitHub attestation.
 The builder derives the license bundle from the packages that Go reports as
 compiled into the release commands. It fails closed if an external compiled
 module has no discoverable root license evidence, if a binary package omits
-the Agent OS license, source notice, or third-party manifest, or if any archive
+the Agent OS license, project notice, source notice, or third-party manifest, or if any archive
 content or metadata is not reproducible. Release CI extracts the corresponding
 source archive on Linux, disables module-network access, and runs its complete
 test suite from the delivered vendored dependency source.
@@ -77,7 +77,7 @@ Publishing `v1.0.0-rc.1` is a separate public/external and trusted-release
 decision. Before publication:
 
 1. confirm required CI is green on the exact `main` commit;
-2. obtain final software-licensing review for the `AGPL-3.0-only` distribution;
+2. obtain final software-licensing review for the `Apache-2.0` distribution;
 3. approve the immutable `v1.0.0-rc.1` tag and public GitHub release;
 4. rebuild from that tag and compare it with the approved commit output;
 5. generate GitHub-signed artifact attestations with minimal workflow

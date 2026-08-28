@@ -45,7 +45,8 @@ SUPPLEMENTAL_NOTICE_NAME = re.compile(
 MAX_LICENSE_BYTES = 2 << 20
 MAX_DEPENDENCY_SOURCE_FILE_BYTES = 64 << 20
 MAX_DEPENDENCY_SOURCE_BYTES = 512 << 20
-AGPL3_SHA256 = "d8a6cc31abc16b6748c7a21f21611f5a1ec33f67d22ca23d7da1c19b95496bee"
+APACHE2_SHA256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+PROJECT_NOTICE = b"Agent OS\nCopyright 2026 Dominic Nunez\n"
 
 
 def command(
@@ -567,7 +568,7 @@ def source_notice(version: str, commit: str) -> bytes:
         f"- Commit: `{commit}`\n"
         f"- Immutable release tag: `v{version}`\n"
         f"- Corresponding-source archive: `agentos_{version}_source.tar.gz`\n"
-        "- License: `AGPL-3.0-only`\n\n"
+        "- License: `Apache-2.0`\n\n"
         "The release tag must resolve to the commit above when the release is "
         "published. The source archive is generated deterministically from that "
         "commit and contains the complete tracked source, this notice, and an "
@@ -754,9 +755,13 @@ def main() -> int:
     source_md = source_notice(version, commit)
     source_files = tracked_source_files(source_md)
     license = source_files.get("LICENSE")
-    if license is None or hashlib.sha256(license[0]).hexdigest() != AGPL3_SHA256:
-        raise RuntimeError("LICENSE must contain the unmodified AGPLv3 text")
+    if license is None or hashlib.sha256(license[0]).hexdigest() != APACHE2_SHA256:
+        raise RuntimeError("LICENSE must contain the unmodified Apache License 2.0 text")
     license_bytes = license[0]
+    notice = source_files.get("NOTICE")
+    if notice is None or notice[0] != PROJECT_NOTICE:
+        raise RuntimeError("NOTICE must contain the canonical Agent OS attribution")
+    notice_bytes = notice[0]
     module_records = compiled_modules(version)
     vendored_sources = dependency_source_files(module_records)
     if source_files.keys() & vendored_sources.keys():
@@ -798,6 +803,7 @@ def main() -> int:
             target_dir.mkdir()
             packaged: dict[str, tuple[bytes, int]] = {
                 "LICENSE": (license_bytes, 0o644),
+                "NOTICE": (notice_bytes, 0o644),
                 "README.md": (source_files["README.md"][0], 0o644),
                 "SOURCE.md": (source_md, 0o644),
                 "VERSION": (source_files["VERSION"][0], 0o644),
@@ -822,6 +828,7 @@ def main() -> int:
             verify_archive(archive_path, root_name, packaged, epoch)
             for required in (
                 "LICENSE",
+                "NOTICE",
                 "SOURCE.md",
                 "THIRD_PARTY_LICENSES/manifest.json",
                 "THIRD_PARTY_LICENSES/npm-frontend.json",

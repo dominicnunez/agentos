@@ -83,6 +83,7 @@ jobs:
             root="agentos_${version}_${target}"
             listing=$(tar --list --gzip --file "$archive")
             grep --fixed-strings --line-regexp "$root/LICENSE" <<<"$listing"
+            grep --fixed-strings --line-regexp "$root/NOTICE" <<<"$listing"
             grep --fixed-strings --line-regexp "$root/SOURCE.md" <<<"$listing"
             grep --fixed-strings --line-regexp \
               "$root/THIRD_PARTY_LICENSES/manifest.json" <<<"$listing"
@@ -96,6 +97,7 @@ jobs:
             --file "$RUNNER_TEMP/agentos-release-a/agentos_${version}_source.tar.gz" \
             --directory "$source_directory"
           test -f "$source_root/LICENSE"
+          test -f "$source_root/NOTICE"
           test -f "$source_root/SOURCE.md"
           test -f "$source_root/vendor/modules.txt"
           cd "$source_root"
