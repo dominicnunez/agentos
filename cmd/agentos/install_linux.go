@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"unicode"
 
 	"github.com/dominicnunez/agentos/internal/bootstrap"
 	"github.com/dominicnunez/agentos/internal/fileguard"
@@ -735,9 +736,13 @@ func serviceCredentialDirectives(config bootstrap.Config) (string, error) {
 	var directives strings.Builder
 	switch provider.Kind {
 	case bootstrap.ProviderOpenAIAPI:
-		directives.WriteString("LoadCredentialEncrypted=" + systemdQuote(provider.SecretRef+":"+filepath.Join(config.Paths.ConfigDir, "credentials", provider.SecretRef+".cred")) + "\n")
+		if err := appendServiceCredential(&directives, "LoadCredentialEncrypted", provider.SecretRef, filepath.Join(config.Paths.ConfigDir, "credentials", provider.SecretRef+".cred")); err != nil {
+			return "", err
+		}
 	case bootstrap.ProviderCodexSubscription:
-		directives.WriteString("LoadCredentialEncrypted=" + systemdQuote(provider.SecretRef+":"+filepath.Join(config.Paths.ConfigDir, "credentials", provider.SecretRef+".cred")) + "\n")
+		if err := appendServiceCredential(&directives, "LoadCredentialEncrypted", provider.SecretRef, filepath.Join(config.Paths.ConfigDir, "credentials", provider.SecretRef+".cred")); err != nil {
+			return "", err
+		}
 	}
 	if config.A2A.ActorsFile == "" {
 		return directives.String(), nil
@@ -753,7 +758,9 @@ func serviceCredentialDirectives(config bootstrap.Config) (string, error) {
 		return "", fmt.Errorf("service credential reference a2a-actors.json is reserved")
 	}
 	references["a2a-actors.json"] = struct{}{}
-	directives.WriteString("LoadCredential=" + systemdQuote("a2a-actors.json:"+config.A2A.ActorsFile) + "\n")
+	if err := appendServiceCredential(&directives, "LoadCredential", "a2a-actors.json", config.A2A.ActorsFile); err != nil {
+		return "", err
+	}
 	if config.A2A.TLSCertFile != "" {
 		for name, source := range map[string]struct {
 			path    string
@@ -770,8 +777,12 @@ func serviceCredentialDirectives(config bootstrap.Config) (string, error) {
 			}
 			references[name] = struct{}{}
 		}
-		directives.WriteString("LoadCredential=" + systemdQuote("a2a-tls-cert:"+config.A2A.TLSCertFile) + "\n")
-		directives.WriteString("LoadCredential=" + systemdQuote("a2a-tls-key:"+config.A2A.TLSKeyFile) + "\n")
+		if err := appendServiceCredential(&directives, "LoadCredential", "a2a-tls-cert", config.A2A.TLSCertFile); err != nil {
+			return "", err
+		}
+		if err := appendServiceCredential(&directives, "LoadCredential", "a2a-tls-key", config.A2A.TLSKeyFile); err != nil {
+			return "", err
+		}
 	}
 	for _, actor := range actors {
 		if !validServiceCredentialName(actor.TokenRef) {
@@ -785,9 +796,24 @@ func serviceCredentialDirectives(config bootstrap.Config) (string, error) {
 		if err := validateReviewedServiceFile(config, path, true); err != nil {
 			return "", fmt.Errorf("external Agent credential %s is unavailable or unsafe", actor.TokenRef)
 		}
-		directives.WriteString("LoadCredentialEncrypted=" + systemdQuote(actor.TokenRef+":"+path) + "\n")
+		if err := appendServiceCredential(&directives, "LoadCredentialEncrypted", actor.TokenRef, path); err != nil {
+			return "", err
+		}
 	}
 	return directives.String(), nil
+}
+
+func appendServiceCredential(directives *strings.Builder, directive, name, path string) error {
+	if directives == nil || (directive != "LoadCredential" && directive != "LoadCredentialEncrypted") || !validServiceCredentialName(name) || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return fmt.Errorf("service credential directive is invalid")
+	}
+	if strings.IndexFunc(path, func(character rune) bool {
+		return unicode.IsControl(character) || unicode.IsSpace(character) || strings.ContainsRune(`:%"\`, character)
+	}) >= 0 {
+		return fmt.Errorf("service credential path cannot be represented safely")
+	}
+	directives.WriteString(directive + "=" + name + ":" + path + "\n")
+	return nil
 }
 
 func validateReviewedServiceFile(config bootstrap.Config, path string, private bool) error {

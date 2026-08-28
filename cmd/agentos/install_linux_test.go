@@ -23,7 +23,7 @@ func TestSystemdUnitsQuoteConfiguredPathsAndPercentSpecifiers(t *testing.T) {
 	if !strings.Contains(unit, `"/var/lib/agentos/work spaces/%%n"`) || strings.Contains(unit, `"/var/lib/agentos/work spaces/%n"`) {
 		t.Fatalf("configured path was not safely quoted:\n%s", unit)
 	}
-	if !strings.Contains(unit, `LoadCredentialEncrypted="openai-api-key:/etc/agentos/credentials/openai-api-key.cred"`) {
+	if !strings.Contains(unit, "LoadCredentialEncrypted=openai-api-key:/etc/agentos/credentials/openai-api-key.cred\n") {
 		t.Fatalf("credential directive was not quoted:\n%s", unit)
 	}
 	if !strings.Contains(unit, "RuntimeDirectory=agentos-private\nRuntimeDirectoryMode=0700") || !strings.Contains(unit, `"/run/agentos-private"`) {
@@ -75,11 +75,26 @@ func TestUserServiceLoadsReviewedA2ACredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(unit, `LoadCredential="a2a-actors.json:`) || !strings.Contains(unit, `LoadCredentialEncrypted="agent-1-token:`) {
+	if !strings.Contains(unit, "LoadCredential=a2a-actors.json:") || !strings.Contains(unit, "LoadCredentialEncrypted=agent-1-token:") {
 		t.Fatalf("A2A credential directives are missing:\n%s", unit)
 	}
 	if !strings.Contains(unit, "UMask=0077") {
 		t.Fatal("user service does not enforce a private file-creation mask")
+	}
+}
+
+func TestServiceCredentialDirectiveRejectsAmbiguousValues(t *testing.T) {
+	var directives strings.Builder
+	if err := appendServiceCredential(&directives, "LoadCredentialEncrypted", "provider-key", "/etc/agentos/credentials/provider-key.cred"); err != nil {
+		t.Fatal(err)
+	}
+	if got := directives.String(); got != "LoadCredentialEncrypted=provider-key:/etc/agentos/credentials/provider-key.cred\n" {
+		t.Fatalf("credential directive=%q", got)
+	}
+	for _, path := range []string{"relative.cred", "/etc/agent os/key.cred", "/etc/agentos/key.cred%N", "/etc/agentos/key.cred\nLoadCredential=unsafe"} {
+		if err := appendServiceCredential(&directives, "LoadCredentialEncrypted", "provider-key", path); err == nil {
+			t.Fatalf("accepted unsafe credential path %q", path)
+		}
 	}
 }
 
