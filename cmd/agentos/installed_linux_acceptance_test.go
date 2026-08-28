@@ -175,7 +175,15 @@ _, status = os.waitpid(pid, 0)
 sys.stdout.buffer.write(output)
 sys.exit(os.waitstatus_to_exitcode(status))
 `
-	return exec.CommandContext(ctx, "/usr/bin/python3", "-c", script, binary).CombinedOutput()
+	command := exec.CommandContext(ctx, "/usr/bin/python3", "-c", script, binary)
+	command.Env = make([]string, 0, len(os.Environ()))
+	for _, value := range os.Environ() {
+		if strings.HasPrefix(value, "SUDO_USER=") || strings.HasPrefix(value, "SUDO_UID=") || strings.HasPrefix(value, "SUDO_GID=") {
+			continue
+		}
+		command.Env = append(command.Env, value)
+	}
+	return command.CombinedOutput()
 }
 
 func exerciseInstalledUserLifecycle(t *testing.T, binary, recoveryBinary string) {
