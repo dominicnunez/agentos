@@ -20,6 +20,10 @@ test('formats typed display messages with exact interpolation values', () => {
     formatDisplayMessage('en', 'organization.assignedTo', { type: 'AGENT', id: 'agent-1' }),
     'Assigned to AGENT agent-1'
   );
+  assert.equal(
+    formatDisplayMessage('en', 'task.fieldBounds', { description: 'Exact evidence', minimum: 1, maximum: 64 }),
+    'Exact evidence; 1 to 64 UTF-8 bytes'
+  );
 });
 
 test('fails closed when interpolation values are missing or unexpected', () => {
