@@ -116,7 +116,7 @@
         if (recovered) {
           refreshGeneration += 1;
           setOrganization(recovered);
-          notice = 'Recovered durable Mission and Goal creation after an interrupted response.';
+          notice = ui('notice.recoveredStrategy');
         }
       } catch (cause) {
         recoveryFailures.push(message(cause));
@@ -126,7 +126,7 @@
         if (recovered) {
           task = recovered;
           taskID = recovered.task_id;
-          notice = `Recovered Task ${recovered.task_id} after an interrupted Intent confirmation.`;
+          notice = ui('notice.recoveredTask', { task: safeDisplay(recovered.task_id) });
         }
       } catch (cause) {
         recoveryFailures.push(message(cause));
@@ -140,7 +140,7 @@
         }
       }
       await refresh();
-      if (recoveryFailures.length) error = `Pending operation recovery failed. ${recoveryFailures.join(' ')}${error ? ` ${error}` : ''}`;
+      if (recoveryFailures.length) error = ui('error.recoveryFailed', { details: [...recoveryFailures, ...(error ? [error] : [])].join(' ') });
     } catch (cause) {
       error = message(cause);
     }
@@ -188,7 +188,7 @@
         const recovered = approvals.find((item) => item.approval_id === pendingApprovalDecision?.approval_id);
         if (recovered && terminalApproval(recovered)) {
           const recorded = recovered.status === 'APPROVED' ? 'APPROVE' : 'DENY';
-          if (recorded !== pendingApprovalDecision.decision) notice = `Another authorized operator recorded ${recovered.status} for the recovered approval.`;
+          if (recorded !== pendingApprovalDecision.decision) notice = ui('notice.otherApprovalDecision', { status: safeDisplay(recovered.status) });
           selectedApproval = recovered;
           clearPendingApprovalDecision();
         }
@@ -199,7 +199,7 @@
       if (pendingReviewDecision) {
         const recovered = reviews.find((item) => item.review_id === pendingReviewDecision?.review_id);
         if (recovered && terminalCompletionReview(recovered)) {
-          if (recovered.state !== pendingReviewDecision.decision || (recovered.state !== 'APPROVE' && recovered.feedback !== pendingReviewDecision.feedback)) notice = `Another authorized operator recorded ${recovered.state} for the recovered completion review.`;
+          if (recovered.state !== pendingReviewDecision.decision || (recovered.state !== 'APPROVE' && recovered.feedback !== pendingReviewDecision.feedback)) notice = ui('notice.otherReviewDecision', { state: safeDisplay(recovered.state) });
           selectedReview = recovered;
           clearPendingReviewDecision();
         }
@@ -211,7 +211,7 @@
       taskID = taskResult.value.task_id;
       if (taskResult.value.state !== 'INPUT_REQUIRED' || taskResult.value.task_id !== displayedTask?.task_id || taskResult.value.updated_at !== displayedTask.updated_at || taskResult.value.prompt !== displayedTask.prompt) clearTaskInput();
     }
-    if (failures.length) error = `Dashboard refresh failed; previously loaded governance data was preserved. ${failures.join(' ')}`;
+    if (failures.length) error = ui('error.refreshFailed', { details: failures.join(' ') });
     selectedApproval = approvals.find((item) => item.approval_id === selectedApproval?.approval_id) ?? (selectedApproval && (terminalApproval(selectedApproval) || pendingApprovalDecision) ? selectedApproval : null);
     selectedReview = reviews.find((item) => item.review_id === selectedReview?.review_id) ?? (selectedReview && (terminalCompletionReview(selectedReview) || pendingReviewDecision) ? selectedReview : null);
   }
@@ -224,7 +224,7 @@
       const evidence = await verifiedDownload('/api/v1/user/aims/evidence');
       const bundle = buildEvidenceBundle(evidence.body, evidence.sha256);
       downloadBlob(new Blob([bundle], { type: 'application/x-tar' }), 'agentos-aims-evidence.tar');
-      notice = `Downloaded bounded AIMS readiness evidence bundle ${evidence.sha256.slice(0, 12)}.`;
+      notice = ui('notice.evidenceDownloaded', { digest: evidence.sha256.slice(0, 12) });
     } catch (cause) {
       error = message(cause);
     } finally {
@@ -293,12 +293,12 @@
     } catch (cause) {
       if (cause instanceof APIError && cause.status === 410) {
         clearPendingApprovalDecision();
-        notice = 'The interrupted approval expired without authorizing its effect.';
+        notice = ui('notice.approvalExpired');
         return available;
       }
       throw cause;
     }
-    if (exact.approval_id !== pendingApprovalDecision.approval_id || exact.effect_fingerprint !== pendingApprovalDecision.fingerprint) throw new Error('The durable approval changed while recovering a decision.');
+    if (exact.approval_id !== pendingApprovalDecision.approval_id || exact.effect_fingerprint !== pendingApprovalDecision.fingerprint) throw new Error(ui('error.approvalChanged'));
     if (terminalApproval(exact)) {
       return [...available.filter((item) => item.approval_id !== exact.approval_id), exact];
     } else {
@@ -314,7 +314,7 @@
     if (!pendingReviewDecision) return available;
     let exact = await api<CompletionReview>(`/api/v1/user/reviews/${encodeURIComponent(pendingReviewDecision.task_id)}/records/${encodeURIComponent(pendingReviewDecision.review_id)}`);
     if (exact.review_id !== pendingReviewDecision.review_id || exact.fingerprint !== pendingReviewDecision.fingerprint) {
-      throw new Error('The durable completion review changed while recovering a decision.');
+      throw new Error(ui('error.reviewChanged'));
     }
     if (terminalCompletionReview(exact)) {
       return [...available.filter((item) => item.review_id !== exact.review_id), exact];
@@ -362,7 +362,7 @@
       pendingWorkMessageID = '';
       pendingWorkKey = '';
       if (workText === text) workText = '';
-      notice = active.prompt || 'The proposed work was updated.';
+      notice = active.prompt || ui('notice.proposalUpdated');
     });
   }
 
@@ -391,7 +391,7 @@
       taskID = confirmed.task_id;
       clearTaskInput();
       conversationID = '';
-      notice = `Task ${confirmed.task_id} for Work ${confirmed.work_id || ''} was created from the confirmed Intent.`;
+      notice = ui('notice.taskCreated', { task: safeDisplay(confirmed.task_id), work: safeDisplay(confirmed.work_id || '') });
       await refresh();
     });
   }
@@ -416,7 +416,7 @@
       pendingWorkKey = '';
       pendingAbandonMessageID = '';
       pendingAbandonConversationID = '';
-      notice = 'The intake was abandoned. Its event history remains immutable.';
+      notice = ui('notice.intakeAbandoned');
       await refresh();
     });
   }
@@ -445,7 +445,7 @@
     const criteria = strategyCriteria();
     if (!statement || !objective || !criteria.length) return;
     if (pendingStrategy && !matchesStrategyRetry(pendingStrategy, statement, objective, goalMode, criteria)) {
-      error = 'The interrupted Mission and Goal creation must be recovered before different direction can be submitted.';
+      error = ui('error.strategyRecovery');
       return;
     }
     await action(async () => {
@@ -468,7 +468,7 @@
       goalMode = 'TARGET';
       goalCriteria = '';
       clearPendingStrategy();
-      notice = 'The Mission and Goal are now durable organizational direction.';
+      notice = ui('notice.strategyDurable');
     });
   }
 
@@ -582,7 +582,7 @@
       pendingTaskInputMessageID = '';
       pendingTaskInputKey = '';
       if (taskInput === text) taskInput = '';
-      notice = task.prompt || 'The requested input was recorded and work resumed.';
+      notice = task.prompt || ui('notice.inputRecorded');
       await refresh();
     });
   }
@@ -609,7 +609,7 @@
         body: JSON.stringify({ message_id: messageID, fields: evidence.fields, artifacts })
       });
       completionMessageID = '';
-      notice = 'Completion evidence was submitted for deterministic validation.';
+      notice = ui('notice.completionSubmitted');
       await refresh();
     });
   }
@@ -617,35 +617,35 @@
   async function decideApproval(decision: 'APPROVE' | 'DENY'): Promise<void> {
     if (!selectedApproval) return;
     if (pendingApprovalDecision) {
-      error = 'The earlier approval decision must be recovered before another decision can begin.';
+      error = ui('error.approvalRecovery');
       return;
     }
     const approval = selectedApproval;
     if (terminalApproval(approval)) return;
     const expected = decision === 'APPROVE' ? `APPROVE ${approval.effect_fingerprint.slice(0, 12)}` : 'DENY';
     if (approvalPhrase.trim() !== expected) {
-      error = `Type ${expected} exactly.`;
+      error = ui('error.typeExact', { expected });
       return;
     }
     pendingApprovalDecision = approvalRetryBinding(approval.approval_id, approval.effect_fingerprint, decision);
     sessionStorage.setItem(pendingApprovalKey, JSON.stringify(pendingApprovalDecision));
     await action(async () => {
       let current = await api<Approval>(`/api/v1/control/approvals/${encodeURIComponent(approval.approval_id)}`);
-      if (current.effect_fingerprint !== approval.effect_fingerprint) throw new Error('The durable approval fingerprint changed.');
+      if (current.effect_fingerprint !== approval.effect_fingerprint) throw new Error(ui('error.approvalFingerprintChanged'));
       if (terminalApproval(current)) {
         const recorded = current.status === 'APPROVED' ? 'APPROVE' : 'DENY';
-        if (recorded !== decision) throw new Error(`The exact effect was already ${current.status.toLowerCase()}.`);
+        if (recorded !== decision) throw new Error(ui('error.effectAlready', { status: safeDisplay(current.status.toLowerCase()) }));
         selectedApproval = current;
         clearPendingApprovalDecision();
         approvalPhrase = '';
-        notice = `Exact effect ${decision === 'APPROVE' ? 'approved' : 'denied'}.`;
+        notice = ui(decision === 'APPROVE' ? 'notice.effectApproved' : 'notice.effectDenied');
         await refresh();
         return;
       }
       selectedApproval = await replayApprovalDecision(api, current, decision);
       clearPendingApprovalDecision();
       approvalPhrase = '';
-      notice = `Exact effect ${decision === 'APPROVE' ? 'approved' : 'denied'}.`;
+      notice = ui(decision === 'APPROVE' ? 'notice.effectApproved' : 'notice.effectDenied');
       await refresh();
     });
   }
@@ -653,18 +653,18 @@
   async function decideReview(decision: 'APPROVE' | 'REJECT' | 'REVISE'): Promise<void> {
     if (!selectedReview) return;
     if (pendingReviewDecision) {
-      error = 'The earlier completion-review decision must be recovered before another decision can begin.';
+      error = ui('error.reviewRecovery');
       return;
     }
     const review = selectedReview;
     if (terminalCompletionReview(review)) return;
     const expected = `${decision} ${review.fingerprint.slice(0, 12)}`;
     if (reviewPhrase.trim() !== expected) {
-      error = `Type ${expected} exactly.`;
+      error = ui('error.typeExact', { expected });
       return;
     }
     if (decision === 'REVISE' && !reviewFeedback.trim()) {
-      error = 'Revision feedback is required.';
+      error = ui('error.revisionFeedback');
       return;
     }
     const feedback = completionReviewFeedback(decision, reviewFeedback);
@@ -672,14 +672,14 @@
     sessionStorage.setItem(pendingReviewKey, JSON.stringify(pendingReviewDecision));
     await action(async () => {
       const current = await api<CompletionReview>(`/api/v1/user/reviews/${encodeURIComponent(review.task_id)}/records/${encodeURIComponent(review.review_id)}`);
-      if (current.review_id !== review.review_id || current.fingerprint !== review.fingerprint) throw new Error('The durable completion review changed.');
+      if (current.review_id !== review.review_id || current.fingerprint !== review.fingerprint) throw new Error(ui('error.reviewChanged'));
       if (terminalCompletionReview(current)) {
-        if (current.state !== decision || (decision !== 'APPROVE' && current.feedback !== feedback)) throw new Error('The completion review already has a different durable decision.');
+        if (current.state !== decision || (decision !== 'APPROVE' && current.feedback !== feedback)) throw new Error(ui('error.reviewDecisionChanged'));
         selectedReview = current;
         clearPendingReviewDecision();
         reviewPhrase = '';
         reviewFeedback = '';
-        notice = `Completion evidence is already marked ${decision.toLowerCase()}.`;
+        notice = ui('notice.reviewAlreadyMarked', { decision: decision.toLowerCase() });
         await refresh();
         return;
       }
@@ -687,7 +687,7 @@
       clearPendingReviewDecision();
       reviewPhrase = '';
       reviewFeedback = '';
-      notice = `Completion evidence marked ${decision.toLowerCase()}.`;
+      notice = ui('notice.reviewMarked', { decision: decision.toLowerCase() });
       await refresh();
     });
   }
@@ -917,23 +917,23 @@
     {:else if section === 'governance'}
       {#if governance}
         <section class="metrics">
-          <div><span>Critical</span><strong>{governance.summary.critical}</strong><small>Immediate governance holes</small></div>
-          <div><span>High</span><strong>{governance.summary.high}</strong><small>Material governance holes</small></div>
-          <div><span>Rules</span><strong>{governance.summary.rules_executed}</strong><small>{governance.summary.findings} open findings</small></div>
+          <div><span>{ui('governance.critical')}</span><strong>{governance.summary.critical}</strong><small>{ui('governance.criticalHelp')}</small></div>
+          <div><span>{ui('governance.high')}</span><strong>{governance.summary.high}</strong><small>{ui('governance.highHelp')}</small></div>
+          <div><span>{ui('governance.rules')}</span><strong>{governance.summary.rules_executed}</strong><small>{ui('governance.openFindingsCount', { count: governance.summary.findings })}</small></div>
         </section>
         <section class="panel">
-          <div class="panel-title"><div><p class="eyebrow">Verified runtime inspection</p><h2>Governance findings</h2></div><span class="status">{safeDisplay(governance.integrity.verification)}</span></div>
+          <div class="panel-title"><div><p class="eyebrow">{ui('governance.inspectionEyebrow')}</p><h2>{ui('governance.findingsTitle')}</h2></div><span class="status">{safeDisplay(governance.integrity.verification)}</span></div>
           <p class="boundary-note">{safeDisplay(governance.boundary.authority)}</p>
-          <dl><div><dt>Observed</dt><dd>{safeDisplay(governance.observed_at)}</dd></div><div><dt>Ledger head</dt><dd class="mono">{safeDisplay(governance.integrity.ledger_event_id)}</dd></div><div><dt>Report digest</dt><dd class="mono">{safeDisplay(governance.sha256)}</dd></div></dl>
+          <dl><div><dt>{ui('governance.observed')}</dt><dd>{safeDisplay(governance.observed_at)}</dd></div><div><dt>{ui('governance.ledgerHead')}</dt><dd class="mono">{safeDisplay(governance.integrity.ledger_event_id)}</dd></div><div><dt>{ui('governance.reportDigest')}</dt><dd class="mono">{safeDisplay(governance.sha256)}</dd></div></dl>
         </section>
         <section class="split">
-          <div class="panel list"><div class="panel-title"><div><p class="eyebrow">Deterministic rule host</p><h2>Open findings</h2></div><span class="count">{governance.findings.length}</span></div>{#if governance.findings.length}{#each governance.findings as finding}<button class:selected={selectedFinding?.id === finding.id} onclick={() => selectedFinding = finding}><div><strong>{safeDisplay(finding.rule_id)}</strong><span>{safeDisplay(finding.scope_kind)} · {safeDisplay(finding.scope_id)}</span></div><span class="risk">{safeDisplay(finding.severity)}</span></button>{/each}{:else}<div class="empty">No governance holes were found by the executed rules at this ledger head.</div>{/if}</div>
-          <div class="panel detail">{#if selectedFinding}<p class="eyebrow">{safeDisplay(selectedFinding.category)}</p><h2>{safeDisplay(selectedFinding.message)}</h2><dl><div><dt>Severity</dt><dd>{safeDisplay(selectedFinding.severity)}</dd></div><div><dt>Status</dt><dd>{safeDisplay(selectedFinding.status)}</dd></div><div><dt>Scope</dt><dd>{safeDisplay(selectedFinding.scope_kind)} {safeDisplay(selectedFinding.scope_id)}</dd></div><div><dt>Rule</dt><dd class="mono">{safeDisplay(selectedFinding.rule_id)}</dd></div></dl><h4>Evidence references</h4><ul class="mono">{#each selectedFinding.evidence_refs as ref}<li>{safeDisplay(ref)}</li>{/each}</ul><p class="boundary-note">Inspection is read-only. Resolving a finding requires the normal governed workflow and does not occur from this view.</p>{:else}<div class="empty">Select a finding to inspect its exact rule, scope, and evidence references.</div>{/if}</div>
+          <div class="panel list"><div class="panel-title"><div><p class="eyebrow">{ui('governance.ruleHostEyebrow')}</p><h2>{ui('governance.openFindings')}</h2></div><span class="count">{governance.findings.length}</span></div>{#if governance.findings.length}{#each governance.findings as finding}<button class:selected={selectedFinding?.id === finding.id} onclick={() => selectedFinding = finding}><div><strong>{safeDisplay(finding.rule_id)}</strong><span>{safeDisplay(finding.scope_kind)} · {safeDisplay(finding.scope_id)}</span></div><span class="risk">{safeDisplay(finding.severity)}</span></button>{/each}{:else}<div class="empty">{ui('governance.noFindings')}</div>{/if}</div>
+          <div class="panel detail">{#if selectedFinding}<p class="eyebrow">{safeDisplay(selectedFinding.category)}</p><h2>{safeDisplay(selectedFinding.message)}</h2><dl><div><dt>{ui('governance.severity')}</dt><dd>{safeDisplay(selectedFinding.severity)}</dd></div><div><dt>{ui('governance.status')}</dt><dd>{safeDisplay(selectedFinding.status)}</dd></div><div><dt>{ui('governance.scope')}</dt><dd>{safeDisplay(selectedFinding.scope_kind)} {safeDisplay(selectedFinding.scope_id)}</dd></div><div><dt>{ui('governance.rule')}</dt><dd class="mono">{safeDisplay(selectedFinding.rule_id)}</dd></div></dl><h4>{ui('governance.evidenceReferences')}</h4><ul class="mono">{#each selectedFinding.evidence_refs as ref}<li>{safeDisplay(ref)}</li>{/each}</ul><p class="boundary-note">{ui('governance.readOnlyBoundary')}</p>{:else}<div class="empty">{ui('governance.selectFinding')}</div>{/if}</div>
         </section>
-      {:else}<div class="panel empty">Open Governance to run a bounded inspection of the current verified organization.</div>{/if}
+      {:else}<div class="panel empty">{ui('governance.openPrompt')}</div>{/if}
     {:else}
-      <section class="grid two"><div class="panel"><p class="eyebrow">Local boundary</p><h2>Dashboard session</h2><dl><div><dt>Organization</dt><dd>{safeDisplay(identity?.organization ?? 'Unavailable')}</dd></div><div><dt>Install mode</dt><dd>{safeDisplay(identity?.mode ?? 'Unavailable')}</dd></div><div><dt>Agent OS</dt><dd>{safeDisplay(identity?.version ?? 'Unavailable')}</dd></div><div><dt>Expires</dt><dd>{safeDisplay(identity?.session_expires_at ?? 'Unavailable')}</dd></div></dl></div><div class="panel"><p class="eyebrow">Diagnostics</p><h2>Read-only system checks</h2><p>Use <code>agentos doctor</code> for configuration, credential, service, private-gateway, and SQLite integrity checks.</p><pre>agentos doctor
-sudo agentos doctor</pre></div><div class="panel"><p class="eyebrow">AI management system</p><h2>Readiness evidence</h2><p>Download a tenant-scoped technical-control inventory and evidence index. It excludes raw events, prompts, results, artifacts, credentials, approvals, and authority records.</p><button class="primary" onclick={downloadAIMSEvidence} disabled={busy || !identity}>Download evidence bundle</button><p class="boundary-note">This artifact supports ISO/IEC 42001 readiness work. It is not a conformity assessment or certification.</p></div></section>
+      <section class="grid two"><div class="panel"><p class="eyebrow">{ui('system.localBoundary')}</p><h2>{ui('system.sessionTitle')}</h2><dl><div><dt>{ui('system.organization')}</dt><dd>{safeDisplay(identity?.organization ?? ui('system.unavailable'))}</dd></div><div><dt>{ui('system.installMode')}</dt><dd>{safeDisplay(identity?.mode ?? ui('system.unavailable'))}</dd></div><div><dt>{ui('app.title')}</dt><dd>{safeDisplay(identity?.version ?? ui('system.unavailable'))}</dd></div><div><dt>{ui('system.expires')}</dt><dd>{safeDisplay(identity?.session_expires_at ?? ui('system.unavailable'))}</dd></div></dl></div><div class="panel"><p class="eyebrow">{ui('system.diagnostics')}</p><h2>{ui('system.checksTitle')}</h2><p>{ui('system.doctorHelp')}</p><pre>agentos doctor
+  sudo agentos doctor</pre></div><div class="panel"><p class="eyebrow">{ui('system.aimsEyebrow')}</p><h2>{ui('system.readinessTitle')}</h2><p>{ui('system.readinessHelp')}</p><button class="primary" onclick={downloadAIMSEvidence} disabled={busy || !identity}>{ui('system.downloadEvidence')}</button><p class="boundary-note">{ui('system.readinessBoundary')}</p></div></section>
     {/if}
   </main>
 </div>
