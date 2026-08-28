@@ -82,7 +82,7 @@ the local user because this gateway has no TCP listener.
 User mode follows the XDG directories beneath the current account and uses its
 private runtime directory for `user.sock`. It may be selected by any verified
 account, including root, but system mode remains the recommended default for a
-machine-level installation. User mode requires systemd 256 or newer so its
+machine-level installation. User mode requires systemd 258 or newer so its
 encrypted service credentials can be bound to that Linux user; system mode
 uses host-scoped systemd credentials.
 

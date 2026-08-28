@@ -30,9 +30,16 @@ import (
 
 func nowUTC() time.Time { return time.Now().UTC() }
 
+const minimumUserSystemdVersion = 258
+
 func runInit(ctx context.Context, mode bootstrap.Mode, resume bool, input *os.File, output io.Writer) error {
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("agent OS V1 setup is supported on Linux")
+	}
+	if mode == bootstrap.ModeUser {
+		if err := requireUserSystemd(ctx); err != nil {
+			return err
+		}
 	}
 	ui := newTerminalUI(input, output)
 	completed, err := ensureInitPrivileges(ctx, mode, ui)
@@ -107,6 +114,30 @@ func runInit(ctx context.Context, mode bootstrap.Mode, resume bool, input *os.Fi
 	}
 	_, err = fmt.Fprintln(output, "\nAgent OS is ready. Run agentos to open the organization dashboard.")
 	return err
+}
+
+func requireUserSystemd(ctx context.Context) error {
+	output, err := exec.CommandContext(ctx, "/usr/bin/systemd", "--version").Output()
+	if err != nil {
+		return fmt.Errorf("user mode requires systemd %d or newer", minimumUserSystemdVersion)
+	}
+	version, err := parseSystemdVersion(output)
+	if err != nil || version < minimumUserSystemdVersion {
+		return fmt.Errorf("user mode requires systemd %d or newer", minimumUserSystemdVersion)
+	}
+	return nil
+}
+
+func parseSystemdVersion(output []byte) (int, error) {
+	fields := strings.Fields(string(output))
+	if len(fields) < 2 || fields[0] != "systemd" {
+		return 0, fmt.Errorf("systemd version output is invalid")
+	}
+	version, err := strconv.Atoi(fields[1])
+	if err != nil || version <= 0 {
+		return 0, fmt.Errorf("systemd version output is invalid")
+	}
+	return version, nil
 }
 
 func initialPaths(ctx context.Context, mode bootstrap.Mode) (bootstrap.Paths, bootstrap.Owner, error) {

@@ -118,3 +118,17 @@ jobs:
             exit 1
           fi
           grep --fixed-strings "No valid installation" "$RUNNER_TEMP/agentos-doctor.log"
+
+      - name: Exercise installed Linux system lifecycle offline
+        env:
+          GOCACHE: ${{ runner.temp }}/agentos-installed-gocache
+          GOMODCACHE: ${{ runner.temp }}/agentos-installed-gomodcache
+        run: |
+          version=$(tr -d '\r\n' < VERSION)
+          package_root="$RUNNER_TEMP/agentos-package/agentos_${version}_linux_amd64"
+          test_binary="$RUNNER_TEMP/agentos-installed-linux.test"
+          go test -c -tags=installedlinux -o "$test_binary" ./cmd/agentos
+          sudo env \
+            AGENTOS_TEST_PACKAGED_BINARY="$package_root/agentos" \
+            AGENTOS_TEST_PACKAGED_RECOVERY="$package_root/agentos-recovery" \
+            "$test_binary" -test.run '^TestInstalledLinuxSystemLifecycle$' -test.v

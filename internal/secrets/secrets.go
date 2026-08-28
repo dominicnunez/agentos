@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 )
 
@@ -57,7 +56,7 @@ func (c CredentialDirectory) Resolve(_ context.Context, ref Ref) (Value, error) 
 	if err != nil {
 		return "", fmt.Errorf("secret %q is unavailable", ref)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 64<<10 || (runtime.GOOS == "linux" && info.Mode().Perm()&0o077 != 0) {
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 64<<10 || !privateCredentialFile(path, info) {
 		return "", fmt.Errorf("secret %q is unavailable", ref)
 	}
 	file, err := os.Open(path)

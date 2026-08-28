@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"unicode"
 
 	"github.com/dominicnunez/agentos/internal/bootstrap"
 	"github.com/dominicnunez/agentos/internal/fileguard"
@@ -242,6 +243,14 @@ func applyProviderRuntime(ctx context.Context, config bootstrap.Config) error {
 }
 
 func installSystemRuntime(ctx context.Context, config bootstrap.Config, serviceChoice int) error {
+	source, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return installSystemRuntimeFrom(ctx, config, serviceChoice, source)
+}
+
+func installSystemRuntimeFrom(ctx context.Context, config bootstrap.Config, serviceChoice int, source string) error {
 	if effectiveUID() != 0 {
 		return fmt.Errorf("system installation requires administrator access")
 	}
@@ -272,7 +281,7 @@ func installSystemRuntime(ctx context.Context, config bootstrap.Config, serviceC
 	if err := prepareSystemWorkspace(config.Paths.Workspace, config.Owner, serviceUID, serviceGID); err != nil {
 		return err
 	}
-	if err := installExecutable("/usr/local/bin/agentos"); err != nil {
+	if err := installExecutable(source, "/usr/local/bin/agentos"); err != nil {
 		return err
 	}
 	servicePath := "/etc/systemd/system/agentos.service"
@@ -284,7 +293,11 @@ func installSystemRuntime(ctx context.Context, config bootstrap.Config, serviceC
 	if err := writeRestrictedFile(servicePath, []byte(serviceUnit), 0o644); err != nil {
 		return err
 	}
-	if err := writeRestrictedFile(socketPath, []byte(systemSocketUnit(config)), 0o644); err != nil {
+	socketUnit, err := systemSocketUnit(config)
+	if err != nil {
+		return err
+	}
+	if err := writeRestrictedFile(socketPath, []byte(socketUnit), 0o644); err != nil {
 		return err
 	}
 	if err := runCommand(ctx, "systemctl", "daemon-reload"); err != nil {
@@ -444,34 +457,15 @@ func rejectSymlinkDirectoryChain(path string) error {
 }
 
 func installUserRuntime(ctx context.Context, config bootstrap.Config, serviceChoice int) error {
-	if effectiveUID() != config.Owner.UID {
-		return fmt.Errorf("user installation must run as its configured Linux owner")
-	}
-	if err := validateUserRuntimeBase(config); err != nil {
-		return err
-	}
-	current, err := os.UserHomeDir()
+	source, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	for _, directory := range []string{config.Paths.ConfigDir, config.Paths.DataDir, config.Paths.StateDir, config.Paths.CacheDir, config.Paths.RuntimeDir, config.Paths.Workspace} {
-		if err := ensureOwnedRuntimeDirectory(directory, config.Owner.UID, 0o700); err != nil {
-			return err
-		}
-	}
-	binary := filepath.Join(current, ".local", "bin", "agentos")
-	if err := installExecutable(binary); err != nil {
-		return err
-	}
-	unitDirectory := filepath.Join(current, ".config", "systemd", "user")
-	if err := os.MkdirAll(unitDirectory, 0o700); err != nil {
-		return err
-	}
-	serviceUnit, err := userServiceUnit(config, binary)
-	if err != nil {
-		return err
-	}
-	if err := writeRestrictedFile(filepath.Join(unitDirectory, "agentos.service"), []byte(serviceUnit), 0o600); err != nil {
+	return installUserRuntimeFrom(ctx, config, serviceChoice, source)
+}
+
+func installUserRuntimeFrom(ctx context.Context, config bootstrap.Config, serviceChoice int, source string) error {
+	if _, err := prepareUserRuntime(config, source); err != nil {
 		return err
 	}
 	if err := runCommand(ctx, "systemctl", "--user", "daemon-reload"); err != nil {
@@ -485,6 +479,40 @@ func installUserRuntime(ctx context.Context, config bootstrap.Config, serviceCho
 	default:
 		return nil
 	}
+}
+
+func prepareUserRuntime(config bootstrap.Config, source string) (string, error) {
+	if effectiveUID() != config.Owner.UID {
+		return "", fmt.Errorf("user installation must run as its configured Linux owner")
+	}
+	if err := validateUserRuntimeBase(config); err != nil {
+		return "", err
+	}
+	current, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	for _, directory := range []string{config.Paths.ConfigDir, config.Paths.DataDir, config.Paths.StateDir, config.Paths.CacheDir, config.Paths.RuntimeDir, config.Paths.Workspace} {
+		if err := ensureOwnedRuntimeDirectory(directory, config.Owner.UID, 0o700); err != nil {
+			return "", err
+		}
+	}
+	binary := filepath.Join(current, ".local", "bin", "agentos")
+	if err := installExecutable(source, binary); err != nil {
+		return "", err
+	}
+	unitDirectory := filepath.Join(current, ".config", "systemd", "user")
+	if err := os.MkdirAll(unitDirectory, 0o700); err != nil {
+		return "", err
+	}
+	serviceUnit, err := userServiceUnit(config, binary)
+	if err != nil {
+		return "", err
+	}
+	if err := writeRestrictedFile(filepath.Join(unitDirectory, "agentos.service"), []byte(serviceUnit), 0o600); err != nil {
+		return "", err
+	}
+	return binary, nil
 }
 
 func validateUserRuntimeBase(config bootstrap.Config) error {
@@ -551,19 +579,30 @@ func lookupNumericIdentity(ctx context.Context, name string) (int, int, error) {
 	return uid, gid, nil
 }
 
-func installExecutable(destination string) error {
-	source, err := os.Executable()
-	if err != nil {
-		return err
+func installExecutable(source, destination string) error {
+	if !filepath.IsAbs(source) || filepath.Clean(source) != source {
+		return fmt.Errorf("installation source must be an absolute regular file")
 	}
-	if same, _ := filepath.EvalSymlinks(destination); same == source {
+	sourceInfo, err := os.Lstat(source)
+	if err != nil || sourceInfo.Mode()&os.ModeSymlink != 0 || !sourceInfo.Mode().IsRegular() || sourceInfo.Size() <= 0 {
+		return fmt.Errorf("installation source must be a non-empty regular file")
+	}
+	resolvedSource, err := filepath.EvalSymlinks(source)
+	if err != nil || resolvedSource != source {
+		return fmt.Errorf("installation source must not traverse a link")
+	}
+	if same, _ := filepath.EvalSymlinks(destination); same == resolvedSource {
 		return nil
 	}
-	input, err := os.Open(source)
+	input, err := os.Open(resolvedSource)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = input.Close() }()
+	openedInfo, err := input.Stat()
+	if err != nil || !os.SameFile(sourceInfo, openedInfo) || openedInfo.Mode()&os.ModeSymlink != 0 || !openedInfo.Mode().IsRegular() || openedInfo.Size() != sourceInfo.Size() {
+		return fmt.Errorf("installation source changed while it was opened")
+	}
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		return err
 	}
@@ -573,9 +612,15 @@ func installExecutable(destination string) error {
 	}
 	temporaryPath := temporary.Name()
 	defer func() { _ = os.Remove(temporaryPath) }()
-	if _, err := io.Copy(temporary, input); err != nil {
+	copied, err := io.Copy(temporary, input)
+	if err != nil {
 		_ = temporary.Close()
 		return err
+	}
+	finalSourceInfo, statErr := input.Stat()
+	if statErr != nil || copied != sourceInfo.Size() || !os.SameFile(openedInfo, finalSourceInfo) || finalSourceInfo.Size() != sourceInfo.Size() || !finalSourceInfo.ModTime().Equal(sourceInfo.ModTime()) {
+		_ = temporary.Close()
+		return fmt.Errorf("installation source changed while it was copied")
 	}
 	if err := temporary.Chmod(0o755); err != nil {
 		_ = temporary.Close()
@@ -610,6 +655,7 @@ Wants=network-online.target
 Type=simple
 User=agentos
 Group=agentos
+Sockets=agentos-user.socket
 UMask=0077
 RuntimeDirectory=agentos-private
 RuntimeDirectoryMode=0700
@@ -633,22 +679,27 @@ WantedBy=multi-user.target
 `, nil
 }
 
-func systemSocketUnit(config bootstrap.Config) string {
+func systemSocketUnit(config bootstrap.Config) (string, error) {
+	if err := config.ValidateReady(); err != nil {
+		return "", fmt.Errorf("system socket configuration is invalid: %w", err)
+	}
+	if config.Mode != bootstrap.ModeSystem || config.Paths.UserSocket != bootstrap.SystemPaths().UserSocket {
+		return "", fmt.Errorf("system socket identity is invalid")
+	}
 	return `[Unit]
 Description=Agent OS private user gateway
 
 [Socket]
-ListenStream=` + systemdQuote(config.Paths.UserSocket) + `
+ListenStream=` + config.Paths.UserSocket + `
 DirectoryMode=0711
 SocketMode=0600
-SocketUser=` + systemdQuote(config.Owner.Username) + `
-SocketGroup=` + strconv.Itoa(config.Owner.GID) + `
+SocketUser=` + config.Owner.Username + `
 RemoveOnStop=yes
 Service=agentos.service
 
 [Install]
 WantedBy=sockets.target
-`
+`, nil
 }
 
 func userServiceUnit(config bootstrap.Config, binary string) (string, error) {
@@ -685,9 +736,13 @@ func serviceCredentialDirectives(config bootstrap.Config) (string, error) {
 	var directives strings.Builder
 	switch provider.Kind {
 	case bootstrap.ProviderOpenAIAPI:
-		directives.WriteString("LoadCredentialEncrypted=" + systemdQuote(provider.SecretRef+":"+filepath.Join(config.Paths.ConfigDir, "credentials", provider.SecretRef+".cred")) + "\n")
+		if err := appendServiceCredential(&directives, "LoadCredentialEncrypted", provider.SecretRef, filepath.Join(config.Paths.ConfigDir, "credentials", provider.SecretRef+".cred")); err != nil {
+			return "", err
+		}
 	case bootstrap.ProviderCodexSubscription:
-		directives.WriteString("LoadCredentialEncrypted=" + systemdQuote(provider.SecretRef+":"+filepath.Join(config.Paths.ConfigDir, "credentials", provider.SecretRef+".cred")) + "\n")
+		if err := appendServiceCredential(&directives, "LoadCredentialEncrypted", provider.SecretRef, filepath.Join(config.Paths.ConfigDir, "credentials", provider.SecretRef+".cred")); err != nil {
+			return "", err
+		}
 	}
 	if config.A2A.ActorsFile == "" {
 		return directives.String(), nil
@@ -703,7 +758,9 @@ func serviceCredentialDirectives(config bootstrap.Config) (string, error) {
 		return "", fmt.Errorf("service credential reference a2a-actors.json is reserved")
 	}
 	references["a2a-actors.json"] = struct{}{}
-	directives.WriteString("LoadCredential=" + systemdQuote("a2a-actors.json:"+config.A2A.ActorsFile) + "\n")
+	if err := appendServiceCredential(&directives, "LoadCredential", "a2a-actors.json", config.A2A.ActorsFile); err != nil {
+		return "", err
+	}
 	if config.A2A.TLSCertFile != "" {
 		for name, source := range map[string]struct {
 			path    string
@@ -720,8 +777,12 @@ func serviceCredentialDirectives(config bootstrap.Config) (string, error) {
 			}
 			references[name] = struct{}{}
 		}
-		directives.WriteString("LoadCredential=" + systemdQuote("a2a-tls-cert:"+config.A2A.TLSCertFile) + "\n")
-		directives.WriteString("LoadCredential=" + systemdQuote("a2a-tls-key:"+config.A2A.TLSKeyFile) + "\n")
+		if err := appendServiceCredential(&directives, "LoadCredential", "a2a-tls-cert", config.A2A.TLSCertFile); err != nil {
+			return "", err
+		}
+		if err := appendServiceCredential(&directives, "LoadCredential", "a2a-tls-key", config.A2A.TLSKeyFile); err != nil {
+			return "", err
+		}
 	}
 	for _, actor := range actors {
 		if !validServiceCredentialName(actor.TokenRef) {
@@ -735,9 +796,44 @@ func serviceCredentialDirectives(config bootstrap.Config) (string, error) {
 		if err := validateReviewedServiceFile(config, path, true); err != nil {
 			return "", fmt.Errorf("external Agent credential %s is unavailable or unsafe", actor.TokenRef)
 		}
-		directives.WriteString("LoadCredentialEncrypted=" + systemdQuote(actor.TokenRef+":"+path) + "\n")
+		if err := appendServiceCredential(&directives, "LoadCredentialEncrypted", actor.TokenRef, path); err != nil {
+			return "", err
+		}
 	}
 	return directives.String(), nil
+}
+
+func appendServiceCredential(directives *strings.Builder, directive, name, path string) error {
+	if directives == nil || (directive != "LoadCredential" && directive != "LoadCredentialEncrypted") || !validServiceCredentialName(name) || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return fmt.Errorf("service credential directive is invalid")
+	}
+	encodedPath, err := systemdCredentialPath(path)
+	if err != nil {
+		return fmt.Errorf("service credential path cannot be represented safely")
+	}
+	directives.WriteString(directive + "=" + name + ":" + encodedPath + "\n")
+	return nil
+}
+
+func systemdCredentialPath(path string) (string, error) {
+	var encoded strings.Builder
+	for _, character := range path {
+		switch {
+		case unicode.IsControl(character):
+			return "", fmt.Errorf("credential path contains a control character")
+		case character == ' ':
+			encoded.WriteString(`\x20`)
+		case character == '%':
+			encoded.WriteString("%%")
+		case character == '\\':
+			encoded.WriteString(`\\`)
+		case character == '"':
+			encoded.WriteString(`\"`)
+		default:
+			encoded.WriteRune(character)
+		}
+	}
+	return encoded.String(), nil
 }
 
 func validateReviewedServiceFile(config bootstrap.Config, path string, private bool) error {
