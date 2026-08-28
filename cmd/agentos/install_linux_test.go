@@ -218,4 +218,3 @@ func TestInstallExecutableCopiesOnlyAnExplicitRegularSource(t *testing.T) {
 		}
 	}
 }
-
