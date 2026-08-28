@@ -32,6 +32,9 @@ func TestSystemdUnitsQuoteConfiguredPathsAndPercentSpecifiers(t *testing.T) {
 	if !strings.Contains(unit, "UMask=0077") {
 		t.Fatal("system service does not enforce a private file-creation mask")
 	}
+	if !strings.Contains(unit, "Sockets=agentos-user.socket\n") {
+		t.Fatal("system service does not inherit the private gateway socket")
+	}
 	socketUnit, err := systemSocketUnit(config)
 	if err != nil {
 		t.Fatal(err)

@@ -654,6 +654,7 @@ Wants=network-online.target
 Type=simple
 User=agentos
 Group=agentos
+Sockets=agentos-user.socket
 UMask=0077
 RuntimeDirectory=agentos-private
 RuntimeDirectoryMode=0700
