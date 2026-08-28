@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -342,21 +341,6 @@ func waitForUserUnit(t *testing.T, username, home, runtimeBase, socket string) {
 	status, _ := runUserCommandOutput(t.Context(), username, home, runtimeBase, "/usr/bin/systemctl", "--user", "status", "--no-pager", "agentos.service")
 	journal, _ := runUserCommandOutput(t.Context(), username, home, runtimeBase, "/usr/bin/journalctl", "--user", "--no-pager", "--unit", "agentos.service", "--lines", "100")
 	t.Fatalf("user service did not become ready with %s\nstatus:\n%s\njournal:\n%s", socket, status, journal)
-}
-
-func waitForSocket(t *testing.T, path string, command *exec.Cmd, diagnostics *bytes.Buffer) {
-	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSocket != 0 {
-			return
-		}
-		if err := command.Process.Signal(syscall.Signal(0)); err != nil {
-			t.Fatalf("user runtime exited before creating its socket: %v\n%s", err, diagnostics.String())
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("user runtime did not create %s\n%s", path, diagnostics.String())
 }
 
 func assertInstalledUserLayout(t *testing.T, config bootstrap.Config) {
