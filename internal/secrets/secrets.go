@@ -57,7 +57,7 @@ func (c CredentialDirectory) Resolve(_ context.Context, ref Ref) (Value, error) 
 	if err != nil {
 		return "", fmt.Errorf("secret %q is unavailable", ref)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 64<<10 || (runtime.GOOS == "linux" && info.Mode().Perm()&0o077 != 0) {
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 64<<10 || (runtime.GOOS == "linux" && !privateCredentialMode(info.Mode())) {
 		return "", fmt.Errorf("secret %q is unavailable", ref)
 	}
 	file, err := os.Open(path)
@@ -79,4 +79,11 @@ func (c CredentialDirectory) Resolve(_ context.Context, ref Ref) (Value, error) 
 		return "", fmt.Errorf("secret %q is unavailable", ref)
 	}
 	return Value(value), nil
+}
+
+func privateCredentialMode(mode os.FileMode) bool {
+	// systemd may represent its service-specific ACL as group-read permission.
+	// Credentials must remain immutable to the service and inaccessible to all
+	// other users; group write and every "other" permission remain forbidden.
+	return mode.Perm()&0o027 == 0
 }

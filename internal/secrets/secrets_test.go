@@ -27,4 +27,21 @@ func TestCredentialDirectoryResolvesOnlyBoundedNamedRegularFiles(t *testing.T) {
 			t.Fatal("symlink credential was accepted")
 		}
 	}
+	if err := os.WriteFile(filepath.Join(directory, "systemd-acl-credential"), []byte("acl-value"), 0o440); err != nil {
+		t.Fatal(err)
+	}
+	value, err = source.Resolve(context.Background(), "systemd-acl-credential")
+	if err != nil || value != "acl-value" {
+		t.Fatalf("systemd ACL value=%q err=%v", value, err)
+	}
+	for mode, accepted := range map[os.FileMode]bool{
+		0o400: true,
+		0o440: true,
+		0o460: false,
+		0o404: false,
+	} {
+		if privateCredentialMode(mode) != accepted {
+			t.Fatalf("credential mode %o accepted=%t, want %t", mode, privateCredentialMode(mode), accepted)
+		}
+	}
 }
