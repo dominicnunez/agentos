@@ -1,4 +1,5 @@
 import type { DashboardIdentity } from './types';
+import { DisplayError } from './display-error.ts';
 
 const sessionKey = 'agentos.dashboard.session';
 let sessionToken = '';
@@ -45,7 +46,7 @@ export async function connect(): Promise<DashboardIdentity> {
     clearBootstrapFragment();
   }
   if (!sessionToken) {
-    throw new Error('Launch the dashboard with `agentos` to establish a local session.');
+    throw new DisplayError('error.sessionRequired', 'Launch the dashboard with `agentos` to establish a local session.');
   }
   try {
     try {
@@ -96,12 +97,12 @@ export async function verifiedDownload(path: string): Promise<{ body: ArrayBuffe
 
 export async function verifySHA256(body: ArrayBuffer, expected: string): Promise<void> {
   if (!/^[0-9a-f]{64}$/.test(expected)) {
-    throw new Error('The evidence response did not include a valid SHA-256 checksum.');
+    throw new DisplayError('error.evidenceChecksumMissing', 'The evidence response did not include a valid SHA-256 checksum.');
   }
   const digest = await crypto.subtle.digest('SHA-256', body);
   const actual = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, '0')).join('');
   if (actual !== expected) {
-    throw new Error('The evidence response did not match its SHA-256 checksum.');
+    throw new DisplayError('error.evidenceChecksumMismatch', 'The evidence response did not match its SHA-256 checksum.');
   }
 }
 

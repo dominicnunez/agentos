@@ -253,7 +253,31 @@ export const english = {
   'error.revisionFeedback': 'Revision feedback is required.',
   'error.reviewDecisionChanged': 'The completion review already has a different durable decision.',
   'notice.reviewMarked': 'Completion evidence marked {decision}.',
-  'notice.reviewAlreadyMarked': 'Completion evidence is already marked {decision}.'
+  'notice.reviewAlreadyMarked': 'Completion evidence is already marked {decision}.',
+  'error.requestFailed': 'The request failed.',
+  'error.sessionRequired': 'Launch the dashboard with `agentos` to establish a local session.',
+  'error.evidenceChecksumMissing': 'The evidence response did not include a valid SHA-256 checksum.',
+  'error.evidenceChecksumMismatch': 'The evidence response did not match its SHA-256 checksum.',
+  'error.evidenceBundleChecksum': 'A valid SHA-256 checksum is required for the evidence bundle.',
+  'error.evidenceTarBounds': 'Evidence bundle entry is outside the supported tar bounds.',
+  'error.evidenceTarField': 'Evidence bundle value exceeds its tar field.',
+  'error.approvalDifferentDecision': 'The approval has a different durable decision.',
+  'error.approvalNotReady': 'The approval is not in a decision-ready state.',
+  'error.intentConversationInvalid': 'Intent conversation identity is invalid.',
+  'error.storedConfirmationRetryInvalid': 'Stored Intent confirmation retry is invalid.',
+  'error.approvalRetryInvalid': 'Approval retry binding is invalid.',
+  'error.storedApprovalRetryInvalid': 'Stored approval retry is invalid.',
+  'error.completionReviewRetryInvalid': 'Completion-review retry binding is invalid.',
+  'error.storedCompletionReviewRetryInvalid': 'Stored completion-review retry is invalid.',
+  'error.strategyRetryInvalid': 'Strategy retry binding is invalid.',
+  'error.storedStrategyRetryInvalid': 'Stored strategy retry is invalid.',
+  'error.intentFingerprintInvalid': 'Intent fingerprint is invalid.',
+  'error.unexpectedCompletionField': 'Unexpected completion field: {name}.',
+  'error.completionPaginationRepeat': 'Completion review pagination returned a repeated cursor.',
+  'error.completionQueueLimit': 'Completion review queue exceeds the dashboard safety limit.',
+  'error.artifactCount': '{role} requires {minimum} to {maximum} files.',
+  'error.artifactSize': '{name} must contain 1 byte to 16 MiB.',
+  'error.completionEvidenceTotal': 'Completion evidence must not exceed 32 MiB in total.'
 } as const;
 
 export type DisplayLocale = 'en' | 'es' | 'zh-CN';
@@ -267,14 +291,19 @@ const catalogs: Readonly<Record<DisplayLocale, DisplayCatalog>> = {
   'zh-CN': simplifiedChinese
 };
 
-const localePattern = /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i;
+const localePattern = /^[a-z]{2,3}(?:-[a-z0-9]{1,8})*$/i;
 const placeholderPattern = /\{([a-z][a-z0-9_]*)\}/gi;
 
 export function resolveDisplayLocale(candidates: readonly string[]): DisplayLocale {
   for (const candidate of candidates) {
     const normalized = candidate.trim().toLowerCase();
     if (!localePattern.test(normalized)) continue;
-    if (normalized === 'zh' || normalized === 'zh-cn' || normalized === 'zh-sg' || normalized.startsWith('zh-hans')) {
+    if (
+      normalized === 'zh' ||
+      normalized === 'zh-cn' || normalized.startsWith('zh-cn-') ||
+      normalized === 'zh-sg' || normalized.startsWith('zh-sg-') ||
+      normalized === 'zh-hans' || normalized.startsWith('zh-hans-')
+    ) {
       return 'zh-CN';
     }
     if (normalized === 'es' || normalized.startsWith('es-')) return 'es';

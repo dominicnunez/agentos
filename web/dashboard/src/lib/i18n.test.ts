@@ -21,8 +21,11 @@ test('resolves supported Spanish and Simplified Chinese locale families', () => 
   assert.equal(resolveDisplayLocale(['zh-SG']), 'zh-CN');
   assert.equal(resolveDisplayLocale(['zh-Hans']), 'zh-CN');
   assert.equal(resolveDisplayLocale(['zh-Hans-CN']), 'zh-CN');
+  assert.equal(resolveDisplayLocale(['zh-CN-u-nu-hanidec']), 'zh-CN');
+  assert.equal(resolveDisplayLocale(['zh-SG-x-private']), 'zh-CN');
   assert.equal(resolveDisplayLocale(['zh-TW', 'es-ES']), 'es');
   assert.equal(resolveDisplayLocale(['zh-Hant', 'en-US']), 'en');
+  assert.equal(resolveDisplayLocale(['zh-Hansx', 'en-US']), 'en');
 });
 
 test('keeps every translated interpolation contract identical to English', () => {
@@ -60,6 +63,14 @@ test('formats typed display messages with exact interpolation values', () => {
   assert.equal(
     formatDisplayMessage('zh-CN', 'task.fieldBounds', { description: '精确证据', minimum: 1, maximum: 64 }),
     '精确证据；1 至 64 个 UTF-8 字节'
+  );
+  assert.equal(
+    formatDisplayMessage('es', 'error.unexpectedCompletionField', { name: 'resultado' }),
+    'Campo de finalización inesperado: resultado.'
+  );
+  assert.equal(
+    formatDisplayMessage('zh-CN', 'error.artifactCount', { role: '报告', minimum: 1, maximum: 2 }),
+    '报告 需要 1 至 2 个文件。'
   );
 });
 
