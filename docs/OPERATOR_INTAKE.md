@@ -108,6 +108,13 @@ permission, and applies a strict hash-bound Content Security Policy. Browser
 credentials never cross into the Unix gateway; the bridge connects separately
 and Linux `SO_PEERCRED` re-establishes the configured owner.
 
+Dashboard localization is display-only. The browser language list is matched
+against an explicit supported-locale allowlist and otherwise falls back to
+English, which is the only production catalog in the initial slice. Locale can
+change labels and explanatory text only: protocol values, Event Contracts,
+states, identifiers, fingerprints, approval phrases, request bodies, and
+authority semantics remain canonical and untranslated.
+
 The initial views are:
 
 - Overview: current intake and governance queues.

@@ -4,6 +4,8 @@
   import { buildEvidenceBundle } from '$lib/archive';
   import { approvalRetryBinding, completionReviewFeedback, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, discardStrategyRetry, loadAllCompletionReviews, matchesConfirmationRetry, matchesStrategyRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, parseStrategyRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, strategyRetryBinding, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
   import type { ApprovalRetryBinding, ReviewRetryBinding, StrategyRetryBinding } from '$lib/governance';
+  import { formatDisplayMessage, resolveDisplayLocale } from '$lib/i18n';
+  import type { DisplayLocale, DisplayMessageID, DisplayMessageValues } from '$lib/i18n';
   import '$lib/app.css';
   import type { Approval, CompletionReview, CompletionReviewPage, DashboardIdentity, GovernanceFinding, GovernanceInspection, IntentDraft, OrganizationSnapshot, TaskView } from '$lib/types';
 
@@ -23,8 +25,27 @@
   const pendingApprovalKey = 'agentos.dashboard.pending-approval';
   const pendingReviewKey = 'agentos.dashboard.pending-review';
   const pendingStrategyStorageKey = 'agentos.dashboard.pending-strategy';
+  const navigation: readonly [Section, DisplayMessageID][] = [
+    ['overview', 'navigation.overview'],
+    ['organization', 'navigation.organization'],
+    ['work', 'navigation.work'],
+    ['approvals', 'navigation.approvals'],
+    ['reviews', 'navigation.reviews'],
+    ['governance', 'navigation.governance'],
+    ['system', 'navigation.system']
+  ];
+  const sectionTitles: Readonly<Record<Section, DisplayMessageID>> = {
+    overview: 'section.overview',
+    organization: 'section.organization',
+    work: 'section.work',
+    approvals: 'section.approvals',
+    reviews: 'section.reviews',
+    governance: 'section.governance',
+    system: 'section.system'
+  };
 
   let section: Section = 'overview';
+  let displayLocale: DisplayLocale = 'en';
   let identity: DashboardIdentity | null = null;
   let organization: OrganizationSnapshot | null = null;
   let organizationIndex = emptyOrganizationIndex();
@@ -67,6 +88,8 @@
   let refreshGeneration = 0;
 
   onMount(async () => {
+    displayLocale = resolveDisplayLocale(navigator.languages);
+    document.documentElement.lang = displayLocale;
     try {
       identity = await connect();
       const recoveryFailures: string[] = [];
@@ -758,42 +781,46 @@
     if (values) values.push(value);
     else index.set(key, [value]);
   }
+
+  function ui(id: DisplayMessageID, values?: DisplayMessageValues): string {
+    return formatDisplayMessage(displayLocale, id, values);
+  }
 </script>
 
 <svelte:head>
-  <title>Agent OS</title>
-  <meta name="description" content="Agent OS organization dashboard" />
+  <title>{ui('app.title')}</title>
+  <meta name="description" content={ui('app.description')} />
 </svelte:head>
 
 <div class="shell">
   <aside>
-    <div class="brand"><span class="mark">AO</span><div><strong>Agent OS</strong><small>Organization control</small></div></div>
-    <nav aria-label="Dashboard">
-      {#each [['overview','Overview'],['organization','Organization'],['work','Work'],['approvals','Approvals'],['reviews','Reviews'],['governance','Governance'],['system','System']] as item}
-        <button class:active={section === item[0]} onclick={() => openSection(item[0] as Section)}><span class="nav-dot"></span>{item[1]}</button>
+    <div class="brand"><span class="mark">AO</span><div><strong>{ui('app.title')}</strong><small>{ui('app.brandSubtitle')}</small></div></div>
+    <nav aria-label={ui('navigation.label')}>
+      {#each navigation as item}
+        <button class:active={section === item[0]} onclick={() => openSection(item[0])}><span class="nav-dot"></span>{ui(item[1])}</button>
       {/each}
     </nav>
-    <div class="identity"><span class:online={Boolean(identity)}></span><div><strong>{safeDisplay(identity?.organization ?? 'Not connected')}</strong><small>{identity ? `${safeDisplay(identity.mode)} installation` : 'local session required'}</small></div></div>
+    <div class="identity"><span class:online={Boolean(identity)}></span><div><strong>{safeDisplay(identity?.organization ?? ui('identity.notConnected'))}</strong><small>{identity ? ui('identity.installation', { mode: safeDisplay(identity.mode) }) : ui('identity.sessionRequired')}</small></div></div>
   </aside>
 
   <main>
-    <header><div><p class="eyebrow">Artificial organization</p><h1>{section === 'overview' ? 'Command center' : section[0].toUpperCase() + section.slice(1)}</h1></div><button class="quiet" onclick={() => section === 'governance' ? refreshGovernance() : refresh()} disabled={!identity || busy}>Refresh</button></header>
+    <header><div><p class="eyebrow">{ui('header.organization')}</p><h1>{ui(sectionTitles[section])}</h1></div><button class="quiet" onclick={() => section === 'governance' ? refreshGovernance() : refresh()} disabled={!identity || busy}>{ui('header.refresh')}</button></header>
     {#if error}<div class="banner error" role="alert">{safeDisplay(error)}</div>{/if}
     {#if notice}<div class="banner notice" role="status">{safeDisplay(notice)}</div>{/if}
 
     {#if section === 'overview'}
       <section class="metrics">
-        <button onclick={() => section='organization'}><span>Active Work</span><strong>{organizationIndex.activeWorkCount}</strong><small>{organization ? `${organization.missions.length} Missions · ${organization.goals.length} Goals · ${organization.teams.length} Teams · ${organization.agents.length} Agents` : 'Organization state unavailable'}</small></button>
-        <button onclick={() => section='approvals'}><span>Approvals</span><strong>{pendingApprovalCount()}</strong><small>Exact effects awaiting a decision</small></button>
-        <button onclick={() => section='reviews'}><span>Completion reviews</span><strong>{pendingReviewCount()}</strong><small>Evidence awaiting judgment</small></button>
+        <button onclick={() => section='organization'}><span>{ui('overview.activeWork')}</span><strong>{organizationIndex.activeWorkCount}</strong><small>{organization ? ui('overview.organizationCounts', { missions: organization.missions.length, goals: organization.goals.length, teams: organization.teams.length, agents: organization.agents.length }) : ui('overview.organizationUnavailable')}</small></button>
+        <button onclick={() => section='approvals'}><span>{ui('overview.approvals')}</span><strong>{pendingApprovalCount()}</strong><small>{ui('overview.effectsAwaiting')}</small></button>
+        <button onclick={() => section='reviews'}><span>{ui('overview.completionReviews')}</span><strong>{pendingReviewCount()}</strong><small>{ui('overview.evidenceAwaiting')}</small></button>
       </section>
       <section class="panel mission">
-        <div><p class="eyebrow">Current organization</p><h2>{safeDisplay(organization?.organization.name ?? identity?.organization ?? 'Connect to Agent OS')}</h2><p>Durable Missions provide direction, Goals define measurable outcomes, and bounded Work becomes Task DAGs assigned to reviewed Agents.</p><button class="text" onclick={() => section='organization'}>Open organization</button></div>
-        <div class="flow"><span>Mission</span><i></i><span>Goal</span><i></i><span>Work</span><i></i><span>Task</span></div>
+        <div><p class="eyebrow">{ui('overview.currentOrganization')}</p><h2>{safeDisplay(organization?.organization.name ?? identity?.organization ?? ui('overview.connect'))}</h2><p>{ui('overview.organizationSummary')}</p><button class="text" onclick={() => section='organization'}>{ui('overview.openOrganization')}</button></div>
+        <div class="flow"><span>{ui('overview.mission')}</span><i></i><span>{ui('overview.goal')}</span><i></i><span>{ui('overview.work')}</span><i></i><span>{ui('overview.task')}</span></div>
       </section>
       <section class="grid two">
-        <div class="panel"><div class="panel-title"><h2>Continue work</h2><button class="text" onclick={() => section='work'}>Open work</button></div>{#if active}<span class="status">{safeDisplay(active.state)}</span><h3>{safeDisplay(active.intent?.objective ?? active.prompt ?? 'Intake conversation')}</h3><p class="mono">{safeDisplay(active.conversation_id)}</p>{:else}<div class="empty">No unfinished intake conversation.</div>{/if}</div>
-        <div class="panel"><div class="panel-title"><h2>Governance queue</h2></div><div class="queue"><div><strong>{pendingApprovalCount()}</strong><span>effect decisions</span></div><div><strong>{pendingReviewCount()}</strong><span>evidence reviews</span></div></div></div>
+        <div class="panel"><div class="panel-title"><h2>{ui('overview.continueWork')}</h2><button class="text" onclick={() => section='work'}>{ui('overview.openWork')}</button></div>{#if active}<span class="status">{safeDisplay(active.state)}</span><h3>{safeDisplay(active.intent?.objective ?? active.prompt ?? ui('overview.intakeConversation'))}</h3><p class="mono">{safeDisplay(active.conversation_id)}</p>{:else}<div class="empty">{ui('overview.noIntake')}</div>{/if}</div>
+        <div class="panel"><div class="panel-title"><h2>{ui('overview.governanceQueue')}</h2></div><div class="queue"><div><strong>{pendingApprovalCount()}</strong><span>{ui('overview.effectDecisions')}</span></div><div><strong>{pendingReviewCount()}</strong><span>{ui('overview.evidenceReviews')}</span></div></div></div>
       </section>
     {:else if section === 'organization'}
       {#if canCreateInitialStrategy()}
