@@ -503,6 +503,7 @@ func localRequest(t *testing.T, config bootstrap.Config, method, path, body stri
 	if err != nil {
 		t.Fatal(err)
 	}
+	client.Timeout = 15 * time.Second
 	t.Cleanup(client.CloseIdleConnections)
 	request, err := http.NewRequestWithContext(t.Context(), method, "http://agentos.local"+path, strings.NewReader(body))
 	if err != nil {
@@ -516,6 +517,11 @@ func localRequest(t *testing.T, config bootstrap.Config, method, path, body stri
 	}
 	response, err := client.Do(request)
 	if err != nil {
+		if config.Mode == bootstrap.ModeSystem {
+			status, _ := exec.CommandContext(t.Context(), "/usr/bin/systemctl", "status", "--no-pager", "agentos-user.socket", "agentos.service").CombinedOutput()
+			journal, _ := exec.CommandContext(t.Context(), "/usr/bin/journalctl", "--no-pager", "--unit", "agentos.service", "--lines", "100").CombinedOutput()
+			t.Fatalf("local request: %v\nstatus:\n%s\njournal:\n%s", err, status, journal)
+		}
 		t.Fatal(err)
 	}
 	return response
