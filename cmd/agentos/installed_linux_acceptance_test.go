@@ -465,7 +465,7 @@ func assertOnlineDoctorRejectsFakeCredential(t *testing.T, binary string) {
 
 func assertDifferentUIDCannotConnect(t *testing.T, socket string) {
 	t.Helper()
-	script := "import socket,sys\ns=socket.socket(socket.AF_UNIX)\ntry:\n s.connect(sys.argv[1])\nexcept OSError:\n sys.exit(0)\nsys.exit(1)\n"
+	script := "import socket,sys\ns=socket.socket(socket.AF_UNIX)\ntry:\n s.connect(sys.argv[1])\nexcept PermissionError:\n sys.exit(0)\nexcept OSError as error:\n print(error, file=sys.stderr)\n sys.exit(2)\nsys.exit(1)\n"
 	output, err := exec.CommandContext(t.Context(), "/usr/sbin/runuser", "-u", "nobody", "--", "/usr/bin/python3", "-c", script, socket).CombinedOutput()
 	if err != nil {
 		t.Fatalf("different UID reached the private gateway: %v %s", err, output)
@@ -544,10 +544,12 @@ func assertRestoredOrganization(t *testing.T, database string) {
 func assertProductionRejectsUnsupportedProvider(t *testing.T, binary string, ready bootstrap.Config) {
 	t.Helper()
 	invalid := ready
+	invalid.Providers = append([]bootstrap.Provider(nil), ready.Providers...)
+	root := t.TempDir()
 	invalid.Paths = bootstrap.Paths{
-		ConfigDir: "/tmp/agentos-invalid/config", DataDir: "/tmp/agentos-invalid/data", StateDir: "/tmp/agentos-invalid/state",
-		CacheDir: "/tmp/agentos-invalid/cache", RuntimeDir: "/tmp/agentos-invalid/run", Workspace: "/tmp/agentos-invalid/workspace",
-		Database: "/tmp/agentos-invalid/data/agentos.db", UserSocket: "/tmp/agentos-invalid/run/user.sock",
+		ConfigDir: filepath.Join(root, "config"), DataDir: filepath.Join(root, "data"), StateDir: filepath.Join(root, "state"),
+		CacheDir: filepath.Join(root, "cache"), RuntimeDir: filepath.Join(root, "run"), Workspace: filepath.Join(root, "workspace"),
+		Database: filepath.Join(root, "data", "agentos.db"), UserSocket: filepath.Join(root, "run", "user.sock"),
 	}
 	invalid.Providers[0].Kind = bootstrap.ProviderKind("fake")
 	path := filepath.Join(t.TempDir(), "invalid.json")
