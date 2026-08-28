@@ -807,13 +807,33 @@ func appendServiceCredential(directives *strings.Builder, directive, name, path 
 	if directives == nil || (directive != "LoadCredential" && directive != "LoadCredentialEncrypted") || !validServiceCredentialName(name) || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return fmt.Errorf("service credential directive is invalid")
 	}
-	if strings.IndexFunc(path, func(character rune) bool {
-		return unicode.IsControl(character) || unicode.IsSpace(character) || strings.ContainsRune(`:%"\`, character)
-	}) >= 0 {
+	encodedPath, err := systemdCredentialPath(path)
+	if err != nil {
 		return fmt.Errorf("service credential path cannot be represented safely")
 	}
-	directives.WriteString(directive + "=" + name + ":" + path + "\n")
+	directives.WriteString(directive + "=" + name + ":" + encodedPath + "\n")
 	return nil
+}
+
+func systemdCredentialPath(path string) (string, error) {
+	var encoded strings.Builder
+	for _, character := range path {
+		switch {
+		case unicode.IsControl(character):
+			return "", fmt.Errorf("credential path contains a control character")
+		case character == ' ':
+			encoded.WriteString(`\x20`)
+		case character == '%':
+			encoded.WriteString("%%")
+		case character == '\\':
+			encoded.WriteString(`\\`)
+		case character == '"':
+			encoded.WriteString(`\"`)
+		default:
+			encoded.WriteRune(character)
+		}
+	}
+	return encoded.String(), nil
 }
 
 func validateReviewedServiceFile(config bootstrap.Config, path string, private bool) error {

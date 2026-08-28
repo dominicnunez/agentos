@@ -83,7 +83,7 @@ func TestUserServiceLoadsReviewedA2ACredentials(t *testing.T) {
 	}
 }
 
-func TestServiceCredentialDirectiveRejectsAmbiguousValues(t *testing.T) {
+func TestServiceCredentialDirectiveEncodesValidPaths(t *testing.T) {
 	var directives strings.Builder
 	if err := appendServiceCredential(&directives, "LoadCredentialEncrypted", "provider-key", "/etc/agentos/credentials/provider-key.cred"); err != nil {
 		t.Fatal(err)
@@ -91,7 +91,13 @@ func TestServiceCredentialDirectiveRejectsAmbiguousValues(t *testing.T) {
 	if got := directives.String(); got != "LoadCredentialEncrypted=provider-key:/etc/agentos/credentials/provider-key.cred\n" {
 		t.Fatalf("credential directive=%q", got)
 	}
-	for _, path := range []string{"relative.cred", "/etc/agent os/key.cred", "/etc/agentos/key.cred%N", "/etc/agentos/key.cred\nLoadCredential=unsafe"} {
+	if err := appendServiceCredential(&directives, "LoadCredentialEncrypted", "provider-key", `/home/Agent OS/100%/key\"name.cred`); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(directives.String(), "LoadCredentialEncrypted=provider-key:/home/Agent\\x20OS/100%%/key\\\\\\\"name.cred\n") {
+		t.Fatalf("credential path was not encoded safely: %q", directives.String())
+	}
+	for _, path := range []string{"relative.cred", "/etc/agentos/key.cred\nLoadCredential=unsafe"} {
 		if err := appendServiceCredential(&directives, "LoadCredentialEncrypted", "provider-key", path); err == nil {
 			t.Fatalf("accepted unsafe credential path %q", path)
 		}

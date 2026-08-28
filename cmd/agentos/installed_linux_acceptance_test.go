@@ -53,8 +53,12 @@ func TestInstalledLinuxSystemLifecycle(t *testing.T) {
 	if err := storeEncryptedCredential(ctx, config, config.Providers[0].SecretRef, []byte("installed-test-not-a-live-key")); err != nil {
 		t.Fatalf("store offline provider credential: %v", err)
 	}
-	if err := installSystemRuntimeFrom(ctx, config, 2, binary); err != nil {
-		t.Fatalf("install packaged system runtime: %v", err)
+	if output, err := runPackagedSetupResume(ctx, binary); err != nil {
+		t.Fatalf("resume packaged system setup: %v\n%s", err, output)
+	}
+	loaded, err = bootstrap.LoadState(bootstrap.StatePath(config.Paths))
+	if err != nil || loaded.Stage != bootstrap.StageReady {
+		t.Fatalf("packaged system resume state=%+v err=%v", loaded, err)
 	}
 	installOfflineTestConfinement(t)
 	runSystemctl(t, "enable", "agentos-user.socket", "agentos.service")
@@ -67,11 +71,6 @@ func TestInstalledLinuxSystemLifecycle(t *testing.T) {
 		defer cancel()
 		_ = exec.CommandContext(cleanupContext, "/usr/bin/systemctl", "disable", "--now", "agentos-user.socket", "agentos.service").Run()
 	})
-	state.Stage = bootstrap.StageReady
-	if err := checkpoint(bootstrap.ConfigPath(config.Paths), bootstrap.StatePath(config.Paths), &config, &state); err != nil {
-		t.Fatalf("persist ready setup checkpoint: %v", err)
-	}
-
 	assertInstalledSystemLayout(t, config)
 	assertDoctorReady(t, binary)
 	assertDifferentUIDCannotConnect(t, config.Paths.UserSocket)
@@ -124,12 +123,12 @@ func TestInstalledLinuxUserHelper(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(credentialDirectory, "openai-api-key.cred"), []byte("not-a-systemd-encrypted-credential"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := prepareUserRuntime(config, requirePackagedExecutable(t, installedTestBinary)); err != nil {
-			t.Fatal(err)
+		if output, err := runPackagedSetupResume(t.Context(), requirePackagedExecutable(t, installedTestBinary)); err != nil {
+			t.Fatalf("resume packaged user setup: %v\n%s", err, output)
 		}
-		state.Stage = bootstrap.StageReady
-		if err := checkpoint(configPath, bootstrap.StatePath(paths), &config, &state); err != nil {
-			t.Fatal(err)
+		loaded, err := bootstrap.LoadState(bootstrap.StatePath(paths))
+		if err != nil || loaded.Stage != bootstrap.StageReady {
+			t.Fatalf("packaged user resume state=%+v err=%v", loaded, err)
 		}
 		assertInstalledUserLayout(t, config)
 		assertOnlineDoctorRejectsFakeCredential(t, filepath.Join(home, ".local", "bin", "agentos"))
@@ -153,6 +152,30 @@ func TestInstalledLinuxUserHelper(t *testing.T) {
 	default:
 		t.Fatalf("unknown user helper action %q", action)
 	}
+}
+
+func runPackagedSetupResume(ctx context.Context, binary string) ([]byte, error) {
+	const script = `import errno, os, pty, sys
+pid, fd = pty.fork()
+if pid == 0:
+    os.execve(sys.argv[1], [sys.argv[1]], os.environ)
+os.write(fd, b"\x1b[B\x1b[B\r")
+output = bytearray()
+while True:
+    try:
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            break
+        output.extend(chunk)
+    except OSError as error:
+        if error.errno == errno.EIO:
+            break
+        raise
+_, status = os.waitpid(pid, 0)
+sys.stdout.buffer.write(output)
+sys.exit(os.waitstatus_to_exitcode(status))
+`
+	return exec.CommandContext(ctx, "/usr/bin/python3", "-c", script, binary).CombinedOutput()
 }
 
 func exerciseInstalledUserLifecycle(t *testing.T, binary, recoveryBinary string) {
@@ -185,6 +208,11 @@ func exerciseInstalledUserLifecycle(t *testing.T, binary, recoveryBinary string)
 	}
 	home := "/home/" + username
 	runtimeBase := fmt.Sprintf("/run/user/%d", uid)
+	userUnit := fmt.Sprintf("user@%d.service", uid)
+	runSystemctl(t, "start", userUnit)
+	t.Cleanup(func() {
+		_ = exec.CommandContext(context.Background(), "/usr/bin/systemctl", "stop", userUnit).Run()
+	})
 	if err := os.MkdirAll(runtimeBase, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +295,7 @@ func runUserHelper(t *testing.T, username, home, runtimeBase, binary, testBinary
 	t.Helper()
 	arguments := []string{
 		"-u", username, "--", "/usr/bin/env",
-		"HOME=" + home, "XDG_RUNTIME_DIR=" + runtimeBase,
+		"HOME=" + home, "XDG_RUNTIME_DIR=" + runtimeBase, "DBUS_SESSION_BUS_ADDRESS=unix:path=" + filepath.Join(runtimeBase, "bus"),
 		installedUserHelper + "=" + action, installedTestBinary + "=" + binary,
 		testBinary, "-test.run", "^TestInstalledLinuxUserHelper$", "-test.v", "-test.timeout", "30s",
 	}
@@ -280,7 +308,7 @@ func runUserHelper(t *testing.T, username, home, runtimeBase, binary, testBinary
 func runAsUser(t *testing.T, username, home, runtimeBase, binary string, arguments ...string) {
 	t.Helper()
 	commandArguments := []string{
-		"-u", username, "--", "/usr/bin/env", "HOME=" + home, "XDG_RUNTIME_DIR=" + runtimeBase,
+		"-u", username, "--", "/usr/bin/env", "HOME=" + home, "XDG_RUNTIME_DIR=" + runtimeBase, "DBUS_SESSION_BUS_ADDRESS=unix:path=" + filepath.Join(runtimeBase, "bus"),
 		binary,
 	}
 	commandArguments = append(commandArguments, arguments...)
