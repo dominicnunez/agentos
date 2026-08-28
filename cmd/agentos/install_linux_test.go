@@ -32,8 +32,12 @@ func TestSystemdUnitsQuoteConfiguredPathsAndPercentSpecifiers(t *testing.T) {
 	if !strings.Contains(unit, "UMask=0077") {
 		t.Fatal("system service does not enforce a private file-creation mask")
 	}
-	if !strings.Contains(systemSocketUnit(config), "DirectoryMode=0711") {
+	socketUnit := systemSocketUnit(config)
+	if !strings.Contains(socketUnit, "DirectoryMode=0711") {
 		t.Fatal("socket parent directory mode is not explicit")
+	}
+	if !strings.Contains(socketUnit, `SocketUser="root"`) || strings.Contains(socketUnit, "SocketGroup=") {
+		t.Fatalf("socket ownership must use a valid account name and its primary group:\n%s", socketUnit)
 	}
 }
 

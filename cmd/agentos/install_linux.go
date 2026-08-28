@@ -682,7 +682,6 @@ ListenStream=` + systemdQuote(config.Paths.UserSocket) + `
 DirectoryMode=0711
 SocketMode=0600
 SocketUser=` + systemdQuote(config.Owner.Username) + `
-SocketGroup=` + strconv.Itoa(config.Owner.GID) + `
 RemoveOnStop=yes
 Service=agentos.service
 
