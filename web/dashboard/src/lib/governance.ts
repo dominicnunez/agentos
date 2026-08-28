@@ -1,4 +1,5 @@
 import type { Approval, CompletionContract, CompletionReview, CompletionReviewPage, TaskView } from './types';
+import { DisplayError } from './display-error.ts';
 
 const maximumReviewPages = 100;
 const maximumArtifactBytes = 16 * 1024 * 1024;
@@ -41,7 +42,9 @@ export async function replayApprovalDecision(request: DashboardRequest, current:
   const terminal = (approval: Approval): Approval | null => {
     if (!terminalApproval(approval)) return null;
     const recorded = approval.status === 'APPROVED' ? 'APPROVE' : 'DENY';
-    if (recorded !== decision) throw new Error('The approval has a different durable decision.');
+    if (recorded !== decision) {
+      throw new DisplayError('error.approvalDifferentDecision', 'The approval has a different durable decision.');
+    }
     return approval;
   };
   const recorded = terminal(current);
@@ -57,7 +60,9 @@ export async function replayApprovalDecision(request: DashboardRequest, current:
   }
   const afterBegin = terminal(current);
   if (afterBegin) return afterBegin;
-  if (current.status !== 'PENDING_DECISION') throw new Error('The approval is not in a decision-ready state.');
+  if (current.status !== 'PENDING_DECISION') {
+    throw new DisplayError('error.approvalNotReady', 'The approval is not in a decision-ready state.');
+  }
   return request<Approval>(`/api/v1/control/approvals/${encodeURIComponent(current.approval_id)}/decision`, {
     method: 'POST',
     body: JSON.stringify({ effect_fingerprint: current.effect_fingerprint, decision })
@@ -77,7 +82,9 @@ export function replayCompletionReviewDecision(request: DashboardRequest, curren
 }
 
 export function confirmationRetryBinding(conversationID: string, fingerprint: string): ConfirmationRetryBinding {
-  if (!validBoundaryIdentifier(conversationID)) throw new Error('Intent conversation identity is invalid.');
+  if (!validBoundaryIdentifier(conversationID)) {
+    throw new DisplayError('error.intentConversationInvalid', 'Intent conversation identity is invalid.');
+  }
   confirmationMessageID(fingerprint);
   return { conversation_id: conversationID, fingerprint };
 }
@@ -88,39 +95,53 @@ export function parseConfirmationRetryBinding(value: string | null): Confirmatio
   try {
     parsed = JSON.parse(value);
   } catch {
-    throw new Error('Stored Intent confirmation retry is invalid.');
+    throw new DisplayError('error.storedConfirmationRetryInvalid', 'Stored Intent confirmation retry is invalid.');
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Stored Intent confirmation retry is invalid.');
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new DisplayError('error.storedConfirmationRetryInvalid', 'Stored Intent confirmation retry is invalid.');
+  }
   const record = parsed as Record<string, unknown>;
   if (Object.keys(record).sort().join(',') !== 'conversation_id,fingerprint' || typeof record.conversation_id !== 'string' || typeof record.fingerprint !== 'string') {
-    throw new Error('Stored Intent confirmation retry is invalid.');
+    throw new DisplayError('error.storedConfirmationRetryInvalid', 'Stored Intent confirmation retry is invalid.');
   }
   return confirmationRetryBinding(record.conversation_id, record.fingerprint);
 }
 
 export function approvalRetryBinding(approvalID: string, fingerprint: string, decision: 'APPROVE' | 'DENY'): ApprovalRetryBinding {
-  if (!validBoundaryIdentifier(approvalID) || !validFingerprint(fingerprint) || (decision !== 'APPROVE' && decision !== 'DENY')) throw new Error('Approval retry binding is invalid.');
+  if (!validBoundaryIdentifier(approvalID) || !validFingerprint(fingerprint) || (decision !== 'APPROVE' && decision !== 'DENY')) {
+    throw new DisplayError('error.approvalRetryInvalid', 'Approval retry binding is invalid.');
+  }
   return { approval_id: approvalID, fingerprint, decision };
 }
 
 export function parseApprovalRetryBinding(value: string | null): ApprovalRetryBinding | null {
-  const record = parseStrictRecord(value, ['approval_id', 'decision', 'fingerprint'], 'approval');
+  const record = parseStrictRecord(value, ['approval_id', 'decision', 'fingerprint'], () =>
+    new DisplayError('error.storedApprovalRetryInvalid', 'Stored approval retry is invalid.'));
   if (!record) return null;
-  if (typeof record.approval_id !== 'string' || typeof record.fingerprint !== 'string' || (record.decision !== 'APPROVE' && record.decision !== 'DENY')) throw new Error('Stored approval retry is invalid.');
+  if (typeof record.approval_id !== 'string' || typeof record.fingerprint !== 'string' || (record.decision !== 'APPROVE' && record.decision !== 'DENY')) {
+    throw new DisplayError('error.storedApprovalRetryInvalid', 'Stored approval retry is invalid.');
+  }
   return approvalRetryBinding(record.approval_id, record.fingerprint, record.decision);
 }
 
 export function reviewRetryBinding(taskID: string, reviewID: string, fingerprint: string, decision: 'APPROVE' | 'REJECT' | 'REVISE', feedback: string): ReviewRetryBinding {
-  if (!validBoundaryIdentifier(taskID) || !validBoundaryIdentifier(reviewID) || !validFingerprint(fingerprint) || !['APPROVE', 'REJECT', 'REVISE'].includes(decision)) throw new Error('Completion-review retry binding is invalid.');
+  if (!validBoundaryIdentifier(taskID) || !validBoundaryIdentifier(reviewID) || !validFingerprint(fingerprint) || !['APPROVE', 'REJECT', 'REVISE'].includes(decision)) {
+    throw new DisplayError('error.completionReviewRetryInvalid', 'Completion-review retry binding is invalid.');
+  }
   const bytes = new TextEncoder().encode(feedback).byteLength;
-  if (bytes > 64 * 1024 || (decision === 'REVISE' && !feedback.trim()) || (decision === 'APPROVE' && feedback !== '')) throw new Error('Completion-review retry binding is invalid.');
+  if (bytes > 64 * 1024 || (decision === 'REVISE' && !feedback.trim()) || (decision === 'APPROVE' && feedback !== '')) {
+    throw new DisplayError('error.completionReviewRetryInvalid', 'Completion-review retry binding is invalid.');
+  }
   return { task_id: taskID, review_id: reviewID, fingerprint, decision, feedback };
 }
 
 export function parseReviewRetryBinding(value: string | null): ReviewRetryBinding | null {
-  const record = parseStrictRecord(value, ['decision', 'feedback', 'fingerprint', 'review_id', 'task_id'], 'completion-review');
+  const record = parseStrictRecord(value, ['decision', 'feedback', 'fingerprint', 'review_id', 'task_id'], () =>
+    new DisplayError('error.storedCompletionReviewRetryInvalid', 'Stored completion-review retry is invalid.'));
   if (!record) return null;
-  if (typeof record.task_id !== 'string' || typeof record.review_id !== 'string' || typeof record.fingerprint !== 'string' || typeof record.feedback !== 'string' || (record.decision !== 'APPROVE' && record.decision !== 'REJECT' && record.decision !== 'REVISE')) throw new Error('Stored completion-review retry is invalid.');
+  if (typeof record.task_id !== 'string' || typeof record.review_id !== 'string' || typeof record.fingerprint !== 'string' || typeof record.feedback !== 'string' || (record.decision !== 'APPROVE' && record.decision !== 'REJECT' && record.decision !== 'REVISE')) {
+    throw new DisplayError('error.storedCompletionReviewRetryInvalid', 'Stored completion-review retry is invalid.');
+  }
   return reviewRetryBinding(record.task_id, record.review_id, record.fingerprint, record.decision, record.feedback);
 }
 
@@ -140,7 +161,7 @@ export function strategyRetryBinding(
     !validStrategyText(missionStatement, 16 * 1024) || !validStrategyText(goalObjective, 16 * 1024) ||
     (goalMode !== 'TARGET' && goalMode !== 'CONTINUOUS') || criteria.length < 1 || criteria.length > 32 || total > 64 * 1024 ||
     new Set(criteria).size !== criteria.length || criteria.some((criterion) => !validStrategyText(criterion, 4 * 1024))) {
-    throw new Error('Strategy retry binding is invalid.');
+    throw new DisplayError('error.strategyRetryInvalid', 'Strategy retry binding is invalid.');
   }
   return {
     request_id: requestID,
@@ -154,13 +175,14 @@ export function strategyRetryBinding(
 }
 
 export function parseStrategyRetryBinding(value: string | null): StrategyRetryBinding | null {
-  const record = parseStrictRecord(value, ['goal_id', 'goal_mode', 'goal_objective', 'mission_id', 'mission_statement', 'request_id', 'success_criteria'], 'strategy');
+  const record = parseStrictRecord(value, ['goal_id', 'goal_mode', 'goal_objective', 'mission_id', 'mission_statement', 'request_id', 'success_criteria'], () =>
+    new DisplayError('error.storedStrategyRetryInvalid', 'Stored strategy retry is invalid.'));
   if (!record) return null;
   if (typeof record.request_id !== 'string' || typeof record.mission_id !== 'string' || typeof record.mission_statement !== 'string' ||
     typeof record.goal_id !== 'string' || typeof record.goal_objective !== 'string' ||
     (record.goal_mode !== 'TARGET' && record.goal_mode !== 'CONTINUOUS') || !Array.isArray(record.success_criteria) ||
     !record.success_criteria.every((criterion) => typeof criterion === 'string')) {
-    throw new Error('Stored strategy retry is invalid.');
+    throw new DisplayError('error.storedStrategyRetryInvalid', 'Stored strategy retry is invalid.');
   }
   return strategyRetryBinding(record.request_id, record.mission_id, record.mission_statement, record.goal_id, record.goal_objective, record.goal_mode, record.success_criteria as string[]);
 }
@@ -176,15 +198,15 @@ export function matchesStrategyRetry(
     binding.success_criteria.length === successCriteria.length && binding.success_criteria.every((criterion, index) => criterion === successCriteria[index]);
 }
 
-function parseStrictRecord(value: string | null, keys: string[], name: string): Record<string, unknown> | null {
+function parseStrictRecord(value: string | null, keys: string[], invalid: () => DisplayError): Record<string, unknown> | null {
   if (!value) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
   } catch {
-    throw new Error(`Stored ${name} retry is invalid.`);
+    throw invalid();
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Object.keys(parsed).sort().join(',') !== keys.join(',')) throw new Error(`Stored ${name} retry is invalid.`);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Object.keys(parsed).sort().join(',') !== keys.join(',')) throw invalid();
   return parsed as Record<string, unknown>;
 }
 
@@ -220,7 +242,9 @@ export function safeDisplay(value: string): string {
 }
 
 export function confirmationMessageID(fingerprint: string): string {
-	if (!validFingerprint(fingerprint)) throw new Error('Intent fingerprint is invalid.');
+	if (!validFingerprint(fingerprint)) {
+    throw new DisplayError('error.intentFingerprintInvalid', 'Intent fingerprint is invalid.');
+  }
   return `confirmation-${fingerprint}`;
 }
 
@@ -257,16 +281,22 @@ function validStrategyIdentifier(value: string): boolean {
 export function validateCompletionFields(
   requirements: FieldRequirement[],
   fields: Record<string, string>
-): string | null {
+): DisplayError | null {
   const required = new Set(requirements.map((item) => item.name));
   for (const requirement of requirements) {
     const length = new TextEncoder().encode(fields[requirement.name] ?? '').byteLength;
     if (length < requirement.min_bytes || length > requirement.max_bytes) {
-      return `${requirement.name} must contain ${requirement.min_bytes} to ${requirement.max_bytes} UTF-8 bytes.`;
+      return new DisplayError(
+        'task.fieldBounds',
+        `${requirement.name} must contain ${requirement.min_bytes} to ${requirement.max_bytes} UTF-8 bytes.`,
+        { description: requirement.name, minimum: requirement.min_bytes, maximum: requirement.max_bytes }
+      );
     }
   }
   for (const name of Object.keys(fields)) {
-    if (!required.has(name)) return `Unexpected completion field: ${name}.`;
+    if (!required.has(name)) {
+      return new DisplayError('error.unexpectedCompletionField', `Unexpected completion field: ${name}.`, { name });
+    }
   }
   return null;
 }
@@ -282,31 +312,35 @@ export async function loadAllCompletionReviews(
     reviews.push(...result.reviews);
     if (!result.next_after) return reviews;
     if (result.next_after === after || cursors.has(result.next_after)) {
-      throw new Error('Completion review pagination returned a repeated cursor.');
+      throw new DisplayError('error.completionPaginationRepeat', 'Completion review pagination returned a repeated cursor.');
     }
     cursors.add(result.next_after);
     after = result.next_after;
   }
-  throw new Error('Completion review queue exceeds the dashboard safety limit.');
+  throw new DisplayError('error.completionQueueLimit', 'Completion review queue exceeds the dashboard safety limit.');
 }
 
 export function validateArtifactSelections(
   requirements: ArtifactRequirement[],
   selected: Record<string, ArtifactSelection[]>
-): string | null {
+): DisplayError | null {
   let total = 0;
   for (const requirement of requirements) {
     const files = selected[requirement.role] ?? [];
     if (files.length < requirement.min_count || files.length > requirement.max_count) {
-      return `${requirement.role} requires ${requirement.min_count} to ${requirement.max_count} files.`;
+      return new DisplayError(
+        'error.artifactCount',
+        `${requirement.role} requires ${requirement.min_count} to ${requirement.max_count} files.`,
+        { role: requirement.role, minimum: requirement.min_count, maximum: requirement.max_count }
+      );
     }
     for (const file of files) {
       if (file.size < 1 || file.size > maximumArtifactBytes) {
-        return `${file.name} must contain 1 byte to 16 MiB.`;
+        return new DisplayError('error.artifactSize', `${file.name} must contain 1 byte to 16 MiB.`, { name: file.name });
       }
       total += file.size;
       if (total > maximumCompletionBytes) {
-        return 'Completion evidence must not exceed 32 MiB in total.';
+        return new DisplayError('error.completionEvidenceTotal', 'Completion evidence must not exceed 32 MiB in total.');
       }
     }
   }

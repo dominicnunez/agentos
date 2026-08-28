@@ -110,10 +110,11 @@ and Linux `SO_PEERCRED` re-establishes the configured owner.
 
 Dashboard localization is display-only. The browser language list is matched
 against an explicit supported-locale allowlist and otherwise falls back to
-English, which is the only production catalog in the initial slice. Locale can
-change labels and explanatory text only: protocol values, Event Contracts,
-states, identifiers, fingerprints, approval phrases, request bodies, and
-authority semantics remain canonical and untranslated.
+English. The production catalogs are English, Spanish, and Simplified Chinese
+(`zh-CN`); Traditional Chinese locales remain unsupported and fall back to
+English. Locale can change labels and explanatory text only: protocol values,
+Event Contracts, states, identifiers, fingerprints, approval phrases, request
+bodies, and authority semantics remain canonical and untranslated.
 
 The initial views are:
 

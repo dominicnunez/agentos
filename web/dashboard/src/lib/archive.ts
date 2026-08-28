@@ -1,9 +1,11 @@
+import { DisplayError } from './display-error.ts';
+
 const blockSize = 512;
 const encoder = new TextEncoder();
 
 export function buildEvidenceBundle(evidence: ArrayBuffer, sha256: string): ArrayBuffer {
   if (!/^[0-9a-f]{64}$/.test(sha256)) {
-    throw new Error('A valid SHA-256 checksum is required for the evidence bundle.');
+    throw new DisplayError('error.evidenceBundleChecksum', 'A valid SHA-256 checksum is required for the evidence bundle.');
   }
   const entries = [
     { name: 'agentos-aims-evidence.json', body: new Uint8Array(evidence) },
@@ -25,7 +27,7 @@ export function buildEvidenceBundle(evidence: ArrayBuffer, sha256: string): Arra
 function tarHeader(name: string, size: number): Uint8Array {
   const nameBytes = encoder.encode(name);
   if (nameBytes.byteLength === 0 || nameBytes.byteLength > 100 || size < 0 || size > 0o77777777777) {
-    throw new Error('Evidence bundle entry is outside the supported tar bounds.');
+    throw new DisplayError('error.evidenceTarBounds', 'Evidence bundle entry is outside the supported tar bounds.');
   }
   const header = new Uint8Array(blockSize);
   header.set(nameBytes, 0);
@@ -47,7 +49,9 @@ function tarHeader(name: string, size: number): Uint8Array {
 
 function writeOctal(target: Uint8Array, offset: number, width: number, value: number): void {
   const encoded = value.toString(8).padStart(width - 1, '0');
-  if (encoded.length >= width) throw new Error('Evidence bundle value exceeds its tar field.');
+  if (encoded.length >= width) {
+    throw new DisplayError('error.evidenceTarField', 'Evidence bundle value exceeds its tar field.');
+  }
   target.set(encoder.encode(encoded), offset);
   target[offset + width - 1] = 0;
 }

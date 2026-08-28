@@ -84,14 +84,14 @@ test('rejects repeated completion-review cursors', async () => {
 
 test('rejects artifact counts before evidence upload', () => {
   const requirements = [{ role: 'report', media_types: ['text/plain'], min_count: 2, max_count: 2 }];
-  assert.match(validateArtifactSelections(requirements, { report: [{ name: 'one.txt', size: 1, type: 'text/plain' }] }) ?? '', /requires 2 to 2 files/);
+  assert.match(validateArtifactSelections(requirements, { report: [{ name: 'one.txt', size: 1, type: 'text/plain' }] })?.message ?? '', /requires 2 to 2 files/);
   assert.equal(validateArtifactSelections(requirements, { report: [{ name: 'one.txt', size: 1, type: 'text/plain' }, { name: 'two.txt', size: 1, type: 'text/plain' }] }), null);
 });
 
 test('validates completion fields by UTF-8 byte length', () => {
   const requirement = [{ name: 'answer', min_bytes: 1, max_bytes: 4 }];
   assert.equal(validateCompletionFields(requirement, { answer: '😀' }), null);
-  assert.match(validateCompletionFields(requirement, { answer: '😀a' }) ?? '', /UTF-8 bytes/);
+  assert.match(validateCompletionFields(requirement, { answer: '😀a' })?.message ?? '', /UTF-8 bytes/);
 });
 
 test('removes control and direction-format characters from governed display text', () => {

@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { APIError, api, connect, emptyJSONPost, identifier, verifiedDownload } from '$lib/api';
   import { buildEvidenceBundle } from '$lib/archive';
+  import { DisplayError } from '$lib/display-error';
   import { approvalRetryBinding, completionReviewFeedback, confirmationMessageID, confirmationRetryBinding, discardConfirmationRetry, discardStrategyRetry, loadAllCompletionReviews, matchesConfirmationRetry, matchesStrategyRetry, parseApprovalRetryBinding, parseConfirmationRetryBinding, parseReviewRetryBinding, parseStrategyRetryBinding, replayApprovalDecision, replayCompletionReviewDecision, reviewRetryBinding, safeDisplay, sameCompletionContract, snapshotCompletionEvidence, strategyRetryBinding, terminalApproval, terminalCompletionReview, validateArtifactSelections, validateCompletionFields } from '$lib/governance';
   import type { ApprovalRetryBinding, ReviewRetryBinding, StrategyRetryBinding } from '$lib/governance';
   import { formatDisplayMessage, resolveDisplayLocale } from '$lib/i18n';
@@ -595,9 +596,9 @@
     const messageID = completionMessageID;
     await action(async () => {
       const fieldError = validateCompletionFields(currentTask.completion_contract!.required_fields ?? [], evidence.fields);
-      if (fieldError) throw new Error(fieldError);
+      if (fieldError) throw fieldError;
       const selectionError = validateArtifactSelections(currentTask.completion_contract!.artifact_requirements ?? [], evidence.files);
-      if (selectionError) throw new Error(selectionError);
+      if (selectionError) throw selectionError;
       const artifacts: { role: string; name: string; media_type: string; data: string }[] = [];
       for (const requirement of currentTask.completion_contract!.artifact_requirements ?? []) {
         for (const file of evidence.files[requirement.role] ?? []) {
@@ -679,7 +680,7 @@
         clearPendingReviewDecision();
         reviewPhrase = '';
         reviewFeedback = '';
-        notice = ui('notice.reviewAlreadyMarked', { decision: decision.toLowerCase() });
+        notice = ui('notice.reviewAlreadyMarked', { decision });
         await refresh();
         return;
       }
@@ -687,7 +688,7 @@
       clearPendingReviewDecision();
       reviewPhrase = '';
       reviewFeedback = '';
-      notice = ui('notice.reviewMarked', { decision: decision.toLowerCase() });
+      notice = ui('notice.reviewMarked', { decision });
       await refresh();
     });
   }
@@ -750,7 +751,8 @@
   }
 
   function message(cause: unknown): string {
-    return cause instanceof Error ? safeDisplay(cause.message) : 'The request failed.';
+    if (cause instanceof DisplayError) return ui(cause.messageID, cause.values);
+    return cause instanceof Error ? safeDisplay(cause.message) : ui('error.requestFailed');
   }
 
   function values(draft: IntentDraft, key: IntentList) {
