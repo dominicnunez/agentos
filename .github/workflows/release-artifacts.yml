@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   frontend:
+    name: Dashboard frontend
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -40,6 +41,7 @@ jobs:
           fi
 
   verify:
+    name: Release artifact verification
     needs: frontend
     runs-on: ubuntu-latest
     timeout-minutes: 20
