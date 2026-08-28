@@ -410,16 +410,16 @@ func assertInstalledSystemLayout(t *testing.T, config bootstrap.Config) {
 		gid  int
 		mode os.FileMode
 	}{
-		{config.Paths.ConfigDir, 0, 0, 0o755},
+		{config.Paths.ConfigDir, 0, 0, os.ModeDir | 0o755},
 		{bootstrap.ConfigPath(config.Paths), 0, 0, 0o644},
 		{bootstrap.StatePath(config.Paths), 0, 0, 0o644},
-		{filepath.Join(config.Paths.ConfigDir, "credentials"), 0, 0, 0o700},
+		{filepath.Join(config.Paths.ConfigDir, "credentials"), 0, 0, os.ModeDir | 0o700},
 		{filepath.Join(config.Paths.ConfigDir, "credentials", "openai-api-key.cred"), 0, 0, 0o600},
-		{config.Paths.DataDir, serviceUID, serviceGID, 0o751},
-		{config.Paths.StateDir, serviceUID, serviceGID, 0o750},
-		{config.Paths.CacheDir, serviceUID, serviceGID, 0o750},
-		{config.Paths.Workspace, 0, serviceGID, 0o770},
-		{config.Paths.RuntimeDir, 0, 0, 0o711},
+		{config.Paths.DataDir, serviceUID, serviceGID, os.ModeDir | 0o751},
+		{config.Paths.StateDir, serviceUID, serviceGID, os.ModeDir | 0o750},
+		{config.Paths.CacheDir, serviceUID, serviceGID, os.ModeDir | 0o750},
+		{config.Paths.Workspace, 0, serviceGID, os.ModeDir | 0o770},
+		{config.Paths.RuntimeDir, 0, 0, os.ModeDir | 0o711},
 		{"/usr/local/bin/agentos", 0, 0, 0o755},
 		{"/etc/systemd/system/agentos.service", 0, 0, 0o644},
 		{"/etc/systemd/system/agentos-user.socket", 0, 0, 0o644},
