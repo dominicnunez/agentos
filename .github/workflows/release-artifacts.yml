@@ -132,4 +132,3 @@ jobs:
             AGENTOS_TEST_PACKAGED_BINARY="$package_root/agentos" \
             AGENTOS_TEST_PACKAGED_RECOVERY="$package_root/agentos-recovery" \
             "$test_binary" -test.run '^TestInstalledLinuxSystemLifecycle$' -test.v
-
