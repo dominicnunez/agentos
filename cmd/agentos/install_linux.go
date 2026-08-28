@@ -594,6 +594,10 @@ func installExecutable(source, destination string) error {
 		return err
 	}
 	defer func() { _ = input.Close() }()
+	openedInfo, err := input.Stat()
+	if err != nil || !os.SameFile(sourceInfo, openedInfo) || openedInfo.Mode()&os.ModeSymlink != 0 || !openedInfo.Mode().IsRegular() || openedInfo.Size() != sourceInfo.Size() {
+		return fmt.Errorf("installation source changed while it was opened")
+	}
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		return err
 	}
@@ -603,9 +607,15 @@ func installExecutable(source, destination string) error {
 	}
 	temporaryPath := temporary.Name()
 	defer func() { _ = os.Remove(temporaryPath) }()
-	if _, err := io.Copy(temporary, input); err != nil {
+	copied, err := io.Copy(temporary, input)
+	if err != nil {
 		_ = temporary.Close()
 		return err
+	}
+	finalSourceInfo, statErr := input.Stat()
+	if statErr != nil || copied != sourceInfo.Size() || !os.SameFile(openedInfo, finalSourceInfo) || finalSourceInfo.Size() != sourceInfo.Size() || !finalSourceInfo.ModTime().Equal(sourceInfo.ModTime()) {
+		_ = temporary.Close()
+		return fmt.Errorf("installation source changed while it was copied")
 	}
 	if err := temporary.Chmod(0o755); err != nil {
 		_ = temporary.Close()
