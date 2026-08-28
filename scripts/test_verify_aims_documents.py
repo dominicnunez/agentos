@@ -82,10 +82,15 @@ class VerifyAIMSDocumentsTest(unittest.TestCase):
             "statement_of_applicability": {
                 "document_id": "aims.statement-of-applicability",
                 "result": "COMPLETE",
+                "reviewed_control_count": 12,
+                "included_control_count": 10,
+                "excluded_control_count": 2,
+                "controls_without_rationale": 0,
             },
             "readiness_decision": {
                 "document_id": "aims.assessment-readiness-decision",
                 "disposition": "READY",
+                "open_blocking_actions": 0,
             },
         }
 
@@ -265,6 +270,42 @@ class VerifyAIMSDocumentsTest(unittest.TestCase):
             "assessment_outcomes": outcomes,
         }
         with self.assertRaisesRegex(VerificationError, "must be an integer"):
+            _parse_manifest_bytes((json.dumps(manifest) + "\n").encode(), "test manifest")
+
+    def test_rejects_complete_applicability_with_incomplete_decisions(self) -> None:
+        outcomes = self.affirmative_outcomes()
+        applicability = outcomes["statement_of_applicability"]  # type: ignore[assignment]
+        applicability["included_control_count"] = 9  # type: ignore[index]
+        manifest = {
+            "schema_version": 2,
+            "documents": [],
+            "assessment_outcomes": outcomes,
+        }
+        with self.assertRaisesRegex(VerificationError, "every reviewed control"):
+            _parse_manifest_bytes((json.dumps(manifest) + "\n").encode(), "test manifest")
+
+    def test_rejects_complete_applicability_with_missing_rationale(self) -> None:
+        outcomes = self.affirmative_outcomes()
+        applicability = outcomes["statement_of_applicability"]  # type: ignore[assignment]
+        applicability["controls_without_rationale"] = 1  # type: ignore[index]
+        manifest = {
+            "schema_version": 2,
+            "documents": [],
+            "assessment_outcomes": outcomes,
+        }
+        with self.assertRaisesRegex(VerificationError, "every reviewed control"):
+            _parse_manifest_bytes((json.dumps(manifest) + "\n").encode(), "test manifest")
+
+    def test_rejects_ready_decision_with_open_blocking_actions(self) -> None:
+        outcomes = self.affirmative_outcomes()
+        readiness = outcomes["readiness_decision"]  # type: ignore[assignment]
+        readiness["open_blocking_actions"] = 1  # type: ignore[index]
+        manifest = {
+            "schema_version": 2,
+            "documents": [],
+            "assessment_outcomes": outcomes,
+        }
+        with self.assertRaisesRegex(VerificationError, "blocking actions remain open"):
             _parse_manifest_bytes((json.dumps(manifest) + "\n").encode(), "test manifest")
 
     def test_rejects_outcome_change_without_new_approved_evidence(self) -> None:

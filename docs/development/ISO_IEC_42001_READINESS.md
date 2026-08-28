@@ -73,7 +73,9 @@ does not attest to ledger integrity, control effectiveness, or conformity.
 5. Run an internal readiness audit against an authorized standard copy, close findings, then obtain an independent certification assessment.
 
 The repository now contains hash-bound public drafts for steps 3 and 4 plus a
-deterministic bounded assessment bundle. Draft existence does not complete
+deterministic bounded assessment bundle. Conservative structured draft records
+for audit, management review, applicability, and readiness outcomes remain
+negative until their exact governed decisions and evidence exist. Draft existence does not complete
 either step: approval, operation, effectiveness evidence, internal audit,
 management review, and the authorized-standard applicability decision remain
 required.

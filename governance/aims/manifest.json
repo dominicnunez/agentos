@@ -17,6 +17,36 @@
       "sha256": "5f29edb4a1878bc4a86a8a5702519fb974d11be9169c96faa9184949593c0df9"
     },
     {
+      "id": "aims.assessment-readiness-decision",
+      "path": "governance/aims/records/assessment-readiness-decision.md",
+      "version": "0.2",
+      "status": "DRAFT",
+      "owner": "accountable-executive",
+      "classification": "PUBLIC",
+      "approval_ref": null,
+      "approved_by": null,
+      "approved_at": null,
+      "review_due": null,
+      "supersedes": [],
+      "superseded_by": null,
+      "sha256": "f9c8b5f66eef5d35419a1951f378698dc03656e67e412bb8c5aba2630b762c22"
+    },
+    {
+      "id": "aims.audit-result",
+      "path": "governance/aims/records/audit-result.md",
+      "version": "0.1",
+      "status": "DRAFT",
+      "owner": "internal-auditor",
+      "classification": "PUBLIC",
+      "approval_ref": null,
+      "approved_by": null,
+      "approved_at": null,
+      "review_due": null,
+      "supersedes": [],
+      "superseded_by": null,
+      "sha256": "7765f4ba243d61f14a4906a384658e4345e8c6fc94892ab4caf4a4e3f347d3f4"
+    },
+    {
       "id": "aims.competence-communication",
       "path": "governance/aims/records/competence-communication.md",
       "version": "0.1",
@@ -107,6 +137,21 @@
       "sha256": "cba6d8d4d4e120e7e5b05dd3ea950727491a17f2b94e5a59ecf196686e5b8c25"
     },
     {
+      "id": "aims.management-review-result",
+      "path": "governance/aims/records/management-review-result.md",
+      "version": "0.1",
+      "status": "DRAFT",
+      "owner": "accountable-executive",
+      "classification": "PUBLIC",
+      "approval_ref": null,
+      "approved_by": null,
+      "approved_at": null,
+      "review_due": null,
+      "supersedes": [],
+      "superseded_by": null,
+      "sha256": "f31a0d52e11edb3547f963a198603b8cbff37f0370e599b8d5ba4cb624fa0d45"
+    },
+    {
       "id": "aims.objectives",
       "path": "governance/aims/records/objectives.md",
       "version": "0.1",
@@ -165,6 +210,21 @@
       "supersedes": [],
       "superseded_by": null,
       "sha256": "da53ce79ce2ec98c46516d0b4e9726607fcfd55b3a39f4e805c0683a13433564"
+    },
+    {
+      "id": "aims.statement-of-applicability",
+      "path": "governance/aims/records/statement-of-applicability.md",
+      "version": "0.2",
+      "status": "DRAFT",
+      "owner": "aims-manager",
+      "classification": "PUBLIC",
+      "approval_ref": null,
+      "approved_by": null,
+      "approved_at": null,
+      "review_due": null,
+      "supersedes": [],
+      "superseded_by": null,
+      "sha256": "dca2b219858b85ff691704be8a651f6e74300bf287bc0787604cb20557ac40cd"
     },
     {
       "id": "aims.supplier-management",

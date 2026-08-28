@@ -206,10 +206,15 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
             "statement_of_applicability": {
                 "document_id": "aims.statement-of-applicability",
                 "result": "COMPLETE",
+                "reviewed_control_count": 12,
+                "included_control_count": 10,
+                "excluded_control_count": 2,
+                "controls_without_rationale": 0,
             },
             "readiness_decision": {
                 "document_id": "aims.assessment-readiness-decision",
                 "disposition": "READY",
+                "open_blocking_actions": 0,
             },
         }
 
@@ -317,6 +322,20 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
         )
         self.assertFalse(report["certification_assessment_ready"])
         self.assertIn("INTERNAL_AUDIT_OUTCOME_BLOCKS_READINESS", report["blockers"])
+
+    def test_readiness_requires_zero_open_blocking_actions(self) -> None:
+        outcomes = self.affirmative_outcomes()
+        outcomes["readiness_decision"]["disposition"] = "NOT_READY"  # type: ignore[index]
+        outcomes["readiness_decision"]["open_blocking_actions"] = 1  # type: ignore[index]
+        report = readiness_report(
+            self.approved_readiness_manifest(outcomes),
+            "a" * 40,
+            datetime(2026, 8, 27, 12),
+            commit_at=datetime(2026, 8, 27, 11),
+            source_verified=True,
+        )
+        self.assertFalse(report["certification_assessment_ready"])
+        self.assertIn("OPEN_BLOCKING_CORRECTIVE_ACTIONS", report["blockers"])
 
     def test_readiness_accepts_only_complete_affirmative_outcomes(self) -> None:
         outcomes = self.affirmative_outcomes()
