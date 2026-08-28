@@ -922,4 +922,3 @@ func fileOwner(path string) (int, os.FileMode, error) {
 	}
 	return int(stat.Uid), info.Mode(), nil
 }
-
