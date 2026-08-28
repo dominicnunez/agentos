@@ -1331,4 +1331,3 @@ func syncDirectory(path string) error {
 	closeErr := directory.Close()
 	return errors.Join(syncErr, closeErr)
 }
-

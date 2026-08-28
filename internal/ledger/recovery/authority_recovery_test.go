@@ -357,4 +357,3 @@ func TestVerifyRejectsOrganizationMismatchedFreezeRecord(t *testing.T) {
 		t.Fatalf("organization-mismatched freeze passed recovery: %v", err)
 	}
 }
-
