@@ -486,18 +486,24 @@ type recoveryProjectionKey struct {
 }
 
 type recoveryDispatchIndex struct {
-	eventsByID map[string]events.Event
-	history    map[recoveryProjectionKey][]events.Event
+	eventsByID              map[string]events.Event
+	nextProjectionByEventID map[string]events.Event
 }
 
 const maximumRecoveryDispatchEvidence = 6
 
 func newRecoveryDispatchIndex(stream []events.Event) (*recoveryDispatchIndex, error) {
 	index := &recoveryDispatchIndex{
-		eventsByID: make(map[string]events.Event, len(stream)),
-		history:    make(map[recoveryProjectionKey][]events.Event),
+		eventsByID:              make(map[string]events.Event, len(stream)),
+		nextProjectionByEventID: make(map[string]events.Event),
 	}
+	lastProjection := make(map[recoveryProjectionKey]events.Event)
+	var priorSequence int64
 	for _, event := range stream {
+		if event.Sequence <= priorSequence {
+			return nil, fmt.Errorf("event stream is not in strict sequence order")
+		}
+		priorSequence = event.Sequence
 		if _, duplicate := index.eventsByID[event.EventID]; duplicate {
 			return nil, fmt.Errorf("event %s is duplicated", event.EventID)
 		}
@@ -512,13 +518,11 @@ func newRecoveryDispatchIndex(stream []events.Event) (*recoveryDispatchIndex, er
 		switch payload.Projection.ProjectionKind {
 		case "agent", "agent_blueprint", "execution_profile":
 			key := recoveryProjectionKey{kind: payload.Projection.ProjectionKind, recordID: payload.Projection.RecordID}
-			index.history[key] = append(index.history[key], event)
+			if prior, found := lastProjection[key]; found {
+				index.nextProjectionByEventID[prior.EventID] = event
+			}
+			lastProjection[key] = event
 		}
-	}
-	for key := range index.history {
-		sort.Slice(index.history[key], func(left, right int) bool {
-			return index.history[key][left].Sequence < index.history[key][right].Sequence
-		})
 	}
 	return index, nil
 }
@@ -540,26 +544,16 @@ func (index *recoveryDispatchIndex) boundedStreamForStart(start events.Event) ([
 		return nil, fmt.Errorf("execution start lacks its dispatch binding")
 	}
 	binding := detail.DispatchBinding
-	references := []struct {
-		key      recoveryProjectionKey
-		eventRef string
-	}{
-		{key: recoveryProjectionKey{kind: "agent", recordID: string(binding.AgentID)}, eventRef: binding.AgentEventRef},
-		{key: recoveryProjectionKey{kind: "agent_blueprint", recordID: string(binding.BlueprintID)}, eventRef: binding.BlueprintEventRef},
-		{key: recoveryProjectionKey{kind: "execution_profile", recordID: string(binding.ExecutionProfileID)}, eventRef: binding.ExecutionProfileEventRef},
-	}
+	references := []string{binding.AgentEventRef, binding.BlueprintEventRef, binding.ExecutionProfileEventRef}
 	bounded := make([]events.Event, 0, maximumRecoveryDispatchEvidence)
-	for _, reference := range references {
-		referenced, found := index.eventsByID[reference.eventRef]
+	for _, eventRef := range references {
+		referenced, found := index.eventsByID[eventRef]
 		if found {
 			bounded = append(bounded, referenced)
 		}
-		history := index.history[reference.key]
-		position := sort.Search(len(history), func(position int) bool {
-			return history[position].Sequence > referenced.Sequence
-		})
-		if found && position < len(history) && history[position].Sequence < start.Sequence {
-			bounded = append(bounded, history[position])
+		if successor, superseded := index.nextProjectionByEventID[eventRef]; found && superseded &&
+			successor.Sequence < start.Sequence {
+			bounded = append(bounded, successor)
 		}
 	}
 	if len(bounded) > maximumRecoveryDispatchEvidence {
