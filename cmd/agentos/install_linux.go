@@ -242,6 +242,14 @@ func applyProviderRuntime(ctx context.Context, config bootstrap.Config) error {
 }
 
 func installSystemRuntime(ctx context.Context, config bootstrap.Config, serviceChoice int) error {
+	source, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return installSystemRuntimeFrom(ctx, config, serviceChoice, source)
+}
+
+func installSystemRuntimeFrom(ctx context.Context, config bootstrap.Config, serviceChoice int, source string) error {
 	if effectiveUID() != 0 {
 		return fmt.Errorf("system installation requires administrator access")
 	}
@@ -272,7 +280,7 @@ func installSystemRuntime(ctx context.Context, config bootstrap.Config, serviceC
 	if err := prepareSystemWorkspace(config.Paths.Workspace, config.Owner, serviceUID, serviceGID); err != nil {
 		return err
 	}
-	if err := installExecutable("/usr/local/bin/agentos"); err != nil {
+	if err := installExecutable(source, "/usr/local/bin/agentos"); err != nil {
 		return err
 	}
 	servicePath := "/etc/systemd/system/agentos.service"
@@ -444,34 +452,15 @@ func rejectSymlinkDirectoryChain(path string) error {
 }
 
 func installUserRuntime(ctx context.Context, config bootstrap.Config, serviceChoice int) error {
-	if effectiveUID() != config.Owner.UID {
-		return fmt.Errorf("user installation must run as its configured Linux owner")
-	}
-	if err := validateUserRuntimeBase(config); err != nil {
-		return err
-	}
-	current, err := os.UserHomeDir()
+	source, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	for _, directory := range []string{config.Paths.ConfigDir, config.Paths.DataDir, config.Paths.StateDir, config.Paths.CacheDir, config.Paths.RuntimeDir, config.Paths.Workspace} {
-		if err := ensureOwnedRuntimeDirectory(directory, config.Owner.UID, 0o700); err != nil {
-			return err
-		}
-	}
-	binary := filepath.Join(current, ".local", "bin", "agentos")
-	if err := installExecutable(binary); err != nil {
-		return err
-	}
-	unitDirectory := filepath.Join(current, ".config", "systemd", "user")
-	if err := os.MkdirAll(unitDirectory, 0o700); err != nil {
-		return err
-	}
-	serviceUnit, err := userServiceUnit(config, binary)
-	if err != nil {
-		return err
-	}
-	if err := writeRestrictedFile(filepath.Join(unitDirectory, "agentos.service"), []byte(serviceUnit), 0o600); err != nil {
+	return installUserRuntimeFrom(ctx, config, serviceChoice, source)
+}
+
+func installUserRuntimeFrom(ctx context.Context, config bootstrap.Config, serviceChoice int, source string) error {
+	if _, err := prepareUserRuntime(config, source); err != nil {
 		return err
 	}
 	if err := runCommand(ctx, "systemctl", "--user", "daemon-reload"); err != nil {
@@ -485,6 +474,40 @@ func installUserRuntime(ctx context.Context, config bootstrap.Config, serviceCho
 	default:
 		return nil
 	}
+}
+
+func prepareUserRuntime(config bootstrap.Config, source string) (string, error) {
+	if effectiveUID() != config.Owner.UID {
+		return "", fmt.Errorf("user installation must run as its configured Linux owner")
+	}
+	if err := validateUserRuntimeBase(config); err != nil {
+		return "", err
+	}
+	current, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	for _, directory := range []string{config.Paths.ConfigDir, config.Paths.DataDir, config.Paths.StateDir, config.Paths.CacheDir, config.Paths.RuntimeDir, config.Paths.Workspace} {
+		if err := ensureOwnedRuntimeDirectory(directory, config.Owner.UID, 0o700); err != nil {
+			return "", err
+		}
+	}
+	binary := filepath.Join(current, ".local", "bin", "agentos")
+	if err := installExecutable(source, binary); err != nil {
+		return "", err
+	}
+	unitDirectory := filepath.Join(current, ".config", "systemd", "user")
+	if err := os.MkdirAll(unitDirectory, 0o700); err != nil {
+		return "", err
+	}
+	serviceUnit, err := userServiceUnit(config, binary)
+	if err != nil {
+		return "", err
+	}
+	if err := writeRestrictedFile(filepath.Join(unitDirectory, "agentos.service"), []byte(serviceUnit), 0o600); err != nil {
+		return "", err
+	}
+	return binary, nil
 }
 
 func validateUserRuntimeBase(config bootstrap.Config) error {
@@ -551,15 +574,22 @@ func lookupNumericIdentity(ctx context.Context, name string) (int, int, error) {
 	return uid, gid, nil
 }
 
-func installExecutable(destination string) error {
-	source, err := os.Executable()
-	if err != nil {
-		return err
+func installExecutable(source, destination string) error {
+	if !filepath.IsAbs(source) || filepath.Clean(source) != source {
+		return fmt.Errorf("installation source must be an absolute regular file")
 	}
-	if same, _ := filepath.EvalSymlinks(destination); same == source {
+	sourceInfo, err := os.Lstat(source)
+	if err != nil || sourceInfo.Mode()&os.ModeSymlink != 0 || !sourceInfo.Mode().IsRegular() || sourceInfo.Size() <= 0 {
+		return fmt.Errorf("installation source must be a non-empty regular file")
+	}
+	resolvedSource, err := filepath.EvalSymlinks(source)
+	if err != nil || resolvedSource != source {
+		return fmt.Errorf("installation source must not traverse a link")
+	}
+	if same, _ := filepath.EvalSymlinks(destination); same == resolvedSource {
 		return nil
 	}
-	input, err := os.Open(source)
+	input, err := os.Open(resolvedSource)
 	if err != nil {
 		return err
 	}
@@ -892,3 +922,4 @@ func fileOwner(path string) (int, os.FileMode, error) {
 	}
 	return int(stat.Uid), info.Mode(), nil
 }
+
