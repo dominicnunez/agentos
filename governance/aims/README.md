@@ -28,6 +28,12 @@ approval evidence, approve policy, accept residual risk, determine control
 applicability, perform management review, or certify Agent OS. Those decisions
 remain explicit and fail closed.
 
+The controlled draft outcome records intentionally encode `FAIL`,
+`DO_NOT_PROCEED`, `INCOMPLETE`, and `NOT_READY`. They are fillable record
+shapes, not simulated operating evidence. The verifier accepts an affirmative
+outcome only after the exact structured record and its manifest entry are both
+approved through the governed lifecycle.
+
 ## Public and confidential evidence
 
 Every file committed here is public and must be classified `PUBLIC`. Never put
