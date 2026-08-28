@@ -128,8 +128,19 @@ func TestInstalledLinuxUserHelper(t *testing.T) {
 		} else if err := os.WriteFile(credentialPath, []byte("systemd-before-256-cannot-create-user-scoped-credentials"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if output, err := runPackagedSetupResume(t.Context(), requirePackagedExecutable(t, installedTestBinary)); err != nil {
-			t.Fatalf("resume packaged user setup: %v\n%s", err, output)
+		packagedBinary := requirePackagedExecutable(t, installedTestBinary)
+		if supportsUserScopedCredentials(t.Context()) {
+			if output, err := runPackagedSetupResume(t.Context(), packagedBinary); err != nil {
+				t.Fatalf("resume packaged user setup: %v\n%s", err, output)
+			}
+		} else {
+			if err := installUserRuntimeFrom(t.Context(), config, 2, packagedBinary); err != nil {
+				t.Fatalf("prepare user runtime below the supported service version: %v", err)
+			}
+			state.Stage = bootstrap.StageReady
+			if err := checkpoint(configPath, bootstrap.StatePath(paths), &config, &state); err != nil {
+				t.Fatalf("persist process-only user checkpoint: %v", err)
+			}
 		}
 		loaded, err := bootstrap.LoadState(bootstrap.StatePath(paths))
 		if err != nil || loaded.Stage != bootstrap.StageReady {
