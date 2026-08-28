@@ -16,6 +16,10 @@ test('formats typed display messages with exact interpolation values', () => {
     '1 Missions · 2 Goals · 3 Teams · 4 Agents'
   );
   assert.equal(formatDisplayMessage('en', 'header.refresh'), 'Refresh');
+  assert.equal(
+    formatDisplayMessage('en', 'organization.assignedTo', { type: 'AGENT', id: 'agent-1' }),
+    'Assigned to AGENT agent-1'
+  );
 });
 
 test('fails closed when interpolation values are missing or unexpected', () => {
