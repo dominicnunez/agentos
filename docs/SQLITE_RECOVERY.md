@@ -26,7 +26,8 @@ copied, malformed, cross-organization, or otherwise mismatched state is
 rejected. Existing SQLite journal,
 WAL, or shared-memory sidecars at the destination are rejected so stale state
 cannot be applied to a recovered ledger. The utility returns JSON containing
-the resolved path, file SHA-256 checksum, size, event count, maximum sequence,
+the resolved path, file SHA-256 checksum and explicit `OFFLINE_DATABASE_FILE`
+checksum scope, size, event count, maximum sequence,
 storage-schema version, Event Contract schema version, and verified event-chain
 algorithm and head hash.
 
@@ -65,6 +66,16 @@ superseded, cross-organization, or rewritten roster references. A later
 deactivation does not invalidate an earlier committed start, while interrupted
 adaptive work remains uncertain and cannot reuse that admission for a blind
 retry.
+
+`agentos-recovery verify` is for an offline backup or restore candidate. The
+operator-facing `agentos doctor` check is different: it uses SQLite's native
+online backup API to capture one committed snapshot, then runs every logical
+validator, event count, maximum sequence, event-chain check, and byte checksum
+against that same snapshot. Its `ONLINE_BACKUP_SNAPSHOT` checksum scope means
+the SHA-256 identifies the temporary snapshot file—including committed WAL
+state captured by SQLite—not the live main database file and not a standalone
+logical ledger identity. A concurrent append is either inside or outside that
+snapshot; diagnostic fields never mix the two states.
 
 ## Storage and Event Contract versions
 
