@@ -83,7 +83,36 @@ func TestAgentEvidenceRecoveryUsesBoundedIndexedDispatchHistory(t *testing.T) {
 	}
 }
 
+func TestRecoveryDispatchIndexSeparatesOrganizations(t *testing.T) {
+	now := time.Now().UTC()
+	blueprint := sealedRecoveryProjection(t, "blueprint-event", 1, "AGENT_BLUEPRINT_CREATED", "agent_blueprint", "blueprint-1", 1, "roster", "", map[string]string{"id": "blueprint-1"}, nil, now)
+	profile := sealedRecoveryProjection(t, "profile-event", 2, "EXECUTION_PROFILE_CREATED", "execution_profile", "profile-1", 1, "roster", "", map[string]string{"id": "profile-1"}, nil, now)
+	agent := sealedRecoveryProjection(t, "agent-event", 3, "AGENT_CREATED", "agent", "shared-agent-id", 1, "roster", "", map[string]string{"id": "shared-agent-id"}, nil, now)
+	otherOrganizationAgent := sealedRecoveryProjectionForOrganization(t, "org-2", "other-agent-event", 4, "AGENT_CREATED", "agent", "shared-agent-id", 1, "other-roster", "", map[string]string{"id": "shared-agent-id"}, nil, now)
+	detail := events.ExecutionStartDetail{DispatchBinding: &events.AgentDispatchBinding{
+		AgentEventRef: agent.EventID, BlueprintEventRef: blueprint.EventID, ExecutionProfileEventRef: profile.EventID,
+	}}
+	start := sealedRecoveryProjection(t, "start-event", 5, "EXECUTION_STARTED", "task", "task-1", 2, "work-1", "task-1", map[string]string{"id": "task-1"}, detail, now)
+
+	index, err := newRecoveryDispatchIndex([]events.Event{blueprint, profile, agent, otherOrganizationAgent, start})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bounded, err := index.boundedStreamForStart(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bounded) != 3 {
+		t.Fatalf("cross-organization record ID collision contaminated dispatch history: got %d events", len(bounded))
+	}
+}
+
 func sealedRecoveryProjection(t *testing.T, eventID string, sequence int64, eventType, kind, recordID string, version int, correlationID, taskID string, value any, detail any, createdAt time.Time) events.Event {
+	t.Helper()
+	return sealedRecoveryProjectionForOrganization(t, "org-1", eventID, sequence, eventType, kind, recordID, version, correlationID, taskID, value, detail, createdAt)
+}
+
+func sealedRecoveryProjectionForOrganization(t *testing.T, organizationID, eventID string, sequence int64, eventType, kind, recordID string, version int, correlationID, taskID string, value any, detail any, createdAt time.Time) events.Event {
 	t.Helper()
 	valueBody, err := json.Marshal(value)
 	if err != nil {
@@ -96,7 +125,7 @@ func sealedRecoveryProjection(t *testing.T, eventID string, sequence int64, even
 	if detail == nil {
 		detailBody = nil
 	}
-	event := events.Event{EventID: eventID, Sequence: sequence, OrganizationID: "org-1", EventType: eventType, SourceActorID: "runtime", TaskID: taskID, CorrelationID: correlationID, CreatedAt: createdAt, SchemaVersion: events.SchemaVersion}
+	event := events.Event{EventID: eventID, Sequence: sequence, OrganizationID: organizationID, EventType: eventType, SourceActorID: "runtime", TaskID: taskID, CorrelationID: correlationID, CreatedAt: createdAt, SchemaVersion: events.SchemaVersion}
 	sealed, err := events.SealProjectionEvent(event, events.ProjectionRecord{ProjectionKind: kind, RecordID: recordID, Version: version, Value: valueBody, CorrelationID: correlationID}, detailBody)
 	if err != nil {
 		t.Fatal(err)
@@ -328,3 +357,4 @@ func TestVerifyRejectsOrganizationMismatchedFreezeRecord(t *testing.T) {
 		t.Fatalf("organization-mismatched freeze passed recovery: %v", err)
 	}
 }
+

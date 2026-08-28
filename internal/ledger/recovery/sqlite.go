@@ -481,8 +481,9 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 }
 
 type recoveryProjectionKey struct {
-	kind     string
-	recordID string
+	organizationID string
+	kind           string
+	recordID       string
 }
 
 type recoveryDispatchIndex struct {
@@ -517,7 +518,11 @@ func newRecoveryDispatchIndex(stream []events.Event) (*recoveryDispatchIndex, er
 		}
 		switch payload.Projection.ProjectionKind {
 		case "agent", "agent_blueprint", "execution_profile":
-			key := recoveryProjectionKey{kind: payload.Projection.ProjectionKind, recordID: payload.Projection.RecordID}
+			key := recoveryProjectionKey{
+				organizationID: event.OrganizationID,
+				kind:           payload.Projection.ProjectionKind,
+				recordID:       payload.Projection.RecordID,
+			}
 			if prior, found := lastProjection[key]; found {
 				index.nextProjectionByEventID[prior.EventID] = event
 			}
@@ -1326,3 +1331,4 @@ func syncDirectory(path string) error {
 	closeErr := directory.Close()
 	return errors.Join(syncErr, closeErr)
 }
+
