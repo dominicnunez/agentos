@@ -40,4 +40,3 @@ checklist does not authorize deployment or publication.
    are recorded.
 4. Perform final security and licensing reviews before approving and publishing
    an immutable release candidate.
-
