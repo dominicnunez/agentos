@@ -525,7 +525,9 @@ func runSystemctl(t *testing.T, arguments ...string) {
 	t.Helper()
 	output, err := exec.CommandContext(t.Context(), "/usr/bin/systemctl", arguments...).CombinedOutput()
 	if err != nil {
-		t.Fatalf("systemctl %s: %v\n%s", strings.Join(arguments, " "), err, output)
+		verification, _ := exec.CommandContext(t.Context(), "/usr/bin/systemd-analyze", "verify", "/etc/systemd/system/agentos-user.socket", "/etc/systemd/system/agentos.service").CombinedOutput()
+		status, _ := exec.CommandContext(t.Context(), "/usr/bin/systemctl", "status", "--no-pager", "agentos-user.socket", "agentos.service").CombinedOutput()
+		t.Fatalf("systemctl %s: %v\n%s\nverification:\n%s\nstatus:\n%s", strings.Join(arguments, " "), err, output, verification, status)
 	}
 }
 
