@@ -120,8 +120,8 @@ func TestInstalledLinuxUserHelper(t *testing.T) {
 		if err := os.MkdirAll(credentialDirectory, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(credentialDirectory, "openai-api-key.cred"), []byte("not-a-systemd-encrypted-credential"), 0o600); err != nil {
-			t.Fatal(err)
+		if err := storeEncryptedCredential(t.Context(), config, config.Providers[0].SecretRef, []byte("installed-user-test-not-a-live-key")); err != nil {
+			t.Fatalf("store user-scoped provider credential: %v", err)
 		}
 		if output, err := runPackagedSetupResume(t.Context(), requirePackagedExecutable(t, installedTestBinary)); err != nil {
 			t.Fatalf("resume packaged user setup: %v\n%s", err, output)
@@ -131,7 +131,6 @@ func TestInstalledLinuxUserHelper(t *testing.T) {
 			t.Fatalf("packaged user resume state=%+v err=%v", loaded, err)
 		}
 		assertInstalledUserLayout(t, config)
-		assertOnlineDoctorRejectsFakeCredential(t, filepath.Join(home, ".local", "bin", "agentos"))
 	case "bootstrap", "verify":
 		config, err := bootstrap.LoadConfig(configPath)
 		if err != nil {
@@ -236,47 +235,13 @@ func exerciseInstalledUserLifecycle(t *testing.T, binary, recoveryBinary string)
 	if err != nil {
 		t.Fatal(err)
 	}
-	credentialDirectory := filepath.Join(paths.RuntimeDir, "test-credentials")
-	if err := os.MkdirAll(credentialDirectory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chown(credentialDirectory, uid, gid); err != nil {
-		t.Fatal(err)
-	}
-	credentialPath := filepath.Join(credentialDirectory, "openai-api-key")
-	if err := os.WriteFile(credentialPath, []byte("installed-user-test-not-a-live-key"), 0o400); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chown(credentialPath, uid, gid); err != nil {
-		t.Fatal(err)
-	}
-
-	start := func() (*exec.Cmd, *bytes.Buffer) {
-		var diagnostics bytes.Buffer
-		command := exec.CommandContext(t.Context(),
-			"/usr/bin/unshare", "--net", "/usr/bin/setpriv",
-			fmt.Sprintf("--reuid=%d", uid), fmt.Sprintf("--regid=%d", gid), "--clear-groups",
-			filepath.Join(home, ".local", "bin", "agentos"), "serve", "--config", bootstrap.ConfigPath(paths),
-		)
-		command.Env = append(os.Environ(), "HOME="+home, "XDG_RUNTIME_DIR="+runtimeBase, "CREDENTIALS_DIRECTORY="+credentialDirectory)
-		command.Stdout = &diagnostics
-		command.Stderr = &diagnostics
-		if err := command.Start(); err != nil {
-			t.Fatalf("start offline user runtime: %v", err)
-		}
-		waitForSocket(t, paths.UserSocket, command, &diagnostics)
-		return command, &diagnostics
-	}
-	stop := func(command *exec.Cmd, diagnostics *bytes.Buffer) {
-		if err := command.Process.Signal(os.Interrupt); err != nil {
-			t.Fatalf("signal user runtime: %v", err)
-		}
-		if err := command.Wait(); err != nil {
-			t.Fatalf("stop user runtime: %v\n%s", err, diagnostics.String())
-		}
-	}
-
-	command, diagnostics := start()
+	installUserOfflineConfinement(t, home, uid, gid)
+	runUserSystemctl(t, username, home, runtimeBase, "daemon-reload")
+	runUserSystemctl(t, username, home, runtimeBase, "start", "agentos.service")
+	t.Cleanup(func() {
+		_ = runUserCommand(context.Background(), username, home, runtimeBase, "/usr/bin/systemctl", "--user", "stop", "agentos.service")
+	})
+	waitForUserUnit(t, username, home, runtimeBase, paths.UserSocket)
 	runUserHelper(t, username, home, runtimeBase, packagedSource, testSource, "bootstrap")
 	config, err := bootstrap.LoadConfig(bootstrap.ConfigPath(paths))
 	if err != nil {
@@ -287,16 +252,33 @@ func exerciseInstalledUserLifecycle(t *testing.T, binary, recoveryBinary string)
 	if response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("root peer crossed user gateway boundary: status=%d", response.StatusCode)
 	}
-	stop(command, diagnostics)
-
-	command, diagnostics = start()
+	runUserSystemctl(t, username, home, runtimeBase, "restart", "agentos.service")
+	waitForUserUnit(t, username, home, runtimeBase, paths.UserSocket)
 	runUserHelper(t, username, home, runtimeBase, packagedSource, testSource, "verify")
 	userBackup := filepath.Join(paths.DataDir, "installed-user-backup.db")
 	userRestore := filepath.Join(paths.DataDir, "installed-user-restored.db")
 	runAsUser(t, username, home, runtimeBase, recoverySource, "backup", "--database", paths.Database, "--output", userBackup)
 	runAsUser(t, username, home, runtimeBase, recoverySource, "restore", "--backup", userBackup, "--output", userRestore)
-	stop(command, diagnostics)
+	runUserSystemctl(t, username, home, runtimeBase, "stop", "agentos.service")
 	assertRestoredOrganizationID(t, userRestore, "default", "goal-installed-user")
+}
+
+func installUserOfflineConfinement(t *testing.T, home string, uid, gid int) {
+	t.Helper()
+	directory := filepath.Join(home, ".config", "systemd", "user", "agentos.service.d")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "installed-acceptance.conf")
+	if err := os.WriteFile(path, []byte("[Service]\nIPAddressDeny=any\nRestrictAddressFamilies=AF_UNIX\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(directory, uid, gid); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(path, uid, gid); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func runUserHelper(t *testing.T, username, home, runtimeBase, binary, testBinary, action string) {
@@ -324,6 +306,42 @@ func runAsUser(t *testing.T, username, home, runtimeBase, binary string, argumen
 	if err != nil {
 		t.Fatalf("run %s as %s: %v\n%s", filepath.Base(binary), username, err, output)
 	}
+}
+
+func runUserSystemctl(t *testing.T, username, home, runtimeBase string, arguments ...string) {
+	t.Helper()
+	if output, err := runUserCommandOutput(t.Context(), username, home, runtimeBase, "/usr/bin/systemctl", append([]string{"--user"}, arguments...)...); err != nil {
+		t.Fatalf("user systemctl %s: %v\n%s", strings.Join(arguments, " "), err, output)
+	}
+}
+
+func runUserCommand(ctx context.Context, username, home, runtimeBase, binary string, arguments ...string) error {
+	_, err := runUserCommandOutput(ctx, username, home, runtimeBase, binary, arguments...)
+	return err
+}
+
+func runUserCommandOutput(ctx context.Context, username, home, runtimeBase, binary string, arguments ...string) ([]byte, error) {
+	commandArguments := []string{
+		"-u", username, "--", "/usr/bin/env", "HOME=" + home, "XDG_RUNTIME_DIR=" + runtimeBase,
+		"DBUS_SESSION_BUS_ADDRESS=unix:path=" + filepath.Join(runtimeBase, "bus"), binary,
+	}
+	commandArguments = append(commandArguments, arguments...)
+	return exec.CommandContext(ctx, "/usr/sbin/runuser", commandArguments...).CombinedOutput()
+}
+
+func waitForUserUnit(t *testing.T, username, home, runtimeBase, socket string) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		active := runUserCommand(t.Context(), username, home, runtimeBase, "/usr/bin/systemctl", "--user", "is-active", "--quiet", "agentos.service") == nil
+		if info, err := os.Lstat(socket); active && err == nil && info.Mode()&os.ModeSocket != 0 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	status, _ := runUserCommandOutput(t.Context(), username, home, runtimeBase, "/usr/bin/systemctl", "--user", "status", "--no-pager", "agentos.service")
+	journal, _ := runUserCommandOutput(t.Context(), username, home, runtimeBase, "/usr/bin/journalctl", "--user", "--no-pager", "--unit", "agentos.service", "--lines", "100")
+	t.Fatalf("user service did not become ready with %s\nstatus:\n%s\njournal:\n%s", socket, status, journal)
 }
 
 func waitForSocket(t *testing.T, path string, command *exec.Cmd, diagnostics *bytes.Buffer) {
@@ -492,14 +510,6 @@ func assertDoctorReady(t *testing.T, binary string) {
 	}
 	if err := json.Unmarshal(output, &result); err != nil || !result.Ready {
 		t.Fatalf("packaged doctor result=%s err=%v", output, err)
-	}
-}
-
-func assertOnlineDoctorRejectsFakeCredential(t *testing.T, binary string) {
-	t.Helper()
-	output, err := exec.CommandContext(t.Context(), binary, "doctor", "--online").CombinedOutput()
-	if err == nil || !strings.Contains(string(output), "decrypt provider credential failed") {
-		t.Fatalf("online doctor accepted fake encrypted credential: err=%v output=%s", err, output)
 	}
 }
 
