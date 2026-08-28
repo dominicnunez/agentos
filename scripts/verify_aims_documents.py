@@ -155,8 +155,23 @@ def _validate_assessment_outcomes(value: Any, label: str) -> None:
     expected = {
         "audit": ({"document_id", "result", "open_blocking_findings"}, "result", {"PASS", "FAIL"}),
         "management_review": ({"document_id", "disposition"}, "disposition", {"PROCEED", "DO_NOT_PROCEED"}),
-        "statement_of_applicability": ({"document_id", "result"}, "result", {"COMPLETE", "INCOMPLETE"}),
-        "readiness_decision": ({"document_id", "disposition"}, "disposition", {"READY", "NOT_READY"}),
+        "statement_of_applicability": (
+            {
+                "document_id",
+                "result",
+                "reviewed_control_count",
+                "included_control_count",
+                "excluded_control_count",
+                "controls_without_rationale",
+            },
+            "result",
+            {"COMPLETE", "INCOMPLETE"},
+        ),
+        "readiness_decision": (
+            {"document_id", "disposition", "open_blocking_actions"},
+            "disposition",
+            {"READY", "NOT_READY"},
+        ),
     }
     for outcome_name, (keys, result_key, allowed) in expected.items():
         outcome = value[outcome_name]
@@ -174,6 +189,45 @@ def _validate_assessment_outcomes(value: Any, label: str) -> None:
             if type(count) is not int or count < 0 or count > 10000:
                 raise VerificationError(
                     f"{outcome_label}.open_blocking_findings must be an integer from 0 through 10000"
+                )
+        elif outcome_name == "statement_of_applicability":
+            count_keys = (
+                "reviewed_control_count",
+                "included_control_count",
+                "excluded_control_count",
+                "controls_without_rationale",
+            )
+            counts = {key: outcome[key] for key in count_keys}
+            if any(type(count) is not int or count < 0 or count > 10000 for count in counts.values()):
+                raise VerificationError(
+                    f"{outcome_label} control counts must be integers from 0 through 10000"
+                )
+            decided = counts["included_control_count"] + counts["excluded_control_count"]
+            if decided > counts["reviewed_control_count"]:
+                raise VerificationError(
+                    f"{outcome_label} decided controls exceed the authorized review basis"
+                )
+            if counts["controls_without_rationale"] > counts["reviewed_control_count"]:
+                raise VerificationError(
+                    f"{outcome_label}.controls_without_rationale exceeds the authorized review basis"
+                )
+            if outcome["result"] == "COMPLETE" and (
+                counts["reviewed_control_count"] == 0
+                or decided != counts["reviewed_control_count"]
+                or counts["controls_without_rationale"] != 0
+            ):
+                raise VerificationError(
+                    f"{outcome_label} cannot be COMPLETE until every reviewed control has a decision and rationale"
+                )
+        elif outcome_name == "readiness_decision":
+            count = outcome["open_blocking_actions"]
+            if type(count) is not int or count < 0 or count > 10000:
+                raise VerificationError(
+                    f"{outcome_label}.open_blocking_actions must be an integer from 0 through 10000"
+                )
+            if outcome["disposition"] == "READY" and count != 0:
+                raise VerificationError(
+                    f"{outcome_label} cannot be READY while blocking actions remain open"
                 )
 
 
@@ -208,10 +262,15 @@ def _parse_outcome_record_bytes(
         "statement_of_applicability": {
             "document_id": OUTCOME_DOCUMENT_IDS["statement_of_applicability"],
             "result": "INCOMPLETE",
+            "reviewed_control_count": 0,
+            "included_control_count": 0,
+            "excluded_control_count": 0,
+            "controls_without_rationale": 0,
         },
         "readiness_decision": {
             "document_id": OUTCOME_DOCUMENT_IDS["readiness_decision"],
             "disposition": "NOT_READY",
+            "open_blocking_actions": 1,
         },
     }
     defaults[outcome_name] = record["outcome"]

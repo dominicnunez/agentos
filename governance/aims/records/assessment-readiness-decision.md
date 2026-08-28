@@ -15,11 +15,15 @@ not a conformity or certification decision.
 The decision remains negative until the approved scope, policy, roles,
 objectives, risk and impact treatment, complete control-applicability review,
 internal-audit result, management-review result, operating evidence, and open
-corrective actions have all been evaluated by the accountable executive.
+corrective actions have all been evaluated by the accountable executive. Every
+readiness-blocking corrective action must be closed with effectiveness evidence;
+any action left open requires an explicit governed, evidence-backed
+determination that it is non-blocking.
 
 ## Required decision evidence
 
 The governed decision must identify the exact evidence bundle and versions,
 decision maker and role, decision time, conflicts, unresolved limitations,
 conditions, and next review date. An affirmative decision must be converted to
-the closed structured outcome contract and approved in the controlled manifest.
+the closed structured outcome contract, record zero open blocking actions, and
+be approved in the controlled manifest.

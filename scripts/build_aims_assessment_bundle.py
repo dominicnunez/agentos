@@ -630,10 +630,22 @@ def readiness_report(
             blockers.append("INTERNAL_AUDIT_OUTCOME_BLOCKS_READINESS")
         if outcomes["management_review"]["disposition"] != "PROCEED":
             blockers.append("MANAGEMENT_REVIEW_BLOCKS_READINESS")
-        if outcomes["statement_of_applicability"]["result"] != "COMPLETE":
+        applicability = outcomes["statement_of_applicability"]
+        if applicability["result"] != "COMPLETE":
             blockers.append("CONTROL_APPLICABILITY_REVIEW_INCOMPLETE")
-        if outcomes["readiness_decision"]["disposition"] != "READY":
+        elif (
+            applicability["reviewed_control_count"] == 0
+            or applicability["included_control_count"]
+            + applicability["excluded_control_count"]
+            != applicability["reviewed_control_count"]
+            or applicability["controls_without_rationale"] != 0
+        ):
+            blockers.append("CONTROL_APPLICABILITY_EVIDENCE_INCOMPLETE")
+        readiness = outcomes["readiness_decision"]
+        if readiness["disposition"] != "READY":
             blockers.append("ACCOUNTABLE_DECISION_IS_NOT_READY")
+        if readiness["open_blocking_actions"] != 0:
+            blockers.append("OPEN_BLOCKING_CORRECTIVE_ACTIONS")
     if not source_verified:
         blockers.append("SOURCE_NOT_GIT_VERIFIED")
 

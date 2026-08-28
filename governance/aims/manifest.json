@@ -19,7 +19,7 @@
     {
       "id": "aims.assessment-readiness-decision",
       "path": "governance/aims/records/assessment-readiness-decision.md",
-      "version": "0.1",
+      "version": "0.2",
       "status": "DRAFT",
       "owner": "accountable-executive",
       "classification": "PUBLIC",
@@ -29,7 +29,7 @@
       "review_due": null,
       "supersedes": [],
       "superseded_by": null,
-      "sha256": "5d5d1806a4826644d49f64e06d79180a494e3a6c53a26bd648bc12af41025569"
+      "sha256": "f9c8b5f66eef5d35419a1951f378698dc03656e67e412bb8c5aba2630b762c22"
     },
     {
       "id": "aims.audit-result",
@@ -214,7 +214,7 @@
     {
       "id": "aims.statement-of-applicability",
       "path": "governance/aims/records/statement-of-applicability.md",
-      "version": "0.1",
+      "version": "0.2",
       "status": "DRAFT",
       "owner": "aims-manager",
       "classification": "PUBLIC",
@@ -224,7 +224,7 @@
       "review_due": null,
       "supersedes": [],
       "superseded_by": null,
-      "sha256": "2e96a1951e5631e900e3a97dd7c55481e9ecbc8522852ab4d0bf6a33ca5956e6"
+      "sha256": "dca2b219858b85ff691704be8a651f6e74300bf287bc0787604cb20557ac40cd"
     },
     {
       "id": "aims.supplier-management",

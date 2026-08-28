@@ -32,7 +32,10 @@ The controlled draft outcome records intentionally encode `FAIL`,
 `DO_NOT_PROCEED`, `INCOMPLETE`, and `NOT_READY`. They are fillable record
 shapes, not simulated operating evidence. The verifier accepts an affirmative
 outcome only after the exact structured record and its manifest entry are both
-approved through the governed lifecycle.
+approved through the governed lifecycle. The structured applicability outcome
+binds reviewed, included, excluded, and missing-rationale counts; the readiness
+outcome binds the number of open blocking corrective actions. A complete or
+ready disposition is rejected unless those closure conditions are satisfied.
 
 ## Public and confidential evidence
 
