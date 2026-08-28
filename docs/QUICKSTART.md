@@ -14,13 +14,13 @@ installation, so this walkthrough must not be used to alter or operate an
 existing system deployment.
 
 Agent OS releases are Linux-only. This user-mode walkthrough requires systemd
-256 or newer for encrypted service credentials. Check before setup:
+258 or newer for encrypted service credentials. Check before setup:
 
 ```sh
 systemctl --version
 ```
 
-If the first line reports a version below 256, use the system-mode installation
+If the first line reports a version below 258, use the system-mode installation
 described in the [operator guide](OPERATOR_INTAKE.md) instead of this
 walkthrough. If the
 [release page](https://github.com/dominicnunez/agentos/releases) has no approved

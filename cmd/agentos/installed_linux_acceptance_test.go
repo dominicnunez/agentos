@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -282,7 +281,7 @@ func installedUserRuntime(t *testing.T, username, home, runtimeBase string, path
 			}
 	}
 
-	t.Log("systemd is older than 256; exercising the installed user process offline without claiming user-unit credential validation")
+	t.Log("systemd is older than 258; exercising the installed user process offline without claiming user-unit credential validation")
 	credentialDirectory := filepath.Join(paths.RuntimeDir, "test-credentials")
 	if err := os.MkdirAll(credentialDirectory, 0o700); err != nil {
 		t.Fatal(err)
@@ -334,12 +333,8 @@ func supportsUserScopedCredentials(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	fields := strings.Fields(string(output))
-	if len(fields) < 2 || fields[0] != "systemd" {
-		return false
-	}
-	version, err := strconv.Atoi(fields[1])
-	return err == nil && version >= 256
+	version, err := parseSystemdVersion(output)
+	return err == nil && version >= minimumUserSystemdVersion
 }
 
 func installUserOfflineConfinement(t *testing.T, home string, uid, gid int) {

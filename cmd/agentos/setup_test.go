@@ -105,3 +105,29 @@ func TestLoadOrBeginInitPersistsOneWayVersion1Upgrade(t *testing.T) {
 		t.Fatalf("upgraded checkpoint was not persisted: config=%+v err=%v", reloaded, err)
 	}
 }
+
+func TestParseSystemdVersionRequiresCanonicalPositiveVersion(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		output  string
+		version int
+		valid   bool
+	}{
+		{name: "supported", output: "systemd 258 (258.1)\n+PAM AUDIT\n", version: 258, valid: true},
+		{name: "older", output: "systemd 255 (255.4)\n", version: 255, valid: true},
+		{name: "missing", output: "", valid: false},
+		{name: "wrong program", output: "other 258\n", valid: false},
+		{name: "not numeric", output: "systemd latest\n", valid: false},
+		{name: "zero", output: "systemd 0\n", valid: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			version, err := parseSystemdVersion([]byte(test.output))
+			if test.valid && (err != nil || version != test.version) {
+				t.Fatalf("version=%d err=%v", version, err)
+			}
+			if !test.valid && err == nil {
+				t.Fatalf("invalid output was accepted as version %d", version)
+			}
+		})
+	}
+}
