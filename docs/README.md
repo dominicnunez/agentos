@@ -26,6 +26,8 @@
 
 - [Threat model](THREAT_MODEL.md) - protected assets, attack surfaces, controls, and residual risks.
 - [Execution authority](EXECUTION_AUTHORITY.md) - supply-chain boundaries, consequential tool capabilities, containment prerequisites, and staged promotion.
+- [Event ledger integrity](EVENT_LEDGER_INTEGRITY.md) - stored-byte chaining, verification boundaries, and residual tampering risks.
+- [Incident replay](INCIDENT_REPLAY.md) - bounded, payload-free reconstruction of one durable Work conversation.
 - [Release artifacts](RELEASE.md) - reproducible Linux packages, corresponding source, and publication controls.
 - [Security policy](../SECURITY.md) - private vulnerability reporting.
 
