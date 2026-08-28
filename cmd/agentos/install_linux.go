@@ -292,7 +292,11 @@ func installSystemRuntimeFrom(ctx context.Context, config bootstrap.Config, serv
 	if err := writeRestrictedFile(servicePath, []byte(serviceUnit), 0o644); err != nil {
 		return err
 	}
-	if err := writeRestrictedFile(socketPath, []byte(systemSocketUnit(config)), 0o644); err != nil {
+	socketUnit, err := systemSocketUnit(config)
+	if err != nil {
+		return err
+	}
+	if err := writeRestrictedFile(socketPath, []byte(socketUnit), 0o644); err != nil {
 		return err
 	}
 	if err := runCommand(ctx, "systemctl", "daemon-reload"); err != nil {
@@ -673,21 +677,27 @@ WantedBy=multi-user.target
 `, nil
 }
 
-func systemSocketUnit(config bootstrap.Config) string {
+func systemSocketUnit(config bootstrap.Config) (string, error) {
+	if err := config.ValidateReady(); err != nil {
+		return "", fmt.Errorf("system socket configuration is invalid: %w", err)
+	}
+	if config.Mode != bootstrap.ModeSystem || config.Paths.UserSocket != bootstrap.SystemPaths().UserSocket {
+		return "", fmt.Errorf("system socket identity is invalid")
+	}
 	return `[Unit]
 Description=Agent OS private user gateway
 
 [Socket]
-ListenStream=` + systemdQuote(config.Paths.UserSocket) + `
+ListenStream=` + config.Paths.UserSocket + `
 DirectoryMode=0711
 SocketMode=0600
-SocketUser=` + systemdQuote(config.Owner.Username) + `
+SocketUser=` + config.Owner.Username + `
 RemoveOnStop=yes
 Service=agentos.service
 
 [Install]
 WantedBy=sockets.target
-`
+`, nil
 }
 
 func userServiceUnit(config bootstrap.Config, binary string) (string, error) {
