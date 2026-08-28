@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -120,8 +121,13 @@ func TestInstalledLinuxUserHelper(t *testing.T) {
 		if err := os.MkdirAll(credentialDirectory, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := storeEncryptedCredential(t.Context(), config, config.Providers[0].SecretRef, []byte("installed-user-test-not-a-live-key")); err != nil {
-			t.Fatalf("store user-scoped provider credential: %v", err)
+		credentialPath := filepath.Join(credentialDirectory, "openai-api-key.cred")
+		if supportsUserScopedCredentials(t.Context()) {
+			if err := storeEncryptedCredential(t.Context(), config, config.Providers[0].SecretRef, []byte("installed-user-test-not-a-live-key")); err != nil {
+				t.Fatalf("store user-scoped provider credential: %v", err)
+			}
+		} else if err := os.WriteFile(credentialPath, []byte("systemd-before-256-cannot-create-user-scoped-credentials"), 0o600); err != nil {
+			t.Fatal(err)
 		}
 		if output, err := runPackagedSetupResume(t.Context(), requirePackagedExecutable(t, installedTestBinary)); err != nil {
 			t.Fatalf("resume packaged user setup: %v\n%s", err, output)
@@ -235,13 +241,9 @@ func exerciseInstalledUserLifecycle(t *testing.T, binary, recoveryBinary string)
 	if err != nil {
 		t.Fatal(err)
 	}
-	installUserOfflineConfinement(t, home, uid, gid)
-	runUserSystemctl(t, username, home, runtimeBase, "daemon-reload")
-	runUserSystemctl(t, username, home, runtimeBase, "start", "agentos.service")
-	t.Cleanup(func() {
-		_ = runUserCommand(context.Background(), username, home, runtimeBase, "/usr/bin/systemctl", "--user", "stop", "agentos.service")
-	})
-	waitForUserUnit(t, username, home, runtimeBase, paths.UserSocket)
+	start, stop := installedUserRuntime(t, username, home, runtimeBase, paths, uid, gid)
+	start()
+	t.Cleanup(func() { stop(false) })
 	runUserHelper(t, username, home, runtimeBase, packagedSource, testSource, "bootstrap")
 	config, err := bootstrap.LoadConfig(bootstrap.ConfigPath(paths))
 	if err != nil {
@@ -252,15 +254,92 @@ func exerciseInstalledUserLifecycle(t *testing.T, binary, recoveryBinary string)
 	if response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("root peer crossed user gateway boundary: status=%d", response.StatusCode)
 	}
-	runUserSystemctl(t, username, home, runtimeBase, "restart", "agentos.service")
-	waitForUserUnit(t, username, home, runtimeBase, paths.UserSocket)
+	stop(true)
+	start()
 	runUserHelper(t, username, home, runtimeBase, packagedSource, testSource, "verify")
 	userBackup := filepath.Join(paths.DataDir, "installed-user-backup.db")
 	userRestore := filepath.Join(paths.DataDir, "installed-user-restored.db")
 	runAsUser(t, username, home, runtimeBase, recoverySource, "backup", "--database", paths.Database, "--output", userBackup)
 	runAsUser(t, username, home, runtimeBase, recoverySource, "restore", "--backup", userBackup, "--output", userRestore)
-	runUserSystemctl(t, username, home, runtimeBase, "stop", "agentos.service")
+	stop(true)
 	assertRestoredOrganizationID(t, userRestore, "default", "goal-installed-user")
+}
+
+func installedUserRuntime(t *testing.T, username, home, runtimeBase string, paths bootstrap.Paths, uid, gid int) (func(), func(bool)) {
+	t.Helper()
+	if supportsUserScopedCredentials(t.Context()) {
+		installUserOfflineConfinement(t, home, uid, gid)
+		runUserSystemctl(t, username, home, runtimeBase, "daemon-reload")
+		return func() {
+				runUserSystemctl(t, username, home, runtimeBase, "start", "agentos.service")
+				waitForUserUnit(t, username, home, runtimeBase, paths.UserSocket)
+			}, func(required bool) {
+				if required {
+					runUserSystemctl(t, username, home, runtimeBase, "stop", "agentos.service")
+					return
+				}
+				_ = runUserCommand(context.Background(), username, home, runtimeBase, "/usr/bin/systemctl", "--user", "stop", "agentos.service")
+			}
+	}
+
+	t.Log("systemd is older than 256; exercising the installed user process offline without claiming user-unit credential validation")
+	credentialDirectory := filepath.Join(paths.RuntimeDir, "test-credentials")
+	if err := os.MkdirAll(credentialDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(credentialDirectory, uid, gid); err != nil {
+		t.Fatal(err)
+	}
+	credentialPath := filepath.Join(credentialDirectory, "openai-api-key")
+	if err := os.WriteFile(credentialPath, []byte("installed-user-test-not-a-live-key"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(credentialPath, uid, gid); err != nil {
+		t.Fatal(err)
+	}
+	var command *exec.Cmd
+	var diagnostics bytes.Buffer
+	return func() {
+			diagnostics.Reset()
+			command = exec.CommandContext(t.Context(),
+				"/usr/bin/unshare", "--net", "/usr/bin/setpriv",
+				fmt.Sprintf("--reuid=%d", uid), fmt.Sprintf("--regid=%d", gid), "--clear-groups",
+				filepath.Join(home, ".local", "bin", "agentos"), "serve", "--config", bootstrap.ConfigPath(paths),
+			)
+			command.Env = append(os.Environ(), "HOME="+home, "XDG_RUNTIME_DIR="+runtimeBase, "CREDENTIALS_DIRECTORY="+credentialDirectory)
+			command.Stdout = &diagnostics
+			command.Stderr = &diagnostics
+			if err := command.Start(); err != nil {
+				t.Fatalf("start offline user runtime: %v", err)
+			}
+			waitForSocket(t, paths.UserSocket, command, &diagnostics)
+		}, func(required bool) {
+			if command == nil || command.ProcessState != nil {
+				return
+			}
+			if err := command.Process.Signal(os.Interrupt); err != nil {
+				if required {
+					t.Fatalf("signal user runtime: %v", err)
+				}
+				return
+			}
+			if err := command.Wait(); err != nil && required {
+				t.Fatalf("stop user runtime: %v\n%s", err, diagnostics.String())
+			}
+		}
+}
+
+func supportsUserScopedCredentials(ctx context.Context) bool {
+	output, err := exec.CommandContext(ctx, "/usr/bin/systemd", "--version").Output()
+	if err != nil {
+		return false
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) < 2 || fields[0] != "systemd" {
+		return false
+	}
+	version, err := strconv.Atoi(fields[1])
+	return err == nil && version >= 256
 }
 
 func installUserOfflineConfinement(t *testing.T, home string, uid, gid int) {
@@ -342,6 +421,21 @@ func waitForUserUnit(t *testing.T, username, home, runtimeBase, socket string) {
 	status, _ := runUserCommandOutput(t.Context(), username, home, runtimeBase, "/usr/bin/systemctl", "--user", "status", "--no-pager", "agentos.service")
 	journal, _ := runUserCommandOutput(t.Context(), username, home, runtimeBase, "/usr/bin/journalctl", "--user", "--no-pager", "--unit", "agentos.service", "--lines", "100")
 	t.Fatalf("user service did not become ready with %s\nstatus:\n%s\njournal:\n%s", socket, status, journal)
+}
+
+func waitForSocket(t *testing.T, path string, command *exec.Cmd, diagnostics *bytes.Buffer) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSocket != 0 {
+			return
+		}
+		if err := command.Process.Signal(syscall.Signal(0)); err != nil {
+			t.Fatalf("user runtime exited before creating its socket: %v\n%s", err, diagnostics.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("user runtime did not create %s\n%s", path, diagnostics.String())
 }
 
 func assertInstalledUserLayout(t *testing.T, config bootstrap.Config) {
