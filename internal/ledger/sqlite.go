@@ -3355,6 +3355,9 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, obligation
 	if obligation.OrganizationID == "" || obligation.TaskID == "" || obligation.ActorID == "" || obligation.Action == "" || obligation.Resource == "" || obligation.Scope == "" || len(obligation.AuthorizationRefs) == 0 || obligation.ID == "" || version < 1 {
 		return core.AuthorizationTrace{}, fmt.Errorf("effect authority, record identity, and positive version are required")
 	}
+	if err := core.ValidateExecutionAuthorityEffect(obligation); err != nil {
+		return core.AuthorizationTrace{}, err
+	}
 	requiresApproval, err := approvals.RequiresHumanApproval(obligation.ConsequenceBoundary)
 	if err != nil {
 		return core.AuthorizationTrace{}, err
@@ -3368,6 +3371,12 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, obligation
 	}
 	var trace core.AuthorizationTrace
 	err = l.withTx(ctx, func(tx *sql.Tx) error {
+		if err := validateEffectTrajectory(ctx, tx, obligation); err != nil {
+			return fmt.Errorf("validate protected effect trajectory: %w", err)
+		}
+		if err := validateEffectInfluence(ctx, tx, obligation); err != nil {
+			return fmt.Errorf("validate protected effect influence: %w", err)
+		}
 		var approval core.HumanApproval
 		if obligation.ApprovalRef != "" {
 			approvalBody, found, err := latestRecordBody(ctx, tx, "approval", obligation.ApprovalRef)
@@ -3413,7 +3422,7 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, obligation
 				return err
 			}
 		}
-		trace = authority.Check(authorizedAt, obligation.ActorID, obligation.ActorKind, obligation.TaskID, obligation.Action, obligation.Resource, obligation.Scope, leases, frozen)
+		trace = authority.CheckClosure(authorizedAt, obligation.ActorID, obligation.ActorKind, obligation.TaskID, obligation.Action, obligation.Resource, obligation.Scope, obligation.RequiredCapabilities, leases, frozen)
 		traceBody, err := json.Marshal(trace)
 		if err != nil {
 			return err
@@ -3446,6 +3455,117 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, obligation
 		return appendRecord(ctx, tx, effectDraft, "effect", string(obligation.ID), version, body)
 	})
 	return trace, err
+}
+
+func validateEffectTrajectory(ctx context.Context, tx *sql.Tx, obligation core.EffectObligation) error {
+	if obligation.Trajectory == nil {
+		return nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT r.body FROM records r JOIN events e ON e.event_id=r.admission_event_id
+WHERE r.kind='effect' AND e.organization_id=? AND e.task_id=? AND r.version=(SELECT MAX(r2.version) FROM records r2 WHERE r2.kind=r.kind AND r2.record_id=r.record_id)
+ORDER BY r.record_id LIMIT 1025`, string(obligation.OrganizationID), string(obligation.TaskID))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	effects := make(map[core.ID]core.EffectObligation)
+	for rows.Next() {
+		var body []byte
+		var effect core.EffectObligation
+		if err := rows.Scan(&body); err != nil || decodeExactJSONBytes(body, &effect) != nil || effect.ID == "" || effect.OrganizationID != obligation.OrganizationID || effect.TaskID != obligation.TaskID {
+			return fmt.Errorf("effect trajectory contains an invalid durable obligation")
+		}
+		effects[effect.ID] = effect
+		if len(effects) > 1024 {
+			return fmt.Errorf("effect trajectory exceeds its bounded history")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	effects[obligation.ID] = obligation
+	refs := make([]string, 0, len(effects)-1)
+	boundaries := make([]string, 0)
+	destinations := make([]string, 0)
+	protectedCount := 0
+	approvalCount := 0
+	for id, effect := range effects {
+		if effect.ConsequenceBoundary == "" {
+			continue
+		}
+		protectedCount++
+		if effect.ApprovalRef != "" {
+			approvalCount++
+		}
+		if id != obligation.ID {
+			refs = append(refs, string(id))
+		}
+		if !slices.Contains(boundaries, effect.ConsequenceBoundary) {
+			boundaries = append(boundaries, effect.ConsequenceBoundary)
+		}
+		if !slices.Contains(destinations, effect.Resource) {
+			destinations = append(destinations, effect.Resource)
+		}
+	}
+	slices.Sort(refs)
+	slices.Sort(boundaries)
+	slices.Sort(destinations)
+	if obligation.Trajectory.ProtectedEffectCount != protectedCount || obligation.Trajectory.ApprovalRequestCount != approvalCount ||
+		!slices.Equal(obligation.Trajectory.RelatedEffectRefs, refs) || !slices.Equal(obligation.Trajectory.ConsequenceBoundaries, boundaries) ||
+		!slices.Equal(obligation.Trajectory.Destinations, destinations) {
+		return fmt.Errorf("effect trajectory does not match current durable Task history")
+	}
+	return nil
+}
+
+func validateEffectInfluence(ctx context.Context, tx *sql.Tx, obligation core.EffectObligation) error {
+	if obligation.Influence == nil {
+		return nil
+	}
+	for _, ref := range obligation.Influence.SourceEventRefs {
+		event, err := scanEvent(tx.QueryRowContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_id=?`, ref))
+		if err != nil {
+			return fmt.Errorf("resolve influence event %s: %w", ref, err)
+		}
+		if event.OrganizationID != string(obligation.OrganizationID) || event.SchemaVersion != events.SchemaVersion || event.TaskID != "" && event.TaskID != string(obligation.TaskID) {
+			return fmt.Errorf("influence event %s crosses its tenant or Task boundary", ref)
+		}
+	}
+	if obligation.Influence.ExecutionID == "" {
+		return nil
+	}
+	manifestEvent, err := scanEvent(tx.QueryRowContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_id=?`, obligation.Influence.ManifestEventRef))
+	if err != nil {
+		return fmt.Errorf("resolve execution context manifest: %w", err)
+	}
+	var manifest core.ExecutionContextManifest
+	if manifestEvent.EventType != "EXECUTION_CONTEXT_MANIFESTED" || manifestEvent.OrganizationID != string(obligation.OrganizationID) ||
+		manifestEvent.SourceActorID != "runtime" || manifestEvent.SourceExecutionID != string(obligation.Influence.ExecutionID) ||
+		manifestEvent.TaskID != string(obligation.TaskID) || len(manifestEvent.AuthorizationRefs) != 0 ||
+		manifestEvent.SchemaVersion != events.SchemaVersion || decodeExactJSONBytes(manifestEvent.Payload, &manifest) != nil ||
+		manifest.ExecutionID != obligation.Influence.ExecutionID || manifest.TaskID != obligation.TaskID ||
+		manifest.ExecutionInputSHA256 != obligation.Influence.ExecutionInputSHA256 ||
+		(obligation.ActorKind == core.PrincipalAgent || obligation.ActorKind == core.PrincipalExternalAgent) && manifest.AgentID != obligation.ActorID {
+		return fmt.Errorf("execution influence does not match its runtime-owned manifest")
+	}
+	for _, ref := range manifest.KnowledgeRefs {
+		version, err := strconv.Atoi(ref.Version)
+		if err != nil || version < 1 || strconv.Itoa(version) != ref.Version {
+			return fmt.Errorf("protected consequence references an invalid knowledge revision")
+		}
+		var body []byte
+		var admissionOrganization string
+		err = tx.QueryRowContext(ctx, `SELECT r.body,e.organization_id FROM records r JOIN events e ON e.event_id=r.admission_event_id WHERE r.kind='knowledge' AND r.record_id=? AND r.version=?`, ref.ID, version).Scan(&body, &admissionOrganization)
+		var projection events.ProjectionRecord
+		var knowledge core.KnowledgeRecord
+		if err != nil || admissionOrganization != string(obligation.OrganizationID) || decodeExactJSONBytes(body, &projection) != nil ||
+			projection.ProjectionKind != "knowledge" || projection.RecordID != ref.ID || projection.Version != version ||
+			decodeExactJSONBytes(projection.Value, &knowledge) != nil || knowledge.KnowledgeID != core.ID(ref.ID) ||
+			knowledge.OrganizationID != obligation.OrganizationID || core.ValidateKnowledgeForProtectedConsequence(knowledge) != nil {
+			return fmt.Errorf("protected consequence knowledge lacks independent authoritative validation")
+		}
+	}
+	return nil
 }
 
 func currentAuthorizationTrace(ctx context.Context, tx *sql.Tx, organizationID, actorID core.ID, actorKind core.PrincipalKind, taskID core.ID, action, resource, scope string, authorizationRefs []string, now time.Time) (core.AuthorizationTrace, error) {

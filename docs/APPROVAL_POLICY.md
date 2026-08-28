@@ -10,11 +10,18 @@ The runtime requires appropriately scoped user approval for:
 - privilege, capability, or trust expansion;
 - legal or binding commitments;
 - ordinary Agent OS deployment;
-- trusted-core or security changes.
+- trusted-core or security changes;
+- introducing third-party executable or potentially executable code;
+- mutating protected manifests, workflows, hooks, or other execution surfaces.
 
 Unanswered decisions fail closed. Approval binds the exact effect fingerprint,
 arguments, task, expiry, and single-use status where applicable. Approval of
 one effect never grants broader authority.
+
+Code introduction and execution-surface mutation are separate approval
+boundaries. Approval for one cannot satisfy the other, and neither approval
+makes hostile-code execution available while effective isolation is absent.
+See [Execution authority](EXECUTION_AUTHORITY.md).
 
 Before requesting attention, the runtime persists a replay-complete
 EffectObligation in `PENDING`. Single-use approval consumption and transition

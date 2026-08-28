@@ -164,6 +164,36 @@ func TestPrepareRejectsFingerprintThatDoesNotBindReplayContext(t *testing.T) {
 	}
 }
 
+func TestCodeIntroductionRemainsBlockedWithoutHostileCodeIsolation(t *testing.T) {
+	l, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	apply := &adapter{}
+	digest := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	obligation := core.EffectObligation{
+		ID: "effect-code", OrganizationID: "org", TaskID: "task", ActorID: "agent", ActorKind: core.PrincipalAgent,
+		Action: core.ActionCodeIntroduce, Resource: "npm/example", Scope: "org", ConsequenceBoundary: core.BoundaryCodeIntroduction,
+		Descriptor: "introduce exact npm package", AuthorizationRefs: []string{"lease-code"}, ApprovalRef: "approval-code", IdempotencyKey: "key-code", ReplayContext: map[string]string{"version": "1.0.0"},
+		RequiredCapabilities: []core.CapabilityRequirement{{Action: core.ActionCodeIntroduce, Resource: "npm/example", Scope: "org"}},
+		Influence:            &core.ActionInfluenceBinding{ExecutionID: "execution-1", ManifestEventRef: "manifest-1", ExecutionInputSHA256: digest, SourceEventRefs: []string{"manifest-1"}},
+		Trajectory:           &core.EffectTrajectory{ProtectedEffectCount: 1, ApprovalRequestCount: 1, ConsequenceBoundaries: []string{core.BoundaryCodeIntroduction}},
+		CodeIntroduction:     &core.CodeIntroductionBinding{SourceType: "npm", ArtifactName: "example", ExactVersion: "1.0.0", Source: "https://registry.npmjs.org", ArtifactSHA256: digest, SandboxProfile: "hostile-code-v1", NetworkProfile: "deny-egress", EnvironmentManifestRef: "environment-1", EnvironmentSHA256: digest, Workspace: core.WorkspaceBinding{WorkspaceID: "workspace-1", Trust: core.WorkspaceUntrusted, Namespace: core.NamespaceExecutionPrivate, OwnerExecutionID: "execution-1", Writable: true}},
+	}
+	setEffectFingerprint(t, &obligation)
+	coordinator := New(l, apply, &approvalReader{})
+	if _, err := coordinator.Prepare(context.Background(), obligation); err != nil {
+		t.Fatalf("exact blocked obligation could not be persisted for audit: %v", err)
+	}
+	if _, err := coordinator.Execute(context.Background(), obligation); !errors.Is(err, ErrHostileCodeIsolationUnavailable) {
+		t.Fatalf("code introduction did not fail at the isolation prerequisite: %v", err)
+	}
+	if apply.called {
+		t.Fatal("hostile code reached an effect adapter")
+	}
+}
+
 func TestUnprotectedEffectsReloadDurableState(t *testing.T) {
 	l, err := ledger.Open(":memory:")
 	if err != nil {

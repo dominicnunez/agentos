@@ -129,6 +129,38 @@ func TestKnowledgeActivationRejectsAgentSelfValidation(t *testing.T) {
 	}
 }
 
+func TestProtectedConsequenceKnowledgeFailsClosedWithoutProvenanceIndependence(t *testing.T) {
+	now := time.Now().UTC()
+	verified := now.Add(time.Minute)
+	supersedes := 1
+	record := KnowledgeRecord{
+		KnowledgeID: "knowledge-security", OrganizationID: "org-1", Version: 2,
+		Type: KnowledgeClaim, Scope: KnowledgeScopeOrganization, ScopeID: "org-1", Status: KnowledgeActive,
+		Title: "Package is safe", Content: "A third-party package is safe to execute.", Basis: KnowledgeBasisExternalEvidence,
+		ProvenanceEventRefs: []string{"source-x"}, CreatedBy: "agent-1", CreatedByKind: PrincipalAgent, CreatedAt: now,
+		ValidationMethod: KnowledgeValidationIndependentAgent, ValidationRefs: []string{"source-x-validation"},
+		ValidatedBy: "agent-2", ValidatedByKind: PrincipalAgent, LastVerifiedAt: &verified, SupersedesVersion: &supersedes,
+	}
+	if !ValidKnowledgeRecord(record) {
+		t.Fatal("test knowledge is structurally invalid")
+	}
+	if err := ValidateKnowledgeForProtectedConsequence(record); err == nil {
+		t.Fatal("different Agent identity was mistaken for independent root provenance")
+	}
+	record.ValidationMethod = KnowledgeValidationHuman
+	record.ValidatedBy = "user-1"
+	record.ValidatedByKind = PrincipalHuman
+	if err := ValidateKnowledgeForProtectedConsequence(record); err != nil {
+		t.Fatalf("explicit user judgment was rejected: %v", err)
+	}
+	record.ValidationMethod = KnowledgeValidationDeterministic
+	record.ValidatedBy = "runtime"
+	record.ValidatedByKind = PrincipalRuntime
+	if err := ValidateKnowledgeForProtectedConsequence(record); err != nil {
+		t.Fatalf("deterministic validation was rejected: %v", err)
+	}
+}
+
 func TestDerivedKnowledgeCannotWidenSourceScope(t *testing.T) {
 	tests := []struct {
 		name    string

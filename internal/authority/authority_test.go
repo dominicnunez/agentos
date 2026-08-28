@@ -50,3 +50,22 @@ func TestCheckSeparatesPrincipalKindsSharingOneID(t *testing.T) {
 		t.Fatalf("exact external Agent authority was rejected: %+v", trace)
 	}
 }
+
+func TestCheckClosureRejectsConfusedDeputyCapabilities(t *testing.T) {
+	now := time.Now().UTC()
+	operation := core.CapabilityLease{ID: "lease-tool", ActorID: "agent-1", ActorKind: core.PrincipalAgent, OriginTaskID: "task-1", Action: "artifact.fetch", Resource: "artifact-service", Scope: "org-1"}
+	requirements := []core.CapabilityRequirement{
+		{Action: operation.Action, Resource: operation.Resource, Scope: operation.Scope},
+		{Action: "network.fetch", Resource: "arbitrary-url", Scope: "org-1"},
+	}
+	trace := CheckClosure(now, operation.ActorID, operation.ActorKind, operation.OriginTaskID, operation.Action, operation.Resource, operation.Scope, requirements, []core.CapabilityLease{operation}, false)
+	if trace.Allowed || len(trace.Consequential) != 1 || trace.Consequential[0].Action != "network.fetch" || trace.Consequential[0].Allowed {
+		t.Fatalf("allowed broker laundered denied network authority: %+v", trace)
+	}
+
+	network := core.CapabilityLease{ID: "lease-network", ActorID: operation.ActorID, ActorKind: operation.ActorKind, OriginTaskID: operation.OriginTaskID, Action: "network.fetch", Resource: "arbitrary-url", Scope: "org-1"}
+	trace = CheckClosure(now, operation.ActorID, operation.ActorKind, operation.OriginTaskID, operation.Action, operation.Resource, operation.Scope, requirements, []core.CapabilityLease{operation, network}, false)
+	if !trace.Allowed || len(trace.Consequential) != 1 || trace.Consequential[0].LeaseID != network.ID {
+		t.Fatalf("exact consequential capability closure was rejected: %+v", trace)
+	}
+}

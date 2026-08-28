@@ -3,7 +3,6 @@ package effects
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -36,9 +35,10 @@ func New(r Records, a Adapter, approvalReader ApprovalReader) *Coordinator {
 }
 
 var (
-	ErrEffectNotPrepared  = errors.New("effect obligation is not persisted")
-	ErrEffectUncertain    = errors.New("effect attempt has uncertain outcome")
-	ErrEffectUnauthorized = errors.New("effect is not authorized at time of use")
+	ErrEffectNotPrepared               = errors.New("effect obligation is not persisted")
+	ErrEffectUncertain                 = errors.New("effect attempt has uncertain outcome")
+	ErrEffectUnauthorized              = errors.New("effect is not authorized at time of use")
+	ErrHostileCodeIsolationUnavailable = errors.New("hostile-code isolation is unavailable")
 )
 
 func Fingerprint(obligation core.EffectObligation) (string, error) {
@@ -86,6 +86,9 @@ func (c *Coordinator) Execute(ctx context.Context, o core.EffectObligation) (cor
 	requiresApproval, err := c.validateAndClassify(o)
 	if err != nil {
 		return o, err
+	}
+	if o.CodeIntroduction != nil {
+		return o, ErrHostileCodeIsolationUnavailable
 	}
 	version := 0
 	stored, storedVersion, loadErr := c.load(ctx, o.ID)
@@ -193,8 +196,8 @@ func loadEffect(ctx context.Context, records recordReader, effectID core.ID) (co
 	if len(rows) == 0 {
 		return core.EffectObligation{}, 0, ErrEffectNotPrepared
 	}
-	var obligation core.EffectObligation
-	if err := json.Unmarshal(rows[len(rows)-1], &obligation); err != nil {
+	obligation, err := core.DecodeEffectObligation(rows[len(rows)-1])
+	if err != nil {
 		return core.EffectObligation{}, 0, fmt.Errorf("decode effect obligation %s: %w", effectID, err)
 	}
 	return obligation, len(rows), nil
@@ -214,6 +217,15 @@ func validateObligationIdentity(obligation core.EffectObligation, requirePrincip
 		!requirePrincipalKind && obligation.ActorKind != "" && !core.ValidPrincipalKind(obligation.ActorKind) ||
 		obligation.Action == "" || obligation.Resource == "" || obligation.Scope == "" || obligation.EffectFingerprint == "" || obligation.IdempotencyKey == "" || len(obligation.AuthorizationRefs) == 0 || len(obligation.AuthorizationRefs) > core.MaximumEffectAuthorizationRefs {
 		return fmt.Errorf("effect identity, organization, task, actor, action, resource, scope, authorization, fingerprint, and idempotency key are required")
+	}
+	if err := core.ValidateExecutionAuthorityEffect(obligation); err != nil {
+		return err
+	}
+	if obligation.ActorKind != "" {
+		expected, err := core.FingerprintEffect(obligation)
+		if err != nil || expected != obligation.EffectFingerprint {
+			return fmt.Errorf("effect fingerprint does not match durable intent")
+		}
 	}
 	seen := make(map[string]struct{}, len(obligation.AuthorizationRefs))
 	for _, ref := range obligation.AuthorizationRefs {
@@ -260,7 +272,13 @@ func sameEffectIntent(stored, requested core.EffectObligation) bool {
 		stored.ApprovalRef == requested.ApprovalRef &&
 		stored.IdempotencyKey == requested.IdempotencyKey &&
 		slices.Equal(stored.AuthorizationRefs, requested.AuthorizationRefs) &&
-		reflect.DeepEqual(stored.ReplayContext, requested.ReplayContext)
+		reflect.DeepEqual(stored.ReplayContext, requested.ReplayContext) &&
+		reflect.DeepEqual(stored.RequiredCapabilities, requested.RequiredCapabilities) &&
+		reflect.DeepEqual(stored.ToolDefinition, requested.ToolDefinition) &&
+		reflect.DeepEqual(stored.Influence, requested.Influence) &&
+		reflect.DeepEqual(stored.Trajectory, requested.Trajectory) &&
+		reflect.DeepEqual(stored.CodeIntroduction, requested.CodeIntroduction) &&
+		reflect.DeepEqual(stored.ExecutionSurfaceMutation, requested.ExecutionSurfaceMutation)
 }
 
 func (c *Coordinator) record(ctx context.Context, o core.EffectObligation, version int) error {
