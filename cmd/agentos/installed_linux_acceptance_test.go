@@ -585,7 +585,7 @@ func assertProductionRejectsUnsupportedProvider(t *testing.T, binary string, rea
 		t.Fatal(err)
 	}
 	output, err := exec.CommandContext(t.Context(), binary, "serve", "--config", path).CombinedOutput()
-	if err == nil || !strings.Contains(string(output), "provider kind is invalid") {
+	if err == nil || !strings.Contains(string(output), "provider must be codex-subscription or openai-api") {
 		t.Fatalf("production binary accepted unsupported provider: err=%v output=%s", err, output)
 	}
 	if _, statErr := os.Lstat(invalid.Paths.Database); !os.IsNotExist(statErr) {
