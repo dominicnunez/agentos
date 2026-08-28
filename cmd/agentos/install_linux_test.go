@@ -187,3 +187,35 @@ func TestServiceCredentialsRejectMissingProvider(t *testing.T) {
 		t.Fatal("service credential generation accepted a missing provider")
 	}
 }
+
+func TestInstallExecutableCopiesOnlyAnExplicitRegularSource(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "package", "agentos")
+	if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("packaged-agentos"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(root, "install", "agentos")
+	if err := installExecutable(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(destination)
+	if err != nil || string(body) != "packaged-agentos" {
+		t.Fatalf("installed body=%q err=%v", body, err)
+	}
+	info, err := os.Lstat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("installed mode=%v", info.Mode())
+	}
+	for _, invalid := range []string{"relative-agentos", filepath.Dir(source)} {
+		if err := installExecutable(invalid, filepath.Join(root, "invalid")); err == nil {
+			t.Fatalf("invalid source %q was accepted", invalid)
+		}
+	}
+}
+
