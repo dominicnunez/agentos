@@ -36,6 +36,78 @@ func recoveryTestManifest(task core.Task, selection events.ExecutionStartSelecti
 	}
 }
 
+func TestAgentEvidenceRecoveryUsesBoundedIndexedDispatchHistory(t *testing.T) {
+	const evidenceCount = 2048
+	now := time.Now().UTC()
+	organizationID := core.ID("org-1")
+	blueprint := core.AgentBlueprint{ID: "blueprint-1", OrganizationID: organizationID, Version: "v1", Role: "worker", OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE", CreatedAt: now}
+	profile := core.ExecutionProfile{ID: "profile-1", OrganizationID: organizationID, Version: "v1", ModelProvider: "provider", Model: "model", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE", CreatedAt: now}
+	agent := core.Agent{ID: "agent-1", OrganizationID: organizationID, BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ExecutionProfileID: profile.ID, ExecutionProfileVersion: profile.Version, RuntimeAdapter: "local", Status: "ACTIVE"}
+	config := core.AgentConfig{BlueprintID: blueprint.ID, BlueprintVersion: blueprint.Version, ProfileID: profile.ID, ProfileVersion: profile.Version, RuntimeAdapter: agent.RuntimeAdapter}
+	task := core.Task{ID: "task-1", WorkID: "work-1", Description: "publish evidence", ExecutionKind: core.ExecutionAgent, ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: &config, TaskContractVersion: "1", Status: core.TaskRunning}
+
+	blueprintEvent := sealedRecoveryProjection(t, "blueprint-event", 1, "AGENT_BLUEPRINT_CREATED", "agent_blueprint", string(blueprint.ID), 1, "roster", "", blueprint, nil, now)
+	profileEvent := sealedRecoveryProjection(t, "profile-event", 2, "EXECUTION_PROFILE_CREATED", "execution_profile", string(profile.ID), 1, "roster", "", profile, nil, now)
+	agentEvent := sealedRecoveryProjection(t, "agent-event", 3, "AGENT_CREATED", "agent", string(agent.ID), 1, "roster", "", agent, nil, now)
+	detail := events.ExecutionStartDetail{InboxCutoffSequence: 3, DispatchBinding: &events.AgentDispatchBinding{
+		DispatchID: "execution-task-1-v2", OrganizationID: organizationID, TaskID: task.ID, TaskVersion: 2,
+		AgentID: agent.ID, AgentRecordVersion: 1, AgentEventRef: agentEvent.EventID,
+		BlueprintID: blueprint.ID, BlueprintRecordVersion: 1, BlueprintVersion: blueprint.Version, BlueprintEventRef: blueprintEvent.EventID,
+		ExecutionProfileID: profile.ID, ExecutionProfileRecordVersion: 1, ExecutionProfileVersion: profile.Version, ExecutionProfileEventRef: profileEvent.EventID,
+		RuntimeAdapter: agent.RuntimeAdapter,
+	}}
+	start := sealedRecoveryProjection(t, "start-event", 4, "EXECUTION_STARTED", "task", string(task.ID), 2, "work-1", string(task.ID), task, detail, now)
+	stream := []events.Event{blueprintEvent, profileEvent, agentEvent, start}
+	for index := 0; index < evidenceCount; index++ {
+		artifact := fmt.Sprintf("artifact-%d", index)
+		payload, err := json.Marshal(events.EvidencePublishedPayload{Summary: "bounded evidence", ArtifactRefs: []string{artifact}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream = append(stream, events.Event{
+			EventID: fmt.Sprintf("evidence-%d", index), Sequence: int64(index + 5), OrganizationID: string(organizationID), EventType: "EVIDENCE_PUBLISHED",
+			SourceActorID: string(agent.ID), SourceExecutionID: "execution-task-1-v2", TaskID: string(task.ID), ArtifactRefs: []string{artifact},
+			Payload: payload, CorrelationID: "work-1", CreatedAt: now, SchemaVersion: events.SchemaVersion,
+		})
+	}
+	index, err := newRecoveryDispatchIndex(stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bounded, err := index.boundedStreamForStart(start)
+	if err != nil || len(bounded) != 3 {
+		t.Fatalf("dispatch history was not bounded to exact roster evidence: events=%d err=%v", len(bounded), err)
+	}
+	if err := validateRecoveryAgentEvidence(stream, index); err != nil {
+		t.Fatalf("large valid Agent evidence history failed indexed recovery: %v", err)
+	}
+}
+
+func sealedRecoveryProjection(t *testing.T, eventID string, sequence int64, eventType, kind, recordID string, version int, correlationID, taskID string, value any, detail any, createdAt time.Time) events.Event {
+	t.Helper()
+	valueBody, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detailBody, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail == nil {
+		detailBody = nil
+	}
+	event := events.Event{EventID: eventID, Sequence: sequence, OrganizationID: "org-1", EventType: eventType, SourceActorID: "runtime", TaskID: taskID, CorrelationID: correlationID, CreatedAt: createdAt, SchemaVersion: events.SchemaVersion}
+	sealed, err := events.SealProjectionEvent(event, events.ProjectionRecord{ProjectionKind: kind, RecordID: recordID, Version: version, Value: valueBody, CorrelationID: correlationID}, detailBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.Payload, err = json.Marshal(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return event
+}
+
 func TestVerifyRejectsAgentEvidenceDetachedFromItsExecution(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "agent-evidence.db")
