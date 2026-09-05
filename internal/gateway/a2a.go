@@ -16,6 +16,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/dominicnunez/agentos-a2a-go/executionkind"
+	"github.com/dominicnunez/agentos/internal/boundaryjson"
 	"github.com/dominicnunez/agentos/internal/intake"
 )
 
@@ -61,13 +62,8 @@ func readA2AContent(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 		return nil, err
 	}
 	var content any
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-	if err := decoder.Decode(&content); err != nil {
+	if err := boundaryjson.UnmarshalNumbers(body, &content); err != nil {
 		return nil, err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return nil, errors.New("A2A request must contain one JSON object")
 	}
 	if err := rejectAuthorityContent(content); err != nil {
 		return nil, err

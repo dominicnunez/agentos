@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"iter"
 	"strings"
 
@@ -16,6 +15,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/dominicnunez/agentos-a2a-go/executionkind"
 	"github.com/dominicnunez/agentos-a2a-go/intentconfirmation"
+	"github.com/dominicnunez/agentos/internal/boundaryjson"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/intake"
 )
@@ -139,16 +139,7 @@ func validateGetTaskParams(raw json.RawMessage) error {
 }
 
 func decodeStrictJSON(raw []byte, target any) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	decoder.UseNumber()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return errors.New("content must contain one JSON object")
-	}
-	return nil
+	return boundaryjson.UnmarshalNumbers(raw, target)
 }
 
 func validRPCID(id json.RawMessage) bool {

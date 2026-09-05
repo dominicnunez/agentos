@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/dominicnunez/agentos/internal/boundaryjson"
 	"github.com/dominicnunez/agentos/internal/fileguard"
 	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/modelid"
@@ -458,14 +459,17 @@ func decodeFile(path, label string, target any) error {
 		return fmt.Errorf("open %s: %w", label, err)
 	}
 	defer func() { _ = file.Close() }()
-	decoder := json.NewDecoder(io.LimitReader(file, 1<<20))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
+	body, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
+	if err != nil {
+		return fmt.Errorf("read %s: %w", label, err)
+	}
+	if len(body) > 1<<20 {
+		return fmt.Errorf("decode %s: file exceeds limit", label)
+	}
+	if err := boundaryjson.Unmarshal(body, target); err != nil {
 		return fmt.Errorf("decode %s: %w", label, err)
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return fmt.Errorf("decode %s: trailing content", label)
-	}
+
 	return nil
 }
 

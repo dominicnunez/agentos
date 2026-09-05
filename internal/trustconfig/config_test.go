@@ -20,6 +20,8 @@ func TestDecodeObjectIsStrict(t *testing.T) {
 	}
 
 	for _, input := range []string{
+		`{"name":"trusted","name":"replacement"}`,
+		`{"NAME":"replacement"}`,
 		`{"name":"trusted","unknown":true}`,
 		`{"name":"trusted"} {}`,
 	} {

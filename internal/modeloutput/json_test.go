@@ -11,9 +11,12 @@ func TestDecodeJSONRequiresOneClosedBoundedValue(t *testing.T) {
 		t.Fatalf("value=%+v err=%v", valid, err)
 	}
 	for name, text := range map[string]string{
-		"unknown":   `{"value":"ok","authority":"admin"}`,
-		"trailing":  `{"value":"ok"}{}`,
-		"oversized": `{"value":"this response is too large"}`,
+		"duplicate":         `{"value":"first","value":"second"}`,
+		"case alias":        `{"VALUE":"second"}`,
+		"escaped duplicate": `{"value":"first","\u0076alue":"second"}`,
+		"unknown":           `{"value":"ok","authority":"admin"}`,
+		"trailing":          `{"value":"ok"}{}`,
+		"oversized":         `{"value":"this response is too large"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			limit := 64

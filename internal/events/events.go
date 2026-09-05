@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"reflect"
 	"slices"
 	"sort"
@@ -17,6 +16,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/dominicnunez/agentos/internal/boundaryjson"
 	"github.com/dominicnunez/agentos/internal/core"
 )
 
@@ -3114,9 +3114,7 @@ func admittedProjectionAtSchema(event Event, expectedSchemaVersion int) (Project
 		return ProjectionEventPayload{}, false, nil
 	}
 	var payload ProjectionEventPayload
-	decoder := json.NewDecoder(bytes.NewReader(event.Payload))
-	decoder.DisallowUnknownFields()
-	if decoder.Decode(&payload) != nil || decoder.Decode(&struct{}{}) != io.EOF || event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() || payload.Projection.ProjectionKind == "" || payload.Projection.RecordID == "" || payload.Projection.Version < 1 || payload.Projection.CorrelationID != event.CorrelationID || len(payload.Projection.Value) == 0 || payload.Admission.Method != ProjectionAdmissionMethod || payload.Admission.EventRef != event.EventID || !validSHA256(payload.Admission.Fingerprint) {
+	if boundaryjson.Unmarshal(event.Payload, &payload) != nil || event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() || payload.Projection.ProjectionKind == "" || payload.Projection.RecordID == "" || payload.Projection.Version < 1 || payload.Projection.CorrelationID != event.CorrelationID || len(payload.Projection.Value) == 0 || payload.Admission.Method != ProjectionAdmissionMethod || payload.Admission.EventRef != event.EventID || !validSHA256(payload.Admission.Fingerprint) {
 		return ProjectionEventPayload{}, true, fmt.Errorf("projection event admission is malformed")
 	}
 	want, fingerprintErr := projectionAdmissionFingerprint(payload.Admission, event, payload.Projection, payload.Detail)
@@ -3127,64 +3125,7 @@ func admittedProjectionAtSchema(event Event, expectedSchemaVersion int) (Project
 }
 
 func rejectDuplicateJSONKeys(body []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-	if err := validateUniqueJSONValue(decoder); err != nil {
-		return err
-	}
-	if _, err := decoder.Token(); err != io.EOF {
-		return fmt.Errorf("unexpected trailing JSON")
-	}
-	return nil
-}
-
-func validateUniqueJSONValue(decoder *json.Decoder) error {
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delimiter, compound := token.(json.Delim)
-	if !compound {
-		return nil
-	}
-	switch delimiter {
-	case '{':
-		seen := map[string]struct{}{}
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return fmt.Errorf("JSON object key is invalid")
-			}
-			if _, duplicate := seen[key]; duplicate {
-				return fmt.Errorf("JSON object contains duplicate key %q", key)
-			}
-			seen[key] = struct{}{}
-			if err := validateUniqueJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		closing, err := decoder.Token()
-		if err != nil || closing != json.Delim('}') {
-			return fmt.Errorf("JSON object is incomplete")
-		}
-	case '[':
-		for decoder.More() {
-			if err := validateUniqueJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		closing, err := decoder.Token()
-		if err != nil || closing != json.Delim(']') {
-			return fmt.Errorf("JSON array is incomplete")
-		}
-	default:
-		return fmt.Errorf("unsupported JSON delimiter")
-	}
-	return nil
+	return boundaryjson.Validate(body)
 }
 
 type projectionLifecycleContract struct {
@@ -3689,18 +3630,7 @@ func ValidateTaskProjectionTransition(eventType string, version int, previous *c
 }
 
 func decodeExactEventJSON(data []byte, target any) error {
-	if err := rejectDuplicateJSONKeys(data); err != nil {
-		return err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return fmt.Errorf("unexpected trailing JSON")
-	}
-	return nil
+	return boundaryjson.Unmarshal(data, target)
 }
 
 func validProjectionEventType(kind string, version int, eventType string) bool {

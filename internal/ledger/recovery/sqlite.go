@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dominicnunez/agentos/internal/boundaryjson"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	ledgerstore "github.com/dominicnunez/agentos/internal/ledger"
@@ -1080,15 +1081,7 @@ func sqliteBytes(value any) ([]byte, error) {
 }
 
 func decodeExactJSON(body []byte, target any) error {
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return fmt.Errorf("unexpected trailing JSON")
-	}
-	return nil
+	return boundaryjson.Unmarshal(body, target)
 }
 
 func verifyIntegrity(ctx context.Context, db *sql.DB) (finalErr error) {

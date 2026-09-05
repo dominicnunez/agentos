@@ -3,15 +3,14 @@
 package projections
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"reflect"
 	"slices"
 	"sort"
 
+	"github.com/dominicnunez/agentos/internal/boundaryjson"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 )
@@ -186,9 +185,7 @@ func (r *Repository) SaveWork(ctx context.Context, organizationID core.ID, event
 		var evidence events.WorkCompletionTransitionPayload
 		encoded, err := json.Marshal(detail)
 		if err == nil {
-			decoder := json.NewDecoder(bytes.NewReader(encoded))
-			decoder.DisallowUnknownFields()
-			err = decoder.Decode(&evidence)
+			err = boundaryjson.Unmarshal(encoded, &evidence)
 		}
 		if err != nil {
 			return fmt.Errorf("completed work requires exact durable evidence")
@@ -1387,15 +1384,7 @@ func eventByID(stream []events.Event, eventID string) (events.Event, bool) {
 }
 
 func decodeExactProjectionJSON(data []byte, target any) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return fmt.Errorf("unexpected trailing JSON")
-	}
-	return nil
+	return boundaryjson.Unmarshal(data, target)
 }
 
 func validateWorkCompletionAdmissions(snapshot Snapshot, stream []events.Event, teamRecords [][]byte, inboxObservations map[string]events.InboxObservationBinding) error {
@@ -1570,12 +1559,12 @@ func decodeKnowledgeKind(bodies [][]byte, target map[core.ID]Versioned[core.Know
 func decodeKind[T any](bodies [][]byte, target map[core.ID]Versioned[T], correlationStable bool, sameRecordConfiguration func(T, T) bool) error {
 	for _, body := range bodies {
 		var record events.ProjectionRecord
-		if err := json.Unmarshal(body, &record); err != nil {
+		if err := boundaryjson.Unmarshal(body, &record); err != nil {
 			return err
 		}
 		id := core.ID(record.RecordID)
 		var value T
-		if err := json.Unmarshal(record.Value, &value); err != nil {
+		if err := boundaryjson.Unmarshal(record.Value, &value); err != nil {
 			return err
 		}
 		if err := core.AdmitDurableRevision(target, id, record.Version, record.CorrelationID, value, correlationStable, sameRecordConfiguration); err != nil {

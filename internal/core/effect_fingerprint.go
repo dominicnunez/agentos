@@ -1,12 +1,11 @@
 package core
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"io"
+
+	"github.com/dominicnunez/agentos/internal/boundaryjson"
 )
 
 // FingerprintEffect binds every immutable field that identifies, authorizes,
@@ -60,15 +59,7 @@ func FingerprintEffect(obligation EffectObligation) (string, error) {
 // Effect records are authority-bearing contracts, not extensible content.
 func DecodeEffectObligation(body []byte) (EffectObligation, error) {
 	var obligation EffectObligation
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&obligation); err != nil {
-		return EffectObligation{}, err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		if err == nil {
-			return EffectObligation{}, fmt.Errorf("effect obligation contains trailing JSON")
-		}
+	if err := boundaryjson.Unmarshal(body, &obligation); err != nil {
 		return EffectObligation{}, err
 	}
 	return obligation, nil

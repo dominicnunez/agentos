@@ -2,15 +2,13 @@
 package audit
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"slices"
 	"strconv"
 	"time"
 
+	"github.com/dominicnunez/agentos/internal/boundaryjson"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 )
@@ -244,16 +242,5 @@ func newFinding(id, rule, scope string, refs []string, now time.Time) Finding {
 }
 
 func decodeExact(body []byte, target any) error {
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		if err == nil {
-			return fmt.Errorf("multiple JSON values")
-		}
-		return err
-	}
-	return nil
+	return boundaryjson.Unmarshal(body, target)
 }
