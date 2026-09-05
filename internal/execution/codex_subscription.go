@@ -57,7 +57,7 @@ type CodexSubscription struct {
 	closeErr    error
 }
 
-type codexRun func(context.Context, sdk.RunOptions) (*sdk.RunResult, sdk.StreamSummary, error)
+type codexRun func(context.Context, sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error)
 
 type codexProtocolErrors struct {
 	mu  sync.Mutex
@@ -263,40 +263,6 @@ func codexLoginConfig() login.Config {
 	}
 }
 
-func sdkStreamRun(process *sdk.Process, protocolErrors *codexProtocolErrors) codexRun {
-	return func(ctx context.Context, options sdk.RunOptions) (*sdk.RunResult, sdk.StreamSummary, error) {
-		if err := protocolErrors.take(); err != nil {
-			return nil, sdk.StreamSummary{}, fmt.Errorf("codex protocol was already invalid: %w", err)
-		}
-		collector := sdk.NewStreamCollector()
-		streamCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
-		stream := process.RunStreamedWithCollector(streamCtx, options, collector)
-		budget := codexStreamBudget{}
-		var streamErr error
-		for event, err := range stream.Events() {
-			if err != nil {
-				streamErr = errors.Join(streamErr, err)
-				continue
-			}
-			if err = budget.observe(event); err != nil {
-				streamErr = errors.Join(streamErr, err)
-				cancel()
-			}
-		}
-		result := stream.Result()
-		summary := collector.Summary()
-		streamErr = errors.Join(streamErr, protocolErrors.take())
-		if streamErr != nil {
-			return nil, summary, streamErr
-		}
-		if result == nil {
-			return nil, summary, fmt.Errorf("codex stream completed without a result")
-		}
-		return result, summary, nil
-	}
-}
-
 type codexStreamBudget struct {
 	responseBytes int
 	totalBytes    int
@@ -388,7 +354,10 @@ func (a *CodexSubscription) Complete(ctx context.Context, prompt string) (respon
 	return validatedCodexResponse(a.model, result, summary)
 }
 
-func validatedCodexResponse(model string, result *sdk.RunResult, summary sdk.StreamSummary) (ModelResponse, error) {
+func validatedCodexResponse(model string, result *sdk.RunResult, summary codexRunSummary) (ModelResponse, error) {
+	if summary.EffectiveModel == "" || summary.EffectiveModel != model {
+		return ModelResponse{}, fmt.Errorf("codex effective model identity is missing or mismatched")
+	}
 	if result == nil || result.Turn.Status != sdk.TurnStatusCompleted {
 		return ModelResponse{}, fmt.Errorf("codex turn did not complete successfully")
 	}
@@ -427,7 +396,7 @@ func validatedCodexResponse(model string, result *sdk.RunResult, summary sdk.Str
 	usage := events.InferenceUsageRecordedPayload{
 		Source:       "provider_cli",
 		Provider:     codexProviderName,
-		Model:        model,
+		Model:        summary.EffectiveModel,
 		InputTokens:  input,
 		OutputTokens: output,
 		TotalTokens:  total,

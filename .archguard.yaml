@@ -74,6 +74,12 @@ modules:
 policy:
   default: deny
   allow:
+    - name: execution-json-boundary
+      from:
+        module: execution
+      to:
+        module: boundaryjson
+
     - name: core-json-boundary
       from:
         module: core
