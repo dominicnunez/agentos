@@ -18,9 +18,11 @@ The adapter must:
   request rather than mapping it into Agent OS authority;
 - pass only the materialized execution prompt and declared model settings;
 - bound execution time and response size;
+- require the CLI-reported model to match the requested model before sending
+  the prompt, require the `openai` provider, and reject any model reroute;
 - reject reported usage above the adapter's one-million-token safety ceiling;
-- record the SDK-reported provider, model, and token usage while leaving
-  subscription cost explicitly unknown; and
+- record the subscription adapter identity, validated CLI-reported model, and
+  token usage while leaving subscription cost explicitly unknown; and
 - close the app-server process during Agent OS shutdown.
 
 Codex approval handlers are not Agent OS approval handlers. A Codex request for
@@ -28,17 +30,36 @@ permission must fail; it must never create or consume a `HumanApproval`.
 
 ## SDK boundary
 
-The pinned SDK revision includes the reviewed high-level confinement controls:
-an absolute working directory on both thread and turn requests, thread-scoped
-configuration, read-only sandbox mode, and granular restricted-readable roots.
-It also normalizes or rejects turn working directories at the protocol
-boundary. Agent OS therefore uses the SDK's single turn lifecycle instead of
-maintaining a second protocol implementation.
+The pinned SDK supplies process management, authentication, transport, typed
+protocol objects, and confinement parameters. Its high-level run result drops
+the model reported by `thread/start`, so Agent OS owns the bounded model-only
+thread/turn sequence through the SDK client. It validates the raw start response
+for duplicate or case-aliased identity fields before SDK decoding, checks the
+reported model and provider before `turn/start`, and subscribes to model reroute
+notifications before creating the thread. Reroutes cancel the turn and reject
+its output; they do not silently change the authorized model.
+
+The requested model remains in the adapter descriptor and execution manifest.
+Successful usage records take their model from the observed start response,
+never from a fallback to configuration. Item, completion, and usage evidence
+must identify the same fresh thread and turn, including when notifications
+arrive before the turn-start response. Failed turns request interruption with
+a separate two-second bound when their turn ID is known.
+
+This is evidence reported by the reviewed CLI/provider protocol, not a signed
+attestation of a cloud deployment or model weights. A compromised CLI or a
+provider that conceals rerouting is outside that assurance. No live-provider
+test is implied by the synthetic protocol regressions.
 
 The provider still treats SDK and Codex output as untrusted. A turn is rejected
 if the stream reports an error, lacks token telemetry, attempts a command, file
 change, web search, MCP call, or returns any item outside the narrow
 conversation-only allowlist.
+
+In addition to the existing 256 KiB response and 512 KiB textual stream limits,
+the direct lifecycle bounds notifications to 16,384 messages, 512 KiB per
+message, 4 MiB in aggregate, and 1,024 completed items. Identity and notification
+validation errors do not include notification bodies or reported model names.
 
 The Agent OS service now accepts a configured `ModelAdapter` and derives each
 `ExecutionContextManifest` from that adapter's descriptor. This removes the
