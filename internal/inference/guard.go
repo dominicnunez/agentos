@@ -268,13 +268,13 @@ func (a *GuardedAdapter) Descriptor() execution.ModelDescriptor { return a.adapt
 func (a *GuardedAdapter) Complete(ctx context.Context, prompt string) (execution.ModelResponse, error) {
 	scope, err := scopeFromContext(ctx)
 	if err != nil {
-		return execution.ModelResponse{}, err
+		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, err)
 	}
 	digest := sha256.Sum256([]byte(prompt))
 	request := InferenceRequest{Scope: scope, Descriptor: a.adapter.Descriptor(), PromptSHA256: hex.EncodeToString(digest[:])}
 	reservation, err := a.store.ReserveInference(ctx, request)
 	if err != nil {
-		return execution.ModelResponse{}, fmt.Errorf("authorize inference: %w", err)
+		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, err)
 	}
 	response, providerErr := a.adapter.Complete(ctx, prompt)
 	if providerErr != nil {
@@ -285,19 +285,23 @@ func (a *GuardedAdapter) Complete(ctx context.Context, prompt string) (execution
 		reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reconciliationTimeout)
 		_, reconcileErr := a.store.ReconcileInference(reconcileCtx, reservation, nil, result)
 		cancel()
-		return execution.ModelResponse{}, errors.Join(providerErr, reconcileErr)
+		code := execution.ModelCallFailed
+		if reconcileErr != nil {
+			code = execution.InferenceRecordFailed
+		}
+		return execution.ModelResponse{}, execution.SafeModelError(code, errors.Join(providerErr, reconcileErr))
 	}
 	if !response.Usage.Valid() || response.Usage.Provider != request.Descriptor.Provider || response.Usage.Model != request.Descriptor.Model || int64(response.Usage.InputTokens) > reservation.ReservedInputTokens || int64(response.Usage.OutputTokens) > reservation.ReservedOutputTokens {
 		reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reconciliationTimeout)
 		_, reconcileErr := a.store.ReconcileInference(reconcileCtx, reservation, &response.Usage, ReconciliationViolation)
 		cancel()
-		return execution.ModelResponse{}, errors.Join(fmt.Errorf("provider usage exceeded its authorized inference reservation"), reconcileErr)
+		return execution.ModelResponse{}, execution.SafeModelError(execution.ModelContractFailed, errors.Join(fmt.Errorf("provider usage exceeded its authorized inference reservation"), reconcileErr))
 	}
 	reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reconciliationTimeout)
 	costNanoUSD, err := a.store.ReconcileInference(reconcileCtx, reservation, &response.Usage, ReconciliationCompleted)
 	cancel()
 	if err != nil {
-		return execution.ModelResponse{}, fmt.Errorf("reconcile inference: %w", err)
+		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceRecordFailed, err)
 	}
 	if reservation.Mode == MeteredAPI {
 		costUSD := float64(costNanoUSD) / 1_000_000_000

@@ -78,8 +78,44 @@ func TestGuardedAdapterFailsClosedWithoutDurableScopeOrReservation(t *testing.T)
 		t.Fatalf("provider was called without scope: %v", err)
 	}
 	store.reserveErr = errors.New("budget exhausted")
-	if _, err := adapter.Complete(guardedContext(t), "prompt"); err == nil || model.called || !strings.Contains(err.Error(), "budget exhausted") {
+	if _, err := adapter.Complete(guardedContext(t), "prompt"); err == nil || model.called || execution.ModelErrorClass(err) != string(execution.InferenceDenied) || strings.Contains(err.Error(), "budget exhausted") {
 		t.Fatalf("provider was called without a reservation: %v", err)
+	}
+}
+
+func TestGuardedAdapterSanitizesFailuresWithoutChangingReconciliation(t *testing.T) {
+	private := errors.New("Authorization: Bearer synthetic-private-canary")
+	for _, tc := range []struct {
+		name                                  string
+		providerErr, reserveErr, reconcileErr error
+		want                                  Reconciliation
+		code                                  execution.ModelFaultCode
+		called                                bool
+	}{
+		{name: "authorization", reserveErr: private, code: execution.InferenceDenied},
+		{name: "uncertain", providerErr: private, want: ReconciliationUncertain, code: execution.ModelCallFailed, called: true},
+		{name: "not sent", providerErr: execution.RequestNotSent(private), want: ReconciliationNotSent, code: execution.ModelCallFailed, called: true},
+		{name: "cancelled", providerErr: errors.Join(private, context.Canceled), want: ReconciliationUncertain, code: execution.ModelCallFailed, called: true},
+		{name: "accounting", providerErr: private, reconcileErr: private, want: ReconciliationUncertain, code: execution.InferenceRecordFailed, called: true},
+		{name: "successful response accounting", reconcileErr: private, want: ReconciliationCompleted, code: execution.InferenceRecordFailed, called: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &guardStore{reserveErr: tc.reserveErr, reconcileErr: tc.reconcileErr}
+			model := &guardModel{err: tc.providerErr, response: execution.ModelResponse{Text: "private response", Usage: events.InferenceUsageRecordedPayload{
+				Source: "provider", Provider: "provider", Model: "model", InputTokens: 1, OutputTokens: 1, TotalTokens: 2,
+			}}}
+			adapter, _ := NewGuardedAdapter(store, model)
+			response, err := adapter.Complete(guardedContext(t), "prompt")
+			if err == nil || response.Text != "" || model.called != tc.called || store.result != tc.want || execution.ModelErrorClass(err) != string(tc.code) {
+				t.Fatalf("failure changed accounting or response admission: result=%s class=%s", store.result, execution.ModelErrorClass(err))
+			}
+			if strings.Contains(err.Error(), "synthetic-private-canary") || errors.Is(err, private) {
+				t.Fatal("private provider or store diagnostic escaped the shared boundary")
+			}
+			if errors.Is(err, context.Canceled) != errors.Is(tc.providerErr, context.Canceled) {
+				t.Fatal("cancellation fact changed")
+			}
+		})
 	}
 }
 

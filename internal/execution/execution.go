@@ -131,7 +131,8 @@ func (a *AgentExecution) Execute(ctx context.Context, task core.Task, manifest c
 	}
 	response, err := a.model.Complete(ctx, prompt)
 	if err != nil {
-		return Result{Outcome: core.ToolOutcome{ToolInvocationID: core.ID("model-" + string(task.ID)), ToolID: a.model.Name(), Status: core.OutcomeFailed, PostconditionStatus: core.PostconditionNotChecked, Retryability: core.Retryable, ErrorDetail: err.Error(), StartedAt: started, FinishedAt: time.Now().UTC()}}, err
+		err = SafeModelError(ModelCallFailed, err)
+		return Result{Outcome: core.ToolOutcome{ToolInvocationID: core.ID("model-" + string(task.ID)), ToolID: a.model.Name(), Status: core.OutcomeFailed, PostconditionStatus: core.PostconditionNotChecked, Retryability: core.Retryable, ErrorClass: ModelErrorClass(err), ErrorDetail: err.Error(), StartedAt: started, FinishedAt: time.Now().UTC()}}, err
 	}
 	if !response.Usage.Valid() || response.Usage.Provider != a.descriptor.Provider || response.Usage.Model != a.descriptor.Model {
 		err := fmt.Errorf("model usage identity does not match the configured adapter")
