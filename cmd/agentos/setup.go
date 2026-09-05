@@ -767,4 +767,3 @@ func errorsJoin(errors ...error) error {
 	}
 	return fmt.Errorf("%s", strings.Join(parts, "; "))
 }
-
