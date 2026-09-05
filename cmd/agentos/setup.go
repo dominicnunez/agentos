@@ -117,7 +117,7 @@ func runInit(ctx context.Context, mode bootstrap.Mode, resume bool, input *os.Fi
 }
 
 func requireUserSystemd(ctx context.Context) error {
-	output, err := exec.CommandContext(ctx, "/usr/bin/systemd", "--version").Output()
+	output, err := exec.CommandContext(ctx, "/usr/bin/systemctl", "--version").Output()
 	if err != nil {
 		return fmt.Errorf("user mode requires systemd %d or newer", minimumUserSystemdVersion)
 	}
@@ -767,3 +767,4 @@ func errorsJoin(errors ...error) error {
 	}
 	return fmt.Errorf("%s", strings.Join(parts, "; "))
 }
+
