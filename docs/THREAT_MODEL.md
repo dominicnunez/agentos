@@ -124,6 +124,20 @@ does not claim to defend against a compromised operating-system administrator.
 
 ## Verification
 
+Model-call diagnostics are not work data. The shared inference guard returns
+fixed runtime-owned failure categories for authorization, provider, contract,
+and accounting failures; Agent execution also sanitizes adapter failures before
+creating a `ToolOutcome`. Original error text and error chains are discarded,
+so provider bodies, credentials, and backend diagnostics cannot enter new work
+evidence through those failures. Planning and intake use the same guarded
+provider boundary. Cancellation/deadline and definite pre-send facts survive
+without retaining diagnostic text. Cancellation alone never releases an
+uncertain inference reservation or proves that a request was not sent.
+
+This boundary does not redact model output, setup diagnostics, or historical
+events. Existing ledger history remains immutable; operators must handle any
+previously retained sensitive material under their incident procedures.
+
 CI covers reproducible SvelteKit generation, compiled frontend license
 evidence, dependency audit, type checks, formatting, module consistency, builds, vet, lint, race tests,
 bounded gateway fuzzing, vulnerability scanning, official A2A client tests,
