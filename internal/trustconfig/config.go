@@ -3,11 +3,11 @@
 package trustconfig
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/dominicnunez/agentos/internal/boundaryjson"
 )
 
 const registryLimit = 1 << 20
@@ -22,14 +22,8 @@ func DecodeObject(reader io.Reader, name string, target any) error {
 	if len(content) > registryLimit {
 		return fmt.Errorf("%s exceeds %d bytes", name, registryLimit)
 	}
-	decoder := json.NewDecoder(bytes.NewReader(content))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
+	if err := boundaryjson.Unmarshal(content, target); err != nil {
 		return fmt.Errorf("decode %s: %w", name, err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return fmt.Errorf("%s must contain one JSON object", name)
 	}
 	return nil
 }

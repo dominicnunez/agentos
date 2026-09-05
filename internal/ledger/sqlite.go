@@ -19,6 +19,7 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/approvals"
 	"github.com/dominicnunez/agentos/internal/authority"
+	"github.com/dominicnunez/agentos/internal/boundaryjson"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	_ "modernc.org/sqlite"
@@ -3169,15 +3170,11 @@ func decodeExactJSON(value any, target any) error {
 	if err != nil {
 		return err
 	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	return decoder.Decode(target)
+	return decodeExactJSONBytes(body, target)
 }
 
 func decodeExactJSONBytes(body []byte, target any) error {
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	return decoder.Decode(target)
+	return boundaryjson.Unmarshal(body, target)
 }
 
 func registerExternalWork(ctx context.Context, tx *sql.Tx, organizationID, requestID, correlationID, intentID string) error {

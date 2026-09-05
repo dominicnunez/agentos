@@ -6,6 +6,8 @@ packages:
     - ./internal/...
 
 modules:
+  - name: boundaryjson
+    path: internal/boundaryjson
   - name: app
     path: internal/app
   - name: assignment
@@ -72,6 +74,66 @@ modules:
 policy:
   default: deny
   allow:
+    - name: core-json-boundary
+      from:
+        module: core
+      to:
+        module: boundaryjson
+
+    - name: modeloutput-json-boundary
+      from:
+        module: modeloutput
+      to:
+        module: boundaryjson
+
+    - name: gateway-json-boundary
+      from:
+        module: gateway
+      to:
+        module: boundaryjson
+
+    - name: trustconfig-json-boundary
+      from:
+        module: trustconfig
+      to:
+        module: boundaryjson
+
+    - name: ledger-json-boundary
+      from:
+        module: ledger
+      to:
+        module: boundaryjson
+
+    - name: projections-json-boundary
+      from:
+        module: projections
+      to:
+        module: boundaryjson
+
+    - name: events-json-boundary
+      from:
+        module: events
+      to:
+        module: boundaryjson
+
+    - name: effectstatus-json-boundary
+      from:
+        module: effectstatus
+      to:
+        module: boundaryjson
+
+    - name: audit-json-boundary
+      from:
+        module: audit
+      to:
+        module: boundaryjson
+
+    - name: bootstrap-json-boundary
+      from:
+        module: bootstrap
+      to:
+        module: boundaryjson
+
     - name: same-module
       from:
         module: "*"

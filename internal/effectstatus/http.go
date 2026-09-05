@@ -2,9 +2,7 @@
 package effectstatus
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -12,6 +10,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/dominicnunez/agentos/internal/boundaryjson"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/effects"
 	"github.com/dominicnunez/agentos/internal/trustconfig"
@@ -144,15 +143,9 @@ func (r *httpStatusReconciler) Check(ctx context.Context, obligation core.Effect
 	if len(body) > reconciliationResponseLimit {
 		return effects.ReconciliationObservation{}, fmt.Errorf("reconciliation response exceeds %d bytes", reconciliationResponseLimit)
 	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
 	var result reconciliationResponse
-	if err := decoder.Decode(&result); err != nil {
+	if err := boundaryjson.Unmarshal(body, &result); err != nil {
 		return effects.ReconciliationObservation{}, fmt.Errorf("decode reconciliation response: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return effects.ReconciliationObservation{}, fmt.Errorf("reconciliation response must contain one JSON object")
 	}
 	if result.EffectObligationID != string(obligation.ID) || result.IdempotencyKey != obligation.IdempotencyKey || result.EffectFingerprint != obligation.EffectFingerprint {
 		return effects.ReconciliationObservation{}, fmt.Errorf("reconciliation response identity does not match effect obligation")

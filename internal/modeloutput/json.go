@@ -3,27 +3,20 @@
 package modeloutput
 
 import (
-	"bytes"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
+
+	"github.com/dominicnunez/agentos/internal/boundaryjson"
 )
 
 // DecodeJSON accepts exactly one closed-schema JSON value within maxBytes.
-// Unknown fields and trailing content fail closed.
+// Unknown fields, ambiguous keys, and trailing content fail closed.
 func DecodeJSON[T any](text string, maxBytes int) (T, error) {
 	var value T
 	if maxBytes <= 0 || len(text) > maxBytes {
 		return value, fmt.Errorf("structured model response exceeds limit")
 	}
-	decoder := json.NewDecoder(bytes.NewBufferString(text))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&value); err != nil {
+	if err := boundaryjson.Unmarshal([]byte(text), &value); err != nil {
 		return value, fmt.Errorf("structured model response is invalid JSON: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return value, fmt.Errorf("structured model response contains trailing content")
 	}
 	return value, nil
 }

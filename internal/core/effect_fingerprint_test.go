@@ -57,6 +57,15 @@ func TestEffectFingerprintBindsEveryImmutableEffectField(t *testing.T) {
 }
 
 func TestEffectObligationDecoderRejectsUnknownSecurityState(t *testing.T) {
+	for _, input := range []string{
+		`{"effect_obligation_id":"first","effect_obligation_id":"second"}`,
+		`{"EFFECT_OBLIGATION_ID":"effect-1"}`,
+		`{"replay_context":{"body":"first","body":"second"}}`,
+	} {
+		if _, err := DecodeEffectObligation([]byte(input)); err == nil {
+			t.Fatal("ambiguous effect contract was accepted")
+		}
+	}
 	if _, err := DecodeEffectObligation([]byte(`{"effect_obligation_id":"effect-1","unknown_authority":true}`)); err == nil {
 		t.Fatal("unknown authority-bearing effect state was ignored")
 	}
