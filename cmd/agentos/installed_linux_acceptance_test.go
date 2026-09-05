@@ -340,7 +340,7 @@ func installedUserRuntime(t *testing.T, username, home, runtimeBase string, path
 }
 
 func supportsUserScopedCredentials(ctx context.Context) bool {
-	output, err := exec.CommandContext(ctx, "/usr/bin/systemd", "--version").Output()
+	output, err := exec.CommandContext(ctx, "/usr/bin/systemctl", "--version").Output()
 	if err != nil {
 		return false
 	}
