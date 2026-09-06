@@ -234,8 +234,8 @@ func (l *SQLite) ReserveInference(ctx context.Context, request inference.Inferen
 		windowStart, windowEnd := inferenceWindow(now, time.Duration(policy.WindowDurationSeconds)*time.Second)
 		var chargedTokens, chargedCost int64
 		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(charged_input_tokens+charged_output_tokens),0),COALESCE(SUM(charged_cost_nano_usd),0)
-FROM inference_reservations WHERE organization_id=? AND provider=? AND model=? AND window_started_at=?`,
-			policy.OrganizationID, policy.Provider, policy.Model, windowStart.Format(time.RFC3339Nano)).Scan(&chargedTokens, &chargedCost); err != nil {
+FROM inference_reservations WHERE organization_id=? AND connection_id=? AND provider=? AND model=? AND window_started_at=?`,
+			policy.OrganizationID, policy.ConnectionID, policy.Provider, policy.Model, windowStart.Format(time.RFC3339Nano)).Scan(&chargedTokens, &chargedCost); err != nil {
 			return fmt.Errorf("read inference budget use: %w", err)
 		}
 		selection, err := (inference.Manager{Pools: []inference.Pool{{
