@@ -3984,7 +3984,7 @@ func (g *Gateway) PublishAgentDraft(ctx context.Context, organizationID, actorID
 	}
 	if draft.EventType == "RESULT_PUBLISHED" {
 		var result ResultPublishedPayload
-		if draft.TaskID == "" || decodePayload(draft.Payload, &result) != nil || !result.ValidFor(draft.ArtifactRefs) {
+		if draft.TaskID == "" || decodeExactPayload(draft.Payload, &result) != nil || !result.ValidFor(draft.ArtifactRefs) {
 			return Event{}, fmt.Errorf("result published draft requires a task, summary, and matching artifact refs")
 		}
 	}
