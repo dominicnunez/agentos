@@ -157,6 +157,9 @@ func (binding ToolDefinitionBinding) Valid() bool {
 // FingerprintToolDefinition binds all model-visible definition content and
 // the consequential capabilities declared by the trusted adapter registry.
 func FingerprintToolDefinition(toolID, version, serverIdentity, endpointIdentity, name, description string, inputSchema, outputSchema, metadata json.RawMessage, capabilities []CapabilityRequirement) (string, error) {
+	if err := validateToolDefinitionResources(name, description, inputSchema, outputSchema, metadata); err != nil {
+		return "", err
+	}
 	if !validCapabilityRequirements(capabilities) || !boundedAuthorityName(toolID) || !boundedAuthorityName(version) ||
 		!boundedAuthorityName(serverIdentity) || !boundedAuthorityName(endpointIdentity) || strings.TrimSpace(name) == "" {
 		return "", fmt.Errorf("tool definition identity and consequential capabilities are invalid")
@@ -174,7 +177,10 @@ func FingerprintToolDefinition(toolID, version, serverIdentity, endpointIdentity
 		Capabilities []CapabilityRequirement `json:"declared_effect_capabilities"`
 	}{toolID, version, serverIdentity, endpointIdentity, name, description, inputSchema, outputSchema, metadata, capabilities})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("tool definition cannot be encoded")
+	}
+	if len(canonical) > MaximumToolDefinitionBytes {
+		return "", ErrToolDefinitionLimit
 	}
 	sum := sha256.Sum256(canonical)
 	return hex.EncodeToString(sum[:]), nil
