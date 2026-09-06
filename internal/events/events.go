@@ -3117,9 +3117,7 @@ func admittedProjectionAtSchema(event Event, expectedSchemaVersion int) (Project
 	if json.Unmarshal(event.Payload, &object) != nil || object == nil {
 		return ProjectionEventPayload{}, false, fmt.Errorf("event payload is malformed")
 	}
-	_, hasProjection := object["projection"]
-	_, hasAdmission := object["admission"]
-	if !hasProjection && !hasAdmission {
+	if !hasReservedProjectionField(object) {
 		return ProjectionEventPayload{}, false, nil
 	}
 	var payload ProjectionEventPayload
@@ -3672,12 +3670,21 @@ func ValidateOrdinaryEventPayload(value any) error {
 	if json.Unmarshal(body, &object) != nil || object == nil {
 		return fmt.Errorf("event payload must be a JSON object")
 	}
-	_, hasProjection := object["projection"]
-	_, hasAdmission := object["admission"]
-	if hasProjection || hasAdmission {
+	if hasReservedProjectionField(object) {
 		return fmt.Errorf("projection payloads require typed admission")
 	}
 	return nil
+}
+
+// Reserve every spelling encoding/json could bind to the projection envelope.
+// The exact decoder still requires canonical spelling for sealed events.
+func hasReservedProjectionField(object map[string]json.RawMessage) bool {
+	for key := range object {
+		if strings.EqualFold(key, "projection") || strings.EqualFold(key, "admission") {
+			return true
+		}
+	}
+	return false
 }
 
 func projectionAdmissionFingerprint(admission ProjectionAdmission, event Event, record ProjectionRecord, detail json.RawMessage) (string, error) {
