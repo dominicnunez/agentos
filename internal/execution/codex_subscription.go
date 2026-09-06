@@ -101,7 +101,7 @@ func NewCodexSubscription(ctx context.Context, config CodexSubscriptionConfig) (
 	cleanup := func() error { return removeOwnedCodexDirectory(isolatedDir, isolatedDir, "agentos-codex-") }
 
 	protocolErrors := &codexProtocolErrors{}
-	process, err := sdk.StartProcess(ctx, &sdk.ProcessOptions{
+	process, err := startCodexProcess(ctx, &sdk.ProcessOptions{
 		BinaryPath: config.BinaryPath,
 		Dir:        isolatedDir,
 		Env:        isolatedCodexEnvironment(isolatedDir),

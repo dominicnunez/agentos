@@ -22,13 +22,13 @@ type codexRunSummary struct {
 
 // The high-level SDK run API discards ThreadStartResponse.Model. Use the typed
 // lifecycle so the model-only turn cannot start without observed identity.
-func sdkStreamRun(process *sdk.Process, protocolErrors *codexProtocolErrors) codexRun {
+func sdkStreamRun(process *codexProcess, protocolErrors *codexProtocolErrors) codexRun {
 	return func(ctx context.Context, options sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error) {
-		return runObservedCodexTurn(ctx, process.Client, protocolErrors, options)
+		return runObservedCodexTurn(ctx, process.Client, process.wire, protocolErrors, options)
 	}
 }
 
-func runObservedCodexTurn(ctx context.Context, client *protocol.Client, protocolErrors *codexProtocolErrors, options sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error) {
+func runObservedCodexTurn(ctx context.Context, client *protocol.Client, source codexNotificationSource, protocolErrors *codexProtocolErrors, options sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error) {
 	var empty codexRunSummary
 	if err := protocolErrors.take(); err != nil {
 		return nil, empty, RequestNotSent(fmt.Errorf("codex protocol was already invalid"))
@@ -39,17 +39,10 @@ func runObservedCodexTurn(ctx context.Context, client *protocol.Client, protocol
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	observer := &codexTurnObserver{done: make(chan struct{}), cancel: cancel}
-	var remove []func()
-	for _, method := range codexObservedMethods {
-		remove = append(remove, client.AddNotificationListener(method, func(_ context.Context, notice protocol.Notification) {
-			observer.observe(notice)
-		}))
+	if err := source.attach(observer); err != nil {
+		return nil, empty, RequestNotSent(err)
 	}
-	defer func() {
-		for _, unsubscribe := range remove {
-			unsubscribe()
-		}
-	}()
+	defer source.detach(observer)
 	ephemeral := true
 	thread, err := startObservedCodexThread(runCtx, client, protocol.ThreadStartParams{
 		Cwd: options.Cwd, Ephemeral: &ephemeral, Config: options.Config,
@@ -63,8 +56,12 @@ func runObservedCodexTurn(ctx context.Context, client *protocol.Client, protocol
 		return nil, empty, RequestNotSent(fmt.Errorf("codex effective model identity is missing or mismatched"))
 	}
 	observer.mu.Lock()
+	if observer.threadID != "" && observer.threadID != thread.Thread.ID {
+		observer.fail("codex thread notification identity is inconsistent")
+	}
 	observer.threadID = thread.Thread.ID
 	priorErr := observer.err
+	observer.turnRequested = true
 	observer.mu.Unlock()
 	if priorErr != nil {
 		return nil, empty, RequestNotSent(priorErr)
@@ -127,6 +124,8 @@ func runObservedCodexTurn(ctx context.Context, client *protocol.Client, protocol
 type codexTurnObserver struct {
 	mu               sync.Mutex
 	threadID, turnID string
+	turnRequested    bool
+	threadStarted    bool
 	items            []sdk.ThreadItemWrapper
 	completed        *sdk.Turn
 	usage            *sdk.ThreadTokenUsage
@@ -139,11 +138,9 @@ type codexTurnObserver struct {
 	budget           codexStreamBudget
 }
 
-var codexObservedMethods = []string{
-	"turn/started", "turn/completed", "item/started", "item/completed", "thread/tokenUsage/updated",
-	"item/agentMessage/delta", "item/reasoning/textDelta", "item/reasoning/summaryTextDelta", "item/plan/delta",
-	"model/rerouted", "error", "thread/realtime/error", "item/fileChange/outputDelta", "item/commandExecution/outputDelta",
-	"item/mcpToolCall/progress", "item/collabAgentToolCall/started", "item/collabAgentToolCall/completed",
+type codexNotificationSource interface {
+	attach(*codexTurnObserver) error
+	detach(*codexTurnObserver)
 }
 
 func (o *codexTurnObserver) fail(message string) {
@@ -170,7 +167,7 @@ func (o *codexTurnObserver) bindTurn(id string) bool {
 }
 
 func (o *codexTurnObserver) scope(threadID, turnID string) bool {
-	return o.threadID != "" && threadID == o.threadID && o.bindTurn(turnID)
+	return o.turnRequested && o.threadID != "" && threadID == o.threadID && o.bindTurn(turnID)
 }
 
 func (o *codexTurnObserver) observe(notice protocol.Notification) {
@@ -186,6 +183,29 @@ func (o *codexTurnObserver) observe(notice protocol.Notification) {
 		return
 	}
 	switch notice.Method {
+	case "thread/started":
+		var n protocol.ThreadStartedNotification
+		if o.threadStarted || json.Unmarshal(notice.Params, &n) != nil || n.Thread.ID == "" || n.Thread.ModelProvider != "openai" || o.threadID != "" && o.threadID != n.Thread.ID {
+			o.fail("codex thread notification identity is invalid")
+			return
+		}
+		o.threadID = n.Thread.ID
+		o.threadStarted = true
+	case "thread/status/changed":
+		var n protocol.ThreadStatusChangedNotification
+		if json.Unmarshal(notice.Params, &n) != nil || o.threadID == "" || n.ThreadID != o.threadID {
+			o.fail("codex thread status identity is invalid")
+		}
+	case "item/reasoning/summaryPartAdded":
+		var n protocol.ReasoningSummaryPartAddedNotification
+		if json.Unmarshal(notice.Params, &n) != nil || !o.scope(n.ThreadID, n.TurnID) || n.ItemID == "" || n.SummaryIndex < 0 {
+			o.fail("codex reasoning summary identity is invalid")
+		}
+	case "turn/plan/updated":
+		var n protocol.TurnPlanUpdatedNotification
+		if json.Unmarshal(notice.Params, &n) != nil || !o.scope(n.ThreadID, n.TurnID) {
+			o.fail("codex plan identity is invalid")
+		}
 	case "turn/started", "turn/completed":
 		var n protocol.TurnCompletedNotification
 		if json.Unmarshal(notice.Params, &n) != nil || !o.scope(n.ThreadID, n.Turn.ID) || n.Turn.Error != nil {

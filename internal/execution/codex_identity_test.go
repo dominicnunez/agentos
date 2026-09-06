@@ -84,7 +84,7 @@ func runIdentityTransport(t *testing.T, transport *identityTransport) (*sdk.RunR
 	sandbox := sdk.SandboxModeReadOnly
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
-	return runObservedCodexTurn(ctx, client, protocolErrors, sdk.RunOptions{
+	return runObservedCodexTurn(ctx, client, transport, protocolErrors, sdk.RunOptions{
 		Model: &model, Cwd: &cwd, Prompt: "test", ApprovalPolicy: &approval, Sandbox: &sandbox,
 		SandboxPolicy: sdk.SandboxPolicyReadOnly{},
 	})
@@ -213,3 +213,9 @@ func TestCodexDirectLifecycleRejectsSideEffectsErrorsAndInconsistentTurns(t *tes
 		t.Fatal("response and notification turn IDs disagree")
 	}
 }
+
+func (f *identityTransport) attach(o *codexTurnObserver) error {
+	f.notify = func(_ context.Context, n protocol.Notification) { o.observe(n) }
+	return nil
+}
+func (f *identityTransport) detach(*codexTurnObserver) {}

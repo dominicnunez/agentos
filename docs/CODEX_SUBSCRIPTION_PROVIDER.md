@@ -30,13 +30,13 @@ permission must fail; it must never create or consume a `HumanApproval`.
 
 ## SDK boundary
 
-The pinned SDK supplies process management, authentication, transport, typed
+The pinned SDK supplies authentication, transport dispatch, typed
 protocol objects, and confinement parameters. Its high-level run result drops
 the model reported by `thread/start`, so Agent OS owns the bounded model-only
 thread/turn sequence through the SDK client. It validates the raw start response
 for duplicate or case-aliased identity fields before SDK decoding, checks the
-reported model and provider before `turn/start`, and subscribes to model reroute
-notifications before creating the thread. Reroutes cancel the turn and reject
+reported model and provider before `turn/start`, and observes inbound frames
+before SDK worker dispatch. Reroutes cancel the turn and reject
 its output; they do not silently change the authorized model.
 
 The requested model remains in the adapter descriptor and execution manifest.
@@ -57,9 +57,20 @@ change, web search, MCP call, or returns any item outside the narrow
 conversation-only allowlist.
 
 In addition to the existing 256 KiB response and 512 KiB textual stream limits,
-the direct lifecycle bounds notifications to 16,384 messages, 512 KiB per
-message, 4 MiB in aggregate, and 1,024 completed items. Identity and notification
+the direct lifecycle bounds all inbound frames to 16,384 messages, 512 KiB per
+frame, 4 MiB in aggregate, and 1,024 completed items. Unknown notifications fail
+closed. Expected reasoning/plan and thread lifecycle notifications are validated;
+attempted side effects are rejected. Identity and notification
 validation errors do not include notification bodies or reported model names.
+
+Agent OS owns the child process and pipes to install that reader before the SDK
+can dispatch different notification methods to independent workers. Earlier wire
+reroutes and limit violations therefore cannot arrive after accepted completion.
+The executable, environment and working directory remain explicitly isolated.
+Shutdown closes stdin, allows a bounded drain, and terminates the process group
+on Unix or the assigned kill-on-close job on Windows before reaping the child.
+Offline tests exercise the actual SDK worker scheduler and a local helper process;
+cross-compilation does not replace native platform runtime testing.
 
 The Agent OS service now accepts a configured `ModelAdapter` and derives each
 `ExecutionContextManifest` from that adapter's descriptor. This removes the
