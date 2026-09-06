@@ -185,6 +185,11 @@ not establish that its preferences serve its declared purpose. Any systematic
 change in discretionary selections must be attributable to that declared and
 authorized purpose; provenance, versioning and ordinary injection checks alone
 do not establish this property.
+Require independent review of the actual Skill content against its authorized
+purpose and policy, plus absolute policy-compliance checks on each comparison
+arm. A prohibited instruction or outcome denies activation even when both arms
+behave identically. No measured treatment delta cannot excuse an already biased
+baseline, saturated outcome or unauthorized instruction.
 
 Before activating or using a Skill that can influence discretionary decisions,
 require independent behavioral evidence through existing versioned
@@ -213,7 +218,13 @@ uncertain classification takes the behavioral validation path; a label or
 author assertion cannot establish the exception.
 Compare held-out executions with and without
 the exact Skill under the same Agent, effective model, execution profile,
-candidate set and task conditions. Randomize candidate order where relevant,
+task conditions and, for selection-only tasks, the same supplied candidate set.
+For candidate discovery, generation or filtering, instead hold the source
+universe and access conditions equal and evaluate inclusion, omission and
+filtering as outcomes alongside final selections. Do not force the constructed
+candidate sets to match and thereby erase the behavior under assessment. Bind
+the task type, source universe and construction metrics in the protocol.
+Randomize candidate order where relevant,
 and randomize or counterbalance baseline-versus-Skill execution order within
 paired cases. Retain arm assignment, actual execution order and timestamps;
 candidate-order randomization alone does not control temporal effects. Reject
@@ -313,6 +324,15 @@ publication and delivery, including model-only text with no tool call or effect
 commit. Deny publication or delivery and quarantine the affected result if any
 required classification, authorization or behavioral basis has become invalid;
 an earlier acceptance cannot authorize later delivery after revocation.
+Serialize these validity checks and each governed acceptance record in one
+authoritative ledger transaction with policy, classification and evidence
+revocations. Bind the checked versions and ledger position to the accepted
+operation; a revocation ordered first denies it. Dispatch external effects only
+from that committed state through the existing effect boundary. A queued action,
+publication or delivery requires its own current admission when dispatched;
+recovery cannot treat a prior check as a reusable authorization. Do not claim
+that ledger ordering can undo an external effect already committed before a
+later revocation.
 
 A persistent shift requires an explicit explanation tied to the authorized
 objective and an independent
@@ -320,6 +340,15 @@ assessment of that explanation. Missing, mismatched or unexplained evidence
 must deny activation. A changed Skill, purpose, model or relevant execution
 conditions requires fresh applicable evidence rather than inheriting a prior
 assessment. Evaluation evidence grants no capabilities or effect approvals.
+Evidence reuse and non-discretionary classification require a runtime-verifiable
+immutable or attested model deployment revision, bound alongside the reported
+model identity and checked at every use and acceptance boundary. A mutable model
+name alone does not establish continuity. If the provider cannot supply this
+binding, deny Skill activation and use; fresh trials alone cannot establish that
+an unobservable deployment change did not occur afterward. A changed revision
+requires fresh applicable validation. This gate does not restrict existing
+executions with empty SkillRefs or imply that an adapter currently attests model
+weights or deployment revisions.
 
 This is an activation prerequisite, not an implemented evaluator or a guarantee
 about unobserved model behavior. Current execution manifests require empty
