@@ -36,6 +36,13 @@ func NewWithConnections(g *events.Gateway, registry *inference.ConnectionRegistr
 	if err != nil {
 		return nil, err
 	}
+	catalogs := make(map[string]bool)
+	for _, metadata := range registry.Catalog() {
+		catalogs[metadata.ConnectionID] = true
+	}
+	if catalogs[routing.Default] && routing.Requirements == nil {
+		return nil, fmt.Errorf("catalog-backed task default requires routing requirements")
+	}
 	routes := make(map[string]*execution.AgentExecution)
 	for _, id := range registry.Connections() {
 		adapter, err := registry.Adapter(id)
@@ -67,11 +74,17 @@ func NewWithConnections(g *events.Gateway, registry *inference.ConnectionRegistr
 		return nil, fmt.Errorf("too many task requirement rules")
 	}
 	validate := func(requirements modelinput.RouteRequirements) error {
+		if len(catalogs) == 0 {
+			return fmt.Errorf("task routing requirements need a catalog-backed account")
+		}
 		if _, err := requirements.Canonical(); err != nil {
 			return err
 		}
 		ids := append([]string(nil), requirements.PreferredConnections...)
 		if requirements.ConnectionID != "" {
+			if !catalogs[requirements.ConnectionID] {
+				return fmt.Errorf("hard task requirements need a catalog-backed account")
+			}
 			ids = append(ids, requirements.ConnectionID)
 		}
 		for _, id := range ids {
@@ -94,6 +107,21 @@ func NewWithConnections(g *events.Gateway, registry *inference.ConnectionRegistr
 			return nil, err
 		}
 		service.taskRoutingRules[key] = requirements.Clone()
+	}
+	for key, connection := range taskConnections {
+		requirements := service.taskRouting
+		if specific, ok := service.taskRoutingRules[key]; ok {
+			requirements = &specific
+		}
+		if requirements == nil {
+			if catalogs[connection] {
+				return nil, fmt.Errorf("catalog-backed task route requires routing requirements")
+			}
+			continue
+		}
+		if !catalogs[connection] || (requirements.ConnectionID != "" && requirements.ConnectionID != connection) {
+			return nil, fmt.Errorf("task connection conflicts with catalog routing requirements")
+		}
 	}
 	return service, nil
 }

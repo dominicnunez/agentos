@@ -16,6 +16,46 @@ import (
 	"time"
 )
 
+func TestConnectionConstructorRequiresCatalogTaskRequirements(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	model := &routedCountingModel{}
+	metadata := inference.RouteMetadata{ConnectionID: "catalog", Descriptor: model.Descriptor(), Capabilities: []inference.Capability{inference.Text}, Local: true, ContextTokens: 11000, OutputTokens: 1000, DataClasses: []string{"internal"}, ValidUntil: time.Now().UTC().Add(time.Hour)}
+	registry, err := inference.NewConnectionRegistry(store, []inference.Connection{{ID: "catalog", Adapter: model, Metadata: &metadata}, {ID: "legacy", Adapter: model}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirements := modelinput.RouteRequirements{OrganizationID: "org", Capabilities: []modelinput.Capability{modelinput.Text}, InputTokens: 100, OutputTokens: 20, Locality: modelinput.LocalOnly, DataClass: "internal"}
+	for _, tc := range []struct {
+		name    string
+		routing TaskConnectionRouting
+		valid   bool
+	}{
+		{"catalog default missing", TaskConnectionRouting{Default: "catalog"}, false},
+		{"specific rules cannot cover default", TaskConnectionRouting{Default: "catalog", TaskRequirements: map[string]modelinput.RouteRequirements{"research": requirements}}, false},
+		{"catalog pin missing", TaskConnectionRouting{Default: "legacy", ByTaskKey: map[string]string{"research": "catalog"}}, false},
+		{"legacy explicit", TaskConnectionRouting{Default: "legacy", ByTaskKey: map[string]string{"research": "legacy"}}, true},
+		{"catalog default supplied", TaskConnectionRouting{Default: "catalog", Requirements: &requirements}, true},
+		{"catalog pin inherits", TaskConnectionRouting{Default: "legacy", Requirements: &requirements, ByTaskKey: map[string]string{"research": "catalog"}}, true},
+		{"catalog pin specific", TaskConnectionRouting{Default: "legacy", ByTaskKey: map[string]string{"research": "catalog"}, TaskRequirements: map[string]modelinput.RouteRequirements{"research": requirements}}, true},
+		{"broker pin to legacy", TaskConnectionRouting{Default: "catalog", Requirements: &requirements, ByTaskKey: map[string]string{"research": "legacy"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service, err := NewWithConnections(events.NewGateway(store), registry, tc.routing, planning.SingleTaskPlanner{})
+			if (err == nil) != tc.valid || (!tc.valid && service != nil) {
+				t.Fatalf("constructor returned %v, %v", service, err)
+			}
+		})
+	}
+	stream, err := store.Events(t.Context(), "")
+	if err != nil || len(stream) != 0 || model.calls.Load() != 0 {
+		t.Fatalf("constructor persisted events or invoked model: events=%d calls=%d err=%v", len(stream), model.calls.Load(), err)
+	}
+}
+
 func TestServiceResolvesPinnedConnectionInsteadOfDefault(t *testing.T) {
 	store, err := ledger.Open(":memory:")
 	if err != nil {

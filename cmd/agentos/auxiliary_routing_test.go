@@ -137,7 +137,7 @@ func TestAuxiliaryBrokerBindsSelectedAccountAndRequirements(t *testing.T) {
 	} {
 		t.Run("mismatched-"+name, func(t *testing.T) {
 			selector := mismatchedPlannerSelector{routedPlanner: routedPlanner{Planner: basePlanner, route: route}, mutate: mutate}
-			service, err := app.NewWithConnections(events.NewGateway(store), registry, app.TaskConnectionRouting{Default: "first"}, selector)
+			service, err := app.NewWithConnections(events.NewGateway(store), registry, app.TaskConnectionRouting{Default: "first", Requirements: &route.requirements}, selector)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -159,7 +159,7 @@ func TestAuxiliaryBrokerBindsSelectedAccountAndRequirements(t *testing.T) {
 			}
 		})
 	}
-	service, err := app.NewWithConnections(events.NewGateway(store), registry, app.TaskConnectionRouting{Default: "first"}, routedPlanner{Planner: basePlanner, route: route})
+	service, err := app.NewWithConnections(events.NewGateway(store), registry, app.TaskConnectionRouting{Default: "first", Requirements: &route.requirements}, routedPlanner{Planner: basePlanner, route: route})
 	if err != nil {
 		t.Fatal(err)
 	}
