@@ -72,7 +72,12 @@ func TestComposeConnectionsIsolatesCredentialsAndCleansUp(t *testing.T) {
 				policy := provider.InferencePolicy
 				return compositionModel{descriptor: execution.ModelDescriptor{Provider: policy.Provider, Model: policy.Model, ExecutionProfileVersion: policy.ExecutionProfileVersion}}, closeAdapter, nil
 			}
-			registry, closeAll, err := composeProviderConnections(t.Context(), compositionProviders(t), runtimeDir, secrets.Values{"first": "secret-first", "second": "secret-second"}, store, factory)
+			providers := compositionProviders(t)
+			for i := range providers {
+				providers[i].InferencePolicy.Routing = &inference.RoutePolicy{OrganizationID: providers[i].InferencePolicy.OrganizationID, Locality: inference.CloudAllowed, DataClasses: []string{"internal"}}
+				providers[i].InferencePolicy.Catalog = &inference.CatalogDefinition{Capabilities: []inference.Capability{inference.Text}, ContextTokens: 120, OutputTokens: 20, DataClasses: []string{"internal"}, ValidUntil: providers[i].InferencePolicy.AuthorizationExpiresAt}
+			}
+			registry, closeAll, err := composeProviderConnections(t.Context(), providers, runtimeDir, secrets.Values{"first": "secret-first", "second": "secret-second"}, store, factory)
 			if failSecond {
 				if !errors.Is(err, sentinel) || registry != nil || closeAll != nil {
 					t.Fatalf("failed composition escaped: %v", err)
@@ -80,6 +85,10 @@ func TestComposeConnectionsIsolatesCredentialsAndCleansUp(t *testing.T) {
 			} else {
 				if err != nil || !reflect.DeepEqual(registry.Connections(), []string{"first", "second"}) {
 					t.Fatalf("composition failed: %v", err)
+				}
+				catalog := registry.Catalog()
+				if len(catalog) != 2 || catalog[0].ConnectionID != "first" || catalog[1].ConnectionID != "second" || catalog[1].ContextTokens != 120 {
+					t.Fatal("reviewed catalog lost during composition")
 				}
 				if err := closeAll(); err != nil {
 					t.Fatal(err)

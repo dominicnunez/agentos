@@ -21,6 +21,27 @@ func validateConnectionBudgetAgreement(ctx context.Context, tx *sql.Tx, candidat
 	if budget != nil && *budget != *candidate.OrganizationBudget {
 		return fmt.Errorf("active connections disagree on organization inference budget")
 	}
+	rows, err := tx.QueryContext(ctx, `SELECT body FROM inference_policies WHERE organization_id=? AND connection_id<>? AND active=1`, candidate.OrganizationID, candidate.ConnectionID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var body []byte
+		if err := rows.Scan(&body); err != nil {
+			return err
+		}
+		var active inference.Policy
+		if err := decodeExactJSONBytes(body, &active); err != nil {
+			return err
+		}
+		if active.Version == inference.ConnectionPolicyVersion && !inference.SameRoutePolicy(active.Routing, candidate.Routing) {
+			return fmt.Errorf("active connections disagree on organization routing policy")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -112,7 +133,7 @@ func enforceOrganizationBudget(ctx context.Context, tx *sql.Tx, organizationID s
 		return fmt.Errorf("iterate shared inference budget use: %w", err)
 	}
 	if !budget.Allows(active, tokens, chargedCost, input, output, cost) {
-		return fmt.Errorf("organization inference budget exhausted")
+		return inference.ErrOrganizationBudgetExhausted
 	}
 	return nil
 }

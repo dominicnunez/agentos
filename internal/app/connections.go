@@ -1,25 +1,33 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"github.com/dominicnunez/agentos/internal/assignment"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/inference"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 	"github.com/dominicnunez/agentos/internal/planning"
 	"github.com/dominicnunez/agentos/internal/projections"
 )
 
 // TaskConnectionRouting is trusted installation policy keyed by exact planned
-// task keys. It selects accounts only; capability and budget checks still apply.
+// task keys. Requirements enable broker selection; per-task entries are complete
+// requirements, and explicit account rules remain hard constraints. Without
+// requirements, the existing explicit routing contract applies.
 type TaskConnectionRouting struct {
-	Default   string
-	ByTaskKey map[string]string
+	Default          string
+	ByTaskKey        map[string]string
+	Requirements     *modelinput.RouteRequirements
+	TaskRequirements map[string]modelinput.RouteRequirements
 }
 
 // NewWithConnections composes all configured guarded accounts. The default is
-// used for new assignments; an existing task always resolves its pinned profile.
+// preferred for broker assignments unless requirements provide preferences.
+// Without requirements it is selected directly. Existing tasks retain their
+// pinned profiles and requirements.
 func NewWithConnections(g *events.Gateway, registry *inference.ConnectionRegistry, routing TaskConnectionRouting, planner planning.Planner) (*Service, error) {
 	if g == nil || planner == nil {
 		return nil, fmt.Errorf("gateway and planner are required")
@@ -52,6 +60,41 @@ func NewWithConnections(g *events.Gateway, registry *inference.ConnectionRegistr
 	service := NewWithModelAndPlanner(g, model, planner)
 	service.agentRoutes = routes
 	service.taskConnections = taskConnections
+	service.connectionRegistry = registry
+	service.taskRouting = modelinput.CloneRouteRequirements(routing.Requirements)
+	service.taskRoutingRules = make(map[string]modelinput.RouteRequirements, len(routing.TaskRequirements))
+	if len(routing.TaskRequirements) > 1024 {
+		return nil, fmt.Errorf("too many task requirement rules")
+	}
+	validate := func(requirements modelinput.RouteRequirements) error {
+		if _, err := requirements.Canonical(); err != nil {
+			return err
+		}
+		ids := append([]string(nil), requirements.PreferredConnections...)
+		if requirements.ConnectionID != "" {
+			ids = append(ids, requirements.ConnectionID)
+		}
+		for _, id := range ids {
+			if _, err := registry.Adapter(id); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if service.taskRouting != nil {
+		if err := validate(*service.taskRouting); err != nil {
+			return nil, err
+		}
+	}
+	for key, requirements := range routing.TaskRequirements {
+		if !planning.ValidTaskKey(key) {
+			return nil, fmt.Errorf("task requirement rule key is invalid")
+		}
+		if err := validate(requirements); err != nil {
+			return nil, err
+		}
+		service.taskRoutingRules[key] = requirements.Clone()
+	}
 	return service, nil
 }
 
@@ -77,22 +120,53 @@ func (s *Service) resolveAssigned(snapshot projections.Snapshot, organizationID 
 	return assignment.ResolveAssigned(assignmentRoster(snapshot), task, requirement)
 }
 
-func (s *Service) plannedAssignmentRequirement(organizationID core.ID, task core.PlanTask) (assignment.Requirement, error) {
+type plannedAssignment struct {
+	RoutingDecision *modelinput.RouteDecision
+	Requirement     assignment.Requirement
+	Routing         *modelinput.RouteRequirements
+}
+
+func (s *Service) plannedAssignmentRoute(ctx context.Context, organizationID core.ID, task core.PlanTask) (plannedAssignment, error) {
 	requirement := s.assignmentRequirement(organizationID, task.ExecutionKind)
 	if task.ExecutionKind != core.ExecutionAgent || s.agentRoutes == nil {
-		return requirement, nil
+		return plannedAssignment{Requirement: requirement}, nil
 	}
 	connection := s.agentConnection
+	explicit, hasExplicit := s.taskConnections[task.Key]
 	if selected, ok := s.taskConnections[task.Key]; ok {
 		connection = selected
 	}
+	constraints := modelinput.CloneRouteRequirements(s.taskRouting)
+	var decision *modelinput.RouteDecision
+	if specific, ok := s.taskRoutingRules[task.Key]; ok {
+		constraints = modelinput.CloneRouteRequirements(&specific)
+	}
+	if constraints != nil {
+		if constraints.OrganizationID != string(organizationID) {
+			return plannedAssignment{}, fmt.Errorf("task routing requirements belong to another organization")
+		}
+		if hasExplicit {
+			if constraints.ConnectionID != "" && constraints.ConnectionID != explicit {
+				return plannedAssignment{}, fmt.Errorf("task connection conflicts with routing requirements")
+			}
+			constraints.ConnectionID = explicit
+		} else if len(constraints.PreferredConnections) == 0 {
+			constraints.PreferredConnections = []string{connection}
+		}
+		selected, err := s.connectionRegistry.Select(ctx, *constraints)
+		if err != nil {
+			return plannedAssignment{}, err
+		}
+		connection = selected.ConnectionID
+		decision = modelinput.CloneRouteDecision(&selected.Decision)
+	}
 	route, ok := s.agentRoutes[connection]
 	if !ok {
-		return assignment.Requirement{}, fmt.Errorf("planned task connection is not configured")
+		return plannedAssignment{}, fmt.Errorf("planned task connection is not configured")
 	}
 	descriptor := route.Descriptor()
 	requirement.ConnectionID = connection
 	requirement.ModelProvider, requirement.Model = descriptor.Provider, descriptor.Model
 	requirement.ExecutionProfileVersion = descriptor.ExecutionProfileVersion
-	return requirement, nil
+	return plannedAssignment{Requirement: requirement, Routing: constraints, RoutingDecision: decision}, nil
 }

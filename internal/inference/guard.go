@@ -55,6 +55,8 @@ type Pricing struct {
 // values. Metered prices are operator-reviewed inputs and expire independently
 // from the authorization itself.
 type Policy struct {
+	Routing                   *RoutePolicy        `json:"routing,omitempty"`
+	Catalog                   *CatalogDefinition  `json:"catalog,omitempty"`
 	Version                   int                 `json:"version"`
 	ConnectionID              string              `json:"connection_id,omitempty"`
 	OrganizationBudget        *OrganizationBudget `json:"organization_budget,omitempty"`
@@ -117,6 +119,22 @@ func (p Policy) Validate() error {
 		}
 	} else if p.Pricing != nil {
 		return fmt.Errorf("non-metered inference cannot carry monetary pricing")
+	}
+	if p.Catalog != nil {
+		if p.Version != ConnectionPolicyVersion {
+			return fmt.Errorf("catalog requires a named connection policy")
+		}
+		if _, err := p.Catalog.validateForPolicy(p); err != nil {
+			return err
+		}
+		if p.Routing == nil {
+			return fmt.Errorf("catalog requires reviewed organization routing policy")
+		}
+	}
+	if p.Routing != nil {
+		if p.Version != ConnectionPolicyVersion || p.Routing.Validate() != nil || p.Routing.OrganizationID != p.OrganizationID {
+			return fmt.Errorf("routing policy does not match account authorization")
+		}
 	}
 	return nil
 }
@@ -182,16 +200,29 @@ func tokenCostNanoUSD(tokens, pricePerMillion int64) (int64, error) {
 }
 
 type Scope struct {
-	OrganizationID string
-	Purpose        Purpose
-	RequestID      string
-	IntentID       string
-	TaskID         string
-	ExecutionID    string
-	CorrelationID  string
+	RoutingDecision *modelinput.RouteDecision
+	Routing         *modelinput.RouteRequirements
+	OrganizationID  string
+	Purpose         Purpose
+	RequestID       string
+	IntentID        string
+	TaskID          string
+	ExecutionID     string
+	CorrelationID   string
 }
 
 func (s Scope) Validate() error {
+	if s.RoutingDecision != nil && (s.Routing == nil || s.RoutingDecision.ValidateFor(*s.Routing) != nil || s.RoutingDecision.SnapshotSequence <= 0) {
+		return fmt.Errorf("inference routing decision lacks valid requirements or a ledger snapshot")
+	}
+	if s.Routing != nil {
+		if _, err := s.Routing.Canonical(); err != nil {
+			return err
+		}
+		if s.Routing.OrganizationID != s.OrganizationID {
+			return fmt.Errorf("routing requirements belong to another organization")
+		}
+	}
 	if !validValue(s.OrganizationID) || !validValue(s.RequestID) || !validValue(s.ExecutionID) || !validValue(s.CorrelationID) {
 		return fmt.Errorf("inference request scope is incomplete")
 	}
@@ -217,7 +248,7 @@ func WithScope(ctx context.Context, scope Scope) (context.Context, error) {
 	if err != nil {
 		return nil, err
 	}
-	return context.WithValue(ctx, scopeKey{}, scope), nil
+	return context.WithValue(ctx, scopeKey{}, cloneScope(scope)), nil
 }
 
 func scopeFromContext(ctx context.Context) (Scope, error) {
@@ -228,7 +259,16 @@ func scopeFromContext(ctx context.Context) (Scope, error) {
 	if !ok {
 		return Scope{}, fmt.Errorf("durable inference scope is missing")
 	}
-	return scope, scope.Validate()
+	return cloneScope(scope), scope.Validate()
+}
+
+func cloneScope(scope Scope) Scope {
+	scope.RoutingDecision = modelinput.CloneRouteDecision(scope.RoutingDecision)
+	if scope.Routing != nil {
+		routing := scope.Routing.Clone()
+		scope.Routing = &routing
+	}
+	return scope
 }
 
 type InferenceRequest struct {

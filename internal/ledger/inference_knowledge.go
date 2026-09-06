@@ -9,6 +9,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/inference"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 )
 
 // validateInferenceKnowledge runs under the reservation transaction. Neither
@@ -58,10 +59,13 @@ func validateInferenceKnowledge(ctx context.Context, tx *sql.Tx, request inferen
 			return fmt.Errorf("task inference manifest is invalid")
 		}
 		manifestFound = true
+		if decision := manifest.RoutingDecision; decision != nil && (decision.SnapshotSequence <= 0 || decision.SnapshotSequence >= event.Sequence) {
+			return fmt.Errorf("task routing decision does not precede its manifest")
+		}
 	}
 	if !manifestFound || manifest.ContextBuilderVersion != "v5" || manifest.ExecutionID != core.ID(request.Scope.ExecutionID) ||
 		manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID || manifest.ExecutionInputSHA256 != request.PromptSHA256 ||
-		manifest.ConnectionID != request.ConnectionID || manifest.Provider != request.Descriptor.Provider || manifest.Model != request.Descriptor.Model ||
+		!modelinput.SameRouteRequirements(manifest.Routing, request.Scope.Routing) || !modelinput.SameRouteDecision(manifest.RoutingDecision, request.Scope.RoutingDecision) || manifest.ConnectionID != request.ConnectionID || manifest.Provider != request.Descriptor.Provider || manifest.Model != request.Descriptor.Model ||
 		manifest.ExecutionProfileVersion != request.Descriptor.ExecutionProfileVersion || latestSequence == math.MaxInt64 {
 		return fmt.Errorf("task inference request does not match its current execution manifest")
 	}

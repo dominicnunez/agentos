@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"github.com/dominicnunez/agentos/internal/inference"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 	"os"
 	"reflect"
 	"strings"
@@ -18,12 +19,48 @@ func TestRoutedConfigRoundTripAndInvalidRoutes(t *testing.T) {
 	first := testOpenAIProvider(config, "gpt-test-2026-01-01")
 	first.InferencePolicy.Version, first.InferencePolicy.ConnectionID = inference.ConnectionPolicyVersion, "first"
 	first.InferencePolicy.OrganizationBudget = &inference.OrganizationBudget{WindowDurationSeconds: 3600, MaxTokensPerWindow: 100000, MaxCostNanoUSDPerWindow: 100, MaxConcurrentRequests: 2}
+	first.InferencePolicy.Routing = &inference.RoutePolicy{OrganizationID: first.InferencePolicy.OrganizationID, Locality: inference.CloudAllowed, DataClasses: []string{"internal"}}
+	first.InferencePolicy.Catalog = &inference.CatalogDefinition{Capabilities: []inference.Capability{inference.Text}, ContextTokens: 100000, OutputTokens: 20000, DataClasses: []string{"internal"}, ValidUntil: first.InferencePolicy.AuthorizationExpiresAt}
 	second := first
 	second.SecretRef, second.InferencePolicy.ConnectionID = "second-key", "second"
 	config.Providers = []Provider{first, second}
 	config.Routing = &ProviderRouting{TaskDefault: "first", Planning: "second", Normalization: "second", TaskConnections: map[string]string{"research": "second"}}
+	config.Routing.Requirements = &modelinput.RouteRequirements{OrganizationID: first.InferencePolicy.OrganizationID, Capabilities: []modelinput.Capability{modelinput.Text}, InputTokens: 1000, OutputTokens: 100, Locality: modelinput.CloudAllowed, DataClass: "internal"}
+	research := config.Routing.Requirements.Clone()
+	research.PreferredConnections = []string{"second"}
+	config.Routing.TaskRequirements = map[string]modelinput.RouteRequirements{"research": research}
+	config.Routing.PlanningRequirements = modelinput.CloneRouteRequirements(&research)
+	config.Routing.NormalizationRequirements = modelinput.CloneRouteRequirements(config.Routing.Requirements)
 	if err := config.ValidateReady(); err != nil {
 		t.Fatal(err)
+	}
+	for _, mutate := range []func(*ProviderRouting){
+		func(r *ProviderRouting) { r.Requirements = nil },
+		func(r *ProviderRouting) { r.PlanningRequirements = nil },
+		func(r *ProviderRouting) { r.NormalizationRequirements = nil },
+		func(r *ProviderRouting) { r.PlanningRequirements.OrganizationID = "other" },
+		func(r *ProviderRouting) { r.NormalizationRequirements.Locality = "unknown" },
+	} {
+		changed := *config.Routing
+		changed.PlanningRequirements = modelinput.CloneRouteRequirements(config.Routing.PlanningRequirements)
+		changed.NormalizationRequirements = modelinput.CloneRouteRequirements(config.Routing.NormalizationRequirements)
+		mutate(&changed)
+		if err := changed.Validate(config.Providers); err == nil {
+			t.Fatal("missing or invalid purpose requirements passed readiness")
+		}
+	}
+	for _, mutate := range []func(*inference.CatalogDefinition){
+		func(c *inference.CatalogDefinition) { c.Local = true },
+		func(c *inference.CatalogDefinition) { c.ValidUntil = c.ValidUntil.Add(time.Hour) },
+		func(c *inference.CatalogDefinition) { c.Capabilities = []inference.Capability{inference.Vision} },
+	} {
+		changed := first
+		catalog := *first.InferencePolicy.Catalog
+		mutate(&catalog)
+		changed.InferencePolicy.Catalog = &catalog
+		if err := changed.Validate(); err == nil {
+			t.Fatal("invalid catalog metadata passed readiness")
+		}
 	}
 	if err := os.MkdirAll(paths.ConfigDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -40,6 +77,27 @@ func TestRoutedConfigRoundTripAndInvalidRoutes(t *testing.T) {
 		changed.TaskConnections = map[string]string{key: "second"}
 		if err := changed.Validate(config.Providers); err == nil {
 			t.Fatalf("invalid key %q accepted", key)
+		}
+		changed.TaskConnections = nil
+		changed.TaskRequirements = map[string]modelinput.RouteRequirements{key: research}
+		if err := changed.Validate(config.Providers); err == nil {
+			t.Fatalf("invalid requirement key %q accepted", key)
+		}
+	}
+	for _, mutate := range []func(*modelinput.RouteRequirements){
+		func(r *modelinput.RouteRequirements) { r.OrganizationID = "other" },
+		func(r *modelinput.RouteRequirements) { r.InputTokens = 0 },
+		func(r *modelinput.RouteRequirements) { r.Locality = "unknown" },
+		func(r *modelinput.RouteRequirements) { r.ConnectionID = "missing" },
+		func(r *modelinput.RouteRequirements) { r.PreferredConnections = []string{"missing"} },
+		func(r *modelinput.RouteRequirements) { r.ConnectionID = "first" },
+	} {
+		changed := *config.Routing
+		requirements := research.Clone()
+		mutate(&requirements)
+		changed.TaskRequirements = map[string]modelinput.RouteRequirements{"research": requirements}
+		if err := changed.Validate(config.Providers); err == nil {
+			t.Fatal("invalid or conflicting task requirements passed readiness")
 		}
 	}
 	config.Routing = nil

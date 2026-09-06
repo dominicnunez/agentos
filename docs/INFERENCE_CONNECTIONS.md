@@ -1,11 +1,11 @@
 # Inference connections and shared budgets
 
 The runtime supports multiple configured provider connections at once. Explicit
-installation rules select accounts for task execution, planning, and intent
-normalization. Tasks pin immutable execution profiles; changing an Agent's current
+installation rules or a policy-constrained broker select accounts for task execution,
+planning, and intent normalization. Tasks pin immutable execution profiles; changing an Agent's current
 profile or the installation default cannot redirect an already assigned task.
 The supported adapters remain OpenAI API and Codex subscription. This is not a
-claim of complete Hermes coverage or automatic capability-aware model selection.
+claim of complete Hermes coverage or support for advanced model transports.
 
 ## Installation configuration
 
@@ -45,9 +45,9 @@ All policies in an applied set must share organization, author, authorization ti
 and organization limits. Changing accounts or routes never resets accumulated usage.
 
 Task rules match exact planned task keys (lowercase letters/digits/hyphens, up to
-64 characters). A key without a rule uses the explicit task default. A rule cannot
-select an absent account. This is configuration-based selection, not fallback or
-permission to weaken task, completion, confidentiality, or budget requirements.
+64 characters). Without routing requirements, a key without a rule uses the explicit
+task default. A rule cannot select an absent account or weaken task, completion,
+confidentiality, or budget requirements.
 
 Provision every referenced encrypted credential before applying the configuration.
 Codex connections need distinct mutable sealed credential stores. After editing
@@ -64,6 +64,72 @@ Every adapter receives a credential source limited to its configured reference a
 a private runtime directory under `connections/<connection_id>`. Partial startup
 closes initialized adapters in reverse order. Doctor and generated systemd units
 cover every configured account.
+
+## Selection from task and purpose requirements
+
+An account can participate in broker selection when its version-2 inference policy
+includes a reviewed `catalog` and organization `routing` policy. The catalog declares
+`capabilities`, `local`, `context_tokens`, `output_tokens`, `data_classes`, and
+`valid_until`. Identity comes from the enclosing policy. Expiration must fall within
+the policy authorization period. Zero capacity means unknown and cannot satisfy a
+positive token requirement. Current adapters may advertise only `text`; configuration
+cannot activate vision, tools, streaming, or other unimplemented transports.
+
+The policy's `routing` object contains `organization_id`, `locality`, approved
+`data_classes`, and optional `allowed_providers` and `denied_providers`. Every active
+named account must agree on these organization rules. Change them through the same
+atomic policy-set activation used for shared budgets. Both admission and historical
+replay enforce agreement.
+
+Add `task_requirements`, `planning_requirements`, and `normalization_requirements`
+to `provider_routing` to select accounts independently for each purpose. Each is a
+complete requirements object, for example:
+
+```json
+{
+  "organization_id": "organization-1",
+  "capabilities": ["text"],
+  "input_tokens": 8000,
+  "output_tokens": 1000,
+  "locality": "CLOUD_ALLOWED",
+  "data_class": "internal",
+  "preferred_connections": ["auxiliary", "primary"]
+}
+```
+
+Use the installation's actual organization and reviewed token/classification limits.
+Optional `connection_id` is a hard account constraint; provider allow/deny lists and
+`max_cost_nano_usd` further restrict eligibility. `LOCAL_ONLY` prohibits cloud accounts
+regardless of preferences. Local catalog metadata does not establish model identity
+or confinement, or enable an unsupported local provider setup.
+
+`task_requirements_by_key` maps exact task keys to complete requirements, replacing
+the default requirements for those tasks. Explicit `task_connections` remain hard
+constraints and conflicting account choices fail. When no preferences are supplied,
+the configured task, planning, or normalization account becomes the first preference.
+Preferences apply only after all eligibility checks. Catalog-enabled purposes must
+have requirements; startup rejects missing requirements.
+
+The registry selects from a verified ledger snapshot of active policy and account
+and organization budgets. It rejects stale catalog metadata, unsupported capabilities,
+prohibited destinations/classifications, insufficient context/output capacity, and
+unaffordable reservations. Ties use connection ID order. Selection does not reserve
+capacity or call a provider; dispatch performs atomic admission again. A budget or
+policy change can therefore deny a previously selected route.
+
+Task selection occurs once before preparing its Agent and saving the Task DAG.
+Saved tasks retain their constraints across configuration changes. Planning and
+normalization select an adapter per attempt before recording their context. Execution
+manifests and reservations carry the same requirements; admission and replay compare
+them. A failed provider call does not trigger an implicit retry on another account.
+
+Broker decisions also record the selected policy fingerprint, ledger cutoff, ordering
+reason and reservation estimate. Replay reconstructs policies and charges at that
+cutoff and checks the selected account's eligibility, including organization freeze,
+account concurrency and shared budgets. A later refund or policy revision cannot
+justify an earlier decision. This check establishes selected-account eligibility;
+it does not rank accounts absent from the runtime's configured registry or reproduce
+the recorded count of rejected candidates.
 
 ## Connection identity
 
@@ -82,7 +148,10 @@ metadata nor resolves secrets.
 ```mermaid
 flowchart LR
     Composition[Trusted runtime composition] --> Registry[Connection registry]
-    Registry --> Guard[Guarded adapter for exact connection]
+    Requirements[Task or purpose requirements] --> Selection[Verified ledger selection]
+    Registry --> Selection
+    Selection --> Context[Save task or attempt context]
+    Context --> Guard[Guarded adapter for exact connection]
     Guard --> Admission[Ledger reservation]
     Admission --> Limits[Route and organization limits]
     Limits --> Call[Bound provider adapter]
@@ -138,18 +207,16 @@ the end of history. Recovery validates accounting before marking calls uncertain
 It does not repeat provider calls.
 
 Planning and normalization reservations bind the exact runtime context event when
-one exists. Admission and replay verify its account, model identity, and execution
+one exists. Admission and replay verify its account, model identity, routing requirements, and execution
 scope. Named connections cannot drop or substitute that reference during replay.
 Historical singleton contexts without references and standalone accounting requests
 without application context retain their earlier accounting contract.
 
 ## Remaining integration
 
-Capability and context filtering,
-destination and locality restrictions, constraint-preserving fallback, additional
-provider adapters, and their setup flows remain separate implementation work.
-The registry currently records connection identity and adapters, not a complete
-capability catalog. Shared admission performs snapshot validation; its cost on long
+Constraint-preserving fallback, health/latency-aware selection, richer selection and
+rejection audit reasons, advanced model transports, additional provider adapters,
+and their setup flows remain implementation work. Shared admission performs snapshot validation; its cost on long
 histories requires further performance assessment at larger deployment scales.
 
 Tests cover distinct and identical-model accounts, simultaneous reservations,

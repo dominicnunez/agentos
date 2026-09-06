@@ -3,7 +3,9 @@ package ledger
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"sort"
 	"time"
@@ -40,7 +42,10 @@ func ValidateInferenceAdmissions(ctx context.Context, db *sql.DB) error {
 	return tx.Commit()
 }
 
-func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx) error {
+func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx, pending ...inference.InferenceRequest) error {
+	if len(pending) > 1 {
+		return fmt.Errorf("only one pending inference request can be validated")
+	}
 	var storageVersion int
 	if err := tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&storageVersion); err != nil {
 		return fmt.Errorf("read inference storage version: %w", err)
@@ -136,6 +141,7 @@ func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx) error 
 	latestActivation := make(map[connectionKey]int64)
 	activeActivation := make(map[connectionKey]int64)
 	activeOrganizationBudgets := make(map[string]inference.OrganizationBudget)
+	activeRouting := make(map[string]*inference.RoutePolicy)
 	connectionHistory := make(map[connectionKey][]inferencePolicyRevision)
 	rows, err := tx.QueryContext(ctx, `SELECT organization_id,policy_fingerprint,body,activation_event_id,activated_at,active,`+connectionColumn+` FROM inference_policies ORDER BY organization_id,activated_at,policy_fingerprint`)
 	if err != nil {
@@ -181,6 +187,12 @@ func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx) error 
 		usedEvents[activationEventID] = struct{}{}
 		activationPolicies[activationEventID] = policy
 		if active == 1 {
+			if policy.Version == inference.ConnectionPolicyVersion {
+				if prior, exists := activeRouting[organizationID]; exists && !inference.SameRoutePolicy(prior, policy.Routing) {
+					return fmt.Errorf("active connections disagree on organization routing policy")
+				}
+				activeRouting[organizationID] = policy.Routing
+			}
 			activeByConnection[connection]++
 			activeActivation[connection] = activation.Sequence
 			if policy.OrganizationBudget != nil {
@@ -266,7 +278,25 @@ func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx) error 
 			return fmt.Errorf("inference admission event is not materialized by durable accounting")
 		}
 	}
-	return validateOrganizationBudgetHistory(stream, activationPolicies)
+	if err := validateOrganizationBudgetHistory(stream, activationPolicies); err != nil {
+		return err
+	}
+	for _, request := range pending {
+		if request.Scope.RoutingDecision == nil {
+			continue
+		}
+		if len(stream) == 0 || stream[len(stream)-1].Sequence == math.MaxInt64 {
+			return fmt.Errorf("routing snapshot lacks a usable ledger cutoff")
+		}
+		// Include a pending library request even when it has no application
+		// context. This synthetic observer is never persisted or charged.
+		payload, err := json.Marshal(events.InferenceReservedPayload{Routing: request.Scope.Routing, RoutingDecision: request.Scope.RoutingDecision})
+		if err != nil {
+			return err
+		}
+		stream = append(stream, events.Event{OrganizationID: request.Scope.OrganizationID, EventType: "INFERENCE_RESERVED", Sequence: stream[len(stream)-1].Sequence + 1, Payload: payload})
+	}
+	return validateRoutingDecisionHistory(stream, activationPolicies, byOrganization)
 }
 
 type inferenceValidationRow struct {
@@ -338,8 +368,22 @@ func validateInferenceReservationEvent(event events.Event, row inferenceValidati
 	} else if row.connectionID != "" {
 		return fmt.Errorf("connection reservation lacks its admission time")
 	}
+	at, _ := time.Parse(time.RFC3339Nano, payload.AdmittedAt)
+	request := inference.InferenceRequest{
+		ConnectionID: row.connectionID, PromptSHA256: row.promptSHA256,
+		Scope: inference.Scope{OrganizationID: row.organizationID, Purpose: inference.Purpose(row.purpose), RequestID: row.requestID,
+			IntentID: row.intentID, TaskID: row.taskID, ExecutionID: row.executionID, CorrelationID: row.correlationID, Routing: payload.Routing, RoutingDecision: payload.RoutingDecision},
+	}
+	request.Descriptor.Provider = row.provider
+	request.Descriptor.Model = row.model
+	request.Descriptor.ExecutionProfileVersion = row.profile
+	if err := inference.ValidateRequestRouting(at, policy, request); err != nil {
+		return fmt.Errorf("inference reservation routing is invalid: %w", err)
+	}
 	expected := events.InferenceReservedPayload{
-		AdmittedAt: payload.AdmittedAt,
+		Routing:         payload.Routing,
+		RoutingDecision: payload.RoutingDecision,
+		AdmittedAt:      payload.AdmittedAt,
 		// The execution reference is independently verified against its historical
 		// boundary by validateReservedExecutionKnowledge before accounting checks.
 		ConnectionID: row.connectionID, ExecutionManifestRef: payload.ExecutionManifestRef,

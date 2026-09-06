@@ -7,6 +7,7 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/inference"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 )
 
 func auxiliaryInferencePurpose(purpose string) bool {
@@ -44,6 +45,8 @@ func validateAuxiliaryInferenceContext(reservation events.Event, payload events.
 		return fmt.Errorf("auxiliary inference context scope is invalid")
 	}
 	var connection, provider, model, profile string
+	var routing *modelinput.RouteRequirements
+	var decision *modelinput.RouteDecision
 	switch payload.Purpose {
 	case string(inference.PurposePlanning):
 		var context events.PlanningContextPayload
@@ -51,12 +54,16 @@ func validateAuxiliaryInferenceContext(reservation events.Event, payload events.
 			return fmt.Errorf("planning inference context is invalid")
 		}
 		connection, provider, model, profile = context.ConnectionID, context.Provider, context.Model, context.ExecutionProfileVersion
+		routing = context.Routing
+		decision = context.RoutingDecision
 	case string(inference.PurposeIntentNormalization):
 		var context events.IntentNormalizationContextPayload
 		if manifest.EventType != "INTENT_NORMALIZATION_CONTEXT_MANIFESTED" || decodeExactJSONBytes(manifest.Payload, &context) != nil {
 			return fmt.Errorf("normalization inference context is invalid")
 		}
 		connection, provider, model, profile = context.ConnectionID, context.Provider, context.Model, context.ExecutionProfileVersion
+		routing = context.Routing
+		decision = context.RoutingDecision
 	default:
 		return fmt.Errorf("auxiliary inference purpose is invalid")
 	}
@@ -67,6 +74,12 @@ func validateAuxiliaryInferenceContext(reservation events.Event, payload events.
 	}
 	if connection != payload.ConnectionID || provider != payload.Provider || model != payload.Model || profile != payload.ExecutionProfileVersion {
 		return fmt.Errorf("auxiliary inference model does not match its admitted context")
+	}
+	if !modelinput.SameRouteRequirements(routing, payload.Routing) || !modelinput.SameRouteDecision(decision, payload.RoutingDecision) {
+		return fmt.Errorf("auxiliary inference routing constraints differ from admitted context")
+	}
+	if decision != nil && (decision.SnapshotSequence <= 0 || decision.SnapshotSequence >= manifest.Sequence) {
+		return fmt.Errorf("auxiliary routing decision does not precede its context")
 	}
 	return nil
 }

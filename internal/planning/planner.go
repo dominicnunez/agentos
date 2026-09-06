@@ -77,6 +77,13 @@ type Planner interface {
 	Build(context.Context, Input, core.ExecutionKind) (Result, error)
 }
 
+// PlannerSelector binds a model planner to one eligible account before its
+// context is recorded. Selection is per attempt and must not mutate a shared
+// planner used by another request.
+type PlannerSelector interface {
+	SelectPlanner(context.Context, string) (Planner, *modelinput.RouteBinding, error)
+}
+
 // SingleTaskPlanner is the deterministic package/test default. Production
 // composition installs ModelPlanner, which still keeps exact known work on
 // this same no-inference path.

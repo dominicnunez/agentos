@@ -10,6 +10,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/inference"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 )
 
 type inferenceExecutionHistory struct {
@@ -159,11 +160,14 @@ func (h *inferenceExecutionHistory) validateReservation(ctx context.Context, tx 
 		}
 		return fmt.Errorf("inference manifest version is unsupported")
 	}
+	if decision := manifest.RoutingDecision; decision != nil && (decision.SnapshotSequence <= 0 || decision.SnapshotSequence >= manifestEvent.Sequence) {
+		return fmt.Errorf("task routing decision does not precede its manifest")
+	}
 	if payload.ExecutionManifestRef != manifestEvent.EventID || payload.Purpose != string(inference.PurposeTaskExecution) ||
 		payload.RequestID != reservation.SourceExecutionID || manifestEvent.SourceActorID != "runtime" ||
 		manifestEvent.TaskID != reservation.TaskID || manifestEvent.CorrelationID != reservation.CorrelationID ||
 		manifest.ExecutionID != core.ID(reservation.SourceExecutionID) || manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID ||
-		manifest.ConnectionID != payload.ConnectionID || manifest.ExecutionInputSHA256 != payload.PromptSHA256 || manifest.Provider != payload.Provider || manifest.Model != payload.Model ||
+		!modelinput.SameRouteRequirements(manifest.Routing, payload.Routing) || !modelinput.SameRouteDecision(manifest.RoutingDecision, payload.RoutingDecision) || manifest.ConnectionID != payload.ConnectionID || manifest.ExecutionInputSHA256 != payload.PromptSHA256 || manifest.Provider != payload.Provider || manifest.Model != payload.Model ||
 		manifest.ExecutionProfileVersion != payload.ExecutionProfileVersion || taskEvent.EventType != "EXECUTION_STARTED" ||
 		task.Status != core.TaskRunning || task.ModelInferencePolicy == core.InferenceForbidden ||
 		manifestEvent.Sequence <= taskEvent.Sequence || reservation.SourceExecutionID != fmt.Sprintf("execution-%s-v%d", task.ID, taskRecord.Version) {

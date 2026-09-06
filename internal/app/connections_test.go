@@ -74,6 +74,11 @@ func (m *routedCountingModel) CompleteRequest(ctx context.Context, request model
 	return m.FakeModel.CompleteRequest(ctx, request)
 }
 func TestServiceRoutesTwoPlannedTasksThroughDistinctAccounts(t *testing.T) {
+	t.Run("explicit", func(t *testing.T) { testServiceRoutesTwoAccounts(t, false) })
+	t.Run("broker", func(t *testing.T) { testServiceRoutesTwoAccounts(t, true) })
+}
+
+func testServiceRoutesTwoAccounts(t *testing.T, broker bool) {
 	store, err := ledger.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -89,17 +94,72 @@ func TestServiceRoutesTwoPlannedTasksThroughDistinctAccounts(t *testing.T) {
 	now := time.Now().UTC()
 	budget := &inference.OrganizationBudget{WindowDurationSeconds: 3600, MaxTokensPerWindow: 100000, MaxConcurrentRequests: 2}
 	policy := inference.Policy{Version: inference.ConnectionPolicyVersion, ConnectionID: "first", OrganizationBudget: budget, OrganizationID: "org-1", Provider: "fake", Model: "fake-model/v1", ExecutionProfileVersion: "v1-fake", Mode: inference.Local, MaxInputTokensPerRequest: 10000, MaxOutputTokensPerRequest: 1000, MaxTokensPerWindow: 100000, WindowDurationSeconds: 3600, MaxConcurrentRequests: 1, MaxAttemptsPerRequest: 1, AuthorizedBy: "operator", AuthorizedAt: now.Add(-time.Minute), AuthorizationExpiresAt: now.Add(time.Hour)}
+	if broker {
+		policy.Routing = &inference.RoutePolicy{OrganizationID: "org-1", Locality: inference.LocalOnly, DataClasses: []string{"internal"}}
+		policy.Catalog = &inference.CatalogDefinition{Capabilities: []inference.Capability{inference.Text}, Local: true, ContextTokens: 11000, OutputTokens: 1000, DataClasses: []string{"internal"}, ValidUntil: policy.AuthorizationExpiresAt}
+	}
 	other := policy
 	other.ConnectionID = "second"
+	if broker {
+		firstMetadata, err := policy.Catalog.Metadata(policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		secondMetadata, err := other.Catalog.Metadata(other)
+		if err != nil {
+			t.Fatal(err)
+		}
+		registry, err = inference.NewConnectionRegistry(store, []inference.Connection{{ID: "first", Adapter: first, Metadata: &firstMetadata}, {ID: "second", Adapter: second, Metadata: &secondMetadata}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := store.ActivateInferencePolicies(t.Context(), []inference.Policy{policy, other}); err != nil {
 		t.Fatal(err)
 	}
 	rules := map[string]string{"second": "second"}
-	service, err := NewWithConnections(gateway, registry, TaskConnectionRouting{Default: "first", ByTaskKey: rules}, routedTaskPlanner{})
+	routing := TaskConnectionRouting{Default: "first", ByTaskKey: rules}
+	if broker {
+		routing.ByTaskKey = nil
+		routing.Requirements = &modelinput.RouteRequirements{OrganizationID: "org-1", Capabilities: []modelinput.Capability{modelinput.Text}, InputTokens: 10000, OutputTokens: 1000, Locality: modelinput.LocalOnly, DataClass: "internal"}
+		secondRequirements := routing.Requirements.Clone()
+		secondRequirements.PreferredConnections = []string{"second"}
+		routing.TaskRequirements = map[string]modelinput.RouteRequirements{"second": secondRequirements}
+	}
+	service, err := NewWithConnections(gateway, registry, routing, routedTaskPlanner{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if broker {
+		planned := core.PlanTask{Key: "root", ExecutionKind: core.ExecutionAgent}
+		if _, err := service.plannedAssignmentRoute(t.Context(), "other-org", planned); err == nil {
+			t.Fatal("task selection accepted another organization's requirements")
+		}
+		for _, mutate := range []func(*modelinput.RouteRequirements){
+			func(r *modelinput.RouteRequirements) { r.DataClass = "secret" },
+			func(r *modelinput.RouteRequirements) { r.Capabilities = []modelinput.Capability{modelinput.Vision} },
+			func(r *modelinput.RouteRequirements) { r.InputTokens = 11001 },
+			func(r *modelinput.RouteRequirements) { r.DeniedProviders = []string{"fake"} },
+		} {
+			requirements := routing.Requirements.Clone()
+			mutate(&requirements)
+			denied, err := NewWithConnections(gateway, registry, TaskConnectionRouting{Default: "first", Requirements: &requirements}, routedTaskPlanner{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := denied.plannedAssignmentRoute(t.Context(), "org-1", planned); err == nil {
+				t.Fatal("task selection weakened requirements to use the default account")
+			}
+		}
+		if first.calls.Load() != 0 || second.calls.Load() != 0 {
+			t.Fatal("task selection called a provider")
+		}
+	}
 	rules["second"] = "first"
+	if broker {
+		routing.Requirements.DataClass = "changed"
+		routing.TaskRequirements["second"].PreferredConnections[0] = "first"
+	}
 	inputs := []Submit{
 		confirmedGoalSubmit(t, t.Context(), gateway, "routed-tasks-a", "org-1", "goal-1", "prepare a governed result", core.ExecutionAgent),
 		confirmedGoalSubmit(t, t.Context(), gateway, "routed-tasks-b", "org-1", "goal-1", "prepare another governed result", core.ExecutionAgent),
@@ -118,6 +178,8 @@ func TestServiceRoutesTwoPlannedTasksThroughDistinctAccounts(t *testing.T) {
 			t.Fatal(completed.err)
 		}
 		manifests, usage := map[string]int{}, map[string]int{}
+		decisions := map[string]*modelinput.RouteDecision{}
+		reservationDecisions := 0
 		for _, event := range completed.result.Events {
 			switch event.EventType {
 			case "EXECUTION_CONTEXT_MANIFESTED":
@@ -125,7 +187,27 @@ func TestServiceRoutesTwoPlannedTasksThroughDistinctAccounts(t *testing.T) {
 				if err := json.Unmarshal(event.Payload, &payload); err != nil {
 					t.Fatal(err)
 				}
+				if broker && (payload.Routing == nil || payload.Routing.DataClass != "internal" || payload.Routing.Locality != modelinput.LocalOnly) {
+					t.Fatal("manifest lost authoritative task requirements")
+				}
+				if broker {
+					if payload.RoutingDecision == nil || payload.RoutingDecision.ValidateFor(*payload.Routing) != nil || payload.RoutingDecision.ConnectionID != payload.ConnectionID || payload.RoutingDecision.SnapshotSequence <= 0 || payload.RoutingDecision.SnapshotSequence >= event.Sequence {
+						t.Fatal("manifest lost original routing decision")
+					}
+					decisions[payload.ConnectionID] = payload.RoutingDecision
+				}
 				manifests[payload.ConnectionID]++
+			case "INFERENCE_RESERVED":
+				if broker {
+					var payload events.InferenceReservedPayload
+					if err := json.Unmarshal(event.Payload, &payload); err != nil {
+						t.Fatal(err)
+					}
+					if payload.RoutingDecision == nil || !modelinput.SameRouteDecision(decisions[payload.ConnectionID], payload.RoutingDecision) {
+						t.Fatal("reservation changed or removed task routing decision")
+					}
+					reservationDecisions++
+				}
 			case "INFERENCE_USAGE_RECORDED":
 				var payload events.InferenceUsageRecordedPayload
 				if err := json.Unmarshal(event.Payload, &payload); err != nil {
@@ -136,6 +218,9 @@ func TestServiceRoutesTwoPlannedTasksThroughDistinctAccounts(t *testing.T) {
 		}
 		if len(manifests) != 2 || manifests["first"] != 1 || manifests["second"] != 1 || len(usage) != 2 || usage["first"] != 1 || usage["second"] != 1 {
 			t.Fatalf("account attribution changed: manifests=%v usage=%v", manifests, usage)
+		}
+		if broker && reservationDecisions != 2 {
+			t.Fatal("task decisions were not reserved exactly once")
 		}
 	}
 	if first.calls.Load() != 2 || second.calls.Load() != 2 {

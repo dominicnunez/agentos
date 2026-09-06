@@ -3,15 +3,22 @@ package bootstrap
 import (
 	"fmt"
 	"github.com/dominicnunez/agentos/internal/inference"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 	"regexp"
 )
 
-// ProviderRouting explicitly selects configured accounts for each inference purpose.
+// ProviderRouting configures accounts and task requirements for inference purposes.
 type ProviderRouting struct {
 	TaskDefault     string            `json:"task_default"`
 	TaskConnections map[string]string `json:"task_connections,omitempty"`
 	Planning        string            `json:"planning"`
 	Normalization   string            `json:"normalization"`
+	// Requirements enable ledger-backed task selection. Task-specific entries
+	// supply complete requirements; explicit TaskConnections remain hard limits.
+	Requirements              *modelinput.RouteRequirements           `json:"task_requirements,omitempty"`
+	TaskRequirements          map[string]modelinput.RouteRequirements `json:"task_requirements_by_key,omitempty"`
+	PlanningRequirements      *modelinput.RouteRequirements           `json:"planning_requirements,omitempty"`
+	NormalizationRequirements *modelinput.RouteRequirements           `json:"normalization_requirements,omitempty"`
 }
 
 func (r *ProviderRouting) Validate(providers []Provider) error {
@@ -23,10 +30,12 @@ func (r *ProviderRouting) Validate(providers []Provider) error {
 	}
 	policies := make([]inference.Policy, len(providers))
 	ids := map[string]bool{}
+	catalogs := map[string]bool{}
 	stores := map[string]bool{}
 	for i, provider := range providers {
 		policies[i] = provider.InferencePolicy
 		ids[provider.InferencePolicy.ConnectionID] = true
+		catalogs[provider.InferencePolicy.ConnectionID] = provider.InferencePolicy.Catalog != nil
 		if provider.CodexCredential != "" {
 			if stores[provider.CodexCredential] {
 				return fmt.Errorf("connections cannot share a mutable Codex credential store")
@@ -42,12 +51,67 @@ func (r *ProviderRouting) Validate(providers []Provider) error {
 			return fmt.Errorf("every inference purpose requires a configured connection")
 		}
 	}
+	for _, purpose := range []struct {
+		connection   string
+		requirements *modelinput.RouteRequirements
+	}{{r.TaskDefault, r.Requirements}, {r.Planning, r.PlanningRequirements}, {r.Normalization, r.NormalizationRequirements}} {
+		if catalogs[purpose.connection] && purpose.requirements == nil {
+			return fmt.Errorf("catalog-enabled inference purposes require explicit routing requirements")
+		}
+	}
 	if len(r.TaskConnections) > 1024 {
 		return fmt.Errorf("too many task connection rules")
 	}
 	for key, id := range r.TaskConnections {
 		if !routingTaskKey.MatchString(key) || !ids[id] {
 			return fmt.Errorf("task route requires a valid task key and configured connection")
+		}
+	}
+	if len(r.TaskRequirements) > 1024 {
+		return fmt.Errorf("too many task requirement rules")
+	}
+	validateRequirements := func(requirements modelinput.RouteRequirements) error {
+		if _, err := requirements.Canonical(); err != nil {
+			return err
+		}
+		if requirements.OrganizationID != policies[0].OrganizationID {
+			return fmt.Errorf("task requirements must belong to the configured organization")
+		}
+		if requirements.ConnectionID != "" && !ids[requirements.ConnectionID] {
+			return fmt.Errorf("task requirements name an unconfigured connection")
+		}
+		for _, id := range requirements.PreferredConnections {
+			if !ids[id] {
+				return fmt.Errorf("task preference names an unconfigured connection")
+			}
+		}
+		return nil
+	}
+	for _, requirements := range []*modelinput.RouteRequirements{r.Requirements, r.PlanningRequirements, r.NormalizationRequirements} {
+		if requirements != nil {
+			if err := validateRequirements(*requirements); err != nil {
+				return err
+			}
+		}
+	}
+	for key, requirements := range r.TaskRequirements {
+		if !routingTaskKey.MatchString(key) {
+			return fmt.Errorf("task requirements require a valid task key")
+		}
+		if err := validateRequirements(requirements); err != nil {
+			return err
+		}
+	}
+	for key, connection := range r.TaskConnections {
+		requirements := r.Requirements
+		if specific, ok := r.TaskRequirements[key]; ok {
+			requirements = &specific
+		}
+		if catalogs[connection] && requirements == nil {
+			return fmt.Errorf("catalog-enabled task accounts require explicit routing requirements")
+		}
+		if requirements != nil && requirements.ConnectionID != "" && requirements.ConnectionID != connection {
+			return fmt.Errorf("task connection conflicts with routing requirements")
 		}
 	}
 	return nil

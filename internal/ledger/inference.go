@@ -197,6 +197,11 @@ func (l *SQLite) ReserveInference(ctx context.Context, request inference.Inferen
 	}
 	var reserved inference.Reservation
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		if request.Scope.RoutingDecision != nil {
+			if err := validateInferenceAdmissionsSnapshot(ctx, tx, request); err != nil {
+				return err
+			}
+		}
 		// Authorization, pricing, and window time are read only after the
 		// transaction is acquired so expiry cannot race admission.
 		now := l.nowUTC()
@@ -212,6 +217,9 @@ func (l *SQLite) ReserveInference(ctx context.Context, request inference.Inferen
 		}
 		policy, fingerprint, err := activeInferencePolicy(ctx, tx, request.Scope.OrganizationID, request.ConnectionID)
 		if err != nil {
+			return err
+		}
+		if err := inference.ValidateRequestRouting(now, policy, request); err != nil {
 			return err
 		}
 		var prior int
@@ -275,9 +283,11 @@ window_started_at,window_expires_at,created_at,updated_at,connection_id) VALUES(
 			return fmt.Errorf("reserve inference budget: %w", err)
 		}
 		payload := events.InferenceReservedPayload{
-			AdmittedAt:    now.Format(time.RFC3339Nano),
-			ConnectionID:  request.ConnectionID,
-			ReservationID: reserved.ID, RequestID: request.Scope.RequestID, Purpose: string(request.Scope.Purpose),
+			Routing:         request.Scope.Routing,
+			RoutingDecision: request.Scope.RoutingDecision,
+			AdmittedAt:      now.Format(time.RFC3339Nano),
+			ConnectionID:    request.ConnectionID,
+			ReservationID:   reserved.ID, RequestID: request.Scope.RequestID, Purpose: string(request.Scope.Purpose),
 			IntentID: request.Scope.IntentID, PolicyFingerprint: fingerprint, PromptSHA256: request.PromptSHA256,
 			Provider: request.Descriptor.Provider, Model: request.Descriptor.Model,
 			ExecutionProfileVersion: request.Descriptor.ExecutionProfileVersion,

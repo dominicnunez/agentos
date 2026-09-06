@@ -164,7 +164,7 @@ policy:
       from:
         module: app
       to:
-        modules: [assignment, completion, core, events, execution, inference, inspection, lab, planning, projections, replay, telemetry, workflow]
+        modules: [assignment, completion, core, events, execution, inference, inspection, lab, modelinput, planning, projections, replay, telemetry, workflow]
 
     - name: assignment-domain
       from:
@@ -212,7 +212,7 @@ policy:
       from:
         module: bootstrap
       to:
-        modules: [fileguard, inference, modelid]
+        modules: [fileguard, inference, modelid, modelinput]
 
     - name: sealed-file-mutation
       from:
@@ -273,7 +273,7 @@ policy:
       from:
         module: ledger
       to:
-        modules: [approvals, authority, core, events, inference]
+        modules: [approvals, authority, core, events, inference, modelinput]
 
     - name: inference-provider-boundary
       from:
@@ -291,7 +291,7 @@ policy:
       from:
         module: events
       to:
-        module: core
+        modules: [core, modelinput]
 
     - name: projection-domain
       from:

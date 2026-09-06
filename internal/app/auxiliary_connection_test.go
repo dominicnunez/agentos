@@ -2,6 +2,7 @@ package app
 
 import (
 	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 	"testing"
 )
 
@@ -20,5 +21,16 @@ func TestAuxiliaryRetryIdentityIncludesConnection(t *testing.T) {
 	changed.ConnectionID = "second"
 	if sameNormalizationContext(context, changed) {
 		t.Fatal("retry substituted a different normalization account")
+	}
+	context.Routing = &modelinput.RouteRequirements{OrganizationID: "org", Capabilities: []modelinput.Capability{modelinput.Text}, InputTokens: 10, OutputTokens: 5, Locality: modelinput.LocalOnly, DataClass: "internal"}
+	changed = context
+	changed.Routing = modelinput.CloneRouteRequirements(context.Routing)
+	changed.Routing.DataClass = "public"
+	if sameNormalizationContext(context, changed) {
+		t.Fatal("retry changed normalization classification")
+	}
+	changed.Routing = nil
+	if sameNormalizationContext(context, changed) {
+		t.Fatal("retry removed normalization requirements")
 	}
 }

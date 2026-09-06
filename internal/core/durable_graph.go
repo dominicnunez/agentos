@@ -394,6 +394,19 @@ func ValidateDurableGraph(graph DurableGraph) error {
 // ValidateTaskAssignment proves that a Task's assignee and pinned execution
 // configuration are durable within the Task's organization boundary.
 func ValidateTaskAssignment(task Task, organizationID ID, graph DurableGraph) error {
+	if task.RoutingDecision != nil {
+		if task.Routing == nil || task.RoutingDecision.ValidateFor(*task.Routing) != nil || task.RoutingDecision.SnapshotSequence <= 0 || task.AssigneeType != "AGENT" {
+			return fmt.Errorf("task routing decision lacks valid requirements, snapshot or Agent assignment")
+		}
+	}
+	if task.Routing != nil {
+		if _, err := task.Routing.Canonical(); err != nil {
+			return err
+		}
+		if task.Routing.OrganizationID != string(organizationID) || task.ExecutionKind != ExecutionAgent {
+			return fmt.Errorf("task routing constraints do not match its organization and execution kind")
+		}
+	}
 	switch task.AssigneeType {
 	case "":
 		if task.AssigneeID != "" || task.AgentConfig != nil {
@@ -406,6 +419,12 @@ func ValidateTaskAssignment(task Task, organizationID ID, graph DurableGraph) er
 		}
 		if err := validateDurableTaskAgentConfig(task.ID, task.AgentConfig, organizationID, graph); err != nil {
 			return err
+		}
+		if decision := task.RoutingDecision; decision != nil {
+			profile := graph.ExecutionProfiles[task.AgentConfig.ProfileID].Value
+			if decision.ConnectionID != profile.ConnectionID || decision.Provider != profile.ModelProvider || decision.Model != profile.Model || decision.ExecutionProfileVersion != profile.Version {
+				return fmt.Errorf("task routing decision differs from its pinned execution profile")
+			}
 		}
 	case "TEAM":
 		if task.AgentConfig != nil {

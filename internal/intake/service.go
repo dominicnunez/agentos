@@ -17,6 +17,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/inspection"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 	"github.com/dominicnunez/agentos/internal/replay"
 )
 
@@ -676,9 +677,29 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 	attempt := intentNormalizationAttempt(stream, message.MessageID) + 1
 	executionID := fmt.Sprintf("intent-normalization-%s-%s-a%d", stream[0].CorrelationID, message.MessageID, attempt)
 	descriptor, usesModel := normalizer.Descriptor()
+	var routing *modelinput.RouteRequirements
+	var routingDecision *modelinput.RouteDecision
 	if usesModel {
+		if selector, ok := normalizer.(NormalizerSelector); ok {
+			var binding *modelinput.RouteBinding
+			normalizer, binding, err = selector.SelectNormalizer(ctx, principal.OrganizationID)
+			if err != nil {
+				return View{}, fmt.Errorf("%w: select normalization route", ErrUnavailable)
+			}
+			if normalizer == nil || binding == nil || binding.Validate() != nil || binding.Requirements.OrganizationID != principal.OrganizationID {
+				return View{}, fmt.Errorf("%w: normalization selection lacks organization requirements", ErrUnavailable)
+			}
+			routing = modelinput.CloneRouteRequirements(&binding.Requirements)
+			routingDecision = modelinput.CloneRouteDecision(&binding.Decision)
+			descriptor, usesModel = normalizer.Descriptor()
+			if !usesModel {
+				return View{}, fmt.Errorf("%w: selected normalizer lacks model identity", ErrUnavailable)
+			}
+		}
 		stream, err = s.app.RecordIntentNormalizationContext(ctx, principal.OrganizationID, message.ConversationID, app.IntentNormalizationContext{
-			ExecutionID: executionID, SourceMessageID: message.MessageID, PromptVersion: descriptor.PromptVersion,
+			RoutingDecision: modelinput.CloneRouteDecision(routingDecision),
+			Routing:         modelinput.CloneRouteRequirements(routing),
+			ExecutionID:     executionID, SourceMessageID: message.MessageID, PromptVersion: descriptor.PromptVersion,
 			ConnectionID: descriptor.ConnectionID, Provider: descriptor.Provider, Model: descriptor.Model, ExecutionProfileVersion: descriptor.ExecutionProfileVersion,
 		})
 		if err != nil {
@@ -688,7 +709,9 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 	normalizationCtx := ctx
 	if usesModel {
 		normalizationCtx, err = inference.WithScope(ctx, inference.Scope{
-			OrganizationID: principal.OrganizationID, Purpose: inference.PurposeIntentNormalization,
+			RoutingDecision: modelinput.CloneRouteDecision(routingDecision),
+			OrganizationID:  principal.OrganizationID, Purpose: inference.PurposeIntentNormalization,
+			Routing:   modelinput.CloneRouteRequirements(routing),
 			RequestID: executionID, IntentID: "intent-" + stream[0].CorrelationID,
 			TaskID: "task-" + stream[0].CorrelationID, ExecutionID: executionID,
 			CorrelationID: stream[0].CorrelationID,
