@@ -22,6 +22,7 @@
 - [Codex subscription provider](CODEX_SUBSCRIPTION_PROVIDER.md) - confined subscription-provider setup.
 - [OpenAI API provider](OPENAI_API_PROVIDER.md) - Responses API setup and approval requirements.
 - [Structured model input](STRUCTURED_MODEL_INPUT.md) - instruction roles, invocation-bound source evidence, and transport limitations.
+- [Inference connections](INFERENCE_CONNECTIONS.md) - exact account identity, shared budgets, atomic policy updates, and remaining runtime integration.
 
 ## Security and releases
 

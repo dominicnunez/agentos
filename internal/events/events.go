@@ -3040,6 +3040,7 @@ type InferenceUsageRecordedPayload struct {
 // budget admitted by the runtime. Limits are non-secret and the fingerprint
 // binds subsequent reservations to this immutable policy revision.
 type InferencePolicyActivatedPayload struct {
+	ConnectionID            string    `json:"connection_id,omitempty"`
 	PolicyFingerprint       string    `json:"policy_fingerprint"`
 	Provider                string    `json:"provider"`
 	Model                   string    `json:"model"`
@@ -3051,6 +3052,8 @@ type InferencePolicyActivatedPayload struct {
 }
 
 type InferenceReservedPayload struct {
+	AdmittedAt              string    `json:"admitted_at,omitempty"`
+	ConnectionID            string    `json:"connection_id,omitempty"`
 	ExecutionManifestRef    string    `json:"execution_manifest_ref,omitempty"`
 	ReservationID           string    `json:"reservation_id"`
 	RequestID               string    `json:"request_id"`
@@ -3069,6 +3072,7 @@ type InferenceReservedPayload struct {
 }
 
 type InferenceReconciledPayload struct {
+	ConnectionID        string `json:"connection_id,omitempty"`
 	ReservationID       string `json:"reservation_id"`
 	State               string `json:"state"`
 	ChargedInputTokens  int64  `json:"charged_input_tokens"`

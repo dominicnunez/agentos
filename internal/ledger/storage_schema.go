@@ -25,7 +25,7 @@ const (
 	// not identify or publish an Agent OS release.
 	OldestSupportedStorageVersion = 1
 	// CurrentStorageVersion is the only layout accepted after runtime startup.
-	CurrentStorageVersion = 9
+	CurrentStorageVersion = 10
 	// AuthorityAdmissionBindingStorageVersion is the first storage contract in
 	// which every capability and freeze record names its exact admitting event.
 	AuthorityAdmissionBindingStorageVersion = 7
@@ -91,6 +91,11 @@ var storageIndexesV5 = map[string]string{
 var storageIndexesV9 = map[string]string{
 	"records_knowledge_organization_idx": "records",
 }
+
+const storageSchemaV10SQL = `ALTER TABLE inference_policies ADD COLUMN connection_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE inference_reservations ADD COLUMN connection_id TEXT NOT NULL DEFAULT '';
+DROP INDEX inference_policies_active_idx;
+CREATE UNIQUE INDEX inference_policies_active_idx ON inference_policies(organization_id,connection_id) WHERE active=1;`
 
 const storageSchemaV1SQL = `CREATE TABLE events (
 sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, organization_id TEXT NOT NULL,
@@ -317,6 +322,11 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 			return err
 		}
 		return advanceProjectionStorageContract(ctx, tx, from, to, "knowledge-tenant-index")
+	case from == 9 && to == 10:
+		if _, err := tx.ExecContext(ctx, storageSchemaV10SQL); err != nil {
+			return err
+		}
+		return advanceProjectionStorageContract(ctx, tx, from, to, "inference-connections")
 	default:
 		return fmt.Errorf("no reviewed storage migration exists")
 	}
@@ -592,6 +602,11 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 	if version >= 8 {
 		for table, columns := range storageColumnsV8 {
 			expected[table] = columns
+		}
+	}
+	if version >= 10 {
+		for _, table := range []string{"inference_policies", "inference_reservations"} {
+			expected[table] = append(slices.Clone(expected[table]), "connection_id")
 		}
 	}
 	tables, err := userStorageTables(ctx, query)

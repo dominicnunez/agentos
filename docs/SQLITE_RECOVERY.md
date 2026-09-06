@@ -90,7 +90,7 @@ Event Contract validator and tenant, revision, sequence, and dispatch rules.
 ## Storage and Event Contract versions
 
 SQLite storage versions are independent of the Agent OS binary version. The
-current runtime writes storage schema v9 and accepts v1 as the oldest supported
+current runtime writes storage schema v10 and accepts v1 as the oldest supported
 upgrade source. Schema v1 is frozen in
 `internal/ledger/testdata/storage-v1.sql`. Schema v2 adds metadata that binds
 the storage version, Agent OS application ID, current Event Contract schema,

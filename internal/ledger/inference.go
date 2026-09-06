@@ -34,20 +34,23 @@ func (l *SQLite) RecoverInferenceReservations(ctx context.Context, organizationI
 	recovered := 0
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
 		now := l.nowUTC()
-		rows, err := tx.QueryContext(ctx, `SELECT reservation_id,request_id,organization_id,purpose,intent_id,task_id,execution_id,correlation_id,prompt_sha256,provider,model,execution_profile_version,policy_fingerprint,reserved_input_tokens,reserved_output_tokens,reserved_cost_nano_usd,charged_input_tokens,charged_output_tokens,charged_cost_nano_usd FROM inference_reservations WHERE organization_id=? AND state=? ORDER BY created_at,reservation_id`, organizationID, inferenceStateReserved)
+		if err := validateInferenceAdmissionsSnapshot(ctx, tx); err != nil {
+			return fmt.Errorf("validate inference recovery accounting: %w", err)
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT reservation_id,request_id,organization_id,purpose,intent_id,task_id,execution_id,correlation_id,prompt_sha256,provider,model,execution_profile_version,policy_fingerprint,reserved_input_tokens,reserved_output_tokens,reserved_cost_nano_usd,charged_input_tokens,charged_output_tokens,charged_cost_nano_usd,connection_id FROM inference_reservations WHERE organization_id=? AND state=? ORDER BY created_at,reservation_id`, organizationID, inferenceStateReserved)
 		if err != nil {
 			return fmt.Errorf("read incomplete inference reservations: %w", err)
 		}
 		defer func() { _ = rows.Close() }()
 		type recoveryRow struct {
 			reservationID, requestID, organizationID, purpose, intentID, taskID, executionID, correlationID string
-			promptSHA256, provider, model, profile, policyFingerprint                                       string
+			promptSHA256, provider, model, profile, policyFingerprint, connectionID                         string
 			reservedInput, reservedOutput, reservedCost, chargedInput, chargedOutput, chargedCost           int64
 		}
 		var pending []recoveryRow
 		for rows.Next() {
 			var item recoveryRow
-			if err := rows.Scan(&item.reservationID, &item.requestID, &item.organizationID, &item.purpose, &item.intentID, &item.taskID, &item.executionID, &item.correlationID, &item.promptSHA256, &item.provider, &item.model, &item.profile, &item.policyFingerprint, &item.reservedInput, &item.reservedOutput, &item.reservedCost, &item.chargedInput, &item.chargedOutput, &item.chargedCost); err != nil {
+			if err := rows.Scan(&item.reservationID, &item.requestID, &item.organizationID, &item.purpose, &item.intentID, &item.taskID, &item.executionID, &item.correlationID, &item.promptSHA256, &item.provider, &item.model, &item.profile, &item.policyFingerprint, &item.reservedInput, &item.reservedOutput, &item.reservedCost, &item.chargedInput, &item.chargedOutput, &item.chargedCost, &item.connectionID); err != nil {
 				return fmt.Errorf("scan incomplete inference reservation: %w", err)
 			}
 			scope := inference.Scope{
@@ -80,7 +83,7 @@ func (l *SQLite) RecoverInferenceReservations(ctx context.Context, organizationI
 				return fmt.Errorf("inference reservation changed during recovery")
 			}
 			payload := events.InferenceReconciledPayload{
-				ReservationID: item.reservationID, State: inferenceStateUncertain,
+				ConnectionID: item.connectionID, ReservationID: item.reservationID, State: inferenceStateUncertain,
 				ChargedInputTokens: item.chargedInput, ChargedOutputTokens: item.chargedOutput,
 				ChargedCostNanoUSD: item.chargedCost,
 			}
@@ -99,6 +102,12 @@ func (l *SQLite) RecoverInferenceReservations(ctx context.Context, organizationI
 }
 
 func (l *SQLite) ActivateInferencePolicy(ctx context.Context, policy inference.Policy) error {
+	return l.withTx(ctx, func(tx *sql.Tx) error {
+		return activateInferencePolicyInTx(ctx, tx, policy, l.nowUTC(), true)
+	})
+}
+
+func activateInferencePolicyInTx(ctx context.Context, tx *sql.Tx, policy inference.Policy, now time.Time, checkAgreement bool) error {
 	if err := policy.Validate(); err != nil {
 		return err
 	}
@@ -110,70 +119,76 @@ func (l *SQLite) ActivateInferencePolicy(ctx context.Context, policy inference.P
 	if err != nil {
 		return fmt.Errorf("encode inference policy: %w", err)
 	}
-	return l.withTx(ctx, func(tx *sql.Tx) error {
-		now := l.nowUTC()
-		if now.Before(policy.AuthorizedAt) || !now.Before(policy.AuthorizationExpiresAt) || policy.Pricing != nil && !now.Before(policy.Pricing.ExpiresAt) {
-			return fmt.Errorf("inference policy or pricing is not currently valid")
+	if now.Before(policy.AuthorizedAt) || !now.Before(policy.AuthorizationExpiresAt) || policy.Pricing != nil && !now.Before(policy.Pricing.ExpiresAt) {
+		return fmt.Errorf("inference policy or pricing is not currently valid")
+	}
+	if checkAgreement && policy.OrganizationBudget != nil {
+		if err := validateConnectionBudgetAgreement(ctx, tx, policy); err != nil {
+			return err
 		}
-		var existingFingerprint string
-		var existingBody []byte
-		err := tx.QueryRowContext(ctx, `SELECT policy_fingerprint,body FROM inference_policies WHERE organization_id=? AND active=1`, policy.OrganizationID).Scan(&existingFingerprint, &existingBody)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("read active inference policy: %w", err)
+	}
+	var existingFingerprint string
+	var existingBody []byte
+	err = tx.QueryRowContext(ctx, `SELECT policy_fingerprint,body FROM inference_policies WHERE organization_id=? AND connection_id=? AND active=1`, policy.OrganizationID, policy.ConnectionID).Scan(&existingFingerprint, &existingBody)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read active inference policy: %w", err)
+	}
+	if err == nil {
+		var existing inference.Policy
+		if decodeExactJSONBytes(existingBody, &existing) != nil {
+			return fmt.Errorf("active inference policy is malformed")
 		}
-		if err == nil {
-			var existing inference.Policy
-			if decodeExactJSONBytes(existingBody, &existing) != nil {
-				return fmt.Errorf("active inference policy is malformed")
+		existingCalculated, fingerprintErr := existing.Fingerprint()
+		if fingerprintErr != nil || existingCalculated != existingFingerprint {
+			return fmt.Errorf("active inference policy fingerprint is invalid")
+		}
+		if existingFingerprint == fingerprint {
+			if !reflect.DeepEqual(existing, policy) {
+				return fmt.Errorf("active inference policy conflicts with its fingerprint")
 			}
-			existingCalculated, fingerprintErr := existing.Fingerprint()
-			if fingerprintErr != nil || existingCalculated != existingFingerprint {
-				return fmt.Errorf("active inference policy fingerprint is invalid")
-			}
-			if existingFingerprint == fingerprint {
-				if !reflect.DeepEqual(existing, policy) {
-					return fmt.Errorf("active inference policy conflicts with its fingerprint")
-				}
-				return nil
-			}
-			if !policy.AuthorizedAt.After(existing.AuthorizedAt) {
-				return fmt.Errorf("replacement inference policy is not newer than the active policy")
-			}
-			var active int
-			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inference_reservations WHERE organization_id=? AND state=?`, policy.OrganizationID, inferenceStateReserved).Scan(&active); err != nil {
-				return fmt.Errorf("inspect active inference reservations: %w", err)
-			}
-			if active != 0 {
-				return fmt.Errorf("cannot replace an inference policy while provider calls are active")
-			}
+			return nil
 		}
-		payload := events.InferencePolicyActivatedPayload{
-			PolicyFingerprint: fingerprint, Provider: policy.Provider, Model: policy.Model,
-			ExecutionProfileVersion: policy.ExecutionProfileVersion, AccessMode: string(policy.Mode),
-			AuthorizedBy: policy.AuthorizedBy, AuthorizedAt: policy.AuthorizedAt,
-			AuthorizationExpiresAt: policy.AuthorizationExpiresAt,
+		if !policy.AuthorizedAt.After(existing.AuthorizedAt) {
+			return fmt.Errorf("replacement inference policy is not newer than the active policy")
 		}
-		event, err := appendEvent(ctx, tx, events.TrustedDraft{
-			OrganizationID: policy.OrganizationID, EventType: "INFERENCE_POLICY_ACTIVATED",
-			SourceActorID: policy.AuthorizedBy, Payload: payload,
-			CorrelationID: "inference-policy-" + fingerprint[:16],
-		})
-		if err != nil {
-			return fmt.Errorf("append inference policy activation: %w", err)
+		var active int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inference_reservations WHERE organization_id=? AND connection_id=? AND state=?`, policy.OrganizationID, policy.ConnectionID, inferenceStateReserved).Scan(&active); err != nil {
+			return fmt.Errorf("inspect active inference reservations: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE inference_policies SET active=0 WHERE organization_id=? AND active=1`, policy.OrganizationID); err != nil {
-			return fmt.Errorf("retire prior inference policy: %w", err)
+		if active != 0 {
+			return fmt.Errorf("cannot replace an inference policy while provider calls are active")
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO inference_policies(organization_id,policy_fingerprint,body,activation_event_id,activated_at,active) VALUES(?,?,?,?,?,1)`,
-			policy.OrganizationID, fingerprint, body, event.EventID, now.Format(time.RFC3339Nano))
-		if err != nil {
-			return fmt.Errorf("activate inference policy: %w", err)
-		}
-		return nil
+	}
+	payload := events.InferencePolicyActivatedPayload{
+		ConnectionID:      policy.ConnectionID,
+		PolicyFingerprint: fingerprint, Provider: policy.Provider, Model: policy.Model,
+		ExecutionProfileVersion: policy.ExecutionProfileVersion, AccessMode: string(policy.Mode),
+		AuthorizedBy: policy.AuthorizedBy, AuthorizedAt: policy.AuthorizedAt,
+		AuthorizationExpiresAt: policy.AuthorizationExpiresAt,
+	}
+	event, err := appendEvent(ctx, tx, events.TrustedDraft{
+		OrganizationID: policy.OrganizationID, EventType: "INFERENCE_POLICY_ACTIVATED",
+		SourceActorID: policy.AuthorizedBy, Payload: payload,
+		CorrelationID: "inference-policy-" + fingerprint[:16],
 	})
+	if err != nil {
+		return fmt.Errorf("append inference policy activation: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE inference_policies SET active=0 WHERE organization_id=? AND connection_id=? AND active=1`, policy.OrganizationID, policy.ConnectionID); err != nil {
+		return fmt.Errorf("retire prior inference policy: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO inference_policies(organization_id,policy_fingerprint,body,activation_event_id,activated_at,active,connection_id) VALUES(?,?,?,?,?,1,?)`,
+		policy.OrganizationID, fingerprint, body, event.EventID, now.Format(time.RFC3339Nano), policy.ConnectionID)
+	if err != nil {
+		return fmt.Errorf("activate inference policy: %w", err)
+	}
+	return nil
 }
 
 func (l *SQLite) ReserveInference(ctx context.Context, request inference.InferenceRequest) (inference.Reservation, error) {
+	if request.ConnectionID != "" && !inference.ValidConnectionID(request.ConnectionID) {
+		return inference.Reservation{}, fmt.Errorf("inference connection identity is invalid")
+	}
 	if err := request.Scope.Validate(); err != nil {
 		return inference.Reservation{}, err
 	}
@@ -195,7 +210,7 @@ func (l *SQLite) ReserveInference(ctx context.Context, request inference.Inferen
 		if err := validateInferenceKnowledge(ctx, tx, request); err != nil {
 			return err
 		}
-		policy, fingerprint, err := activeInferencePolicy(ctx, tx, request.Scope.OrganizationID)
+		policy, fingerprint, err := activeInferencePolicy(ctx, tx, request.Scope.OrganizationID, request.ConnectionID)
 		if err != nil {
 			return err
 		}
@@ -210,22 +225,31 @@ func (l *SQLite) ReserveInference(ctx context.Context, request inference.Inferen
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inference_reservations WHERE organization_id=? AND state=?`, request.Scope.OrganizationID, inferenceStateReserved).Scan(&active); err != nil {
 			return fmt.Errorf("inspect concurrent inference requests: %w", err)
 		}
+		poolActive := active
+		if policy.Version == inference.ConnectionPolicyVersion {
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inference_reservations WHERE organization_id=? AND connection_id=? AND state=?`, request.Scope.OrganizationID, request.ConnectionID, inferenceStateReserved).Scan(&poolActive); err != nil {
+				return fmt.Errorf("inspect connection concurrency: %w", err)
+			}
+		}
 		windowStart, windowEnd := inferenceWindow(now, time.Duration(policy.WindowDurationSeconds)*time.Second)
 		var chargedTokens, chargedCost int64
 		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(charged_input_tokens+charged_output_tokens),0),COALESCE(SUM(charged_cost_nano_usd),0)
-FROM inference_reservations WHERE organization_id=? AND provider=? AND model=? AND window_started_at=?`,
-			policy.OrganizationID, policy.Provider, policy.Model, windowStart.Format(time.RFC3339Nano)).Scan(&chargedTokens, &chargedCost); err != nil {
+FROM inference_reservations WHERE organization_id=? AND connection_id=? AND provider=? AND model=? AND window_started_at=?`,
+			policy.OrganizationID, policy.ConnectionID, policy.Provider, policy.Model, windowStart.Format(time.RFC3339Nano)).Scan(&chargedTokens, &chargedCost); err != nil {
 			return fmt.Errorf("read inference budget use: %w", err)
 		}
 		selection, err := (inference.Manager{Pools: []inference.Pool{{
-			ID: fingerprint, Policy: policy, Available: true, ActiveRequests: active,
+			ID: fingerprint, Policy: policy, Available: true, ActiveRequests: poolActive,
 			ChargedTokens: chargedTokens, ChargedCostNanoUSD: chargedCost,
-		}}}).Select(now, inference.PoolRequest{Descriptor: request.Descriptor})
+		}}}).Select(now, inference.PoolRequest{ConnectionID: request.ConnectionID, Descriptor: request.Descriptor})
 		if err != nil {
 			return fmt.Errorf("select inference pool: %w", err)
 		}
 		if selection.PoolID != fingerprint || selection.PolicyFingerprint != fingerprint {
 			return fmt.Errorf("selected inference pool is not the active durable policy")
+		}
+		if err := enforceOrganizationBudget(ctx, tx, policy.OrganizationID, now, active, selection.ReservedInputTokens, selection.ReservedOutputTokens, selection.ReservedCostNanoUSD); err != nil {
+			return err
 		}
 		reservationID, err := inferenceReservationID(request)
 		if err != nil {
@@ -240,17 +264,19 @@ FROM inference_reservations WHERE organization_id=? AND provider=? AND model=? A
 reservation_id,request_id,organization_id,purpose,intent_id,task_id,execution_id,correlation_id,prompt_sha256,
 provider,model,execution_profile_version,policy_fingerprint,state,reserved_input_tokens,reserved_output_tokens,
 reserved_cost_nano_usd,charged_input_tokens,charged_output_tokens,charged_cost_nano_usd,
-window_started_at,window_expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+window_started_at,window_expires_at,created_at,updated_at,connection_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			reserved.ID, request.Scope.RequestID, request.Scope.OrganizationID, request.Scope.Purpose, request.Scope.IntentID, request.Scope.TaskID,
 			request.Scope.ExecutionID, request.Scope.CorrelationID, request.PromptSHA256, request.Descriptor.Provider, request.Descriptor.Model,
 			request.Descriptor.ExecutionProfileVersion, fingerprint, inferenceStateReserved, reserved.ReservedInputTokens,
 			reserved.ReservedOutputTokens, reserved.ReservedCostNanoUSD, reserved.ReservedInputTokens, reserved.ReservedOutputTokens,
 			reserved.ReservedCostNanoUSD, windowStart.Format(time.RFC3339Nano), windowEnd.Format(time.RFC3339Nano),
-			now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+			now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), request.ConnectionID)
 		if err != nil {
 			return fmt.Errorf("reserve inference budget: %w", err)
 		}
 		payload := events.InferenceReservedPayload{
+			AdmittedAt:    now.Format(time.RFC3339Nano),
+			ConnectionID:  request.ConnectionID,
 			ReservationID: reserved.ID, RequestID: request.Scope.RequestID, Purpose: string(request.Scope.Purpose),
 			IntentID: request.Scope.IntentID, PolicyFingerprint: fingerprint, PromptSHA256: request.PromptSHA256,
 			Provider: request.Descriptor.Provider, Model: request.Descriptor.Model,
@@ -313,12 +339,17 @@ func (l *SQLite) ReconcileInference(ctx context.Context, reservation inference.R
 	violated := state == inferenceStateViolation
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
 		now := l.nowUTC()
-		policy, fingerprint, err := activeInferencePolicy(ctx, tx, reservation.Request.Scope.OrganizationID)
+		policy, fingerprint, err := activeInferencePolicy(ctx, tx, reservation.Request.Scope.OrganizationID, reservation.Request.ConnectionID)
 		if err != nil {
 			return err
 		}
 		if fingerprint != reservation.PolicyFingerprint || policy.Mode != reservation.Mode {
 			return fmt.Errorf("inference reservation policy is no longer authoritative")
+		}
+		if policy.Version == inference.ConnectionPolicyVersion {
+			if err := validateInferenceAdmissionsSnapshot(ctx, tx); err != nil {
+				return fmt.Errorf("validate connection reconciliation accounting: %w", err)
+			}
 		}
 		if usageMatches && policy.Mode == inference.MeteredAPI {
 			actualCost, err := policy.ActualCostNanoUSD(*usage)
@@ -333,7 +364,7 @@ func (l *SQLite) ReconcileInference(ctx context.Context, reservation inference.R
 			chargedCost = 0
 		}
 		var stored inferenceReservationRow
-		if err := scanInferenceReservation(tx.QueryRowContext(ctx, `SELECT reservation_id,request_id,organization_id,purpose,intent_id,task_id,execution_id,correlation_id,prompt_sha256,provider,model,execution_profile_version,policy_fingerprint,state,reserved_input_tokens,reserved_output_tokens,reserved_cost_nano_usd,window_started_at,window_expires_at FROM inference_reservations WHERE reservation_id=?`, reservation.ID), &stored); err != nil {
+		if err := scanInferenceReservation(tx.QueryRowContext(ctx, `SELECT reservation_id,request_id,organization_id,purpose,intent_id,task_id,execution_id,correlation_id,prompt_sha256,provider,model,execution_profile_version,policy_fingerprint,state,reserved_input_tokens,reserved_output_tokens,reserved_cost_nano_usd,window_started_at,window_expires_at,connection_id FROM inference_reservations WHERE reservation_id=?`, reservation.ID), &stored); err != nil {
 			return err
 		}
 		if stored.state != inferenceStateReserved || !stored.matches(reservation) {
@@ -344,6 +375,7 @@ func (l *SQLite) ReconcileInference(ctx context.Context, reservation inference.R
 			return fmt.Errorf("reconcile inference reservation: %w", err)
 		}
 		payload := events.InferenceReconciledPayload{
+			ConnectionID:  reservation.Request.ConnectionID,
 			ReservationID: reservation.ID, State: state, ChargedInputTokens: chargedInput,
 			ChargedOutputTokens: chargedOutput, ChargedCostNanoUSD: chargedCost,
 		}
@@ -362,17 +394,17 @@ func (l *SQLite) ReconcileInference(ctx context.Context, reservation inference.R
 	return chargedCost, err
 }
 
-func activeInferencePolicy(ctx context.Context, tx *sql.Tx, organizationID string) (inference.Policy, string, error) {
+func activeInferencePolicy(ctx context.Context, tx *sql.Tx, organizationID, connectionID string) (inference.Policy, string, error) {
 	var fingerprint string
 	var body []byte
-	if err := tx.QueryRowContext(ctx, `SELECT policy_fingerprint,body FROM inference_policies WHERE organization_id=? AND active=1`, organizationID).Scan(&fingerprint, &body); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT policy_fingerprint,body FROM inference_policies WHERE organization_id=? AND connection_id=? AND active=1`, organizationID, connectionID).Scan(&fingerprint, &body); err != nil {
 		if err == sql.ErrNoRows {
 			return inference.Policy{}, "", fmt.Errorf("organization has no active inference policy")
 		}
 		return inference.Policy{}, "", fmt.Errorf("read active inference policy: %w", err)
 	}
 	var policy inference.Policy
-	if decodeExactJSONBytes(body, &policy) != nil || policy.Validate() != nil || policy.OrganizationID != organizationID {
+	if decodeExactJSONBytes(body, &policy) != nil || policy.Validate() != nil || policy.OrganizationID != organizationID || policy.ConnectionID != connectionID {
 		return inference.Policy{}, "", fmt.Errorf("active inference policy is invalid")
 	}
 	calculated, err := policy.Fingerprint()
@@ -391,6 +423,7 @@ func inferenceWindow(now time.Time, duration time.Duration) (time.Time, time.Tim
 
 func inferenceReservationID(request inference.InferenceRequest) (string, error) {
 	body, err := json.Marshal(struct {
+		ConnectionID            string `json:"connection_id,omitempty"`
 		OrganizationID          string `json:"organization_id"`
 		Purpose                 string `json:"purpose"`
 		RequestID               string `json:"request_id"`
@@ -403,6 +436,7 @@ func inferenceReservationID(request inference.InferenceRequest) (string, error) 
 		ExecutionProfileVersion string `json:"execution_profile_version"`
 		PromptSHA256            string `json:"prompt_sha256"`
 	}{
+		ConnectionID:   request.ConnectionID,
 		OrganizationID: request.Scope.OrganizationID, Purpose: string(request.Scope.Purpose),
 		RequestID: request.Scope.RequestID, IntentID: request.Scope.IntentID, TaskID: request.Scope.TaskID,
 		ExecutionID: request.Scope.ExecutionID, CorrelationID: request.Scope.CorrelationID,
@@ -426,13 +460,13 @@ func validSHA256Hex(value string) bool {
 
 type inferenceReservationRow struct {
 	reservationID, requestID, organizationID, purpose, intentID, taskID, executionID, correlationID string
-	promptSHA256, provider, model, profile, policyFingerprint, state                                string
+	promptSHA256, provider, model, profile, policyFingerprint, state, connectionID                  string
 	reservedInput, reservedOutput, reservedCost                                                     int64
 	windowStart, windowEnd                                                                          string
 }
 
 func scanInferenceReservation(row *sql.Row, target *inferenceReservationRow) error {
-	if err := row.Scan(&target.reservationID, &target.requestID, &target.organizationID, &target.purpose, &target.intentID, &target.taskID, &target.executionID, &target.correlationID, &target.promptSHA256, &target.provider, &target.model, &target.profile, &target.policyFingerprint, &target.state, &target.reservedInput, &target.reservedOutput, &target.reservedCost, &target.windowStart, &target.windowEnd); err != nil {
+	if err := row.Scan(&target.reservationID, &target.requestID, &target.organizationID, &target.purpose, &target.intentID, &target.taskID, &target.executionID, &target.correlationID, &target.promptSHA256, &target.provider, &target.model, &target.profile, &target.policyFingerprint, &target.state, &target.reservedInput, &target.reservedOutput, &target.reservedCost, &target.windowStart, &target.windowEnd, &target.connectionID); err != nil {
 		return fmt.Errorf("read inference reservation: %w", err)
 	}
 	return nil
@@ -443,7 +477,7 @@ func (r inferenceReservationRow) matches(expected inference.Reservation) bool {
 	end, endErr := time.Parse(time.RFC3339Nano, r.windowEnd)
 	request := expected.Request
 	return startErr == nil && endErr == nil &&
-		r.reservationID == expected.ID && r.requestID == request.Scope.RequestID && r.organizationID == request.Scope.OrganizationID &&
+		r.connectionID == request.ConnectionID && r.reservationID == expected.ID && r.requestID == request.Scope.RequestID && r.organizationID == request.Scope.OrganizationID &&
 		r.purpose == string(request.Scope.Purpose) && r.intentID == request.Scope.IntentID && r.taskID == request.Scope.TaskID &&
 		r.executionID == request.Scope.ExecutionID && r.correlationID == request.Scope.CorrelationID && r.promptSHA256 == request.PromptSHA256 &&
 		r.provider == request.Descriptor.Provider && r.model == request.Descriptor.Model && r.profile == request.Descriptor.ExecutionProfileVersion &&

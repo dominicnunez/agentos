@@ -41,6 +41,16 @@ func ValidateInferenceAdmissions(ctx context.Context, db *sql.DB) error {
 }
 
 func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx) error {
+	var storageVersion int
+	if err := tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&storageVersion); err != nil {
+		return fmt.Errorf("read inference storage version: %w", err)
+	}
+	// Older offline snapshots have no connection column. Empty identifies only
+	// the original singleton policy; it never selects a configured connection.
+	connectionColumn := "''"
+	if storageVersion >= 10 {
+		connectionColumn = "connection_id"
+	}
 	_, freezes, err := authorityAdmissionsSnapshot(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("validate inference authority history: %w", err)
@@ -119,19 +129,24 @@ func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx) error 
 
 	type policyKey struct{ organizationID, fingerprint string }
 	policies := make(map[policyKey]inference.Policy)
+	activationPolicies := make(map[string]inference.Policy)
 	usedEvents := make(map[string]struct{})
-	activeByOrganization := make(map[string]int)
-	policyOrganizations := make(map[string]struct{})
-	rows, err := tx.QueryContext(ctx, `SELECT organization_id,policy_fingerprint,body,activation_event_id,activated_at,active FROM inference_policies ORDER BY organization_id,activated_at,policy_fingerprint`)
+	type connectionKey struct{ organizationID, connectionID string }
+	activeByConnection := make(map[connectionKey]int)
+	latestActivation := make(map[connectionKey]int64)
+	activeActivation := make(map[connectionKey]int64)
+	activeOrganizationBudgets := make(map[string]inference.OrganizationBudget)
+	connectionHistory := make(map[connectionKey][]inferencePolicyRevision)
+	rows, err := tx.QueryContext(ctx, `SELECT organization_id,policy_fingerprint,body,activation_event_id,activated_at,active,`+connectionColumn+` FROM inference_policies ORDER BY organization_id,activated_at,policy_fingerprint`)
 	if err != nil {
 		return fmt.Errorf("read inference policy history: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
-		var organizationID, fingerprint, activationEventID, activatedAt string
+		var organizationID, fingerprint, activationEventID, activatedAt, connectionID string
 		var body []byte
 		var active int
-		if err := rows.Scan(&organizationID, &fingerprint, &body, &activationEventID, &activatedAt, &active); err != nil {
+		if err := rows.Scan(&organizationID, &fingerprint, &body, &activationEventID, &activatedAt, &active, &connectionID); err != nil {
 			return fmt.Errorf("scan inference policy history: %w", err)
 		}
 		var policy inference.Policy
@@ -141,19 +156,20 @@ func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx) error 
 		}
 		activated, timeErr := time.Parse(time.RFC3339Nano, activatedAt)
 		key := policyKey{organizationID, fingerprint}
+		if connectionID != policy.ConnectionID {
+			return fmt.Errorf("inference policy connection differs from admitted policy")
+		}
 		if organizationID == "" || fingerprint == "" || policy.Validate() != nil || policy.OrganizationID != organizationID || calculated != fingerprint || activationEventID == "" || timeErr != nil || activated.IsZero() || active != 0 && active != 1 {
 			return fmt.Errorf("inference policy history is invalid")
 		}
 		if _, exists := policies[key]; exists {
 			return fmt.Errorf("inference policy history is duplicated")
 		}
-		if active == 1 {
-			activeByOrganization[organizationID]++
-		}
-		policyOrganizations[organizationID] = struct{}{}
+		connection := connectionKey{organizationID, connectionID}
 		activation, found := eventsByID[activationEventID]
 		var payload events.InferencePolicyActivatedPayload
 		expected := events.InferencePolicyActivatedPayload{
+			ConnectionID:      policy.ConnectionID,
 			PolicyFingerprint: fingerprint, Provider: policy.Provider, Model: policy.Model,
 			ExecutionProfileVersion: policy.ExecutionProfileVersion, AccessMode: string(policy.Mode),
 			AuthorizedBy: policy.AuthorizedBy, AuthorizedAt: policy.AuthorizedAt,
@@ -163,7 +179,26 @@ func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx) error 
 			return fmt.Errorf("inference policy lacks its exact activation event")
 		}
 		usedEvents[activationEventID] = struct{}{}
+		activationPolicies[activationEventID] = policy
+		if active == 1 {
+			activeByConnection[connection]++
+			activeActivation[connection] = activation.Sequence
+			if policy.OrganizationBudget != nil {
+				if budget, exists := activeOrganizationBudgets[organizationID]; exists && budget != *policy.OrganizationBudget {
+					return fmt.Errorf("active connections disagree on organization inference budget")
+				}
+				activeOrganizationBudgets[organizationID] = *policy.OrganizationBudget
+			}
+		}
+		if activation.Sequence > latestActivation[connection] {
+			latestActivation[connection] = activation.Sequence
+		}
 		policies[key] = policy
+		if policy.Version == inference.ConnectionPolicyVersion {
+			connectionHistory[connection] = append(connectionHistory[connection], inferencePolicyRevision{
+				fingerprint: fingerprint, sequence: activation.Sequence, authorizedAt: policy.AuthorizedAt,
+			})
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate inference policy history: %w", err)
@@ -171,20 +206,29 @@ func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx) error 
 	if err := rows.Close(); err != nil {
 		return fmt.Errorf("close inference policy history: %w", err)
 	}
-	for organizationID := range policyOrganizations {
-		if organizationID == "" || activeByOrganization[organizationID] != 1 {
-			return fmt.Errorf("organization inference policy history has no unique active revision")
+	for connection, sequence := range latestActivation {
+		if activeByConnection[connection] != 1 || activeActivation[connection] != sequence {
+			return fmt.Errorf("inference connection policy history has no unique current active revision")
 		}
 	}
+	for connection, history := range connectionHistory {
+		sort.Slice(history, func(i, j int) bool { return history[i].sequence < history[j].sequence })
+		for i, revision := range history {
+			if revision.sequence < 1 || i > 0 && (history[i-1].sequence >= revision.sequence || !revision.authorizedAt.After(history[i-1].authorizedAt)) {
+				return fmt.Errorf("connection policy replacement history is invalid")
+			}
+		}
+		connectionHistory[connection] = history
+	}
 
-	reservationRows, err := tx.QueryContext(ctx, `SELECT reservation_id,request_id,organization_id,purpose,intent_id,task_id,execution_id,correlation_id,prompt_sha256,provider,model,execution_profile_version,policy_fingerprint,state,reserved_input_tokens,reserved_output_tokens,reserved_cost_nano_usd,charged_input_tokens,charged_output_tokens,charged_cost_nano_usd,window_started_at,window_expires_at FROM inference_reservations ORDER BY created_at,reservation_id`)
+	reservationRows, err := tx.QueryContext(ctx, `SELECT reservation_id,request_id,organization_id,purpose,intent_id,task_id,execution_id,correlation_id,prompt_sha256,provider,model,execution_profile_version,policy_fingerprint,state,reserved_input_tokens,reserved_output_tokens,reserved_cost_nano_usd,charged_input_tokens,charged_output_tokens,charged_cost_nano_usd,window_started_at,window_expires_at,`+connectionColumn+`,created_at FROM inference_reservations ORDER BY created_at,reservation_id`)
 	if err != nil {
 		return fmt.Errorf("read inference reservation history: %w", err)
 	}
 	defer func() { _ = reservationRows.Close() }()
 	for reservationRows.Next() {
 		var row inferenceValidationRow
-		if err := reservationRows.Scan(&row.reservationID, &row.requestID, &row.organizationID, &row.purpose, &row.intentID, &row.taskID, &row.executionID, &row.correlationID, &row.promptSHA256, &row.provider, &row.model, &row.profile, &row.policyFingerprint, &row.state, &row.reservedInput, &row.reservedOutput, &row.reservedCost, &row.chargedInput, &row.chargedOutput, &row.chargedCost, &row.windowStart, &row.windowEnd); err != nil {
+		if err := reservationRows.Scan(&row.reservationID, &row.requestID, &row.organizationID, &row.purpose, &row.intentID, &row.taskID, &row.executionID, &row.correlationID, &row.promptSHA256, &row.provider, &row.model, &row.profile, &row.policyFingerprint, &row.state, &row.reservedInput, &row.reservedOutput, &row.reservedCost, &row.chargedInput, &row.chargedOutput, &row.chargedCost, &row.windowStart, &row.windowEnd, &row.connectionID, &row.createdAt); err != nil {
 			return fmt.Errorf("scan inference reservation history: %w", err)
 		}
 		policy, found := policies[policyKey{row.organizationID, row.policyFingerprint}]
@@ -192,11 +236,17 @@ func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx) error 
 			return fmt.Errorf("inference reservation history is invalid")
 		}
 		admission, found := reservedEvents[row.reservationID]
-		if !found || validateInferenceReservationEvent(admission, row) != nil {
+		if !found || validateInferenceReservationEvent(admission, row, policy) != nil {
 			return fmt.Errorf("inference reservation lacks its exact admission event")
 		}
 		usedEvents[admission.EventID] = struct{}{}
 		reconciliations := reconciledEvents[row.reservationID]
+		if policy.Version == inference.ConnectionPolicyVersion {
+			history := connectionHistory[connectionKey{row.organizationID, row.connectionID}]
+			if err := validateConnectionPolicyLifetime(history, row.policyFingerprint, admission.Sequence, reconciliations); err != nil {
+				return err
+			}
+		}
 		if row.state == inferenceStateReserved {
 			if len(reconciliations) != 0 {
 				return fmt.Errorf("active inference reservation has terminal reconciliation")
@@ -216,14 +266,14 @@ func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx) error 
 			return fmt.Errorf("inference admission event is not materialized by durable accounting")
 		}
 	}
-	return nil
+	return validateOrganizationBudgetHistory(stream, activationPolicies)
 }
 
 type inferenceValidationRow struct {
 	reservationID, requestID, organizationID, purpose, intentID, taskID, executionID, correlationID string
-	promptSHA256, provider, model, profile, policyFingerprint, state                                string
+	promptSHA256, provider, model, profile, policyFingerprint, state, connectionID                  string
 	reservedInput, reservedOutput, reservedCost, chargedInput, chargedOutput, chargedCost           int64
-	windowStart, windowEnd                                                                          string
+	windowStart, windowEnd, createdAt                                                               string
 }
 
 func (r inferenceValidationRow) validate(policy inference.Policy) error {
@@ -231,7 +281,7 @@ func (r inferenceValidationRow) validate(policy inference.Policy) error {
 	end, endErr := time.Parse(time.RFC3339Nano, r.windowEnd)
 	duration := time.Duration(policy.WindowDurationSeconds) * time.Second
 	expectedCost, costErr := policy.ReservedCostNanoUSD()
-	if r.reservationID == "" || r.requestID == "" || r.organizationID != policy.OrganizationID || r.executionID == "" || r.correlationID == "" || r.provider != policy.Provider || r.model != policy.Model || r.profile != policy.ExecutionProfileVersion || r.policyFingerprint == "" || !validSHA256Hex(r.promptSHA256) || r.reservedInput != policy.MaxInputTokensPerRequest || r.reservedOutput != policy.MaxOutputTokensPerRequest || costErr != nil || r.reservedCost != expectedCost || startErr != nil || endErr != nil || !end.Equal(start.Add(duration)) || start.Unix()%policy.WindowDurationSeconds != 0 || r.chargedInput < 0 || r.chargedOutput < 0 || r.chargedCost < 0 {
+	if r.connectionID != policy.ConnectionID || r.reservationID == "" || r.requestID == "" || r.organizationID != policy.OrganizationID || r.executionID == "" || r.correlationID == "" || r.provider != policy.Provider || r.model != policy.Model || r.profile != policy.ExecutionProfileVersion || r.policyFingerprint == "" || !validSHA256Hex(r.promptSHA256) || r.reservedInput != policy.MaxInputTokensPerRequest || r.reservedOutput != policy.MaxOutputTokensPerRequest || costErr != nil || r.reservedCost != expectedCost || startErr != nil || endErr != nil || !end.Equal(start.Add(duration)) || start.Unix()%policy.WindowDurationSeconds != 0 || r.chargedInput < 0 || r.chargedOutput < 0 || r.chargedCost < 0 {
 		return fmt.Errorf("inference reservation fields are invalid")
 	}
 	switch inference.Purpose(r.purpose) {
@@ -270,18 +320,30 @@ func (r inferenceValidationRow) validate(policy inference.Policy) error {
 	return nil
 }
 
-func validateInferenceReservationEvent(event events.Event, row inferenceValidationRow) error {
+func validateInferenceReservationEvent(event events.Event, row inferenceValidationRow, policy inference.Policy) error {
 	var payload events.InferenceReservedPayload
 	if decodeExactJSONBytes(event.Payload, &payload) != nil {
 		return fmt.Errorf("inference reservation event is invalid")
 	}
 	start, _ := time.Parse(time.RFC3339Nano, row.windowStart)
 	end, _ := time.Parse(time.RFC3339Nano, row.windowEnd)
+	if payload.AdmittedAt != "" {
+		admitted, err := time.Parse(time.RFC3339Nano, payload.AdmittedAt)
+		if err != nil || admitted.IsZero() || payload.AdmittedAt != row.createdAt || admitted.Before(start) || !admitted.Before(end) {
+			return fmt.Errorf("inference reservation admission time is invalid")
+		}
+		if admitted.Before(policy.AuthorizedAt) || !admitted.Before(policy.AuthorizationExpiresAt) || policy.Pricing != nil && !admitted.Before(policy.Pricing.ExpiresAt) {
+			return fmt.Errorf("inference reservation was admitted outside policy or pricing validity")
+		}
+	} else if row.connectionID != "" {
+		return fmt.Errorf("connection reservation lacks its admission time")
+	}
 	expected := events.InferenceReservedPayload{
+		AdmittedAt: payload.AdmittedAt,
 		// The execution reference is independently verified against its historical
 		// boundary by validateReservedExecutionKnowledge before accounting checks.
-		ExecutionManifestRef: payload.ExecutionManifestRef,
-		ReservationID:        row.reservationID, RequestID: row.requestID, Purpose: row.purpose, IntentID: row.intentID,
+		ConnectionID: row.connectionID, ExecutionManifestRef: payload.ExecutionManifestRef,
+		ReservationID: row.reservationID, RequestID: row.requestID, Purpose: row.purpose, IntentID: row.intentID,
 		PolicyFingerprint: row.policyFingerprint, PromptSHA256: row.promptSHA256, Provider: row.provider, Model: row.model,
 		ExecutionProfileVersion: row.profile, ReservedInputTokens: row.reservedInput,
 		ReservedOutputTokens: row.reservedOutput, ReservedCostNanoUSD: row.reservedCost,
@@ -296,7 +358,7 @@ func validateInferenceReservationEvent(event events.Event, row inferenceValidati
 func validateInferenceReconciliationEvent(event events.Event, row inferenceValidationRow) error {
 	var payload events.InferenceReconciledPayload
 	expected := events.InferenceReconciledPayload{
-		ReservationID: row.reservationID, State: row.state, ChargedInputTokens: row.chargedInput,
+		ConnectionID: row.connectionID, ReservationID: row.reservationID, State: row.state, ChargedInputTokens: row.chargedInput,
 		ChargedOutputTokens: row.chargedOutput, ChargedCostNanoUSD: row.chargedCost,
 	}
 	if event.EventType != "INFERENCE_RECONCILED" || event.OrganizationID != row.organizationID || event.SourceActorID != "runtime" || event.SourceExecutionID != row.executionID || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != row.taskID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID != row.correlationID || event.SchemaVersion != events.SchemaVersion || decodeExactJSONBytes(event.Payload, &payload) != nil || !reflect.DeepEqual(payload, expected) {
