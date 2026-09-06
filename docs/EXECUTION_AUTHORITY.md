@@ -277,8 +277,11 @@ filtering as outcomes alongside final selections. Do not force the constructed
 candidate sets to match and thereby erase the behavior under assessment. Bind
 the task type, source universe and construction metrics in the protocol.
 Randomize candidate order where relevant,
-and randomize or counterbalance baseline-versus-Skill execution order within
-paired cases. Retain arm assignment, actual execution order and timestamps;
+and randomize or counterbalance execution order across every comparison arm,
+including the no-Skill baseline, Skill treatment and purpose-neutral control,
+within matched cases. Include all arms in the committed runtime-generated
+permutation or counterbalancing scheme; none may occupy an unaccounted fixed
+position. Retain arm assignment, actual execution order and timestamps;
 candidate-order randomization alone does not control temporal effects. Reject
 comparisons with unresolved deployment, state or ordering confounds.
 Commit the randomization algorithm, entropy-source requirements and redraw rules
@@ -427,6 +430,16 @@ evidence. Validate production Events, Knowledge, Artifacts, tools and additional
 context against that boundary at every use and acceptance. New or changed inputs
 outside it require reassessment; matching a broad task class alone is insufficient.
 Record the concrete context digest and applicability decision for each use.
+Bind the assessed production tool environment as well: exact backend and response
+semantics versions, source snapshot, initial state and access conditions, or an
+independently assessed environment class with deterministic membership criteria.
+Record the mapping from the committed replay/simulator environment to that
+production boundary. Revalidate actual environment membership before each use,
+tool interaction and protected acceptance, retaining the observed environment
+references and decision. Changed inventory, rankings, API behavior or access
+outside the assessed boundary requires fresh applicable assessment. An unchanged
+tool definition or task class cannot establish continuity; unavailable or
+unverifiable environment evidence denies the affected use.
 Bind the complete ordered set of co-materialized Skills, including every exact
 version, materialization and resolved-content digest, in both comparison arms
 and in the resulting applicability evidence. Evaluate the production composition,
@@ -537,7 +550,19 @@ conditions requires fresh applicable evidence rather than inheriting a prior
 assessment. Evaluation evidence grants no capabilities or effect approvals.
 Evidence reuse and non-discretionary classification require a runtime-verifiable
 immutable or attested model deployment revision, bound alongside the reported
-model identity and checked at every use and acceptance boundary. A mutable model
+model identity and checked at every use and acceptance boundary.
+Require an independently authorized, versioned trust policy defining eligible
+attestation issuers, verification keys and signature chain, deployment and
+configuration scope, freshness/expiry and revocation checks. Verify evidence
+against that trust anchor and bind it to the exact deployment/configuration
+serving each assessment and production inference, including reroutes. A signed
+opaque label or a provider's repeated revision assertion alone does not prove
+that binding. Immutable local revisions likewise require runtime verification of
+the actual loaded deployment/configuration. Missing, expired, revoked or
+unverifiable evidence denies reuse and the affected behavioral-policy use;
+record the trust-policy version and verification decision. Existing provider
+identity observations do not supply this deployment attestation.
+A mutable model
 name alone does not establish continuity. If the provider cannot supply this
 binding, deny behavioral-policy activation and use; fresh trials alone cannot establish that
 an unobservable deployment change did not occur afterward. A changed revision
