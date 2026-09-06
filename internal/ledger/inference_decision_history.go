@@ -2,7 +2,6 @@ package ledger
 
 import (
 	"fmt"
-	"math"
 	"sort"
 	"time"
 
@@ -24,6 +23,7 @@ type historicalRouteBinding struct {
 func validateRoutingDecisionHistory(stream []events.Event, activations map[string]inference.Policy, freezes map[core.ID][]events.OrganizationFreezeAdmission) error {
 	var bindings []historicalRouteBinding
 	seen := make(map[modelinput.RouteDecision]bool)
+	chargeTimes := make(map[string][]time.Time)
 	for _, event := range stream {
 		var requirements *modelinput.RouteRequirements
 		var decision *modelinput.RouteDecision
@@ -34,6 +34,11 @@ func validateRoutingDecisionHistory(stream []events.Event, activations map[strin
 				return err
 			}
 			requirements, decision = payload.Routing, payload.RoutingDecision
+			at, err := time.Parse(time.RFC3339Nano, payload.AdmittedAt)
+			if payload.AdmittedAt != "" && err != nil {
+				return err
+			}
+			chargeTimes[event.OrganizationID] = append(chargeTimes[event.OrganizationID], at, payload.WindowStartedAt, payload.WindowExpiresAt)
 		case "PLANNING_CONTEXT_MANIFESTED":
 			var payload events.PlanningContextPayload
 			if err := decodeExactJSONBytes(event.Payload, &payload); err != nil {
@@ -83,6 +88,10 @@ func validateRoutingDecisionHistory(stream []events.Event, activations map[strin
 	policies := make(map[string]map[string]inference.Policy)
 	activatedAt := make(map[string]map[string]time.Time)
 	charges := make(map[string]map[string]historicalInferenceCharge)
+	indexes := make(map[string]*routeChargeIndex)
+	for organization, times := range chargeTimes {
+		indexes[organization] = newRouteChargeIndex(times)
+	}
 	latestSnapshotTime := make(map[string]time.Time)
 	cursor := 0
 	for _, binding := range bindings {
@@ -121,7 +130,11 @@ func validateRoutingDecisionHistory(stream []events.Event, activations map[strin
 				if charges[event.OrganizationID] == nil {
 					charges[event.OrganizationID] = make(map[string]historicalInferenceCharge)
 				}
-				charges[event.OrganizationID][payload.ReservationID] = historicalInferenceCharge{admission: payload, input: payload.ReservedInputTokens, output: payload.ReservedOutputTokens, cost: payload.ReservedCostNanoUSD, outstanding: true, admittedAt: at}
+				charge := historicalInferenceCharge{admission: payload, input: payload.ReservedInputTokens, output: payload.ReservedOutputTokens, cost: payload.ReservedCostNanoUSD, outstanding: true, admittedAt: at}
+				if err := indexes[event.OrganizationID].change(charge, 1); err != nil {
+					return err
+				}
+				charges[event.OrganizationID][payload.ReservationID] = charge
 			case "INFERENCE_RECONCILED":
 				var payload events.InferenceReconciledPayload
 				if err := decodeExactJSONBytes(event.Payload, &payload); err != nil {
@@ -131,7 +144,13 @@ func validateRoutingDecisionHistory(stream []events.Event, activations map[strin
 				if !ok || !charge.outstanding {
 					return fmt.Errorf("routing snapshot has unmatched reconciliation")
 				}
+				if err := indexes[event.OrganizationID].change(charge, -1); err != nil {
+					return err
+				}
 				charge.input, charge.output, charge.cost, charge.outstanding = payload.ChargedInputTokens, payload.ChargedOutputTokens, payload.ChargedCostNanoUSD, false
+				if err := indexes[event.OrganizationID].change(charge, 1); err != nil {
+					return err
+				}
 				charges[event.OrganizationID][payload.ReservationID] = charge
 			}
 		}
@@ -160,14 +179,17 @@ func validateRoutingDecisionHistory(stream []events.Event, activations map[strin
 				return fmt.Errorf("routing decision observed an incomplete policy-set change")
 			}
 		}
-		if err := validateHistoricalRouteBudget(binding, policy, charges[organization]); err != nil {
+		if indexes[organization] == nil {
+			indexes[organization] = newRouteChargeIndex(nil)
+		}
+		if err := validateHistoricalRouteBudget(binding, policy, indexes[organization]); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateHistoricalRouteBudget(binding historicalRouteBinding, policy inference.Policy, charges map[string]historicalInferenceCharge) error {
+func validateHistoricalRouteBudget(binding historicalRouteBinding, policy inference.Policy, index *routeChargeIndex) error {
 	d := binding.decision
 	metadata, err := policy.Catalog.Metadata(policy)
 	if err != nil {
@@ -176,25 +198,13 @@ func validateHistoricalRouteBudget(binding historicalRouteBinding, policy infere
 	pool := inference.Pool{ID: d.PolicyFingerprint, Policy: policy, Available: true}
 	start, _ := inferenceWindow(d.SelectedAt, time.Duration(policy.WindowDurationSeconds)*time.Second)
 	orgStart, orgEnd := inferenceWindow(d.SelectedAt, time.Duration(policy.OrganizationBudget.WindowDurationSeconds)*time.Second)
-	totals := historicalBudgetTotals{start: orgStart, end: orgEnd}
-	for _, charge := range charges {
-		if err := totals.add(charge); err != nil {
-			return err
-		}
-		if charge.admission.ConnectionID != policy.ConnectionID {
-			continue
-		}
-		if charge.outstanding {
-			pool.ActiveRequests++
-		}
-		if charge.admission.Provider != policy.Provider || charge.admission.Model != policy.Model || !charge.admission.WindowStartedAt.Equal(start) {
-			continue
-		}
-		if charge.input < 0 || charge.output < 0 || charge.cost < 0 || charge.input > math.MaxInt64-pool.ChargedTokens || charge.output > math.MaxInt64-pool.ChargedTokens-charge.input || charge.cost > math.MaxInt64-pool.ChargedCostNanoUSD {
-			return fmt.Errorf("routing snapshot account charges overflow")
-		}
-		pool.ChargedTokens += charge.input + charge.output
-		pool.ChargedCostNanoUSD += charge.cost
+	totals, err := index.organization(orgStart, orgEnd)
+	if err != nil {
+		return err
+	}
+	pool.ActiveRequests, pool.ChargedTokens, pool.ChargedCostNanoUSD, err = index.account(routeAccountWindow{policy.ConnectionID, policy.Provider, policy.Model, start.UTC()})
+	if err != nil {
+		return err
 	}
 	requirements := binding.requirements.Clone()
 	requirements.ConnectionID = d.ConnectionID

@@ -86,7 +86,7 @@ func TestRoutedConfigRoundTripAndInvalidRoutes(t *testing.T) {
 			t.Fatalf("%s catalog-enabled hard route rejected: %v", purpose, err)
 		}
 	}
-	for _, purpose := range []string{"task", "planning", "normalization", "pin"} {
+	for _, purpose := range []string{"task", "planning", "normalization", "pin", "soft-task", "soft-planning", "soft-normalization", "soft-specific"} {
 		for name, mutate := range map[string]func(*modelinput.RouteRequirements){
 			"capability": func(r *modelinput.RouteRequirements) {
 				r.Capabilities = []modelinput.Capability{modelinput.Text, modelinput.Vision}
@@ -102,13 +102,18 @@ func TestRoutedConfigRoundTripAndInvalidRoutes(t *testing.T) {
 			changed.TaskConnections, changed.TaskRequirements = nil, nil
 			constraints := config.Routing.Requirements.Clone()
 			constraints.ConnectionID = "second"
+			if strings.HasPrefix(purpose, "soft-") {
+				constraints.ConnectionID = ""
+			}
 			switch purpose {
-			case "task":
+			case "task", "soft-task":
 				changed.Requirements = &constraints
-			case "planning":
+			case "planning", "soft-planning":
 				changed.PlanningRequirements = &constraints
-			case "normalization":
+			case "normalization", "soft-normalization":
 				changed.NormalizationRequirements = &constraints
+			case "soft-specific":
+				changed.TaskRequirements = map[string]modelinput.RouteRequirements{"research": constraints}
 			case "pin":
 				constraints.ConnectionID = ""
 				changed.Requirements = &constraints
@@ -118,10 +123,21 @@ func TestRoutedConfigRoundTripAndInvalidRoutes(t *testing.T) {
 				t.Fatalf("eligible %s hard route rejected: %v", purpose, err)
 			}
 			mutate(&constraints)
+			if purpose == "soft-specific" {
+				changed.TaskRequirements["research"] = constraints
+			}
 			if err := changed.Validate(config.Providers); err == nil {
 				t.Fatalf("%s hard route accepted incompatible %s", purpose, name)
 			}
 		}
+	}
+	// A soft route may use the second account when the default cannot fit it.
+	oneEligible := append([]Provider(nil), config.Providers...)
+	small := *oneEligible[0].InferencePolicy.Catalog
+	small.OutputTokens = 99
+	oneEligible[0].InferencePolicy.Catalog = &small
+	if err := config.Routing.Validate(oneEligible); err != nil {
+		t.Fatal("soft routing rejected an eligible alternative account", err)
 	}
 	for _, mutate := range []func(*ProviderRouting){
 		func(r *ProviderRouting) { r.Requirements = nil },
