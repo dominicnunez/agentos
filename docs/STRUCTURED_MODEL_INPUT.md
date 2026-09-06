@@ -57,6 +57,11 @@ Envelopes expose the source handle, class, and content; internal source
 references and digests are not added as transport metadata. Original payloads
 can contain IDs or metadata claims as untrusted text.
 
+The OpenAI adapter also caps the serialized message array at 256 KiB, after
+encoding source envelopes into message content. Input that passes the canonical
+request limit can still exceed this transport limit through JSON escaping;
+the adapter rejects it locally before credential resolution or an HTTP call.
+
 Neither transport provides a native role below user for these data messages.
 Quoting and explicit classification preserve the runtime representation;
 they do not prove that a model will resist prompt injection. Runtime authority,

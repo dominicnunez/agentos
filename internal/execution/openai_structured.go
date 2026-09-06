@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/dominicnunez/agentos/internal/modelinput"
 )
@@ -35,5 +36,12 @@ func (a *OpenAIAPI) CompleteRequest(ctx context.Context, request modelinput.Requ
 		}
 		input[i] = openAIInputMessage{Type: "message", Role: message.Role, Content: content}
 	}
-	return a.completeInput(ctx, input)
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return ModelResponse{}, RequestNotSent(err)
+	}
+	if len(encoded) > openAIMaximumPromptBytes {
+		return ModelResponse{}, RequestNotSent(modelinput.ErrLimit)
+	}
+	return a.completeInput(ctx, json.RawMessage(encoded))
 }
