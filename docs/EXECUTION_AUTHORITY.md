@@ -67,9 +67,33 @@ model emitted them.
 
 A tool definition may declare the exact downstream capabilities exposed by an
 Agent-controlled invocation. The ledger requires an exact active lease for the
-top-level operation and every declared consequence. A broker with network or
-credential access therefore cannot exercise those powers for an Agent that
-lacks the corresponding exact leases.
+top-level operation and every declared consequence. Missing an exact lease for
+any declared consequence denies the invocation. This verifies the declared
+closure; it does not inspect the effective authority of a backend credential.
+
+Before a consequential credentialed broker can be enabled, its runtime-owned
+authority evidence must bind the exact adapter and operation, backend endpoint,
+effective principal, tenant, credential generation (without secret bytes), and
+canonical effective capability set. Backend-verifiable evidence must establish
+that every effective capability is within the declared consequential closure.
+A parser allowlist, configured read-only flag, or credential class name alone
+does not establish this subset relationship. Prefer backend-enforced least
+privilege, including restrictions on privileged functions and indirect effects.
+
+The evidence must be bound into the protected effect and approval fingerprint,
+checked at time of use with the exact leases, and retained for recovery. Missing,
+expired, revoked, mismatched, or unverifiable evidence must deny execution.
+Credential rotation or backend permission changes require new verified evidence;
+recovery may explain an old attempt but must not treat old evidence as authority
+for a new attempt. The current effect contract does not implement this evidence
+or a downstream-principal attestor. Production effect writers and dynamic
+credentialed brokers remain unavailable pending that implementation and tests
+for excess backend privileges, cross-tenant substitution, rotation and revocation.
+
+The configured effect-status adapter is an observational reconciliation boundary
+with an exact endpoint and fixed GET contract, not a general Agent-controlled
+broker. Its credential remains adapter-private; its configuration is not proof
+of the backend principal's effective authority. It cannot enable effect writes.
 
 For protected execution consequences, the approval fingerprint also binds a
 deterministic Task-local trajectory: prior protected effect identities,
