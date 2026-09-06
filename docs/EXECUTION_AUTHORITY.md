@@ -204,7 +204,9 @@ requirement intentionally adds this gate for discretionary Skills; the preserved
 handoff's deferral of automated evaluation does not waive it.
 The non-discretionary classification requires independently authorized,
 version-bound evidence covering the exact content, materialization, composition
-and applicability scope. The author cannot approve that classification. Bind
+and applicability scope, Agent ID, blueprint ID/version and operating-instructions
+digest, effective model identity and execution profile. Changing any of these
+requires fresh classification before use. The author cannot approve that classification. Bind
 the classification decision, eligible reviewer and supporting evidence, and
 revalidate them at use and protected-action boundaries. Missing, stale or
 uncertain classification takes the behavioral validation path; a label or
@@ -212,13 +214,26 @@ author assertion cannot establish the exception.
 Compare held-out executions with and without
 the exact Skill under the same Agent, effective model, execution profile,
 candidate set and task conditions. Randomize candidate order where relevant,
-retain the comparison protocol and outcomes, and record unexplained persistent
+and randomize or counterbalance baseline-versus-Skill execution order within
+paired cases. Retain arm assignment, actual execution order and timestamps;
+candidate-order randomization alone does not control temporal effects. Reject
+comparisons with unresolved deployment, state or ordering confounds.
+Retain the comparison protocol and outcomes, and record unexplained persistent
 preference shifts. Evaluator count is not independence. Eligibility requires
 deterministic validation of recorded measurements and appropriately authorized
 human judgment for discretionary interpretation, with provenance and conflicts
 checked independently of the author. Bind the eligible principal, validation
 method, authorization and provenance evidence; an author-controlled Agent or
 another Agent repeating the same evidence cannot satisfy this requirement.
+Run both arms in isolated shadow/replay mode with runtime-enforced effectless
+capability profiles and controlled recorded or simulated tool outcomes. Remove
+production credentials, capabilities and approvals regardless of their source;
+neither arm may commit production effects or send real messages or orders.
+Bind the effectless evaluation profile and its explicit mapping to the intended
+production context in the evidence. The safety-only authority restriction must
+not silently change model-visible decision inputs; any other context difference
+requires independent applicability assessment before production use. Evaluation
+outputs stay isolated and cannot enter production as approved results or actions.
 
 Commit the exact Skill content, declared-purpose and evaluation-protocol digests
 to the ledger, including metrics, subgroups, persistence and acceptance thresholds,
@@ -293,6 +308,11 @@ freshness, evaluator eligibility and independent provenance. Missing lineage or
 revocation after materialization denies the action and quarantines affected
 outputs; a running execution or previously accepted output cannot bypass this
 check. Apply the same check to recovered or replayed proposals before action.
+Apply the same lineage and current-validity checks before result acceptance,
+publication and delivery, including model-only text with no tool call or effect
+commit. Deny publication or delivery and quarantine the affected result if any
+required classification, authorization or behavioral basis has become invalid;
+an earlier acceptance cannot authorize later delivery after revocation.
 
 A persistent shift requires an explicit explanation tied to the authorized
 objective and an independent
