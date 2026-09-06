@@ -21,7 +21,7 @@ func TestCodexSubscriptionAppliesFailClosedRunProfile(t *testing.T) {
 		model:       "gpt-test",
 		isolatedDir: root,
 		runPermit:   make(chan struct{}, 1),
-		run: func(_ context.Context, options sdk.RunOptions) (*sdk.RunResult, sdk.StreamSummary, error) {
+		run: func(_ context.Context, options sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error) {
 			captured = options
 			return successfulCodexRun("answer"), successfulCodexSummary(12, 3), nil
 		},
@@ -75,9 +75,9 @@ func TestCodexSubscriptionDeadlineIncludesSerializedQueueWait(t *testing.T) {
 		model:       "gpt-test",
 		isolatedDir: t.TempDir(),
 		runPermit:   permit,
-		run: func(_ context.Context, _ sdk.RunOptions) (*sdk.RunResult, sdk.StreamSummary, error) {
+		run: func(_ context.Context, _ sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error) {
 			t.Fatal("queued run unexpectedly started")
-			return nil, sdk.StreamSummary{}, nil
+			return nil, codexRunSummary{}, nil
 		},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -118,14 +118,14 @@ func TestCodexStreamBudgetRejectsSideEffectsImmediately(t *testing.T) {
 func TestCodexSubscriptionRejectsAnySideEffectEvidence(t *testing.T) {
 	for _, test := range []struct {
 		name   string
-		mutate func(*sdk.StreamSummary)
+		mutate func(*codexRunSummary)
 	}{
-		{name: "command", mutate: func(summary *sdk.StreamSummary) {
+		{name: "command", mutate: func(summary *codexRunSummary) {
 			summary.CommandExecutions["command"] = sdk.CommandExecutionLifecycle{}
 		}},
-		{name: "mcp", mutate: func(summary *sdk.StreamSummary) { summary.McpToolCalls["mcp"] = sdk.McpToolCallLifecycle{} }},
-		{name: "web", mutate: func(summary *sdk.StreamSummary) { summary.WebSearches["web"] = sdk.WebSearchLifecycle{} }},
-		{name: "file", mutate: func(summary *sdk.StreamSummary) { summary.FileChanges["file"] = sdk.FileChangeLifecycle{} }},
+		{name: "mcp", mutate: func(summary *codexRunSummary) { summary.McpToolCalls["mcp"] = sdk.McpToolCallLifecycle{} }},
+		{name: "web", mutate: func(summary *codexRunSummary) { summary.WebSearches["web"] = sdk.WebSearchLifecycle{} }},
+		{name: "file", mutate: func(summary *codexRunSummary) { summary.FileChanges["file"] = sdk.FileChangeLifecycle{} }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			summary := successfulCodexSummary(1, 1)
@@ -244,16 +244,16 @@ func successfulCodexRun(response string) *sdk.RunResult {
 	}
 }
 
-func successfulCodexSummary(input, output int64) sdk.StreamSummary {
+func successfulCodexSummary(input, output int64) codexRunSummary {
 	usage := &sdk.ThreadTokenUsage{}
 	usage.Total.InputTokens = input
 	usage.Total.OutputTokens = output
 	usage.Total.TotalTokens = input + output
-	return sdk.StreamSummary{
+	return codexRunSummary{EffectiveModel: "gpt-test", StreamSummary: sdk.StreamSummary{
 		LatestTokenUsage:  usage,
 		CommandExecutions: map[string]sdk.CommandExecutionLifecycle{},
 		McpToolCalls:      map[string]sdk.McpToolCallLifecycle{},
 		WebSearches:       map[string]sdk.WebSearchLifecycle{},
 		FileChanges:       map[string]sdk.FileChangeLifecycle{},
-	}
+	}}
 }
