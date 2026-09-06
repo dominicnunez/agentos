@@ -225,10 +225,22 @@ composition, lineage, evidence validity and deployment continuity apply equally
 to those classified inputs; bind their exact record identity, revision and
 resolved content in place of a Skill identity. A Skill-only inventory cannot
 establish an empty behavioral-policy closure.
+Runtime-owned security contracts have a separate admission basis: exact reviewed
+runtime/version-bound content, independently authorized security invariants and
+integrity-checked assembly. They do not require candidate Skill evidence merely
+for expressing those invariants. This exception cannot cover model-authored,
+imported or discretionary preference policy inserted into the security contract.
+Admit blueprint instructions through exact version/content and authorized scope
+review. Classify their content by the same functional distinction: runtime
+security invariants and authorized Task/role constraints use those respective
+admission bases; reusable discretionary steering requires the behavioral evidence
+path here, or remains unavailable. Blueprint approval alone cannot waive that
+path. Retain classification and exact component boundaries, deny ambiguous
+instructions and bind the admitted blueprint identically across assessment arms.
 Require independent review of the actual Skill content against its authorized
 purpose and policy, plus absolute policy-compliance checks on each comparison
 arm. Prohibited Skill content or treatment outcomes deny activation even when
-both arms behave identically. Record baseline violations and require an explicit
+all arms behave identically. Record baseline violations and require an explicit
 independent remediation assessment; a compliant corrective treatment may be
 activated when its authorized purpose addresses those violations and all other
 gates pass. Baseline violations remain ineligible for production acceptance and
@@ -298,7 +310,7 @@ candidate-order randomization alone does not control temporal effects. Reject
 comparisons with unresolved deployment, state or ordering confounds.
 Commit the randomization algorithm, entropy-source requirements and redraw rules
 with the protocol. The runtime generates and commits candidate ordering and arm
-assignments, including the protected seed/entropy reference, before either arm
+assignments, including the protected seed/entropy reference, before any arm
 executes. Retain every draw and redraw with its reason and ledger ordering;
 unauthorized redraws or incomplete assignment history invalidate the comparison.
 Protect assignment details from blinded scorers until their scores are committed.
@@ -315,10 +327,10 @@ to the ledger. Retain the runtime-owned assignment and reveal ordering. If the
 required scoring cannot be blinded, reject that subjective evidence rather than
 treating independence or execution-order randomization as a substitute. Content
 policy review remains separate from blinded outcome scoring.
-Run both arms in isolated shadow/replay mode with runtime-enforced effectless
+Run every arm, including the neutral control, in isolated shadow/replay mode with runtime-enforced effectless
 capability profiles and controlled recorded or simulated tool outcomes. Remove
 production credentials, capabilities and approvals regardless of their source;
-neither arm may commit production effects or send real messages or orders.
+no arm may commit production effects or send real messages or orders.
 Bind the effectless evaluation profile and its explicit mapping to the intended
 production context in the evidence. The safety-only authority restriction must
 not silently change model-visible decision inputs; any other context difference
@@ -353,6 +365,12 @@ access to or influence that selection. Retain selection provenance, access
 boundaries and ledger ordering; author-visible, author-selected or adaptively
 chosen cases cannot establish held-out evidence. A revised Skill requires a
 new commitment and fresh independent held-out selection.
+Commit the eligible sampling frame and its immutable snapshot, strata and
+allocation, selection algorithm, entropy-source requirements and replacement
+rules with the protocol. The runtime applies those rules and retains the seed
+reference, every selection/replacement and its reason and ordering. Neither
+author nor evaluator may substitute cases after seeing candidate behavior;
+unauthorized selection or incomplete history invalidates the comparison.
 Before accepting the protocol, require independent, authorized approval of
 risk-appropriate sampling, relevant subgroup and task coverage, and detection
 sensitivity or statistical power for policy-relevant effects. Bind the adequacy
@@ -379,7 +397,7 @@ references, effective model identity, behavioral-shift summary, evaluator
 reference, and durable evidence references. Bind the exact Agent ID and blueprint
 ID/version, including its operating-instructions digest, exact Agent record
 revision and runtime adapter identity/version. Changes to the Agent record or
-adapter require fresh applicable assessment. Resolve both comparison
+adapter require fresh applicable assessment. Resolve all comparison
 arms to runtime-owned execution manifests and validate equality of the Agent,
 record revision, runtime adapter, blueprint, effective model, profile and
 controlled task/candidate conditions;
@@ -401,7 +419,7 @@ are outcomes or mediators, not exogenous inputs required to be byte-identical.
 Retain the complete trajectories and deterministically verify each response and
 state transition against the committed environment. Unexplained environment or
 input differences invalidate the comparison; do not erase legitimate behavioral
-differences by forcing identical tool trajectories. Pair both arms
+differences by forcing identical tool trajectories. Match all arms
 within each preregistered randomized ordering; different full input digests alone
 do not prove a controlled comparison.
 Include an additional purpose-neutral control matched to the Skill's rendered
@@ -411,12 +429,14 @@ assessment. Record rendered inputs and effective token budgets and establish
 that no arm truncated, displaced or silently omitted common input. Evaluate
 footprint effects separately from policy semantics; if rendering or neutral
 control effects cannot be excluded, deny the proposed purpose attribution.
-Before admitting a comparison, resolve the candidate's transitive influence
+Before admitting a comparison, resolve the entire runtime-bound candidate family's transitive influence
 lineage in the case inputs and reject any case containing prior outputs or
-derivatives influenced by that candidate, including Knowledge and Artifacts.
+derivatives influenced by any related family member, including earlier versions,
+renamed candidates, Knowledge and Artifacts. Use the bounded complete family
+history above; missing family membership or lineage denies evidence acceptance.
 Apply this contamination check to reassessment as well as initial trials and
 retain its evidence. A case with unavailable or ambiguous lineage cannot serve
-as a control; acquire fresh uncontaminated cases instead of comparing two
+as a control; acquire fresh uncontaminated cases instead of comparing
 already-influenced arms.
 Bind outcomes, computed metrics, behavioral-shift summary, adequacy approval and
 activation decision to the exact preregistered protocol digest and ledger
@@ -425,11 +445,11 @@ and deterministically verify that the retained analysis used its exact metrics,
 thresholds, subgroups and analysis version. Missing bindings or post-hoc analysis
 substitution denies acceptance of the evidence.
 Bind the exact context-builder version in classification and behavioral evidence,
-both comparison arms and production applicability checks. A changed prompt
+all comparison arms and production applicability checks. A changed prompt
 assembly version requires fresh applicable assessment even if all other
 identities and resolved content remain unchanged.
 Also bind the exact TaskContract version and canonical content digest in
-classification, behavioral evidence and both comparison arms, and validate them
+classification, behavioral evidence and all comparison arms, and validate them
 at production use. Changed constraints, success criteria or other contract
 content require fresh applicable assessment even within the same task class.
 Reconcile every selected case and arm assignment to its recorded outcome or
@@ -465,7 +485,7 @@ outside the assessed boundary requires fresh applicable assessment. An unchanged
 tool definition or task class cannot establish continuity; unavailable or
 unverifiable environment evidence denies the affected use.
 Bind the complete ordered set of co-materialized Skills, including every exact
-version, materialization and resolved-content digest, in both comparison arms
+version, materialization and resolved-content digest, in all comparison arms
 and in the resulting applicability evidence. Evaluate the production composition,
 with only the declared intervention removed from its paired baseline. Individual
 Skill approvals do not establish safety of their combination. Adding, removing,
@@ -518,6 +538,15 @@ and changed evaluator assumptions. Check the current policy and trusted runtime
 time at every use and acceptance boundary. Missing policy, unverifiable time,
 expiry or a triggered revalidation condition denies use until fresh evidence is
 admitted; absence of a revocation is not a freshness determination.
+Make drift checks executable: bind the reference population/snapshot, required
+observations and provenance, observation window, versioned detector, subgroup
+metrics and thresholds, and maximum decision age in the approved freshness
+policy. The runtime evaluates the registered test, retaining observed inputs,
+computed metrics and the decision used at each use/acceptance boundary. Missing,
+insufficient or stale required observations or a triggered threshold denies
+reuse pending reassessment, including shifts within an otherwise admitted class.
+Bound observation retention and detector work through versioned finite runtime
+limits; exceeding them cannot produce a successful freshness decision.
 Carry these exact Skill, composition, classification, authorization and evidence
 references through the execution manifest and resulting outputs and proposed
 effects. Before accepting a protected downstream action, including a tool call
