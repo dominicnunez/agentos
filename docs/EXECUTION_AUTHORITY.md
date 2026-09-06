@@ -364,6 +364,14 @@ Choosing a winner among alternatives requires a committed multiplicity rule and
 post-selection confirmation on another fresh independent set. Missing search
 history or confirmation denies activation; repeated attempts cannot be hidden
 by assigning a new version or identity.
+Enforce versioned runtime-owned finite limits on candidates per family, total
+attempts and retries, history references, resolved evidence bytes and ledger
+reads. Apply limits at candidate/attempt admission and incrementally during
+history resolution and reconciliation; missing limits or excess denies further
+admission and evidence acceptance. Bind family identity and accounting through
+the runtime so new candidate identities cannot reset the budget. Retain the
+bounded admitted history and terminal limit-exceeded decision; never truncate
+history to claim a successful proof or start an unlinked family to hide attempts.
 
 The evidence must bind the exact Skill ID/version and content digest, declared
 purpose digest, evaluation-set digest, baseline and Skill execution-profile
@@ -375,11 +383,15 @@ adapter require fresh applicable assessment. Resolve both comparison
 arms to runtime-owned execution manifests and validate equality of the Agent,
 record revision, runtime adapter, blueprint, effective model, profile and
 controlled task/candidate conditions;
-record each arm's input digest and the intentional Skill intervention separately.
+record each arm's input digest and its committed intervention separately.
 Different blueprint instructions cannot silently become part of the intervention.
 Require field-by-field equality of every exogenous non-Skill input, or equality of a
-canonical digest computed after removing only the explicitly defined Skill
-intervention. This covers Event, Knowledge, Artifact, tool and additional-context
+canonical digest computed after removing only the explicitly defined arm-specific
+intervention: no added content for the baseline, exact Skill content for treatment,
+and exact purpose-neutral content for the neutral-control arm. Commit this mapping
+and each intervention's resolved bytes, rendered token length and placement with
+the protocol before case selection; comparison normalization may remove only
+those bound additions. This covers Event, Knowledge, Artifact, tool and additional-context
 references, resolved bytes, message order and candidate order supplied independently
 of the intervention. Bind the same preregistered deterministic replay or simulator
 response function, version, source snapshot, initial state and access conditions
