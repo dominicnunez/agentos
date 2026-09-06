@@ -9,6 +9,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/lab"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 	"github.com/dominicnunez/agentos/internal/planning"
 )
 
@@ -45,6 +46,8 @@ type IntakeAbandonment struct {
 }
 
 type IntentNormalizationContext struct {
+	RoutingDecision         *modelinput.RouteDecision
+	Routing                 *modelinput.RouteRequirements
 	ConnectionID            string
 	ExecutionID             string
 	SourceMessageID         string
@@ -214,6 +217,35 @@ func (s *Service) ValidateSelectedGoal(ctx context.Context, organizationID, goal
 }
 
 func (s *Service) RecordIntentNormalizationContext(ctx context.Context, organizationID, requestID string, in IntentNormalizationContext) ([]events.Event, error) {
+	if (in.Routing == nil) != (in.RoutingDecision == nil) {
+		return nil, fmt.Errorf("normalization routing requirements and decision must be present together")
+	}
+	if in.Routing == nil {
+		required, err := s.gateway.InferenceConnectionRequiresRouting(ctx, in.ConnectionID)
+		if err != nil {
+			return nil, err
+		}
+		if required {
+			return nil, fmt.Errorf("governed normalizer requires route selection before publication")
+		}
+	}
+	if decision := in.RoutingDecision; decision != nil {
+		if in.Routing == nil || decision.ValidateFor(*in.Routing) != nil || decision.SnapshotSequence <= 0 || decision.ConnectionID != in.ConnectionID ||
+			decision.Provider != in.Provider || decision.Model != in.Model || decision.ExecutionProfileVersion != in.ExecutionProfileVersion {
+			return nil, fmt.Errorf("normalization routing decision does not identify its context")
+		}
+	}
+	if in.Routing != nil {
+		if _, err := in.Routing.Canonical(); err != nil {
+			return nil, err
+		}
+		if in.Routing.OrganizationID != organizationID || in.Routing.ConnectionID != "" && in.Routing.ConnectionID != in.ConnectionID {
+			return nil, fmt.Errorf("normalization requirements do not match their context")
+		}
+		if err := s.gateway.ValidateInferenceRouteBinding(ctx, modelinput.RouteBinding{Requirements: *in.Routing, Decision: *in.RoutingDecision}); err != nil {
+			return nil, fmt.Errorf("validate normalization route provenance: %w", err)
+		}
+	}
 	if (in.ConnectionID != "" && !core.ValidInferenceConnectionID(in.ConnectionID)) || in.ExecutionID == "" || in.SourceMessageID == "" || in.PromptVersion == "" || in.Provider == "" || in.Model == "" || in.ExecutionProfileVersion == "" {
 		return nil, fmt.Errorf("complete intent normalization context is required")
 	}
@@ -239,6 +271,8 @@ func (s *Service) RecordIntentNormalizationContext(ctx context.Context, organiza
 		}
 	}
 	payload := events.IntentNormalizationContextPayload{
+		RoutingDecision: modelinput.CloneRouteDecision(in.RoutingDecision),
+		Routing:         modelinput.CloneRouteRequirements(in.Routing),
 		SourceMessageID: in.SourceMessageID, PromptVersion: in.PromptVersion,
 		ConnectionID: in.ConnectionID, Provider: in.Provider, Model: in.Model, ExecutionProfileVersion: in.ExecutionProfileVersion,
 		InputEventRefs: refs,
@@ -501,7 +535,7 @@ func latestIntakeMessage(stream []events.Event) (events.IntakeMessageRecordedPay
 }
 
 func sameNormalizationContext(left, right events.IntentNormalizationContextPayload) bool {
-	return left.ConnectionID == right.ConnectionID && left.SourceMessageID == right.SourceMessageID && left.PromptVersion == right.PromptVersion &&
+	return modelinput.SameRouteDecision(left.RoutingDecision, right.RoutingDecision) && modelinput.SameRouteRequirements(left.Routing, right.Routing) && left.ConnectionID == right.ConnectionID && left.SourceMessageID == right.SourceMessageID && left.PromptVersion == right.PromptVersion &&
 		left.Provider == right.Provider && left.Model == right.Model &&
 		left.ExecutionProfileVersion == right.ExecutionProfileVersion && slices.Equal(left.InputEventRefs, right.InputEventRefs)
 }

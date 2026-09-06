@@ -1,9 +1,26 @@
 package core
 
 import (
+	"github.com/dominicnunez/agentos/internal/modelinput"
 	"strings"
 	"testing"
 )
+
+func TestTaskRoutingRequiresPairedDecision(t *testing.T) {
+	task := Task{ID: "task", ExecutionKind: ExecutionAgent}
+	if err := ValidateTaskAssignment(task, "org", DurableGraph{}); err != nil {
+		t.Fatal("legacy unassigned task rejected", err)
+	}
+	task.Routing = &modelinput.RouteRequirements{OrganizationID: "org", Capabilities: []modelinput.Capability{modelinput.Text}, InputTokens: 100, OutputTokens: 20, Locality: modelinput.LocalOnly, DataClass: "internal"}
+	if err := ValidateTaskAssignment(task, "org", DurableGraph{}); err == nil || !strings.Contains(err.Error(), "present together") {
+		t.Fatalf("routing without decision accepted: %v", err)
+	}
+	task.Routing = nil
+	task.RoutingDecision = &modelinput.RouteDecision{}
+	if err := ValidateTaskAssignment(task, "org", DurableGraph{}); err == nil || !strings.Contains(err.Error(), "present together") {
+		t.Fatalf("decision without routing accepted: %v", err)
+	}
+}
 
 func TestValidateDurableGraphRejectsInvalidTeamRoster(t *testing.T) {
 	graph := DurableGraph{

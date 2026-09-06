@@ -52,6 +52,12 @@ type Normalizer interface {
 	Normalize(context.Context, []ConversationTurn) (Normalization, error)
 }
 
+// NormalizerSelector chooses one account before recording an attempt's context.
+// The returned normalizer and requirements belong to that attempt only.
+type NormalizerSelector interface {
+	SelectNormalizer(context.Context, string) (Normalizer, *modelinput.RouteBinding, error)
+}
+
 type NormalizerDescriptor struct {
 	ConnectionID            string
 	PromptVersion           string

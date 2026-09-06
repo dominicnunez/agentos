@@ -1,6 +1,11 @@
 package inference
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+var ErrOrganizationBudgetExhausted = errors.New("organization inference budget exhausted")
 
 // OrganizationBudget applies across every configured connection and model.
 // It supplements individual policy limits; it does not allocate a fresh budget

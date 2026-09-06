@@ -45,7 +45,15 @@ func validateOrganizationBudgetHistory(stream []events.Event, activations map[st
 			connections[event.OrganizationID][policy.ConnectionID] = policy
 			var budget *inference.OrganizationBudget
 			disagrees := false
+			var routing *inference.RoutePolicy
+			routingSeen := false
 			for _, active := range connections[event.OrganizationID] {
+				if active.Version == inference.ConnectionPolicyVersion {
+					if routingSeen && !inference.SameRoutePolicy(routing, active.Routing) {
+						disagrees = true
+					}
+					routing, routingSeen = active.Routing, true
+				}
 				if active.OrganizationBudget == nil {
 					continue
 				}

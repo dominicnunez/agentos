@@ -21,6 +21,27 @@ func validateConnectionBudgetAgreement(ctx context.Context, tx *sql.Tx, candidat
 	if budget != nil && *budget != *candidate.OrganizationBudget {
 		return fmt.Errorf("active connections disagree on organization inference budget")
 	}
+	rows, err := tx.QueryContext(ctx, `SELECT body FROM inference_policies WHERE organization_id=? AND connection_id<>? AND active=1`, candidate.OrganizationID, candidate.ConnectionID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var body []byte
+		if err := rows.Scan(&body); err != nil {
+			return err
+		}
+		var active inference.Policy
+		if err := decodeExactJSONBytes(body, &active); err != nil {
+			return err
+		}
+		if active.Version == inference.ConnectionPolicyVersion && !inference.SameRoutePolicy(active.Routing, candidate.Routing) {
+			return fmt.Errorf("active connections disagree on organization routing policy")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -73,10 +94,36 @@ func enforceOrganizationBudget(ctx context.Context, tx *sql.Tx, organizationID s
 	if err := validateInferenceAdmissionsSnapshot(ctx, tx); err != nil {
 		return fmt.Errorf("validate shared inference accounting: %w", err)
 	}
+	use, err := readOrganizationBudgetUse(ctx, tx, organizationID, now, active, budget)
+	if err != nil {
+		return err
+	}
+	return use.allows(input, output, cost)
+}
+
+type organizationBudgetUse struct {
+	budget       *inference.OrganizationBudget
+	active       int
+	tokens, cost int64
+}
+
+func (u organizationBudgetUse) allows(input, output, cost int64) error {
+	if u.budget != nil && !u.budget.Allows(u.active, u.tokens, u.cost, input, output, cost) {
+		return inference.ErrOrganizationBudgetExhausted
+	}
+	return nil
+}
+
+// The caller must validate inference history in this same immutable transaction
+// first. Candidate selection can reuse these totals without repeating replay.
+func readOrganizationBudgetUse(ctx context.Context, tx *sql.Tx, organizationID string, now time.Time, active int, budget *inference.OrganizationBudget) (organizationBudgetUse, error) {
+	if budget == nil {
+		return organizationBudgetUse{}, nil
+	}
 	start, end := inferenceWindow(now, time.Duration(budget.WindowDurationSeconds)*time.Second)
 	rows, err := tx.QueryContext(ctx, `SELECT COALESCE((SELECT json_extract(e.payload,'$.admitted_at') FROM events e WHERE e.organization_id=r.organization_id AND e.event_type='INFERENCE_RESERVED' AND e.source_execution_id=r.execution_id AND json_extract(e.payload,'$.reservation_id')=r.reservation_id),''),r.window_started_at,r.window_expires_at,r.state,r.charged_input_tokens,r.charged_output_tokens,r.charged_cost_nano_usd FROM inference_reservations r WHERE r.organization_id=?`, organizationID)
 	if err != nil {
-		return fmt.Errorf("read shared inference budget use: %w", err)
+		return organizationBudgetUse{}, fmt.Errorf("read shared inference budget use: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var tokens, chargedCost int64
@@ -84,7 +131,7 @@ func enforceOrganizationBudget(ctx context.Context, tx *sql.Tx, organizationID s
 		var admittedAt, windowStart, windowEnd, state string
 		var chargedInput, chargedOutput, rowCost int64
 		if err := rows.Scan(&admittedAt, &windowStart, &windowEnd, &state, &chargedInput, &chargedOutput, &rowCost); err != nil {
-			return fmt.Errorf("scan shared inference budget use: %w", err)
+			return organizationBudgetUse{}, fmt.Errorf("scan shared inference budget use: %w", err)
 		}
 		// Historical events did not bind a precise admission time. Their sealed
 		// route window is the available evidence, so count overlapping windows
@@ -95,7 +142,7 @@ func enforceOrganizationBudget(ctx context.Context, tx *sql.Tx, organizationID s
 		if admittedAt != "" {
 			admitted, err := time.Parse(time.RFC3339Nano, admittedAt)
 			if err != nil || admitted.After(now) {
-				return fmt.Errorf("shared inference budget admission time is invalid")
+				return organizationBudgetUse{}, fmt.Errorf("shared inference budget admission time is invalid")
 			}
 			inWindow = !admitted.Before(start) && admitted.Before(end)
 		}
@@ -103,16 +150,13 @@ func enforceOrganizationBudget(ctx context.Context, tx *sql.Tx, organizationID s
 			continue
 		}
 		if chargedInput > math.MaxInt64-tokens || chargedOutput > math.MaxInt64-tokens-chargedInput || rowCost > math.MaxInt64-chargedCost {
-			return fmt.Errorf("shared inference budget accounting overflow")
+			return organizationBudgetUse{}, fmt.Errorf("shared inference budget accounting overflow")
 		}
 		tokens += chargedInput + chargedOutput
 		chargedCost += rowCost
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate shared inference budget use: %w", err)
+		return organizationBudgetUse{}, fmt.Errorf("iterate shared inference budget use: %w", err)
 	}
-	if !budget.Allows(active, tokens, chargedCost, input, output, cost) {
-		return fmt.Errorf("organization inference budget exhausted")
-	}
-	return nil
+	return organizationBudgetUse{budget: budget, active: active, tokens: tokens, cost: chargedCost}, nil
 }

@@ -197,6 +197,11 @@ func (l *SQLite) ReserveInference(ctx context.Context, request inference.Inferen
 	}
 	var reserved inference.Reservation
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		if request.Scope.RoutingDecision != nil {
+			if err := validateInferenceAdmissionsSnapshot(ctx, tx, request); err != nil {
+				return err
+			}
+		}
 		// Authorization, pricing, and window time are read only after the
 		// transaction is acquired so expiry cannot race admission.
 		now := l.nowUTC()
@@ -212,6 +217,9 @@ func (l *SQLite) ReserveInference(ctx context.Context, request inference.Inferen
 		}
 		policy, fingerprint, err := activeInferencePolicy(ctx, tx, request.Scope.OrganizationID, request.ConnectionID)
 		if err != nil {
+			return err
+		}
+		if err := inference.ValidateRequestRouting(now, policy, request); err != nil {
 			return err
 		}
 		var prior int
@@ -248,7 +256,23 @@ FROM inference_reservations WHERE organization_id=? AND connection_id=? AND prov
 		if selection.PoolID != fingerprint || selection.PolicyFingerprint != fingerprint {
 			return fmt.Errorf("selected inference pool is not the active durable policy")
 		}
-		if err := enforceOrganizationBudget(ctx, tx, policy.OrganizationID, now, active, selection.ReservedInputTokens, selection.ReservedOutputTokens, selection.ReservedCostNanoUSD); err != nil {
+		var budgetErr error
+		if request.Scope.RoutingDecision != nil {
+			// History and the pending decision were validated above; no writes
+			// have occurred in this transaction since that verification.
+			budget, err := activeOrganizationBudget(ctx, tx, policy.OrganizationID, nil)
+			if err != nil {
+				return err
+			}
+			use, err := readOrganizationBudgetUse(ctx, tx, policy.OrganizationID, now, active, budget)
+			if err != nil {
+				return err
+			}
+			budgetErr = use.allows(selection.ReservedInputTokens, selection.ReservedOutputTokens, selection.ReservedCostNanoUSD)
+		} else {
+			budgetErr = enforceOrganizationBudget(ctx, tx, policy.OrganizationID, now, active, selection.ReservedInputTokens, selection.ReservedOutputTokens, selection.ReservedCostNanoUSD)
+		}
+		if err := budgetErr; err != nil {
 			return err
 		}
 		reservationID, err := inferenceReservationID(request)
@@ -275,9 +299,11 @@ window_started_at,window_expires_at,created_at,updated_at,connection_id) VALUES(
 			return fmt.Errorf("reserve inference budget: %w", err)
 		}
 		payload := events.InferenceReservedPayload{
-			AdmittedAt:    now.Format(time.RFC3339Nano),
-			ConnectionID:  request.ConnectionID,
-			ReservationID: reserved.ID, RequestID: request.Scope.RequestID, Purpose: string(request.Scope.Purpose),
+			Routing:         request.Scope.Routing,
+			RoutingDecision: request.Scope.RoutingDecision,
+			AdmittedAt:      now.Format(time.RFC3339Nano),
+			ConnectionID:    request.ConnectionID,
+			ReservationID:   reserved.ID, RequestID: request.Scope.RequestID, Purpose: string(request.Scope.Purpose),
 			IntentID: request.Scope.IntentID, PolicyFingerprint: fingerprint, PromptSHA256: request.PromptSHA256,
 			Provider: request.Descriptor.Provider, Model: request.Descriptor.Model,
 			ExecutionProfileVersion: request.Descriptor.ExecutionProfileVersion,

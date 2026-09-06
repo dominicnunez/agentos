@@ -63,6 +63,12 @@ func (m Manager) Select(now time.Time, request PoolRequest) (PoolSelection, erro
 		if policy.Provider != request.Descriptor.Provider || policy.Model != request.Descriptor.Model || policy.ExecutionProfileVersion != request.Descriptor.ExecutionProfileVersion {
 			continue
 		}
+		if governance := policy.Routing; governance != nil {
+			if governance.Locality == LocalOnly && policy.Mode != Local || !providerAllowed(policy.Provider, governance.AllowedProviders, governance.DeniedProviders) {
+				failure = "inference route is prohibited by organization policy"
+				continue
+			}
+		}
 		if !pool.Available {
 			failure = "matching pool is unavailable"
 			continue
@@ -70,6 +76,13 @@ func (m Manager) Select(now time.Time, request PoolRequest) (PoolSelection, erro
 		if now.Before(policy.AuthorizedAt) || !now.Before(policy.AuthorizationExpiresAt) {
 			failure = "inference authorization is missing, not yet valid, or expired"
 			continue
+		}
+		if catalog := policy.Catalog; catalog != nil {
+			if !now.Before(catalog.ValidUntil) || policy.MaxOutputTokensPerRequest > catalog.OutputTokens ||
+				policy.MaxInputTokensPerRequest > catalog.ContextTokens || policy.MaxOutputTokensPerRequest > catalog.ContextTokens-policy.MaxInputTokensPerRequest {
+				failure = "inference catalog is expired or cannot satisfy the reserved token limits"
+				continue
+			}
 		}
 		if pool.ActiveRequests >= policy.MaxConcurrentRequests {
 			failure = "inference concurrency limit is exhausted"

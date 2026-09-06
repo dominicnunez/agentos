@@ -1,6 +1,9 @@
 package core
 
-import "time"
+import (
+	"github.com/dominicnunez/agentos/internal/modelinput"
+	"time"
+)
 
 type ID string
 
@@ -268,22 +271,24 @@ type AgentConfig struct {
 }
 
 type Task struct {
-	ID                   ID                   `json:"id"`
-	WorkID               ID                   `json:"work_id"`
-	Description          string               `json:"description"`
-	ExecutionBrief       string               `json:"execution_brief,omitempty"`
-	AcceptanceCriteria   []IntentValue        `json:"acceptance_criteria,omitempty"`
-	ExecutionKind        ExecutionKind        `json:"execution_kind"`
-	ModelInferencePolicy ModelInferencePolicy `json:"model_inference_policy"`
-	DependsOn            []ID                 `json:"depends_on,omitempty"`
-	ParentID             ID                   `json:"parent_id,omitempty"`
-	AssigneeType         string               `json:"assignee_type,omitempty"`
-	AssigneeID           ID                   `json:"assignee_id,omitempty"`
-	AgentConfig          *AgentConfig         `json:"agent_config,omitempty"`
-	RuntimeHandlerRef    string               `json:"runtime_handler_ref,omitempty"`
-	TaskContractVersion  string               `json:"task_contract_version"`
-	CompletionContract   *CompletionContract  `json:"completion_contract,omitempty"`
-	Status               TaskStatus           `json:"status"`
+	Routing              *modelinput.RouteRequirements `json:"routing,omitempty"`
+	RoutingDecision      *modelinput.RouteDecision     `json:"routing_decision,omitempty"`
+	ID                   ID                            `json:"id"`
+	WorkID               ID                            `json:"work_id"`
+	Description          string                        `json:"description"`
+	ExecutionBrief       string                        `json:"execution_brief,omitempty"`
+	AcceptanceCriteria   []IntentValue                 `json:"acceptance_criteria,omitempty"`
+	ExecutionKind        ExecutionKind                 `json:"execution_kind"`
+	ModelInferencePolicy ModelInferencePolicy          `json:"model_inference_policy"`
+	DependsOn            []ID                          `json:"depends_on,omitempty"`
+	ParentID             ID                            `json:"parent_id,omitempty"`
+	AssigneeType         string                        `json:"assignee_type,omitempty"`
+	AssigneeID           ID                            `json:"assignee_id,omitempty"`
+	AgentConfig          *AgentConfig                  `json:"agent_config,omitempty"`
+	RuntimeHandlerRef    string                        `json:"runtime_handler_ref,omitempty"`
+	TaskContractVersion  string                        `json:"task_contract_version"`
+	CompletionContract   *CompletionContract           `json:"completion_contract,omitempty"`
+	Status               TaskStatus                    `json:"status"`
 }
 
 func (t Task) Ready(tasks map[ID]Task) bool {
@@ -412,28 +417,30 @@ type VersionedRef struct {
 	MaterializationState MaterializationState `json:"materialization_state"`
 }
 type ExecutionContextManifest struct {
-	ConnectionID            string         `json:"connection_id,omitempty"`
-	ExecutionID             ID             `json:"execution_id"`
-	AgentID                 ID             `json:"agent_id"`
-	AgentBlueprintVersion   string         `json:"agent_blueprint_version"`
-	ExecutionProfileVersion string         `json:"execution_profile_version"`
-	RuntimeAdapter          string         `json:"runtime_adapter"`
-	Provider                string         `json:"provider,omitempty"`
-	Model                   string         `json:"model,omitempty"`
-	TaskID                  ID             `json:"task_id"`
-	TaskContractVersion     string         `json:"task_contract_version"`
-	ExecutionInputSHA256    string         `json:"execution_input_sha256"`
-	PromptVersion           string         `json:"prompt_version,omitempty"`
-	PolicyVersion           string         `json:"policy_version,omitempty"`
-	EventRefs               []string       `json:"event_refs"`
-	KnowledgeRefs           []VersionedRef `json:"knowledge_refs"`
-	CoordinationRefs        []VersionedRef `json:"coordination_refs,omitempty"`
-	SkillRefs               []VersionedRef `json:"skill_refs"`
-	ToolDefinitions         []VersionedRef `json:"tool_definitions"`
-	ArtifactRefs            []VersionedRef `json:"artifact_refs"`
-	AdditionalContextRefs   []VersionedRef `json:"additional_context_refs"`
-	ContextBuilderVersion   string         `json:"context_builder_version"`
-	CreatedAt               time.Time      `json:"created_at"`
+	Routing                 *modelinput.RouteRequirements `json:"routing,omitempty"`
+	RoutingDecision         *modelinput.RouteDecision     `json:"routing_decision,omitempty"`
+	ConnectionID            string                        `json:"connection_id,omitempty"`
+	ExecutionID             ID                            `json:"execution_id"`
+	AgentID                 ID                            `json:"agent_id"`
+	AgentBlueprintVersion   string                        `json:"agent_blueprint_version"`
+	ExecutionProfileVersion string                        `json:"execution_profile_version"`
+	RuntimeAdapter          string                        `json:"runtime_adapter"`
+	Provider                string                        `json:"provider,omitempty"`
+	Model                   string                        `json:"model,omitempty"`
+	TaskID                  ID                            `json:"task_id"`
+	TaskContractVersion     string                        `json:"task_contract_version"`
+	ExecutionInputSHA256    string                        `json:"execution_input_sha256"`
+	PromptVersion           string                        `json:"prompt_version,omitempty"`
+	PolicyVersion           string                        `json:"policy_version,omitempty"`
+	EventRefs               []string                      `json:"event_refs"`
+	KnowledgeRefs           []VersionedRef                `json:"knowledge_refs"`
+	CoordinationRefs        []VersionedRef                `json:"coordination_refs,omitempty"`
+	SkillRefs               []VersionedRef                `json:"skill_refs"`
+	ToolDefinitions         []VersionedRef                `json:"tool_definitions"`
+	ArtifactRefs            []VersionedRef                `json:"artifact_refs"`
+	AdditionalContextRefs   []VersionedRef                `json:"additional_context_refs"`
+	ContextBuilderVersion   string                        `json:"context_builder_version"`
+	CreatedAt               time.Time                     `json:"created_at"`
 }
 
 type CapabilityLease struct {

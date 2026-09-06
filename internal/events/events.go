@@ -18,6 +18,7 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/boundaryjson"
 	"github.com/dominicnunez/agentos/internal/core"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 )
 
 const SchemaVersion = 4
@@ -290,13 +291,15 @@ type IntakeAbandonedPayload struct {
 }
 
 type IntentNormalizationContextPayload struct {
-	ConnectionID            string   `json:"connection_id,omitempty"`
-	SourceMessageID         string   `json:"source_message_id"`
-	PromptVersion           string   `json:"prompt_version"`
-	Provider                string   `json:"provider"`
-	Model                   string   `json:"model"`
-	ExecutionProfileVersion string   `json:"execution_profile_version"`
-	InputEventRefs          []string `json:"input_event_refs"`
+	Routing                 *modelinput.RouteRequirements `json:"routing,omitempty"`
+	RoutingDecision         *modelinput.RouteDecision     `json:"routing_decision,omitempty"`
+	ConnectionID            string                        `json:"connection_id,omitempty"`
+	SourceMessageID         string                        `json:"source_message_id"`
+	PromptVersion           string                        `json:"prompt_version"`
+	Provider                string                        `json:"provider"`
+	Model                   string                        `json:"model"`
+	ExecutionProfileVersion string                        `json:"execution_profile_version"`
+	InputEventRefs          []string                      `json:"input_event_refs"`
 }
 
 type IntentConfirmedPayload struct {
@@ -1639,7 +1642,7 @@ func validateAgentExecutionModel(binding WorkCompletionBinding, task core.Task, 
 	profile, profileFound := binding.ExecutionProfiles[config.ProfileID]
 	_, createdOffset := manifest.CreatedAt.Zone()
 	if found.EventID == "" || !profileFound || profile.ID != config.ProfileID || profile.OrganizationID != core.ID(binding.OrganizationID) || profile.Version != config.ProfileVersion ||
-		manifest.ExecutionID != core.ID(executionID) || manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID || manifest.AgentBlueprintVersion != config.BlueprintVersion || manifest.ExecutionProfileVersion != profile.Version || manifest.RuntimeAdapter != config.RuntimeAdapter || manifest.ConnectionID != profile.ConnectionID || (manifest.ConnectionID != "" && (!core.ValidInferenceConnectionID(manifest.ConnectionID) || manifest.ContextBuilderVersion != "v5")) || manifest.Provider != profile.ModelProvider || manifest.Model != profile.Model || manifest.TaskContractVersion != task.TaskContractVersion || manifest.PromptVersion != profile.PromptVersion || manifest.PolicyVersion != "v1" || !validExecutionContextBuilderVersion(manifest.ContextBuilderVersion) || manifest.CreatedAt.IsZero() || createdOffset != 0 ||
+		manifest.ExecutionID != core.ID(executionID) || manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID || manifest.AgentBlueprintVersion != config.BlueprintVersion || manifest.ExecutionProfileVersion != profile.Version || manifest.RuntimeAdapter != config.RuntimeAdapter || !modelinput.SameRouteRequirements(manifest.Routing, task.Routing) || !modelinput.SameRouteDecision(manifest.RoutingDecision, task.RoutingDecision) || manifest.ConnectionID != profile.ConnectionID || (manifest.ConnectionID != "" && (!core.ValidInferenceConnectionID(manifest.ConnectionID) || manifest.ContextBuilderVersion != "v5")) || manifest.Provider != profile.ModelProvider || manifest.Model != profile.Model || manifest.TaskContractVersion != task.TaskContractVersion || manifest.PromptVersion != profile.PromptVersion || manifest.PolicyVersion != "v1" || !validExecutionContextBuilderVersion(manifest.ContextBuilderVersion) || manifest.CreatedAt.IsZero() || createdOffset != 0 ||
 		len(manifest.SkillRefs) != 0 || len(manifest.ToolDefinitions) != 0 || len(manifest.ArtifactRefs) != 0 || !validSHA256(manifest.ExecutionInputSHA256) {
 		return executionModel{}, fmt.Errorf("work completion Agent manifest does not match its immutable Task")
 	}
@@ -2919,16 +2922,18 @@ func validSHA256(value string) bool {
 // Intent event/fingerprint supplied to one planning attempt. Planning output is
 // still untrusted until the runtime validates and records a Plan.
 type PlanningContextPayload struct {
-	ConnectionID            string              `json:"connection_id,omitempty"`
-	PlanID                  string              `json:"plan_id"`
-	IntentID                string              `json:"intent_id"`
-	IntentFingerprint       string              `json:"intent_fingerprint"`
-	PromptVersion           string              `json:"prompt_version"`
-	Provider                string              `json:"provider"`
-	Model                   string              `json:"model"`
-	ExecutionProfileVersion string              `json:"execution_profile_version"`
-	InputEventRefs          []string            `json:"input_event_refs"`
-	StrategicContextRefs    []core.VersionedRef `json:"strategic_context_refs,omitempty"`
+	Routing                 *modelinput.RouteRequirements `json:"routing,omitempty"`
+	RoutingDecision         *modelinput.RouteDecision     `json:"routing_decision,omitempty"`
+	ConnectionID            string                        `json:"connection_id,omitempty"`
+	PlanID                  string                        `json:"plan_id"`
+	IntentID                string                        `json:"intent_id"`
+	IntentFingerprint       string                        `json:"intent_fingerprint"`
+	PromptVersion           string                        `json:"prompt_version"`
+	Provider                string                        `json:"provider"`
+	Model                   string                        `json:"model"`
+	ExecutionProfileVersion string                        `json:"execution_profile_version"`
+	InputEventRefs          []string                      `json:"input_event_refs"`
+	StrategicContextRefs    []core.VersionedRef           `json:"strategic_context_refs,omitempty"`
 }
 
 func (p ResultPublishedPayload) ValidFor(artifactRefs []string) bool {
@@ -3055,23 +3060,25 @@ type InferencePolicyActivatedPayload struct {
 }
 
 type InferenceReservedPayload struct {
-	AdmittedAt              string    `json:"admitted_at,omitempty"`
-	ConnectionID            string    `json:"connection_id,omitempty"`
-	ExecutionManifestRef    string    `json:"execution_manifest_ref,omitempty"`
-	ReservationID           string    `json:"reservation_id"`
-	RequestID               string    `json:"request_id"`
-	Purpose                 string    `json:"purpose"`
-	IntentID                string    `json:"intent_id,omitempty"`
-	PolicyFingerprint       string    `json:"policy_fingerprint"`
-	PromptSHA256            string    `json:"prompt_sha256"`
-	Provider                string    `json:"provider"`
-	Model                   string    `json:"model"`
-	ExecutionProfileVersion string    `json:"execution_profile_version"`
-	ReservedInputTokens     int64     `json:"reserved_input_tokens"`
-	ReservedOutputTokens    int64     `json:"reserved_output_tokens"`
-	ReservedCostNanoUSD     int64     `json:"reserved_cost_nano_usd"`
-	WindowStartedAt         time.Time `json:"window_started_at"`
-	WindowExpiresAt         time.Time `json:"window_expires_at"`
+	Routing                 *modelinput.RouteRequirements `json:"routing,omitempty"`
+	RoutingDecision         *modelinput.RouteDecision     `json:"routing_decision,omitempty"`
+	AdmittedAt              string                        `json:"admitted_at,omitempty"`
+	ConnectionID            string                        `json:"connection_id,omitempty"`
+	ExecutionManifestRef    string                        `json:"execution_manifest_ref,omitempty"`
+	ReservationID           string                        `json:"reservation_id"`
+	RequestID               string                        `json:"request_id"`
+	Purpose                 string                        `json:"purpose"`
+	IntentID                string                        `json:"intent_id,omitempty"`
+	PolicyFingerprint       string                        `json:"policy_fingerprint"`
+	PromptSHA256            string                        `json:"prompt_sha256"`
+	Provider                string                        `json:"provider"`
+	Model                   string                        `json:"model"`
+	ExecutionProfileVersion string                        `json:"execution_profile_version"`
+	ReservedInputTokens     int64                         `json:"reserved_input_tokens"`
+	ReservedOutputTokens    int64                         `json:"reserved_output_tokens"`
+	ReservedCostNanoUSD     int64                         `json:"reserved_cost_nano_usd"`
+	WindowStartedAt         time.Time                     `json:"window_started_at"`
+	WindowExpiresAt         time.Time                     `json:"window_expires_at"`
 }
 
 type InferenceReconciledPayload struct {
@@ -4190,6 +4197,37 @@ func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event
 		return Event{}, err
 	}
 	return g.ledger.Append(ctx, draft)
+}
+
+// ValidateInferenceRouteBinding proves a proposed route against the same ledger
+// that will persist its context. Structural validation alone cannot establish
+// that the selected policy and snapshot ever existed.
+func (g *Gateway) ValidateInferenceRouteBinding(ctx context.Context, binding modelinput.RouteBinding) error {
+	if err := binding.Validate(); err != nil {
+		return err
+	}
+	validator, ok := g.ledger.(interface {
+		ValidateInferenceRouteBinding(context.Context, modelinput.RouteBinding) error
+	})
+	if !ok {
+		return fmt.Errorf("event ledger cannot validate inference route provenance")
+	}
+	return validator.ValidateInferenceRouteBinding(ctx, binding)
+}
+
+// InferenceConnectionRequiresRouting reads durable account prerequisites before
+// a model context is published. Legacy singleton policies cannot carry routing.
+func (g *Gateway) InferenceConnectionRequiresRouting(ctx context.Context, connectionID string) (bool, error) {
+	if connectionID == "" {
+		return false, nil
+	}
+	reader, ok := g.ledger.(interface {
+		InferenceConnectionRequiresRouting(context.Context, string) (bool, error)
+	})
+	if !ok {
+		return false, fmt.Errorf("event ledger cannot establish inference routing prerequisites")
+	}
+	return reader.InferenceConnectionRequiresRouting(ctx, connectionID)
 }
 
 // PublishWorkCompletionEvidence admits the aggregate evidence only through a

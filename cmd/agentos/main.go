@@ -128,8 +128,16 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 		return err
 	}
 	var service *app.Service
+	var selectedPlanner planning.Planner = planner
+	if models.registry != nil && config.Routing.PlanningRequirements != nil {
+		route, err := newAuxiliaryRoute(models.registry, config.Routing.Planning, *config.Routing.PlanningRequirements)
+		if err != nil {
+			return err
+		}
+		selectedPlanner = routedPlanner{Planner: planner, route: route}
+	}
 	if models.registry != nil {
-		service, err = app.NewWithConnections(events.NewGateway(l), models.registry, app.TaskConnectionRouting{Default: config.Routing.TaskDefault, ByTaskKey: config.Routing.TaskConnections}, planner)
+		service, err = app.NewWithConnections(events.NewGateway(l), models.registry, app.TaskConnectionRouting{Default: config.Routing.TaskDefault, ByTaskKey: config.Routing.TaskConnections, Requirements: config.Routing.Requirements, TaskRequirements: config.Routing.TaskRequirements}, selectedPlanner)
 		if err != nil {
 			return err
 		}
@@ -150,7 +158,15 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 	if err != nil {
 		return err
 	}
-	operator := intake.NewWithNormalizer(service, normalizer)
+	var selectedNormalizer intake.Normalizer = normalizer
+	if models.registry != nil && config.Routing.NormalizationRequirements != nil {
+		route, err := newAuxiliaryRoute(models.registry, config.Routing.Normalization, *config.Routing.NormalizationRequirements)
+		if err != nil {
+			return err
+		}
+		selectedNormalizer = routedNormalizer{Normalizer: normalizer, route: route}
+	}
+	operator := intake.NewWithNormalizer(service, selectedNormalizer)
 	owner := gateway.LocalHuman{
 		UID: config.Owner.UID, ID: core.ID("local-uid-" + strconv.Itoa(config.Owner.UID)),
 		OrganizationID: core.ID(config.Organization),

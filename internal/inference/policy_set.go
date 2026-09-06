@@ -16,6 +16,9 @@ func ValidatePolicySet(policies []Policy) error {
 		if *policy.OrganizationBudget != *first.OrganizationBudget {
 			return fmt.Errorf("inference policy set has conflicting organization budgets")
 		}
+		if !SameRoutePolicy(policy.Routing, first.Routing) {
+			return fmt.Errorf("inference policy set has conflicting organization routing rules")
+		}
 		seen[policy.ConnectionID] = true
 	}
 	return nil

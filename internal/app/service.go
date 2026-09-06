@@ -20,6 +20,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/lab"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 	"github.com/dominicnunez/agentos/internal/planning"
 	"github.com/dominicnunez/agentos/internal/projections"
 	"github.com/dominicnunez/agentos/internal/telemetry"
@@ -98,21 +99,24 @@ func (e *planningAttemptError) Unwrap() error {
 }
 
 type Service struct {
-	permit           chan struct{}
-	gateway          *events.Gateway
-	state            *projections.Repository
-	scheduler        workflow.Scheduler
-	deterministic    execution.Handler
-	agent            execution.Handler
-	agentModel       execution.ModelDescriptor
-	agentConnection  string
-	agentRoutes      map[string]*execution.AgentExecution
-	taskConnections  map[string]string
-	planner          planning.Planner
-	verifier         completion.Verifier
-	completion       completion.Engine
-	modelTurnTimeout time.Duration
-	lab              *lab.Service
+	permit             chan struct{}
+	gateway            *events.Gateway
+	state              *projections.Repository
+	scheduler          workflow.Scheduler
+	deterministic      execution.Handler
+	agent              execution.Handler
+	agentModel         execution.ModelDescriptor
+	agentConnection    string
+	agentRoutes        map[string]*execution.AgentExecution
+	taskConnections    map[string]string
+	connectionRegistry *inference.ConnectionRegistry
+	taskRouting        *modelinput.RouteRequirements
+	taskRoutingRules   map[string]modelinput.RouteRequirements
+	planner            planning.Planner
+	verifier           completion.Verifier
+	completion         completion.Engine
+	modelTurnTimeout   time.Duration
+	lab                *lab.Service
 }
 
 func New(g *events.Gateway) *Service {
@@ -1760,15 +1764,18 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 	if existingTasks != 0 && existingTasks != len(plan.Tasks) {
 		return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("durable Task DAG is only partially materialized")
 	}
+	assignments := make(map[string]plannedAssignment)
 	if existingTasks == 0 {
 		for _, planned := range plan.Tasks {
 			if planned.ExecutionKind != core.ExecutionDeterministic && planned.ExecutionKind != core.ExecutionAgent {
 				continue
 			}
-			requirement, routeErr := s.plannedAssignmentRequirement(organizationID, planned)
+			route, routeErr := s.plannedAssignmentRoute(ctx, organizationID, planned)
 			if routeErr != nil {
 				return core.Intent{}, core.Work{}, core.Task{}, routeErr
 			}
+			assignments[planned.Key] = route
+			requirement := route.Requirement
 			if _, selectErr := assignment.Select(assignmentRoster(snapshot), requirement); selectErr == nil {
 				continue
 			}
@@ -1778,7 +1785,7 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 			}
 		}
 	}
-	task, err := s.ensurePlanTasks(ctx, organizationID, correlationID, snapshot, work, intent, plan, intent.SourcePrincipalKind == core.PrincipalHuman)
+	task, err := s.ensurePlanTasks(ctx, organizationID, correlationID, snapshot, work, intent, plan, assignments, intent.SourcePrincipalKind == core.PrincipalHuman)
 	if err != nil {
 		return core.Intent{}, core.Work{}, core.Task{}, err
 	}
@@ -2002,7 +2009,8 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 		return core.Plan{}, fmt.Errorf("strategic planning context is not active")
 	}
 
-	descriptor, modelCapable := s.planner.Descriptor()
+	planner := s.planner
+	descriptor, modelCapable := planner.Descriptor()
 	usesModel := modelCapable && requestedKind == core.ExecutionAgent
 	intentInputRefs, err := planningInputRefs(stream, intent, draft)
 	if err != nil {
@@ -2018,16 +2026,50 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	}
 	executionID := core.ID("")
 	planningContextRef := ""
+	var routing *modelinput.RouteRequirements
+	var routingDecision *modelinput.RouteDecision
 	if usesModel {
 		if err := planning.ValidateModelInput(planning.Input{Intent: draft, Strategy: strategy}); err != nil {
 			return core.Plan{}, fmt.Errorf("validate bounded planning input: %w", err)
 		}
+		if selector, ok := planner.(planning.PlannerSelector); ok {
+			var binding *modelinput.RouteBinding
+			planner, binding, err = selector.SelectPlanner(ctx, string(organizationID))
+			if err != nil {
+				return core.Plan{}, fmt.Errorf("select planning route: %w", err)
+			}
+			if planner == nil || binding == nil || binding.Validate() != nil || binding.Requirements.OrganizationID != string(organizationID) {
+				return core.Plan{}, fmt.Errorf("planning selection lacks its organization requirements")
+			}
+			routing = modelinput.CloneRouteRequirements(&binding.Requirements)
+			routingDecision = modelinput.CloneRouteDecision(&binding.Decision)
+			descriptor, modelCapable = planner.Descriptor()
+			if !modelCapable {
+				return core.Plan{}, fmt.Errorf("selected planner lacks model identity")
+			}
+			if descriptor.ConnectionID != routingDecision.ConnectionID || descriptor.Provider != routingDecision.Provider || descriptor.Model != routingDecision.Model || descriptor.ExecutionProfileVersion != routingDecision.ExecutionProfileVersion {
+				return core.Plan{}, fmt.Errorf("selected planner identity differs from routing decision")
+			}
+			if err := s.gateway.ValidateInferenceRouteBinding(ctx, *binding); err != nil {
+				return core.Plan{}, fmt.Errorf("validate planning route provenance: %w", err)
+			}
+		}
+		if routing == nil {
+			required, err := s.gateway.InferenceConnectionRequiresRouting(ctx, descriptor.ConnectionID)
+			if err != nil {
+				return core.Plan{}, err
+			}
+			if required {
+				return core.Plan{}, fmt.Errorf("governed model planner requires a route selector")
+			}
+		}
 		executionID = core.ID(fmt.Sprintf("planning-%s-attempt-1", planID))
 		contextPayload := events.PlanningContextPayload{
-			PlanID: string(planID), IntentID: string(intent.ID), IntentFingerprint: draft.Fingerprint,
+			RoutingDecision: modelinput.CloneRouteDecision(routingDecision),
+			PlanID:          string(planID), IntentID: string(intent.ID), IntentFingerprint: draft.Fingerprint,
 			ConnectionID: descriptor.ConnectionID, PromptVersion: descriptor.PromptVersion, Provider: descriptor.Provider, Model: descriptor.Model,
 			ExecutionProfileVersion: descriptor.ExecutionProfileVersion, InputEventRefs: inputRefs,
-			StrategicContextRefs: strategicContextRefs,
+			StrategicContextRefs: strategicContextRefs, Routing: modelinput.CloneRouteRequirements(routing),
 		}
 		contextEvent, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
 			OrganizationID: string(organizationID), EventType: "PLANNING_CONTEXT_MANIFESTED", SourceActorID: "runtime",
@@ -2048,7 +2090,9 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	turnCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.modelTurnTimeout)
 	if usesModel {
 		turnCtx, err = inference.WithScope(turnCtx, inference.Scope{
-			OrganizationID: string(organizationID), Purpose: inference.PurposePlanning,
+			RoutingDecision: modelinput.CloneRouteDecision(routingDecision),
+			OrganizationID:  string(organizationID), Purpose: inference.PurposePlanning,
+			Routing:   modelinput.CloneRouteRequirements(routing),
 			RequestID: string(executionID), IntentID: string(intent.ID), TaskID: "task-" + correlationID,
 			ExecutionID: string(executionID), CorrelationID: correlationID,
 		})
@@ -2057,7 +2101,7 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 			return core.Plan{}, attemptFailure(fmt.Errorf("bind planning inference scope: %w", err))
 		}
 	}
-	result, buildErr := s.planner.Build(turnCtx, planning.Input{Intent: draft, Strategy: strategy}, requestedKind)
+	result, buildErr := planner.Build(turnCtx, planning.Input{Intent: draft, Strategy: strategy}, requestedKind)
 	cancel()
 	if result.Usage != nil {
 		if !usesModel || result.Usage.ConnectionID != descriptor.ConnectionID || !result.Usage.Valid() || result.Usage.Provider != descriptor.Provider || result.Usage.Model != descriptor.Model {
@@ -2173,7 +2217,7 @@ func validateDurablePlan(plan core.Plan, planID core.ID, intent core.Intent, dra
 	return nil
 }
 
-func (s *Service) ensurePlanTasks(ctx context.Context, organizationID core.ID, correlationID string, snapshot projections.Snapshot, work core.Work, intent core.Intent, plan core.Plan, structuredUserCompletion bool) (core.Task, error) {
+func (s *Service) ensurePlanTasks(ctx context.Context, organizationID core.ID, correlationID string, snapshot projections.Snapshot, work core.Work, intent core.Intent, plan core.Plan, assignments map[string]plannedAssignment, structuredUserCompletion bool) (core.Task, error) {
 	ids := planTaskIDs(correlationID, plan)
 	rootID := core.ID("task-" + correlationID)
 	expected := make([]core.Task, 0, len(plan.Tasks))
@@ -2194,12 +2238,16 @@ func (s *Service) ensurePlanTasks(ctx context.Context, organizationID core.ID, c
 				task.AssigneeID = durable.Value.AssigneeID
 				config := *durable.Value.AgentConfig
 				task.AgentConfig = &config
+				task.Routing = modelinput.CloneRouteRequirements(durable.Value.Routing)
+				task.RoutingDecision = modelinput.CloneRouteDecision(durable.Value.RoutingDecision)
 			} else {
-				requirement, err := s.plannedAssignmentRequirement(organizationID, item)
-				if err != nil {
-					return core.Task{}, err
+				route, ok := assignments[item.Key]
+				if !ok {
+					return core.Task{}, fmt.Errorf("planned task %s lacks a selected assignment", item.Key)
 				}
-				selection, err := assignment.Select(assignmentRoster(snapshot), requirement)
+				task.Routing = modelinput.CloneRouteRequirements(route.Routing)
+				task.RoutingDecision = modelinput.CloneRouteDecision(route.RoutingDecision)
+				selection, err := assignment.Select(assignmentRoster(snapshot), route.Requirement)
 				if err != nil {
 					return core.Task{}, fmt.Errorf("assign planned task %s: %w", item.Key, err)
 				}
@@ -2322,7 +2370,7 @@ func sameTaskContract(existing, expected core.Task) bool {
 		existing.ExecutionKind == expected.ExecutionKind && existing.ModelInferencePolicy == expected.ModelInferencePolicy &&
 		slices.Equal(existing.DependsOn, expected.DependsOn) && existing.ParentID == expected.ParentID &&
 		existing.AssigneeType == expected.AssigneeType && existing.AssigneeID == expected.AssigneeID &&
-		reflect.DeepEqual(existing.AgentConfig, expected.AgentConfig) &&
+		reflect.DeepEqual(existing.AgentConfig, expected.AgentConfig) && modelinput.SameRouteRequirements(existing.Routing, expected.Routing) && modelinput.SameRouteDecision(existing.RoutingDecision, expected.RoutingDecision) &&
 		existing.RuntimeHandlerRef == expected.RuntimeHandlerRef && existing.TaskContractVersion == expected.TaskContractVersion &&
 		reflect.DeepEqual(existing.CompletionContract, expected.CompletionContract)
 }
@@ -2825,6 +2873,8 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 				})
 			}
 			manifest = core.ExecutionContextManifest{
+				Routing:                 modelinput.CloneRouteRequirements(task.Routing),
+				RoutingDecision:         modelinput.CloneRouteDecision(task.RoutingDecision),
 				ConnectionID:            selected.ExecutionProfile.ConnectionID,
 				ExecutionID:             executionID,
 				AgentID:                 task.AssigneeID,
@@ -2884,7 +2934,9 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		executionCtx, cancel = context.WithTimeout(ctx, s.modelTurnTimeout)
 		executionCtx, err = inference.WithScope(executionCtx, inference.Scope{
 			OrganizationID: string(organizationID), Purpose: inference.PurposeTaskExecution,
-			RequestID: string(executionID), TaskID: string(task.ID), ExecutionID: string(executionID),
+			Routing:         modelinput.CloneRouteRequirements(task.Routing),
+			RoutingDecision: modelinput.CloneRouteDecision(task.RoutingDecision),
+			RequestID:       string(executionID), TaskID: string(task.ID), ExecutionID: string(executionID),
 			CorrelationID: state.CorrelationID,
 		})
 		if err != nil {

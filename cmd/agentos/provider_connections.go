@@ -102,7 +102,15 @@ func composeProviderConnections(ctx context.Context, providers []bootstrap.Provi
 		if descriptor.Provider != policy.Provider || descriptor.Model != policy.Model || descriptor.ExecutionProfileVersion != policy.ExecutionProfileVersion {
 			return fail(fmt.Errorf("provider adapter does not match its reviewed policy"))
 		}
-		connections = append(connections, inference.Connection{ID: id, Adapter: adapter})
+		connection := inference.Connection{ID: id, Adapter: adapter}
+		if provider.InferencePolicy.Catalog != nil {
+			metadata, err := provider.InferencePolicy.Catalog.Metadata(policy)
+			if err != nil {
+				return fail(err)
+			}
+			connection.Metadata = &metadata
+		}
+		connections = append(connections, connection)
 	}
 	registry, err := inference.NewConnectionRegistry(store, connections)
 	if err != nil {
