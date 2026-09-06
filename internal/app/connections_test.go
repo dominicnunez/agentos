@@ -56,6 +56,37 @@ func TestConnectionConstructorRequiresCatalogTaskRequirements(t *testing.T) {
 	}
 }
 
+func TestConnectionConstructorRejectsGovernedNoncatalogRoutes(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	policy := inference.Policy{Version: inference.ConnectionPolicyVersion, ConnectionID: "governed", OrganizationID: "org-1", Provider: "fake", Model: "fake-model/v1", ExecutionProfileVersion: "v1-fake", Mode: inference.Local, MaxInputTokensPerRequest: 10000, MaxOutputTokensPerRequest: 1000, MaxTokensPerWindow: 100000, WindowDurationSeconds: 3600, MaxConcurrentRequests: 1, MaxAttemptsPerRequest: 1, AuthorizedBy: "operator", AuthorizedAt: now.Add(-time.Minute), AuthorizationExpiresAt: now.Add(time.Hour), OrganizationBudget: &inference.OrganizationBudget{WindowDurationSeconds: 3600, MaxTokensPerWindow: 100000, MaxConcurrentRequests: 2}, Routing: &inference.RoutePolicy{OrganizationID: "org-1", Locality: inference.LocalOnly, DataClasses: []string{"internal"}}}
+	if err := store.ActivateInferencePolicy(t.Context(), policy); err != nil {
+		t.Fatal(err)
+	}
+	model := &routedCountingModel{}
+	registry, err := inference.NewConnectionRegistry(store, []inference.Connection{{ID: "governed", Adapter: model}, {ID: "legacy", Adapter: model}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Events(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, routing := range []TaskConnectionRouting{{Default: "governed"}, {Default: "legacy", ByTaskKey: map[string]string{"research": "governed"}}} {
+		if service, err := NewWithConnections(events.NewGateway(store), registry, routing, planning.SingleTaskPlanner{}); err == nil || service != nil {
+			t.Fatal("governed route accepted without requirements")
+		}
+	}
+	after, err := store.Events(t.Context(), "")
+	if err != nil || len(before) != len(after) || model.calls.Load() != 0 {
+		t.Fatal("rejected composition changed durable state or called provider", err)
+	}
+}
+
 func TestServiceResolvesPinnedConnectionInsteadOfDefault(t *testing.T) {
 	store, err := ledger.Open(":memory:")
 	if err != nil {

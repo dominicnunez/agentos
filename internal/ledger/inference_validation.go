@@ -13,7 +13,26 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/inference"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 )
+
+// ValidateInferenceRouteBinding validates provenance without reserving a call
+// or publishing a context. Dispatch still performs authoritative admission.
+func (l *SQLite) ValidateInferenceRouteBinding(ctx context.Context, binding modelinput.RouteBinding) error {
+	if err := binding.Validate(); err != nil {
+		return err
+	}
+	tx, err := l.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	pending := inference.InferenceRequest{Scope: inference.Scope{OrganizationID: binding.Requirements.OrganizationID, Routing: &binding.Requirements, RoutingDecision: &binding.Decision}}
+	if err := validateInferenceAdmissionsSnapshot(ctx, tx, pending); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
 // ValidateInferenceAdmissions verifies the live ledger before runtime code can
 // trust its mutable budget-accounting columns.

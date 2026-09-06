@@ -11,6 +11,43 @@ import (
 	"github.com/dominicnunez/agentos/internal/inference"
 )
 
+// InferenceConnectionRequiresRouting conservatively checks every organization
+// using this account because app composition does not bind one organization.
+func (l *SQLite) InferenceConnectionRequiresRouting(ctx context.Context, connectionID string) (bool, error) {
+	tx, err := l.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateInferenceAdmissionsSnapshot(ctx, tx); err != nil {
+		return false, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT body FROM inference_policies WHERE connection_id=? AND active=1`, connectionID)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+	required := false
+	for rows.Next() {
+		var body []byte
+		if err := rows.Scan(&body); err != nil {
+			return false, err
+		}
+		var policy inference.Policy
+		if decodeExactJSONBytes(body, &policy) != nil || policy.Validate() != nil || policy.ConnectionID != connectionID {
+			return false, fmt.Errorf("invalid account routing policy")
+		}
+		required = required || policy.Routing != nil || policy.Catalog != nil
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	if err := rows.Close(); err != nil {
+		return false, err
+	}
+	return required, tx.Commit()
+}
+
 // SelectInferenceRoute reads account and shared budgets from one verified
 // snapshot. It does not reserve, contact a provider, or replace dispatch-time
 // admission: a later reservation must still recheck current policy and budgets.

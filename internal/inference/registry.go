@@ -24,6 +24,7 @@ type ConnectionRegistry struct {
 	adapters map[string]*GuardedAdapter
 	metadata map[string]RouteMetadata
 	selector RouteSelector
+	store    Store
 }
 
 // RouteSelector reads authoritative policy and accounting for advisory selection.
@@ -38,6 +39,7 @@ func NewConnectionRegistry(store Store, connections []Connection) (*ConnectionRe
 	}
 	registry := &ConnectionRegistry{adapters: make(map[string]*GuardedAdapter, len(connections)), metadata: make(map[string]RouteMetadata, len(connections))}
 	registry.selector, _ = store.(RouteSelector)
+	registry.store = store
 	for _, connection := range connections {
 		if !ValidConnectionID(connection.ID) || registry.adapters[connection.ID] != nil {
 			return nil, fmt.Errorf("connection registry contains an invalid or duplicate identity")
@@ -63,6 +65,24 @@ func NewConnectionRegistry(store Store, connections []Connection) (*ConnectionRe
 		}
 	}
 	return registry, nil
+}
+
+// RequiresRouting reports catalog or durable governance requirements, including
+// accounts that have governance policy but no capability catalog.
+func (r *ConnectionRegistry) RequiresRouting(ctx context.Context, connectionID string) (bool, error) {
+	if _, err := r.Adapter(connectionID); err != nil {
+		return false, err
+	}
+	if _, ok := r.metadata[connectionID]; ok {
+		return true, nil
+	}
+	reader, ok := r.store.(interface {
+		InferenceConnectionRequiresRouting(context.Context, string) (bool, error)
+	})
+	if !ok {
+		return false, fmt.Errorf("inference store cannot establish account routing prerequisites")
+	}
+	return reader.InferenceConnectionRequiresRouting(ctx, connectionID)
 }
 
 // Select uses the same authority that admits this registry's provider calls.

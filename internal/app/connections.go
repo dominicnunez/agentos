@@ -40,8 +40,12 @@ func NewWithConnections(g *events.Gateway, registry *inference.ConnectionRegistr
 	for _, metadata := range registry.Catalog() {
 		catalogs[metadata.ConnectionID] = true
 	}
-	if catalogs[routing.Default] && routing.Requirements == nil {
-		return nil, fmt.Errorf("catalog-backed task default requires routing requirements")
+	requiresRouting, err := registry.RequiresRouting(context.Background(), routing.Default)
+	if err != nil {
+		return nil, err
+	}
+	if requiresRouting && routing.Requirements == nil {
+		return nil, fmt.Errorf("governed task default requires routing requirements")
 	}
 	routes := make(map[string]*execution.AgentExecution)
 	for _, id := range registry.Connections() {
@@ -114,8 +118,12 @@ func NewWithConnections(g *events.Gateway, registry *inference.ConnectionRegistr
 			requirements = &specific
 		}
 		if requirements == nil {
-			if catalogs[connection] {
-				return nil, fmt.Errorf("catalog-backed task route requires routing requirements")
+			required, err := registry.RequiresRouting(context.Background(), connection)
+			if err != nil {
+				return nil, err
+			}
+			if required {
+				return nil, fmt.Errorf("governed task route requires routing requirements")
 			}
 			continue
 		}

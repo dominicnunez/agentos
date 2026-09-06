@@ -4199,6 +4199,22 @@ func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event
 	return g.ledger.Append(ctx, draft)
 }
 
+// ValidateInferenceRouteBinding proves a proposed route against the same ledger
+// that will persist its context. Structural validation alone cannot establish
+// that the selected policy and snapshot ever existed.
+func (g *Gateway) ValidateInferenceRouteBinding(ctx context.Context, binding modelinput.RouteBinding) error {
+	if err := binding.Validate(); err != nil {
+		return err
+	}
+	validator, ok := g.ledger.(interface {
+		ValidateInferenceRouteBinding(context.Context, modelinput.RouteBinding) error
+	})
+	if !ok {
+		return fmt.Errorf("event ledger cannot validate inference route provenance")
+	}
+	return validator.ValidateInferenceRouteBinding(ctx, binding)
+}
+
 // PublishWorkCompletionEvidence admits the aggregate evidence only through a
 // ledger implementation that can validate it against current durable Work.
 // The later terminal projection remains a separate atomic admission.

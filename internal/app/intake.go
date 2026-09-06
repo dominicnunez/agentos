@@ -233,6 +233,9 @@ func (s *Service) RecordIntentNormalizationContext(ctx context.Context, organiza
 		if in.Routing.OrganizationID != organizationID || in.Routing.ConnectionID != "" && in.Routing.ConnectionID != in.ConnectionID {
 			return nil, fmt.Errorf("normalization requirements do not match their context")
 		}
+		if err := s.gateway.ValidateInferenceRouteBinding(ctx, modelinput.RouteBinding{Requirements: *in.Routing, Decision: *in.RoutingDecision}); err != nil {
+			return nil, fmt.Errorf("validate normalization route provenance: %w", err)
+		}
 	}
 	if (in.ConnectionID != "" && !core.ValidInferenceConnectionID(in.ConnectionID)) || in.ExecutionID == "" || in.SourceMessageID == "" || in.PromptVersion == "" || in.Provider == "" || in.Model == "" || in.ExecutionProfileVersion == "" {
 		return nil, fmt.Errorf("complete intent normalization context is required")
