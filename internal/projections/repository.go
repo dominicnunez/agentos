@@ -491,7 +491,7 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 	if err := validateWorkCompletionAdmissions(snapshot, stream, records[KindTeam], inboxObservations); err != nil {
 		return Snapshot{}, err
 	}
-	if err := validateGoalAchievementAdmissionsFromEvents(snapshot, stream); err != nil {
+	if err := validateGoalAchievementAdmissionsFromEvents(snapshot, stream, records[KindTeam], inboxObservations); err != nil {
 		return Snapshot{}, err
 	}
 	return snapshot, nil
@@ -1174,7 +1174,7 @@ func (r *Repository) validateGoalAchievementAdmissions(ctx context.Context, snap
 // the records table. The completed-Work admission audit runs first, so this
 // pass may safely index only Work evidence that is bound to an exact current
 // terminal projection in the same authoritative stream.
-func validateGoalAchievementAdmissionsFromEvents(snapshot Snapshot, stream []events.Event) error {
+func validateGoalAchievementAdmissionsFromEvents(snapshot Snapshot, stream []events.Event, teamRecords [][]byte, inboxObservations map[string]events.InboxObservationBinding) error {
 	type workEvidenceBinding struct {
 		Evidence           events.GoalWorkEvidence
 		CompletionSequence int64
@@ -1245,6 +1245,7 @@ func validateGoalAchievementAdmissionsFromEvents(snapshot Snapshot, stream []eve
 			return fmt.Errorf("achieved Goal %s lacks its active mission: %w", goalID, err)
 		}
 		selected := make([]events.GoalWorkEvidence, 0, len(evaluation.WorkEvidenceRefs))
+		workUseSequences := make(map[core.ID]int64, len(evaluation.WorkEvidenceRefs))
 		for _, ref := range evaluation.WorkEvidenceRefs {
 			binding, ok := workEvidence[ref]
 			if !ok || binding.Evidence.Evidence.GoalID != goalID {
@@ -1254,6 +1255,10 @@ func validateGoalAchievementAdmissionsFromEvents(snapshot Snapshot, stream []eve
 				return fmt.Errorf("achieved Goal %s references Work completed after its evaluation", goalID)
 			}
 			selected = append(selected, binding.Evidence)
+			workUseSequences[binding.Evidence.Evidence.WorkID] = evaluationEvent.Sequence
+		}
+		if err := validateWorkCompletionAdmissionsAtUse(snapshot, stream, teamRecords, inboxObservations, workUseSequences); err != nil {
+			return fmt.Errorf("achieved Goal %s used invalid Work evidence at evaluation: %w", goalID, err)
 		}
 		if err := events.ValidateGoalProgressEvaluation(prior.Value, prior.Version, selected, evaluation); err != nil {
 			return fmt.Errorf("achieved Goal %s lacks authoritative completed-Work evidence: %w", goalID, err)
@@ -1388,7 +1393,16 @@ func decodeExactProjectionJSON(data []byte, target any) error {
 }
 
 func validateWorkCompletionAdmissions(snapshot Snapshot, stream []events.Event, teamRecords [][]byte, inboxObservations map[string]events.InboxObservationBinding) error {
+	return validateWorkCompletionAdmissionsAtUse(snapshot, stream, teamRecords, inboxObservations, nil)
+}
+
+func validateWorkCompletionAdmissionsAtUse(snapshot Snapshot, stream []events.Event, teamRecords [][]byte, inboxObservations map[string]events.InboxObservationBinding, useSequences map[core.ID]int64) error {
 	for workID, state := range snapshot.Works {
+		if useSequences != nil {
+			if _, selected := useSequences[workID]; !selected {
+				continue
+			}
+		}
 		if state.Value.Status != core.WorkCompleted {
 			continue
 		}
@@ -1452,6 +1466,12 @@ func validateWorkCompletionAdmissions(snapshot Snapshot, stream []events.Event, 
 			TeamRevisions: teamRevisions, InboxObservations: inboxObservations, AgentBlueprints: blueprints, ExecutionProfiles: profiles,
 		}
 		binding.CompletionSequence = transition.Sequence
+		if useSequences != nil {
+			binding.CompletionSequence = useSequences[workID]
+			if binding.CompletionSequence <= transition.Sequence {
+				return fmt.Errorf("work evidence use must follow completion")
+			}
+		}
 		evidence, err := events.ValidateWorkCompletionEvidenceChain(binding, evidenceEvent, stream)
 		if err != nil || evidence.Fingerprint != transitionDetail.Fingerprint {
 			return fmt.Errorf("completed work %s lacks exact durable evidence", workID)

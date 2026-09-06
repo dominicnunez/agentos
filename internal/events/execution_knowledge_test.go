@@ -317,6 +317,27 @@ func TestCompletionReplayPreservesVersionOneExecutionContext(t *testing.T) {
 			if _, err := completionExecutionModel(binding, task, string(currentManifest.ExecutionID), start, currentOutcome, currentStream); err != nil {
 				t.Fatalf("valid %s Knowledge context rejected: %v", version, err)
 			}
+			if version == "v5" {
+				for name, alter := range map[string]func(*Event){
+					"missing actor":      func(e *Event) { e.SourceActorID = "" },
+					"substituted actor":  func(e *Event) { e.SourceActorID = "agent-1" },
+					"recipient scope":    func(e *Event) { e.RecipientScope = RecipientAgent },
+					"recipient identity": func(e *Event) { e.RecipientID = "agent-1" },
+					"authorization":      func(e *Event) { e.AuthorizationRefs = []string{"lease-1"} },
+					"artifact":           func(e *Event) { e.ArtifactRefs = []string{"artifact-1"} },
+					"schema":             func(e *Event) { e.SchemaVersion = SchemaVersion + 1 },
+					"identity":           func(e *Event) { e.EventID = "" },
+					"timestamp":          func(e *Event) { e.CreatedAt = time.Time{} },
+				} {
+					t.Run(name, func(t *testing.T) {
+						changed := append([]Event(nil), currentStream...)
+						alter(&changed[len(changed)-2])
+						if _, err := completionExecutionModel(binding, task, string(currentManifest.ExecutionID), start, currentOutcome, changed); err == nil {
+							t.Fatal("v5 manifest envelope substitution accepted without inference reservation")
+						}
+					})
+				}
+			}
 			stale := activeKnowledge
 			stale.Version = 3
 			stale.Status = core.KnowledgeStale

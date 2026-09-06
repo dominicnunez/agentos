@@ -1617,6 +1617,11 @@ func completionExecutionModel(binding WorkCompletionBinding, task core.Task, exe
 		}
 		found = event
 	}
+	if manifest.ContextBuilderVersion == "v5" && (found.EventID == "" || found.SourceActorID != "runtime" ||
+		found.RecipientScope != "" || found.RecipientID != "" || len(found.AuthorizationRefs) != 0 ||
+		len(found.ArtifactRefs) != 0 || found.SchemaVersion != SchemaVersion || found.CreatedAt.IsZero()) {
+		return executionModel{}, fmt.Errorf("work completion v5 manifest envelope is not runtime-owned")
+	}
 	config := task.AgentConfig
 	profile, profileFound := binding.ExecutionProfiles[config.ProfileID]
 	_, createdOffset := manifest.CreatedAt.Zone()

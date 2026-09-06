@@ -1317,10 +1317,11 @@ func currentExecutionKnowledgeRecords(ctx context.Context, tx *sql.Tx, organizat
 ) AS latest ON latest.record_id=r.record_id AND latest.version=r.version
 WHERE r.kind='knowledge' AND e.organization_id=? AND e.sequence<?
 AND json_extract(r.body,'$.value.status')=?
+AND json_extract(r.body,'$.value.context_use')=?
 AND ((json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scope_id')=?)
 OR (json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scope_id')=?)`
 	args := []any{
-		organizationID, organizationID, startSequence, string(core.KnowledgeActive),
+		organizationID, organizationID, startSequence, string(core.KnowledgeActive), string(core.KnowledgeFactualReference),
 		string(core.KnowledgeScopeOrganization), organizationID,
 		string(core.KnowledgeScopeAgent), string(task.AssigneeID),
 	}

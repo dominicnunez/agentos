@@ -1268,7 +1268,7 @@ func TestGoalAchievementEventReplayRejectsExperimentalWorkEvidence(t *testing.T)
 		Works:       map[core.ID]Versioned[core.Work]{work.ID: {Version: 2, CorrelationID: "work-1", Value: work}},
 		Experiments: map[core.ID]Versioned[core.Experiment]{"experiment-1": {Version: 2, CorrelationID: "work-1", Value: core.Experiment{ID: "experiment-1", OrganizationID: "org-1", WorkID: work.ID, Objective: work.Objective, SandboxRef: "sandbox", CapabilityProfileRef: "no-effects", Budget: core.ExperimentBudget{MaxExecutions: 1, MaxUsageUnits: 1, MaxWallTimeSeconds: 1, AllowedInferencePools: []string{"deterministic"}}, Status: core.ExperimentCompleted, TrustLabel: core.ExperimentTrustUnverified, ResultEventRefs: []string{"result-1"}, StartedAt: now, FinishedAt: &finished}}},
 	}
-	if err := validateGoalAchievementAdmissionsFromEvents(snapshot, stream); err == nil || !strings.Contains(err.Error(), "missing or cross-Goal Work evidence") {
+	if err := validateGoalAchievementAdmissionsFromEvents(snapshot, stream, nil, nil); err == nil || !strings.Contains(err.Error(), "missing or cross-Goal Work evidence") {
 		t.Fatalf("event replay accepted experimental Goal evidence: %v", err)
 	}
 }

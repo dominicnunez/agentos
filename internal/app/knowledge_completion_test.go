@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -263,6 +264,48 @@ func TestTaskCompletionRejectsKnowledgeInvalidatedAfterOutcome(t *testing.T) {
 							if err := invalidateKnowledge(); err != nil {
 								t.Fatal(err)
 							}
+							stream, err := gateway.Events(ctx, "")
+							if err != nil {
+								t.Fatal(err)
+							}
+							replay := &knowledgeGoalReplayLedger{SQLite: store, stream: stream}
+							if _, err := projections.New(events.NewGateway(replay)).Rebuild(ctx); err != nil {
+								t.Fatalf("valid event-only Goal replay rejected: %v", err)
+							}
+							// Move the genuine later invalidation before the Goal evaluation,
+							// retaining its exact content and all reviewed Work evidence.
+							stale := stream[len(stream)-1]
+							changed := make([]events.Event, 0, len(stream))
+							for _, event := range stream[:len(stream)-1] {
+								if event.EventID == progress.EvaluationEvent.EventID {
+									changed = append(changed, stale)
+								}
+								changed = append(changed, event)
+							}
+							for i := range changed {
+								projection, present, err := events.AdmittedProjection(changed[i])
+								if err != nil {
+									t.Fatal(err)
+								}
+								changed[i].Sequence = int64(i + 1)
+								if present {
+									sealed, err := events.SealProjectionEvent(changed[i], projection.Projection, projection.Detail)
+									if err != nil {
+										t.Fatal(err)
+									}
+									changed[i].Payload, err = json.Marshal(sealed)
+									if err != nil {
+										t.Fatal(err)
+									}
+								}
+							}
+							if len(changed) != len(stream) {
+								t.Fatal("Goal evaluation missing from replay fixture")
+							}
+							replay.stream = changed
+							if _, err := projections.New(events.NewGateway(replay)).Rebuild(ctx); err == nil {
+								t.Fatal("event-only Goal replay accepted Knowledge invalidated before its evaluation")
+							}
 						}
 					}
 				}
@@ -276,6 +319,21 @@ func TestTaskCompletionRejectsKnowledgeInvalidatedAfterOutcome(t *testing.T) {
 
 		})
 	}
+}
+
+type knowledgeGoalReplayLedger struct {
+	*ledger.SQLite
+	stream []events.Event
+}
+
+func (l *knowledgeGoalReplayLedger) Events(_ context.Context, correlationID string) ([]events.Event, error) {
+	var result []events.Event
+	for _, event := range l.stream {
+		if correlationID == "" || event.CorrelationID == correlationID {
+			result = append(result, event)
+		}
+	}
+	return result, nil
 }
 
 func seedCompletionFactualKnowledge(t *testing.T, store *ledger.SQLite, gateway *events.Gateway) core.KnowledgeRecord {

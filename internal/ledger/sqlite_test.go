@@ -2914,6 +2914,13 @@ func TestExecutionKnowledgeRejectsUnboundedTeamScopes(t *testing.T) {
 }
 
 func TestExecutionKnowledgeCandidateLimitIsTerminalizable(t *testing.T) {
+	for _, use := range []core.KnowledgeContextUse{"", core.KnowledgeBehavioralPolicy, core.KnowledgeFactualReference} {
+		t.Run("classification="+string(use), func(t *testing.T) { testExecutionKnowledgeCandidateLimit(t, use) })
+	}
+}
+
+func testExecutionKnowledgeCandidateLimit(t *testing.T, use core.KnowledgeContextUse) {
+	t.Helper()
 	ctx := t.Context()
 	store, err := Open(":memory:")
 	if err != nil {
@@ -2926,11 +2933,16 @@ func TestExecutionKnowledgeCandidateLimitIsTerminalizable(t *testing.T) {
 	}
 	defer func() { _ = tx.Rollback() }()
 	createdAt := time.Now().UTC()
-	for index := 1; index <= maximumCurrentExecutionKnowledgeScan+1; index++ {
+	for index := 1; index <= maximumCurrentExecutionKnowledgeScan+2; index++ {
 		recordID := fmt.Sprintf("knowledge-%04d", index)
+		classification := use
+		if index == maximumCurrentExecutionKnowledgeScan+2 {
+			classification = core.KnowledgeFactualReference
+		}
 		value, err := json.Marshal(core.KnowledgeRecord{
 			KnowledgeID: core.ID(recordID), OrganizationID: "org-1", Version: 1,
 			Scope: core.KnowledgeScopeOrganization, ScopeID: "org-1", Status: core.KnowledgeActive,
+			ContextUse: classification,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -2961,7 +2973,13 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, event.Sequence, event.EventID, event.Org
 			t.Fatal(err)
 		}
 	}
-	_, err = currentExecutionKnowledgeRecords(ctx, tx, "org-1", core.Task{AssigneeID: "agent-1"}, maximumCurrentExecutionKnowledgeScan+2, nil)
+	records, err := currentExecutionKnowledgeRecords(ctx, tx, "org-1", core.Task{AssigneeID: "agent-1"}, maximumCurrentExecutionKnowledgeScan+3, nil)
+	if use != core.KnowledgeFactualReference {
+		if err != nil || len(records) != 1 {
+			t.Fatalf("excluded classification exhausted factual scan: count=%d err=%v", len(records), err)
+		}
+		return
+	}
 	if !errors.Is(err, core.ErrExecutionContextLimitExceeded) {
 		t.Fatalf("knowledge candidate overflow was not terminalizable: %v", err)
 	}
