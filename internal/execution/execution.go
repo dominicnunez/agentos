@@ -9,6 +9,7 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 )
 
 type Handler interface {
@@ -36,6 +37,13 @@ type ModelAdapter interface {
 	Name() string
 	Descriptor() ModelDescriptor
 	Complete(context.Context, string) (ModelResponse, error)
+}
+
+// StructuredModelAdapter preserves roles and source boundaries. A caller must
+// reject an adapter without this contract instead of flattening the request.
+type StructuredModelAdapter interface {
+	ModelAdapter
+	CompleteRequest(context.Context, modelinput.Request) (ModelResponse, error)
 }
 type ModelDescriptor struct {
 	Provider                string
@@ -129,7 +137,13 @@ func (a *AgentExecution) Execute(ctx context.Context, task core.Task, manifest c
 	if task.ExecutionBrief != "" {
 		prompt = task.ExecutionBrief
 	}
-	response, err := a.model.Complete(ctx, prompt)
+	var response ModelResponse
+	var err error
+	if manifest.ContextBuilderVersion == "v4" {
+		response, err = a.completeStructured(ctx, prompt, manifest)
+	} else {
+		response, err = a.model.Complete(ctx, prompt)
+	}
 	if err != nil {
 		err = SafeModelError(ModelCallFailed, err)
 		return Result{Outcome: core.ToolOutcome{ToolInvocationID: core.ID("model-" + string(task.ID)), ToolID: a.model.Name(), Status: core.OutcomeFailed, PostconditionStatus: core.PostconditionNotChecked, Retryability: core.Retryable, ErrorClass: ModelErrorClass(err), ErrorDetail: err.Error(), StartedAt: started, FinishedAt: time.Now().UTC()}}, err

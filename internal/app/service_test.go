@@ -18,6 +18,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/lab"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 	"github.com/dominicnunez/agentos/internal/planning"
 	"github.com/dominicnunez/agentos/internal/projections"
 	"github.com/dominicnunez/agentos/internal/telemetry"
@@ -263,7 +264,7 @@ func saveTestVerifiedTask(ctx context.Context, gateway *events.Gateway, reposito
 				coordinationRefs = append(coordinationRefs, core.VersionedRef{ID: string(selectedPeer.Task.ID), Version: fmt.Sprintf("%d", selectedPeer.Version), MaterializationState: core.MaterializedFull})
 			}
 			var materializeErr error
-			_, executionInput, materializeErr = core.MaterializeAgentExecutionInput(inputContext)
+			executionInput, materializeErr = structuredTestInput(organizationID, core.ID(fmt.Sprintf("execution-%s-v%d", task.ID, startVersion)), inputContext)
 			if materializeErr != nil {
 				return core.ExecutionContextManifest{}, materializeErr
 			}
@@ -272,7 +273,7 @@ func saveTestVerifiedTask(ctx context.Context, gateway *events.Gateway, reposito
 				AgentBlueprintVersion: task.AgentConfig.BlueprintVersion, ExecutionProfileVersion: task.AgentConfig.ProfileVersion,
 				RuntimeAdapter: task.AgentConfig.RuntimeAdapter, Provider: "fake", Model: "fake-model/v1",
 				TaskID: task.ID, TaskContractVersion: task.TaskContractVersion, PromptVersion: "v1",
-				PolicyVersion: "v1", KnowledgeRefs: knowledgeRefs, CoordinationRefs: coordinationRefs, ContextBuilderVersion: "v3",
+				PolicyVersion: "v1", KnowledgeRefs: knowledgeRefs, CoordinationRefs: coordinationRefs, ContextBuilderVersion: "v4",
 				ExecutionInputSHA256: core.FingerprintExecutionInput(executionInput), CreatedAt: selection.Started.CreatedAt,
 			}, nil
 		})
@@ -758,7 +759,7 @@ func TestWorkCompletionAdmissionRecomputesAgentPostcondition(t *testing.T) {
 
 	forgedBlueprint := snapshot.AgentBlueprints[taskState.Value.AgentConfig.BlueprintID].Value
 	forgedBlueprint.OperatingInstructions = "substituted operating instructions"
-	_, substitutedInput, err := core.MaterializeAgentExecutionInput(core.AgentExecutionInputContext{
+	substitutedInput, err := structuredTestInput(core.ID(binding.OrganizationID), executionIDFromTestStream(t, stream, taskState.Value.ID), core.AgentExecutionInputContext{
 		Blueprint: forgedBlueprint,
 		Task:      taskState.Value,
 	})
@@ -862,7 +863,7 @@ func TestWorkCompletionAdmissionRecomputesAgentPostcondition(t *testing.T) {
 		SourceActorID: "forged-producer", RecipientScope: events.RecipientTeam, RecipientID: string(forgedTeam.ID),
 		CreatedAt: startEvent.CreatedAt.Add(-time.Second), Payload: messagePayload, CorrelationID: "different-work",
 	}
-	_, teamSubstitutedInput, err := core.MaterializeAgentExecutionInput(core.AgentExecutionInputContext{
+	teamSubstitutedInput, err := structuredTestInput(core.ID(binding.OrganizationID), executionIDFromTestStream(t, stream, taskState.Value.ID), core.AgentExecutionInputContext{
 		Blueprint: binding.AgentBlueprints[taskState.Value.AgentConfig.BlueprintID], Task: taskState.Value,
 		InboxEvents: []core.AgentExecutionInboxEvent{{
 			Sequence: messageEvent.Sequence, EventID: messageEvent.EventID, EventType: messageEvent.EventType,
@@ -1472,7 +1473,7 @@ func TestAgentExecutionUsesFakeAdapter(t *testing.T) {
 		t.Fatal(err)
 	}
 	observed, ok := r.Outcome.ObservedEffect.(string)
-	if !ok || !strings.HasPrefix(observed, "fake-model: Operate only as this runtime-selected durable Agent blueprint.") || !strings.Contains(observed, `"objective":"summarize"`) {
+	if !ok || !strings.HasPrefix(observed, `fake-model: {"version":"model-input-v1"`) || !strings.Contains(observed, `\"objective\":\"summarize\"`) {
 		t.Fatalf("effect=%q", r.Outcome.ObservedEffect)
 	}
 	if !r.Completion.Complete || r.Task.Status != core.TaskCompleted {
@@ -1508,8 +1509,8 @@ func (m organizationPlanningModel) Descriptor() planning.Descriptor {
 	descriptor := m.model.Descriptor()
 	return planning.Descriptor{Provider: descriptor.Provider, Model: descriptor.Model, ExecutionProfileVersion: descriptor.ExecutionProfileVersion}
 }
-func (m organizationPlanningModel) CompleteText(ctx context.Context, prompt string) (planning.TextCompletion, error) {
-	response, err := m.model.Complete(ctx, prompt)
+func (m organizationPlanningModel) CompleteRequest(ctx context.Context, request modelinput.Request) (planning.TextCompletion, error) {
+	response, err := m.model.CompleteRequest(ctx, request)
 	return planning.TextCompletion{Text: response.Text, Usage: response.Usage}, err
 }
 
@@ -1586,8 +1587,8 @@ func (m delayedPlanningModel) Descriptor() planning.Descriptor {
 	descriptor := m.model.Descriptor()
 	return planning.Descriptor{Provider: descriptor.Provider, Model: descriptor.Model, ExecutionProfileVersion: descriptor.ExecutionProfileVersion}
 }
-func (m delayedPlanningModel) CompleteText(ctx context.Context, prompt string) (planning.TextCompletion, error) {
-	response, err := m.model.Complete(ctx, prompt)
+func (m delayedPlanningModel) CompleteRequest(ctx context.Context, request modelinput.Request) (planning.TextCompletion, error) {
+	response, err := m.model.CompleteRequest(ctx, request)
 	return planning.TextCompletion{Text: response.Text, Usage: response.Usage}, err
 }
 
@@ -1730,7 +1731,7 @@ func TestAcceptedIntentBecomesDurableTaskDAGWithDependencyEvidence(t *testing.T)
 		t.Fatalf("child result=%q root manifest=%+v", childResultEvent, rootManifest)
 	}
 	observed, ok := result.Outcome.ObservedEffect.(string)
-	if !ok || !strings.Contains(observed, childResultEvent) || !strings.Contains(observed, "Runtime-selected dependency evidence") {
+	if !ok || !strings.Contains(observed, childResultEvent) || !strings.Contains(observed, `"kind":"coordination_context"`) {
 		t.Fatalf("root execution omitted bounded dependency evidence: %q", result.Outcome.ObservedEffect)
 	}
 	if plan.IntentFingerprint == "" || plan.IntentFingerprint != result.Intent.AcceptedFingerprint || plan.Fingerprint == "" {
@@ -2019,7 +2020,7 @@ func TestAgentExecutionManifestUsesConfiguredModelDescriptor(t *testing.T) {
 		t.Fatalf("durable execution profile does not bind the configured provider: %+v", profile)
 	}
 	observed, ok := r.Outcome.ObservedEffect.(string)
-	if !ok || !strings.HasPrefix(observed, "configured-model: Operate only as this runtime-selected durable Agent blueprint.") || !strings.Contains(observed, `"objective":"summarize"`) {
+	if !ok || !strings.HasPrefix(observed, `configured-model: {"version":"model-input-v1"`) || !strings.Contains(observed, `\"objective\":\"summarize\"`) {
 		t.Fatalf("provider result was not preserved: %+v", r.Outcome)
 	}
 	assertEventOrder(t, r.Events, "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_REVIEW_REQUESTED", "TASK_BLOCKED")
@@ -2192,7 +2193,7 @@ func TestHumanReviewerFinalizesExactModelCandidate(t *testing.T) {
 		t.Fatalf("submitted=%+v err=%v", submitted, err)
 	}
 	view, found, err := service.CompletionReview(context.Background(), "org-1", string(submitted.Task.ID))
-	if err != nil || !found || !strings.HasPrefix(view.Result, "configured-model: Operate only as this runtime-selected durable Agent blueprint.") || !strings.Contains(view.Result, `"objective":"summarize"`) || len(view.Request.EvidenceRefs) != 3 {
+	if err != nil || !found || !strings.HasPrefix(view.Result, `configured-model: {"version":"model-input-v1"`) || !strings.Contains(view.Result, `\"objective\":\"summarize\"`) || len(view.Request.EvidenceRefs) != 3 {
 		t.Fatalf("review=%+v found=%t err=%v", view, found, err)
 	}
 	stream, err := service.Events(context.Background(), submitted.Events[0].CorrelationID)
@@ -3581,7 +3582,7 @@ func TestRecoveryIsDeterministicFirst(t *testing.T) {
 							AgentBlueprintVersion: task.AgentConfig.BlueprintVersion, ExecutionProfileVersion: task.AgentConfig.ProfileVersion,
 							RuntimeAdapter: task.AgentConfig.RuntimeAdapter, Provider: "fake", Model: "fake-model/v1",
 							TaskID: task.ID, TaskContractVersion: task.TaskContractVersion, PromptVersion: "v1", PolicyVersion: "v1",
-							ContextBuilderVersion: "v3", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
+							ContextBuilderVersion: "v4", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
 						}, nil
 					})
 					return err

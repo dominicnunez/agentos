@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 )
 
 type normalizationModel struct{ response string }
@@ -14,8 +15,8 @@ func (normalizationModel) Descriptor() NormalizerDescriptor {
 	return NormalizerDescriptor{Provider: "test", Model: "test-model", ExecutionProfileVersion: "test-profile"}
 }
 
-func (m normalizationModel) CompleteText(context.Context, string) (TextCompletion, error) {
-	return TextCompletion{Text: m.response, Usage: events.InferenceUsageRecordedPayload{Source: "test", Provider: "test", Model: "test-model"}}, nil
+func (m normalizationModel) CompleteRequest(_ context.Context, request modelinput.Request) (TextCompletion, error) {
+	return TextCompletion{Text: testNormalizationResponse(m.response, request), Usage: events.InferenceUsageRecordedPayload{Source: "test", Provider: "test", Model: "test-model"}}, nil
 }
 
 func TestModelNormalizerRequiresCompleteStrictIntent(t *testing.T) {
@@ -24,7 +25,7 @@ func TestModelNormalizerRequiresCompleteStrictIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := normalizer.Normalize(context.Background(), []ConversationTurn{{MessageID: "message-1", Text: "Release version 1 for Linux"}})
+	result, err := normalizer.Normalize(normalizationTestContext(t), []ConversationTurn{{MessageID: "message-1", Text: "Release version 1 for Linux"}})
 	if err != nil || result.State != normalizationReady || result.Candidate.Objective != "Release version 1" || result.Usage == nil {
 		t.Fatalf("normalization=%+v err=%v", result, err)
 	}
@@ -43,7 +44,7 @@ func TestModelNormalizerRequiresCompleteStrictIntent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := normalizer.Normalize(context.Background(), []ConversationTurn{{MessageID: "message-1", Text: "release"}}); err == nil {
+		if _, err := normalizer.Normalize(normalizationTestContext(t), []ConversationTurn{{MessageID: "message-1", Text: "release"}}); err == nil {
 			t.Fatalf("malformed normalization was accepted: %s", malformed)
 		}
 	}
@@ -55,7 +56,7 @@ func TestModelNormalizerAllowsOnlyExplicitMissingUserInputState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := normalizer.Normalize(context.Background(), []ConversationTurn{{MessageID: "message-1", Text: "Publish a release"}})
+	result, err := normalizer.Normalize(normalizationTestContext(t), []ConversationTurn{{MessageID: "message-1", Text: "Publish a release"}})
 	if err != nil || result.State != normalizationNeedsInput || len(result.Candidate.MissingUserInputs) != 1 {
 		t.Fatalf("normalization=%+v err=%v", result, err)
 	}
@@ -67,7 +68,7 @@ func TestModelNormalizerBindsOnlyExplicitGoalReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := normalizer.Normalize(context.Background(), []ConversationTurn{{MessageID: "message-1", Text: "Use goal-123 for this work"}})
+	result, err := normalizer.Normalize(normalizationTestContext(t), []ConversationTurn{{MessageID: "message-1", Text: "Use goal-123 for this work"}})
 	if err != nil || result.Candidate.Goal == nil || result.Candidate.Goal.Value != "goal-123" {
 		t.Fatalf("explicit Goal normalization=%+v err=%v", result, err)
 	}
@@ -81,7 +82,7 @@ func TestModelNormalizerBindsOnlyExplicitGoalReference(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := normalizer.Normalize(context.Background(), []ConversationTurn{{MessageID: "message-1", Text: "Use goal-123 for this work"}}); err == nil {
+		if _, err := normalizer.Normalize(normalizationTestContext(t), []ConversationTurn{{MessageID: "message-1", Text: "Use goal-123 for this work"}}); err == nil {
 			t.Fatalf("untrusted Goal binding was accepted: %s", invalid)
 		}
 	}
@@ -94,7 +95,7 @@ func TestModelNormalizerTreatsOnlyUnambiguousPunctuationAsGoalBoundary(t *testin
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := normalizer.Normalize(context.Background(), []ConversationTurn{{MessageID: "message-1", Text: text}}); err != nil {
+		if _, err := normalizer.Normalize(normalizationTestContext(t), []ConversationTurn{{MessageID: "message-1", Text: text}}); err != nil {
 			t.Fatalf("ordinary Goal punctuation was rejected for %q: %v", text, err)
 		}
 	}
@@ -103,7 +104,7 @@ func TestModelNormalizerTreatsOnlyUnambiguousPunctuationAsGoalBoundary(t *testin
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := normalizer.Normalize(context.Background(), []ConversationTurn{{MessageID: "message-1", Text: text}}); err == nil {
+		if _, err := normalizer.Normalize(normalizationTestContext(t), []ConversationTurn{{MessageID: "message-1", Text: text}}); err == nil {
 			t.Fatalf("Goal prefix was accepted as an exact reference in %q", text)
 		}
 	}
@@ -116,7 +117,7 @@ func TestModelNormalizerBindsExplicitReplacementWorkProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	turns := []ConversationTurn{{MessageID: "message-1", Text: "Replace work-failed-1 with a bounded approach and verify the result."}}
-	result, err := normalizer.Normalize(context.Background(), turns)
+	result, err := normalizer.Normalize(normalizationTestContext(t), turns)
 	if err != nil || result.Candidate.ReplacesWork == nil || result.Candidate.ReplacesWork.Value != "work-failed-1" {
 		t.Fatalf("replacement normalization=%+v err=%v", result, err)
 	}
@@ -130,7 +131,7 @@ func TestModelNormalizerBindsExplicitReplacementWorkProvenance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := normalizer.Normalize(context.Background(), turns); err == nil {
+			if _, err := normalizer.Normalize(normalizationTestContext(t), turns); err == nil {
 				t.Fatal("untrusted replacement provenance was accepted")
 			}
 		})

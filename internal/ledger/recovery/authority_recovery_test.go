@@ -32,7 +32,7 @@ func recoveryTestManifest(task core.Task, selection events.ExecutionStartSelecti
 		AgentBlueprintVersion: task.AgentConfig.BlueprintVersion, ExecutionProfileVersion: task.AgentConfig.ProfileVersion,
 		RuntimeAdapter: task.AgentConfig.RuntimeAdapter, Provider: "test", Model: "test", TaskID: task.ID,
 		TaskContractVersion: task.TaskContractVersion, PromptVersion: "test", PolicyVersion: "v1", EventRefs: refs, CoordinationRefs: coordinationRefs,
-		ContextBuilderVersion: "v3", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
+		ContextBuilderVersion: "v4", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
 	}
 }
 

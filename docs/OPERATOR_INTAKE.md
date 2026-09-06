@@ -15,6 +15,11 @@ Content never supplies its own identity, capabilities, organization, approval,
 or policy. The authenticated boundary injects those values before work enters
 the event ledger.
 
+Model normalization receives separate instruction and operator messages.
+Model-proposed provenance must cite a handle issued for this invocation;
+intake resolves it to the original durable message ID before accepting the
+candidate. See [Structured model input](STRUCTURED_MODEL_INPUT.md).
+
 The Mission/Goal link is optional for ad hoc Work. When present, it must point
 to an active Goal under an active Mission in the same organization and cannot
 be changed by later conversation, Task output, or Work state transitions. The

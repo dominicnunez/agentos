@@ -18,6 +18,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/intake"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 )
 
 const testOwnerMarker = "local-owner-uid-marker"
@@ -279,7 +280,7 @@ func TestHumanGatewayRoutesNaturalLanguageAndReturnsNarrowTaskView(t *testing.T)
 	response := submitAndConfirmHuman(t, handler, humanMessageRequest{
 		ConversationID: "direct-1", MessageID: "message-1", Text: "draft a release update",
 	})
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) || !strings.Contains(response.Body.String(), `"result":"fake-model: Operate only as this runtime-selected durable Agent blueprint.`) || !strings.Contains(response.Body.String(), `\"objective\":\"draft a release update\"`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) || !strings.Contains(response.Body.String(), `"result":"fake-model: {`) || !strings.Contains(response.Body.String(), `draft a release update`) {
 		t.Fatalf("natural-language submit=%d %s", response.Code, response.Body.String())
 	}
 	if strings.Contains(response.Body.String(), `"events"`) || strings.Contains(response.Body.String(), `"payload"`) || strings.Contains(response.Body.String(), `"intent"`) {
@@ -290,7 +291,7 @@ func TestHumanGatewayRoutesNaturalLanguageAndReturnsNarrowTaskView(t *testing.T)
 		t.Fatalf("human response has no task id: %s err=%v", response.Body.String(), err)
 	}
 	response = serveHuman(handler, http.MethodGet, "/v1/user/tasks/"+submitted.TaskID, testOwnerMarker, "")
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"result":"fake-model: Operate only as this runtime-selected durable Agent blueprint.`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"result":"fake-model: {`) {
 		t.Fatalf("human status=%d %s", response.Code, response.Body.String())
 	}
 
@@ -537,7 +538,7 @@ func TestLocalOwnerCanFinalizeExactCompletionReview(t *testing.T) {
 		t.Fatalf("review list=%s err=%v", response.Body.String(), err)
 	}
 	response = serveHuman(handler, http.MethodGet, "/v1/user/reviews/"+task.TaskID, testOwnerMarker, "")
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"objective":"draft a release update"`) || !strings.Contains(response.Body.String(), `"candidate_result":"candidate: Operate only as this runtime-selected durable Agent blueprint.`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"objective":"draft a release update"`) || !strings.Contains(response.Body.String(), `"candidate_result":"candidate: {`) {
 		t.Fatalf("review fetch=%d %s", response.Code, response.Body.String())
 	}
 	if response.Header().Get("Cache-Control") != "no-store" {
@@ -568,7 +569,7 @@ func TestLocalOwnerCanFinalizeExactCompletionReview(t *testing.T) {
 		t.Fatalf("recent completion review=%d %s", response.Code, response.Body.String())
 	}
 	response = serveHuman(handler, http.MethodGet, "/v1/user/tasks/"+task.TaskID, testOwnerMarker, "")
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) || !strings.Contains(response.Body.String(), `"result":"candidate: Operate only as this runtime-selected durable Agent blueprint.`) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"COMPLETED"`) || !strings.Contains(response.Body.String(), `"result":"candidate: {`) {
 		t.Fatalf("reviewed task=%d %s", response.Code, response.Body.String())
 	}
 }
@@ -692,4 +693,12 @@ func serveHuman(handler http.Handler, method, path, token, body string) *httptes
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+func (m reviewerModel) CompleteRequest(ctx context.Context, request modelinput.Request) (execution.ModelResponse, error) {
+	body, err := request.Canonical()
+	if err != nil {
+		return execution.ModelResponse{}, err
+	}
+	return m.Complete(ctx, string(body))
 }

@@ -16,7 +16,9 @@ The adapter must:
   filesystem access and restricted network access;
 - reject every command, file-change, web-search, MCP, permission, and approval
   request rather than mapping it into Agent OS authority;
-- pass only the materialized execution prompt and declared model settings;
+- pass runtime instructions separately from the materialized user/data turn,
+  using the [structured input contract](STRUCTURED_MODEL_INPUT.md), and pass
+  only declared model settings;
 - bound execution time and response size;
 - require the CLI-reported model to match the requested model before sending
   the prompt, require the `openai` provider, and reject any model reroute;
