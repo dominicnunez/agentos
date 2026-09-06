@@ -182,7 +182,7 @@ policy:
       from:
         module: approvals
       to:
-        modules: [core, events]
+        modules: [boundaryjson, core, events]
 
     - name: audit-domain
       from:

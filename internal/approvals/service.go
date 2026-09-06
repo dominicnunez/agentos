@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/dominicnunez/agentos/internal/boundaryjson"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 )
@@ -395,7 +396,7 @@ func (s *Service) PendingDecisionContexts(ctx context.Context, organizationID, h
 	contexts := make([]DecisionContext, 0, len(bodies))
 	for _, body := range bodies {
 		var approval core.HumanApproval
-		if err := json.Unmarshal(body, &approval); err != nil {
+		if err := boundaryjson.Unmarshal(body, &approval); err != nil {
 			return nil, fmt.Errorf("decode approval inbox: %w", err)
 		}
 		if approval.OrganizationID != organizationID {
@@ -444,7 +445,7 @@ func (s *Service) RecentDecisionContexts(ctx context.Context, organizationID, hu
 	contexts := make([]DecisionContext, 0, limit)
 	for _, event := range recent {
 		var approval core.HumanApproval
-		if err := json.Unmarshal(event.Payload, &approval); err != nil {
+		if err := boundaryjson.Unmarshal(event.Payload, &approval); err != nil {
 			return nil, fmt.Errorf("decode approval history: %w", err)
 		}
 		if approval.OrganizationID != organizationID || approval.ID == "" || string(approval.TaskID) != event.TaskID || event.SourceActorID != string(approval.DecidedBy) ||
@@ -475,7 +476,7 @@ func (s *Service) load(ctx context.Context, approvalID core.ID) (core.HumanAppro
 		return core.HumanApproval{}, 0, err
 	}
 	var approval core.HumanApproval
-	if err := json.Unmarshal(body, &approval); err != nil {
+	if err := boundaryjson.Unmarshal(body, &approval); err != nil {
 		return core.HumanApproval{}, 0, fmt.Errorf("decode approval %s: %w", approvalID, err)
 	}
 	return approval, version, nil
