@@ -132,6 +132,27 @@ model-visible metadata, and declared consequential capabilities. Any definition
 change changes the digest; one tool's description cannot grant authority over
 itself or another tool.
 
+The existing fingerprint helper rejects resource excess before hashing. Before
+parsing any JSON field it caps the name at 256 bytes, description at 16 KiB,
+each schema at 64 KiB, and metadata at 16 KiB. Each JSON field permits at most
+32 nested containers and 1,024 object members in total, including nested
+extensions; duplicate keys, invalid UTF-8 and trailing values are rejected.
+The encoded definition is capped at 256 KiB after JSON escaping. Rejection
+returns a fixed error category and no digest; content is never truncated.
+Valid existing definitions retain their fingerprint representation.
+
+These helper limits do not implement discovery or a tool runtime. Before
+enabling either, the adapter must enforce bounded streaming reads before
+materializing definitions, a tool-count limit per server, discovery deadlines,
+per-call tool/resource-result limits, and cumulative result bytes and call
+counts per execution. Admission and runtime evidence must bind an exact budget
+profile/version, and execution must reject a missing or weaker profile.
+Transport limits must hold without a trustworthy Content-Length and terminate
+slow or oversized streams. Runtime-owned limits must precede parsing,
+registration and model materialization; a definition digest alone provides no
+resource-budget evidence. Dynamic tools remain unavailable until these
+prerequisites and the existing authority checks are implemented and verified.
+
 ## Current implementation status
 
 ### Organization freeze and model admission
