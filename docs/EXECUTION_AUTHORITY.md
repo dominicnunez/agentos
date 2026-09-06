@@ -247,6 +247,12 @@ human judgment for discretionary interpretation, with provenance and conflicts
 checked independently of the author. Bind the eligible principal, validation
 method, authorization and provenance evidence; an author-controlled Agent or
 another Agent repeating the same evidence cannot satisfy this requirement.
+For subjective behavioral scoring, use opaque randomized arm identifiers and
+conceal assignment from scorers until their scores and reasoning are committed
+to the ledger. Retain the runtime-owned assignment and reveal ordering. If the
+required scoring cannot be blinded, reject that subjective evidence rather than
+treating independence or execution-order randomization as a substitute. Content
+policy review remains separate from blinded outcome scoring.
 Run both arms in isolated shadow/replay mode with runtime-enforced effectless
 capability profiles and controlled recorded or simulated tool outcomes. Remove
 production credentials, capabilities and approvals regardless of their source;
@@ -316,6 +322,10 @@ Bind the exact context-builder version in classification and behavioral evidence
 both comparison arms and production applicability checks. A changed prompt
 assembly version requires fresh applicable assessment even if all other
 identities and resolved content remain unchanged.
+Also bind the exact TaskContract version and canonical content digest in
+classification, behavioral evidence and both comparison arms, and validate them
+at production use. Changed constraints, success criteria or other contract
+content require fresh applicable assessment even within the same task class.
 Reconcile every selected case and arm assignment to its recorded outcome or
 explicit terminal failure, including timeouts, refusals and cancellations. Commit
 the missing-data, failure and retry handling rules before case selection; retain
@@ -434,8 +444,14 @@ name alone does not establish continuity. If the provider cannot supply this
 binding, deny Skill activation and use; fresh trials alone cannot establish that
 an unobservable deployment change did not occur afterward. A changed revision
 requires fresh applicable validation. This gate does not restrict existing
-executions whose verified complete transitive Skill provenance closure is empty,
-including both direct SkillRefs and all derived inputs. Empty direct SkillRefs
+executions whose verified transitive Skill influence closure is empty. Compute
+that closure from all content or references actually exposed to the model,
+including direct Skills and derived inputs. Runtime-proven OMITTED or UNAVAILABLE
+entries that expose neither content nor a reference are retained in the manifest
+but do not add influence lineage. A state label alone is insufficient: any exposed
+summary, identifier or reference remains subject to the gate, and later resolution
+requires a new check before exposure. Apply this exposure rule to the lineage
+validity gates above as well. Empty direct SkillRefs
 alone do not establish this exemption. It does not imply that an adapter attests model
 weights or deployment revisions.
 
