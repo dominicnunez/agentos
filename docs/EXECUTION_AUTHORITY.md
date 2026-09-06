@@ -185,6 +185,16 @@ not establish that its preferences serve its declared purpose. Any systematic
 change in discretionary selections must be attributable to that declared and
 authorized purpose; provenance, versioning and ordinary injection checks alone
 do not establish this property.
+Apply this behavioral-policy classification to instruction-like model context
+regardless of record type, including PROCEDURE Knowledge, Artifacts and Events.
+Independently authored steering instructions cannot evade these requirements
+merely because they have no Skill ancestor. Before enabling general Skill use,
+the runtime must classify such inputs under the same purpose, evidence and
+deployment gates or deny their materialization as behavioral instructions;
+uncertain classification denies that use. Data records do not acquire policy
+authority through their storage type. This is also an implementation prerequisite:
+the current empty-SkillRefs restriction alone does not prove equivalent controls
+over existing Knowledge or Artifact materialization paths.
 Require independent review of the actual Skill content against its authorized
 purpose and policy, plus absolute policy-compliance checks on each comparison
 arm. Prohibited Skill content or treatment outcomes deny activation even when
@@ -234,6 +244,12 @@ the classification decision, eligible reviewer and supporting evidence, and
 revalidate them at use and protected-action boundaries. Missing, stale or
 uncertain classification takes the behavioral validation path; a label or
 author assertion cannot establish the exception.
+Use the non-discretionary exception only when absence of discretionary influence
+can be established deterministically over the exact applicable input behavior.
+Content review, reviewer independence and a few favorable executions are not
+such proof. Otherwise require the full behavioral validation path, including its
+preregistered coverage and sensitivity requirements, rather than classifying
+rare, subgroup-specific or nondeterministic steering as non-discretionary.
 Compare held-out executions with and without
 the exact Skill under the same Agent, effective model, execution profile,
 task conditions and, for selection-only tasks, the same supplied candidate set.
@@ -319,6 +335,13 @@ intervention. This covers Event, Knowledge, Artifact, tool and additional-contex
 references, resolved bytes, message order and candidate order. Pair both arms
 within each preregistered randomized ordering; different full input digests alone
 do not prove a controlled comparison.
+Before admitting a comparison, resolve the candidate's transitive influence
+lineage in the case inputs and reject any case containing prior outputs or
+derivatives influenced by that candidate, including Knowledge and Artifacts.
+Apply this contamination check to reassessment as well as initial trials and
+retain its evidence. A case with unavailable or ambiguous lineage cannot serve
+as a control; acquire fresh uncontaminated cases instead of comparing two
+already-influenced arms.
 Bind outcomes, computed metrics, behavioral-shift summary, adequacy approval and
 activation decision to the exact preregistered protocol digest and ledger
 commitment. Validate the commitment's ordering before case selection or reveal,
