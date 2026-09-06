@@ -202,6 +202,13 @@ must consider actual behavior, not a Skill's label: selection, ranking and
 tie-breaking guidance require the behavioral path below. The active security
 requirement intentionally adds this gate for discretionary Skills; the preserved
 handoff's deferral of automated evaluation does not waive it.
+The non-discretionary classification requires independently authorized,
+version-bound evidence covering the exact content, materialization, composition
+and applicability scope. The author cannot approve that classification. Bind
+the classification decision, eligible reviewer and supporting evidence, and
+revalidate them at use and protected-action boundaries. Missing, stale or
+uncertain classification takes the behavioral validation path; a label or
+author assertion cannot establish the exception.
 Compare held-out executions with and without
 the exact Skill under the same Agent, effective model, execution profile,
 candidate set and task conditions. Randomize candidate order where relevant,
@@ -221,6 +228,12 @@ access to or influence that selection. Retain selection provenance, access
 boundaries and ledger ordering; author-visible, author-selected or adaptively
 chosen cases cannot establish held-out evidence. A revised Skill requires a
 new commitment and fresh independent held-out selection.
+Before accepting the protocol, require independent, authorized approval of
+risk-appropriate sampling, relevant subgroup and task coverage, and detection
+sensitivity or statistical power for policy-relevant effects. Bind the adequacy
+criteria, rationale and approval to the committed protocol and evaluated scope.
+Insufficient coverage, sample size or sensitivity denies activation; absence of
+a detected shift in an inadequate test is not evidence of acceptable behavior.
 Retain the full candidate family and search/attempt history, including failures.
 Choosing a winner among alternatives requires a committed multiplicity rule and
 post-selection confirmation on another fresh independent set. Missing search
@@ -250,6 +263,13 @@ the same materialization and covered scope; a different representation, newly
 resolved asset or expanded scope requires fresh applicable evidence. A package
 digest or organization-wide purpose authorization does not establish coverage
 of untested materializations or task classes.
+Bind the complete ordered set of co-materialized Skills, including every exact
+version, materialization and resolved-content digest, in both comparison arms
+and in the resulting applicability evidence. Evaluate the production composition,
+with only the declared intervention removed from its paired baseline. Individual
+Skill approvals do not establish safety of their combination. Adding, removing,
+reordering or changing a co-materialized Skill requires fresh applicable evidence
+before using the changed composition.
 
 Bind the organization and exact policy version, authorized objective, and the
 runtime-owned authorization decision that permits this declared purpose for
@@ -265,6 +285,14 @@ evidence itself, its applicability and freshness, evaluator eligibility and
 authorization, and independent provenance. Revoked, stale, unavailable,
 unverifiable or mismatched evidence or evaluator eligibility denies use and
 quarantines the active version until new applicable evidence is admitted.
+Carry these exact Skill, composition, classification, authorization and evidence
+references through the execution manifest and resulting outputs and proposed
+effects. Before accepting a protected downstream action, including a tool call
+or effect commit, resolve and revalidate their current validity, applicability,
+freshness, evaluator eligibility and independent provenance. Missing lineage or
+revocation after materialization denies the action and quarantines affected
+outputs; a running execution or previously accepted output cannot bypass this
+check. Apply the same check to recovered or replayed proposals before action.
 
 A persistent shift requires an explicit explanation tied to the authorized
 objective and an independent
