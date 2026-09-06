@@ -30,7 +30,7 @@ func TestPlanningKeepsAcceptedIntentOutOfSystemInstructions(t *testing.T) {
 	if _, err := planner.Build(planningTestContext(t), input, core.ExecutionAgent); err != nil {
 		t.Fatal(err)
 	}
-	if len(model.request.Messages) != 2 || model.request.Messages[0].Role != modelinput.System || model.request.Messages[0].Source.Kind != modelinput.RuntimeContract || model.request.Messages[1].Role != modelinput.User || model.request.Messages[1].Source.Reference != string(input.Intent.ID) {
+	if len(model.request.Messages) != 2 || model.request.Messages[0].Role != modelinput.System || model.request.Messages[0].Source.Kind != modelinput.RuntimeContract || model.request.Messages[1].Role != modelinput.User || model.request.Messages[1].Source.Reference != "intent-sha256:"+modelinput.TextDigest(string(input.Intent.ID)) {
 		t.Fatal("accepted Intent lost its source or privilege")
 	}
 	scope, err := modelinput.Invocation(planningTestContext(t))
@@ -73,5 +73,28 @@ func TestPlanningPreflightBoundsEscapedStructuredSources(t *testing.T) {
 	}
 	if _, err := planner.Build(planningTestContext(t), input, core.ExecutionAgent); err == nil || model.calls != 0 {
 		t.Fatal("oversized escaped sources reached inference")
+	}
+}
+
+func TestPlanningBindsLongDerivedIntentIdentity(t *testing.T) {
+	model := &plannerModel{text: `{"tasks":[]}`}
+	planner, err := NewModelPlanner(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, length := range []int{249, 250, 256} {
+		input := Input{Intent: acceptedDraft()}
+		input.Intent.ID = core.ID("intent-" + strings.Repeat("x", length))
+		if _, err := planner.Build(planningTestContext(t), input, core.ExecutionAgent); err != nil {
+			t.Fatalf("admitted conversation length %d failed: %v", length, err)
+		}
+		source := model.request.Messages[1].Source
+		if len(source.Reference) > 256 || source.Reference != "intent-sha256:"+modelinput.TextDigest(string(input.Intent.ID)) {
+			t.Fatal("derived source identity was truncated or not bounded")
+		}
+		var accepted core.IntentDraft
+		if err := json.Unmarshal([]byte(model.request.Messages[1].Text), &accepted); err != nil || accepted.ID != input.Intent.ID {
+			t.Fatal("full accepted identity was lost")
+		}
 	}
 }

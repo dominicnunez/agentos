@@ -21,7 +21,8 @@ func (a *CodexSubscription) CompleteRequest(ctx context.Context, request modelin
 	if _, err := request.Canonical(); err != nil {
 		return ModelResponse{}, RequestNotSent(err)
 	}
-	var trusted, data []string
+	var trusted []string
+	var data []json.RawMessage
 	for _, message := range request.Messages {
 		switch message.Role {
 		case modelinput.System:
@@ -34,7 +35,16 @@ func (a *CodexSubscription) CompleteRequest(ctx context.Context, request modelin
 			if err != nil {
 				return ModelResponse{}, RequestNotSent(err)
 			}
-			data = append(data, quoted)
+			encoded := json.RawMessage(quoted)
+			if message.Source.Handle == "" && message.Role == modelinput.User {
+				// Unbound user text has no runtime envelope. Encode it as a
+				// string; never interpret payload JSON as envelope metadata.
+				encoded, err = json.Marshal(quoted)
+				if err != nil {
+					return ModelResponse{}, RequestNotSent(modelinput.ErrInvalid)
+				}
+			}
+			data = append(data, encoded)
 		case modelinput.Assistant:
 			return ModelResponse{}, RequestNotSent(fmt.Errorf("codex structured input does not support assistant history"))
 		default:
