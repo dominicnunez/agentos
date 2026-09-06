@@ -195,6 +195,14 @@ uncertain classification denies that use. Data records do not acquire policy
 authority through their storage type. This is also an implementation prerequisite:
 the current empty-SkillRefs restriction alone does not prove equivalent controls
 over existing Knowledge or Artifact materialization paths.
+Classification must assess actual function, not imperative wording: precomputed
+rankings, curated examples or factual-looking ratings used as reusable preference
+policy are covered even without explicit instructions. Independently validate
+the provenance and applicability of ordinary factual evidence under its existing
+Knowledge/Artifact rules; factual relevance alone is not reusable policy. If the
+runtime cannot distinguish that evidence use from embedded discretionary policy,
+deny the policy use pending independent classification. Record type, prose style
+and lack of Skill ancestry cannot establish an exemption.
 Require independent review of the actual Skill content against its authorized
 purpose and policy, plus absolute policy-compliance checks on each comparison
 arm. Prohibited Skill content or treatment outcomes deny activation even when
@@ -263,6 +271,12 @@ and randomize or counterbalance baseline-versus-Skill execution order within
 paired cases. Retain arm assignment, actual execution order and timestamps;
 candidate-order randomization alone does not control temporal effects. Reject
 comparisons with unresolved deployment, state or ordering confounds.
+Commit the randomization algorithm, entropy-source requirements and redraw rules
+with the protocol. The runtime generates and commits candidate ordering and arm
+assignments, including the protected seed/entropy reference, before either arm
+executes. Retain every draw and redraw with its reason and ledger ordering;
+unauthorized redraws or incomplete assignment history invalidate the comparison.
+Protect assignment details from blinded scorers until their scores are committed.
 Retain the comparison protocol and outcomes, and record unexplained persistent
 preference shifts. Evaluator count is not independence. Eligibility requires
 deterministic validation of recorded measurements and appropriately authorized
@@ -335,6 +349,13 @@ intervention. This covers Event, Knowledge, Artifact, tool and additional-contex
 references, resolved bytes, message order and candidate order. Pair both arms
 within each preregistered randomized ordering; different full input digests alone
 do not prove a controlled comparison.
+Include an additional purpose-neutral control matched to the Skill's rendered
+token length and placement, while retaining the required no-Skill baseline.
+Independently validate and bind the neutral control content and its own influence
+assessment. Record rendered inputs and effective token budgets and establish
+that no arm truncated, displaced or silently omitted common input. Evaluate
+footprint effects separately from policy semantics; if rendering or neutral
+control effects cannot be excluded, deny the proposed purpose attribution.
 Before admitting a comparison, resolve the candidate's transitive influence
 lineage in the case inputs and reject any case containing prior outputs or
 derivatives influenced by that candidate, including Knowledge and Artifacts.
@@ -372,6 +393,12 @@ the same materialization and covered scope; a different representation, newly
 resolved asset or expanded scope requires fresh applicable evidence. A package
 digest or organization-wide purpose authorization does not establish coverage
 of untested materializations or task classes.
+Bind an independently evaluated non-Skill context class with deterministic
+membership criteria, or the exact canonical non-Skill input digest, in behavioral
+evidence. Validate production Events, Knowledge, Artifacts, tools and additional
+context against that boundary at every use and acceptance. New or changed inputs
+outside it require reassessment; matching a broad task class alone is insufficient.
+Record the concrete context digest and applicability decision for each use.
 Bind the complete ordered set of co-materialized Skills, including every exact
 version, materialization and resolved-content digest, in both comparison arms
 and in the resulting applicability evidence. Evaluate the production composition,
