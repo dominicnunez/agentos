@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,7 +11,8 @@ import (
 )
 
 func TestInferenceSelectionUsesSharedLedgerBudget(t *testing.T) {
-	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	// Keep the injected admission clock after real event creation timestamps.
+	now := time.Now().UTC().Add(time.Minute)
 	store, err := Open(filepath.Join(t.TempDir(), "selection.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -46,6 +48,11 @@ func TestInferenceSelectionUsesSharedLedgerBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := inference.RouteRequirements{OrganizationID: "organization-1", Capabilities: []inference.Capability{inference.Text}, InputTokens: 50, OutputTokens: 10, Locality: inference.CloudAllowed, DataClass: "internal", PreferredConnections: []string{"large"}}
+	store.now = func() time.Time { return now.Add(-time.Hour) }
+	if _, err := store.SelectInferenceRoute(t.Context(), registry, request); err == nil || !strings.Contains(err.Error(), "snapshot") {
+		t.Fatalf("backwards clock did not fail snapshot verification: %v", err)
+	}
+	store.now = func() time.Time { return now }
 	selected, err := registry.Select(t.Context(), request)
 	if err != nil || selected.ConnectionID != "large" {
 		t.Fatalf("initial selection=%+v err=%v", selected, err)

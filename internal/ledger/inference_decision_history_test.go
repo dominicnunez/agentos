@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -116,6 +117,89 @@ func TestRoutingDecisionCannotUseLaterRefundOrFrozenSnapshot(t *testing.T) {
 	if err := check(3, nil); err == nil {
 		t.Fatal("account concurrency bypassed at historical cutoff")
 	}
+	policy.MaxConcurrentRequests = 2
+	decision.PolicyFingerprint, err = policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	activations["selected"] = policy
+	if err := check(3, nil); err != nil {
+		t.Fatal("available second account slot rejected", err)
+	}
+}
+
+func TestRoutingDecisionRejectsPartialPolicySetCutoff(t *testing.T) {
+	policy, requirements, decision := decisionHistoryFixture(t)
+	other := policy
+	other.ConnectionID = "other"
+	changed := policy
+	rules := *policy.Routing
+	rules.DataClasses = []string{"internal", "public"}
+	changed.Routing = &rules
+	changedOther := changed
+	changedOther.ConnectionID = other.ConnectionID
+	activations := map[string]inference.Policy{"old": policy, "other": other, "new": changed, "new-other": changedOther}
+	stream := []events.Event{}
+	for i, id := range []string{"old", "other", "new", "new-other"} {
+		stream = append(stream, events.Event{EventID: id, Sequence: int64(i + 1), OrganizationID: policy.OrganizationID, EventType: "INFERENCE_POLICY_ACTIVATED", CreatedAt: decision.SelectedAt})
+	}
+	decision.PolicyFingerprint, _ = changed.Fingerprint()
+	for _, cutoff := range []int64{3, 4} {
+		decision.SnapshotSequence = cutoff
+		origin := decisionHistoryEvent(t, 5, policy.OrganizationID, "PLANNING_CONTEXT_MANIFESTED", events.PlanningContextPayload{Routing: &requirements, RoutingDecision: &decision})
+		err := validateRoutingDecisionHistory(append(stream, origin), activations, nil)
+		if cutoff == 3 && err == nil {
+			t.Fatal("partial policy-set cutoff accepted")
+		}
+		if cutoff == 4 && err != nil {
+			t.Fatal("complete policy-set cutoff rejected", err)
+		}
+	}
+}
+
+func TestRoutingDecisionStandalonePendingRequestRejectsForgedPolicy(t *testing.T) {
+	policy, requirements, decision := decisionHistoryFixture(t)
+	store, err := Open(filepath.Join(t.TempDir(), "pending.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	// Use the real event clock so the selected timestamp follows activation.
+	now := time.Now().UTC()
+	policy.AuthorizedAt = now.Add(-time.Minute)
+	policy.AuthorizationExpiresAt = now.Add(time.Hour)
+	policy.Pricing.ExpiresAt = policy.AuthorizationExpiresAt
+	policy.Catalog.ValidUntil = policy.AuthorizationExpiresAt
+	if err := store.ActivateInferencePolicy(t.Context(), policy); err != nil {
+		t.Fatal(err)
+	}
+	decision.SelectedAt = time.Now().UTC()
+	decision.PolicyFingerprint, err = policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(t.Context(), `SELECT MAX(sequence) FROM events`).Scan(&decision.SnapshotSequence); err != nil {
+		t.Fatal(err)
+	}
+	request := testInferenceRequest("standalone")
+	request.ConnectionID = policy.ConnectionID
+	request.Scope.Routing, request.Scope.RoutingDecision = &requirements, &decision
+	validFingerprint := decision.PolicyFingerprint
+	decision.PolicyFingerprint = modelinput.TextDigest("forged policy")
+	if _, err := store.ReserveInference(t.Context(), request); err == nil {
+		t.Fatal("standalone request bypassed historical policy verification")
+	}
+	var count int
+	if err := store.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM inference_reservations`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("rejected decision changed accounting: count=%d err=%v", count, err)
+	}
+	decision.PolicyFingerprint = validFingerprint
+	if _, err := store.ReserveInference(t.Context(), request); err != nil {
+		t.Fatal("valid standalone decision rejected", err)
+	}
+	if err := store.ValidateInferenceAdmissions(t.Context()); err != nil {
+		t.Fatal("valid standalone reservation failed replay", err)
+	}
 }
 
 func TestRoutingDecisionRejectsMissingCutoffAndChangedEstimate(t *testing.T) {
@@ -133,5 +217,37 @@ func TestRoutingDecisionRejectsMissingCutoffAndChangedEstimate(t *testing.T) {
 		if err := validateRoutingDecisionHistory(append(stream, origin), map[string]inference.Policy{"policy": policy}, nil); err == nil {
 			t.Fatal("invalid historical decision accepted")
 		}
+	}
+}
+
+func TestRoutingDecisionCannotBackdateAccountingSnapshot(t *testing.T) {
+	policy, requirements, decision := decisionHistoryFixture(t)
+	start, end := inferenceWindow(decision.SelectedAt, time.Hour)
+	reserved := events.InferenceReservedPayload{ReservationID: "prior", ConnectionID: policy.ConnectionID, Provider: policy.Provider, Model: policy.Model, ReservedInputTokens: 100, ReservedOutputTokens: 20, AdmittedAt: decision.SelectedAt.Format(time.RFC3339Nano), WindowStartedAt: start, WindowExpiresAt: end}
+	stream := []events.Event{
+		{EventID: "policy", Sequence: 1, OrganizationID: policy.OrganizationID, EventType: "INFERENCE_POLICY_ACTIVATED", CreatedAt: policy.AuthorizedAt},
+		decisionHistoryEvent(t, 2, policy.OrganizationID, "INFERENCE_RESERVED", reserved),
+		decisionHistoryEvent(t, 3, policy.OrganizationID, "INFERENCE_RECONCILED", events.InferenceReconciledPayload{ReservationID: "prior"}),
+	}
+	decision.SnapshotSequence = 3
+	check := func() error {
+		origin := decisionHistoryEvent(t, 4, policy.OrganizationID, "PLANNING_CONTEXT_MANIFESTED", events.PlanningContextPayload{Routing: &requirements, RoutingDecision: &decision})
+		return validateRoutingDecisionHistory(append(stream, origin), map[string]inference.Policy{"policy": policy}, nil)
+	}
+	if err := check(); err != nil {
+		t.Fatal("baseline refunded snapshot rejected", err)
+	}
+	stream[2].CreatedAt = decision.SelectedAt.Add(time.Second)
+	if err := check(); err == nil {
+		t.Fatal("selection predating refund timestamp accepted")
+	}
+	decision.SelectedAt = stream[2].CreatedAt
+	if err := check(); err != nil {
+		t.Fatal("selection at refund timestamp rejected", err)
+	}
+	reserved.AdmittedAt = decision.SelectedAt.Add(time.Second).Format(time.RFC3339Nano)
+	stream[1] = decisionHistoryEvent(t, 2, policy.OrganizationID, "INFERENCE_RESERVED", reserved)
+	if err := check(); err == nil {
+		t.Fatal("selection predating admission timestamp accepted")
 	}
 }

@@ -80,6 +80,7 @@ func validateRoutingDecisionHistory(stream []events.Event, activations map[strin
 	policies := make(map[string]map[string]inference.Policy)
 	activatedAt := make(map[string]map[string]time.Time)
 	charges := make(map[string]map[string]historicalInferenceCharge)
+	latestSnapshotTime := make(map[string]time.Time)
 	cursor := 0
 	for _, binding := range bindings {
 		d := binding.decision
@@ -87,6 +88,9 @@ func validateRoutingDecisionHistory(stream []events.Event, activations map[strin
 		for cursor < len(stream) && stream[cursor].Sequence <= d.SnapshotSequence {
 			event := stream[cursor]
 			cursor++
+			if event.CreatedAt.After(latestSnapshotTime[event.OrganizationID]) {
+				latestSnapshotTime[event.OrganizationID] = event.CreatedAt
+			}
 			switch event.EventType {
 			case "INFERENCE_POLICY_ACTIVATED":
 				policy, ok := activations[event.EventID]
@@ -108,6 +112,9 @@ func validateRoutingDecisionHistory(stream []events.Event, activations map[strin
 				if payload.AdmittedAt != "" && err != nil {
 					return err
 				}
+				if at.After(latestSnapshotTime[event.OrganizationID]) {
+					latestSnapshotTime[event.OrganizationID] = at
+				}
 				if charges[event.OrganizationID] == nil {
 					charges[event.OrganizationID] = make(map[string]historicalInferenceCharge)
 				}
@@ -127,6 +134,9 @@ func validateRoutingDecisionHistory(stream []events.Event, activations map[strin
 		}
 		if cursor == 0 || stream[cursor-1].Sequence != d.SnapshotSequence {
 			return fmt.Errorf("routing snapshot cutoff does not exist")
+		}
+		if d.SelectedAt.Before(latestSnapshotTime[organization]) {
+			return fmt.Errorf("routing selection timestamp predates its organization snapshot")
 		}
 		frozen := false
 		for _, freeze := range freezes[core.ID(organization)] {

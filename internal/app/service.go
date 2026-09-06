@@ -2047,6 +2047,9 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 			if !modelCapable {
 				return core.Plan{}, fmt.Errorf("selected planner lacks model identity")
 			}
+			if descriptor.ConnectionID != routingDecision.ConnectionID || descriptor.Provider != routingDecision.Provider || descriptor.Model != routingDecision.Model || descriptor.ExecutionProfileVersion != routingDecision.ExecutionProfileVersion {
+				return core.Plan{}, fmt.Errorf("selected planner identity differs from routing decision")
+			}
 		}
 		executionID = core.ID(fmt.Sprintf("planning-%s-attempt-1", planID))
 		contextPayload := events.PlanningContextPayload{

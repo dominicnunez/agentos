@@ -63,6 +63,13 @@ func (l *SQLite) SelectInferenceRoute(ctx context.Context, registry *inference.C
 			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0) FROM events`).Scan(&selected.Decision.SnapshotSequence); err != nil {
 				return inference.RouteSelection{}, err
 			}
+			// Prove the candidate against the same snapshot before returning it.
+			// A backwards clock must fail here, rather than emit a decision that
+			// admission or replay would later reject.
+			pending := inference.InferenceRequest{Scope: inference.Scope{OrganizationID: request.OrganizationID, Routing: &request, RoutingDecision: &selected.Decision}}
+			if err := validateInferenceAdmissionsSnapshot(ctx, tx, pending); err != nil {
+				return inference.RouteSelection{}, err
+			}
 			if err := tx.Commit(); err != nil {
 				return inference.RouteSelection{}, err
 			}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,6 +23,28 @@ import (
 type failingAuxiliaryModel struct {
 	execution.FakeModel
 	calls atomic.Int32
+}
+
+type mismatchedPlanner struct {
+	planning.Planner
+	descriptor planning.Descriptor
+}
+
+func (p mismatchedPlanner) Descriptor() (planning.Descriptor, bool) { return p.descriptor, true }
+
+type mismatchedPlannerSelector struct {
+	routedPlanner
+	mutate func(*planning.Descriptor)
+}
+
+func (p mismatchedPlannerSelector) SelectPlanner(ctx context.Context, organization string) (planning.Planner, *modelinput.RouteBinding, error) {
+	selected, binding, err := p.routedPlanner.SelectPlanner(ctx, organization)
+	if err != nil {
+		return nil, nil, err
+	}
+	descriptor, _ := selected.Descriptor()
+	p.mutate(&descriptor)
+	return mismatchedPlanner{Planner: selected, descriptor: descriptor}, binding, nil
 }
 
 func (m *failingAuxiliaryModel) CompleteRequest(context.Context, modelinput.Request) (execution.ModelResponse, error) {
@@ -103,6 +126,36 @@ func TestAuxiliaryBrokerBindsSelectedAccountAndRequirements(t *testing.T) {
 	basePlanner, err := planning.NewModelPlanner(planningModel{adapter: adapter})
 	if err != nil {
 		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*planning.Descriptor){
+		"connection": func(d *planning.Descriptor) { d.ConnectionID = "first" },
+		"provider":   func(d *planning.Descriptor) { d.Provider = "other" },
+		"model":      func(d *planning.Descriptor) { d.Model = "other" },
+		"profile":    func(d *planning.Descriptor) { d.ExecutionProfileVersion = "other" },
+	} {
+		t.Run("mismatched-"+name, func(t *testing.T) {
+			selector := mismatchedPlannerSelector{routedPlanner: routedPlanner{Planner: basePlanner, route: route}, mutate: mutate}
+			service, err := app.NewWithConnections(events.NewGateway(store), registry, app.TaskConnectionRouting{Default: "first"}, selector)
+			if err != nil {
+				t.Fatal(err)
+			}
+			submission := app.Submit{RequestID: "mismatched-" + name, OrganizationID: "org-1", Statement: "perform adaptive work", Kind: core.ExecutionAgent}
+			if _, err := service.Submit(t.Context(), submission); err == nil || !strings.Contains(err.Error(), "identity differs from routing decision") {
+				t.Fatalf("mismatched planner was not rejected at selection: %v", err)
+			}
+			stream, err := service.ExternalEvents(t.Context(), "org-1", submission.RequestID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range stream {
+				if event.EventType == "PLANNING_CONTEXT_MANIFESTED" || event.EventType == "INFERENCE_RESERVED" {
+					t.Fatal("mismatched planner persisted inference context or reservation")
+				}
+			}
+			if first.calls.Load() != 0 || second.calls.Load() != 0 {
+				t.Fatal("mismatched planner contacted provider")
+			}
+		})
 	}
 	service, err := app.NewWithConnections(events.NewGateway(store), registry, app.TaskConnectionRouting{Default: "first"}, routedPlanner{Planner: basePlanner, route: route})
 	if err != nil {
