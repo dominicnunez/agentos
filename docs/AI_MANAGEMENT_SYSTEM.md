@@ -1,5 +1,12 @@
 # AI management system
 
+Formal project certification is not being pursued. Non-code ISO/IEC 42001 work
+is indefinitely deferred. Software engineering continues to preserve applicable
+technical controls, tests, and reviewable evidence for future readiness. This
+deferral does not relax runtime authority, approval, security, or completion
+requirements. Existing governance records remain preserved; see the
+[current scope](development/ISO_IEC_42001_READINESS.md#current-engineering-scope).
+
 Agent OS is being developed to support an organization operating an artificial intelligence management system (AIMS) aligned with [ISO/IEC 42001:2023](https://www.iso.org/standard/42001). ISO/IEC 42001 applies to an organization and its management system, not to a software binary in isolation. Installing Agent OS therefore does not make an operator compliant or certified.
 
 Agent OS contributes technical controls and reviewable evidence:

@@ -2,15 +2,37 @@
 
 ## Claim boundary
 
-Target: make the Agent OS project auditable against ISO/IEC 42001:2023 and make Agent OS useful as a technical control and evidence system within an operator's AIMS.
+Engineering target: retain applicable ISO/IEC 42001:2023 software controls and verifiable evidence so Agent OS can support an operator's AIMS and a future readiness assessment.
 
-Current claim: **readiness work in progress; not certified**.
+Current claim: **software readiness work continues; formal certification is not being pursued; not certified**.
 
 ISO describes ISO/IEC 42001 as a management-system standard for establishing, implementing, maintaining, and continually improving responsible AI governance using a Plan-Do-Check-Act approach. A repository can supply controls and evidence, but conformity also depends on accountable organizational decisions and operating practice. Certification is a separate assessment performed by a competent certification body.
 
 This document is a public readiness register, not a reproduction of the copyrighted standard and not legal or certification advice. A final conformity audit must use an authorized copy of the standard and the organization's approved AIMS scope.
 
-## Intended certification scope
+## Current engineering scope
+
+The project has cancelled its current formal certification effort. All non-code
+ISO/IEC 42001 work is indefinitely deferred, including organizational approvals,
+operating assessments, competence and supplier reviews, internal audits,
+management reviews, and certification-body engagement. No completion date is
+assigned to that work.
+
+Applicable software requirements remain active: preserve and test authority,
+approval, completion, tenant isolation, provider governance, bounded evidence,
+audit integrity, and recovery controls. Deferral cannot supply a missing runtime
+approval or weaken a fail-closed boundary. Retain technical evidence and existing
+governance records so future work can build on them. Code changes must continue
+to be assessed against their applicable requirements; code alone does not prove
+management-system conformity.
+
+GitHub issues are reserved for code-related work. Deferred non-code obligations
+remain described here and in existing governance records; do not create new
+GitHub issues for them. The register below preserves evidence and outstanding
+obligations. Its management-system states are not active delivery commitments
+or a statement that the obligations have been met.
+
+## Historical proposed certification scope
 
 The proposed project scope is the design, development, security review, release, maintenance, and support of Agent OS as software for governing artificial organizations. The scope is provisional until approved by project leadership.
 
@@ -55,7 +77,7 @@ States mean:
 3. Model output and external-agent content are never policy decisions, approvals, impact assessments, audit conclusions, or completion authority.
 4. User policy decisions remain explicit and fail closed when unanswered.
 5. Evidence exports must be bounded, redactable where required, independently verifiable, and must not expose credentials, private prompts, or unrelated tenant data.
-6. Findings outside an active pull request become prioritized Issues; in-scope findings are fixed before merge.
+6. Code-related findings outside an active pull request become prioritized Issues; in-scope findings are fixed before merge. Non-code ISO/IEC 42001 findings remain indefinitely deferred in the preserved readiness records.
 
 The current export is structurally minimized rather than a general ledger dump:
 it omits free-text Mission, Goal, Work, and Task content while retaining the
@@ -65,7 +87,12 @@ The single downloaded tar contains the JSON artifact and its `.sha256`
 companion, which verifies the exact JSON bytes; it
 does not attest to ledger integrity, control effectiveness, or conformity.
 
-## Delivery order
+## Preserved future readiness sequence
+
+This sequence records the earlier certification plan. Non-code steps are
+indefinitely deferred under the current engineering scope; resumption requires
+an explicit project decision. Existing software controls and verification remain
+active.
 
 1. Keep the full governed organization loop usable: durable direction, reviewed work intake, planning, assignment, execution, completion, and evidence.
 2. Add an AIMS inventory and evidence export based on public projections and typed event contracts.

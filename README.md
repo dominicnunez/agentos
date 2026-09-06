@@ -67,7 +67,7 @@ documentation is indexed in [`docs/`](docs/README.md).
 
 Agent OS is licensed under the [Apache License 2.0](LICENSE).
 
-Issues are welcome. Report vulnerabilities privately through [`SECURITY.md`](SECURITY.md), not through a public issue.
+Code-related issues are welcome; see [`CONTRIBUTING.md`](CONTRIBUTING.md). Report vulnerabilities privately through [`SECURITY.md`](SECURITY.md), not through a public issue.
 
 External code contributions and pull requests are not currently accepted. Contributor governance will be established deliberately before outside code is incorporated.
 
