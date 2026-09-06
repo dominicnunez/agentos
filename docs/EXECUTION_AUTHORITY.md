@@ -187,19 +187,38 @@ authorized purpose; provenance, versioning and ordinary injection checks alone
 do not establish this property.
 
 Before a Skill can be promoted for activation or used to influence discretionary
-decisions, reuse the Lab, evaluator and governed promotion boundaries to require
-independent behavioral evidence. Compare held-out executions with and without
+decisions, require independent behavioral evidence through existing versioned
+evidence and governed decision boundaries. This does not require a deferred Lab
+orchestrator: an appropriately authorized independent human can administer the
+controlled comparison and record its evidence and judgment through those
+boundaries. Reuse Lab/evaluator records where implemented; do not make deferred
+automated orchestration a dependency of V1 instruction/reference Skill validation.
+The additional behavioral evidence is a security prerequisite for discretionary
+influence, not authorization to implement deferred Lab facilities.
+Compare held-out executions with and without
 the exact Skill under the same Agent, effective model, execution profile,
 candidate set and task conditions. Randomize candidate order where relevant,
 retain the comparison protocol and outcomes, and record unexplained persistent
-preference shifts. The authoring Agent must not be the sole evaluator.
+preference shifts. Evaluator count is not independence. Eligibility requires
+deterministic validation of recorded measurements and appropriately authorized
+human judgment for discretionary interpretation, with provenance and conflicts
+checked independently of the author. Bind the eligible principal, validation
+method, authorization and provenance evidence; an author-controlled Agent or
+another Agent repeating the same evidence cannot satisfy this requirement.
 
-Commit the exact Skill content and declared-purpose digests to the ledger
+Commit the exact Skill content, declared-purpose and evaluation-protocol digests
+to the ledger, including metrics, subgroups, persistence and acceptance thresholds,
+analysis version and the rule for interpreting an authorized preference shift,
 before the runtime selects or reveals held-out cases. The author must not have
 access to or influence that selection. Retain selection provenance, access
 boundaries and ledger ordering; author-visible, author-selected or adaptively
 chosen cases cannot establish held-out evidence. A revised Skill requires a
 new commitment and fresh independent held-out selection.
+Retain the full candidate family and search/attempt history, including failures.
+Choosing a winner among alternatives requires a committed multiplicity rule and
+post-selection confirmation on another fresh independent set. Missing search
+history or confirmation denies activation; repeated attempts cannot be hidden
+by assigning a new version or identity.
 
 The evidence must bind the exact Skill ID/version and content digest, declared
 purpose digest, evaluation-set digest, baseline and Skill execution-profile
@@ -210,16 +229,33 @@ arms to runtime-owned execution manifests and validate equality of the Agent,
 blueprint, effective model, profile and controlled task/candidate conditions;
 record each arm's input digest and the intentional Skill intervention separately.
 Different blueprint instructions cannot silently become part of the intervention.
+Require field-by-field equality of every non-Skill input, or equality of a
+canonical digest computed after removing only the explicitly defined Skill
+intervention. This covers Event, Knowledge, Artifact, tool and additional-context
+references, resolved bytes, message order and candidate order. Pair both arms
+within each preregistered randomized ordering; different full input digests alone
+do not prove a controlled comparison.
+
+Bind the Skill's exact materialization state and the resolved instruction bytes,
+summaries and referenced-asset digests actually supplied to the model. Bind an
+evaluated applicability scope of task and candidate classes. At each use, require
+the same materialization and covered scope; a different representation, newly
+resolved asset or expanded scope requires fresh applicable evidence. A package
+digest or organization-wide purpose authorization does not establish coverage
+of untested materializations or task classes.
 
 Bind the organization and exact policy version, authorized objective, and the
 runtime-owned authorization decision that permits this declared purpose for
-that scope. Resolve and validate those references at activation; a purpose hash,
+that scope. Resolve and validate those references at activation and at every
+materialization/use boundary; a purpose hash,
 model explanation or evaluator assertion cannot authorize its own objective.
 Missing, revoked, superseded or mismatched purpose authorization denies
-activation and requires a new applicable assessment and authorization.
+activation and further use, quarantines any stale active version, and requires
+a new applicable assessment and authorization. An already-active status cannot
+bypass a later policy change or revocation.
 
-A persistent shift requires an
-explicit explanation tied to the authorized objective and an independent
+A persistent shift requires an explicit explanation tied to the authorized
+objective and an independent
 assessment of that explanation. Missing, mismatched or unexplained evidence
 must deny activation. A changed Skill, purpose, model or relevant execution
 conditions requires fresh applicable evidence rather than inheriting a prior
