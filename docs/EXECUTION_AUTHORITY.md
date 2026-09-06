@@ -194,10 +194,31 @@ candidate set and task conditions. Randomize candidate order where relevant,
 retain the comparison protocol and outcomes, and record unexplained persistent
 preference shifts. The authoring Agent must not be the sole evaluator.
 
+Commit the exact Skill content and declared-purpose digests to the ledger
+before the runtime selects or reveals held-out cases. The author must not have
+access to or influence that selection. Retain selection provenance, access
+boundaries and ledger ordering; author-visible, author-selected or adaptively
+chosen cases cannot establish held-out evidence. A revised Skill requires a
+new commitment and fresh independent held-out selection.
+
 The evidence must bind the exact Skill ID/version and content digest, declared
 purpose digest, evaluation-set digest, baseline and Skill execution-profile
 references, effective model identity, behavioral-shift summary, evaluator
-reference, and durable evidence references. A persistent shift requires an
+reference, and durable evidence references. Bind the exact Agent ID and blueprint
+ID/version, including its operating-instructions digest. Resolve both comparison
+arms to runtime-owned execution manifests and validate equality of the Agent,
+blueprint, effective model, profile and controlled task/candidate conditions;
+record each arm's input digest and the intentional Skill intervention separately.
+Different blueprint instructions cannot silently become part of the intervention.
+
+Bind the organization and exact policy version, authorized objective, and the
+runtime-owned authorization decision that permits this declared purpose for
+that scope. Resolve and validate those references at activation; a purpose hash,
+model explanation or evaluator assertion cannot authorize its own objective.
+Missing, revoked, superseded or mismatched purpose authorization denies
+activation and requires a new applicable assessment and authorization.
+
+A persistent shift requires an
 explicit explanation tied to the authorized objective and an independent
 assessment of that explanation. Missing, mismatched or unexplained evidence
 must deny activation. A changed Skill, purpose, model or relevant execution
