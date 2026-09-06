@@ -213,6 +213,10 @@ and applicability scope, Agent ID, blueprint ID/version and operating-instructio
 digest, exact Agent record revision, runtime adapter identity and version,
 effective model identity and execution profile. Changing any of these
 requires fresh classification before use. The author cannot approve that classification. Bind
+classification to a canonical digest of all model-visible non-Skill context,
+including Event, Knowledge, Artifact, tool and additional-context references,
+resolved bytes and ordering. Any change requires fresh classification before
+the exception can be used. Bind
 the classification decision, eligible reviewer and supporting evidence, and
 revalidate them at use and protected-action boundaries. Missing, stale or
 uncertain classification takes the behavioral validation path; a label or
@@ -327,6 +331,13 @@ evidence itself, its applicability and freshness, evaluator eligibility and
 authorization, and independent provenance. Revoked, stale, unavailable,
 unverifiable or mismatched evidence or evaluator eligibility denies use and
 quarantines the active version until new applicable evidence is admitted.
+Bind an independently authorized, versioned, risk-appropriate freshness policy
+to every assessment and classification, including a finite maximum age, explicit
+expiry, trusted assessment time and revalidation triggers for distribution drift
+and changed evaluator assumptions. Check the current policy and trusted runtime
+time at every use and acceptance boundary. Missing policy, unverifiable time,
+expiry or a triggered revalidation condition denies use until fresh evidence is
+admitted; absence of a revocation is not a freshness determination.
 Carry these exact Skill, composition, classification, authorization and evidence
 references through the execution manifest and resulting outputs and proposed
 effects. Before accepting a protected downstream action, including a tool call
@@ -343,11 +354,28 @@ same use and acceptance boundaries even when the consumer has no direct
 SkillRefs. Missing or unverifiable lineage denies use. Invalidating an originating
 basis quarantines its dependent descendants from further use, publication or
 delivery; copying, promotion or a new record identity cannot erase that basis.
+Enforce finite runtime-owned limits on lineage depth, distinct references, edges,
+total resolved bytes and ledger reads both when admitting derivatives and when
+resolving them. Bind the versioned limits in the execution policy; missing limits
+deny admission and use. Detect cycles and reject cyclic or over-limit closure
+before materialization or protected acceptance, bounding work as each edge or
+record is read rather than after full traversal. Never truncate lineage into a
+successful validation; shared ancestors may be deduplicated without omitting
+their validity checks.
 Apply the same lineage and current-validity checks before result acceptance,
 publication and delivery, including model-only text with no tool call or effect
 commit. Deny publication or delivery and quarantine the affected result if any
 required classification, authorization or behavioral basis has become invalid;
 an earlier acceptance cannot authorize later delivery after revocation.
+Independently validate the concrete production result, proposed selection and
+effect against current applicable absolute policy and the specific work
+objective at these same acceptance, publication, delivery and action boundaries.
+Use deterministic checks where the policy is mechanically decidable and an
+appropriately authorized independent judgment otherwise; unavailable or
+inconclusive validation denies acceptance. Historical behavioral evidence does
+not authorize a prohibited current outcome. Bind the exact output/effect digest,
+policy and work revisions, checker eligibility and decision to the governed
+acceptance record, alongside the evidence-validity checks below.
 Serialize these validity checks and each governed acceptance record in one
 authoritative ledger transaction with policy, classification and evidence
 revocations. Bind the checked versions and ledger position to the accepted
