@@ -201,6 +201,7 @@ func TestVerifyRejectsAgentEvidenceDetachedFromItsExecution(t *testing.T) {
 		_ = db.Close()
 		t.Fatal(err)
 	}
+	removeConnectionColumnsForLegacyFixture(t, db)
 	fingerprint, err := testStorageSchemaFingerprint(ctx, db)
 	if err != nil {
 		_ = db.Close()

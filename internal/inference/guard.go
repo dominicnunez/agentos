@@ -20,6 +20,10 @@ import (
 
 const PolicyVersion = 1
 
+// ConnectionPolicyVersion binds an independently configured connection. Legacy
+// policies retain their original version and fingerprint serialization.
+const ConnectionPolicyVersion = 2
+
 const reconciliationTimeout = 5 * time.Second
 
 type AccessMode string
@@ -51,28 +55,41 @@ type Pricing struct {
 // values. Metered prices are operator-reviewed inputs and expire independently
 // from the authorization itself.
 type Policy struct {
-	Version                   int        `json:"version"`
-	OrganizationID            string     `json:"organization_id"`
-	Provider                  string     `json:"provider"`
-	Model                     string     `json:"model"`
-	ExecutionProfileVersion   string     `json:"execution_profile_version"`
-	Mode                      AccessMode `json:"mode"`
-	MaxInputTokensPerRequest  int64      `json:"max_input_tokens_per_request"`
-	MaxOutputTokensPerRequest int64      `json:"max_output_tokens_per_request"`
-	MaxTokensPerWindow        int64      `json:"max_tokens_per_window"`
-	ContinuityReserveTokens   int64      `json:"continuity_reserve_tokens"`
-	WindowDurationSeconds     int64      `json:"window_duration_seconds"`
-	MaxConcurrentRequests     int        `json:"max_concurrent_requests"`
-	MaxAttemptsPerRequest     int        `json:"max_attempts_per_request"`
-	AuthorizedBy              string     `json:"authorized_by"`
-	AuthorizedAt              time.Time  `json:"authorized_at"`
-	AuthorizationExpiresAt    time.Time  `json:"authorization_expires_at"`
-	Pricing                   *Pricing   `json:"pricing,omitempty"`
+	Version                   int                 `json:"version"`
+	ConnectionID              string              `json:"connection_id,omitempty"`
+	OrganizationBudget        *OrganizationBudget `json:"organization_budget,omitempty"`
+	OrganizationID            string              `json:"organization_id"`
+	Provider                  string              `json:"provider"`
+	Model                     string              `json:"model"`
+	ExecutionProfileVersion   string              `json:"execution_profile_version"`
+	Mode                      AccessMode          `json:"mode"`
+	MaxInputTokensPerRequest  int64               `json:"max_input_tokens_per_request"`
+	MaxOutputTokensPerRequest int64               `json:"max_output_tokens_per_request"`
+	MaxTokensPerWindow        int64               `json:"max_tokens_per_window"`
+	ContinuityReserveTokens   int64               `json:"continuity_reserve_tokens"`
+	WindowDurationSeconds     int64               `json:"window_duration_seconds"`
+	MaxConcurrentRequests     int                 `json:"max_concurrent_requests"`
+	MaxAttemptsPerRequest     int                 `json:"max_attempts_per_request"`
+	AuthorizedBy              string              `json:"authorized_by"`
+	AuthorizedAt              time.Time           `json:"authorized_at"`
+	AuthorizationExpiresAt    time.Time           `json:"authorization_expires_at"`
+	Pricing                   *Pricing            `json:"pricing,omitempty"`
 }
 
 func (p Policy) Validate() error {
-	if p.Version != PolicyVersion || !validValue(p.OrganizationID) || !validValue(p.Provider) || !validValue(p.Model) || !validValue(p.ExecutionProfileVersion) || !validValue(p.AuthorizedBy) {
+	if p.Version != PolicyVersion && p.Version != ConnectionPolicyVersion || !validValue(p.OrganizationID) || !validValue(p.Provider) || !validValue(p.Model) || !validValue(p.ExecutionProfileVersion) || !validValue(p.AuthorizedBy) {
 		return fmt.Errorf("inference policy identity is incomplete")
+	}
+	if p.Version == PolicyVersion && p.ConnectionID != "" || p.Version == ConnectionPolicyVersion && !ValidConnectionID(p.ConnectionID) {
+		return fmt.Errorf("inference policy connection identity is invalid")
+	}
+	if p.Version == PolicyVersion && p.OrganizationBudget != nil {
+		return fmt.Errorf("legacy inference policy cannot carry connection budget semantics")
+	}
+	if p.Version == ConnectionPolicyVersion {
+		if p.OrganizationBudget == nil || p.OrganizationBudget.Validate() != nil {
+			return fmt.Errorf("connection policy requires a valid organization inference budget")
+		}
 	}
 	if p.Mode != Subscription && p.Mode != MeteredAPI && p.Mode != Local {
 		return fmt.Errorf("inference access mode is invalid")
@@ -215,6 +232,7 @@ func scopeFromContext(ctx context.Context) (Scope, error) {
 }
 
 type InferenceRequest struct {
+	ConnectionID string
 	Scope        Scope
 	Descriptor   execution.ModelDescriptor
 	PromptSHA256 string
@@ -251,8 +269,23 @@ type Store interface {
 // provider call only after a durable reservation and returns a response only
 // after the reservation is durably reconciled.
 type GuardedAdapter struct {
-	store   Store
-	adapter execution.ModelAdapter
+	store        Store
+	adapter      execution.ModelAdapter
+	connectionID string
+}
+
+// NewGuardedConnectionAdapter binds connection identity at trusted composition,
+// independently of model/provider responses and request content.
+func NewGuardedConnectionAdapter(store Store, adapter execution.ModelAdapter, connectionID string) (*GuardedAdapter, error) {
+	if !ValidConnectionID(connectionID) {
+		return nil, fmt.Errorf("inference connection identity is invalid")
+	}
+	guard, err := NewGuardedAdapter(store, adapter)
+	if err != nil {
+		return nil, err
+	}
+	guard.connectionID = connectionID
+	return guard, nil
 }
 
 func NewGuardedAdapter(store Store, adapter execution.ModelAdapter) (*GuardedAdapter, error) {
@@ -282,7 +315,7 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 	if err != nil {
 		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, err)
 	}
-	request := InferenceRequest{Scope: scope, Descriptor: a.adapter.Descriptor(), PromptSHA256: fingerprint}
+	request := InferenceRequest{ConnectionID: a.connectionID, Scope: scope, Descriptor: a.adapter.Descriptor(), PromptSHA256: fingerprint}
 	reservation, err := a.store.ReserveInference(ctx, request)
 	if err != nil {
 		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, err)
@@ -325,4 +358,22 @@ func validValue(value string) bool {
 	return value != "" && len(value) <= 512 && strings.TrimSpace(value) == value && utf8.ValidString(value) && strings.IndexFunc(value, func(character rune) bool {
 		return unicode.IsControl(character) || unicode.Is(unicode.Cf, character)
 	}) < 0
+}
+
+// ValidConnectionID accepts a bounded configuration identifier, never a URL,
+// credential, path, or provider-returned model name.
+func ValidConnectionID(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, c := range value {
+		if c < 'a' || c > 'z' {
+			if c < '0' || c > '9' {
+				if c != '-' && c != '_' {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }

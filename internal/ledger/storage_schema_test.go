@@ -47,6 +47,7 @@ func TestStorageV9MigrationAddsTenantKnowledgeIndex(t *testing.T) {
 		_ = db.Close()
 		t.Fatal(err)
 	}
+	removeConnectionColumnsForLegacyFixture(t, db)
 	fingerprint, err := storageSchemaFingerprint(ctx, db)
 	if err != nil {
 		_ = db.Close()
@@ -105,6 +106,7 @@ func TestStorageV7UpgradePreservesAuthorityAndAddsKnowledgeAdmission(t *testing.
 		_ = db.Close()
 		t.Fatal(err)
 	}
+	removeConnectionColumnsForLegacyFixture(t, db)
 	fingerprint, err := storageSchemaFingerprint(ctx, db)
 	if err != nil {
 		_ = db.Close()
@@ -159,6 +161,7 @@ func TestStorageV8QuarantinesLegacyUnsealedKnowledge(t *testing.T) {
 		_ = db.Close()
 		t.Fatal(err)
 	}
+	removeConnectionColumnsForLegacyFixture(t, db)
 	fingerprint, err := storageSchemaFingerprint(ctx, db)
 	if err != nil {
 		_ = db.Close()
@@ -369,6 +372,7 @@ func TestStorageV2MigrationPreservesReviewedIntentEvidence(t *testing.T) {
 		_ = db.Close()
 		t.Fatal(err)
 	}
+	removeConnectionColumnsForLegacyFixture(t, db)
 	fingerprint, err := storageSchemaFingerprint(ctx, db)
 	if err != nil {
 		_ = db.Close()
@@ -447,6 +451,7 @@ func TestStorageV4MigrationRebuildsBoundedGovernanceQueues(t *testing.T) {
 		_ = db.Close()
 		t.Fatal(err)
 	}
+	removeConnectionColumnsForLegacyFixture(t, db)
 	fingerprint, err := storageSchemaFingerprint(ctx, db)
 	if err != nil {
 		_ = db.Close()
@@ -532,6 +537,7 @@ func TestAuthorityBindingMigrationRejectsTamperedChainWithoutMutation(t *testing
 		t.Fatal(err)
 	}
 	preBindingVersion := AuthorityAdmissionBindingStorageVersion - 1
+	removeConnectionColumnsForLegacyFixture(t, db)
 	if _, err := db.ExecContext(ctx, `DROP INDEX records_knowledge_organization_idx; DROP TABLE legacy_knowledge_quarantine; UPDATE records SET admission_event_id='' WHERE kind='capability_lease'`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)

@@ -19,7 +19,8 @@ type Pool struct {
 }
 
 type PoolRequest struct {
-	Descriptor execution.ModelDescriptor
+	ConnectionID string
+	Descriptor   execution.ModelDescriptor
 }
 
 type PoolSelection struct {
@@ -37,6 +38,9 @@ type Manager struct{ Pools []Pool }
 // reserve, and cost constraints before deterministic pool ordering. It uses
 // exact integer accounting for subscription, metered, and local pools alike.
 func (m Manager) Select(now time.Time, request PoolRequest) (PoolSelection, error) {
+	if request.ConnectionID != "" && !ValidConnectionID(request.ConnectionID) {
+		return PoolSelection{}, fmt.Errorf("inference pool connection identity is invalid")
+	}
 	if !validValue(request.Descriptor.Provider) || !validValue(request.Descriptor.Model) || !validValue(request.Descriptor.ExecutionProfileVersion) {
 		return PoolSelection{}, fmt.Errorf("inference pool request identity is incomplete")
 	}
@@ -53,6 +57,9 @@ func (m Manager) Select(now time.Time, request PoolRequest) (PoolSelection, erro
 		}
 		seen[pool.ID] = struct{}{}
 		policy := pool.Policy
+		if policy.ConnectionID != request.ConnectionID {
+			continue
+		}
 		if policy.Provider != request.Descriptor.Provider || policy.Model != request.Descriptor.Model || policy.ExecutionProfileVersion != request.Descriptor.ExecutionProfileVersion {
 			continue
 		}
