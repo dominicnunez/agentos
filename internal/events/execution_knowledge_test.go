@@ -36,6 +36,109 @@ func TestResolveExecutionKnowledgeSelectsExactRelevantActiveScope(t *testing.T) 
 	}
 }
 
+func TestIncrementalExecutionKnowledgeMatchesReplay(t *testing.T) {
+	task := core.Task{ID: "task-1", WorkID: "work-1", Description: "verify rollback", ExecutionKind: core.ExecutionAgent, AssigneeID: "agent-1", Status: core.TaskRunning}
+	stream := activeExecutionKnowledge(t, 1, "knowledge-org", core.KnowledgeScopeOrganization, "org-1", "Rollback evidence", "Rollback restored three records.")
+	stream = append(stream, activeExecutionKnowledge(t, 4, "knowledge-other", core.KnowledgeScopeAgent, "other-agent", "Rollback evidence", "Rollback restored seven records.")...)
+	stream = append(stream, activeExecutionKnowledge(t, 7, "knowledge-irrelevant", core.KnowledgeScopeOrganization, "org-1", "Revenue", "Sales increased.")...)
+	replay := NewExecutionKnowledgeReplay("org-1")
+	for _, event := range stream {
+		if err := replay.Observe(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	selected, err := replay.Select(task, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := ResolveExecutionKnowledge("org-1", task, 10, nil, stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(selected, expected) || len(selected) != 1 {
+		t.Fatalf("indexed selection differs: got %+v want %+v", selected, expected)
+	}
+	manifest := core.ExecutionContextManifest{ContextBuilderVersion: "v5", KnowledgeRefs: []core.VersionedRef{{ID: "knowledge-org", Version: "2", MaterializationState: core.MaterializedFull}}}
+	if err := replay.ValidateUse(task, manifest, 10, nil); err != nil {
+		t.Fatal(err)
+	}
+	stale := decodeKnowledgeProjection(t, stream[1])
+	stale.Version, stale.Status, stale.SupersedesVersion = 3, core.KnowledgeStale, integerRef(2)
+	invalidation := executionKnowledgeProjection(t, 11, "KNOWLEDGE_STALE", stale)
+	if err := replay.Observe(invalidation); err != nil {
+		t.Fatal(err)
+	}
+	stream = append(stream, invalidation)
+	selected, err = replay.Select(task, 12, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err = ResolveExecutionKnowledge("org-1", task, 12, nil, stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(selected, expected) || len(selected) != 0 {
+		t.Fatal("stale candidate survived indexed selection")
+	}
+	if replay.ValidateUse(task, manifest, 12, nil) == nil || ValidateExecutionKnowledgeAtUse("org-1", task, manifest, 12, nil, stream) == nil {
+		t.Fatal("stale manifested revision survived use validation")
+	}
+	if _, err := replay.Select(task, 10, nil); err == nil {
+		t.Fatal("incremental state was reused for an earlier boundary")
+	}
+	if err := replay.Observe(invalidation); err == nil {
+		t.Fatal("duplicate sequence accepted")
+	}
+}
+
+func TestIncrementalKnowledgeKeepsStartSelectionSeparateFromUse(t *testing.T) {
+	task := core.Task{ID: "task-1", WorkID: "work-1", Description: "verify rollback", ExecutionKind: core.ExecutionAgent, AssigneeID: "agent-1", Status: core.TaskRunning}
+	replay := NewExecutionKnowledgeReplay("org-1")
+	initial := activeExecutionKnowledge(t, 1, "knowledge-original", core.KnowledgeScopeOrganization, "org-1", "Rollback evidence", "Rollback restored three records.")
+	for _, event := range initial {
+		if err := replay.Observe(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := Event{EventID: "start-1", Sequence: 3, OrganizationID: "org-1", EventType: "EXECUTION_STARTED", TaskID: string(task.ID)}
+	if err := replay.CaptureStart(start, task, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range activeExecutionKnowledge(t, 4, "knowledge-later", core.KnowledgeScopeOrganization, "org-1", "Rollback evidence", "Rollback restored nine records.") {
+		if err := replay.Observe(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	frozen, err := replay.selectionAtStart("org-1", start, task)
+	if err != nil || len(frozen) != 1 || frozen[0].Record.KnowledgeID != "knowledge-original" {
+		t.Fatalf("start selection changed: %+v, %v", frozen, err)
+	}
+	current, err := replay.Select(task, 6, nil)
+	if err != nil || len(current) != 2 || current[0].Record.KnowledgeID != "knowledge-later" {
+		t.Fatalf("new start selection did not include later evidence: %+v, %v", current, err)
+	}
+	manifest := core.ExecutionContextManifest{ContextBuilderVersion: "v5", KnowledgeRefs: []core.VersionedRef{{ID: "knowledge-original", Version: "2", MaterializationState: core.MaterializedFull}}}
+	if err := replay.ValidateUse(task, manifest, 6, nil); err != nil {
+		t.Fatal(err)
+	}
+	changed := task
+	changed.Description = "different execution input"
+	if _, err := replay.selectionAtStart("org-1", start, changed); err == nil {
+		t.Fatal("captured selection rebound to another Task input")
+	}
+	stale := decodeKnowledgeProjection(t, initial[1])
+	stale.Version, stale.Status, stale.SupersedesVersion = 3, core.KnowledgeStale, integerRef(2)
+	if err := replay.Observe(executionKnowledgeProjection(t, 7, "KNOWLEDGE_STALE", stale)); err != nil {
+		t.Fatal(err)
+	}
+	if err := replay.ValidateUse(task, manifest, 8, nil); err == nil {
+		t.Fatal("later invalidation did not block manifested use")
+	}
+	if _, err := replay.selectionAtStart("org-1", start, task); err != nil {
+		t.Fatalf("later invalidation erased historical start selection: %v", err)
+	}
+}
+
 func TestResolveExecutionKnowledgeHasNoLifetimeIdentityLimit(t *testing.T) {
 	const count = 4097
 	task := core.Task{
@@ -180,7 +283,65 @@ func TestKnowledgeContextClassificationIsVersionedAndTransitive(t *testing.T) {
 			if err != nil || len(selected) != 0 {
 				t.Fatalf("current projection bypassed lineage: count=%d err=%v", len(selected), err)
 			}
+			indexed := NewExecutionKnowledgeReplay("org-1")
+			for _, event := range stream {
+				if err := indexed.Observe(event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			selected, err = indexed.Select(task, 5, nil)
+			if err != nil || len(selected) != 0 {
+				t.Fatalf("indexed selection bypassed lineage classification: count=%d err=%v", len(selected), err)
+			}
 		})
+	}
+}
+
+func TestIncrementalKnowledgeValidatesUnselectedAncestors(t *testing.T) {
+	task := core.Task{ID: "task-1", WorkID: "work-1", Description: "verify rollback", ExecutionKind: core.ExecutionAgent, AssigneeID: "agent-1", Status: core.TaskRunning}
+	source := activeExecutionKnowledge(t, 1, "source", core.KnowledgeScopeAgent, "other-agent", "Archive", "Inventory contains three records.")
+	child := activeExecutionKnowledge(t, 3, "child", core.KnowledgeScopeOrganization, "org-1", "Rollback evidence", "Rollback restored three records.")
+	for i := range child {
+		record := decodeKnowledgeProjection(t, child[i])
+		record.Basis = core.KnowledgeBasisDerived
+		record.DerivedKnowledgeRefs = []core.VersionedRef{{ID: "source", Version: "2", MaterializationState: core.MaterializedFull}}
+		child[i] = executionKnowledgeProjection(t, int64(i+3), child[i].EventType, record)
+	}
+	stream := append(source, child...)
+	indexed := NewExecutionKnowledgeReplay("org-1")
+	for _, event := range stream {
+		if err := indexed.Observe(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	selected, err := indexed.Select(task, 5, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := ResolveExecutionKnowledge("org-1", task, 5, nil, stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(selected, expected) || len(selected) != 1 || selected[0].Record.KnowledgeID != "child" {
+		t.Fatalf("unselected ancestor was not validated: %+v, expected %+v", selected, expected)
+	}
+	manifest := core.ExecutionContextManifest{ContextBuilderVersion: "v5", KnowledgeRefs: []core.VersionedRef{{ID: "child", Version: "2", MaterializationState: core.MaterializedFull}}}
+	if err := indexed.ValidateUse(task, manifest, 5, nil); err != nil {
+		t.Fatal(err)
+	}
+	stale := decodeKnowledgeProjection(t, source[1])
+	stale.Version, stale.Status, stale.SupersedesVersion = 3, core.KnowledgeStale, integerRef(2)
+	invalidation := executionKnowledgeProjection(t, 6, "KNOWLEDGE_STALE", stale)
+	if err := indexed.Observe(invalidation); err != nil {
+		t.Fatal(err)
+	}
+	stream = append(stream, invalidation)
+	selected, err = indexed.Select(task, 7, nil)
+	if err != nil || len(selected) != 0 {
+		t.Fatalf("invalid ancestor survived indexed selection: %+v, %v", selected, err)
+	}
+	if indexed.ValidateUse(task, manifest, 7, nil) == nil || ValidateExecutionKnowledgeAtUse("org-1", task, manifest, 7, nil, stream) == nil {
+		t.Fatal("invalid ancestor survived manifested use")
 	}
 }
 

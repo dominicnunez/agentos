@@ -775,6 +775,7 @@ type ExecutionStartSelection struct {
 type ExecutionStartValidator func(ExecutionStartSelection) (core.ExecutionContextManifest, error)
 
 type WorkCompletionBinding struct {
+	knowledgeReplay *ExecutionKnowledgeReplay
 	// CompletionSequence is the final Work transition boundary. Zero is used
 	// while admitting aggregate evidence before that transition exists.
 	CompletionSequence int64
@@ -1603,6 +1604,17 @@ type executionModel struct {
 }
 
 func completionExecutionModel(binding WorkCompletionBinding, task core.Task, executionID string, startEvent, outcomeEvent Event, stream []Event) (executionModel, error) {
+	return validateAgentExecutionModel(binding, task, executionID, startEvent, outcomeEvent.Sequence, stream)
+}
+
+// ValidateAgentExecutionManifest reconstructs the admitted execution input and
+// validates its manifest before a consumer at useSequence may rely on it.
+func ValidateAgentExecutionManifest(binding WorkCompletionBinding, task core.Task, executionID string, startEvent Event, useSequence int64, stream []Event) (core.ExecutionContextManifest, error) {
+	model, err := validateAgentExecutionModel(binding, task, executionID, startEvent, useSequence, stream)
+	return model.Manifest, err
+}
+
+func validateAgentExecutionModel(binding WorkCompletionBinding, task core.Task, executionID string, startEvent Event, useSequence int64, stream []Event) (executionModel, error) {
 	if task.AssigneeType != "AGENT" || task.AssigneeID == "" || task.AgentConfig == nil {
 		return executionModel{}, fmt.Errorf("work completion Agent assignment is invalid")
 	}
@@ -1612,7 +1624,7 @@ func completionExecutionModel(binding WorkCompletionBinding, task core.Task, exe
 		if event.EventType != "EXECUTION_CONTEXT_MANIFESTED" || event.TaskID != string(task.ID) || event.SourceExecutionID != executionID || event.CorrelationID != binding.CorrelationID {
 			continue
 		}
-		if found.EventID != "" || event.Sequence <= startEvent.Sequence || event.Sequence >= outcomeEvent.Sequence || event.OrganizationID != binding.OrganizationID || json.Unmarshal(event.Payload, &manifest) != nil {
+		if found.EventID != "" || event.Sequence <= startEvent.Sequence || event.Sequence >= useSequence || event.OrganizationID != binding.OrganizationID || json.Unmarshal(event.Payload, &manifest) != nil {
 			return executionModel{}, fmt.Errorf("work completion Agent manifest record is invalid")
 		}
 		found = event
@@ -1637,8 +1649,13 @@ func completionExecutionModel(binding WorkCompletionBinding, task core.Task, exe
 	if manifest.ExecutionInputSHA256 != core.FingerprintExecutionInput(expectedInput) {
 		return executionModel{}, fmt.Errorf("work completion Agent manifest input does not match durable execution context")
 	}
-	if err := ValidateExecutionKnowledgeAtUse(binding.OrganizationID, task, manifest, outcomeEvent.Sequence, binding.TeamRevisions, stream); err != nil {
-		return executionModel{}, fmt.Errorf("work completion Agent Knowledge was invalid at outcome: %w", err)
+	if binding.knowledgeReplay != nil && manifest.ContextBuilderVersion == "v5" {
+		err = binding.knowledgeReplay.ValidateUse(task, manifest, useSequence, binding.TeamRevisions)
+	} else {
+		err = ValidateExecutionKnowledgeAtUse(binding.OrganizationID, task, manifest, useSequence, binding.TeamRevisions, stream)
+	}
+	if err != nil {
+		return executionModel{}, fmt.Errorf("agent execution Knowledge was invalid at use: %w", err)
 	}
 	return executionModel{Manifest: manifest, Provider: manifest.Provider, Model: manifest.Model, ExecutionInputSHA256: manifest.ExecutionInputSHA256}, nil
 }
@@ -1739,7 +1756,13 @@ func validExecutionContextBuilderVersion(version string) bool {
 }
 
 func executionKnowledge(binding WorkCompletionBinding, task core.Task, startEvent Event, stream []Event, requireClassification bool) ([]core.VersionedRef, []core.KnowledgeRecord, error) {
-	selected, err := resolveExecutionKnowledge(binding.OrganizationID, task, startEvent.Sequence, binding.TeamRevisions, stream, requireClassification)
+	var selected []KnowledgeSelection
+	var err error
+	if requireClassification && binding.knowledgeReplay != nil {
+		selected, err = binding.knowledgeReplay.selectionAtStart(binding.OrganizationID, startEvent, task)
+	} else {
+		selected, err = resolveExecutionKnowledge(binding.OrganizationID, task, startEvent.Sequence, binding.TeamRevisions, stream, requireClassification)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve execution knowledge: %w", err)
 	}
@@ -2231,6 +2254,10 @@ func ValidateExecutionKnowledgeAtUse(organizationID string, task core.Task, mani
 	if err != nil {
 		return err
 	}
+	return validateExecutionKnowledgeHistoryAtUse(organizationID, task, manifest, useSequence, teamRevisions, history)
+}
+
+func validateExecutionKnowledgeHistoryAtUse(organizationID string, task core.Task, manifest core.ExecutionContextManifest, useSequence int64, teamRevisions map[core.ID][]TeamRevisionBinding, history map[core.ID]executionKnowledgeRevision) error {
 	seen := make(map[string]struct{}, len(manifest.KnowledgeRefs))
 	memo := make(map[core.ID]bool)
 	for _, ref := range manifest.KnowledgeRefs {

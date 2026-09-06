@@ -951,7 +951,7 @@ func assignedTask(assigneeID core.ID, config core.AgentConfig) core.Task {
 	}
 }
 
-func appendTaskAssignmentAgent(t *testing.T, ctx context.Context, store *SQLite, organizationID, suffix string, includeOrganization bool) (core.Agent, core.AgentConfig) {
+func appendTaskAssignmentAgent(t testing.TB, ctx context.Context, store *SQLite, organizationID, suffix string, includeOrganization bool) (core.Agent, core.AgentConfig) {
 	t.Helper()
 	now := time.Now().UTC()
 	organization := core.Organization{ID: core.ID(organizationID), Name: organizationID, PolicyVersion: "v1", CreatedAt: now}

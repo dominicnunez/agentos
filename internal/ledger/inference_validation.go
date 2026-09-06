@@ -52,14 +52,35 @@ func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx) error 
 	for _, history := range byOrganization {
 		sort.Slice(history, func(i, j int) bool { return history[i].Sequence < history[j].Sequence })
 	}
-	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_type IN ('INFERENCE_POLICY_ACTIVATED','INFERENCE_RESERVED','INFERENCE_RECONCILED') ORDER BY sequence`))
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events ORDER BY sequence`))
 	if err != nil {
 		return fmt.Errorf("read inference admission events: %w", err)
 	}
 	eventsByID := make(map[string]events.Event, len(stream))
 	reservedEvents := make(map[string]events.Event)
 	reconciledEvents := make(map[string][]events.Event)
+	lastReservation := make(map[string]int64)
 	for _, event := range stream {
+		if event.EventType == "INFERENCE_RESERVED" {
+			lastReservation[event.OrganizationID] = event.Sequence
+		}
+	}
+	executionHistory := make(map[string]*inferenceExecutionHistory)
+	var inbox map[string]events.InboxObservationBinding
+	for _, event := range stream {
+		if event.Sequence < lastReservation[event.OrganizationID] {
+			history := executionHistory[event.OrganizationID]
+			if history == nil {
+				history = newInferenceExecutionHistory()
+				executionHistory[event.OrganizationID] = history
+			}
+			if err := history.observe(event); err != nil {
+				return err
+			}
+		}
+		if event.EventType != "INFERENCE_POLICY_ACTIVATED" && event.EventType != "INFERENCE_RESERVED" && event.EventType != "INFERENCE_RECONCILED" {
+			continue
+		}
 		if _, exists := eventsByID[event.EventID]; exists {
 			return fmt.Errorf("inference admission contains a duplicate event")
 		}
@@ -75,7 +96,12 @@ func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx) error 
 			if decodeExactJSONBytes(event.Payload, &payload) != nil || payload.ReservationID == "" {
 				return fmt.Errorf("inference reservation event is malformed")
 			}
-			if err := validateReservedExecutionKnowledge(ctx, tx, event, payload); err != nil {
+			execution := executionHistory[event.OrganizationID]
+			if execution == nil {
+				execution = newInferenceExecutionHistory()
+				executionHistory[event.OrganizationID] = execution
+			}
+			if err := execution.validateReservation(ctx, tx, event, payload, &inbox); err != nil {
 				return err
 			}
 			if _, exists := reservedEvents[payload.ReservationID]; exists {
