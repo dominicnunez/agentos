@@ -203,6 +203,13 @@ Knowledge/Artifact rules; factual relevance alone is not reusable policy. If the
 runtime cannot distinguish that evidence use from embedded discretionary policy,
 deny the policy use pending independent classification. Record type, prose style
 and lack of Skill ancestry cannot establish an exemption.
+Throughout this section, the behavioral-policy influence closure includes every
+input classified as behavioral policy, regardless of record type or Skill
+ancestry, and all of its transitive derivatives. Requirements below for Skill
+composition, lineage, evidence validity and deployment continuity apply equally
+to those classified inputs; bind their exact record identity, revision and
+resolved content in place of a Skill identity. A Skill-only inventory cannot
+establish an empty behavioral-policy closure.
 Require independent review of the actual Skill content against its authorized
 purpose and policy, plus absolute policy-compliance checks on each comparison
 arm. Prohibited Skill content or treatment outcomes deny activation even when
@@ -305,6 +312,15 @@ candidate, protocol, approved evaluator and effectless profile. This narrow path
 does not require the behavioral evidence or classification it is being run to
 create. It retains all other applicable isolation, input-integrity, provenance,
 resource, current authorization and deployment-identity checks. Evaluation-only
+authorization may name an exact ordered joint candidate or changed composition,
+binding every member's identity, revision and materialized content. Within that
+effectless assessment only, waive the missing or mismatched composition evidence
+being created for each explicitly named member, including previously active
+members. Record each waived requirement and its assessment purpose; unrelated
+invalidity, revocation or safety denials remain enforced. Evidence from the joint
+assessment must cover every member and the exact intended composition before
+production use; evaluation authorization cannot activate that composition.
+Evaluation-only
 records and outputs must be marked and confined to the assessment evidence
 boundary; they may be retained for analysis, including failed outcomes, but may
 not satisfy production acceptance or delivery. Production activation, execution
@@ -343,10 +359,19 @@ record revision, runtime adapter, blueprint, effective model, profile and
 controlled task/candidate conditions;
 record each arm's input digest and the intentional Skill intervention separately.
 Different blueprint instructions cannot silently become part of the intervention.
-Require field-by-field equality of every non-Skill input, or equality of a
+Require field-by-field equality of every exogenous non-Skill input, or equality of a
 canonical digest computed after removing only the explicitly defined Skill
 intervention. This covers Event, Knowledge, Artifact, tool and additional-context
-references, resolved bytes, message order and candidate order. Pair both arms
+references, resolved bytes, message order and candidate order supplied independently
+of the intervention. Bind the same preregistered deterministic replay or simulator
+response function, version, source snapshot, initial state and access conditions
+across arms. Isolate per-arm state under that same transition function. Realized
+tool calls, responses and subsequent trajectory ordering caused by the intervention
+are outcomes or mediators, not exogenous inputs required to be byte-identical.
+Retain the complete trajectories and deterministically verify each response and
+state transition against the committed environment. Unexplained environment or
+input differences invalidate the comparison; do not erase legitimate behavioral
+differences by forcing identical tool trajectories. Pair both arms
 within each preregistered randomized ordering; different full input digests alone
 do not prove a controlled comparison.
 Include an additional purpose-neutral control matched to the Skill's rendered
@@ -461,7 +486,7 @@ freshness, evaluator eligibility and independent provenance. Missing lineage or
 revocation after materialization denies the action and quarantines affected
 outputs; a running execution or previously accepted output cannot bypass this
 check. Apply the same check to recovered or replayed proposals before action.
-Preserve the complete transitive Skill provenance closure in every durable
+Preserve the complete transitive behavioral-policy provenance closure in every durable
 derivative, including copied or summarized results, Knowledge, Artifacts and
 new Skills, and in executions consuming those derivatives. Resolve and validate
 the originating classifications, authorizations and behavioral evidence at the
@@ -511,12 +536,13 @@ Evidence reuse and non-discretionary classification require a runtime-verifiable
 immutable or attested model deployment revision, bound alongside the reported
 model identity and checked at every use and acceptance boundary. A mutable model
 name alone does not establish continuity. If the provider cannot supply this
-binding, deny Skill activation and use; fresh trials alone cannot establish that
+binding, deny behavioral-policy activation and use; fresh trials alone cannot establish that
 an unobservable deployment change did not occur afterward. A changed revision
 requires fresh applicable validation. This gate does not restrict existing
-executions whose verified transitive Skill influence closure is empty. Compute
+executions whose verified transitive behavioral-policy influence closure is empty. Compute
 that closure from all content or references actually exposed to the model,
-including direct Skills and derived inputs. Runtime-proven OMITTED or UNAVAILABLE
+including direct Skills, independently classified non-Skill policies and all
+derived inputs. Runtime-proven OMITTED or UNAVAILABLE
 entries that expose neither content nor a reference are retained in the manifest
 but do not add influence lineage. A state label alone is insufficient: any exposed
 summary, identifier or reference remains subject to the gate, and later resolution
