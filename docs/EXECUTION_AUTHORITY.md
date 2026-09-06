@@ -188,7 +188,7 @@ do not establish this property.
 Require independent review of the actual Skill content against its authorized
 purpose and policy, plus absolute policy-compliance checks on each comparison
 arm. A prohibited instruction or outcome denies activation even when both arms
-behave identically. No measured treatment delta cannot excuse an already biased
+behave identically. Neither a measured delta nor its absence excuses an already biased
 baseline, saturated outcome or unauthorized instruction.
 
 Before activating or using a Skill that can influence discretionary decisions,
@@ -210,7 +210,8 @@ handoff's deferral of automated evaluation does not waive it.
 The non-discretionary classification requires independently authorized,
 version-bound evidence covering the exact content, materialization, composition
 and applicability scope, Agent ID, blueprint ID/version and operating-instructions
-digest, effective model identity and execution profile. Changing any of these
+digest, exact Agent record revision, runtime adapter identity and version,
+effective model identity and execution profile. Changing any of these
 requires fresh classification before use. The author cannot approve that classification. Bind
 the classification decision, eligible reviewer and supporting evidence, and
 revalidate them at use and protected-action boundaries. Missing, stale or
@@ -270,9 +271,12 @@ The evidence must bind the exact Skill ID/version and content digest, declared
 purpose digest, evaluation-set digest, baseline and Skill execution-profile
 references, effective model identity, behavioral-shift summary, evaluator
 reference, and durable evidence references. Bind the exact Agent ID and blueprint
-ID/version, including its operating-instructions digest. Resolve both comparison
+ID/version, including its operating-instructions digest, exact Agent record
+revision and runtime adapter identity/version. Changes to the Agent record or
+adapter require fresh applicable assessment. Resolve both comparison
 arms to runtime-owned execution manifests and validate equality of the Agent,
-blueprint, effective model, profile and controlled task/candidate conditions;
+record revision, runtime adapter, blueprint, effective model, profile and
+controlled task/candidate conditions;
 record each arm's input digest and the intentional Skill intervention separately.
 Different blueprint instructions cannot silently become part of the intervention.
 Require field-by-field equality of every non-Skill input, or equality of a
@@ -281,6 +285,12 @@ intervention. This covers Event, Knowledge, Artifact, tool and additional-contex
 references, resolved bytes, message order and candidate order. Pair both arms
 within each preregistered randomized ordering; different full input digests alone
 do not prove a controlled comparison.
+Bind outcomes, computed metrics, behavioral-shift summary, adequacy approval and
+activation decision to the exact preregistered protocol digest and ledger
+commitment. Validate the commitment's ordering before case selection or reveal,
+and deterministically verify that the retained analysis used its exact metrics,
+thresholds, subgroups and analysis version. Missing bindings or post-hoc analysis
+substitution denies acceptance of the evidence.
 
 Bind the Skill's exact materialization state and the resolved instruction bytes,
 summaries and referenced-asset digests actually supplied to the model. Bind an
@@ -300,6 +310,12 @@ before using the changed composition.
 Bind the organization and exact policy version, authorized objective, and the
 runtime-owned authorization decision that permits this declared purpose for
 that scope. Resolve and validate those references at activation and at every
+materialization against the concrete Intent, Goal and Task objective revisions
+and a runtime-owned applicability decision that the Skill purpose serves that
+specific work. Bind those exact work references and decision to the execution;
+changed objectives require a fresh applicability decision and any newly required
+evidence. Broad organization or task-class approval cannot substitute for this
+work-specific check. Revalidate the same work bindings at every
 materialization/use boundary; a purpose hash,
 model explanation or evaluator assertion cannot authorize its own objective.
 Missing, revoked, superseded or mismatched purpose authorization denies
@@ -319,6 +335,14 @@ freshness, evaluator eligibility and independent provenance. Missing lineage or
 revocation after materialization denies the action and quarantines affected
 outputs; a running execution or previously accepted output cannot bypass this
 check. Apply the same check to recovered or replayed proposals before action.
+Preserve the complete transitive Skill provenance closure in every durable
+derivative, including copied or summarized results, Knowledge, Artifacts and
+new Skills, and in executions consuming those derivatives. Resolve and validate
+the originating classifications, authorizations and behavioral evidence at the
+same use and acceptance boundaries even when the consumer has no direct
+SkillRefs. Missing or unverifiable lineage denies use. Invalidating an originating
+basis quarantines its dependent descendants from further use, publication or
+delivery; copying, promotion or a new record identity cannot erase that basis.
 Apply the same lineage and current-validity checks before result acceptance,
 publication and delivery, including model-only text with no tool call or effect
 commit. Deny publication or delivery and quarantine the affected result if any
