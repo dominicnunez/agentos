@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 	"reflect"
+	"sort"
 	"time"
 
+	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/inference"
 )
@@ -27,7 +29,30 @@ func ValidateInferenceAdmissions(ctx context.Context, db *sql.DB) error {
 	if db == nil {
 		return fmt.Errorf("inference admission database is required")
 	}
-	stream, err := collectEvents(db.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_type IN ('INFERENCE_POLICY_ACTIVATED','INFERENCE_RESERVED','INFERENCE_RECONCILED') ORDER BY sequence`))
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("begin inference admission snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateInferenceAdmissionsSnapshot(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx) error {
+	_, freezes, err := authorityAdmissionsSnapshot(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("validate inference authority history: %w", err)
+	}
+	byOrganization := make(map[core.ID][]events.OrganizationFreezeAdmission)
+	for _, freeze := range freezes {
+		byOrganization[freeze.OrganizationID] = append(byOrganization[freeze.OrganizationID], freeze)
+	}
+	for _, history := range byOrganization {
+		sort.Slice(history, func(i, j int) bool { return history[i].Sequence < history[j].Sequence })
+	}
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_type IN ('INFERENCE_POLICY_ACTIVATED','INFERENCE_RESERVED','INFERENCE_RECONCILED') ORDER BY sequence`))
 	if err != nil {
 		return fmt.Errorf("read inference admission events: %w", err)
 	}
@@ -41,6 +66,11 @@ func ValidateInferenceAdmissions(ctx context.Context, db *sql.DB) error {
 		eventsByID[event.EventID] = event
 		switch event.EventType {
 		case "INFERENCE_RESERVED":
+			history := byOrganization[core.ID(event.OrganizationID)]
+			index := sort.Search(len(history), func(i int) bool { return history[i].Sequence >= event.Sequence })
+			if index > 0 && history[index-1].Frozen {
+				return fmt.Errorf("inference reservation was admitted while organization was frozen")
+			}
 			var payload events.InferenceReservedPayload
 			if decodeExactJSONBytes(event.Payload, &payload) != nil || payload.ReservationID == "" {
 				return fmt.Errorf("inference reservation event is malformed")
@@ -63,7 +93,7 @@ func ValidateInferenceAdmissions(ctx context.Context, db *sql.DB) error {
 	usedEvents := make(map[string]struct{})
 	activeByOrganization := make(map[string]int)
 	policyOrganizations := make(map[string]struct{})
-	rows, err := db.QueryContext(ctx, `SELECT organization_id,policy_fingerprint,body,activation_event_id,activated_at,active FROM inference_policies ORDER BY organization_id,activated_at,policy_fingerprint`)
+	rows, err := tx.QueryContext(ctx, `SELECT organization_id,policy_fingerprint,body,activation_event_id,activated_at,active FROM inference_policies ORDER BY organization_id,activated_at,policy_fingerprint`)
 	if err != nil {
 		return fmt.Errorf("read inference policy history: %w", err)
 	}
@@ -118,7 +148,7 @@ func ValidateInferenceAdmissions(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
-	reservationRows, err := db.QueryContext(ctx, `SELECT reservation_id,request_id,organization_id,purpose,intent_id,task_id,execution_id,correlation_id,prompt_sha256,provider,model,execution_profile_version,policy_fingerprint,state,reserved_input_tokens,reserved_output_tokens,reserved_cost_nano_usd,charged_input_tokens,charged_output_tokens,charged_cost_nano_usd,window_started_at,window_expires_at FROM inference_reservations ORDER BY created_at,reservation_id`)
+	reservationRows, err := tx.QueryContext(ctx, `SELECT reservation_id,request_id,organization_id,purpose,intent_id,task_id,execution_id,correlation_id,prompt_sha256,provider,model,execution_profile_version,policy_fingerprint,state,reserved_input_tokens,reserved_output_tokens,reserved_cost_nano_usd,charged_input_tokens,charged_output_tokens,charged_cost_nano_usd,window_started_at,window_expires_at FROM inference_reservations ORDER BY created_at,reservation_id`)
 	if err != nil {
 		return fmt.Errorf("read inference reservation history: %w", err)
 	}

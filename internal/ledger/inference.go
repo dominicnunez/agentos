@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/inference"
 )
@@ -184,6 +185,13 @@ func (l *SQLite) ReserveInference(ctx context.Context, request inference.Inferen
 		// Authorization, pricing, and window time are read only after the
 		// transaction is acquired so expiry cannot race admission.
 		now := l.nowUTC()
+		frozen, err := organizationFrozenAtSequence(ctx, tx, core.ID(request.Scope.OrganizationID), 0)
+		if err != nil {
+			return fmt.Errorf("validate inference freeze state: %w", err)
+		}
+		if frozen {
+			return fmt.Errorf("organization is frozen; inference admission denied")
+		}
 		policy, fingerprint, err := activeInferencePolicy(ctx, tx, request.Scope.OrganizationID)
 		if err != nil {
 			return err
