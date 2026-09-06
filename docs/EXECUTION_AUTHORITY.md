@@ -134,6 +134,24 @@ itself or another tool.
 
 ## Current implementation status
 
+### Organization freeze and model admission
+
+A committed organization freeze prevents new inference reservations for intake,
+planning, and Task execution. The ledger reads the exact tenant's admitted
+freeze state in the same transaction as budget reservation. Missing freeze
+history means no freeze has been set; malformed or mismatched authority fails
+closed. A later admitted release permits new reservations under the existing
+inference policy. Restart preserves the freeze, and recovery rejects any
+reservation admitted while that organization was frozen.
+
+An inference reservation that commits before the freeze remains an admitted
+call. Its usage or uncertain outcome must still be reconciled while frozen;
+the freeze does not establish that the request was never sent. This admission
+boundary does not cancel an already-dispatched provider request or implement
+execution-, Agent-, or Work-scoped active quarantine. Active context cancellation,
+coordination suspension, and controlled release remain prerequisites for a
+broader runtime security hold before long-running high-autonomy execution.
+
 | Control | Status |
 |---|---|
 | Separate `CODE_INTRODUCTION` and `EXECUTION_SURFACE_MUTATION` contracts | Implemented |
