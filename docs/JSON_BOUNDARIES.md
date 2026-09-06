@@ -30,6 +30,13 @@ partial event views and third-party provider/SDK schemas are not automatically
 converted into closed schemas by this change. This contract does not claim
 that every `encoding/json` call in the repository has been replaced.
 
+OpenAI Responses input is validated before typed conversion: recursive duplicate
+keys, invalid UTF-8, excessive depth and oversized bodies fail closed. Fields
+consumed for response identity, execution profile, usage and output must use their
+exact JSON casing. Unconsumed provider metadata remains open for compatibility,
+but duplicate keys within it are still rejected. Decoder errors contain no
+response-derived field names or values.
+
 Existing valid canonical records retain their representation and fingerprints;
 no schema version or on-disk rewrite is introduced. Previously tolerated
 ambiguous input can now fail at admission or recovery instead of silently

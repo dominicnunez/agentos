@@ -209,10 +209,13 @@ type openAIOutputContent struct {
 }
 
 func decodeOpenAIResponse(body []byte) (openAIResponse, error) {
+	if !validOpenAIResponseJSON(body) {
+		return openAIResponse{}, fmt.Errorf("response JSON is invalid or ambiguous")
+	}
 	var response openAIResponse
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	if err := decoder.Decode(&response); err != nil {
-		return openAIResponse{}, err
+		return openAIResponse{}, fmt.Errorf("response fields are invalid")
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return openAIResponse{}, fmt.Errorf("trailing JSON content")
