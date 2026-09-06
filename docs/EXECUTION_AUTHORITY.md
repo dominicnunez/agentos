@@ -212,6 +212,13 @@ must consider actual behavior, not a Skill's label: selection, ranking and
 tie-breaking guidance require the behavioral path below. The active security
 requirement intentionally adds this gate for discretionary Skills; the preserved
 handoff's deferral of automated evaluation does not waive it.
+Scope authorization: the project owner's requested engineering work includes
+GAP-030, "Skills must preserve declared behavioral-policy integrity," from the
+supplied `agent-os-security-gaps-complete.md`. Its explicit requirement for
+controlled held-out with-Skill/without-Skill evidence promotes that prerequisite
+for discretionary Skill activation. This active amendment records that human
+direction while preserving the handoff snapshot; it does not promote unrelated
+Lab automation or experimentation features.
 The non-discretionary classification requires independently authorized,
 version-bound evidence covering the exact content, materialization, composition
 and applicability scope, Agent ID, blueprint ID/version and operating-instructions
@@ -351,6 +358,13 @@ reordering or changing a co-materialized Skill requires fresh applicable evidenc
 before using the changed composition.
 
 Bind the organization and exact policy version, authorized objective, and the
+Skill's exact ownership/applicability scope. For Team-scoped Skills, bind the
+Team ID and record revision, relevant roster/membership revision and the Agent's
+current membership in classification, behavioral evidence and purpose decisions.
+Validate those bindings during assessment, activation and every use/acceptance;
+roster or membership changes require a fresh applicability decision and fresh
+assessment wherever evaluated conditions change. Cross-Team use cannot inherit
+the prior Team's authorization. Bind the
 runtime-owned authorization decision that permits this declared purpose for
 that scope. Resolve and validate those references at activation against the
 declared applicability scope and policy; reusable activation does not require
@@ -374,8 +388,14 @@ bypass a later policy change or revocation.
 At every materialization/use boundary, also resolve and validate the behavioral
 evidence itself, its applicability and freshness, evaluator eligibility and
 authorization, and independent provenance. Revoked, stale, unavailable,
-unverifiable or mismatched evidence or evaluator eligibility denies use and
-quarantines the active version until new applicable evidence is admitted.
+unverifiable or mismatched evidence or evaluator eligibility denies use.
+Quarantine the accepted Skill basis and its dependent uses when that basis is
+expired, revoked or invalidated. A request outside otherwise valid scope, with
+the wrong context or Team, instead denies and quarantines that attempted
+execution and its outputs; it must not invalidate unrelated uses covered by
+the still-valid basis. Apply this distinction to all quarantine rules here:
+request mismatch alone cannot quarantine the shared Skill version. Restore an
+invalidated basis only through new applicable evidence and authorization.
 Bind an independently authorized, versioned, risk-appropriate freshness policy
 to every assessment and classification, including a finite maximum age, explicit
 expiry, trusted assessment time and revalidation triggers for distribution drift
