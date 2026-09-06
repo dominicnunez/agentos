@@ -3,14 +3,47 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
+	"github.com/dominicnunez/agentos/internal/ledger"
 	"github.com/dominicnunez/agentos/internal/modelinput"
 	"github.com/dominicnunez/agentos/internal/planning"
 )
+
+func TestLongConversationCompletesStructuredRootAndChildExecution(t *testing.T) {
+	for _, decomposed := range []bool{false, true} {
+		t.Run(fmt.Sprint(decomposed), func(t *testing.T) {
+			store, err := ledger.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			model := &organizationLoopModel{plan: `{"tasks":[]}`}
+			if decomposed {
+				model.plan = `{"tasks":[{"key":"` + strings.Repeat("k", 64) + `","description":"bounded child work","execution_kind":"AGENT","model_inference_policy":"REQUIRED","depends_on":[]}]}`
+			}
+			service := NewWithModelAndPlanner(events.NewGateway(store), model, newOrganizationPlanner(t, model))
+			submission := Submit{RequestID: strings.Repeat("x", 256), OrganizationID: "org-1", Statement: "prepare a verified briefing", Kind: core.ExecutionAgent}
+			result, err := service.Submit(t.Context(), submission)
+			if err != nil || result.Task.Status != core.TaskCompleted || result.Work.Status != "COMPLETED" {
+				t.Fatalf("admitted long conversation did not complete: %v %+v", err, result.Task)
+			}
+			calls := len(model.prompts)
+			if calls != 2 && !decomposed || calls != 3 && decomposed {
+				t.Fatalf("unexpected model calls: %d", calls)
+			}
+			replayed, err := service.Submit(t.Context(), submission)
+			if err != nil || replayed.Task.ID != result.Task.ID || len(model.prompts) != calls {
+				t.Fatal("long source identity did not replay exactly")
+			}
+		})
+	}
+}
 
 func executionIDFromTestStream(t *testing.T, stream []events.Event, taskID core.ID) core.ID {
 	t.Helper()

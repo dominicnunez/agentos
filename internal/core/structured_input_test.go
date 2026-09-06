@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dominicnunez/agentos/internal/modelinput"
 )
@@ -122,5 +123,60 @@ func TestExecutionSourceHandlesBindOrganizationAndInvocation(t *testing.T) {
 		if other.Request().Messages[2].Source.Handle == first.Request().Messages[2].Source.Handle {
 			t.Fatal("handle crossed organization or invocation boundary")
 		}
+	}
+}
+
+func TestStructuredExecutionBoundsDerivedTaskAndBlueprintReferences(t *testing.T) {
+	created := time.Unix(2, 0).UTC()
+	verified := created.Add(time.Second)
+	supersedes := 1
+	context := AgentExecutionInputContext{
+		Blueprint: AgentBlueprint{ID: ID(strings.Repeat("b", 256)), Version: strings.Repeat("v", 256), OperatingInstructions: "bounded work"},
+		Task:      Task{ID: ID("task-" + strings.Repeat("x", 256) + "-" + strings.Repeat("k", 64)), Description: "bounded task"},
+	}
+	context.Strategy = &StrategicContext{
+		Mission: Mission{ID: "mission-1", OrganizationID: "org-1", Statement: "bounded direction", Status: MissionActive, CreatedAt: created}, MissionVersion: 2,
+		Goal: Goal{ID: ID(strings.Repeat("g", 256)), OrganizationID: "org-1", MissionID: "mission-1", Objective: "verified result", Mode: GoalTarget, SuccessCriteria: []IntentValue{{Value: "accepted", Origin: "USER"}}, Status: GoalActive, CreatedAt: created}, GoalVersion: 3,
+	}
+	context.Knowledge = []KnowledgeRecord{{
+		KnowledgeID: ID(strings.Repeat("k", 256)), OrganizationID: "org-1", Version: 2, Type: KnowledgeProcedure, Scope: KnowledgeScopeOrganization, ScopeID: "org-1",
+		Status: KnowledgeActive, Title: "Evidence", Content: "Verify evidence.", Basis: KnowledgeBasisHumanInput,
+		ProvenanceEventRefs: []string{"event-proposal"}, EvidenceArtifactRefs: []string{}, CreatedBy: "user-1", CreatedByKind: PrincipalHuman,
+		CreatedAt: created, LastVerifiedAt: &verified, ValidationMethod: KnowledgeValidationHuman, ValidationRefs: []string{"event-validation"},
+		ValidatedBy: "user-2", ValidatedByKind: PrincipalHuman, SupersedesVersion: &supersedes,
+	}}
+	first, err := BindAgentExecutionInput("org-1", "execution-1", context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := first.Request()
+	if request.Messages[2].Source.Reference != "task-sha256:"+modelinput.TextDigest(string(context.Task.ID)) {
+		t.Fatal("full Task identity was not bound")
+	}
+	for _, message := range request.Messages {
+		if len(message.Source.Reference) > 256 {
+			t.Fatal("derived source exceeded reference limit")
+		}
+	}
+	context.Task.ID += "different"
+	second, err := BindAgentExecutionInput("org-1", "execution-1", context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Messages[2].Source.Handle == second.Request().Messages[2].Source.Handle {
+		t.Fatal("long identity was truncated")
+	}
+	context.Blueprint.ID, context.Blueprint.Version = "a/b", "c"
+	first, err = BindAgentExecutionInput("org-1", "execution-1", context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	context.Blueprint.ID, context.Blueprint.Version = "a", "b/c"
+	second, err = BindAgentExecutionInput("org-1", "execution-1", context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Request().Messages[1].Source.Handle == second.Request().Messages[1].Source.Handle {
+		t.Fatal("compound source identities aliased")
 	}
 }

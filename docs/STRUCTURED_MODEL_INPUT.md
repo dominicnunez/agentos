@@ -15,6 +15,12 @@ also retains its 128 KiB complete-input limit. Invalid input fails before a
 provider call. An adapter without structured-input support is rejected rather
 than silently receiving a flattened prompt.
 
+Derived Intent/Task IDs and compound blueprint, Goal, and knowledge revision
+references use bounded SHA-256 identity components. Prefixes and child-task
+suffixes therefore do not invalidate an admitted identifier, and full identities
+are hashed without truncation. Blueprint ID and version are hashed separately
+so delimiter-containing components cannot alias another revision.
+
 ## Invocation binding
 
 The runtime issues a `src_` handle for each selected source. Handles bind the
