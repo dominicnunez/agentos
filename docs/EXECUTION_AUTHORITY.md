@@ -217,6 +217,7 @@ version-bound evidence covering the exact content, materialization, composition
 and applicability scope, Agent ID, blueprint ID/version and operating-instructions
 digest, exact Agent record revision, runtime adapter identity and version,
 effective model identity and execution profile. Changing any of these
+or the bound context-builder version
 requires fresh classification before use. The author cannot approve that classification. Bind
 classification to a canonical digest of all model-visible non-Skill context,
 including Event, Knowledge, Artifact, tool and additional-context references,
@@ -311,6 +312,18 @@ commitment. Validate the commitment's ordering before case selection or reveal,
 and deterministically verify that the retained analysis used its exact metrics,
 thresholds, subgroups and analysis version. Missing bindings or post-hoc analysis
 substitution denies acceptance of the evidence.
+Bind the exact context-builder version in classification and behavioral evidence,
+both comparison arms and production applicability checks. A changed prompt
+assembly version requires fresh applicable assessment even if all other
+identities and resolved content remain unchanged.
+Reconcile every selected case and arm assignment to its recorded outcome or
+explicit terminal failure, including timeouts, refusals and cancellations. Commit
+the missing-data, failure and retry handling rules before case selection; retain
+all attempts and apply those rules without selectively dropping unsuccessful
+pairs. Incomplete accounting denies evidence acceptance. Independently reassess
+coverage and sensitivity after attrition under the committed adequacy criteria;
+insufficient evidence requires new assessment, not a favorable summary of only
+successful cases.
 
 Bind the Skill's exact materialization state and the resolved instruction bytes,
 summaries and referenced-asset digests actually supplied to the model. Bind an
@@ -421,7 +434,9 @@ name alone does not establish continuity. If the provider cannot supply this
 binding, deny Skill activation and use; fresh trials alone cannot establish that
 an unobservable deployment change did not occur afterward. A changed revision
 requires fresh applicable validation. This gate does not restrict existing
-executions with empty SkillRefs or imply that an adapter currently attests model
+executions whose verified complete transitive Skill provenance closure is empty,
+including both direct SkillRefs and all derived inputs. Empty direct SkillRefs
+alone do not establish this exemption. It does not imply that an adapter attests model
 weights or deployment revisions.
 
 This is an activation prerequisite, not an implemented evaluator or a guarantee
