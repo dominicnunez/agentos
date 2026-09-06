@@ -177,6 +177,41 @@ registration and model materialization; a definition digest alone provides no
 resource-budget evidence. Dynamic tools remain unavailable until these
 prerequisites and the existing authority checks are implemented and verified.
 
+## Skill behavioral policy integrity
+
+A Skill is a behavioral policy artifact even when it introduces no executable
+code. Staying within an authorized candidate set and producing valid output do
+not establish that its preferences serve its declared purpose. Any systematic
+change in discretionary selections must be attributable to that declared and
+authorized purpose; provenance, versioning and ordinary injection checks alone
+do not establish this property.
+
+Before a Skill can be promoted for activation or used to influence discretionary
+decisions, reuse the Lab, evaluator and governed promotion boundaries to require
+independent behavioral evidence. Compare held-out executions with and without
+the exact Skill under the same Agent, effective model, execution profile,
+candidate set and task conditions. Randomize candidate order where relevant,
+retain the comparison protocol and outcomes, and record unexplained persistent
+preference shifts. The authoring Agent must not be the sole evaluator.
+
+The evidence must bind the exact Skill ID/version and content digest, declared
+purpose digest, evaluation-set digest, baseline and Skill execution-profile
+references, effective model identity, behavioral-shift summary, evaluator
+reference, and durable evidence references. A persistent shift requires an
+explicit explanation tied to the authorized objective and an independent
+assessment of that explanation. Missing, mismatched or unexplained evidence
+must deny activation. A changed Skill, purpose, model or relevant execution
+conditions requires fresh applicable evidence rather than inheriting a prior
+assessment. Evaluation evidence grants no capabilities or effect approvals.
+
+This is an activation prerequisite, not an implemented evaluator or a guarantee
+about unobserved model behavior. Current execution manifests require empty
+`SkillRefs`; there is no general Skill materialization or activation runtime.
+Lab may retain a `SKILL` promotion-candidate record, but nomination is not
+activation and does not satisfy this evidence requirement. Keep activation
+unavailable until its evidence validation, independent review, exact version
+binding and rejection tests are implemented.
+
 ## Current implementation status
 
 ### Organization freeze and model admission
@@ -207,6 +242,7 @@ broader runtime security hold before long-running high-autonomy execution.
 | Effective environment attestation contract | Fail-closed prerequisite; no production hostile-code sandbox exists |
 | Execution-private writable workspace contract | Implemented domain boundary; no mutable coding runtime exists |
 | Provenance independence for protected use | Implemented conservatively; Agent-only corroboration is ineligible |
+| Independent Skill behavioral policy-integrity evidence | Required before activation; evaluator and activation runtime are not implemented |
 | Arbitrary shell, package installation, external code, container image, MCP, plugin, or executable Skill execution | Unsupported and denied |
 | Staged adaptive editing and promotion runtime | Deferred until a write-capable coding runtime exists |
 
