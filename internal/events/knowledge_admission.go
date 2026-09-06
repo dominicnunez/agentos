@@ -459,6 +459,7 @@ func ValidKnowledgeJudgmentStatement(evidence Event, value core.KnowledgeRecord,
 	}
 	var judgment KnowledgeJudgmentPayload
 	if decodeExactEventJSON(evidence.Payload, &judgment) != nil ||
+		judgment.ContextUse != value.ContextUse ||
 		!judgment.ValidFor(evidence, value.KnowledgeID, knowledgeCandidateVersion(value), authorizationEventID, evidence.ArtifactRefs) ||
 		!knowledgeEvidenceArtifactsBound(evidence.ArtifactRefs, value.EvidenceArtifactRefs) {
 		return false

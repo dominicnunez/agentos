@@ -19,6 +19,13 @@ func (m *countingStructuredModel) CompleteRequest(ctx context.Context, request m
 }
 
 func TestStructuredExecutionRequiresExactManifestedSourceBinding(t *testing.T) {
+	for _, version := range []string{"v4", "v5"} {
+		t.Run(version, func(t *testing.T) { testStructuredExecutionRequiresExactManifestedSourceBinding(t, version) })
+	}
+}
+
+func testStructuredExecutionRequiresExactManifestedSourceBinding(t *testing.T, version string) {
+	t.Helper()
 	request := modelinput.Request{Version: modelinput.Version, Messages: []modelinput.Message{{Role: modelinput.User, Text: "work", Source: modelinput.Source{Kind: modelinput.TaskContext, Reference: "task-1", Digest: modelinput.TextDigest("work")}}}}
 	body, err := request.Canonical()
 	if err != nil {
@@ -31,7 +38,7 @@ func TestStructuredExecutionRequiresExactManifestedSourceBinding(t *testing.T) {
 	model := &countingStructuredModel{}
 	adapter := NewAgentExecution(model)
 	descriptor := model.Descriptor()
-	manifest := core.ExecutionContextManifest{ContextBuilderVersion: "v4", ExecutionInputSHA256: fingerprint, Provider: descriptor.Provider, Model: descriptor.Model, ExecutionProfileVersion: descriptor.ExecutionProfileVersion}
+	manifest := core.ExecutionContextManifest{ContextBuilderVersion: version, ExecutionInputSHA256: fingerprint, Provider: descriptor.Provider, Model: descriptor.Model, ExecutionProfileVersion: descriptor.ExecutionProfileVersion}
 	task := core.Task{ID: "task-1", ModelInferencePolicy: core.InferenceAllowed, ExecutionBrief: string(body)}
 	if _, err := adapter.Execute(t.Context(), task, manifest); err != nil || model.calls != 1 {
 		t.Fatalf("valid manifested input rejected: %v", err)

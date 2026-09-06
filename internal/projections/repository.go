@@ -1451,6 +1451,7 @@ func validateWorkCompletionAdmissions(snapshot Snapshot, stream []events.Event, 
 			Work: state.Value, WorkVersion: state.Version, Intent: intent.Value, Tasks: tasks,
 			TeamRevisions: teamRevisions, InboxObservations: inboxObservations, AgentBlueprints: blueprints, ExecutionProfiles: profiles,
 		}
+		binding.CompletionSequence = transition.Sequence
 		evidence, err := events.ValidateWorkCompletionEvidenceChain(binding, evidenceEvent, stream)
 		if err != nil || evidence.Fingerprint != transitionDetail.Fingerprint {
 			return fmt.Errorf("completed work %s lacks exact durable evidence", workID)

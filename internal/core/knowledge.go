@@ -32,6 +32,9 @@ const (
 )
 
 func ValidKnowledgeRecord(record KnowledgeRecord) bool {
+	if !validKnowledgeContextClassification(record) {
+		return false
+	}
 	if !ValidGoalReferenceID(string(record.KnowledgeID)) || !ValidGoalReferenceID(string(record.OrganizationID)) ||
 		!ValidGoalReferenceID(string(record.ScopeID)) || record.Version < 1 ||
 		!validKnowledgeType(record.Type) || !validKnowledgeScope(record) || !validKnowledgeStatus(record.Status) ||
@@ -209,7 +212,7 @@ func validKnowledgeVerification(record KnowledgeRecord) bool {
 }
 
 func sameKnowledgeValidation(prior, next KnowledgeRecord) bool {
-	return prior.ValidationMethod == next.ValidationMethod && slices.Equal(prior.ValidationRefs, next.ValidationRefs) &&
+	return prior.ContextUse == next.ContextUse && prior.ValidationMethod == next.ValidationMethod && slices.Equal(prior.ValidationRefs, next.ValidationRefs) &&
 		prior.ValidatedBy == next.ValidatedBy && prior.ValidatedByKind == next.ValidatedByKind &&
 		equalOptionalTime(prior.LastVerifiedAt, next.LastVerifiedAt)
 }

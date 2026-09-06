@@ -514,6 +514,7 @@ const (
 )
 
 type KnowledgeRecord struct {
+	ContextUse           KnowledgeContextUse       `json:"context_use,omitempty"`
 	KnowledgeID          ID                        `json:"knowledge_id"`
 	OrganizationID       ID                        `json:"organization_id"`
 	Version              int                       `json:"version"`

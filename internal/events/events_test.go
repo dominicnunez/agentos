@@ -335,7 +335,7 @@ func TestHumanCompletionRejectsEnvelopeArtifactsAbsentFromSubmission(t *testing.
 		ArtifactRefs: outcome.ArtifactRefs, Payload: payload,
 	}
 	binding := WorkCompletionBinding{OrganizationID: "org-1", CorrelationID: "run-1"}
-	if _, err := completionDecisionResult(binding, task, decision, outcome, outcomeEvent, verification, []Event{submission}); err == nil {
+	if _, err := completionDecisionResult(binding, task, decision, outcome, outcomeEvent, verification, []Event{submission}, verification.Sequence); err == nil {
 		t.Fatal("submission envelope introduced artifacts absent from the authenticated payload")
 	}
 }
@@ -366,7 +366,7 @@ func TestHumanCompletionRequiresExactRuntimeOutcome(t *testing.T) {
 	verification := Event{EventID: "verification-1", Sequence: 3, OrganizationID: "org-1", EventType: "COMPLETION_VERIFIED", TaskID: "task-1", CorrelationID: "run-1"}
 	decision := CompletionDecisionPayload{Contract: contract, SubmissionEventRef: submission.EventID}
 	binding := WorkCompletionBinding{OrganizationID: "org-1", CorrelationID: "run-1"}
-	result, err := completionDecisionResult(binding, task, decision, outcome, outcomeEvent, verification, []Event{submission})
+	result, err := completionDecisionResult(binding, task, decision, outcome, outcomeEvent, verification, []Event{submission}, verification.Sequence)
 	if err != nil || !result.Complete {
 		t.Fatalf("exact runtime user outcome was rejected: result=%+v err=%v", result, err)
 	}
@@ -387,7 +387,7 @@ func TestHumanCompletionRequiresExactRuntimeOutcome(t *testing.T) {
 			if test.mutate != nil {
 				test.mutate(&candidate)
 			}
-			if _, err := completionDecisionResult(binding, task, decision, candidate, test.event, verification, []Event{submission}); err == nil {
+			if _, err := completionDecisionResult(binding, task, decision, candidate, test.event, verification, []Event{submission}, verification.Sequence); err == nil {
 				t.Fatal("non-runtime user outcome authorized completion")
 			}
 		})

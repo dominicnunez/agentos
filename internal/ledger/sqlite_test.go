@@ -1027,7 +1027,7 @@ func testAgentStartManifest(task core.Task, selection events.ExecutionStartSelec
 		AgentBlueprintVersion: blueprintVersion, ExecutionProfileVersion: profileVersion, RuntimeAdapter: runtimeAdapter,
 		Provider: "test", Model: "test", TaskID: task.ID, TaskContractVersion: task.TaskContractVersion,
 		PromptVersion: "test", PolicyVersion: "v1", EventRefs: eventRefs, KnowledgeRefs: knowledgeRefs, CoordinationRefs: coordinationRefs,
-		ContextBuilderVersion: "v4", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
+		ContextBuilderVersion: "v5", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
 	}
 }
 
@@ -1125,7 +1125,7 @@ func TestAgentExecutionStartBindsExactSameWorkPeerCoordination(t *testing.T) {
 		}
 	}
 	expected := []core.VersionedRef{{ID: string(peer.ID), Version: "2", MaterializationState: core.MaterializedFull}}
-	if !slices.Equal(manifest.CoordinationRefs, expected) || manifest.ContextBuilderVersion != "v4" {
+	if !slices.Equal(manifest.CoordinationRefs, expected) || manifest.ContextBuilderVersion != "v5" {
 		t.Fatalf("execution manifest did not bind peer coordination: %+v", manifest)
 	}
 }
@@ -1172,7 +1172,7 @@ func TestAgentExecutionManifestReferenceLimitIsTerminalizable(t *testing.T) {
 		ExecutionID: "execution-reference-limit", AgentID: task.AssigneeID,
 		AgentBlueprintVersion: "blueprint-v1", ExecutionProfileVersion: "profile-v1", RuntimeAdapter: "runtime-v1",
 		Provider: "provider", Model: "model", TaskID: task.ID, TaskContractVersion: task.TaskContractVersion,
-		PromptVersion: "prompt-v1", PolicyVersion: "v1", ContextBuilderVersion: "v4",
+		PromptVersion: "prompt-v1", PolicyVersion: "v1", ContextBuilderVersion: "v5",
 		ExecutionInputSHA256: core.FingerprintExecutionInput("bounded input"), CreatedAt: now,
 		EventRefs: make([]string, 1025),
 	}
@@ -2890,15 +2890,15 @@ func TestExecutionStartRequiresCurrentContextBuilderVersion(t *testing.T) {
 		TaskContractVersion: "v1", PromptVersion: "v1", PolicyVersion: "v1", ContextBuilderVersion: "v1",
 		ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: created,
 	}
-	for _, version := range []string{"v1", "v2", "v3"} {
+	for _, version := range []string{"v1", "v2", "v3", "v4"} {
 		manifest.ContextBuilderVersion = version
 		if err := validateExecutionStartManifest(context.Background(), nil, task, started, events.ExecutionStartDetail{}, events.ExecutionStartSelection{}, manifest); err == nil {
 			t.Fatalf("new execution admitted the historical %s context-builder contract", version)
 		}
 	}
-	manifest.ContextBuilderVersion = "v4"
+	manifest.ContextBuilderVersion = "v5"
 	if err := validateExecutionStartManifest(context.Background(), nil, task, started, events.ExecutionStartDetail{}, events.ExecutionStartSelection{}, manifest); err != nil {
-		t.Fatalf("current v4 context-builder contract was rejected: %v", err)
+		t.Fatalf("current v5 context-builder contract was rejected: %v", err)
 	}
 }
 

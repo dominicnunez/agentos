@@ -149,15 +149,16 @@ const KnowledgeJudgmentValidated = "VALIDATED"
 // candidate revision. CapabilityCheckEventID authorizes this statement but is
 // not itself the judgment.
 type KnowledgeJudgmentPayload struct {
-	KnowledgeID            core.ID  `json:"knowledge_id"`
-	CandidateVersion       int      `json:"candidate_version"`
-	Decision               string   `json:"decision"`
-	Statement              string   `json:"statement"`
-	CapabilityCheckEventID string   `json:"capability_check_event_id"`
-	SourcePrincipalID      string   `json:"source_principal_id"`
-	SourcePrincipalKind    string   `json:"source_principal_kind"`
-	SourceChannel          string   `json:"source_channel"`
-	ArtifactRefs           []string `json:"artifact_refs"`
+	ContextUse             core.KnowledgeContextUse `json:"context_use,omitempty"`
+	KnowledgeID            core.ID                  `json:"knowledge_id"`
+	CandidateVersion       int                      `json:"candidate_version"`
+	Decision               string                   `json:"decision"`
+	Statement              string                   `json:"statement"`
+	CapabilityCheckEventID string                   `json:"capability_check_event_id"`
+	SourcePrincipalID      string                   `json:"source_principal_id"`
+	SourcePrincipalKind    string                   `json:"source_principal_kind"`
+	SourceChannel          string                   `json:"source_channel"`
+	ArtifactRefs           []string                 `json:"artifact_refs"`
 }
 
 // KnowledgeDeterministicValidationPayload binds a registered deterministic
@@ -774,16 +775,19 @@ type ExecutionStartSelection struct {
 type ExecutionStartValidator func(ExecutionStartSelection) (core.ExecutionContextManifest, error)
 
 type WorkCompletionBinding struct {
-	OrganizationID    string
-	CorrelationID     string
-	Work              core.Work
-	WorkVersion       int
-	Intent            core.Intent
-	Tasks             []WorkCompletionTaskBinding
-	TeamRevisions     map[core.ID][]TeamRevisionBinding
-	InboxObservations map[string]InboxObservationBinding
-	AgentBlueprints   map[core.ID]core.AgentBlueprint
-	ExecutionProfiles map[core.ID]core.ExecutionProfile
+	// CompletionSequence is the final Work transition boundary. Zero is used
+	// while admitting aggregate evidence before that transition exists.
+	CompletionSequence int64
+	OrganizationID     string
+	CorrelationID      string
+	Work               core.Work
+	WorkVersion        int
+	Intent             core.Intent
+	Tasks              []WorkCompletionTaskBinding
+	TeamRevisions      map[core.ID][]TeamRevisionBinding
+	InboxObservations  map[string]InboxObservationBinding
+	AgentBlueprints    map[core.ID]core.AgentBlueprint
+	ExecutionProfiles  map[core.ID]core.ExecutionProfile
 }
 
 // ResolveStrategicContext selects the latest exact Mission and Goal
@@ -1192,6 +1196,9 @@ func ValidateGoalProgressEvaluation(goal core.Goal, goalVersion int, workEvidenc
 // is insufficient: the immutable Intent, Plan, and complete Task set must all
 // match runtime-owned events that precede the aggregate evidence.
 func ValidateWorkCompletionEvidenceChain(binding WorkCompletionBinding, evidenceEvent Event, stream []Event) (WorkCompletionEvidencePayload, error) {
+	if binding.CompletionSequence != 0 && binding.CompletionSequence <= evidenceEvent.Sequence {
+		return WorkCompletionEvidencePayload{}, fmt.Errorf("work completion transition must follow its evidence")
+	}
 	var evidence WorkCompletionEvidencePayload
 	if binding.OrganizationID == "" || binding.CorrelationID == "" || binding.Work.ID == "" || binding.Work.Status != core.WorkCompleted || binding.WorkVersion < 2 || binding.Intent.ID == "" ||
 		binding.Intent.ID != binding.Work.IntentID || binding.Intent.GoalID != binding.Work.GoalID || binding.Intent.NormalizedObjective != binding.Work.Objective || string(binding.Intent.OrganizationID) != binding.OrganizationID || json.Unmarshal(evidenceEvent.Payload, &evidence) != nil || !evidence.Valid() {
@@ -1256,7 +1263,7 @@ func ValidateTaskCompletionEvidenceChain(binding WorkCompletionBinding, task Wor
 		decodeExactEventJSON(outcomeEvent.Payload, &outcome) != nil || !outcome.Valid() || !slices.Equal(outcomeEvent.ArtifactRefs, outcome.ArtifactRefs) || !slices.Equal(verification.ArtifactRefs, outcome.ArtifactRefs) || verification.SourceExecutionID != "" && verification.SourceExecutionID != outcomeEvent.SourceExecutionID {
 		return CompletionDecisionPayload{}, fmt.Errorf("task completion outcome evidence is invalid")
 	}
-	expected, err := completionDecisionResult(binding, task, decision, outcome, outcomeEvent, verification, stream)
+	expected, err := completionDecisionResult(binding, task, decision, outcome, outcomeEvent, verification, stream, completionEvent.Sequence)
 	if err != nil {
 		return CompletionDecisionPayload{}, err
 	}
@@ -1383,9 +1390,14 @@ func completionEvidenceTasks(binding WorkCompletionBinding, evidence WorkComplet
 		if verification.SourceExecutionID != "" && outcomeEvent.SourceExecutionID != verification.SourceExecutionID {
 			return fmt.Errorf("work completion outcome crosses its execution boundary")
 		}
-		expected, err := completionDecisionResult(binding, bindingTask, decision, outcome, outcomeEvent, verification, stream)
+		expected, err := completionDecisionResult(binding, bindingTask, decision, outcome, outcomeEvent, verification, stream, evidenceEvent.Sequence)
 		if err != nil {
 			return err
+		}
+		if binding.CompletionSequence != 0 {
+			if _, err := completionDecisionResult(binding, bindingTask, decision, outcome, outcomeEvent, verification, stream, binding.CompletionSequence); err != nil {
+				return err
+			}
 		}
 		if !reflect.DeepEqual(expected, decision.Result) {
 			return fmt.Errorf("work completion decision does not match its durable evidence")
@@ -1404,7 +1416,7 @@ func completionEvidenceTasks(binding WorkCompletionBinding, evidence WorkComplet
 	return nil
 }
 
-func completionDecisionResult(binding WorkCompletionBinding, task WorkCompletionTaskBinding, decision CompletionDecisionPayload, outcome core.ToolOutcome, outcomeEvent, verification Event, stream []Event) (core.CompletionResult, error) {
+func completionDecisionResult(binding WorkCompletionBinding, task WorkCompletionTaskBinding, decision CompletionDecisionPayload, outcome core.ToolOutcome, outcomeEvent, verification Event, stream []Event, useSequence int64) (core.CompletionResult, error) {
 	if task.Task.CompletionContract != nil {
 		if task.Task.ExecutionKind != core.ExecutionHuman || !reflect.DeepEqual(*task.Task.CompletionContract, decision.Contract) || decision.SubmissionEventRef == "" || decision.JudgmentRef != "" {
 			return core.CompletionResult{}, fmt.Errorf("work completion user evidence reference is invalid")
@@ -1436,7 +1448,7 @@ func completionDecisionResult(binding WorkCompletionBinding, task WorkCompletion
 	if decision.SubmissionEventRef != "" {
 		return core.CompletionResult{}, fmt.Errorf("work completion decision has unexpected user evidence")
 	}
-	expectedContract, verifiedOutcome, err := completionDecisionContract(binding, task.Task, decision, outcome, outcomeEvent, stream)
+	expectedContract, verifiedOutcome, err := completionDecisionContract(binding, task.Task, decision, outcome, outcomeEvent, stream, useSequence)
 	if err != nil {
 		return core.CompletionResult{}, err
 	}
@@ -1512,7 +1524,7 @@ func sameTaskDefinition(left, right core.Task) bool {
 		reflect.DeepEqual(left.CompletionContract, right.CompletionContract)
 }
 
-func completionDecisionContract(binding WorkCompletionBinding, task core.Task, decision CompletionDecisionPayload, outcome core.ToolOutcome, outcomeEvent Event, stream []Event) (core.CompletionContract, core.ToolOutcome, error) {
+func completionDecisionContract(binding WorkCompletionBinding, task core.Task, decision CompletionDecisionPayload, outcome core.ToolOutcome, outcomeEvent Event, stream []Event, useSequence int64) (core.CompletionContract, core.ToolOutcome, error) {
 	startEvent, remediation, err := validateExecutionStart(binding, task, decision.Contract.TaskVersion, outcomeEvent, stream)
 	if err != nil {
 		return core.CompletionContract{}, core.ToolOutcome{}, err
@@ -1542,6 +1554,9 @@ func completionDecisionContract(binding WorkCompletionBinding, task core.Task, d
 		}
 		if model.Model != outcome.ToolID && model.Provider+"/"+model.Model != outcome.ToolID {
 			return core.CompletionContract{}, core.ToolOutcome{}, fmt.Errorf("work completion Agent execution manifest is invalid")
+		}
+		if err := ValidateExecutionKnowledgeAtUse(binding.OrganizationID, task, model.Manifest, useSequence, binding.TeamRevisions, stream); err != nil {
+			return core.CompletionContract{}, core.ToolOutcome{}, fmt.Errorf("knowledge is invalid at completion admission: %w", err)
 		}
 		verified, available := core.VerifyPersistedPostcondition(task, outcome, model.ExecutionInputSHA256)
 		if available {
@@ -1581,6 +1596,7 @@ func completionDecisionContract(binding WorkCompletionBinding, task core.Task, d
 }
 
 type executionModel struct {
+	Manifest             core.ExecutionContextManifest
 	Provider             string
 	Model                string
 	ExecutionInputSHA256 string
@@ -1616,7 +1632,10 @@ func completionExecutionModel(binding WorkCompletionBinding, task core.Task, exe
 	if manifest.ExecutionInputSHA256 != core.FingerprintExecutionInput(expectedInput) {
 		return executionModel{}, fmt.Errorf("work completion Agent manifest input does not match durable execution context")
 	}
-	return executionModel{Provider: manifest.Provider, Model: manifest.Model, ExecutionInputSHA256: manifest.ExecutionInputSHA256}, nil
+	if err := ValidateExecutionKnowledgeAtUse(binding.OrganizationID, task, manifest, outcomeEvent.Sequence, binding.TeamRevisions, stream); err != nil {
+		return executionModel{}, fmt.Errorf("work completion Agent Knowledge was invalid at outcome: %w", err)
+	}
+	return executionModel{Manifest: manifest, Provider: manifest.Provider, Model: manifest.Model, ExecutionInputSHA256: manifest.ExecutionInputSHA256}, nil
 }
 
 func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, startEvent, manifestEvent Event, manifest core.ExecutionContextManifest, stream []Event) (string, error) {
@@ -1639,7 +1658,7 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 			return "", fmt.Errorf("version 1 execution manifest contains unsupported context references")
 		}
 	case "v2":
-		knowledgeRefs, selected, err := executionKnowledge(binding, task, startEvent, stream)
+		knowledgeRefs, selected, err := executionKnowledge(binding, task, startEvent, stream, false)
 		if err != nil {
 			return "", err
 		}
@@ -1650,8 +1669,8 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 			return "", fmt.Errorf("version 2 execution manifest contains coordination references")
 		}
 		knowledge = selected
-	case "v3", "v4":
-		knowledgeRefs, selectedKnowledge, err := executionKnowledge(binding, task, startEvent, stream)
+	case "v3", "v4", "v5":
+		knowledgeRefs, selectedKnowledge, err := executionKnowledge(binding, task, startEvent, stream, manifest.ContextBuilderVersion == "v5")
 		if err != nil {
 			return "", err
 		}
@@ -1694,8 +1713,12 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 	inputContext := core.AgentExecutionInputContext{
 		Blueprint: blueprint, Task: task, Strategy: strategy, Knowledge: knowledge, DependencyResults: dependencies, InboxEvents: inbox, PeerTasks: peerTasks, Revision: revision,
 	}
-	if manifest.ContextBuilderVersion == "v4" {
-		inputBinding, err := core.BindAgentExecutionInput(core.ID(binding.OrganizationID), manifest.ExecutionID, inputContext)
+	if manifest.ContextBuilderVersion == "v4" || manifest.ContextBuilderVersion == "v5" {
+		bindInput := core.BindAgentExecutionInput
+		if manifest.ContextBuilderVersion == "v5" {
+			bindInput = core.BindCurrentAgentExecutionInput
+		}
+		inputBinding, err := bindInput(core.ID(binding.OrganizationID), manifest.ExecutionID, inputContext)
 		if err != nil {
 			return "", err
 		}
@@ -1707,11 +1730,11 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 }
 
 func validExecutionContextBuilderVersion(version string) bool {
-	return version == "v1" || version == "v2" || version == "v3" || version == "v4"
+	return version == "v1" || version == "v2" || version == "v3" || version == "v4" || version == "v5"
 }
 
-func executionKnowledge(binding WorkCompletionBinding, task core.Task, startEvent Event, stream []Event) ([]core.VersionedRef, []core.KnowledgeRecord, error) {
-	selected, err := ResolveExecutionKnowledge(binding.OrganizationID, task, startEvent.Sequence, binding.TeamRevisions, stream)
+func executionKnowledge(binding WorkCompletionBinding, task core.Task, startEvent Event, stream []Event, requireClassification bool) ([]core.VersionedRef, []core.KnowledgeRecord, error) {
+	selected, err := resolveExecutionKnowledge(binding.OrganizationID, task, startEvent.Sequence, binding.TeamRevisions, stream, requireClassification)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve execution knowledge: %w", err)
 	}
@@ -2136,9 +2159,22 @@ type executionKnowledgeRevision struct {
 // Organization, assigned Agent, and Teams that contained that Agent at the
 // start boundary. Selection is bounded and requires task-text relevance.
 func ResolveExecutionKnowledge(organizationID string, task core.Task, startSequence int64, teamRevisions map[core.ID][]TeamRevisionBinding, stream []Event) ([]KnowledgeSelection, error) {
+	return resolveExecutionKnowledge(organizationID, task, startSequence, teamRevisions, stream, true)
+}
+
+// Historical manifested executions retain their original selection semantics.
+func resolveExecutionKnowledge(organizationID string, task core.Task, startSequence int64, teamRevisions map[core.ID][]TeamRevisionBinding, stream []Event, requireClassification bool) ([]KnowledgeSelection, error) {
 	if organizationID == "" || task.ExecutionKind != core.ExecutionAgent || task.AssigneeID == "" || startSequence < 1 {
 		return nil, fmt.Errorf("complete Agent execution knowledge boundary is required")
 	}
+	history, err := replayExecutionKnowledge(organizationID, startSequence, stream)
+	if err != nil {
+		return nil, err
+	}
+	return selectExecutionKnowledge(organizationID, task, startSequence, teamRevisions, history, requireClassification)
+}
+
+func replayExecutionKnowledge(organizationID string, startSequence int64, stream []Event) (map[core.ID]executionKnowledgeRevision, error) {
 	history := make(map[core.ID]executionKnowledgeRevision)
 	for _, event := range stream {
 		if event.Sequence >= startSequence || event.OrganizationID != organizationID {
@@ -2168,7 +2204,43 @@ func ResolveExecutionKnowledge(organizationID string, task core.Task, startSeque
 		history[record.KnowledgeID] = executionKnowledgeRevision{record: record, sequence: event.Sequence}
 	}
 
-	return selectExecutionKnowledge(organizationID, task, startSequence, teamRevisions, history)
+	return history, nil
+}
+
+// ValidateExecutionKnowledgeAtUse verifies the manifested revisions and their
+// current transitive lineage immediately before a durable use boundary. It does
+// not rerun relevance ranking: newly admitted unrelated facts cannot evict an
+// otherwise valid manifested reference. Historical pre-v5 contracts retain
+// their original reconstruction semantics.
+func ValidateExecutionKnowledgeAtUse(organizationID string, task core.Task, manifest core.ExecutionContextManifest, useSequence int64, teamRevisions map[core.ID][]TeamRevisionBinding, stream []Event) error {
+	if manifest.ContextBuilderVersion != "v5" {
+		return nil
+	}
+	if organizationID == "" || task.ExecutionKind != core.ExecutionAgent || task.AssigneeID == "" || useSequence < 1 {
+		return fmt.Errorf("complete Knowledge use boundary is required")
+	}
+	if len(manifest.KnowledgeRefs) == 0 {
+		return nil
+	}
+	history, err := replayExecutionKnowledge(organizationID, useSequence, stream)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(manifest.KnowledgeRefs))
+	memo := make(map[core.ID]bool)
+	for _, ref := range manifest.KnowledgeRefs {
+		if _, duplicate := seen[ref.ID]; duplicate {
+			return fmt.Errorf("duplicate Knowledge use reference")
+		}
+		seen[ref.ID] = struct{}{}
+		current, found := history[core.ID(ref.ID)]
+		if !found || ref.MaterializationState != core.MaterializedFull || ref.Version != strconv.Itoa(current.record.Version) ||
+			!executionKnowledgeScopeAllowed(organizationID, task, useSequence, teamRevisions, current.record) ||
+			!executionKnowledgeLineageActive(current.record.KnowledgeID, history, make(map[core.ID]struct{}), memo, true) {
+			return fmt.Errorf("manifested Knowledge or its lineage is no longer eligible")
+		}
+	}
+	return nil
 }
 
 // SelectCurrentExecutionKnowledge applies the same deterministic selection to
@@ -2192,15 +2264,15 @@ func SelectCurrentExecutionKnowledge(organizationID string, task core.Task, star
 		}
 		history[record.KnowledgeID] = executionKnowledgeRevision{record: record, sequence: revision.AdmissionSequence}
 	}
-	return selectExecutionKnowledge(organizationID, task, startSequence, teamRevisions, history)
+	return selectExecutionKnowledge(organizationID, task, startSequence, teamRevisions, history, true)
 }
 
-func selectExecutionKnowledge(organizationID string, task core.Task, startSequence int64, teamRevisions map[core.ID][]TeamRevisionBinding, history map[core.ID]executionKnowledgeRevision) ([]KnowledgeSelection, error) {
+func selectExecutionKnowledge(organizationID string, task core.Task, startSequence int64, teamRevisions map[core.ID][]TeamRevisionBinding, history map[core.ID]executionKnowledgeRevision, requireClassification bool) ([]KnowledgeSelection, error) {
 	candidates := make([]executionKnowledgeRevision, 0, len(history))
 	lineageMemo := make(map[core.ID]bool, len(history))
 	for _, revision := range history {
 		if revision.record.Status != core.KnowledgeActive || !executionKnowledgeScopeAllowed(organizationID, task, startSequence, teamRevisions, revision.record) ||
-			!executionKnowledgeLineageActive(revision.record.KnowledgeID, history, make(map[core.ID]struct{}), lineageMemo) || !executionKnowledgeRelevant(task, revision.record) {
+			!executionKnowledgeLineageActive(revision.record.KnowledgeID, history, make(map[core.ID]struct{}), lineageMemo, requireClassification) || !executionKnowledgeRelevant(task, revision.record) {
 			continue
 		}
 		candidates = append(candidates, revision)
@@ -2234,12 +2306,12 @@ func selectExecutionKnowledge(organizationID string, task core.Task, startSequen
 	return selected, nil
 }
 
-func executionKnowledgeLineageActive(knowledgeID core.ID, history map[core.ID]executionKnowledgeRevision, visiting map[core.ID]struct{}, memo map[core.ID]bool) bool {
+func executionKnowledgeLineageActive(knowledgeID core.ID, history map[core.ID]executionKnowledgeRevision, visiting map[core.ID]struct{}, memo map[core.ID]bool, requireClassification bool) bool {
 	if active, resolved := memo[knowledgeID]; resolved {
 		return active
 	}
 	revision, found := history[knowledgeID]
-	if !found || revision.record.Status != core.KnowledgeActive {
+	if !found || revision.record.Status != core.KnowledgeActive || (requireClassification && !core.KnowledgeEligibleForModelContext(revision.record)) {
 		memo[knowledgeID] = false
 		return false
 	}
@@ -2253,7 +2325,7 @@ func executionKnowledgeLineageActive(knowledgeID core.ID, history map[core.ID]ex
 		version, err := strconv.Atoi(ref.Version)
 		source, sourceFound := history[core.ID(ref.ID)]
 		if err != nil || !sourceFound || source.record.Version != version || source.record.Status != core.KnowledgeActive ||
-			!executionKnowledgeLineageActive(source.record.KnowledgeID, history, visiting, memo) {
+			!executionKnowledgeLineageActive(source.record.KnowledgeID, history, visiting, memo, requireClassification) {
 			memo[knowledgeID] = false
 			return false
 		}
@@ -2830,6 +2902,9 @@ func (p ResultPublishedPayload) ValidFor(artifactRefs []string) bool {
 }
 
 func (p KnowledgeJudgmentPayload) ValidFor(event Event, knowledgeID core.ID, candidateVersion int, capabilityCheckEventID string, artifactRefs []string) bool {
+	if !core.ValidKnowledgeContextUse(p.ContextUse) || (p.ContextUse != "" && event.EventType != "HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED") {
+		return false
+	}
 	if p.KnowledgeID != knowledgeID || p.CandidateVersion != candidateVersion || p.Decision != KnowledgeJudgmentValidated ||
 		strings.TrimSpace(p.Statement) == "" || !utf8.ValidString(p.Statement) || len(p.Statement) > 16<<10 ||
 		p.CapabilityCheckEventID == "" || p.CapabilityCheckEventID != capabilityCheckEventID ||
@@ -2944,6 +3019,7 @@ type InferencePolicyActivatedPayload struct {
 }
 
 type InferenceReservedPayload struct {
+	ExecutionManifestRef    string    `json:"execution_manifest_ref,omitempty"`
 	ReservationID           string    `json:"reservation_id"`
 	RequestID               string    `json:"request_id"`
 	Purpose                 string    `json:"purpose"`

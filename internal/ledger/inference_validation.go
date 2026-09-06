@@ -75,6 +75,9 @@ func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx) error 
 			if decodeExactJSONBytes(event.Payload, &payload) != nil || payload.ReservationID == "" {
 				return fmt.Errorf("inference reservation event is malformed")
 			}
+			if err := validateReservedExecutionKnowledge(ctx, tx, event, payload); err != nil {
+				return err
+			}
 			if _, exists := reservedEvents[payload.ReservationID]; exists {
 				return fmt.Errorf("inference reservation has multiple admission events")
 			}
@@ -243,10 +246,16 @@ func (r inferenceValidationRow) validate(policy inference.Policy) error {
 
 func validateInferenceReservationEvent(event events.Event, row inferenceValidationRow) error {
 	var payload events.InferenceReservedPayload
+	if decodeExactJSONBytes(event.Payload, &payload) != nil {
+		return fmt.Errorf("inference reservation event is invalid")
+	}
 	start, _ := time.Parse(time.RFC3339Nano, row.windowStart)
 	end, _ := time.Parse(time.RFC3339Nano, row.windowEnd)
 	expected := events.InferenceReservedPayload{
-		ReservationID: row.reservationID, RequestID: row.requestID, Purpose: row.purpose, IntentID: row.intentID,
+		// The execution reference is independently verified against its historical
+		// boundary by validateReservedExecutionKnowledge before accounting checks.
+		ExecutionManifestRef: payload.ExecutionManifestRef,
+		ReservationID:        row.reservationID, RequestID: row.requestID, Purpose: row.purpose, IntentID: row.intentID,
 		PolicyFingerprint: row.policyFingerprint, PromptSHA256: row.promptSHA256, Provider: row.provider, Model: row.model,
 		ExecutionProfileVersion: row.profile, ReservedInputTokens: row.reservedInput,
 		ReservedOutputTokens: row.reservedOutput, ReservedCostNanoUSD: row.reservedCost,
