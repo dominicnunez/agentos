@@ -187,9 +187,14 @@ authorized purpose; provenance, versioning and ordinary injection checks alone
 do not establish this property.
 Require independent review of the actual Skill content against its authorized
 purpose and policy, plus absolute policy-compliance checks on each comparison
-arm. A prohibited instruction or outcome denies activation even when both arms
-behave identically. Neither a measured delta nor its absence excuses an already biased
-baseline, saturated outcome or unauthorized instruction.
+arm. Prohibited Skill content or treatment outcomes deny activation even when
+both arms behave identically. Record baseline violations and require an explicit
+independent remediation assessment; a compliant corrective treatment may be
+activated when its authorized purpose addresses those violations and all other
+gates pass. Baseline violations remain ineligible for production acceptance and
+must not be hidden or treated as acceptable controls. Neither a measured delta
+nor its absence excuses prohibited content, treatment outcomes or a saturated
+test that cannot establish the required evidence.
 
 Before activating or using a Skill that can influence discretionary decisions,
 require independent behavioral evidence through existing versioned
@@ -250,6 +255,17 @@ production context in the evidence. The safety-only authority restriction must
 not silently change model-visible decision inputs; any other context difference
 requires independent applicability assessment before production use. Evaluation
 outputs stay isolated and cannot enter production as approved results or actions.
+For initial assessment and reassessment, permit candidate materialization only
+through a separately authorized evaluation-only execution tied to the committed
+candidate, protocol, approved evaluator and effectless profile. This narrow path
+does not require the behavioral evidence or classification it is being run to
+create. It retains all other applicable isolation, input-integrity, provenance,
+resource, current authorization and deployment-identity checks. Evaluation-only
+records and outputs must be marked and confined to the assessment evidence
+boundary; they may be retained for analysis, including failed outcomes, but may
+not satisfy production acceptance or delivery. Production activation, execution
+and downstream consumers cannot use this exception. Assessment approval cannot
+waive an independent safety denial or authorize real effects.
 
 Commit the exact Skill content, declared-purpose and evaluation-protocol digests
 to the ledger, including metrics, subgroups, persistence and acceptance thresholds,
@@ -313,8 +329,11 @@ before using the changed composition.
 
 Bind the organization and exact policy version, authorized objective, and the
 runtime-owned authorization decision that permits this declared purpose for
-that scope. Resolve and validate those references at activation and at every
-materialization against the concrete Intent, Goal and Task objective revisions
+that scope. Resolve and validate those references at activation against the
+declared applicability scope and policy; reusable activation does not require
+an active Task and grants no permission for a particular execution. At every
+production materialization or use, additionally resolve the concrete Intent,
+Goal and Task objective revisions
 and a runtime-owned applicability decision that the Skill purpose serves that
 specific work. Bind those exact work references and decision to the execution;
 changed objectives require a fresh applicability decision and any newly required
