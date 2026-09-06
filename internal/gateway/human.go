@@ -400,7 +400,7 @@ func (h *Human) handleTaskCompletion(w http.ResponseWriter, r *http.Request, pri
 	for index, upload := range request.Artifacts {
 		stored, _, err := h.artifacts.Put(principal.OrganizationID, taskID, principal.ID, upload)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "user task artifact storage is unavailable"})
 			return
 		}
 		if stored != evidence[index] {

@@ -22,6 +22,9 @@ import (
 
 const MaximumArtifactBytes = 16 << 20
 
+// ErrStorageUnavailable is safe to expose without filesystem paths or OS diagnostics.
+var ErrStorageUnavailable = errors.New("artifact storage is unavailable")
+
 type Upload struct {
 	Role      string `json:"role"`
 	Name      string `json:"name"`
@@ -42,7 +45,7 @@ func (s Store) Put(organizationID, taskID, principalID string, upload Upload) (c
 	hash := evidence.SHA256
 	directory := filepath.Join(s.Root, hash[:2])
 	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return core.ArtifactEvidence{}, false, err
+		return core.ArtifactEvidence{}, false, ErrStorageUnavailable
 	}
 	path := filepath.Join(directory, hash)
 	created := false
@@ -53,22 +56,22 @@ func (s Store) Put(organizationID, taskID, principalID string, upload Upload) (c
 			return core.ArtifactEvidence{}, false, fmt.Errorf("content-addressed artifact collision")
 		}
 	} else if err != nil {
-		return core.ArtifactEvidence{}, false, err
+		return core.ArtifactEvidence{}, false, ErrStorageUnavailable
 	} else {
 		created = true
 		if _, err := file.Write(upload.Data); err != nil {
 			_ = file.Close()
 			_ = os.Remove(path)
-			return core.ArtifactEvidence{}, false, err
+			return core.ArtifactEvidence{}, false, ErrStorageUnavailable
 		}
 		if err := file.Sync(); err != nil {
 			_ = file.Close()
 			_ = os.Remove(path)
-			return core.ArtifactEvidence{}, false, err
+			return core.ArtifactEvidence{}, false, ErrStorageUnavailable
 		}
 		if err := file.Close(); err != nil {
 			_ = os.Remove(path)
-			return core.ArtifactEvidence{}, false, err
+			return core.ArtifactEvidence{}, false, ErrStorageUnavailable
 		}
 	}
 	return evidence, created, nil
