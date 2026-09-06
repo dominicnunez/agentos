@@ -333,8 +333,11 @@ that scope. Resolve and validate those references at activation against the
 declared applicability scope and policy; reusable activation does not require
 an active Task and grants no permission for a particular execution. At every
 production materialization or use, additionally resolve the concrete Intent,
-Goal and Task objective revisions
-and a runtime-owned applicability decision that the Skill purpose serves that
+Work and Task objective revisions and, when the Work is linked to a Goal, that
+Goal's objective revision. For ad hoc Work, bind the absence of Goal linkage and
+use the Intent/Work/Task objective; do not invent or require a Goal. Validate the
+current linkage as well as any linked Goal revision. Require
+a runtime-owned applicability decision that the Skill purpose serves that
 specific work. Bind those exact work references and decision to the execution;
 changed objectives require a fresh applicability decision and any newly required
 evidence. Broad organization or task-class approval cannot substitute for this
