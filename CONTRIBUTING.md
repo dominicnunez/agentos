@@ -1,7 +1,9 @@
 # Contributions
 
-Issues that report defects, security-neutral interoperability gaps, or focused
-documentation improvements are welcome.
+GitHub issues are reserved for code-related work: software defects,
+interoperability gaps, and implementation changes. Non-code ISO/IEC 42001
+governance and certification work is indefinitely deferred and is not tracked
+as new GitHub issues. Existing records remain historical evidence.
 
 External code contributions are not currently accepted. Please do not open a
 pull request: unsolicited pull requests will be closed without review. This
