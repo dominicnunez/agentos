@@ -100,9 +100,13 @@ func TestRoutedConfigRoundTripAndInvalidRoutes(t *testing.T) {
 	withoutCatalog[1].InferencePolicy.Catalog = nil
 	noCatalogs := append([]Provider(nil), withoutCatalog...)
 	noCatalogs[0].InferencePolicy.Catalog = nil
+	legacyProviders := append([]Provider(nil), noCatalogs...)
+	for i := range legacyProviders {
+		legacyProviders[i].InferencePolicy.Routing = nil
+	}
 	for _, purpose := range []string{"task", "planning", "normalization", "task-specific"} {
 		changed := ProviderRouting{TaskDefault: "first", Planning: "first", Normalization: "first"}
-		if err := changed.Validate(noCatalogs); err != nil {
+		if err := changed.Validate(legacyProviders); err != nil {
 			t.Fatal("legacy explicit routing rejected", err)
 		}
 		switch purpose {
@@ -200,6 +204,43 @@ func TestRoutedConfigRoundTripAndInvalidRoutes(t *testing.T) {
 	oneEligible[0].InferencePolicy.Catalog = &small
 	if err := config.Routing.Validate(oneEligible); err != nil {
 		t.Fatal("soft routing rejected an eligible alternative account", err)
+	}
+	for name, mutate := range map[string]func(*inference.OrganizationBudget){
+		"tokens":     func(b *inference.OrganizationBudget) { b.MaxTokensPerWindow = 199 },
+		"continuity": func(b *inference.OrganizationBudget) { b.ContinuityReserveTokens = b.MaxTokensPerWindow - 199 },
+		"cost":       func(b *inference.OrganizationBudget) { b.MaxCostNanoUSDPerWindow = 0 },
+	} {
+		providers := append([]Provider(nil), config.Providers...)
+		budget := *providers[0].InferencePolicy.OrganizationBudget
+		mutate(&budget)
+		for i := range providers {
+			providers[i].InferencePolicy.OrganizationBudget = &budget
+		}
+		if err := config.Routing.Validate(providers); err == nil {
+			t.Fatalf("readiness accepted impossible shared %s budget", name)
+		}
+	}
+	for _, purpose := range []string{"task", "planning", "normalization", "pin"} {
+		changed := *config.Routing
+		changed.TaskConnections, changed.TaskRequirements = nil, nil
+		switch purpose {
+		case "task":
+			changed.TaskDefault = "second"
+			changed.Requirements = nil
+		case "planning":
+			changed.Planning = "second"
+			changed.PlanningRequirements = nil
+		case "normalization":
+			changed.Normalization = "second"
+			changed.NormalizationRequirements = nil
+		case "pin":
+			changed.Requirements = nil
+			changed.TaskDefault = "second"
+			changed.TaskConnections = map[string]string{"research": "second"}
+		}
+		if err := changed.Validate(withoutCatalog); err == nil {
+			t.Fatalf("%s explicit route bypassed governance", purpose)
+		}
 	}
 	for _, mutate := range []func(*ProviderRouting){
 		func(r *ProviderRouting) { r.Requirements = nil },

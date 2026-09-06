@@ -24,7 +24,12 @@ func validateRoutingDecisionHistory(stream []events.Event, activations map[strin
 	var bindings []historicalRouteBinding
 	seen := make(map[modelinput.RouteDecision]bool)
 	chargeTimes := make(map[string][]time.Time)
-	for _, event := range stream {
+	timestamps := routingSnapshotTimes(stream)
+	for i, event := range stream {
+		if i > 0 {
+			previous := stream[i-1]
+			timestamps[previous.OrganizationID].add(previous.CreatedAt, previous.Sequence)
+		}
 		var requirements *modelinput.RouteRequirements
 		var decision *modelinput.RouteDecision
 		switch event.EventType {
@@ -45,12 +50,18 @@ func validateRoutingDecisionHistory(stream []events.Event, activations map[strin
 				return err
 			}
 			requirements, decision = payload.Routing, payload.RoutingDecision
+			if !routeContextIdentityMatches(decision, payload.ConnectionID, payload.Provider, payload.Model, payload.ExecutionProfileVersion) {
+				return fmt.Errorf("planning context identity differs from routing decision")
+			}
 		case "INTENT_NORMALIZATION_CONTEXT_MANIFESTED":
 			var payload events.IntentNormalizationContextPayload
 			if err := decodeExactJSONBytes(event.Payload, &payload); err != nil {
 				return err
 			}
 			requirements, decision = payload.Routing, payload.RoutingDecision
+			if !routeContextIdentityMatches(decision, payload.ConnectionID, payload.Provider, payload.Model, payload.ExecutionProfileVersion) {
+				return fmt.Errorf("normalization context identity differs from routing decision")
+			}
 		case "EXECUTION_CONTEXT_MANIFESTED":
 			var payload core.ExecutionContextManifest
 			if err := decodeExactJSONBytes(event.Payload, &payload); err != nil {
@@ -78,6 +89,9 @@ func validateRoutingDecisionHistory(stream []events.Event, activations map[strin
 			return fmt.Errorf("routing selection timestamp follows its persisted binding")
 		}
 		if !seen[*decision] {
+			if timestamps[event.OrganizationID].latest(decision.SelectedAt) > decision.SnapshotSequence {
+				return fmt.Errorf("routing cutoff omits organization events at selection time")
+			}
 			seen[*decision] = true
 			bindings = append(bindings, historicalRouteBinding{requirements: *requirements, decision: *decision})
 		}
@@ -187,6 +201,10 @@ func validateRoutingDecisionHistory(stream []events.Event, activations map[strin
 		}
 	}
 	return nil
+}
+
+func routeContextIdentityMatches(d *modelinput.RouteDecision, connection, provider, model, profile string) bool {
+	return d == nil || (d.ConnectionID == connection && d.Provider == provider && d.Model == model && d.ExecutionProfileVersion == profile)
 }
 
 func validateHistoricalRouteBudget(binding historicalRouteBinding, policy inference.Policy, index *routeChargeIndex) error {

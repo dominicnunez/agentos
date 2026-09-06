@@ -3,6 +3,7 @@ package ledger
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,56 @@ import (
 	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/modelinput"
 )
+
+func TestRoutingDecisionRejectsStaleCutoff(t *testing.T) {
+	p, r, d := decisionHistoryFixture(t)
+	activation := events.Event{EventID: "policy", Sequence: 1, OrganizationID: p.OrganizationID, EventType: "INFERENCE_POLICY_ACTIVATED", CreatedAt: p.AuthorizedAt}
+	start, end := inferenceWindow(d.SelectedAt, time.Hour)
+	charge := decisionHistoryEvent(t, 2, p.OrganizationID, "INFERENCE_RESERVED", events.InferenceReservedPayload{ReservationID: "prior", ConnectionID: p.ConnectionID, Provider: p.Provider, Model: p.Model, ReservedInputTokens: 100, ReservedOutputTokens: 20, AdmittedAt: d.SelectedAt.Format(time.RFC3339Nano), WindowStartedAt: start, WindowExpiresAt: end})
+	origin := decisionHistoryEvent(t, 3, p.OrganizationID, "PLANNING_CONTEXT_MANIFESTED", events.PlanningContextPayload{Routing: &r, RoutingDecision: &d})
+	for _, delta := range []time.Duration{-time.Nanosecond, 0, time.Nanosecond} {
+		charge.CreatedAt = d.SelectedAt.Add(delta)
+		err := validateRoutingDecisionHistory([]events.Event{activation, charge, origin}, map[string]inference.Policy{"policy": p}, nil)
+		if delta <= 0 && (err == nil || !strings.Contains(err.Error(), "cutoff omits")) {
+			t.Fatalf("stale cutoff at %v accepted: %v", delta, err)
+		}
+		if delta > 0 && err != nil {
+			t.Fatal("post-selection reservation invalidated earlier snapshot", err)
+		}
+	}
+	charge.CreatedAt = d.SelectedAt
+	charge.OrganizationID = "other"
+	if err := validateRoutingDecisionHistory([]events.Event{activation, charge, origin}, map[string]inference.Policy{"policy": p}, nil); err != nil {
+		t.Fatal("other organization affected cutoff", err)
+	}
+	// Later events must not retroactively invalidate an already bound decision.
+	origin.Sequence = 2
+	charge.OrganizationID = p.OrganizationID
+	charge.Sequence = 3
+	copyOrigin := origin
+	copyOrigin.Sequence = 4
+	if err := validateRoutingDecisionHistory([]events.Event{activation, origin, charge, copyOrigin}, map[string]inference.Policy{"policy": p}, nil); err != nil {
+		t.Fatal("later event invalidated first binding", err)
+	}
+}
+
+func TestRoutingDecisionBindsOrphanedAuxiliaryIdentity(t *testing.T) {
+	p, r, d := decisionHistoryFixture(t)
+	activation := events.Event{EventID: "policy", Sequence: 1, OrganizationID: p.OrganizationID, EventType: "INFERENCE_POLICY_ACTIVATED", CreatedAt: p.AuthorizedAt}
+	for _, kind := range []string{"PLANNING_CONTEXT_MANIFESTED", "INTENT_NORMALIZATION_CONTEXT_MANIFESTED"} {
+		for _, field := range []string{"", "connection_id", "provider", "model", "execution_profile_version"} {
+			body := map[string]any{"connection_id": d.ConnectionID, "provider": d.Provider, "model": d.Model, "execution_profile_version": d.ExecutionProfileVersion, "routing": r, "routing_decision": d}
+			if field != "" {
+				body[field] = "different"
+			}
+			origin := decisionHistoryEvent(t, 2, p.OrganizationID, kind, body)
+			err := validateRoutingDecisionHistory([]events.Event{activation, origin}, map[string]inference.Policy{"policy": p}, nil)
+			if (err == nil) != (field == "") {
+				t.Fatalf("%s %s: %v", kind, field, err)
+			}
+		}
+	}
+}
 
 func decisionHistoryFixture(t *testing.T) (inference.Policy, modelinput.RouteRequirements, modelinput.RouteDecision) {
 	t.Helper()
@@ -36,6 +87,18 @@ func decisionHistoryFixture(t *testing.T) (inference.Policy, modelinput.RouteReq
 
 func decisionHistoryEvent(t *testing.T, sequence int64, organization, kind string, body any) events.Event {
 	t.Helper()
+	switch p := body.(type) {
+	case events.PlanningContextPayload:
+		if d := p.RoutingDecision; d != nil && p.ConnectionID == "" && p.Provider == "" && p.Model == "" && p.ExecutionProfileVersion == "" {
+			p.ConnectionID, p.Provider, p.Model, p.ExecutionProfileVersion = d.ConnectionID, d.Provider, d.Model, d.ExecutionProfileVersion
+			body = p
+		}
+	case events.IntentNormalizationContextPayload:
+		if d := p.RoutingDecision; d != nil && p.ConnectionID == "" && p.Provider == "" && p.Model == "" && p.ExecutionProfileVersion == "" {
+			p.ConnectionID, p.Provider, p.Model, p.ExecutionProfileVersion = d.ConnectionID, d.Provider, d.Model, d.ExecutionProfileVersion
+			body = p
+		}
+	}
 	payload, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)
@@ -96,6 +159,8 @@ func TestRoutingDecisionCannotUseLaterRefundOrFrozenSnapshot(t *testing.T) {
 		decisionHistoryEvent(t, 4, policy.OrganizationID, "INFERENCE_RECONCILED", events.InferenceReconciledPayload{ReservationID: "prior"}),
 	}
 	activations := map[string]inference.Policy{"selected": policy, "other": other}
+	stream[2].CreatedAt = decision.SelectedAt
+	stream[3].CreatedAt = decision.SelectedAt
 	check := func(cutoff int64, freezes map[core.ID][]events.OrganizationFreezeAdmission) error {
 		decision.SnapshotSequence = cutoff
 		origin := decisionHistoryEvent(t, 5, policy.OrganizationID, "INTENT_NORMALIZATION_CONTEXT_MANIFESTED", events.IntentNormalizationContextPayload{Routing: &requirements, RoutingDecision: &decision})
@@ -121,6 +186,8 @@ func TestRoutingDecisionCannotUseLaterRefundOrFrozenSnapshot(t *testing.T) {
 	activations["selected"] = policy
 	prior := events.InferenceReservedPayload{ReservationID: "prior", ConnectionID: policy.ConnectionID, Provider: policy.Provider, Model: policy.Model, ReservedInputTokens: 100, ReservedOutputTokens: 20, ReservedCostNanoUSD: decision.ReservedCostNanoUSD, AdmittedAt: decision.SelectedAt.Format(time.RFC3339Nano), WindowStartedAt: start, WindowExpiresAt: end}
 	stream[2] = decisionHistoryEvent(t, 3, policy.OrganizationID, "INFERENCE_RESERVED", prior)
+	stream[2].CreatedAt = decision.SelectedAt
+	stream[3].CreatedAt = decision.SelectedAt.Add(time.Second)
 	if err := check(3, nil); err == nil {
 		t.Fatal("account concurrency bypassed at historical cutoff")
 	}

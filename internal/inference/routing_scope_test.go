@@ -5,6 +5,28 @@ import (
 	"time"
 )
 
+func TestExplicitNoncatalogRouteCannotBypassGovernance(t *testing.T) {
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	broker, requirements, rules := brokerFixture(now)
+	policy := broker.Manager.Pools[0].Policy
+	policy.Catalog = nil
+	policy.Routing = &rules
+	request := InferenceRequest{ConnectionID: policy.ConnectionID, Scope: Scope{OrganizationID: policy.OrganizationID}}
+	if err := ValidateRequestRouting(now, policy, request); err == nil {
+		t.Fatal("governed explicit request admitted without data-class constraints")
+	}
+	requirements.DataClass = "secret"
+	request.Scope.Routing = &requirements
+	if err := ValidateRequestRouting(now, policy, request); err == nil {
+		t.Fatal("noncatalog request established unsupported classification authority")
+	}
+	policy.Routing = nil
+	request.Scope.Routing = nil
+	if err := ValidateRequestRouting(now, policy, request); err != nil {
+		t.Fatal("ungoverned legacy route rejected", err)
+	}
+}
+
 func TestRoutingScopeOwnsItsDecision(t *testing.T) {
 	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
 	broker, request, policy := brokerFixture(now)

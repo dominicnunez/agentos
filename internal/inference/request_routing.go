@@ -19,8 +19,8 @@ func ValidateRequestRouting(now time.Time, policy Policy, request InferenceReque
 		}
 	}
 	if request.Scope.Routing == nil {
-		if policy.Catalog != nil {
-			return fmt.Errorf("catalog inference requires explicit routing constraints")
+		if policy.Catalog != nil || policy.Routing != nil {
+			return fmt.Errorf("governed inference requires explicit routing constraints")
 		}
 		return nil
 	}

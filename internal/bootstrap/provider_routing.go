@@ -36,11 +36,13 @@ func (r *ProviderRouting) validateAt(providers []Provider, now time.Time) error 
 	policies := make([]inference.Policy, len(providers))
 	ids := map[string]bool{}
 	catalogs := map[string]bool{}
+	governed := map[string]bool{}
 	stores := map[string]bool{}
 	for i, provider := range providers {
 		policies[i] = provider.InferencePolicy
 		ids[provider.InferencePolicy.ConnectionID] = true
 		catalogs[provider.InferencePolicy.ConnectionID] = provider.InferencePolicy.Catalog != nil
+		governed[provider.InferencePolicy.ConnectionID] = provider.InferencePolicy.Routing != nil
 		if provider.CodexCredential != "" {
 			if stores[provider.CodexCredential] {
 				return fmt.Errorf("connections cannot share a mutable Codex credential store")
@@ -60,7 +62,7 @@ func (r *ProviderRouting) validateAt(providers []Provider, now time.Time) error 
 		connection   string
 		requirements *modelinput.RouteRequirements
 	}{{r.TaskDefault, r.Requirements}, {r.Planning, r.PlanningRequirements}, {r.Normalization, r.NormalizationRequirements}} {
-		if catalogs[purpose.connection] && purpose.requirements == nil {
+		if (catalogs[purpose.connection] || governed[purpose.connection]) && purpose.requirements == nil {
 			return fmt.Errorf("catalog-enabled inference purposes require explicit routing requirements")
 		}
 	}
@@ -107,7 +109,7 @@ func (r *ProviderRouting) validateAt(providers []Provider, now time.Time) error 
 			// All requirements use the same readiness instant, including catalog,
 			// authorization and pricing expiry. Live accounting remains admission's job.
 			broker := inference.Broker{Routes: []inference.RouteMetadata{metadata}, Manager: inference.Manager{Pools: []inference.Pool{{ID: policy.ConnectionID, Policy: policy, Available: true}}}}
-			if _, err := broker.Select(now, requirements, *policy.Routing); err == nil {
+			if selected, err := broker.Select(now, requirements, *policy.Routing); err == nil && policy.OrganizationBudget != nil && policy.OrganizationBudget.Allows(0, 0, 0, selected.Pool.ReservedInputTokens, selected.Pool.ReservedOutputTokens, selected.Pool.ReservedCostNanoUSD) {
 				feasible = true
 			}
 		}
@@ -141,7 +143,7 @@ func (r *ProviderRouting) validateAt(providers []Provider, now time.Time) error 
 		if specific, ok := r.TaskRequirements[key]; ok {
 			requirements = &specific
 		}
-		if catalogs[connection] && requirements == nil {
+		if (catalogs[connection] || governed[connection]) && requirements == nil {
 			return fmt.Errorf("catalog-enabled task accounts require explicit routing requirements")
 		}
 		if requirements != nil && !catalogs[connection] {
