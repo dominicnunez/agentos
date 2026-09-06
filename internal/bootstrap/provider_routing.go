@@ -5,6 +5,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/modelinput"
 	"regexp"
+	"time"
 )
 
 // ProviderRouting configures accounts and task requirements for inference purposes.
@@ -22,6 +23,10 @@ type ProviderRouting struct {
 }
 
 func (r *ProviderRouting) Validate(providers []Provider) error {
+	return r.validateAt(providers, time.Now().UTC())
+}
+
+func (r *ProviderRouting) validateAt(providers []Provider, now time.Time) error {
 	if r == nil {
 		if len(providers) != 1 || providers[0].InferencePolicy.ConnectionID != "" {
 			return fmt.Errorf("named or multiple providers require explicit provider routing")
@@ -99,10 +104,10 @@ func (r *ProviderRouting) Validate(providers []Provider) error {
 			if err != nil || policy.Routing == nil {
 				return fmt.Errorf("hard route lacks reviewed catalog and routing policy")
 			}
-			// Check static feasibility at authorization time, without live
-			// accounting, network calls, or a wall-clock-dependent config.
+			// All requirements use the same readiness instant, including catalog,
+			// authorization and pricing expiry. Live accounting remains admission's job.
 			broker := inference.Broker{Routes: []inference.RouteMetadata{metadata}, Manager: inference.Manager{Pools: []inference.Pool{{ID: policy.ConnectionID, Policy: policy, Available: true}}}}
-			if _, err := broker.Select(policy.AuthorizedAt, requirements, *policy.Routing); err == nil {
+			if _, err := broker.Select(now, requirements, *policy.Routing); err == nil {
 				feasible = true
 			}
 		}

@@ -10,6 +10,68 @@ import (
 	"time"
 )
 
+func TestRoutingReadinessUsesCurrentCatalogValidity(t *testing.T) {
+	now := time.Now().UTC()
+	paths, err := UserPaths(t.TempDir(), t.TempDir(), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := NewConfig(ModeUser, Owner{Username: "owner", UID: 1000, GID: 1000}, paths, now)
+	first := testOpenAIProvider(config, "gpt-test-2026-01-01")
+	p := &first.InferencePolicy
+	p.Version, p.ConnectionID = inference.ConnectionPolicyVersion, "first"
+	p.AuthorizedAt = now.Add(-time.Hour)
+	p.OrganizationBudget = &inference.OrganizationBudget{WindowDurationSeconds: 3600, MaxTokensPerWindow: 100000, MaxCostNanoUSDPerWindow: 100, MaxConcurrentRequests: 2}
+	p.Routing = &inference.RoutePolicy{OrganizationID: p.OrganizationID, Locality: inference.CloudAllowed, DataClasses: []string{"internal"}}
+	p.Catalog = &inference.CatalogDefinition{Capabilities: []inference.Capability{inference.Text}, ContextTokens: 1000, OutputTokens: 100, DataClasses: []string{"internal"}, ValidUntil: now.Add(-time.Minute)}
+	second := first
+	second.InferencePolicy.ConnectionID = "second"
+	requirements := modelinput.RouteRequirements{OrganizationID: p.OrganizationID, Capabilities: []modelinput.Capability{modelinput.Text}, InputTokens: 100, OutputTokens: 100, Locality: modelinput.CloudAllowed, DataClass: "internal"}
+	routing := ProviderRouting{TaskDefault: "first", Planning: "first", Normalization: "first", Requirements: &requirements, PlanningRequirements: &requirements, NormalizationRequirements: &requirements}
+	config.Providers, config.Routing = []Provider{first, second}, &routing
+	if err := routing.validateAt(config.Providers, now.Add(-2*time.Minute)); err != nil {
+		t.Fatal("catalog should have been feasible before expiration", err)
+	}
+	if err := config.ValidateReady(); err == nil {
+		t.Fatal("startup accepted only expired catalogs while authorization and pricing are valid")
+	}
+	for _, until := range []time.Time{now.Add(-time.Nanosecond), now, now.Add(time.Nanosecond)} {
+		catalog := *p.Catalog
+		catalog.ValidUntil = until
+		config.Providers[1].InferencePolicy.Catalog = &catalog
+		err := routing.validateAt(config.Providers, now)
+		if (err == nil) != until.After(now) {
+			t.Fatalf("catalog boundary %v: %v", until, err)
+		}
+	}
+	valid := *p.Catalog
+	valid.ValidUntil = now.Add(30 * time.Minute)
+	config.Providers[1].InferencePolicy.Catalog = &valid
+	if err := config.ValidateReady(); err != nil {
+		t.Fatal("startup rejected a current alternative catalog", err)
+	}
+	for _, purpose := range []string{"task", "planning", "normalization", "specific", "pin"} {
+		changed := routing
+		hard := requirements.Clone()
+		hard.ConnectionID = "first"
+		switch purpose {
+		case "task":
+			changed.Requirements = &hard
+		case "planning":
+			changed.PlanningRequirements = &hard
+		case "normalization":
+			changed.NormalizationRequirements = &hard
+		case "specific":
+			changed.TaskRequirements = map[string]modelinput.RouteRequirements{"research": hard}
+		case "pin":
+			changed.TaskConnections = map[string]string{"research": "first"}
+		}
+		if err := changed.validateAt(config.Providers, now); err == nil {
+			t.Fatalf("%s hard route accepted expired account", purpose)
+		}
+	}
+}
+
 func TestRoutedConfigRoundTripAndInvalidRoutes(t *testing.T) {
 	paths, err := UserPaths(t.TempDir(), t.TempDir(), 1000)
 	if err != nil {
