@@ -228,6 +228,10 @@ func bindTestAgentExecutionBriefs(t *testing.T, correlationID string, intent cor
 }
 
 func saveTestVerifiedTask(ctx context.Context, gateway *events.Gateway, repository *projections.Repository, organizationID core.ID, correlationID string, state projections.Versioned[core.Task]) error {
+	return saveTestVerifiedTaskAtBoundaries(ctx, gateway, repository, organizationID, correlationID, state, nil, nil)
+}
+
+func saveTestVerifiedTaskAtBoundaries(ctx context.Context, gateway *events.Gateway, repository *projections.Repository, organizationID core.ID, correlationID string, state projections.Versioned[core.Task], afterStart, beforeCompletion func() error) error {
 	task := state.Value
 	executionInput := ""
 	var snapshot projections.Snapshot
@@ -247,8 +251,16 @@ func saveTestVerifiedTask(ctx context.Context, gateway *events.Gateway, reposito
 	task.Status = core.TaskRunning
 	startVersion := state.Version + 1
 	if task.ExecutionKind == core.ExecutionAgent {
-		_, selections, err := repository.StartAgentExecution(ctx, organizationID, correlationID, startVersion, task, "", nil, nil, nil, actionBoundaryRoutes(snapshot, task), func(selection events.ExecutionStartSelection) (core.ExecutionContextManifest, error) {
-			inputContext := core.AgentExecutionInputContext{Blueprint: executionBlueprint, Task: task}
+		stream, err := gateway.Events(ctx, "")
+		if err != nil {
+			return err
+		}
+		strategy, strategyEvents, strategyRefs, err := events.ResolveStrategicContext(string(organizationID), snapshot.Works[task.WorkID].Value, stream, 0)
+		if err != nil {
+			return err
+		}
+		_, selections, err := repository.StartAgentExecution(ctx, organizationID, correlationID, startVersion, task, "", nil, strategyEvents, strategyRefs, actionBoundaryRoutes(snapshot, task), func(selection events.ExecutionStartSelection) (core.ExecutionContextManifest, error) {
+			inputContext := core.AgentExecutionInputContext{Blueprint: executionBlueprint, Task: task, Strategy: strategy}
 			knowledgeRefs := make([]core.VersionedRef, 0, len(selection.Knowledge))
 			for _, knowledge := range selection.Knowledge {
 				inputContext.Knowledge = append(inputContext.Knowledge, knowledge.Record)
@@ -273,7 +285,8 @@ func saveTestVerifiedTask(ctx context.Context, gateway *events.Gateway, reposito
 				AgentBlueprintVersion: task.AgentConfig.BlueprintVersion, ExecutionProfileVersion: task.AgentConfig.ProfileVersion,
 				RuntimeAdapter: task.AgentConfig.RuntimeAdapter, Provider: "fake", Model: "fake-model/v1",
 				TaskID: task.ID, TaskContractVersion: task.TaskContractVersion, PromptVersion: "v1",
-				PolicyVersion: "v1", KnowledgeRefs: knowledgeRefs, CoordinationRefs: coordinationRefs, ContextBuilderVersion: "v4",
+				PolicyVersion: "v1", KnowledgeRefs: knowledgeRefs, CoordinationRefs: coordinationRefs, ContextBuilderVersion: "v5",
+				EventRefs: strategyEvents, AdditionalContextRefs: strategyRefs,
 				ExecutionInputSHA256: core.FingerprintExecutionInput(executionInput), CreatedAt: selection.Started.CreatedAt,
 			}, nil
 		})
@@ -287,6 +300,11 @@ func saveTestVerifiedTask(ctx context.Context, gateway *events.Gateway, reposito
 		}
 	} else if _, err := repository.StartTaskExecution(ctx, organizationID, correlationID, startVersion, task, "", "", nil, nil); err != nil {
 		return err
+	}
+	if afterStart != nil {
+		if err := afterStart(); err != nil {
+			return err
+		}
 	}
 	now := time.Now().UTC()
 	toolID, observed := "builtin.echo", any(strings.TrimPrefix(task.Description, "echo "))
@@ -347,6 +365,11 @@ func saveTestVerifiedTask(ctx context.Context, gateway *events.Gateway, reposito
 		return err
 	}
 	task.Status = core.TaskCompleted
+	if beforeCompletion != nil {
+		if err := beforeCompletion(); err != nil {
+			return err
+		}
+	}
 	return repository.SaveTask(ctx, organizationID, "TASK_VERIFIED_COMPLETE", "runtime", correlationID, state.Version+2, task, detail)
 }
 
@@ -3582,7 +3605,7 @@ func TestRecoveryIsDeterministicFirst(t *testing.T) {
 							AgentBlueprintVersion: task.AgentConfig.BlueprintVersion, ExecutionProfileVersion: task.AgentConfig.ProfileVersion,
 							RuntimeAdapter: task.AgentConfig.RuntimeAdapter, Provider: "fake", Model: "fake-model/v1",
 							TaskID: task.ID, TaskContractVersion: task.TaskContractVersion, PromptVersion: "v1", PolicyVersion: "v1",
-							ContextBuilderVersion: "v4", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
+							ContextBuilderVersion: "v5", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
 						}, nil
 					})
 					return err

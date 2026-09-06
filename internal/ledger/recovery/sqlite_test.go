@@ -532,7 +532,7 @@ func TestVerifyRejectsSemanticallyValidEventPayloadTampering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE events SET payload=? WHERE event_id=?`, `{"state":"changed"}`, event.EventID); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE events SET payload=? WHERE event_id=?`, []byte(`{"state":"changed"}`), event.EventID); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -765,7 +765,7 @@ func restoredInferenceRequest(requestID string) inference.InferenceRequest {
 	digest := sha256.Sum256([]byte("prompt-" + requestID))
 	return inference.InferenceRequest{
 		Scope: inference.Scope{
-			OrganizationID: "organization-1", Purpose: inference.PurposeTaskExecution, RequestID: requestID,
+			OrganizationID: "organization-1", Purpose: inference.PurposePlanning, RequestID: requestID, IntentID: "intent-1",
 			TaskID: "task-1", ExecutionID: requestID, CorrelationID: "work-1",
 		},
 		Descriptor:   execution.ModelDescriptor{Provider: "provider-1", Model: "model-1", ExecutionProfileVersion: "profile-v1"},

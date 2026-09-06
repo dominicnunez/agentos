@@ -192,6 +192,9 @@ func (l *SQLite) ReserveInference(ctx context.Context, request inference.Inferen
 		if frozen {
 			return fmt.Errorf("organization is frozen; inference admission denied")
 		}
+		if err := validateInferenceKnowledge(ctx, tx, request); err != nil {
+			return err
+		}
 		policy, fingerprint, err := activeInferencePolicy(ctx, tx, request.Scope.OrganizationID)
 		if err != nil {
 			return err
@@ -254,6 +257,11 @@ window_started_at,window_expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,
 			ExecutionProfileVersion: request.Descriptor.ExecutionProfileVersion,
 			ReservedInputTokens:     reserved.ReservedInputTokens, ReservedOutputTokens: reserved.ReservedOutputTokens,
 			ReservedCostNanoUSD: reserved.ReservedCostNanoUSD, WindowStartedAt: windowStart, WindowExpiresAt: windowEnd,
+		}
+		if request.Scope.Purpose == inference.PurposeTaskExecution {
+			if err := tx.QueryRowContext(ctx, `SELECT event_id FROM events WHERE organization_id=? AND event_type='EXECUTION_CONTEXT_MANIFESTED' AND source_execution_id=?`, request.Scope.OrganizationID, request.Scope.ExecutionID).Scan(&payload.ExecutionManifestRef); err != nil {
+				return fmt.Errorf("bind inference manifest reference: %w", err)
+			}
 		}
 		if _, err := appendEvent(ctx, tx, events.TrustedDraft{
 			OrganizationID: request.Scope.OrganizationID, EventType: "INFERENCE_RESERVED", SourceActorID: "runtime",

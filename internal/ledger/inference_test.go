@@ -35,7 +35,7 @@ func testInferenceRequest(id string) inference.InferenceRequest {
 	digest := sha256.Sum256([]byte("prompt-" + id))
 	return inference.InferenceRequest{
 		Scope: inference.Scope{
-			OrganizationID: "organization-1", Purpose: inference.PurposeTaskExecution, RequestID: id,
+			OrganizationID: "organization-1", Purpose: inference.PurposePlanning, RequestID: id, IntentID: "intent-1",
 			TaskID: "task-1", ExecutionID: id, CorrelationID: "work-1",
 		},
 		Descriptor:   execution.ModelDescriptor{Provider: "provider-1", Model: "model-1", ExecutionProfileVersion: "profile-v1"},

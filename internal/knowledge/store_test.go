@@ -22,6 +22,7 @@ func TestStoreAdmitsValidatedKnowledgeAndRetrievesOnlyActiveTenantScope(t *testi
 	service := New(gateway)
 
 	candidate := knowledgeCandidate("k-1", "org-1", orgOneEvent.EventID)
+	candidate.Content = "The rollback rehearsal restored three inventory records."
 	proposed, err := service.Propose(ctx, candidate)
 	if err != nil || proposed.EventType != "KNOWLEDGE_PROPOSED" {
 		t.Fatalf("propose knowledge: event=%+v err=%v", proposed, err)
@@ -97,7 +98,8 @@ func TestStoreAdmitsValidatedKnowledgeAndRetrievesOnlyActiveTenantScope(t *testi
 	if err != nil {
 		t.Fatalf("admit validator judgment: %v", err)
 	}
-	statement := publishKnowledgeHumanStatement(t, ctx, gateway, "org-1", candidate.KnowledgeID, lease.ActorID, taskID, judgment.EventID, "work-knowledge-validation")
+	statement := publishKnowledgeHumanStatement(t, ctx, gateway, "org-1", candidate.KnowledgeID, lease.ActorID, taskID, judgment.EventID, "work-knowledge-validation", core.KnowledgeFactualReference)
+	active.ContextUse = core.KnowledgeFactualReference
 	active.ValidationRefs = []string{judgment.EventID, statement.EventID}
 	verifiedBeforeEvidence := judgment.CreatedAt.Add(-time.Nanosecond)
 	active.LastVerifiedAt = &verifiedBeforeEvidence
@@ -214,7 +216,7 @@ func assertActiveKnowledgeSelectedAtExecutionStart(t *testing.T, ctx context.Con
 			RuntimeAdapter: task.AgentConfig.RuntimeAdapter, Provider: "test", Model: "test", TaskID: task.ID,
 			TaskContractVersion: task.TaskContractVersion, PromptVersion: "test", PolicyVersion: "v1",
 			KnowledgeRefs:         []core.VersionedRef{{ID: string(knowledge.KnowledgeID), Version: strconv.Itoa(knowledge.Version), MaterializationState: core.MaterializedFull}},
-			ContextBuilderVersion: "v4", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
+			ContextBuilderVersion: "v5", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
 		}, nil
 	}); err != nil {
 		t.Fatalf("start Agent execution with active knowledge: %v", err)
@@ -1046,13 +1048,17 @@ func appendKnowledgeValidationLifecycle(t *testing.T, ctx context.Context, store
 	return validation
 }
 
-func publishKnowledgeHumanStatement(t *testing.T, ctx context.Context, gateway *events.Gateway, organizationID, knowledgeID, actorID, taskID core.ID, capabilityCheckEventID, correlationID string) events.Event {
+func publishKnowledgeHumanStatement(t *testing.T, ctx context.Context, gateway *events.Gateway, organizationID, knowledgeID, actorID, taskID core.ID, capabilityCheckEventID, correlationID string, contextUses ...core.KnowledgeContextUse) events.Event {
 	t.Helper()
+	var contextUse core.KnowledgeContextUse
+	if len(contextUses) == 1 {
+		contextUse = contextUses[0]
+	}
 	event, err := gateway.PublishTrusted(ctx, events.TrustedDraft{
 		OrganizationID: string(organizationID), EventType: "HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED", SourceActorID: string(actorID),
 		TaskID: string(taskID), CorrelationID: correlationID,
 		Payload: events.KnowledgeJudgmentPayload{
-			KnowledgeID: knowledgeID, CandidateVersion: 1, Decision: events.KnowledgeJudgmentValidated,
+			KnowledgeID: knowledgeID, CandidateVersion: 1, Decision: events.KnowledgeJudgmentValidated, ContextUse: contextUse,
 			Statement: "I independently validate this knowledge candidate.", CapabilityCheckEventID: capabilityCheckEventID,
 			SourcePrincipalID: string(actorID), SourcePrincipalKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", ArtifactRefs: []string{},
 		},

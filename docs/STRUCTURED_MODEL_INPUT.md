@@ -68,9 +68,12 @@ they do not prove that a model will resist prompt injection. Runtime authority,
 effect admission, independent verification, and completion controls remain
 necessary even when model output follows the requested schema.
 
-New Agent executions require context-builder `v4`, whose manifest fingerprints
+New Agent executions require context-builder `v5`, whose manifest fingerprints
 the canonical, invocation-bound request. Replay reconstructs those bytes from
-the selected durable sources. Historical `v1`, `v2`, and `v3` manifests retain
+the selected durable sources. v5 additionally requires the independently
+admitted factual-reference classification described in
+[`ORGANIZATIONAL_KNOWLEDGE.md`](ORGANIZATIONAL_KNOWLEDGE.md#execution-context-status).
+Historical `v1`, `v2`, `v3`, and `v4` manifests retain
 their original materialization rules; new executions cannot select them.
 Planning uses prompt contract `task-planner-v2` with separate accepted-Intent
 and strategy messages.

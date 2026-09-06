@@ -61,7 +61,7 @@ func executionIDFromTestStream(t *testing.T, stream []events.Event, taskID core.
 }
 
 func structuredTestInput(organizationID, executionID core.ID, input core.AgentExecutionInputContext) (string, error) {
-	binding, err := core.BindAgentExecutionInput(organizationID, executionID, input)
+	binding, err := core.BindCurrentAgentExecutionInput(organizationID, executionID, input)
 	if err != nil {
 		return "", err
 	}

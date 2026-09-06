@@ -139,7 +139,7 @@ func (a *AgentExecution) Execute(ctx context.Context, task core.Task, manifest c
 	}
 	var response ModelResponse
 	var err error
-	if manifest.ContextBuilderVersion == "v4" {
+	if manifest.ContextBuilderVersion == "v4" || manifest.ContextBuilderVersion == "v5" {
 		response, err = a.completeStructured(ctx, prompt, manifest)
 	} else {
 		response, err = a.model.Complete(ctx, prompt)

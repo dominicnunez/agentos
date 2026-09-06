@@ -11,6 +11,7 @@
     "validation_method"
   ],
   "properties": {
+    "context_use": { "enum": ["FACTUAL_REFERENCE", "BEHAVIORAL_POLICY"] },
     "knowledge_id": { "type": "string" },
     "organization_id": { "type": "string" },
     "version": { "type": "integer", "minimum": 1 },
@@ -52,6 +53,19 @@
     "supersedes_version": { "type": "integer", "minimum": 1 }
   },
   "allOf": [
+    {
+      "if": { "required": ["context_use"] },
+      "then": {
+        "required": ["validated_by", "validated_by_kind", "last_verified_at", "validation_refs"],
+        "properties": {
+          "status": { "not": { "const": "CANDIDATE" } },
+          "validation_method": { "const": "HUMAN_JUDGMENT" },
+          "validated_by_kind": { "const": "HUMAN" },
+          "validated_by": { "minLength": 1 },
+          "validation_refs": { "minItems": 1 }
+        }
+      }
+    },
     {
       "if": { "properties": { "basis": { "const": "REPEATED_PATTERN" } }, "required": ["basis"] },
       "then": { "required": ["occurrence_event_refs"], "properties": { "occurrence_event_refs": { "minItems": 3 } } }

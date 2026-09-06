@@ -134,6 +134,32 @@ truth, or demonstrate ISO/IEC 42001 conformity or certification.
 
 ## Execution-context status
 
+New model context requires an explicit `context_use: FACTUAL_REFERENCE`
+classification. The independent human validator records that classification
+in the exact-candidate `HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED` statement; activation
+must carry the same value. The statement's existing capability, identity,
+candidate, scope and evidence checks remain required. A human author cannot
+classify their own candidate. Candidate revisions have no classification, and
+terminal revisions preserve the admitted classification.
+
+`FACTUAL_REFERENCE` means factual or reference evidence for the assigned work,
+without reusable instructions that steer unrelated choices or task outcomes.
+For example, an observed vendor inventory count is factual evidence; a rule
+to prefer that vendor regardless of the Task's criteria is behavioral policy.
+The validator must inspect the complete exact candidate, including applicability
+and limitations. This is an accountable human judgment, not a keyword detector
+or a guarantee of factual truth. Record type alone never establishes eligibility.
+
+An absent classification remains valid for historical records and ordinary
+knowledge search, but is excluded from new model context. Explicit
+`BEHAVIORAL_POLICY` records are also excluded: generic knowledge validation
+does not supply the independent behavioral evidence required by
+[`EXECUTION_AUTHORITY.md`](EXECUTION_AUTHORITY.md#skill-behavioral-policy-integrity).
+Agent judgments and deterministic validation cannot substitute for the human
+factual classification. The same requirement applies to every transitive
+Knowledge source of a selected derivative. No Skill reference is needed for
+this boundary to apply.
+
 Agent executions receive a deterministic bounded selection of relevant current
 knowledge. Selection, input materialization, the execution-input digest, the
 exact context manifest, and execution start are admitted in one SQLite
@@ -153,9 +179,11 @@ subject to the separate 256 KiB execution-context limit. Records that do not
 fit are not represented as materialized. Every included record is listed by
 exact identity and version with `FULL` materialization in the
 `ExecutionContextManifest`. Knowledge-aware historical executions use
-context-builder `v2`; current executions use `v3`, which preserves the same
-knowledge selection while also binding the same-Work peer snapshot. Historical
-`v1` and `v2` manifests remain replayable under their original contracts.
+context-builder `v2`; `v3` adds the same-Work peer snapshot and `v4` binds structured
+message roles and sources. Current executions use `v5`, which also enforces the
+factual classification boundary. New starts reject earlier builder versions.
+Historical `v1` through `v4` manifests remain replayable under their original
+contracts and are not silently reclassified.
 
 Completion admission reconstructs knowledge history from sealed projection
 Event Contracts at the execution-start sequence, reruns the same scope,
@@ -164,3 +192,29 @@ match before recomputing the execution-input digest. Later supersession,
 staleness, or quarantine does not rewrite the historical input, while a record
 that was not active and in scope at the start cannot be claimed by the
 execution.
+
+For v5 outcomes, completion validation additionally checks the exact manifested
+revisions, scope and transitive lineage immediately before the outcome event.
+An earlier invalidation prevents that outcome from supporting completion.
+Invalidations after the outcome do not rewrite its historical input or its
+validity at that earlier boundary. Newer unrelated records do not evict a valid
+manifested reference through a second relevance-ranking pass.
+
+Task completion and Work completion admission repeat that validity check at
+their own event sequence, including both aggregate Work evidence and the final
+Work-completed transition. An outcome's earlier validity cannot override an
+invalidation that precedes completion admission. Recovery uses those same
+historical boundaries rather than applying present-day state retroactively.
+
+New Goal progress also checks Knowledge validity when it consumes completed
+Work evidence. Recovery of an existing Goal evaluation uses that evaluation's
+sequence, so later invalidation does not rewrite a valid earlier achievement.
+
+Task inference reservation also checks the exact running execution, v5 manifest,
+provider/model/profile and input digest inside the budget transaction. It checks
+Knowledge and source lineage at that boundary and rejects finished executions.
+The request ID must identify the execution itself, so changing a request ID
+cannot reuse the same execution admission. New reservations bind an
+`execution_manifest_ref`; recovery checks the referenced execution and Knowledge
+at the reservation sequence. Missing or substituted v5 references fail closed.
+Pre-v5 inference accounting retains its historical contract.

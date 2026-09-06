@@ -530,7 +530,7 @@ func ValidateWorkCompletionAdmissions(ctx context.Context, db *sql.DB) error {
 			if err := validateHistoricalPriorActiveWork(ctx, tx, item); err != nil {
 				return fmt.Errorf("completed Work %s lacks its exact prior state: %w", candidate.value.ID, err)
 			}
-			if err := validateWorkCompletionEvidence(ctx, tx, item, detail); err != nil {
+			if err := validateWorkCompletionEvidenceAtSequence(ctx, tx, item, detail, transition.Sequence); err != nil {
 				return fmt.Errorf("completed Work %s lacks exact durable evidence: %w", candidate.value.ID, err)
 			}
 			evidenceEvent, err := scanEvent(tx.QueryRowContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_id=?`, detail.EvidenceEventRef))
@@ -1033,7 +1033,15 @@ FROM events WHERE organization_id=? AND event_type='WORK_COMPLETED' AND json_ext
 			},
 			ProjectionKind: "work", RecordID: string(work.ID), Version: payload.Projection.Version, Value: work,
 		}, true, false)
-		if err != nil || validateWorkCompletionEvidence(ctx, tx, item, detail) != nil {
+		if err != nil {
+			return nil, fmt.Errorf("goal Work completion cannot be prepared: %w", err)
+		}
+		if beforeSequence > 0 {
+			err = validateWorkCompletionEvidenceAtSequence(ctx, tx, item, detail, beforeSequence)
+		} else {
+			err = validateWorkCompletionEvidence(ctx, tx, item, detail)
+		}
+		if err != nil {
 			return nil, fmt.Errorf("goal Work completion lacks authoritative evidence")
 		}
 		row := tx.QueryRowContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_id=?`, detail.EvidenceEventRef)
@@ -1272,7 +1280,7 @@ ORDER BY e.sequence`, draft.Event.OrganizationID, route.Scope, route.ID, cutoff)
 		}
 		if _, err := appendEvent(ctx, tx, events.TrustedDraft{
 			OrganizationID: draft.Event.OrganizationID, EventType: "EXECUTION_CONTEXT_MANIFESTED",
-			SourceExecutionID: string(manifest.ExecutionID), TaskID: string(task.ID),
+			SourceActorID: "runtime", SourceExecutionID: string(manifest.ExecutionID), TaskID: string(task.ID),
 			Payload: manifest, CorrelationID: draft.Event.CorrelationID,
 		}); err != nil {
 			return fmt.Errorf("append atomic Agent execution manifest: %w", err)
@@ -1309,10 +1317,11 @@ func currentExecutionKnowledgeRecords(ctx context.Context, tx *sql.Tx, organizat
 ) AS latest ON latest.record_id=r.record_id AND latest.version=r.version
 WHERE r.kind='knowledge' AND e.organization_id=? AND e.sequence<?
 AND json_extract(r.body,'$.value.status')=?
+AND json_extract(r.body,'$.value.context_use')=?
 AND ((json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scope_id')=?)
 OR (json_extract(r.body,'$.value.scope')=? AND json_extract(r.body,'$.value.scope_id')=?)`
 	args := []any{
-		organizationID, organizationID, startSequence, string(core.KnowledgeActive),
+		organizationID, organizationID, startSequence, string(core.KnowledgeActive), string(core.KnowledgeFactualReference),
 		string(core.KnowledgeScopeOrganization), organizationID,
 		string(core.KnowledgeScopeAgent), string(task.AssigneeID),
 	}
@@ -1389,7 +1398,7 @@ func validateExecutionStartManifest(ctx context.Context, tx *sql.Tx, task core.T
 	if manifest.ExecutionID == "" || manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID ||
 		manifest.AgentBlueprintVersion == "" || manifest.ExecutionProfileVersion == "" || manifest.RuntimeAdapter == "" ||
 		manifest.Provider == "" || manifest.Model == "" || manifest.TaskContractVersion == "" || manifest.PromptVersion == "" ||
-		manifest.PolicyVersion == "" || manifest.ContextBuilderVersion != "v4" || manifest.CreatedAt.IsZero() || offset != 0 ||
+		manifest.PolicyVersion == "" || manifest.ContextBuilderVersion != "v5" || manifest.CreatedAt.IsZero() || offset != 0 ||
 		!manifest.CreatedAt.Equal(started.CreatedAt) || len(manifest.ExecutionInputSHA256) != sha256.Size*2 {
 		return fmt.Errorf("agent execution manifest identity and pinned runtime are invalid")
 	}
@@ -3064,6 +3073,14 @@ func validatePriorActiveWork(ctx context.Context, tx *sql.Tx, item preparedProje
 }
 
 func validateWorkCompletionEvidence(ctx context.Context, tx *sql.Tx, item preparedProjection, detail events.WorkCompletionTransitionPayload) error {
+	var lastSequence int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0) FROM events`).Scan(&lastSequence); err != nil {
+		return fmt.Errorf("read Work completion sequence: %w", err)
+	}
+	return validateWorkCompletionEvidenceAtSequence(ctx, tx, item, detail, lastSequence+1)
+}
+
+func validateWorkCompletionEvidenceAtSequence(ctx context.Context, tx *sql.Tx, item preparedProjection, detail events.WorkCompletionTransitionPayload, completionSequence int64) error {
 	row := tx.QueryRowContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE event_id=?`, detail.EvidenceEventRef)
 	evidenceEvent, err := scanEvent(row)
 	if err != nil {
@@ -3155,6 +3172,8 @@ func validateWorkCompletionEvidence(ctx context.Context, tx *sql.Tx, item prepar
 		Work: *item.work, WorkVersion: item.draft.Version, Intent: intent, Tasks: tasks,
 		TeamRevisions: teamRevisions, InboxObservations: inboxObservations, AgentBlueprints: blueprints, ExecutionProfiles: profiles,
 	}
+	binding.CompletionSequence = completionSequence
+	// Overflow or a non-forward boundary is rejected by the shared validator.
 	evidence, err := events.ValidateWorkCompletionEvidenceChain(binding, evidenceEvent, stream)
 	if err != nil {
 		return err

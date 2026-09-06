@@ -951,7 +951,7 @@ func assignedTask(assigneeID core.ID, config core.AgentConfig) core.Task {
 	}
 }
 
-func appendTaskAssignmentAgent(t *testing.T, ctx context.Context, store *SQLite, organizationID, suffix string, includeOrganization bool) (core.Agent, core.AgentConfig) {
+func appendTaskAssignmentAgent(t testing.TB, ctx context.Context, store *SQLite, organizationID, suffix string, includeOrganization bool) (core.Agent, core.AgentConfig) {
 	t.Helper()
 	now := time.Now().UTC()
 	organization := core.Organization{ID: core.ID(organizationID), Name: organizationID, PolicyVersion: "v1", CreatedAt: now}
@@ -1027,7 +1027,7 @@ func testAgentStartManifest(task core.Task, selection events.ExecutionStartSelec
 		AgentBlueprintVersion: blueprintVersion, ExecutionProfileVersion: profileVersion, RuntimeAdapter: runtimeAdapter,
 		Provider: "test", Model: "test", TaskID: task.ID, TaskContractVersion: task.TaskContractVersion,
 		PromptVersion: "test", PolicyVersion: "v1", EventRefs: eventRefs, KnowledgeRefs: knowledgeRefs, CoordinationRefs: coordinationRefs,
-		ContextBuilderVersion: "v4", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
+		ContextBuilderVersion: "v5", ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: selection.Started.CreatedAt,
 	}
 }
 
@@ -1125,7 +1125,7 @@ func TestAgentExecutionStartBindsExactSameWorkPeerCoordination(t *testing.T) {
 		}
 	}
 	expected := []core.VersionedRef{{ID: string(peer.ID), Version: "2", MaterializationState: core.MaterializedFull}}
-	if !slices.Equal(manifest.CoordinationRefs, expected) || manifest.ContextBuilderVersion != "v4" {
+	if !slices.Equal(manifest.CoordinationRefs, expected) || manifest.ContextBuilderVersion != "v5" {
 		t.Fatalf("execution manifest did not bind peer coordination: %+v", manifest)
 	}
 }
@@ -1172,7 +1172,7 @@ func TestAgentExecutionManifestReferenceLimitIsTerminalizable(t *testing.T) {
 		ExecutionID: "execution-reference-limit", AgentID: task.AssigneeID,
 		AgentBlueprintVersion: "blueprint-v1", ExecutionProfileVersion: "profile-v1", RuntimeAdapter: "runtime-v1",
 		Provider: "provider", Model: "model", TaskID: task.ID, TaskContractVersion: task.TaskContractVersion,
-		PromptVersion: "prompt-v1", PolicyVersion: "v1", ContextBuilderVersion: "v4",
+		PromptVersion: "prompt-v1", PolicyVersion: "v1", ContextBuilderVersion: "v5",
 		ExecutionInputSHA256: core.FingerprintExecutionInput("bounded input"), CreatedAt: now,
 		EventRefs: make([]string, 1025),
 	}
@@ -2890,15 +2890,15 @@ func TestExecutionStartRequiresCurrentContextBuilderVersion(t *testing.T) {
 		TaskContractVersion: "v1", PromptVersion: "v1", PolicyVersion: "v1", ContextBuilderVersion: "v1",
 		ExecutionInputSHA256: core.FingerprintExecutionInput("test"), CreatedAt: created,
 	}
-	for _, version := range []string{"v1", "v2", "v3"} {
+	for _, version := range []string{"v1", "v2", "v3", "v4"} {
 		manifest.ContextBuilderVersion = version
 		if err := validateExecutionStartManifest(context.Background(), nil, task, started, events.ExecutionStartDetail{}, events.ExecutionStartSelection{}, manifest); err == nil {
 			t.Fatalf("new execution admitted the historical %s context-builder contract", version)
 		}
 	}
-	manifest.ContextBuilderVersion = "v4"
+	manifest.ContextBuilderVersion = "v5"
 	if err := validateExecutionStartManifest(context.Background(), nil, task, started, events.ExecutionStartDetail{}, events.ExecutionStartSelection{}, manifest); err != nil {
-		t.Fatalf("current v4 context-builder contract was rejected: %v", err)
+		t.Fatalf("current v5 context-builder contract was rejected: %v", err)
 	}
 }
 
@@ -2914,6 +2914,13 @@ func TestExecutionKnowledgeRejectsUnboundedTeamScopes(t *testing.T) {
 }
 
 func TestExecutionKnowledgeCandidateLimitIsTerminalizable(t *testing.T) {
+	for _, use := range []core.KnowledgeContextUse{"", core.KnowledgeBehavioralPolicy, core.KnowledgeFactualReference} {
+		t.Run("classification="+string(use), func(t *testing.T) { testExecutionKnowledgeCandidateLimit(t, use) })
+	}
+}
+
+func testExecutionKnowledgeCandidateLimit(t *testing.T, use core.KnowledgeContextUse) {
+	t.Helper()
 	ctx := t.Context()
 	store, err := Open(":memory:")
 	if err != nil {
@@ -2926,11 +2933,16 @@ func TestExecutionKnowledgeCandidateLimitIsTerminalizable(t *testing.T) {
 	}
 	defer func() { _ = tx.Rollback() }()
 	createdAt := time.Now().UTC()
-	for index := 1; index <= maximumCurrentExecutionKnowledgeScan+1; index++ {
+	for index := 1; index <= maximumCurrentExecutionKnowledgeScan+2; index++ {
 		recordID := fmt.Sprintf("knowledge-%04d", index)
+		classification := use
+		if index == maximumCurrentExecutionKnowledgeScan+2 {
+			classification = core.KnowledgeFactualReference
+		}
 		value, err := json.Marshal(core.KnowledgeRecord{
 			KnowledgeID: core.ID(recordID), OrganizationID: "org-1", Version: 1,
 			Scope: core.KnowledgeScopeOrganization, ScopeID: "org-1", Status: core.KnowledgeActive,
+			ContextUse: classification,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -2961,7 +2973,13 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, event.Sequence, event.EventID, event.Org
 			t.Fatal(err)
 		}
 	}
-	_, err = currentExecutionKnowledgeRecords(ctx, tx, "org-1", core.Task{AssigneeID: "agent-1"}, maximumCurrentExecutionKnowledgeScan+2, nil)
+	records, err := currentExecutionKnowledgeRecords(ctx, tx, "org-1", core.Task{AssigneeID: "agent-1"}, maximumCurrentExecutionKnowledgeScan+3, nil)
+	if use != core.KnowledgeFactualReference {
+		if err != nil || len(records) != 1 {
+			t.Fatalf("excluded classification exhausted factual scan: count=%d err=%v", len(records), err)
+		}
+		return
+	}
 	if !errors.Is(err, core.ErrExecutionContextLimitExceeded) {
 		t.Fatalf("knowledge candidate overflow was not terminalizable: %v", err)
 	}

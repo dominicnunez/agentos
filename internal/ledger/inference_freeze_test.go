@@ -45,6 +45,12 @@ func TestInferenceRejectsFrozenOrganization(t *testing.T) {
 			}
 			store.now = func() time.Time { return now.Add(time.Minute) }
 			appendInferenceFreeze(t, store, "organization-1", 2, false)
+			if purpose == inference.PurposeTaskExecution {
+				if _, err := store.ReserveInference(t.Context(), request); err == nil || !strings.Contains(err.Error(), "admitted running execution") {
+					t.Fatalf("unfreezing supplied missing Task execution authority: %v", err)
+				}
+				return
+			}
 			if _, err := store.ReserveInference(t.Context(), request); err != nil {
 				t.Fatalf("release did not permit first admission: %v", err)
 			}
