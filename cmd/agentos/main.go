@@ -107,29 +107,35 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 	if err := validatePublicURL(publicURL, remote, externalActors != nil, tlsConfig != nil); err != nil {
 		return err
 	}
-	recoveredInference, err := prepareInferenceAdmissions(ctx, l, config.Providers[0].InferencePolicy)
+	policies := make([]inference.Policy, len(config.Providers))
+	for i, provider := range config.Providers {
+		policies[i] = provider.InferencePolicy
+	}
+	recoveredInference, err := prepareInferenceAdmissions(ctx, l, policies...)
 	if err != nil {
 		return err
 	}
 	if recoveredInference > 0 {
 		log.Printf("inference reservations require conservative reconciliation: count=%d", recoveredInference)
 	}
-	rawModel, closeModel, err := configuredProvider(ctx, config.Providers[0], providerRuntimeDirectory(config), source)
+	models, err := composeRuntimeModels(ctx, config, source, l, configuredProvider)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		err = errors.Join(err, closeModel())
-	}()
-	model, err := inference.NewGuardedAdapter(l, rawModel)
+	defer func() { err = errors.Join(err, models.close()) }()
+	planner, err := planning.NewModelPlanner(planningModel{adapter: models.planning})
 	if err != nil {
 		return err
 	}
-	planner, err := planning.NewModelPlanner(planningModel{adapter: model})
-	if err != nil {
-		return err
+	var service *app.Service
+	if models.registry != nil {
+		service, err = app.NewWithConnections(events.NewGateway(l), models.registry, app.TaskConnectionRouting{Default: config.Routing.TaskDefault, ByTaskKey: config.Routing.TaskConnections}, planner)
+		if err != nil {
+			return err
+		}
+	} else {
+		service = app.NewWithModelAndPlanner(events.NewGateway(l), models.task, planner)
 	}
-	service := app.NewWithModelAndPlanner(events.NewGateway(l), model, planner)
 	if _, err := service.Recover(ctx); err != nil {
 		return fmt.Errorf("recover durable runtime before serving: %w", err)
 	}
@@ -140,7 +146,7 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 	for _, item := range effectRecovery {
 		log.Printf("effect requires reconciliation: effect_id=%s task_id=%s reason=%s", item.EffectID, item.TaskID, item.Reason)
 	}
-	normalizer, err := intake.NewModelNormalizer(intakeModel{adapter: model})
+	normalizer, err := intake.NewModelNormalizer(intakeModel{adapter: models.normalization})
 	if err != nil {
 		return err
 	}
@@ -191,7 +197,26 @@ type inferenceAdmissionStore interface {
 	ActivateInferencePolicy(context.Context, inference.Policy) error
 }
 
-func prepareInferenceAdmissions(ctx context.Context, store inferenceAdmissionStore, policy inference.Policy) (int, error) {
+type inferencePolicySetStore interface {
+	ActivateInferencePolicies(context.Context, []inference.Policy) error
+}
+
+func prepareInferenceAdmissions(ctx context.Context, store inferenceAdmissionStore, policies ...inference.Policy) (int, error) {
+	if len(policies) == 0 || len(policies) > 1024 {
+		return 0, fmt.Errorf("startup requires 1 to 1024 inference policies")
+	}
+	policy := policies[0]
+	var setStore inferencePolicySetStore
+	if len(policies) > 1 || policy.Version == inference.ConnectionPolicyVersion {
+		if err := inference.ValidatePolicySet(policies); err != nil {
+			return 0, fmt.Errorf("validate startup inference policies: %w", err)
+		}
+		var ok bool
+		setStore, ok = store.(inferencePolicySetStore)
+		if !ok {
+			return 0, fmt.Errorf("startup requires atomic connection policy activation")
+		}
+	}
 	if store == nil {
 		return 0, fmt.Errorf("inference admission store is required")
 	}
@@ -202,7 +227,13 @@ func prepareInferenceAdmissions(ctx context.Context, store inferenceAdmissionSto
 	if err != nil {
 		return 0, fmt.Errorf("recover incomplete inference reservations: %w", err)
 	}
-	if err := store.ActivateInferencePolicy(ctx, policy); err != nil {
+	var activationErr error
+	if setStore != nil {
+		activationErr = setStore.ActivateInferencePolicies(ctx, policies)
+	} else {
+		activationErr = store.ActivateInferencePolicy(ctx, policy)
+	}
+	if err := activationErr; err != nil {
 		return 0, fmt.Errorf("activate reviewed inference policy: %w", err)
 	}
 	if err := store.ValidateInferenceAdmissions(ctx); err != nil {
@@ -218,7 +249,7 @@ type planningModel struct{ adapter execution.ModelAdapter }
 func (m planningModel) Descriptor() planning.Descriptor {
 	descriptor := m.adapter.Descriptor()
 	return planning.Descriptor{
-		Provider: descriptor.Provider, Model: descriptor.Model,
+		ConnectionID: modelConnectionID(m.adapter), Provider: descriptor.Provider, Model: descriptor.Model,
 		ExecutionProfileVersion: descriptor.ExecutionProfileVersion,
 	}
 }
@@ -238,7 +269,7 @@ func (m planningModel) CompleteRequest(ctx context.Context, request modelinput.R
 func (m intakeModel) Descriptor() intake.NormalizerDescriptor {
 	descriptor := m.adapter.Descriptor()
 	return intake.NormalizerDescriptor{
-		Provider: descriptor.Provider, Model: descriptor.Model,
+		ConnectionID: modelConnectionID(m.adapter), Provider: descriptor.Provider, Model: descriptor.Model,
 		ExecutionProfileVersion: descriptor.ExecutionProfileVersion,
 	}
 }
@@ -563,4 +594,11 @@ func validatePublicURL(publicURL string, remote, a2aEnabled, tlsEnabled bool) er
 		return fmt.Errorf("TLS listeners require an HTTPS a2a.public_url")
 	}
 	return nil
+}
+
+func modelConnectionID(adapter execution.ModelAdapter) string {
+	if bound, ok := adapter.(execution.ConnectionBoundModelAdapter); ok {
+		return bound.ConnectionID()
+	}
+	return ""
 }

@@ -314,7 +314,17 @@ func installSystemRuntimeFrom(ctx context.Context, config bootstrap.Config, serv
 }
 
 func prepareSystemProviderState(config bootstrap.Config, serviceUID, serviceGID int) error {
-	provider := config.Providers[0]
+	if err := config.Routing.Validate(config.Providers); err != nil {
+		return err
+	}
+	for _, provider := range config.Providers {
+		if err := prepareSingleSystemProviderState(config, provider, serviceUID, serviceGID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func prepareSingleSystemProviderState(config bootstrap.Config, provider bootstrap.Provider, serviceUID, serviceGID int) error {
 	if provider.Kind != bootstrap.ProviderCodexSubscription {
 		return nil
 	}
@@ -728,18 +738,19 @@ WantedBy=default.target
 }
 
 func serviceCredentialDirectives(config bootstrap.Config) (string, error) {
-	if len(config.Providers) != 1 {
-		return "", fmt.Errorf("exactly one configured provider is required")
+	if err := config.Routing.Validate(config.Providers); err != nil {
+		return "", err
 	}
-	provider := config.Providers[0]
-	references := map[string]struct{}{provider.SecretRef: {}}
+	references := map[string]struct{}{}
 	var directives strings.Builder
-	switch provider.Kind {
-	case bootstrap.ProviderOpenAIAPI:
-		if err := appendServiceCredential(&directives, "LoadCredentialEncrypted", provider.SecretRef, filepath.Join(config.Paths.ConfigDir, "credentials", provider.SecretRef+".cred")); err != nil {
+	for _, provider := range config.Providers {
+		if err := provider.Validate(); err != nil {
 			return "", err
 		}
-	case bootstrap.ProviderCodexSubscription:
+		if _, exists := references[provider.SecretRef]; exists {
+			continue
+		}
+		references[provider.SecretRef] = struct{}{}
 		if err := appendServiceCredential(&directives, "LoadCredentialEncrypted", provider.SecretRef, filepath.Join(config.Paths.ConfigDir, "credentials", provider.SecretRef+".cred")); err != nil {
 			return "", err
 		}
@@ -987,4 +998,11 @@ func fileOwner(path string) (int, os.FileMode, error) {
 		return 0, 0, fmt.Errorf("file ownership is unavailable")
 	}
 	return int(stat.Uid), info.Mode(), nil
+}
+
+func ensureProviderApplyPrivileges(ctx context.Context, config bootstrap.Config, ui *terminalUI) (bool, error) {
+	if config.Mode != bootstrap.ModeSystem || effectiveUID() == 0 {
+		return false, nil
+	}
+	return runAdministratorSetup(ctx, ui, "administrator provider application failed", "setup", "providers")
 }

@@ -1,10 +1,69 @@
 # Inference connections and shared budgets
 
-The inference library and ledger support multiple independently identified
-provider connections. Runtime setup still accepts one provider, and task assignment
-still uses one model descriptor. This document describes the implemented foundation;
-it does not claim that installation, task-specific routing, provider discovery, or
-Hermes provider coverage is complete.
+The runtime supports multiple configured provider connections at once. Explicit
+installation rules select accounts for task execution, planning, and intent
+normalization. Tasks pin immutable execution profiles; changing an Agent's current
+profile or the installation default cannot redirect an already assigned task.
+The supported adapters remain OpenAI API and Codex subscription. This is not a
+claim of complete Hermes coverage or automatic capability-aware model selection.
+
+## Installation configuration
+
+Version-2 installation files may contain `provider_routing`. An existing file
+without that field retains its single unnamed provider. Named connections require
+version-2 inference policies and an explicit route for every inference purpose.
+For example, add this section alongside two fully configured provider entries:
+
+```json
+"provider_routing": {
+  "task_default": "primary",
+  "task_connections": { "research": "auxiliary" },
+  "planning": "auxiliary",
+  "normalization": "auxiliary"
+}
+```
+
+The two provider policies must use `connection_id` values `primary` and `auxiliary`.
+Each retains its exact provider/model/profile, credential reference, authorization,
+and per-route limits. Set policy `version` to `2` and include the same reviewed
+`organization_budget` in each, for example for zero-cost subscription accounting:
+
+```json
+"organization_budget": {
+  "window_duration_seconds": 3600,
+  "max_tokens_per_window": 100000,
+  "continuity_reserve_tokens": 10000,
+  "max_cost_nano_usd_per_window": 0,
+  "max_concurrent_requests": 2
+}
+```
+
+These fragments extend a complete reviewed installation; they are not standalone
+configuration files. Choose limits appropriate to the authorized work. Metered
+routes also require current pricing and a sufficient organization monetary cap.
+All policies in an applied set must share organization, author, authorization time,
+and organization limits. Changing accounts or routes never resets accumulated usage.
+
+Task rules match exact planned task keys (lowercase letters/digits/hyphens, up to
+64 characters). A key without a rule uses the explicit task default. A rule cannot
+select an absent account. This is configuration-based selection, not fallback or
+permission to weaken task, completion, confidentiality, or budget requirements.
+
+Provision every referenced encrypted credential before applying the configuration.
+Codex connections need distinct mutable sealed credential stores. After editing
+the installed configuration, run `agentos doctor` for offline readiness checks and
+`agentos setup providers` to validate the full set, regenerate service credential
+directives, and restart the service if it is running. User-mode application requires
+the installation owner; system mode uses the existing administrator setup flow.
+The apply command does not probe providers or recollect credentials. The singular
+`agentos setup provider` wizard remains for single-provider installations and
+rejects routed configurations instead of replacing their provider list.
+
+Startup recovers accounting once and activates the reviewed policy set atomically.
+Every adapter receives a credential source limited to its configured reference and
+a private runtime directory under `connections/<connection_id>`. Partial startup
+closes initialized adapters in reverse order. Doctor and generated systemd units
+cover every configured account.
 
 ## Connection identity
 
@@ -78,17 +137,26 @@ they must share an authorization and restore agreement before any other event or
 the end of history. Recovery validates accounting before marking calls uncertain.
 It does not repeat provider calls.
 
+Planning and normalization reservations bind the exact runtime context event when
+one exists. Admission and replay verify its account, model identity, and execution
+scope. Named connections cannot drop or substitute that reference during replay.
+Historical singleton contexts without references and standalone accounting requests
+without application context retain their earlier accounting contract.
+
 ## Remaining integration
 
-Configuration and task routing must bind reviewed tasks to configured connections,
-including primary and auxiliary purposes. Capability and context filtering,
+Capability and context filtering,
 destination and locality restrictions, constraint-preserving fallback, additional
 provider adapters, and their setup flows remain separate implementation work.
 The registry currently records connection identity and adapters, not a complete
 capability catalog. Shared admission performs snapshot validation; its cost on long
-histories requires performance assessment before broader runtime integration.
+histories requires further performance assessment at larger deployment scales.
 
 Tests cover distinct and identical-model accounts, simultaneous reservations,
 connection substitution, shared token/cost/concurrency limits, atomic updates,
 historical budget decisions, migration, and restart recovery using synthetic models.
 These tests do not constitute live-provider or confinement verification.
+
+Concurrent-submission tests verify that separate workflows preserve account
+identity in task manifests and usage. The service currently serializes execution;
+these tests do not claim parallel model calls.

@@ -301,6 +301,9 @@ func NewGuardedAdapter(store Store, adapter execution.ModelAdapter) (*GuardedAda
 
 func (a *GuardedAdapter) Name() string { return a.adapter.Name() }
 
+// ConnectionID is set by trusted composition, never by the model response.
+func (a *GuardedAdapter) ConnectionID() string { return a.connectionID }
+
 func (a *GuardedAdapter) Descriptor() execution.ModelDescriptor { return a.adapter.Descriptor() }
 
 func (a *GuardedAdapter) Complete(ctx context.Context, prompt string) (execution.ModelResponse, error) {
@@ -335,6 +338,8 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 		}
 		return execution.ModelResponse{}, execution.SafeModelError(code, errors.Join(providerErr, reconcileErr))
 	}
+	// Account attribution belongs to runtime composition, not provider output.
+	response.Usage.ConnectionID = a.connectionID
 	if !response.Usage.Valid() || response.Usage.Provider != request.Descriptor.Provider || response.Usage.Model != request.Descriptor.Model || int64(response.Usage.InputTokens) > reservation.ReservedInputTokens || int64(response.Usage.OutputTokens) > reservation.ReservedOutputTokens {
 		reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reconciliationTimeout)
 		_, reconcileErr := a.store.ReconcileInference(reconcileCtx, reservation, &response.Usage, ReconciliationViolation)
@@ -367,12 +372,8 @@ func ValidConnectionID(value string) bool {
 		return false
 	}
 	for _, c := range value {
-		if c < 'a' || c > 'z' {
-			if c < '0' || c > '9' {
-				if c != '-' && c != '_' {
-					return false
-				}
-			}
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' && c != '_' {
+			return false
 		}
 	}
 	return true

@@ -29,6 +29,9 @@ const (
 
 var planKeyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
 
+// ValidTaskKey shares the exact key contract with trusted routing configuration.
+func ValidTaskKey(key string) bool { return planKeyPattern.MatchString(key) }
+
 // ValidateDeterministicObjective proves that the accepted objective can be
 // routed to a registered deterministic handler before durable confirmation.
 func ValidateDeterministicObjective(objective string) error {
@@ -39,6 +42,7 @@ func ValidateDeterministicObjective(objective string) error {
 }
 
 type Descriptor struct {
+	ConnectionID            string
 	PromptVersion           string
 	Provider                string
 	Model                   string
@@ -99,7 +103,7 @@ func NewModelPlanner(model TextCompleter) (*ModelPlanner, error) {
 	}
 	descriptor := model.Descriptor()
 	descriptor.PromptVersion = PromptVersion
-	if descriptor.Provider == "" || descriptor.Model == "" || descriptor.ExecutionProfileVersion == "" {
+	if (descriptor.ConnectionID != "" && !core.ValidInferenceConnectionID(descriptor.ConnectionID)) || descriptor.Provider == "" || descriptor.Model == "" || descriptor.ExecutionProfileVersion == "" {
 		return nil, fmt.Errorf("task planner requires complete model identity")
 	}
 	return &ModelPlanner{model: model, descriptor: descriptor}, nil
@@ -167,7 +171,7 @@ func (p *ModelPlanner) Build(ctx context.Context, input Input, kind core.Executi
 	if err != nil {
 		return Result{}, fmt.Errorf("plan accepted intent: %w", err)
 	}
-	if !response.Usage.Valid() || response.Usage.Provider != p.descriptor.Provider || response.Usage.Model != p.descriptor.Model {
+	if response.Usage.ConnectionID != p.descriptor.ConnectionID || !response.Usage.Valid() || response.Usage.Provider != p.descriptor.Provider || response.Usage.Model != p.descriptor.Model {
 		return Result{}, fmt.Errorf("task planner returned invalid model usage")
 	}
 	usage := response.Usage
@@ -278,7 +282,7 @@ func validateChildren(tasks []core.PlanTask) error {
 	}
 	known := make(map[string]struct{}, len(tasks))
 	for _, task := range tasks {
-		if task.Key == "root" || !planKeyPattern.MatchString(task.Key) {
+		if task.Key == "root" || !ValidTaskKey(task.Key) {
 			return fmt.Errorf("planned task key is invalid or runtime-reserved")
 		}
 		if _, duplicate := known[task.Key]; duplicate {

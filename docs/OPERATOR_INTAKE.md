@@ -62,8 +62,11 @@ all fail closed in V1.
 
 Run `agentos` with no arguments to start or resume setup. System installation
 is the default. `agentos init --user` selects the current-account alternative.
-Setup is not ready until one real model provider has passed its connection
-check.
+Initial setup verifies the selected real model provider. Existing installations
+can configure additional connections and explicit task, planning, and normalization
+routes as described in [Inference connections](INFERENCE_CONNECTIONS.md).
+`agentos setup providers` validates and applies that complete configuration;
+offline doctor checks every configured policy and credential.
 
 System mode uses:
 

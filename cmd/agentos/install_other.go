@@ -45,3 +45,7 @@ func doctorUserSocket(_ bootstrap.Config) (string, string) {
 func doctorService(_ context.Context, _ bootstrap.Config) (string, string) {
 	return "INFO", "Agent OS V1 service management is supported on Linux"
 }
+
+func ensureProviderApplyPrivileges(context.Context, bootstrap.Config, *terminalUI) (bool, error) {
+	return false, fmt.Errorf("Agent OS V1 setup is supported on Linux")
+}

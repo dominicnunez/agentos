@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 
 	"github.com/dominicnunez/agentos/internal/bootstrap"
 )
@@ -18,4 +19,8 @@ func localConnContext(ctx context.Context, _ net.Conn) context.Context { return 
 func effectiveUID() int                                                { return -1 }
 func validateRuntimeBoundary(bootstrap.Config) error {
 	return fmt.Errorf("Agent OS V1 runtime is supported on Linux")
+}
+
+func ensureOwnedRuntimeDirectory(string, int, os.FileMode) error {
+	return fmt.Errorf("Agent OS V1 runtime directories are supported on Linux")
 }

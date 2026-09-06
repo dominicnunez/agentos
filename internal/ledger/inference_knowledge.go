@@ -61,7 +61,7 @@ func validateInferenceKnowledge(ctx context.Context, tx *sql.Tx, request inferen
 	}
 	if !manifestFound || manifest.ContextBuilderVersion != "v5" || manifest.ExecutionID != core.ID(request.Scope.ExecutionID) ||
 		manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID || manifest.ExecutionInputSHA256 != request.PromptSHA256 ||
-		manifest.Provider != request.Descriptor.Provider || manifest.Model != request.Descriptor.Model ||
+		manifest.ConnectionID != request.ConnectionID || manifest.Provider != request.Descriptor.Provider || manifest.Model != request.Descriptor.Model ||
 		manifest.ExecutionProfileVersion != request.Descriptor.ExecutionProfileVersion || latestSequence == math.MaxInt64 {
 		return fmt.Errorf("task inference request does not match its current execution manifest")
 	}

@@ -105,6 +105,9 @@ type Service struct {
 	deterministic    execution.Handler
 	agent            execution.Handler
 	agentModel       execution.ModelDescriptor
+	agentConnection  string
+	agentRoutes      map[string]*execution.AgentExecution
+	taskConnections  map[string]string
 	planner          planning.Planner
 	verifier         completion.Verifier
 	completion       completion.Engine
@@ -143,6 +146,12 @@ func NewWithModelAndPlanner(g *events.Gateway, model execution.ModelAdapter, pla
 		verifier:         completion.Verifier{},
 		modelTurnTimeout: defaultModelTurnTimeout,
 		lab:              lab.New(g),
+	}
+	if bound, ok := model.(execution.ConnectionBoundModelAdapter); ok {
+		service.agentConnection = bound.ConnectionID()
+		if service.agentConnection != "" && !core.ValidInferenceConnectionID(service.agentConnection) {
+			panic("model connection identity is invalid")
+		}
 	}
 	g.SetRouteValidator(service)
 	return service
@@ -458,7 +467,7 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 					}
 					continue
 				}
-				if _, resolveErr := assignment.ResolveAssigned(assignmentRoster(snapshot), state.Value, s.assignmentRequirement(organizationID, state.Value.ExecutionKind)); resolveErr == nil {
+				if _, resolveErr := s.resolveAssigned(snapshot, organizationID, state.Value); resolveErr == nil {
 					task := state.Value
 					task.Status = core.TaskPending
 					detail := assignmentRevalidatedDetail{Code: "ASSIGNMENT_REVALIDATED", BlockedEventRef: blockedEvent.EventID}
@@ -1752,23 +1761,19 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 		return core.Intent{}, core.Work{}, core.Task{}, fmt.Errorf("durable Task DAG is only partially materialized")
 	}
 	if existingTasks == 0 {
-		needsDefaultAgent := false
-		checkedKinds := make(map[core.ExecutionKind]struct{})
 		for _, planned := range plan.Tasks {
 			if planned.ExecutionKind != core.ExecutionDeterministic && planned.ExecutionKind != core.ExecutionAgent {
 				continue
 			}
-			if _, checked := checkedKinds[planned.ExecutionKind]; checked {
+			requirement, routeErr := s.plannedAssignmentRequirement(organizationID, planned)
+			if routeErr != nil {
+				return core.Intent{}, core.Work{}, core.Task{}, routeErr
+			}
+			if _, selectErr := assignment.Select(assignmentRoster(snapshot), requirement); selectErr == nil {
 				continue
 			}
-			checkedKinds[planned.ExecutionKind] = struct{}{}
-			if _, selectErr := assignment.Select(assignmentRoster(snapshot), s.assignmentRequirement(organizationID, planned.ExecutionKind)); selectErr != nil {
-				needsDefaultAgent = true
-				break
-			}
-		}
-		if needsDefaultAgent {
-			if _, err := s.ensureDefaultAgent(ctx, &snapshot, organizationID, correlationID, now); err != nil {
+			descriptor := execution.ModelDescriptor{Provider: requirement.ModelProvider, Model: requirement.Model, ExecutionProfileVersion: requirement.ExecutionProfileVersion}
+			if _, err := s.ensureConnectionAgent(ctx, &snapshot, organizationID, correlationID, now, requirement.ConnectionID, descriptor); err != nil {
 				return core.Intent{}, core.Work{}, core.Task{}, err
 			}
 		}
@@ -1802,8 +1807,11 @@ func (s *Service) intentBindingWasConfirmed(ctx context.Context, correlationID s
 	return false, nil
 }
 
-func (s *Service) ensureDefaultAgent(ctx context.Context, snapshot *projections.Snapshot, organizationID core.ID, correlationID string, now time.Time) (core.Agent, error) {
+func (s *Service) ensureConnectionAgent(ctx context.Context, snapshot *projections.Snapshot, organizationID core.ID, correlationID string, now time.Time, connectionID string, descriptor execution.ModelDescriptor) (core.Agent, error) {
 	agentID := rosterID("agent", string(organizationID), "default")
+	if connectionID != "" {
+		agentID = rosterID("agent", string(organizationID), "connection", connectionID)
+	}
 	if existing, ok := snapshot.Agents[agentID]; ok && existing.Value.Status != assignment.Active {
 		return existing.Value, nil
 	}
@@ -1821,10 +1829,14 @@ func (s *Service) ensureDefaultAgent(ctx context.Context, snapshot *projections.
 	}
 
 	profile := core.ExecutionProfile{
-		ID:             rosterID("profile", string(organizationID), s.agentModel.Provider, s.agentModel.Model, s.agentModel.ExecutionProfileVersion, defaultPromptVersion),
-		OrganizationID: organizationID, Version: s.agentModel.ExecutionProfileVersion,
-		ModelProvider: s.agentModel.Provider, Model: s.agentModel.Model, PromptVersion: defaultPromptVersion,
+		ConnectionID:   connectionID,
+		ID:             rosterID("profile", string(organizationID), descriptor.Provider, descriptor.Model, descriptor.ExecutionProfileVersion, defaultPromptVersion),
+		OrganizationID: organizationID, Version: descriptor.ExecutionProfileVersion,
+		ModelProvider: descriptor.Provider, Model: descriptor.Model, PromptVersion: defaultPromptVersion,
 		ToolRefs: []string{}, Status: assignment.Active, CreatedAt: now,
+	}
+	if connectionID != "" {
+		profile.ID = rosterID("profile", string(organizationID), connectionID, descriptor.Provider, descriptor.Model, descriptor.ExecutionProfileVersion, defaultPromptVersion)
 	}
 	profile, err = ensureRosterRecord(snapshot.ExecutionProfiles, profile.ID, profile, correlationID, "execution profile", sameExecutionProfile, func() error {
 		return s.state.SaveExecutionProfile(ctx, "EXECUTION_PROFILE_CREATED", "runtime", correlationID, 1, profile, nil)
@@ -1889,7 +1901,7 @@ func sameAgentBlueprint(left, right core.AgentBlueprint) bool {
 }
 
 func sameExecutionProfile(left, right core.ExecutionProfile) bool {
-	return left.ID == right.ID && left.OrganizationID == right.OrganizationID && left.Version == right.Version && left.ModelProvider == right.ModelProvider &&
+	return left.ConnectionID == right.ConnectionID && left.ID == right.ID && left.OrganizationID == right.OrganizationID && left.Version == right.Version && left.ModelProvider == right.ModelProvider &&
 		left.Model == right.Model && left.ReasoningSetting == right.ReasoningSetting && left.PromptVersion == right.PromptVersion && slices.Equal(left.ToolRefs, right.ToolRefs)
 }
 
@@ -2013,7 +2025,7 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 		executionID = core.ID(fmt.Sprintf("planning-%s-attempt-1", planID))
 		contextPayload := events.PlanningContextPayload{
 			PlanID: string(planID), IntentID: string(intent.ID), IntentFingerprint: draft.Fingerprint,
-			PromptVersion: descriptor.PromptVersion, Provider: descriptor.Provider, Model: descriptor.Model,
+			ConnectionID: descriptor.ConnectionID, PromptVersion: descriptor.PromptVersion, Provider: descriptor.Provider, Model: descriptor.Model,
 			ExecutionProfileVersion: descriptor.ExecutionProfileVersion, InputEventRefs: inputRefs,
 			StrategicContextRefs: strategicContextRefs,
 		}
@@ -2048,7 +2060,7 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	result, buildErr := s.planner.Build(turnCtx, planning.Input{Intent: draft, Strategy: strategy}, requestedKind)
 	cancel()
 	if result.Usage != nil {
-		if !usesModel || !result.Usage.Valid() || result.Usage.Provider != descriptor.Provider || result.Usage.Model != descriptor.Model {
+		if !usesModel || result.Usage.ConnectionID != descriptor.ConnectionID || !result.Usage.Valid() || result.Usage.Provider != descriptor.Provider || result.Usage.Model != descriptor.Model {
 			return core.Plan{}, attemptFailure(fmt.Errorf("planner returned usage outside its declared model boundary"))
 		}
 		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
@@ -2183,7 +2195,11 @@ func (s *Service) ensurePlanTasks(ctx context.Context, organizationID core.ID, c
 				config := *durable.Value.AgentConfig
 				task.AgentConfig = &config
 			} else {
-				selection, err := assignment.Select(assignmentRoster(snapshot), s.assignmentRequirement(organizationID, item.ExecutionKind))
+				requirement, err := s.plannedAssignmentRequirement(organizationID, item)
+				if err != nil {
+					return core.Task{}, err
+				}
+				selection, err := assignment.Select(assignmentRoster(snapshot), requirement)
 				if err != nil {
 					return core.Task{}, fmt.Errorf("assign planned task %s: %w", item.Key, err)
 				}
@@ -2294,7 +2310,7 @@ func assignmentRoster(snapshot projections.Snapshot) assignment.Roster {
 func (s *Service) assignmentRequirement(organizationID core.ID, kind core.ExecutionKind) assignment.Requirement {
 	return assignment.Requirement{
 		OrganizationID: organizationID, ExecutionKind: kind, RuntimeAdapter: localRuntimeAdapter,
-		ModelProvider: s.agentModel.Provider, Model: s.agentModel.Model, ExecutionProfileVersion: s.agentModel.ExecutionProfileVersion,
+		ConnectionID: s.agentConnection, ModelProvider: s.agentModel.Provider, Model: s.agentModel.Model, ExecutionProfileVersion: s.agentModel.ExecutionProfileVersion,
 		ReasoningSetting: "", PromptVersion: defaultPromptVersion, ToolRefs: []string{},
 		AvailableCapabilityClasses: []string{},
 	}
@@ -2686,7 +2702,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		strategyContextRefs = append([]core.VersionedRef(nil), plan.StrategicContextRefs...)
 	}
 	if task.ExecutionKind == core.ExecutionDeterministic || task.ExecutionKind == core.ExecutionAgent {
-		selected, err = assignment.ResolveAssigned(assignmentRoster(snapshot), task, s.assignmentRequirement(organizationID, task.ExecutionKind))
+		selected, err = s.resolveAssigned(snapshot, organizationID, task)
 		if err != nil {
 			task.Status = core.TaskBlocked
 			detail := blockedDetail("the durable Agent assignment is unavailable or no longer eligible", "an active same-organization Agent with the exact reviewed blueprint, execution profile, runtime adapter, and capability prerequisites", "the runtime cannot substitute another Agent, infer capabilities, or change provider identity at dispatch")
@@ -2696,6 +2712,9 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			}
 			return taskRun{}, nil
 		}
+	}
+	if task.ExecutionKind == core.ExecutionAgent && s.agentRoutes != nil {
+		handler = s.agentRoutes[selected.ExecutionProfile.ConnectionID]
 	}
 	if task.ExecutionKind == core.ExecutionHuman {
 		task.Status = core.TaskBlocked
@@ -2806,6 +2825,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 				})
 			}
 			manifest = core.ExecutionContextManifest{
+				ConnectionID:            selected.ExecutionProfile.ConnectionID,
 				ExecutionID:             executionID,
 				AgentID:                 task.AssigneeID,
 				AgentBlueprintVersion:   selected.Blueprint.Version,

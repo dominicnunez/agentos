@@ -679,7 +679,7 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 	if usesModel {
 		stream, err = s.app.RecordIntentNormalizationContext(ctx, principal.OrganizationID, message.ConversationID, app.IntentNormalizationContext{
 			ExecutionID: executionID, SourceMessageID: message.MessageID, PromptVersion: descriptor.PromptVersion,
-			Provider: descriptor.Provider, Model: descriptor.Model, ExecutionProfileVersion: descriptor.ExecutionProfileVersion,
+			ConnectionID: descriptor.ConnectionID, Provider: descriptor.Provider, Model: descriptor.Model, ExecutionProfileVersion: descriptor.ExecutionProfileVersion,
 		})
 		if err != nil {
 			return View{}, fmt.Errorf("%w: manifest intent normalization context", ErrUnavailable)

@@ -124,7 +124,8 @@ func ValidAgentBlueprint(blueprint AgentBlueprint) bool {
 // ValidExecutionProfile reports whether one complete execution profile can
 // enter durable organizational state.
 func ValidExecutionProfile(profile ExecutionProfile) bool {
-	return profile.ID != "" && profile.OrganizationID != "" && profile.Version != "" && profile.ModelProvider != "" &&
+	return (profile.ConnectionID == "" || ValidInferenceConnectionID(profile.ConnectionID)) &&
+		profile.ID != "" && profile.OrganizationID != "" && profile.Version != "" && profile.ModelProvider != "" &&
 		profile.Model != "" && profile.PromptVersion != "" && validDurableRosterStatus(profile.Status) && DistinctNonemptyStrings(profile.ToolRefs)
 }
 

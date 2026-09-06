@@ -20,6 +20,7 @@ type Roster struct {
 }
 
 type Requirement struct {
+	ConnectionID               string
 	OrganizationID             core.ID
 	ExecutionKind              core.ExecutionKind
 	RuntimeAdapter             string
@@ -87,6 +88,9 @@ func ResolveAssigned(roster Roster, task core.Task, requirement Requirement) (Se
 }
 
 func validateRequirement(requirement Requirement) error {
+	if requirement.ConnectionID != "" && !core.ValidInferenceConnectionID(requirement.ConnectionID) {
+		return fmt.Errorf("assignment connection identity is invalid")
+	}
 	if requirement.OrganizationID == "" || requirement.RuntimeAdapter == "" {
 		return fmt.Errorf("organization and runtime adapter are required for assignment")
 	}
@@ -132,7 +136,7 @@ func eligibleConfiguration(roster Roster, agent core.Agent, config core.AgentCon
 		return Selection{}, false
 	}
 	if requirement.ExecutionKind == core.ExecutionAgent {
-		if profile.Status != Active || profile.ModelProvider != requirement.ModelProvider || profile.Model != requirement.Model || profile.Version != requirement.ExecutionProfileVersion ||
+		if profile.ConnectionID != requirement.ConnectionID || profile.Status != Active || profile.ModelProvider != requirement.ModelProvider || profile.Model != requirement.Model || profile.Version != requirement.ExecutionProfileVersion ||
 			profile.ReasoningSetting != requirement.ReasoningSetting || profile.PromptVersion != requirement.PromptVersion || !slices.Equal(profile.ToolRefs, requirement.ToolRefs) {
 			return Selection{}, false
 		}

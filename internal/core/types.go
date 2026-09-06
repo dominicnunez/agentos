@@ -91,6 +91,7 @@ type AgentBlueprint struct {
 	CreatedAt                 time.Time `json:"created_at"`
 }
 type ExecutionProfile struct {
+	ConnectionID     string    `json:"connection_id,omitempty"`
 	ID               ID        `json:"id"`
 	OrganizationID   ID        `json:"organization_id"`
 	Version          string    `json:"version"`
@@ -411,6 +412,7 @@ type VersionedRef struct {
 	MaterializationState MaterializationState `json:"materialization_state"`
 }
 type ExecutionContextManifest struct {
+	ConnectionID            string         `json:"connection_id,omitempty"`
 	ExecutionID             ID             `json:"execution_id"`
 	AgentID                 ID             `json:"agent_id"`
 	AgentBlueprintVersion   string         `json:"agent_blueprint_version"`
