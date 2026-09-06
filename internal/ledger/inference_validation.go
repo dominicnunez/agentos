@@ -294,7 +294,10 @@ func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx, pendin
 		if err != nil {
 			return err
 		}
-		stream = append(stream, events.Event{OrganizationID: request.Scope.OrganizationID, EventType: "INFERENCE_RESERVED", Sequence: stream[len(stream)-1].Sequence + 1, Payload: payload})
+		// An unpersisted candidate has no binding timestamp yet. Use its own
+		// selection time for this observer; actual persisted copies must each
+		// prove the upper bound using their immutable event timestamp.
+		stream = append(stream, events.Event{OrganizationID: request.Scope.OrganizationID, EventType: "INFERENCE_RESERVED", Sequence: stream[len(stream)-1].Sequence + 1, CreatedAt: request.Scope.RoutingDecision.SelectedAt, Payload: payload})
 	}
 	return validateRoutingDecisionHistory(stream, activationPolicies, byOrganization)
 }

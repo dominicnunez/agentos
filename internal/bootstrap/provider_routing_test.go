@@ -34,6 +34,37 @@ func TestRoutedConfigRoundTripAndInvalidRoutes(t *testing.T) {
 	if err := config.ValidateReady(); err != nil {
 		t.Fatal(err)
 	}
+	withoutCatalog := append([]Provider(nil), config.Providers...)
+	withoutCatalog[1].InferencePolicy.Catalog = nil
+	for _, purpose := range []string{"task", "planning", "normalization", "pin-default", "pin-specific"} {
+		changed := *config.Routing
+		changed.Requirements = modelinput.CloneRouteRequirements(config.Routing.Requirements)
+		changed.PlanningRequirements = modelinput.CloneRouteRequirements(config.Routing.PlanningRequirements)
+		changed.NormalizationRequirements = modelinput.CloneRouteRequirements(config.Routing.NormalizationRequirements)
+		changed.TaskConnections, changed.TaskRequirements = nil, nil
+		if err := changed.Validate(withoutCatalog); err != nil {
+			t.Fatal("soft preference must permit an eligible catalog account", err)
+		}
+		switch purpose {
+		case "task":
+			changed.Requirements.ConnectionID = "second"
+		case "planning":
+			changed.PlanningRequirements.ConnectionID = "second"
+		case "normalization":
+			changed.NormalizationRequirements.ConnectionID = "second"
+		case "pin-default":
+			changed.TaskConnections = map[string]string{"research": "second"}
+		case "pin-specific":
+			changed.TaskConnections = map[string]string{"research": "second"}
+			changed.TaskRequirements = map[string]modelinput.RouteRequirements{"research": research}
+		}
+		if err := changed.Validate(withoutCatalog); err == nil {
+			t.Fatalf("%s hard route accepted account without catalog", purpose)
+		}
+		if err := changed.Validate(config.Providers); err != nil {
+			t.Fatalf("%s catalog-enabled hard route rejected: %v", purpose, err)
+		}
+	}
 	for _, mutate := range []func(*ProviderRouting){
 		func(r *ProviderRouting) { r.Requirements = nil },
 		func(r *ProviderRouting) { r.PlanningRequirements = nil },

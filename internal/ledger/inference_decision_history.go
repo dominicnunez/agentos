@@ -69,6 +69,9 @@ func validateRoutingDecisionHistory(stream []events.Event, activations map[strin
 		if requirements == nil || requirements.OrganizationID != event.OrganizationID || decision.ValidateFor(*requirements) != nil || decision.SnapshotSequence <= 0 || decision.SnapshotSequence >= event.Sequence {
 			return fmt.Errorf("historical routing decision lacks its originating requirements and cutoff")
 		}
+		if event.CreatedAt.IsZero() || decision.SelectedAt.After(event.CreatedAt) {
+			return fmt.Errorf("routing selection timestamp follows its persisted binding")
+		}
 		if !seen[*decision] {
 			seen[*decision] = true
 			bindings = append(bindings, historicalRouteBinding{requirements: *requirements, decision: *decision})

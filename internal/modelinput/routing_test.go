@@ -15,7 +15,7 @@ func TestRoutingRequirementsFingerprintAndClone(t *testing.T) {
 		t.Fatal(err)
 	}
 	clone := r.Clone()
-	r.Capabilities[0], r.Locality, cost = Vision, CloudAllowed, 1000
+	r.Capabilities, r.Locality, cost = []Capability{Text, Vision}, CloudAllowed, 1000
 	if got, err := clone.Fingerprint(); err != nil || got != fingerprint {
 		t.Fatal("clone changed through original constraints")
 	}
@@ -26,6 +26,9 @@ func TestRoutingRequirementsFingerprintAndClone(t *testing.T) {
 
 func TestRoutingRequirementsRejectInvalidAndOversizedConstraints(t *testing.T) {
 	for _, mutate := range []func(*RouteRequirements){
+		func(r *RouteRequirements) { r.Capabilities = nil },
+		func(r *RouteRequirements) { r.Capabilities = []Capability{} },
+		func(r *RouteRequirements) { r.Capabilities = []Capability{Vision} },
 		func(r *RouteRequirements) { r.Capabilities = []Capability{"unknown"} },
 		func(r *RouteRequirements) { r.Capabilities = []Capability{Text, Text} },
 		func(r *RouteRequirements) { r.InputTokens = math.MaxInt64 },

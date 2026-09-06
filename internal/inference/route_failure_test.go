@@ -37,7 +37,9 @@ func TestBrokerReportsBoundedFailureCategories(t *testing.T) {
 		{RouteInvalidRequirements, func(_ *Broker, r *RouteRequirements) { r.InputTokens = 0 }},
 		{RouteInvalidCatalog, func(b *Broker, _ *RouteRequirements) { b.Routes[0].ConnectionID = "invalid connection" }},
 		{RoutePolicyDenied, func(_ *Broker, r *RouteRequirements) { r.DataClass = "unapproved" }},
-		{RouteNoEligibleAccount, func(_ *Broker, r *RouteRequirements) { r.Capabilities = []Capability{Vision} }},
+		{RouteInvalidRequirements, func(_ *Broker, r *RouteRequirements) { r.Capabilities = nil }},
+		{RouteInvalidRequirements, func(_ *Broker, r *RouteRequirements) { r.Capabilities = []Capability{} }},
+		{RouteNoEligibleAccount, func(_ *Broker, r *RouteRequirements) { r.Capabilities = []Capability{Text, Vision} }},
 	} {
 		broker, request, policy := brokerFixture(now)
 		tc.mutate(&broker, &request)

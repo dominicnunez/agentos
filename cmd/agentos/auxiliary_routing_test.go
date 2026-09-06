@@ -107,7 +107,9 @@ func TestAuxiliaryBrokerBindsSelectedAccountAndRequirements(t *testing.T) {
 	}
 	for _, mutate := range []func(*modelinput.RouteRequirements){
 		func(r *modelinput.RouteRequirements) { r.DataClass = "secret" },
-		func(r *modelinput.RouteRequirements) { r.Capabilities = []modelinput.Capability{modelinput.Vision} },
+		func(r *modelinput.RouteRequirements) {
+			r.Capabilities = []modelinput.Capability{modelinput.Text, modelinput.Vision}
+		},
 		func(r *modelinput.RouteRequirements) { r.DeniedProviders = []string{"fake"} },
 	} {
 		constraints := route.requirements.Clone()

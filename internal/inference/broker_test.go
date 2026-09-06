@@ -172,7 +172,7 @@ func TestBrokerFailsClosed(t *testing.T) {
 		name   string
 		mutate func(*Broker, *RouteRequirements, *RoutePolicy)
 	}{
-		{"unsupported capability", func(_ *Broker, r *RouteRequirements, _ *RoutePolicy) { r.Capabilities = []Capability{Vision} }},
+		{"unsupported capability", func(_ *Broker, r *RouteRequirements, _ *RoutePolicy) { r.Capabilities = []Capability{Text, Vision} }},
 		{"unknown capability", func(_ *Broker, r *RouteRequirements, _ *RoutePolicy) { r.Capabilities = []Capability{"imaginary"} }},
 		{"context overflow", func(_ *Broker, r *RouteRequirements, _ *RoutePolicy) { r.InputTokens++ }},
 		{"output overflow", func(_ *Broker, r *RouteRequirements, _ *RoutePolicy) { r.OutputTokens++ }},

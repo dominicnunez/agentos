@@ -40,7 +40,14 @@ func decisionHistoryEvent(t *testing.T, sequence int64, organization, kind strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	return events.Event{Sequence: sequence, OrganizationID: organization, EventType: kind, Payload: payload}
+	event := events.Event{Sequence: sequence, OrganizationID: organization, EventType: kind, Payload: payload}
+	var binding struct {
+		RoutingDecision *modelinput.RouteDecision `json:"routing_decision"`
+	}
+	if err := json.Unmarshal(payload, &binding); err == nil && binding.RoutingDecision != nil {
+		event.CreatedAt = binding.RoutingDecision.SelectedAt.Add(time.Minute)
+	}
+	return event
 }
 
 func TestRoutingDecisionUsesPolicyAtSelectionNotCurrentPolicy(t *testing.T) {
@@ -249,5 +256,39 @@ func TestRoutingDecisionCannotBackdateAccountingSnapshot(t *testing.T) {
 	stream[1] = decisionHistoryEvent(t, 2, policy.OrganizationID, "INFERENCE_RESERVED", reserved)
 	if err := check(); err == nil {
 		t.Fatal("selection predating admission timestamp accepted")
+	}
+}
+
+func TestRoutingDecisionCannotMovePastFirstBindingIntoUnusedWindow(t *testing.T) {
+	policy, requirements, decision := decisionHistoryFixture(t)
+	policy.AuthorizationExpiresAt = decision.SelectedAt.Add(3 * time.Hour)
+	policy.Pricing.ExpiresAt = policy.AuthorizationExpiresAt
+	policy.Catalog.ValidUntil = policy.AuthorizationExpiresAt
+	decision.PolicyFingerprint, _ = policy.Fingerprint()
+	start, end := inferenceWindow(decision.SelectedAt, time.Hour)
+	stream := []events.Event{
+		{EventID: "policy", Sequence: 1, OrganizationID: policy.OrganizationID, EventType: "INFERENCE_POLICY_ACTIVATED", CreatedAt: policy.AuthorizedAt},
+		decisionHistoryEvent(t, 2, policy.OrganizationID, "INFERENCE_RESERVED", events.InferenceReservedPayload{ReservationID: "prior", ConnectionID: policy.ConnectionID, Provider: policy.Provider, Model: policy.Model, ReservedInputTokens: 100, ReservedOutputTokens: 20, AdmittedAt: decision.SelectedAt.Format(time.RFC3339Nano), WindowStartedAt: start, WindowExpiresAt: end}),
+		decisionHistoryEvent(t, 3, policy.OrganizationID, "INFERENCE_RECONCILED", events.InferenceReconciledPayload{ReservationID: "prior", ChargedInputTokens: 100, ChargedOutputTokens: 20}),
+	}
+	decision.SnapshotSequence = 3
+	firstPersistedAt := decision.SelectedAt.Add(time.Minute)
+	check := func(persistedAt time.Time) error {
+		origin := decisionHistoryEvent(t, 4, policy.OrganizationID, "PLANNING_CONTEXT_MANIFESTED", events.PlanningContextPayload{Routing: &requirements, RoutingDecision: &decision})
+		origin.CreatedAt = persistedAt
+		return validateRoutingDecisionHistory(append(stream, origin), map[string]inference.Policy{"policy": policy}, nil)
+	}
+	if err := check(firstPersistedAt); err == nil {
+		t.Fatal("exhausted original window accepted")
+	}
+	decision.SelectedAt = end.Add(time.Second)
+	if err := check(firstPersistedAt); err == nil {
+		t.Fatal("rewritten decision escaped exhausted window by postdating its binding")
+	}
+	if err := check(decision.SelectedAt); err != nil {
+		t.Fatal("legitimate later-window selection rejected", err)
+	}
+	if err := check(time.Time{}); err == nil {
+		t.Fatal("binding without timestamp accepted")
 	}
 }

@@ -80,6 +80,9 @@ func (r *ProviderRouting) Validate(providers []Provider) error {
 		if requirements.ConnectionID != "" && !ids[requirements.ConnectionID] {
 			return fmt.Errorf("task requirements name an unconfigured connection")
 		}
+		if requirements.ConnectionID != "" && !catalogs[requirements.ConnectionID] {
+			return fmt.Errorf("hard routing requirements require a catalog-enabled connection")
+		}
 		for _, id := range requirements.PreferredConnections {
 			if !ids[id] {
 				return fmt.Errorf("task preference names an unconfigured connection")
@@ -109,6 +112,9 @@ func (r *ProviderRouting) Validate(providers []Provider) error {
 		}
 		if catalogs[connection] && requirements == nil {
 			return fmt.Errorf("catalog-enabled task accounts require explicit routing requirements")
+		}
+		if requirements != nil && !catalogs[connection] {
+			return fmt.Errorf("broker task pins require a catalog-enabled connection")
 		}
 		if requirements != nil && requirements.ConnectionID != "" && requirements.ConnectionID != connection {
 			return fmt.Errorf("task connection conflicts with routing requirements")

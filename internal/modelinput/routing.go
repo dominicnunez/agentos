@@ -71,6 +71,9 @@ func (r RouteRequirements) Validate() error {
 		}
 		seen[c] = true
 	}
+	if !seen[Text] {
+		return fmt.Errorf("inference route requirements must include text capability")
+	}
 	for _, values := range [][]string{r.AllowedProviders, r.DeniedProviders, r.PreferredConnections} {
 		if len(values) > 1024 {
 			return fmt.Errorf("too many inference route constraints")
