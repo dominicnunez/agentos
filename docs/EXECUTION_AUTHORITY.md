@@ -186,8 +186,8 @@ change in discretionary selections must be attributable to that declared and
 authorized purpose; provenance, versioning and ordinary injection checks alone
 do not establish this property.
 
-Before a Skill can be promoted for activation or used to influence discretionary
-decisions, require independent behavioral evidence through existing versioned
+Before activating or using a Skill that can influence discretionary decisions,
+require independent behavioral evidence through existing versioned
 evidence and governed decision boundaries. This does not require a deferred Lab
 orchestrator: an appropriately authorized independent human can administer the
 controlled comparison and record its evidence and judgment through those
@@ -195,6 +195,13 @@ boundaries. Reuse Lab/evaluator records where implemented; do not make deferred
 automated orchestration a dependency of V1 instruction/reference Skill validation.
 The additional behavioral evidence is a security prerequisite for discretionary
 influence, not authorization to implement deferred Lab facilities.
+V1 validation of instruction/reference Skills without discretionary influence
+can use exact version and purpose review, deterministic functional and authority
+checks, and authorized human judgment without held-out A/B testing. Classification
+must consider actual behavior, not a Skill's label: selection, ranking and
+tie-breaking guidance require the behavioral path below. The active security
+requirement intentionally adds this gate for discretionary Skills; the preserved
+handoff's deferral of automated evaluation does not waive it.
 Compare held-out executions with and without
 the exact Skill under the same Agent, effective model, execution profile,
 candidate set and task conditions. Randomize candidate order where relevant,
@@ -253,6 +260,11 @@ Missing, revoked, superseded or mismatched purpose authorization denies
 activation and further use, quarantines any stale active version, and requires
 a new applicable assessment and authorization. An already-active status cannot
 bypass a later policy change or revocation.
+At every materialization/use boundary, also resolve and validate the behavioral
+evidence itself, its applicability and freshness, evaluator eligibility and
+authorization, and independent provenance. Revoked, stale, unavailable,
+unverifiable or mismatched evidence or evaluator eligibility denies use and
+quarantines the active version until new applicable evidence is admitted.
 
 A persistent shift requires an explicit explanation tied to the authorized
 objective and an independent
