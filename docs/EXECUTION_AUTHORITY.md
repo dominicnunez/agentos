@@ -206,6 +206,18 @@ Knowledge/Artifact rules; factual relevance alone is not reusable policy. If the
 runtime cannot distinguish that evidence use from embedded discretionary policy,
 deny the policy use pending independent classification. Record type, prose style
 and lack of Skill ancestry cannot establish an exemption.
+Classify authorized objectives, constraints and corrections for the concrete
+current Task separately from reusable behavioral policy. Verify their admitted
+source, exact Work/Task linkage and revision, authorized scope and current
+applicability through the existing work and review boundaries. Such task-specific
+directives remain untrusted model input and grant no capabilities, policy
+exceptions or completion authority; discretionary influence alone does not make
+them reusable policy or require held-out Skill evidence. An inbox Event or
+reviewer label alone does not authorize a directive. Embedded reusable steering,
+imported policy and policy-derived content remain subject to the behavioral-policy
+gate and transitive lineage checks even inside an authorized task message.
+An unavailable or ambiguous distinction denies the disputed instruction use;
+do not exempt reusable policy merely by naming a Task or copying it into feedback.
 Throughout this section, the behavioral-policy influence closure includes every
 input classified as behavioral policy, regardless of record type or Skill
 ancestry, and all of its transitive derivatives. Requirements below for Skill
