@@ -188,11 +188,14 @@ do not establish this property.
 Apply this behavioral-policy classification to instruction-like model context
 regardless of record type, including PROCEDURE Knowledge, Artifacts and Events.
 Independently authored steering instructions cannot evade these requirements
-merely because they have no Skill ancestor. Before enabling general Skill use,
-the runtime must classify such inputs under the same purpose, evidence and
+merely because they have no Skill ancestor. At every current and future
+materialization boundary, the runtime must classify such inputs under the same purpose, evidence and
 deployment gates or deny their materialization as behavioral instructions;
 uncertain classification denies that use. Data records do not acquire policy
-authority through their storage type. This is also an implementation prerequisite:
+authority through their storage type. Existing Knowledge, Event and Artifact
+paths must enforce this gate now or disable policy-like materialization until
+it exists; general Skill activation is not the trigger for this requirement.
+This is an outstanding implementation obligation, not a claim of current enforcement:
 the current empty-SkillRefs restriction alone does not prove equivalent controls
 over existing Knowledge or Artifact materialization paths.
 Classification must assess actual function, not imperative wording: precomputed
