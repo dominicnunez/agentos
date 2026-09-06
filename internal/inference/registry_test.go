@@ -11,7 +11,7 @@ import (
 
 func TestConnectionRegistryIsolatesAccountsWithIdenticalModels(t *testing.T) {
 	store := &guardStore{}
-	response := execution.ModelResponse{Usage: events.InferenceUsageRecordedPayload{Source: "provider", Provider: "provider", Model: "model", InputTokens: 1, OutputTokens: 1, TotalTokens: 2}}
+	response := execution.ModelResponse{Usage: events.InferenceUsageRecordedPayload{ConnectionID: "provider-spoofed-account", Source: "provider", Provider: "provider", Model: "model", InputTokens: 1, OutputTokens: 1, TotalTokens: 2}}
 	first, second := &guardModel{response: response}, &guardModel{response: response}
 	connections := []Connection{{ID: "second", Adapter: second}, {ID: "first", Adapter: first}}
 	registry, err := NewConnectionRegistry(store, connections)
@@ -33,10 +33,11 @@ func TestConnectionRegistryIsolatesAccountsWithIdenticalModels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := adapter.Complete(guardedContext(t), "prompt"); err != nil {
+	result, err := adapter.Complete(guardedContext(t), "prompt")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if first.called || !second.called || store.reservation.Request.ConnectionID != "second" {
+	if result.Usage.ConnectionID != "second" || first.called || !second.called || store.reservation.Request.ConnectionID != "second" {
 		t.Fatal("same-model accounts crossed connection identity")
 	}
 	first.called, second.called = false, false

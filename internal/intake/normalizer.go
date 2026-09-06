@@ -53,6 +53,7 @@ type Normalizer interface {
 }
 
 type NormalizerDescriptor struct {
+	ConnectionID            string
 	PromptVersion           string
 	Provider                string
 	Model                   string
@@ -80,7 +81,7 @@ func NewModelNormalizer(model TextCompleter) (*ModelNormalizer, error) {
 	}
 	descriptor := model.Descriptor()
 	descriptor.PromptVersion = intentNormalizationPromptVersion
-	if descriptor.Provider == "" || descriptor.Model == "" || descriptor.ExecutionProfileVersion == "" {
+	if (descriptor.ConnectionID != "" && !core.ValidInferenceConnectionID(descriptor.ConnectionID)) || descriptor.Provider == "" || descriptor.Model == "" || descriptor.ExecutionProfileVersion == "" {
 		return nil, fmt.Errorf("intent normalizer requires complete model identity")
 	}
 	return &ModelNormalizer{model: model, descriptor: descriptor}, nil
@@ -130,7 +131,7 @@ func (n *ModelNormalizer) complete(ctx context.Context, request modelinput.Reque
 	if err != nil {
 		return TextCompletion{}, fmt.Errorf("normalize intent: %w", err)
 	}
-	if !response.Usage.Valid() || response.Usage.Provider != n.descriptor.Provider || response.Usage.Model != n.descriptor.Model {
+	if response.Usage.ConnectionID != n.descriptor.ConnectionID || !response.Usage.Valid() || response.Usage.Provider != n.descriptor.Provider || response.Usage.Model != n.descriptor.Model {
 		return TextCompletion{}, fmt.Errorf("intent normalizer returned invalid model usage")
 	}
 	return response, nil

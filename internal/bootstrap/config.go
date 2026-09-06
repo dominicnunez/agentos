@@ -87,15 +87,16 @@ type A2A struct {
 }
 
 type Config struct {
-	Version      int        `json:"version"`
-	Mode         Mode       `json:"mode"`
-	Owner        Owner      `json:"owner"`
-	Organization string     `json:"organization"`
-	Paths        Paths      `json:"paths"`
-	Providers    []Provider `json:"providers"`
-	A2A          A2A        `json:"a2a"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	Routing      *ProviderRouting `json:"provider_routing,omitempty"`
+	Version      int              `json:"version"`
+	Mode         Mode             `json:"mode"`
+	Owner        Owner            `json:"owner"`
+	Organization string           `json:"organization"`
+	Paths        Paths            `json:"paths"`
+	Providers    []Provider       `json:"providers"`
+	A2A          A2A              `json:"a2a"`
+	CreatedAt    time.Time        `json:"created_at"`
+	UpdatedAt    time.Time        `json:"updated_at"`
 }
 
 type State struct {
@@ -153,8 +154,11 @@ func (c Config) ValidateReady() error {
 	problems = append(problems, configurationIdentityProblems(c.Mode, c.Owner, c.Organization, c.Paths, "owner must be the verified Linux user who started setup")...)
 	if len(c.Providers) == 0 {
 		problems = append(problems, fmt.Errorf("at least one real model provider is required"))
-	} else if len(c.Providers) != 1 {
-		problems = append(problems, fmt.Errorf("V1 requires exactly one active model provider"))
+	} else if len(c.Providers) > 1024 {
+		problems = append(problems, fmt.Errorf("at most 1024 model providers may be configured"))
+	}
+	if err := c.Routing.Validate(c.Providers); err != nil {
+		problems = append(problems, err)
 	}
 	for index, provider := range c.Providers {
 		if err := provider.Validate(); err != nil {

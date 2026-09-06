@@ -68,7 +68,7 @@ func (h *inferenceExecutionHistory) observe(event events.Event) error {
 		key := [2]string{event.RecipientScope, event.RecipientID}
 		h.addressed[key] = append(h.addressed[key], event)
 	}
-	if event.EventType == "EXECUTION_CONTEXT_MANIFESTED" {
+	if event.EventType == "EXECUTION_CONTEXT_MANIFESTED" || event.EventType == "PLANNING_CONTEXT_MANIFESTED" || event.EventType == "INTENT_NORMALIZATION_CONTEXT_MANIFESTED" {
 		h.manifests[event.SourceExecutionID] = append(h.manifests[event.SourceExecutionID], event)
 	}
 	if event.EventType == "EXECUTION_FINISHED" {
@@ -125,6 +125,9 @@ func (h *inferenceExecutionHistory) observe(event events.Event) error {
 // a v5 execution retains its previous contract; a v5 manifest cannot lose its
 // reference or be replayed under a different inference purpose.
 func (h *inferenceExecutionHistory) validateReservation(ctx context.Context, tx *sql.Tx, reservation events.Event, payload events.InferenceReservedPayload, inbox *map[string]events.InboxObservationBinding) error {
+	if auxiliaryInferencePurpose(payload.Purpose) {
+		return validateAuxiliaryInferenceContext(reservation, payload, h.manifests[reservation.SourceExecutionID])
+	}
 	var manifest core.ExecutionContextManifest
 	var manifestEvent events.Event
 	task := h.tasks[reservation.TaskID].value
@@ -160,7 +163,7 @@ func (h *inferenceExecutionHistory) validateReservation(ctx context.Context, tx 
 		payload.RequestID != reservation.SourceExecutionID || manifestEvent.SourceActorID != "runtime" ||
 		manifestEvent.TaskID != reservation.TaskID || manifestEvent.CorrelationID != reservation.CorrelationID ||
 		manifest.ExecutionID != core.ID(reservation.SourceExecutionID) || manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID ||
-		manifest.ExecutionInputSHA256 != payload.PromptSHA256 || manifest.Provider != payload.Provider || manifest.Model != payload.Model ||
+		manifest.ConnectionID != payload.ConnectionID || manifest.ExecutionInputSHA256 != payload.PromptSHA256 || manifest.Provider != payload.Provider || manifest.Model != payload.Model ||
 		manifest.ExecutionProfileVersion != payload.ExecutionProfileVersion || taskEvent.EventType != "EXECUTION_STARTED" ||
 		task.Status != core.TaskRunning || task.ModelInferencePolicy == core.InferenceForbidden ||
 		manifestEvent.Sequence <= taskEvent.Sequence || reservation.SourceExecutionID != fmt.Sprintf("execution-%s-v%d", task.ID, taskRecord.Version) {

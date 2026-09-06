@@ -45,6 +45,7 @@ type IntakeAbandonment struct {
 }
 
 type IntentNormalizationContext struct {
+	ConnectionID            string
 	ExecutionID             string
 	SourceMessageID         string
 	PromptVersion           string
@@ -213,7 +214,7 @@ func (s *Service) ValidateSelectedGoal(ctx context.Context, organizationID, goal
 }
 
 func (s *Service) RecordIntentNormalizationContext(ctx context.Context, organizationID, requestID string, in IntentNormalizationContext) ([]events.Event, error) {
-	if in.ExecutionID == "" || in.SourceMessageID == "" || in.PromptVersion == "" || in.Provider == "" || in.Model == "" || in.ExecutionProfileVersion == "" {
+	if (in.ConnectionID != "" && !core.ValidInferenceConnectionID(in.ConnectionID)) || in.ExecutionID == "" || in.SourceMessageID == "" || in.PromptVersion == "" || in.Provider == "" || in.Model == "" || in.ExecutionProfileVersion == "" {
 		return nil, fmt.Errorf("complete intent normalization context is required")
 	}
 	correlationID, found, err := s.gateway.ResolveExternalWork(ctx, organizationID, requestID)
@@ -239,7 +240,7 @@ func (s *Service) RecordIntentNormalizationContext(ctx context.Context, organiza
 	}
 	payload := events.IntentNormalizationContextPayload{
 		SourceMessageID: in.SourceMessageID, PromptVersion: in.PromptVersion,
-		Provider: in.Provider, Model: in.Model, ExecutionProfileVersion: in.ExecutionProfileVersion,
+		ConnectionID: in.ConnectionID, Provider: in.Provider, Model: in.Model, ExecutionProfileVersion: in.ExecutionProfileVersion,
 		InputEventRefs: refs,
 	}
 	for _, event := range stream {
@@ -285,7 +286,7 @@ func (s *Service) RecordIntentNormalizationUsage(ctx context.Context, organizati
 		switch event.EventType {
 		case "INTENT_NORMALIZATION_CONTEXT_MANIFESTED":
 			var context events.IntentNormalizationContextPayload
-			if json.Unmarshal(event.Payload, &context) != nil || context.Provider != usage.Provider || context.Model != usage.Model {
+			if json.Unmarshal(event.Payload, &context) != nil || context.ConnectionID != usage.ConnectionID || context.Provider != usage.Provider || context.Model != usage.Model {
 				return nil, fmt.Errorf("intent normalization usage identity does not match context")
 			}
 			manifested = true
@@ -500,13 +501,13 @@ func latestIntakeMessage(stream []events.Event) (events.IntakeMessageRecordedPay
 }
 
 func sameNormalizationContext(left, right events.IntentNormalizationContextPayload) bool {
-	return left.SourceMessageID == right.SourceMessageID && left.PromptVersion == right.PromptVersion &&
+	return left.ConnectionID == right.ConnectionID && left.SourceMessageID == right.SourceMessageID && left.PromptVersion == right.PromptVersion &&
 		left.Provider == right.Provider && left.Model == right.Model &&
 		left.ExecutionProfileVersion == right.ExecutionProfileVersion && slices.Equal(left.InputEventRefs, right.InputEventRefs)
 }
 
 func sameInferenceUsage(left, right events.InferenceUsageRecordedPayload) bool {
-	if left.Source != right.Source || left.Provider != right.Provider || left.Model != right.Model ||
+	if left.ConnectionID != right.ConnectionID || left.Source != right.Source || left.Provider != right.Provider || left.Model != right.Model ||
 		left.InputTokens != right.InputTokens || left.OutputTokens != right.OutputTokens || left.TotalTokens != right.TotalTokens {
 		return false
 	}

@@ -290,6 +290,7 @@ type IntakeAbandonedPayload struct {
 }
 
 type IntentNormalizationContextPayload struct {
+	ConnectionID            string   `json:"connection_id,omitempty"`
 	SourceMessageID         string   `json:"source_message_id"`
 	PromptVersion           string   `json:"prompt_version"`
 	Provider                string   `json:"provider"`
@@ -1638,7 +1639,7 @@ func validateAgentExecutionModel(binding WorkCompletionBinding, task core.Task, 
 	profile, profileFound := binding.ExecutionProfiles[config.ProfileID]
 	_, createdOffset := manifest.CreatedAt.Zone()
 	if found.EventID == "" || !profileFound || profile.ID != config.ProfileID || profile.OrganizationID != core.ID(binding.OrganizationID) || profile.Version != config.ProfileVersion ||
-		manifest.ExecutionID != core.ID(executionID) || manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID || manifest.AgentBlueprintVersion != config.BlueprintVersion || manifest.ExecutionProfileVersion != profile.Version || manifest.RuntimeAdapter != config.RuntimeAdapter || manifest.Provider != profile.ModelProvider || manifest.Model != profile.Model || manifest.TaskContractVersion != task.TaskContractVersion || manifest.PromptVersion != profile.PromptVersion || manifest.PolicyVersion != "v1" || !validExecutionContextBuilderVersion(manifest.ContextBuilderVersion) || manifest.CreatedAt.IsZero() || createdOffset != 0 ||
+		manifest.ExecutionID != core.ID(executionID) || manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID || manifest.AgentBlueprintVersion != config.BlueprintVersion || manifest.ExecutionProfileVersion != profile.Version || manifest.RuntimeAdapter != config.RuntimeAdapter || manifest.ConnectionID != profile.ConnectionID || (manifest.ConnectionID != "" && (!core.ValidInferenceConnectionID(manifest.ConnectionID) || manifest.ContextBuilderVersion != "v5")) || manifest.Provider != profile.ModelProvider || manifest.Model != profile.Model || manifest.TaskContractVersion != task.TaskContractVersion || manifest.PromptVersion != profile.PromptVersion || manifest.PolicyVersion != "v1" || !validExecutionContextBuilderVersion(manifest.ContextBuilderVersion) || manifest.CreatedAt.IsZero() || createdOffset != 0 ||
 		len(manifest.SkillRefs) != 0 || len(manifest.ToolDefinitions) != 0 || len(manifest.ArtifactRefs) != 0 || !validSHA256(manifest.ExecutionInputSHA256) {
 		return executionModel{}, fmt.Errorf("work completion Agent manifest does not match its immutable Task")
 	}
@@ -2918,6 +2919,7 @@ func validSHA256(value string) bool {
 // Intent event/fingerprint supplied to one planning attempt. Planning output is
 // still untrusted until the runtime validates and records a Plan.
 type PlanningContextPayload struct {
+	ConnectionID            string              `json:"connection_id,omitempty"`
 	PlanID                  string              `json:"plan_id"`
 	IntentID                string              `json:"intent_id"`
 	IntentFingerprint       string              `json:"intent_fingerprint"`
@@ -3027,6 +3029,7 @@ func validUniqueEventRefs(values []string) bool {
 }
 
 type InferenceUsageRecordedPayload struct {
+	ConnectionID string   `json:"connection_id,omitempty"`
 	Source       string   `json:"source"`
 	Provider     string   `json:"provider"`
 	Model        string   `json:"model"`
@@ -3081,7 +3084,7 @@ type InferenceReconciledPayload struct {
 }
 
 func (p InferenceUsageRecordedPayload) Valid() bool {
-	return p.Source != "" && p.Provider != "" && p.Model != "" &&
+	return (p.ConnectionID == "" || core.ValidInferenceConnectionID(p.ConnectionID)) && p.Source != "" && p.Provider != "" && p.Model != "" &&
 		p.InputTokens >= 0 && p.OutputTokens >= 0 &&
 		p.TotalTokens >= 0 &&
 		p.TotalTokens == p.InputTokens+p.OutputTokens &&

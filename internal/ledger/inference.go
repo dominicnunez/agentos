@@ -284,6 +284,11 @@ window_started_at,window_expires_at,created_at,updated_at,connection_id) VALUES(
 			ReservedInputTokens:     reserved.ReservedInputTokens, ReservedOutputTokens: reserved.ReservedOutputTokens,
 			ReservedCostNanoUSD: reserved.ReservedCostNanoUSD, WindowStartedAt: windowStart, WindowExpiresAt: windowEnd,
 		}
+		if auxiliaryInferencePurpose(payload.Purpose) {
+			if err := bindAuxiliaryInferenceContext(ctx, tx, request, &payload); err != nil {
+				return err
+			}
+		}
 		if request.Scope.Purpose == inference.PurposeTaskExecution {
 			if err := tx.QueryRowContext(ctx, `SELECT event_id FROM events WHERE organization_id=? AND event_type='EXECUTION_CONTEXT_MANIFESTED' AND source_execution_id=?`, request.Scope.OrganizationID, request.Scope.ExecutionID).Scan(&payload.ExecutionManifestRef); err != nil {
 				return fmt.Errorf("bind inference manifest reference: %w", err)

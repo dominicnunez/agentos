@@ -70,8 +70,11 @@ func execute(ctx context.Context, args []string, input *os.File, output, errorOu
 	case "doctor":
 		return runDoctor(ctx, args[1:], output)
 	case "setup":
+		if len(args) == 2 && args[1] == "providers" {
+			return runProviderApply(ctx, input, output)
+		}
 		if len(args) != 2 || args[1] != "provider" {
-			return fmt.Errorf("use agentos setup provider")
+			return fmt.Errorf("use agentos setup provider or agentos setup providers")
 		}
 		return runProviderSetup(ctx, input, output)
 	case "help", "--help", "-h":
@@ -170,6 +173,9 @@ func runProviderSetup(ctx context.Context, input *os.File, output io.Writer) err
 	if err != nil || completed {
 		return err
 	}
+	if config.Routing != nil {
+		return fmt.Errorf("routed installations require updating the provider routing configuration as a set")
+	}
 	previous := config.Providers[0]
 	provider, err := collectProvider(ctx, config, input, output)
 	if err != nil {
@@ -230,7 +236,8 @@ func printHelp(output io.Writer) error {
   agentos init --user     Set up an installation for the current Linux user
   agentos doctor          Inspect local health without changing anything
   agentos dashboard       Open the local organization dashboard
-  agentos setup provider  Replace and test the configured model provider
+  agentos setup provider  Replace and test the single configured model provider
+  agentos setup providers Apply the reviewed provider configuration to the service
   agentos serve           Run the configured service
   agentos version         Print the version`)
 	return err
@@ -310,7 +317,7 @@ func runDoctor(ctx context.Context, args []string, output io.Writer) error {
 		} else {
 			providerErr = doctorProviderOnline(ctx, config)
 		}
-		checks = append(checks, doctorCheck{Name: "provider", Status: status(providerErr == nil), Detail: detail(providerErr, string(config.Providers[0].Kind))})
+		checks = append(checks, doctorCheck{Name: "provider", Status: status(providerErr == nil), Detail: detail(providerErr, fmt.Sprintf("%d configured providers", len(config.Providers)))})
 	} else {
 		checks = append(checks, doctorCheck{Name: "provider", Status: "INFO", Detail: "configuration only; use --online for an external check"})
 	}
@@ -325,27 +332,38 @@ func runDoctor(ctx context.Context, args []string, output io.Writer) error {
 }
 
 func doctorInferencePolicy(config bootstrap.Config, now time.Time) error {
-	if len(config.Providers) != 1 {
-		return fmt.Errorf("exactly one inference policy is required")
-	}
-	policy := config.Providers[0].InferencePolicy
-	if err := policy.Validate(); err != nil {
+	if err := config.Routing.Validate(config.Providers); err != nil {
 		return err
 	}
-	if now.Before(policy.AuthorizedAt) || !now.Before(policy.AuthorizationExpiresAt) {
-		return fmt.Errorf("inference authorization is not currently valid")
-	}
-	if policy.Pricing != nil && !now.Before(policy.Pricing.ExpiresAt) {
-		return fmt.Errorf("inference pricing is stale")
+	for _, provider := range config.Providers {
+		policy := provider.InferencePolicy
+		if err := policy.Validate(); err != nil {
+			return err
+		}
+		if now.Before(policy.AuthorizedAt) || !now.Before(policy.AuthorizationExpiresAt) {
+			return fmt.Errorf("inference authorization is not currently valid for connection %q", policy.ConnectionID)
+		}
+		if policy.Pricing != nil && !now.Before(policy.Pricing.ExpiresAt) {
+			return fmt.Errorf("inference pricing is stale for connection %q", policy.ConnectionID)
+		}
 	}
 	return nil
 }
-
 func doctorProviderCredential(config bootstrap.Config) error {
-	if len(config.Providers) != 1 {
-		return fmt.Errorf("exactly one active provider is required")
+	if err := config.Routing.Validate(config.Providers); err != nil {
+		return err
 	}
-	provider := config.Providers[0]
+	for _, provider := range config.Providers {
+		if err := provider.Validate(); err != nil {
+			return err
+		}
+		if err := doctorSingleProviderCredential(config, provider); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func doctorSingleProviderCredential(config bootstrap.Config, provider bootstrap.Provider) error {
 	paths := []string{filepath.Join(config.Paths.ConfigDir, "credentials", provider.SecretRef+".cred")}
 	if provider.Kind == bootstrap.ProviderCodexSubscription {
 		paths = append(paths, provider.CodexCredential)
@@ -369,7 +387,14 @@ func doctorProviderOnline(ctx context.Context, config bootstrap.Config) error {
 	if err := doctorProviderCredential(config); err != nil {
 		return err
 	}
-	provider := config.Providers[0]
+	for _, provider := range config.Providers {
+		if err := doctorSingleProviderOnline(ctx, config, provider); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func doctorSingleProviderOnline(ctx context.Context, config bootstrap.Config, provider bootstrap.Provider) error {
 	if provider.Kind == bootstrap.ProviderOpenAIAPI {
 		secret, err := decryptProviderCredential(ctx, config.Mode, filepath.Join(config.Paths.ConfigDir, "credentials", provider.SecretRef+".cred"), provider.SecretRef)
 		if err != nil {

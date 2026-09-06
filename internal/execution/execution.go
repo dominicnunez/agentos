@@ -45,6 +45,13 @@ type StructuredModelAdapter interface {
 	ModelAdapter
 	CompleteRequest(context.Context, modelinput.Request) (ModelResponse, error)
 }
+
+// ConnectionBoundModelAdapter identifies the account selected by trusted
+// composition. Adapters without this contract retain the legacy empty identity.
+type ConnectionBoundModelAdapter interface {
+	ModelAdapter
+	ConnectionID() string
+}
 type ModelDescriptor struct {
 	Provider                string
 	Model                   string
@@ -116,12 +123,17 @@ func (ReviewFakeModel) Complete(_ context.Context, prompt string) (ModelResponse
 }
 
 type AgentExecution struct {
-	model      ModelAdapter
-	descriptor ModelDescriptor
+	connectionID string
+	model        ModelAdapter
+	descriptor   ModelDescriptor
 }
 
 func NewAgentExecution(model ModelAdapter) *AgentExecution {
-	return &AgentExecution{model: model, descriptor: model.Descriptor()}
+	connectionID := ""
+	if bound, ok := model.(ConnectionBoundModelAdapter); ok {
+		connectionID = bound.ConnectionID()
+	}
+	return &AgentExecution{model: model, descriptor: model.Descriptor(), connectionID: connectionID}
 }
 func (a *AgentExecution) Descriptor() ModelDescriptor { return a.descriptor }
 func (a *AgentExecution) Execute(ctx context.Context, task core.Task, manifest core.ExecutionContextManifest) (Result, error) {
@@ -129,7 +141,8 @@ func (a *AgentExecution) Execute(ctx context.Context, task core.Task, manifest c
 	if task.ModelInferencePolicy == core.InferenceForbidden {
 		return Result{}, fmt.Errorf("model inference forbidden for task %s", task.ID)
 	}
-	if manifest.Provider != a.descriptor.Provider || manifest.Model != a.descriptor.Model || manifest.ExecutionProfileVersion != a.descriptor.ExecutionProfileVersion {
+	if manifest.ConnectionID != a.connectionID || (a.connectionID != "" && (!core.ValidInferenceConnectionID(a.connectionID) || manifest.ContextBuilderVersion != "v5")) ||
+		manifest.Provider != a.descriptor.Provider || manifest.Model != a.descriptor.Model || manifest.ExecutionProfileVersion != a.descriptor.ExecutionProfileVersion {
 		err := fmt.Errorf("execution context model identity does not match the configured adapter")
 		return Result{Outcome: core.ToolOutcome{ToolInvocationID: core.ID("model-" + string(task.ID)), ToolID: a.model.Name(), Status: core.OutcomeFailed, PostconditionStatus: core.PostconditionNotChecked, Retryability: core.NotRetryable, ErrorClass: "provider_contract", ErrorDetail: err.Error(), StartedAt: started, FinishedAt: time.Now().UTC()}}, err
 	}
@@ -148,7 +161,7 @@ func (a *AgentExecution) Execute(ctx context.Context, task core.Task, manifest c
 		err = SafeModelError(ModelCallFailed, err)
 		return Result{Outcome: core.ToolOutcome{ToolInvocationID: core.ID("model-" + string(task.ID)), ToolID: a.model.Name(), Status: core.OutcomeFailed, PostconditionStatus: core.PostconditionNotChecked, Retryability: core.Retryable, ErrorClass: ModelErrorClass(err), ErrorDetail: err.Error(), StartedAt: started, FinishedAt: time.Now().UTC()}}, err
 	}
-	if !response.Usage.Valid() || response.Usage.Provider != a.descriptor.Provider || response.Usage.Model != a.descriptor.Model {
+	if response.Usage.ConnectionID != a.connectionID || !response.Usage.Valid() || response.Usage.Provider != a.descriptor.Provider || response.Usage.Model != a.descriptor.Model {
 		err := fmt.Errorf("model usage identity does not match the configured adapter")
 		return Result{Outcome: core.ToolOutcome{ToolInvocationID: core.ID("model-" + string(task.ID)), ToolID: a.model.Name(), Status: core.OutcomeFailed, PostconditionStatus: core.PostconditionNotChecked, Retryability: core.NotRetryable, ErrorClass: "provider_contract", ErrorDetail: err.Error(), StartedAt: started, FinishedAt: time.Now().UTC()}}, err
 	}
