@@ -51,13 +51,21 @@ func (l *SQLite) SelectInferenceRoute(ctx context.Context, registry *inference.C
 	if policy == nil {
 		return inference.RouteSelection{}, fmt.Errorf("organization lacks an active routing policy")
 	}
+	budget, err := activeOrganizationBudget(ctx, tx, request.OrganizationID, nil)
+	if err != nil {
+		return inference.RouteSelection{}, err
+	}
+	sharedUse, err := readOrganizationBudgetUse(ctx, tx, request.OrganizationID, now, active, budget)
+	if err != nil {
+		return inference.RouteSelection{}, err
+	}
 	sharedBudgetRejections := 0
 	for len(pools) > 0 {
 		selected, err := registry.SelectRoute(now, pools, request, *policy)
 		if err != nil {
 			return inference.RouteSelection{}, err
 		}
-		err = enforceOrganizationBudget(ctx, tx, request.OrganizationID, now, active, selected.Pool.ReservedInputTokens, selected.Pool.ReservedOutputTokens, selected.Pool.ReservedCostNanoUSD)
+		err = sharedUse.allows(selected.Pool.ReservedInputTokens, selected.Pool.ReservedOutputTokens, selected.Pool.ReservedCostNanoUSD)
 		if err == nil {
 			selected.Decision.SharedBudgetRejections = sharedBudgetRejections
 			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0) FROM events`).Scan(&selected.Decision.SnapshotSequence); err != nil {

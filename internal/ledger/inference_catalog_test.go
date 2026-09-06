@@ -10,7 +10,7 @@ import (
 )
 
 func TestInferenceCatalogPolicyPersistsAndExpiresAtAdmission(t *testing.T) {
-	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	path := filepath.Join(t.TempDir(), "catalog.db")
 	store, err := Open(path)
 	if err != nil {
@@ -61,8 +61,20 @@ func TestInferenceCatalogPolicyPersistsAndExpiresAtAdmission(t *testing.T) {
 	request := testInferenceRequest("catalog-expired")
 	request.ConnectionID = "account"
 	request.Scope.Routing = &inference.RouteRequirements{OrganizationID: policy.OrganizationID, Capabilities: []inference.Capability{inference.Text}, InputTokens: 100, OutputTokens: 20, Locality: inference.CloudAllowed, DataClass: "internal"}
+	metadata, err := loaded.Catalog.Metadata(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := (inference.Broker{Routes: []inference.RouteMetadata{metadata}, Manager: inference.Manager{Pools: []inference.Pool{{ID: "account", Policy: loaded, Available: true}}}}).Select(time.Now().UTC(), *request.Scope.Routing, *loaded.Routing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(t.Context(), `SELECT MAX(sequence) FROM events`).Scan(&selected.Decision.SnapshotSequence); err != nil {
+		t.Fatal(err)
+	}
+	request.Scope.RoutingDecision = &selected.Decision
 	store.now = func() time.Time { return now.Add(time.Minute) }
-	if _, err := store.ReserveInference(t.Context(), request); err == nil || !strings.Contains(err.Error(), "catalog") {
+	if _, err := store.ReserveInference(t.Context(), request); err == nil || !strings.Contains(err.Error(), "catalog is expired") {
 		t.Fatalf("expired catalog admitted: %v", err)
 	}
 	if err := store.ValidateInferenceAdmissions(t.Context()); err != nil {

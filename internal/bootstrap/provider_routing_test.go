@@ -36,6 +36,27 @@ func TestRoutedConfigRoundTripAndInvalidRoutes(t *testing.T) {
 	}
 	withoutCatalog := append([]Provider(nil), config.Providers...)
 	withoutCatalog[1].InferencePolicy.Catalog = nil
+	noCatalogs := append([]Provider(nil), withoutCatalog...)
+	noCatalogs[0].InferencePolicy.Catalog = nil
+	for _, purpose := range []string{"task", "planning", "normalization", "task-specific"} {
+		changed := ProviderRouting{TaskDefault: "first", Planning: "first", Normalization: "first"}
+		if err := changed.Validate(noCatalogs); err != nil {
+			t.Fatal("legacy explicit routing rejected", err)
+		}
+		switch purpose {
+		case "task":
+			changed.Requirements = config.Routing.Requirements
+		case "planning":
+			changed.PlanningRequirements = config.Routing.PlanningRequirements
+		case "normalization":
+			changed.NormalizationRequirements = config.Routing.NormalizationRequirements
+		case "task-specific":
+			changed.TaskRequirements = map[string]modelinput.RouteRequirements{"research": research}
+		}
+		if err := changed.Validate(noCatalogs); err == nil {
+			t.Fatalf("%s broker requirements accepted without any catalog", purpose)
+		}
+	}
 	for _, purpose := range []string{"task", "planning", "normalization", "pin-default", "pin-specific"} {
 		changed := *config.Routing
 		changed.Requirements = modelinput.CloneRouteRequirements(config.Routing.Requirements)

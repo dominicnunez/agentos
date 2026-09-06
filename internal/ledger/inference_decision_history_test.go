@@ -191,6 +191,11 @@ func TestRoutingDecisionStandalonePendingRequestRejectsForgedPolicy(t *testing.T
 	request := testInferenceRequest("standalone")
 	request.ConnectionID = policy.ConnectionID
 	request.Scope.Routing, request.Scope.RoutingDecision = &requirements, &decision
+	request.Scope.RoutingDecision = nil
+	if _, err := store.ReserveInference(t.Context(), request); err == nil {
+		t.Fatal("catalog request without decision accepted")
+	}
+	request.Scope.RoutingDecision = &decision
 	validFingerprint := decision.PolicyFingerprint
 	decision.PolicyFingerprint = modelinput.TextDigest("forged policy")
 	if _, err := store.ReserveInference(t.Context(), request); err == nil {

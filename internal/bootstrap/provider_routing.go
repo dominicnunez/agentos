@@ -71,6 +71,13 @@ func (r *ProviderRouting) Validate(providers []Provider) error {
 		return fmt.Errorf("too many task requirement rules")
 	}
 	validateRequirements := func(requirements modelinput.RouteRequirements) error {
+		hasCatalog := false
+		for _, present := range catalogs {
+			hasCatalog = hasCatalog || present
+		}
+		if !hasCatalog {
+			return fmt.Errorf("broker routing requires at least one catalog-enabled connection")
+		}
 		if _, err := requirements.Canonical(); err != nil {
 			return err
 		}

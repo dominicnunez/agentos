@@ -11,14 +11,13 @@ import (
 )
 
 func TestInferenceSelectionUsesSharedLedgerBudget(t *testing.T) {
-	// Keep the injected admission clock after real event creation timestamps.
-	now := time.Now().UTC().Add(time.Minute)
+	now := time.Now().UTC()
 	store, err := Open(filepath.Join(t.TempDir(), "selection.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	store.now = func() time.Time { return now }
+	store.now = func() time.Time { return time.Now().UTC() }
 	model := execution.FakeModel{}
 	descriptor := model.Descriptor()
 	var policies []inference.Policy
@@ -52,13 +51,13 @@ func TestInferenceSelectionUsesSharedLedgerBudget(t *testing.T) {
 	if _, err := store.SelectInferenceRoute(t.Context(), registry, request); err == nil || !strings.Contains(err.Error(), "snapshot") {
 		t.Fatalf("backwards clock did not fail snapshot verification: %v", err)
 	}
-	store.now = func() time.Time { return now }
+	store.now = func() time.Time { return time.Now().UTC() }
 	selected, err := registry.Select(t.Context(), request)
 	if err != nil || selected.ConnectionID != "large" {
 		t.Fatalf("initial selection=%+v err=%v", selected, err)
 	}
 	initialSequence := selected.Decision.SnapshotSequence
-	if selected.ValidateFor(request) != nil || initialSequence <= 0 || selected.Decision.SharedBudgetRejections != 0 || !selected.Decision.SelectedAt.Equal(now) {
+	if selected.ValidateFor(request) != nil || initialSequence <= 0 || selected.Decision.SharedBudgetRejections != 0 || selected.Decision.SelectedAt.Before(now) {
 		t.Fatalf("initial decision lost its verified snapshot: %+v", selected.Decision)
 	}
 	call := testInferenceRequest("small-use")
@@ -73,6 +72,15 @@ func TestInferenceSelectionUsesSharedLedgerBudget(t *testing.T) {
 		t.Fatal("unapproved classification admitted")
 	}
 	constraints.DataClass = "internal"
+	if _, err := store.ReserveInference(t.Context(), call); err == nil || !strings.Contains(err.Error(), "durable routing decision") {
+		t.Fatalf("catalog reservation omitted durable decision: %v", err)
+	}
+	constraints.ConnectionID = "small"
+	smallSelection, err := registry.Select(t.Context(), constraints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call.Scope.RoutingDecision = &smallSelection.Decision
 	reservation, err := store.ReserveInference(t.Context(), call)
 	if err != nil {
 		t.Fatal(err)
