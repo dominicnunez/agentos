@@ -45,14 +45,17 @@ func TestRoutingDecisionRejectsStaleCutoff(t *testing.T) {
 	}
 }
 
-func TestRoutingDecisionBindsOrphanedAuxiliaryIdentity(t *testing.T) {
+func TestRoutingDecisionBindsOrphanedContextIdentity(t *testing.T) {
 	p, r, d := decisionHistoryFixture(t)
 	activation := events.Event{EventID: "policy", Sequence: 1, OrganizationID: p.OrganizationID, EventType: "INFERENCE_POLICY_ACTIVATED", CreatedAt: p.AuthorizedAt}
-	for _, kind := range []string{"PLANNING_CONTEXT_MANIFESTED", "INTENT_NORMALIZATION_CONTEXT_MANIFESTED"} {
-		for _, field := range []string{"", "connection_id", "provider", "model", "execution_profile_version"} {
+	for _, kind := range []string{"PLANNING_CONTEXT_MANIFESTED", "INTENT_NORMALIZATION_CONTEXT_MANIFESTED", "EXECUTION_CONTEXT_MANIFESTED"} {
+		for _, field := range []string{"", "connection_id", "provider", "model", "execution_profile_version", "routing_decision", "routing"} {
 			body := map[string]any{"connection_id": d.ConnectionID, "provider": d.Provider, "model": d.Model, "execution_profile_version": d.ExecutionProfileVersion, "routing": r, "routing_decision": d}
 			if field != "" {
 				body[field] = "different"
+			}
+			if field == "routing_decision" || field == "routing" {
+				delete(body, field)
 			}
 			origin := decisionHistoryEvent(t, 2, p.OrganizationID, kind, body)
 			err := validateRoutingDecisionHistory([]events.Event{activation, origin}, map[string]inference.Policy{"policy": p}, nil)

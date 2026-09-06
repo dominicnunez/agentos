@@ -394,6 +394,9 @@ func ValidateDurableGraph(graph DurableGraph) error {
 // ValidateTaskAssignment proves that a Task's assignee and pinned execution
 // configuration are durable within the Task's organization boundary.
 func ValidateTaskAssignment(task Task, organizationID ID, graph DurableGraph) error {
+	if (task.Routing == nil) != (task.RoutingDecision == nil) {
+		return fmt.Errorf("task routing requirements and decision must be present together")
+	}
 	if task.RoutingDecision != nil {
 		if task.Routing == nil || task.RoutingDecision.ValidateFor(*task.Routing) != nil || task.RoutingDecision.SnapshotSequence <= 0 || task.AssigneeType != "AGENT" {
 			return fmt.Errorf("task routing decision lacks valid requirements, snapshot or Agent assignment")

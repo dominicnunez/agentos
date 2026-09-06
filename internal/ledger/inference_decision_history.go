@@ -68,6 +68,9 @@ func validateRoutingDecisionHistory(stream []events.Event, activations map[strin
 				return err
 			}
 			requirements, decision = payload.Routing, payload.RoutingDecision
+			if !routeContextIdentityMatches(decision, payload.ConnectionID, payload.Provider, payload.Model, payload.ExecutionProfileVersion) {
+				return fmt.Errorf("task context identity differs from routing decision")
+			}
 		default:
 			var projection events.ProjectionEventPayload
 			if decodeExactJSONBytes(event.Payload, &projection) != nil || projection.Projection.ProjectionKind != "task" {
@@ -78,6 +81,9 @@ func validateRoutingDecisionHistory(stream []events.Event, activations map[strin
 				return err
 			}
 			requirements, decision = task.Routing, task.RoutingDecision
+		}
+		if (requirements == nil) != (decision == nil) {
+			return fmt.Errorf("persisted routing requirements and decision must be present together")
 		}
 		if decision == nil {
 			continue
