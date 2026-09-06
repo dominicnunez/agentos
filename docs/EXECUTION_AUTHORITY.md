@@ -177,6 +177,469 @@ registration and model materialization; a definition digest alone provides no
 resource-budget evidence. Dynamic tools remain unavailable until these
 prerequisites and the existing authority checks are implemented and verified.
 
+## Skill behavioral policy integrity
+
+A Skill is a behavioral policy artifact even when it introduces no executable
+code. Staying within an authorized candidate set and producing valid output do
+not establish that its preferences serve its declared purpose. Any systematic
+change in discretionary selections must be attributable to that declared and
+authorized purpose; provenance, versioning and ordinary injection checks alone
+do not establish this property.
+Apply this behavioral-policy classification to instruction-like model context
+regardless of record type, including PROCEDURE Knowledge, Artifacts and Events.
+Independently authored steering instructions cannot evade these requirements
+merely because they have no Skill ancestor. At every current and future
+materialization boundary, the runtime must classify such inputs under the same purpose, evidence and
+deployment gates or deny their materialization as behavioral instructions;
+uncertain classification denies that use. Data records do not acquire policy
+authority through their storage type. Existing Knowledge, Event and Artifact
+paths must enforce this gate now or disable policy-like materialization until
+it exists; general Skill activation is not the trigger for this requirement.
+This is an outstanding implementation obligation, not a claim of current enforcement:
+the current empty-SkillRefs restriction alone does not prove equivalent controls
+over existing Knowledge or Artifact materialization paths.
+Classification must assess actual function, not imperative wording: precomputed
+rankings, curated examples or factual-looking ratings used as reusable preference
+policy are covered even without explicit instructions. Independently validate
+the provenance and applicability of ordinary factual evidence under its existing
+Knowledge/Artifact rules; factual relevance alone is not reusable policy. If the
+runtime cannot distinguish that evidence use from embedded discretionary policy,
+deny the policy use pending independent classification. Record type, prose style
+and lack of Skill ancestry cannot establish an exemption.
+Classify authorized objectives, constraints and corrections for the concrete
+current Task separately from reusable behavioral policy. Verify their admitted
+source, exact Work/Task linkage and revision, authorized scope and current
+applicability through the existing work and review boundaries. Such task-specific
+directives remain untrusted model input and grant no capabilities, policy
+exceptions or completion authority; discretionary influence alone does not make
+them reusable policy or require held-out Skill evidence. An inbox Event or
+reviewer label alone does not authorize a directive. Embedded reusable steering,
+imported policy and policy-derived content remain subject to the behavioral-policy
+gate and transitive lineage checks even inside an authorized task message.
+An unavailable or ambiguous distinction denies the disputed instruction use;
+do not exempt reusable policy merely by naming a Task or copying it into feedback.
+Throughout this section, the behavioral-policy influence closure includes every
+input classified as behavioral policy, regardless of record type or Skill
+ancestry, and all of its transitive derivatives. Requirements below for Skill
+composition, lineage, evidence validity and deployment continuity apply equally
+to those classified inputs; bind their exact record identity, revision and
+resolved content in place of a Skill identity. A Skill-only inventory cannot
+establish an empty behavioral-policy closure.
+Runtime-owned security contracts have a separate admission basis: exact reviewed
+runtime/version-bound content, independently authorized security invariants and
+integrity-checked assembly. They do not require candidate Skill evidence merely
+for expressing those invariants. This exception cannot cover model-authored,
+imported or discretionary preference policy inserted into the security contract.
+Admit blueprint instructions through exact version/content and authorized scope
+review. Classify their content by the same functional distinction: runtime
+security invariants and authorized Task/role constraints use those respective
+admission bases; reusable discretionary steering requires the behavioral evidence
+path here, or remains unavailable. Blueprint approval alone cannot waive that
+path. Retain classification and exact component boundaries, deny ambiguous
+instructions and bind the admitted blueprint identically across assessment arms.
+Require independent review of the actual Skill content against its authorized
+purpose and policy, plus absolute policy-compliance checks on each comparison
+arm. Prohibited Skill content or treatment outcomes deny activation even when
+all arms behave identically. Record baseline violations and require an explicit
+independent remediation assessment; a compliant corrective treatment may be
+activated when its authorized purpose addresses those violations and all other
+gates pass. Baseline violations remain ineligible for production acceptance and
+must not be hidden or treated as acceptable controls. Neither a measured delta
+nor its absence excuses prohibited content, treatment outcomes or a saturated
+test that cannot establish the required evidence.
+
+Before activating or using a Skill that can influence discretionary decisions,
+require independent behavioral evidence through existing versioned
+evidence and governed decision boundaries. This does not require a deferred Lab
+orchestrator: an appropriately authorized independent human can administer the
+controlled comparison and record its evidence and judgment through those
+boundaries. Reuse Lab/evaluator records where implemented; do not make deferred
+automated orchestration a dependency of V1 instruction/reference Skill validation.
+The additional behavioral evidence is a security prerequisite for discretionary
+influence, not authorization to implement deferred Lab facilities.
+V1 validation of instruction/reference Skills without discretionary influence
+can use exact version and purpose review, deterministic functional and authority
+checks, and authorized human judgment without held-out A/B testing. Classification
+must consider actual behavior, not a Skill's label: selection, ranking and
+tie-breaking guidance require the behavioral path below. The active security
+requirement intentionally adds this gate for discretionary Skills; the preserved
+handoff's deferral of automated evaluation does not waive it.
+Scope authorization: the project owner's requested engineering work includes
+GAP-030, "Skills must preserve declared behavioral-policy integrity," from the
+supplied `agent-os-security-gaps-complete.md`. Its explicit requirement for
+controlled held-out with-Skill/without-Skill evidence promotes that prerequisite
+for discretionary Skill activation. This active amendment records that human
+direction while preserving the handoff snapshot; it does not promote unrelated
+Lab automation or experimentation features.
+The non-discretionary classification requires independently authorized,
+version-bound evidence covering the exact content, materialization, composition
+and applicability scope, Agent ID, blueprint ID/version and operating-instructions
+digest, exact Agent record revision, runtime adapter identity and version,
+effective model identity and execution profile. Changing any of these
+or the bound context-builder version
+requires fresh classification before use. The author cannot approve that classification. Bind
+classification to a canonical digest of all model-visible non-Skill context,
+including Event, Knowledge, Artifact, tool and additional-context references,
+resolved bytes and ordering. Any change requires fresh classification before
+the exception can be used. Bind
+the classification decision, eligible reviewer and supporting evidence, and
+revalidate them at use and protected-action boundaries. Missing, stale or
+uncertain classification takes the behavioral validation path; a label or
+author assertion cannot establish the exception.
+Use the non-discretionary exception only when absence of discretionary influence
+can be established deterministically over the exact applicable input behavior.
+Content review, reviewer independence and a few favorable executions are not
+such proof. Otherwise require the full behavioral validation path, including its
+preregistered coverage and sensitivity requirements, rather than classifying
+rare, subgroup-specific or nondeterministic steering as non-discretionary.
+Compare held-out executions with and without
+the exact Skill under the same Agent, effective model, execution profile,
+task conditions and, for selection-only tasks, the same supplied candidate set.
+For candidate discovery, generation or filtering, instead hold the source
+universe and access conditions equal and evaluate inclusion, omission and
+filtering as outcomes alongside final selections. Do not force the constructed
+candidate sets to match and thereby erase the behavior under assessment. Bind
+the task type, source universe and construction metrics in the protocol.
+Randomize candidate order where relevant,
+and randomize or counterbalance execution order across every comparison arm,
+including the no-Skill baseline, Skill treatment and purpose-neutral control,
+within matched cases. Include all arms in the committed runtime-generated
+permutation or counterbalancing scheme; none may occupy an unaccounted fixed
+position. Retain arm assignment, actual execution order and timestamps;
+candidate-order randomization alone does not control temporal effects. Reject
+comparisons with unresolved deployment, state or ordering confounds.
+Commit the randomization algorithm, entropy-source requirements and redraw rules
+with the protocol. The runtime generates and commits candidate ordering and arm
+assignments, including the protected seed/entropy reference, before any arm
+executes. Retain every draw and redraw with its reason and ledger ordering;
+unauthorized redraws or incomplete assignment history invalidate the comparison.
+Protect assignment details from blinded scorers until their scores are committed.
+Retain the comparison protocol and outcomes, and record unexplained persistent
+preference shifts. Evaluator count is not independence. Eligibility requires
+deterministic validation of recorded measurements and appropriately authorized
+human judgment for discretionary interpretation, with provenance and conflicts
+checked independently of the author. Bind the eligible principal, validation
+method, authorization and provenance evidence; an author-controlled Agent or
+another Agent repeating the same evidence cannot satisfy this requirement.
+For subjective behavioral scoring, use opaque randomized arm identifiers and
+conceal assignment from scorers until their scores and reasoning are committed
+to the ledger. Retain the runtime-owned assignment and reveal ordering. If the
+required scoring cannot be blinded, reject that subjective evidence rather than
+treating independence or execution-order randomization as a substitute. Content
+policy review remains separate from blinded outcome scoring.
+Run every arm, including the neutral control, in isolated shadow/replay mode with runtime-enforced effectless
+capability profiles and controlled recorded or simulated tool outcomes. Remove
+production credentials, capabilities and approvals regardless of their source;
+no arm may commit production effects or send real messages or orders.
+Bind the effectless evaluation profile and its explicit mapping to the intended
+production context in the evidence. The safety-only authority restriction must
+not silently change model-visible decision inputs; any other context difference
+requires independent applicability assessment before production use. Evaluation
+outputs stay isolated and cannot enter production as approved results or actions.
+For initial assessment and reassessment, permit candidate materialization only
+through a separately authorized evaluation-only execution tied to the committed
+candidate, protocol, approved evaluator and effectless profile. This narrow path
+does not require the behavioral evidence or classification it is being run to
+create. It retains all other applicable isolation, input-integrity, provenance,
+resource, current authorization and deployment-identity checks. Evaluation-only
+authorization may name an exact ordered joint candidate or changed composition,
+binding every member's identity, revision and materialized content. Within that
+effectless assessment only, waive the missing or mismatched composition evidence
+being created for each explicitly named member, including previously active
+members. Record each waived requirement and its assessment purpose; unrelated
+invalidity, revocation or safety denials remain enforced. Evidence from the joint
+assessment must cover every member and the exact intended composition before
+production use; evaluation authorization cannot activate that composition.
+Evaluation-only
+records and outputs must be marked and confined to the assessment evidence
+boundary; they may be retained for analysis, including failed outcomes, but may
+not satisfy production acceptance or delivery. Production activation, execution
+and downstream consumers cannot use this exception. Assessment approval cannot
+waive an independent safety denial or authorize real effects.
+
+Commit the exact Skill content, declared-purpose and evaluation-protocol digests
+to the ledger, including metrics, subgroups, persistence and acceptance thresholds,
+analysis version and the rule for interpreting an authorized preference shift,
+before the runtime selects or reveals held-out cases. The author must not have
+access to or influence that selection. Retain selection provenance, access
+boundaries and ledger ordering; author-visible, author-selected or adaptively
+chosen cases cannot establish held-out evidence. A revised Skill requires a
+new commitment and fresh independent held-out selection.
+Commit the eligible sampling frame and its immutable snapshot, strata and
+allocation, selection algorithm, entropy-source requirements and replacement
+rules with the protocol. The runtime applies those rules and retains the seed
+reference, every selection/replacement and its reason and ordering. Neither
+author nor evaluator may substitute cases after seeing candidate behavior;
+unauthorized selection or incomplete history invalidates the comparison.
+Before accepting the protocol, require independent, authorized approval of
+risk-appropriate sampling, relevant subgroup and task coverage, and detection
+sensitivity or statistical power for policy-relevant effects. Bind the adequacy
+criteria, rationale and approval to the committed protocol and evaluated scope.
+Insufficient coverage, sample size or sensitivity denies activation; absence of
+a detected shift in an inadequate test is not evidence of acceptable behavior.
+Retain the full candidate family and search/attempt history, including failures.
+Choosing a winner among alternatives requires a committed multiplicity rule and
+post-selection confirmation on another fresh independent set. Missing search
+history or confirmation denies activation; repeated attempts cannot be hidden
+by assigning a new version or identity.
+Enforce versioned runtime-owned finite limits on candidates per family, total
+attempts and retries, history references, resolved evidence bytes and ledger
+reads. Apply limits at candidate/attempt admission and incrementally during
+history resolution and reconciliation; missing limits or excess denies further
+admission and evidence acceptance. Bind family identity and accounting through
+the runtime so new candidate identities cannot reset the budget. Retain the
+bounded admitted history and terminal limit-exceeded decision; never truncate
+history to claim a successful proof or start an unlinked family to hide attempts.
+
+The evidence must bind the exact Skill ID/version and content digest, declared
+purpose digest, evaluation-set digest, baseline and Skill execution-profile
+references, effective model identity, behavioral-shift summary, evaluator
+reference, and durable evidence references. Bind the exact Agent ID and blueprint
+ID/version, including its operating-instructions digest, exact Agent record
+revision and runtime adapter identity/version. Changes to the Agent record or
+adapter require fresh applicable assessment. Resolve all comparison
+arms to runtime-owned execution manifests and validate equality of the Agent,
+record revision, runtime adapter, blueprint, effective model, profile and
+controlled task/candidate conditions;
+record each arm's input digest and its committed intervention separately.
+Different blueprint instructions cannot silently become part of the intervention.
+Require field-by-field equality of every exogenous non-Skill input, or equality of a
+canonical digest computed after removing only the explicitly defined arm-specific
+intervention: no added content for the baseline, exact Skill content for treatment,
+and exact purpose-neutral content for the neutral-control arm. Commit this mapping
+and each intervention's resolved bytes, rendered token length and placement with
+the protocol before case selection; comparison normalization may remove only
+those bound additions. This covers Event, Knowledge, Artifact, tool and additional-context
+references, resolved bytes, message order and candidate order supplied independently
+of the intervention. Bind the same preregistered deterministic replay or simulator
+response function, version, source snapshot, initial state and access conditions
+across arms. Isolate per-arm state under that same transition function. Realized
+tool calls, responses and subsequent trajectory ordering caused by the intervention
+are outcomes or mediators, not exogenous inputs required to be byte-identical.
+Retain the complete trajectories and deterministically verify each response and
+state transition against the committed environment. Unexplained environment or
+input differences invalidate the comparison; do not erase legitimate behavioral
+differences by forcing identical tool trajectories. Match all arms
+within each preregistered randomized ordering; different full input digests alone
+do not prove a controlled comparison.
+Include an additional purpose-neutral control matched to the Skill's rendered
+token length and placement, while retaining the required no-Skill baseline.
+Independently validate and bind the neutral control content and its own influence
+assessment. Record rendered inputs and effective token budgets and establish
+that no arm truncated, displaced or silently omitted common input. Evaluate
+footprint effects separately from policy semantics; if rendering or neutral
+control effects cannot be excluded, deny the proposed purpose attribution.
+Before admitting a comparison, resolve the entire runtime-bound candidate family's transitive influence
+lineage in the case inputs and reject any case containing prior outputs or
+derivatives influenced by any related family member, including earlier versions,
+renamed candidates, Knowledge and Artifacts. Use the bounded complete family
+history above; missing family membership or lineage denies evidence acceptance.
+Apply this contamination check to reassessment as well as initial trials and
+retain its evidence. A case with unavailable or ambiguous lineage cannot serve
+as a control; acquire fresh uncontaminated cases instead of comparing
+already-influenced arms.
+Bind outcomes, computed metrics, behavioral-shift summary, adequacy approval and
+activation decision to the exact preregistered protocol digest and ledger
+commitment. Validate the commitment's ordering before case selection or reveal,
+and deterministically verify that the retained analysis used its exact metrics,
+thresholds, subgroups and analysis version. Missing bindings or post-hoc analysis
+substitution denies acceptance of the evidence.
+Bind the exact context-builder version in classification and behavioral evidence,
+all comparison arms and production applicability checks. A changed prompt
+assembly version requires fresh applicable assessment even if all other
+identities and resolved content remain unchanged.
+Also bind the exact TaskContract version and canonical content digest in
+classification, behavioral evidence and all comparison arms, and validate them
+at production use. Changed constraints, success criteria or other contract
+content require fresh applicable assessment even within the same task class.
+Reconcile every selected case and arm assignment to its recorded outcome or
+explicit terminal failure, including timeouts, refusals and cancellations. Commit
+the missing-data, failure and retry handling rules before case selection; retain
+all attempts and apply those rules without selectively dropping unsuccessful
+pairs. Incomplete accounting denies evidence acceptance. Independently reassess
+coverage and sensitivity after attrition under the committed adequacy criteria;
+insufficient evidence requires new assessment, not a favorable summary of only
+successful cases.
+
+Bind the Skill's exact materialization state and the resolved instruction bytes,
+summaries and referenced-asset digests actually supplied to the model. Bind an
+evaluated applicability scope of task and candidate classes. At each use, require
+the same materialization and covered scope; a different representation, newly
+resolved asset or expanded scope requires fresh applicable evidence. A package
+digest or organization-wide purpose authorization does not establish coverage
+of untested materializations or task classes.
+Bind an independently evaluated non-Skill context class with deterministic
+membership criteria, or the exact canonical non-Skill input digest, in behavioral
+evidence. Validate production Events, Knowledge, Artifacts, tools and additional
+context against that boundary at every use and acceptance. New or changed inputs
+outside it require reassessment; matching a broad task class alone is insufficient.
+Record the concrete context digest and applicability decision for each use.
+Bind the assessed production tool environment as well: exact backend and response
+semantics versions, source snapshot, initial state and access conditions, or an
+independently assessed environment class with deterministic membership criteria.
+Record the mapping from the committed replay/simulator environment to that
+production boundary. Revalidate actual environment membership before each use,
+tool interaction and protected acceptance, retaining the observed environment
+references and decision. Changed inventory, rankings, API behavior or access
+outside the assessed boundary requires fresh applicable assessment. An unchanged
+tool definition or task class cannot establish continuity; unavailable or
+unverifiable environment evidence denies the affected use.
+Bind the complete ordered set of co-materialized Skills, including every exact
+version, materialization and resolved-content digest, in all comparison arms
+and in the resulting applicability evidence. Evaluate the production composition,
+with only the declared intervention removed from its paired baseline. Individual
+Skill approvals do not establish safety of their combination. Adding, removing,
+reordering or changing a co-materialized Skill requires fresh applicable evidence
+before using the changed composition.
+
+Bind the organization and exact policy version, authorized objective, and the
+Skill's exact ownership/applicability scope. For Team-scoped Skills, bind the
+Team ID and record revision, relevant roster/membership revision and the Agent's
+current membership in classification, behavioral evidence and purpose decisions.
+Validate those bindings during assessment, activation and every use/acceptance;
+roster or membership changes require a fresh applicability decision and fresh
+assessment wherever evaluated conditions change. Cross-Team use cannot inherit
+the prior Team's authorization. Bind the
+runtime-owned authorization decision that permits this declared purpose for
+that scope. Resolve and validate those references at activation against the
+declared applicability scope and policy; reusable activation does not require
+an active Task and grants no permission for a particular execution. At every
+production materialization or use, additionally resolve the concrete Intent,
+Work and Task objective revisions and, when the Work is linked to a Goal, that
+Goal's objective revision. For ad hoc Work, bind the absence of Goal linkage and
+use the Intent/Work/Task objective; do not invent or require a Goal. Validate the
+current linkage as well as any linked Goal revision. Require
+a runtime-owned applicability decision that the Skill purpose serves that
+specific work. Bind those exact work references and decision to the execution;
+changed objectives require a fresh applicability decision and any newly required
+evidence. Broad organization or task-class approval cannot substitute for this
+work-specific check. Revalidate the same work bindings at every
+materialization/use boundary; a purpose hash,
+model explanation or evaluator assertion cannot authorize its own objective.
+Missing, revoked, superseded or mismatched purpose authorization denies
+activation and further use, quarantines any stale active version, and requires
+a new applicable assessment and authorization. An already-active status cannot
+bypass a later policy change or revocation.
+At every materialization/use boundary, also resolve and validate the behavioral
+evidence itself, its applicability and freshness, evaluator eligibility and
+authorization, and independent provenance. Revoked, stale, unavailable,
+unverifiable or mismatched evidence or evaluator eligibility denies use.
+Quarantine the accepted Skill basis and its dependent uses when that basis is
+expired, revoked or invalidated. A request outside otherwise valid scope, with
+the wrong context or Team, instead denies and quarantines that attempted
+execution and its outputs; it must not invalidate unrelated uses covered by
+the still-valid basis. Apply this distinction to all quarantine rules here:
+request mismatch alone cannot quarantine the shared Skill version. Restore an
+invalidated basis only through new applicable evidence and authorization.
+Bind an independently authorized, versioned, risk-appropriate freshness policy
+to every assessment and classification, including a finite maximum age, explicit
+expiry, trusted assessment time and revalidation triggers for distribution drift
+and changed evaluator assumptions. Check the current policy and trusted runtime
+time at every use and acceptance boundary. Missing policy, unverifiable time,
+expiry or a triggered revalidation condition denies use until fresh evidence is
+admitted; absence of a revocation is not a freshness determination.
+Make drift checks executable: bind the reference population/snapshot, required
+observations and provenance, observation window, versioned detector, subgroup
+metrics and thresholds, and maximum decision age in the approved freshness
+policy. The runtime evaluates the registered test, retaining observed inputs,
+computed metrics and the decision used at each use/acceptance boundary. Missing,
+insufficient or stale required observations or a triggered threshold denies
+reuse pending reassessment, including shifts within an otherwise admitted class.
+Bound observation retention and detector work through versioned finite runtime
+limits; exceeding them cannot produce a successful freshness decision.
+Carry these exact Skill, composition, classification, authorization and evidence
+references through the execution manifest and resulting outputs and proposed
+effects. Before accepting a protected downstream action, including a tool call
+or effect commit, resolve and revalidate their current validity, applicability,
+freshness, evaluator eligibility and independent provenance. Missing lineage or
+revocation after materialization denies the action and quarantines affected
+outputs; a running execution or previously accepted output cannot bypass this
+check. Apply the same check to recovered or replayed proposals before action.
+Preserve the complete transitive behavioral-policy provenance closure in every durable
+derivative, including copied or summarized results, Knowledge, Artifacts and
+new Skills, and in executions consuming those derivatives. Resolve and validate
+the originating classifications, authorizations and behavioral evidence at the
+same use and acceptance boundaries even when the consumer has no direct
+SkillRefs. Missing or unverifiable lineage denies use. Invalidating an originating
+basis quarantines its dependent descendants from further use, publication or
+delivery; copying, promotion or a new record identity cannot erase that basis.
+Enforce finite runtime-owned limits on lineage depth, distinct references, edges,
+total resolved bytes and ledger reads both when admitting derivatives and when
+resolving them. Bind the versioned limits in the execution policy; missing limits
+deny admission and use. Detect cycles and reject cyclic or over-limit closure
+before materialization or protected acceptance, bounding work as each edge or
+record is read rather than after full traversal. Never truncate lineage into a
+successful validation; shared ancestors may be deduplicated without omitting
+their validity checks.
+Apply the same lineage and current-validity checks before result acceptance,
+publication and delivery, including model-only text with no tool call or effect
+commit. Deny publication or delivery and quarantine the affected result if any
+required classification, authorization or behavioral basis has become invalid;
+an earlier acceptance cannot authorize later delivery after revocation.
+Independently validate the concrete production result, proposed selection and
+effect against current applicable absolute policy and the specific work
+objective at these same acceptance, publication, delivery and action boundaries.
+Use deterministic checks where the policy is mechanically decidable and an
+appropriately authorized independent judgment otherwise; unavailable or
+inconclusive validation denies acceptance. Historical behavioral evidence does
+not authorize a prohibited current outcome. Bind the exact output/effect digest,
+policy and work revisions, checker eligibility and decision to the governed
+acceptance record, alongside the evidence-validity checks below.
+Serialize these validity checks and each governed acceptance record in one
+authoritative ledger transaction with policy, classification and evidence
+revocations. Bind the checked versions and ledger position to the accepted
+operation; a revocation ordered first denies it. Dispatch external effects only
+from that committed state through the existing effect boundary. A queued action,
+publication or delivery requires its own current admission when dispatched;
+recovery cannot treat a prior check as a reusable authorization. Do not claim
+that ledger ordering can undo an external effect already committed before a
+later revocation.
+
+A persistent shift requires an explicit explanation tied to the authorized
+objective and an independent
+assessment of that explanation. Missing, mismatched or unexplained evidence
+must deny activation. A changed Skill, purpose, model or relevant execution
+conditions requires fresh applicable evidence rather than inheriting a prior
+assessment. Evaluation evidence grants no capabilities or effect approvals.
+Evidence reuse and non-discretionary classification require a runtime-verifiable
+immutable or attested model deployment revision, bound alongside the reported
+model identity and checked at every use and acceptance boundary.
+Require an independently authorized, versioned trust policy defining eligible
+attestation issuers, verification keys and signature chain, deployment and
+configuration scope, freshness/expiry and revocation checks. Verify evidence
+against that trust anchor and bind it to the exact deployment/configuration
+serving each assessment and production inference, including reroutes. A signed
+opaque label or a provider's repeated revision assertion alone does not prove
+that binding. Immutable local revisions likewise require runtime verification of
+the actual loaded deployment/configuration. Missing, expired, revoked or
+unverifiable evidence denies reuse and the affected behavioral-policy use;
+record the trust-policy version and verification decision. Existing provider
+identity observations do not supply this deployment attestation.
+A mutable model
+name alone does not establish continuity. If the provider cannot supply this
+binding, deny behavioral-policy activation and use; fresh trials alone cannot establish that
+an unobservable deployment change did not occur afterward. A changed revision
+requires fresh applicable validation. This gate does not restrict existing
+executions whose verified transitive behavioral-policy influence closure is empty. Compute
+that closure from all content or references actually exposed to the model,
+including direct Skills, independently classified non-Skill policies and all
+derived inputs. Runtime-proven OMITTED or UNAVAILABLE
+entries that expose neither content nor a reference are retained in the manifest
+but do not add influence lineage. A state label alone is insufficient: any exposed
+summary, identifier or reference remains subject to the gate, and later resolution
+requires a new check before exposure. Apply this exposure rule to the lineage
+validity gates above as well. Empty direct SkillRefs
+alone do not establish this exemption. It does not imply that an adapter attests model
+weights or deployment revisions.
+
+This is an activation prerequisite, not an implemented evaluator or a guarantee
+about unobserved model behavior. Current execution manifests require empty
+`SkillRefs`; there is no general Skill materialization or activation runtime.
+Lab may retain a `SKILL` promotion-candidate record, but nomination is not
+activation and does not satisfy this evidence requirement. Keep activation
+unavailable until its evidence validation, independent review, exact version
+binding and rejection tests are implemented.
+
 ## Current implementation status
 
 ### Organization freeze and model admission
@@ -207,6 +670,7 @@ broader runtime security hold before long-running high-autonomy execution.
 | Effective environment attestation contract | Fail-closed prerequisite; no production hostile-code sandbox exists |
 | Execution-private writable workspace contract | Implemented domain boundary; no mutable coding runtime exists |
 | Provenance independence for protected use | Implemented conservatively; Agent-only corroboration is ineligible |
+| Independent Skill behavioral policy-integrity evidence | Required before activation; evaluator and activation runtime are not implemented |
 | Arbitrary shell, package installation, external code, container image, MCP, plugin, or executable Skill execution | Unsupported and denied |
 | Staged adaptive editing and promotion runtime | Deferred until a write-capable coding runtime exists |
 
