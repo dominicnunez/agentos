@@ -256,7 +256,23 @@ FROM inference_reservations WHERE organization_id=? AND connection_id=? AND prov
 		if selection.PoolID != fingerprint || selection.PolicyFingerprint != fingerprint {
 			return fmt.Errorf("selected inference pool is not the active durable policy")
 		}
-		if err := enforceOrganizationBudget(ctx, tx, policy.OrganizationID, now, active, selection.ReservedInputTokens, selection.ReservedOutputTokens, selection.ReservedCostNanoUSD); err != nil {
+		var budgetErr error
+		if request.Scope.RoutingDecision != nil {
+			// History and the pending decision were validated above; no writes
+			// have occurred in this transaction since that verification.
+			budget, err := activeOrganizationBudget(ctx, tx, policy.OrganizationID, nil)
+			if err != nil {
+				return err
+			}
+			use, err := readOrganizationBudgetUse(ctx, tx, policy.OrganizationID, now, active, budget)
+			if err != nil {
+				return err
+			}
+			budgetErr = use.allows(selection.ReservedInputTokens, selection.ReservedOutputTokens, selection.ReservedCostNanoUSD)
+		} else {
+			budgetErr = enforceOrganizationBudget(ctx, tx, policy.OrganizationID, now, active, selection.ReservedInputTokens, selection.ReservedOutputTokens, selection.ReservedCostNanoUSD)
+		}
+		if err := budgetErr; err != nil {
 			return err
 		}
 		reservationID, err := inferenceReservationID(request)

@@ -90,6 +90,23 @@ func (r *ProviderRouting) Validate(providers []Provider) error {
 		if requirements.ConnectionID != "" && !catalogs[requirements.ConnectionID] {
 			return fmt.Errorf("hard routing requirements require a catalog-enabled connection")
 		}
+		if requirements.ConnectionID != "" {
+			for _, policy := range policies {
+				if policy.ConnectionID != requirements.ConnectionID {
+					continue
+				}
+				metadata, err := policy.Catalog.Metadata(policy)
+				if err != nil || policy.Routing == nil {
+					return fmt.Errorf("hard route lacks reviewed catalog and routing policy")
+				}
+				// Check static feasibility at authorization time, without live
+				// accounting, network calls, or a wall-clock-dependent config.
+				broker := inference.Broker{Routes: []inference.RouteMetadata{metadata}, Manager: inference.Manager{Pools: []inference.Pool{{ID: policy.ConnectionID, Policy: policy, Available: true}}}}
+				if _, err := broker.Select(policy.AuthorizedAt, requirements, *policy.Routing); err != nil {
+					return fmt.Errorf("hard route cannot satisfy its configured requirements: %w", err)
+				}
+			}
+		}
 		for _, id := range requirements.PreferredConnections {
 			if !ids[id] {
 				return fmt.Errorf("task preference names an unconfigured connection")
@@ -125,6 +142,13 @@ func (r *ProviderRouting) Validate(providers []Provider) error {
 		}
 		if requirements != nil && requirements.ConnectionID != "" && requirements.ConnectionID != connection {
 			return fmt.Errorf("task connection conflicts with routing requirements")
+		}
+		if requirements != nil {
+			pinned := requirements.Clone()
+			pinned.ConnectionID = connection
+			if err := validateRequirements(pinned); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

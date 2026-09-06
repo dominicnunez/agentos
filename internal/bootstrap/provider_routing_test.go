@@ -25,7 +25,7 @@ func TestRoutedConfigRoundTripAndInvalidRoutes(t *testing.T) {
 	second.SecretRef, second.InferencePolicy.ConnectionID = "second-key", "second"
 	config.Providers = []Provider{first, second}
 	config.Routing = &ProviderRouting{TaskDefault: "first", Planning: "second", Normalization: "second", TaskConnections: map[string]string{"research": "second"}}
-	config.Routing.Requirements = &modelinput.RouteRequirements{OrganizationID: first.InferencePolicy.OrganizationID, Capabilities: []modelinput.Capability{modelinput.Text}, InputTokens: 1000, OutputTokens: 100, Locality: modelinput.CloudAllowed, DataClass: "internal"}
+	config.Routing.Requirements = &modelinput.RouteRequirements{OrganizationID: first.InferencePolicy.OrganizationID, Capabilities: []modelinput.Capability{modelinput.Text}, InputTokens: 100, OutputTokens: 100, Locality: modelinput.CloudAllowed, DataClass: "internal"}
 	research := config.Routing.Requirements.Clone()
 	research.PreferredConnections = []string{"second"}
 	config.Routing.TaskRequirements = map[string]modelinput.RouteRequirements{"research": research}
@@ -84,6 +84,43 @@ func TestRoutedConfigRoundTripAndInvalidRoutes(t *testing.T) {
 		}
 		if err := changed.Validate(config.Providers); err != nil {
 			t.Fatalf("%s catalog-enabled hard route rejected: %v", purpose, err)
+		}
+	}
+	for _, purpose := range []string{"task", "planning", "normalization", "pin"} {
+		for name, mutate := range map[string]func(*modelinput.RouteRequirements){
+			"capability": func(r *modelinput.RouteRequirements) {
+				r.Capabilities = []modelinput.Capability{modelinput.Text, modelinput.Vision}
+			},
+			"class":            func(r *modelinput.RouteRequirements) { r.DataClass = "secret" },
+			"input":            func(r *modelinput.RouteRequirements) { r.InputTokens = 100001 },
+			"output":           func(r *modelinput.RouteRequirements) { r.OutputTokens = 20001 },
+			"denied-provider":  func(r *modelinput.RouteRequirements) { r.DeniedProviders = []string{second.InferencePolicy.Provider} },
+			"allowed-provider": func(r *modelinput.RouteRequirements) { r.AllowedProviders = []string{"unconfigured-provider"} },
+			"locality":         func(r *modelinput.RouteRequirements) { r.Locality = modelinput.LocalOnly },
+		} {
+			changed := *config.Routing
+			changed.TaskConnections, changed.TaskRequirements = nil, nil
+			constraints := config.Routing.Requirements.Clone()
+			constraints.ConnectionID = "second"
+			switch purpose {
+			case "task":
+				changed.Requirements = &constraints
+			case "planning":
+				changed.PlanningRequirements = &constraints
+			case "normalization":
+				changed.NormalizationRequirements = &constraints
+			case "pin":
+				constraints.ConnectionID = ""
+				changed.Requirements = &constraints
+				changed.TaskConnections = map[string]string{"research": "second"}
+			}
+			if err := changed.Validate(config.Providers); err != nil {
+				t.Fatalf("eligible %s hard route rejected: %v", purpose, err)
+			}
+			mutate(&constraints)
+			if err := changed.Validate(config.Providers); err == nil {
+				t.Fatalf("%s hard route accepted incompatible %s", purpose, name)
+			}
 		}
 	}
 	for _, mutate := range []func(*ProviderRouting){
