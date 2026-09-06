@@ -220,6 +220,15 @@ func (s *Service) RecordIntentNormalizationContext(ctx context.Context, organiza
 	if (in.Routing == nil) != (in.RoutingDecision == nil) {
 		return nil, fmt.Errorf("normalization routing requirements and decision must be present together")
 	}
+	if in.Routing == nil {
+		required, err := s.gateway.InferenceConnectionRequiresRouting(ctx, in.ConnectionID)
+		if err != nil {
+			return nil, err
+		}
+		if required {
+			return nil, fmt.Errorf("governed normalizer requires route selection before publication")
+		}
+	}
 	if decision := in.RoutingDecision; decision != nil {
 		if in.Routing == nil || decision.ValidateFor(*in.Routing) != nil || decision.SnapshotSequence <= 0 || decision.ConnectionID != in.ConnectionID ||
 			decision.Provider != in.Provider || decision.Model != in.Model || decision.ExecutionProfileVersion != in.ExecutionProfileVersion {

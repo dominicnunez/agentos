@@ -2054,6 +2054,15 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 				return core.Plan{}, fmt.Errorf("validate planning route provenance: %w", err)
 			}
 		}
+		if routing == nil {
+			required, err := s.gateway.InferenceConnectionRequiresRouting(ctx, descriptor.ConnectionID)
+			if err != nil {
+				return core.Plan{}, err
+			}
+			if required {
+				return core.Plan{}, fmt.Errorf("governed model planner requires a route selector")
+			}
+		}
 		executionID = core.ID(fmt.Sprintf("planning-%s-attempt-1", planID))
 		contextPayload := events.PlanningContextPayload{
 			RoutingDecision: modelinput.CloneRouteDecision(routingDecision),

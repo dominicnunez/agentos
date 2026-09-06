@@ -135,6 +135,22 @@ func TestAuxiliaryBrokerBindsSelectedAccountAndRequirements(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if composed, err := app.NewWithConnections(events.NewGateway(store), registry, app.TaskConnectionRouting{Default: "first", Requirements: &route.requirements}, basePlanner); err == nil || composed != nil {
+		t.Fatal("governed planner without selector accepted by constructor")
+	}
+	unguardedComposition := app.NewWithModelAndPlanner(events.NewGateway(store), adapter, basePlanner)
+	if _, err := unguardedComposition.Submit(t.Context(), app.Submit{RequestID: "missing-planner-selector", OrganizationID: "org-1", Statement: "perform adaptive work", Kind: core.ExecutionAgent}); err == nil || !strings.Contains(err.Error(), "requires a route selector") {
+		t.Fatalf("direct planner without selector was not rejected: %v", err)
+	}
+	unselectedStream, err := unguardedComposition.ExternalEvents(t.Context(), "org-1", "missing-planner-selector")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range unselectedStream {
+		if event.EventType == "PLANNING_CONTEXT_MANIFESTED" || event.EventType == "INFERENCE_RESERVED" {
+			t.Fatal("unselected planner published model context")
+		}
+	}
 	for name, mutate := range map[string]func(*modelinput.RouteBinding){
 		"missing-cutoff":  func(b *modelinput.RouteBinding) { b.Decision.SnapshotSequence += 1000000 },
 		"inactive-policy": func(b *modelinput.RouteBinding) { b.Decision.PolicyFingerprint = modelinput.TextDigest("inactive") },
@@ -229,6 +245,29 @@ func TestAuxiliaryBrokerBindsSelectedAccountAndRequirements(t *testing.T) {
 	operator := intake.NewWithNormalizer(service, routedNormalizer{Normalizer: baseNormalizer, route: normalizationRoute})
 	principal := intake.Principal{ID: "human-1", OrganizationID: "org-1", Kind: core.PrincipalHuman, Channel: intake.ChannelHumanDirect, WorkScope: intake.WorkScopeOrganization, Capabilities: []string{intake.CapabilitySubmitWork}}
 	message := intake.Message{ConversationID: "routed-normalization", MessageID: "message-1", Text: "prepare an analysis"}
+	unselectedOperator := intake.NewWithNormalizer(service, baseNormalizer)
+	unselectedMessage := message
+	unselectedMessage.ConversationID = "missing-normalizer-selector"
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := unselectedOperator.Handle(t.Context(), principal, unselectedMessage); err == nil {
+			t.Fatal("governed normalizer without selector accepted")
+		}
+	}
+	unselectedStream, err = service.ExternalEvents(t.Context(), "org-1", unselectedMessage.ConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range unselectedStream {
+		if event.EventType == "INTENT_NORMALIZATION_CONTEXT_MANIFESTED" || event.EventType == "INFERENCE_RESERVED" {
+			t.Fatal("unselected normalizer published model context")
+		}
+	}
+	if first.calls.Load() != 0 || second.calls.Load() != 1 {
+		t.Fatal("unselected normalizer called provider")
+	}
+	if err := store.ValidateInferenceAdmissions(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := operator.Handle(t.Context(), principal, message); err == nil {
 		t.Fatal("synthetic normalization failure was ignored")
 	}

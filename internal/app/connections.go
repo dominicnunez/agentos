@@ -36,6 +36,24 @@ func NewWithConnections(g *events.Gateway, registry *inference.ConnectionRegistr
 	if err != nil {
 		return nil, err
 	}
+	if descriptor, usesModel := planner.Descriptor(); usesModel {
+		if _, selects := planner.(planning.PlannerSelector); !selects {
+			required, err := g.InferenceConnectionRequiresRouting(context.Background(), descriptor.ConnectionID)
+			if err != nil {
+				return nil, err
+			}
+			if descriptor.ConnectionID != "" {
+				catalogRequired, err := registry.RequiresRouting(context.Background(), descriptor.ConnectionID)
+				if err != nil {
+					return nil, err
+				}
+				required = required || catalogRequired
+			}
+			if required {
+				return nil, fmt.Errorf("governed model planner requires a route selector")
+			}
+		}
+	}
 	catalogs := make(map[string]bool)
 	for _, metadata := range registry.Catalog() {
 		catalogs[metadata.ConnectionID] = true

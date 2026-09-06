@@ -4215,6 +4215,21 @@ func (g *Gateway) ValidateInferenceRouteBinding(ctx context.Context, binding mod
 	return validator.ValidateInferenceRouteBinding(ctx, binding)
 }
 
+// InferenceConnectionRequiresRouting reads durable account prerequisites before
+// a model context is published. Legacy singleton policies cannot carry routing.
+func (g *Gateway) InferenceConnectionRequiresRouting(ctx context.Context, connectionID string) (bool, error) {
+	if connectionID == "" {
+		return false, nil
+	}
+	reader, ok := g.ledger.(interface {
+		InferenceConnectionRequiresRouting(context.Context, string) (bool, error)
+	})
+	if !ok {
+		return false, fmt.Errorf("event ledger cannot establish inference routing prerequisites")
+	}
+	return reader.InferenceConnectionRequiresRouting(ctx, connectionID)
+}
+
 // PublishWorkCompletionEvidence admits the aggregate evidence only through a
 // ledger implementation that can validate it against current durable Work.
 // The later terminal projection remains a separate atomic admission.
