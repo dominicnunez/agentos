@@ -40,7 +40,7 @@ func TestConnectionConstructorRequiresCatalogTaskRequirements(t *testing.T) {
 		{"legacy explicit", TaskConnectionRouting{Default: "legacy", ByTaskKey: map[string]string{"research": "legacy"}}, true},
 		{"catalog default supplied", TaskConnectionRouting{Default: "catalog", Requirements: &requirements}, true},
 		{"catalog pin inherits", TaskConnectionRouting{Default: "legacy", Requirements: &requirements, ByTaskKey: map[string]string{"research": "catalog"}}, true},
-		{"catalog pin specific", TaskConnectionRouting{Default: "legacy", ByTaskKey: map[string]string{"research": "catalog"}, TaskRequirements: map[string]modelinput.RouteRequirements{"research": requirements}}, true},
+		{"catalog pin specific needs baseline", TaskConnectionRouting{Default: "legacy", ByTaskKey: map[string]string{"research": "catalog"}, TaskRequirements: map[string]modelinput.RouteRequirements{"research": requirements}}, false},
 		{"broker pin to legacy", TaskConnectionRouting{Default: "catalog", Requirements: &requirements, ByTaskKey: map[string]string{"research": "legacy"}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,6 +194,10 @@ func testServiceRoutesTwoAccounts(t *testing.T, broker bool) {
 		routing.ByTaskKey = nil
 		routing.Requirements = &modelinput.RouteRequirements{OrganizationID: "org-1", Capabilities: []modelinput.Capability{modelinput.Text}, InputTokens: 10000, OutputTokens: 1000, Locality: modelinput.LocalOnly, DataClass: "internal"}
 		secondRequirements := routing.Requirements.Clone()
+		// A model-authored key can choose preferences, but cannot weaken the
+		// default's locality or estimates when selecting the second account.
+		secondRequirements.Locality = modelinput.CloudAllowed
+		secondRequirements.InputTokens, secondRequirements.OutputTokens = 1, 1
 		secondRequirements.PreferredConnections = []string{"second"}
 		routing.TaskRequirements = map[string]modelinput.RouteRequirements{"second": secondRequirements}
 	}

@@ -130,17 +130,27 @@ func (r *ProviderRouting) validateAt(providers []Provider, now time.Time) error 
 			}
 		}
 	}
+	effectiveRules := make(map[string]modelinput.RouteRequirements, len(r.TaskRequirements))
 	for key, requirements := range r.TaskRequirements {
 		if !routingTaskKey.MatchString(key) {
 			return fmt.Errorf("task requirements require a valid task key")
 		}
+		if r.Requirements == nil {
+			return fmt.Errorf("task requirement rules need default routing constraints")
+		}
+		effective, err := modelinput.IntersectRouteRequirements(*r.Requirements, requirements)
+		if err != nil {
+			return err
+		}
+		requirements = effective
+		effectiveRules[key] = effective
 		if err := validateRequirements(requirements); err != nil {
 			return err
 		}
 	}
 	for key, connection := range r.TaskConnections {
 		requirements := r.Requirements
-		if specific, ok := r.TaskRequirements[key]; ok {
+		if specific, ok := effectiveRules[key]; ok {
 			requirements = &specific
 		}
 		if (catalogs[connection] || governed[connection]) && requirements == nil {

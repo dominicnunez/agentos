@@ -7,6 +7,37 @@ import (
 	"testing"
 )
 
+func TestTaskRoutingIntersectionPreservesSecurityFloor(t *testing.T) {
+	cost := int64(10)
+	base := RouteRequirements{OrganizationID: "org", ConnectionID: "local", Capabilities: []Capability{Text, ToolCalling}, InputTokens: 100, OutputTokens: 20, Locality: LocalOnly, DataClass: "internal", AllowedProviders: []string{"safe", "denied"}, DeniedProviders: []string{"denied"}, MaxCostNanoUSD: &cost}
+	rule := RouteRequirements{OrganizationID: "org", Capabilities: []Capability{Text}, InputTokens: 1, OutputTokens: 1, Locality: CloudAllowed, DataClass: "internal", PreferredConnections: []string{"cloud"}}
+	got, err := IntersectRouteRequirements(base, rule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Locality != LocalOnly || got.ConnectionID != "local" || got.InputTokens != 100 || got.OutputTokens != 20 || got.MaxCostNanoUSD == nil || *got.MaxCostNanoUSD != 10 || len(got.Capabilities) != 2 || len(got.AllowedProviders) != 1 || got.AllowedProviders[0] != "safe" || len(got.DeniedProviders) != 1 {
+		t.Fatalf("task key weakened default: %+v", got)
+	}
+	for name, mutate := range map[string]func(*RouteRequirements){
+		"classification":     func(r *RouteRequirements) { r.DataClass = "public" },
+		"organization":       func(r *RouteRequirements) { r.OrganizationID = "other" },
+		"account":            func(r *RouteRequirements) { r.ConnectionID = "cloud" },
+		"disjoint providers": func(r *RouteRequirements) { r.AllowedProviders = []string{"cloud"} },
+		"denied only":        func(r *RouteRequirements) { r.AllowedProviders = []string{"denied"} },
+	} {
+		changed := rule.Clone()
+		mutate(&changed)
+		if _, err := IntersectRouteRequirements(base, changed); err == nil {
+			t.Fatal("conflicting rule accepted", name)
+		}
+	}
+	got.AllowedProviders[0] = "changed"
+	*got.MaxCostNanoUSD = 1000
+	if base.AllowedProviders[0] != "safe" || cost != 10 {
+		t.Fatal("intersection aliases default")
+	}
+}
+
 func TestRoutingRequirementsFingerprintAndClone(t *testing.T) {
 	cost := int64(100)
 	r := RouteRequirements{OrganizationID: "org", Capabilities: []Capability{Text}, InputTokens: 100, OutputTokens: 20, Locality: LocalOnly, DataClass: "internal", MaxCostNanoUSD: &cost}

@@ -103,8 +103,14 @@ Optional `connection_id` is a hard account constraint; provider allow/deny lists
 regardless of preferences. Local catalog metadata does not establish model identity
 or confinement, or enable an unsupported local provider setup.
 
-`task_requirements_by_key` maps exact task keys to complete requirements, replacing
-the default requirements for those tasks. Explicit `task_connections` remain hard
+`task_requirements_by_key` maps exact task keys to complete requirements that
+intersect mandatory default requirements. Model-generated keys cannot weaken the
+default: locality takes the stricter value, provider allowlists intersect, denylists
+and capabilities accumulate, token estimates take the larger value, and cost limits
+take the smaller value. Organization and data-class labels must match the default;
+labels have no implicit sensitivity ordering. Conflicting hard account constraints
+or an empty provider intersection fail closed. Preferences can vary by task after
+these constraints are applied. Explicit `task_connections` remain hard
 constraints and conflicting account choices fail. When no preferences are supplied,
 the configured task, planning, or normalization account becomes the first preference.
 Preferences apply only after all eligibility checks. Catalog-enabled purposes must

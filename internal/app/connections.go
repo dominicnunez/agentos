@@ -14,8 +14,8 @@ import (
 )
 
 // TaskConnectionRouting is trusted installation policy keyed by exact planned
-// task keys. Requirements enable broker selection; per-task entries are complete
-// requirements, and explicit account rules remain hard constraints. Without
+// task keys. Requirements enable broker selection; per-task entries intersect
+// the default requirements, and explicit account rules remain hard constraints. Without
 // requirements, the existing explicit routing contract applies.
 type TaskConnectionRouting struct {
 	Default          string
@@ -124,6 +124,13 @@ func NewWithConnections(g *events.Gateway, registry *inference.ConnectionRegistr
 	for key, requirements := range routing.TaskRequirements {
 		if !planning.ValidTaskKey(key) {
 			return nil, fmt.Errorf("task requirement rule key is invalid")
+		}
+		if service.taskRouting == nil {
+			return nil, fmt.Errorf("task requirement rules need default routing constraints")
+		}
+		requirements, err = modelinput.IntersectRouteRequirements(*service.taskRouting, requirements)
+		if err != nil {
+			return nil, err
 		}
 		if err := validate(requirements); err != nil {
 			return nil, err

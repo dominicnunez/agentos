@@ -56,6 +56,72 @@ func (r RouteRequirements) Clone() RouteRequirements {
 	return r
 }
 
+// IntersectRouteRequirements prevents an untrusted task key from weakening the
+// runtime's default constraints. Data classes are opaque labels, not an ordered
+// sensitivity scale, so a keyed rule cannot change the default classification.
+func IntersectRouteRequirements(base, rule RouteRequirements) (RouteRequirements, error) {
+	if _, err := base.Canonical(); err != nil {
+		return RouteRequirements{}, err
+	}
+	if _, err := rule.Canonical(); err != nil {
+		return RouteRequirements{}, err
+	}
+	if base.OrganizationID != rule.OrganizationID || base.DataClass != rule.DataClass {
+		return RouteRequirements{}, fmt.Errorf("task rule cannot change organization or data classification")
+	}
+	result := rule.Clone()
+	if base.ConnectionID != "" {
+		if rule.ConnectionID != "" && rule.ConnectionID != base.ConnectionID {
+			return RouteRequirements{}, fmt.Errorf("task rule conflicts with default connection")
+		}
+		result.ConnectionID = base.ConnectionID
+	}
+	if base.Locality == LocalOnly {
+		result.Locality = LocalOnly
+	}
+	for _, capability := range base.Capabilities {
+		if !slices.Contains(result.Capabilities, capability) {
+			result.Capabilities = append(result.Capabilities, capability)
+		}
+	}
+	result.InputTokens = max(base.InputTokens, rule.InputTokens)
+	result.OutputTokens = max(base.OutputTokens, rule.OutputTokens)
+	if base.MaxCostNanoUSD != nil && (result.MaxCostNanoUSD == nil || *base.MaxCostNanoUSD < *result.MaxCostNanoUSD) {
+		cost := *base.MaxCostNanoUSD
+		result.MaxCostNanoUSD = &cost
+	}
+	if len(base.AllowedProviders) != 0 {
+		result.AllowedProviders = nil
+		for _, provider := range base.AllowedProviders {
+			if len(rule.AllowedProviders) == 0 || slices.Contains(rule.AllowedProviders, provider) {
+				result.AllowedProviders = append(result.AllowedProviders, provider)
+			}
+		}
+		if len(result.AllowedProviders) == 0 {
+			return RouteRequirements{}, fmt.Errorf("task rule has no provider allowed by default")
+		}
+	}
+	for _, provider := range base.DeniedProviders {
+		if !slices.Contains(result.DeniedProviders, provider) {
+			result.DeniedProviders = append(result.DeniedProviders, provider)
+		}
+	}
+	if len(result.AllowedProviders) != 0 {
+		allowed := result.AllowedProviders[:0]
+		for _, provider := range result.AllowedProviders {
+			if !slices.Contains(result.DeniedProviders, provider) {
+				allowed = append(allowed, provider)
+			}
+		}
+		if len(allowed) == 0 {
+			return RouteRequirements{}, fmt.Errorf("task rule excludes every allowed provider")
+		}
+		result.AllowedProviders = allowed
+	}
+	_, err := result.Canonical()
+	return result, err
+}
+
 func (r RouteRequirements) Validate() error {
 	if !validRoutingValue(r.OrganizationID) || !validRoutingValue(r.DataClass) ||
 		r.ConnectionID != "" && !validRoutingConnection(r.ConnectionID) ||
