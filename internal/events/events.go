@@ -4538,7 +4538,7 @@ func (g *Gateway) validateAddressed(ctx context.Context, draft TrustedDraft, sou
 	}
 	if draft.EventType == "TASK_BLOCKED" {
 		var content TaskBlockedPayload
-		if err := decodePayload(draft.Payload, &content); err != nil || content.Reason == "" || content.Missing == "" || content.WhyNeeded == "" || content.WorkCompleted == "" {
+		if err := decodeExactPayload(draft.Payload, &content); err != nil || content.Reason == "" || content.Missing == "" || content.WhyNeeded == "" || content.WorkCompleted == "" {
 			return fmt.Errorf("task blocked payload requires reason, missing, why_needed, and work_completed")
 		}
 	}
