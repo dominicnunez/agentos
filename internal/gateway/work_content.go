@@ -2,11 +2,11 @@ package gateway
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
 	"mime"
 	"net/http"
 
+	"github.com/dominicnunez/agentos/internal/boundaryjson"
 	"github.com/dominicnunez/agentos/internal/trustconfig"
 )
 
@@ -16,7 +16,7 @@ func decodeWorkContent(w http.ResponseWriter, r *http.Request, target any) error
 		return err
 	}
 	var content any
-	if err := json.Unmarshal(body, &content); err != nil {
+	if err := boundaryjson.UnmarshalNumbers(body, &content); err != nil {
 		return err
 	}
 	if err := rejectAuthorityContent(content); err != nil {
