@@ -217,6 +217,9 @@ func (s *Service) ValidateSelectedGoal(ctx context.Context, organizationID, goal
 }
 
 func (s *Service) RecordIntentNormalizationContext(ctx context.Context, organizationID, requestID string, in IntentNormalizationContext) ([]events.Event, error) {
+	if (in.Routing == nil) != (in.RoutingDecision == nil) {
+		return nil, fmt.Errorf("normalization routing requirements and decision must be present together")
+	}
 	if decision := in.RoutingDecision; decision != nil {
 		if in.Routing == nil || decision.ValidateFor(*in.Routing) != nil || decision.SnapshotSequence <= 0 || decision.ConnectionID != in.ConnectionID ||
 			decision.Provider != in.Provider || decision.Model != in.Model || decision.ExecutionProfileVersion != in.ExecutionProfileVersion {
