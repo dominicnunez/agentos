@@ -16,6 +16,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 )
 
 func TestRouterUsesLeastNondeterministicAvailableMechanism(t *testing.T) {
@@ -255,7 +256,7 @@ func TestIntakeKeepsSourceProvenance(t *testing.T) {
 	externalAgent.WorkScope = WorkScopeOrganization
 
 	view, err := submitAndConfirm(t, ctx, service, human, Message{ConversationID: "human-work", MessageID: "human-message-1", Text: "draft a concise release update"})
-	if err != nil || view.State != StateCompleted || !strings.HasPrefix(view.Result, "fake-model: Operate only as this runtime-selected durable Agent blueprint.") || !strings.Contains(view.Result, `"objective":"draft a concise release update"`) {
+	if err != nil || view.State != StateCompleted || !strings.HasPrefix(view.Result, "fake-model: {") || !strings.Contains(view.Result, `\"objective\":\"draft a concise release update\"`) {
 		t.Fatalf("human view=%+v err=%v", view, err)
 	}
 	intent, task, stream := projectedWork(t, store, "human-work")
@@ -792,12 +793,12 @@ func (*retryNormalizationModel) Descriptor() NormalizerDescriptor {
 	return NormalizerDescriptor{Provider: "test", Model: "test-model", ExecutionProfileVersion: "test-profile"}
 }
 
-func (m *retryNormalizationModel) CompleteText(context.Context, string) (TextCompletion, error) {
+func (m *retryNormalizationModel) CompleteRequest(_ context.Context, request modelinput.Request) (TextCompletion, error) {
 	m.calls++
 	if m.calls == 1 {
 		return TextCompletion{}, errors.New("temporary provider failure")
 	}
-	return TextCompletion{Text: m.response, Usage: events.InferenceUsageRecordedPayload{Source: "test", Provider: "test", Model: "test-model"}}, nil
+	return TextCompletion{Text: testNormalizationResponse(m.response, request), Usage: events.InferenceUsageRecordedPayload{Source: "test", Provider: "test", Model: "test-model"}}, nil
 }
 
 func TestIntentNormalizationRetryCompletesAnInterruptedDraftOnce(t *testing.T) {

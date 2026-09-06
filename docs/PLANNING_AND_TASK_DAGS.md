@@ -39,6 +39,10 @@ unknown dependencies, cycles, oversized graphs, invented deterministic
 operations, and more than 16 total Tasks. The runtime always creates the root
 integration Task itself.
 
+The `task-planner-v2` input contract separates runtime instructions, accepted
+Intent, and low-privilege strategic evidence. Each source is bound to the
+admitted invocation; see [Structured model input](STRUCTURED_MODEL_INPUT.md).
+
 Every accepted Plan records:
 
 - the exact confirmed Intent fingerprint;

@@ -33,6 +33,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/intake"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 	"github.com/dominicnunez/agentos/internal/planning"
 	"github.com/dominicnunez/agentos/internal/secrets"
 )
@@ -222,8 +223,12 @@ func (m planningModel) Descriptor() planning.Descriptor {
 	}
 }
 
-func (m planningModel) CompleteText(ctx context.Context, prompt string) (planning.TextCompletion, error) {
-	response, err := m.adapter.Complete(ctx, prompt)
+func (m planningModel) CompleteRequest(ctx context.Context, request modelinput.Request) (planning.TextCompletion, error) {
+	adapter, ok := m.adapter.(execution.StructuredModelAdapter)
+	if !ok {
+		return planning.TextCompletion{}, fmt.Errorf("planning adapter does not support structured input")
+	}
+	response, err := adapter.CompleteRequest(ctx, request)
 	if err != nil {
 		return planning.TextCompletion{}, err
 	}
@@ -238,8 +243,12 @@ func (m intakeModel) Descriptor() intake.NormalizerDescriptor {
 	}
 }
 
-func (m intakeModel) CompleteText(ctx context.Context, prompt string) (intake.TextCompletion, error) {
-	response, err := m.adapter.Complete(ctx, prompt)
+func (m intakeModel) CompleteRequest(ctx context.Context, request modelinput.Request) (intake.TextCompletion, error) {
+	adapter, ok := m.adapter.(execution.StructuredModelAdapter)
+	if !ok {
+		return intake.TextCompletion{}, fmt.Errorf("intake adapter does not support structured input")
+	}
+	response, err := adapter.CompleteRequest(ctx, request)
 	if err != nil {
 		return intake.TextCompletion{}, err
 	}

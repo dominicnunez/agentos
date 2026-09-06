@@ -9,22 +9,29 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 )
 
 type plannerModel struct {
-	text   string
-	err    error
-	calls  int
-	prompt string
+	text    string
+	err     error
+	calls   int
+	prompt  string
+	request modelinput.Request
 }
 
 func (*plannerModel) Descriptor() Descriptor {
 	return Descriptor{Provider: "test-provider", Model: "test-model", ExecutionProfileVersion: "test-profile"}
 }
 
-func (m *plannerModel) CompleteText(_ context.Context, prompt string) (TextCompletion, error) {
+func (m *plannerModel) CompleteRequest(_ context.Context, request modelinput.Request) (TextCompletion, error) {
 	m.calls++
-	m.prompt = prompt
+	body, err := request.Canonical()
+	if err != nil {
+		return TextCompletion{}, err
+	}
+	m.prompt = string(body)
+	m.request = request
 	if m.err != nil {
 		return TextCompletion{}, m.err
 	}
@@ -42,14 +49,17 @@ func TestModelPlannerBindsGoalAndMissionContext(t *testing.T) {
 	now := time.Unix(1, 0).UTC()
 	goalRef := core.IntentValue{Value: "goal-1", Origin: "USER"}
 	input := Input{
-		Intent: core.IntentDraft{OrganizationID: "org-1", Goal: &goalRef, Objective: "advance the outcome"},
+		Intent: core.IntentDraft{ID: "intent-1", OrganizationID: "org-1", Goal: &goalRef, Objective: "advance the outcome"},
 		Strategy: &core.StrategicContext{
 			Mission: core.Mission{ID: "mission-1", OrganizationID: "org-1", Statement: "build lasting value", Status: core.MissionActive, CreatedAt: now}, MissionVersion: 2,
 			Goal: core.Goal{ID: "goal-1", OrganizationID: "org-1", MissionID: "mission-1", Objective: "reach the outcome", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "evidence", Origin: "USER"}}, Status: core.GoalActive, CreatedAt: now}, GoalVersion: 3,
 		},
 	}
-	if _, err := planner.Build(context.Background(), input, core.ExecutionAgent); err != nil {
+	if _, err := planner.Build(planningTestContext(t), input, core.ExecutionAgent); err != nil {
 		t.Fatal(err)
+	}
+	if len(model.request.Messages) != 3 || model.request.Messages[2].Role != modelinput.Data || model.request.Messages[2].Source.Kind != modelinput.StrategyContext || model.request.Messages[2].Source.Reference != "goal-1" {
+		t.Fatal("strategy was promoted or lost selected source identity")
 	}
 	for _, expected := range []string{"mission-1", "build lasting value", "goal-1", "reach the outcome", "mission_version", "goal_version"} {
 		if !strings.Contains(model.prompt, expected) {
@@ -59,7 +69,7 @@ func TestModelPlannerBindsGoalAndMissionContext(t *testing.T) {
 }
 
 func acceptedDraft() core.IntentDraft {
-	return core.IntentDraft{Objective: "prepare and verify a release candidate"}
+	return core.IntentDraft{ID: "intent-1", OrganizationID: "org-1", Objective: "prepare and verify a release candidate"}
 }
 
 func TestModelPlannerSkipsInferenceForExactDeterministicWork(t *testing.T) {
@@ -68,7 +78,7 @@ func TestModelPlannerSkipsInferenceForExactDeterministicWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := planner.Build(context.Background(), Input{Intent: core.IntentDraft{Objective: "echo hello"}}, core.ExecutionDeterministic)
+	result, err := planner.Build(planningTestContext(t), Input{Intent: core.IntentDraft{Objective: "echo hello"}}, core.ExecutionDeterministic)
 	if err != nil || model.calls != 0 || len(result.Tasks) != 1 || result.Tasks[0].Key != "root" || result.Usage != nil {
 		t.Fatalf("result=%+v calls=%d err=%v", result, model.calls, err)
 	}
@@ -80,7 +90,7 @@ func TestModelPlannerBuildsRuntimeOwnedIntegrationRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := planner.Build(context.Background(), Input{Intent: acceptedDraft()}, core.ExecutionAgent)
+	result, err := planner.Build(planningTestContext(t), Input{Intent: acceptedDraft()}, core.ExecutionAgent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +109,7 @@ func TestModelPlannerAllowsNoValueDecomposition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := planner.Build(context.Background(), Input{Intent: acceptedDraft()}, core.ExecutionAgent)
+	result, err := planner.Build(planningTestContext(t), Input{Intent: acceptedDraft()}, core.ExecutionAgent)
 	if err != nil || len(result.Tasks) != 1 || result.Tasks[0].Key != "root" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -121,7 +131,7 @@ func TestModelPlannerRejectsUntrustedGraphExpansion(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			result, err := planner.Build(context.Background(), Input{Intent: acceptedDraft()}, core.ExecutionAgent)
+			result, err := planner.Build(planningTestContext(t), Input{Intent: acceptedDraft()}, core.ExecutionAgent)
 			if err == nil || result.Usage == nil {
 				t.Fatalf("result=%+v err=%v", result, err)
 			}
@@ -138,7 +148,7 @@ func TestModelPlannerCapsTotalTaskCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := planner.Build(context.Background(), Input{Intent: acceptedDraft()}, core.ExecutionAgent); err == nil {
+	if _, err := planner.Build(planningTestContext(t), Input{Intent: acceptedDraft()}, core.ExecutionAgent); err == nil {
 		t.Fatal("oversized Task DAG was accepted")
 	}
 }
@@ -153,7 +163,7 @@ func TestModelPlannerRejectsOversizedCompleteInputBeforeProviderCall(t *testing.
 	if err := ValidateModelInput(input); err == nil {
 		t.Fatal("oversized complete planning input passed preflight")
 	}
-	if _, err := planner.Build(context.Background(), input, core.ExecutionAgent); err == nil {
+	if _, err := planner.Build(planningTestContext(t), input, core.ExecutionAgent); err == nil {
 		t.Fatal("oversized complete planning input was accepted")
 	}
 	if model.calls != 0 {
@@ -168,13 +178,13 @@ func TestModelPlannerDoesNotApplyPromptLimitToDirectPlanning(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := Input{
-		Intent: core.IntentDraft{OrganizationID: "org-1", Goal: &core.IntentValue{Value: "goal-1", Origin: "USER"}, Objective: "echo hello"},
+		Intent: core.IntentDraft{ID: "intent-1", OrganizationID: "org-1", Goal: &core.IntentValue{Value: "goal-1", Origin: "USER"}, Objective: "echo hello"},
 		Strategy: &core.StrategicContext{
 			Mission: core.Mission{ID: "mission-1", OrganizationID: "org-1", Statement: strings.Repeat("x", maximumPromptBytes), Status: core.MissionActive, CreatedAt: time.Unix(1, 0).UTC()}, MissionVersion: 1,
 			Goal: core.Goal{ID: "goal-1", OrganizationID: "org-1", MissionID: "mission-1", Objective: "outcome", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "evidence", Origin: "USER"}}, Status: core.GoalActive, CreatedAt: time.Unix(1, 0).UTC()}, GoalVersion: 1,
 		},
 	}
-	result, err := planner.Build(context.Background(), input, core.ExecutionDeterministic)
+	result, err := planner.Build(planningTestContext(t), input, core.ExecutionDeterministic)
 	if err != nil || model.calls != 0 || len(result.Tasks) != 1 || result.Tasks[0].ExecutionKind != core.ExecutionDeterministic {
 		t.Fatalf("direct planning incorrectly used the model prompt boundary: result=%+v calls=%d err=%v", result, model.calls, err)
 	}

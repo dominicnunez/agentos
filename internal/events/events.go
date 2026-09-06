@@ -1650,7 +1650,7 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 			return "", fmt.Errorf("version 2 execution manifest contains coordination references")
 		}
 		knowledge = selected
-	case "v3":
+	case "v3", "v4":
 		knowledgeRefs, selectedKnowledge, err := executionKnowledge(binding, task, startEvent, stream)
 		if err != nil {
 			return "", err
@@ -1691,14 +1691,23 @@ func expectedAgentExecutionInput(binding WorkCompletionBinding, task core.Task, 
 	if !slices.Equal(manifest.EventRefs, expectedRefs) {
 		return "", fmt.Errorf("execution context references do not match durable runtime selection")
 	}
-	_, input, err := core.MaterializeAgentExecutionInput(core.AgentExecutionInputContext{
+	inputContext := core.AgentExecutionInputContext{
 		Blueprint: blueprint, Task: task, Strategy: strategy, Knowledge: knowledge, DependencyResults: dependencies, InboxEvents: inbox, PeerTasks: peerTasks, Revision: revision,
-	})
+	}
+	if manifest.ContextBuilderVersion == "v4" {
+		inputBinding, err := core.BindAgentExecutionInput(core.ID(binding.OrganizationID), manifest.ExecutionID, inputContext)
+		if err != nil {
+			return "", err
+		}
+		body, err := inputBinding.Request().Canonical()
+		return string(body), err
+	}
+	_, input, err := core.MaterializeAgentExecutionInput(inputContext)
 	return input, err
 }
 
 func validExecutionContextBuilderVersion(version string) bool {
-	return version == "v1" || version == "v2" || version == "v3"
+	return version == "v1" || version == "v2" || version == "v3" || version == "v4"
 }
 
 func executionKnowledge(binding WorkCompletionBinding, task core.Task, startEvent Event, stream []Event) ([]core.VersionedRef, []core.KnowledgeRecord, error) {

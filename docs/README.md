@@ -21,6 +21,7 @@
 - [A2A interoperability](A2A_INTEROP.md) - the supported A2A profile and authorization boundary.
 - [Codex subscription provider](CODEX_SUBSCRIPTION_PROVIDER.md) - confined subscription-provider setup.
 - [OpenAI API provider](OPENAI_API_PROVIDER.md) - Responses API setup and approval requirements.
+- [Structured model input](STRUCTURED_MODEL_INPUT.md) - instruction roles, invocation-bound source evidence, and transport limitations.
 
 ## Security and releases
 

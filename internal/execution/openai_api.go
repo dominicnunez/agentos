@@ -91,6 +91,13 @@ func (a *OpenAIAPI) Complete(ctx context.Context, prompt string) (ModelResponse,
 	if !utf8.ValidString(prompt) || strings.TrimSpace(prompt) == "" || len(prompt) > openAIMaximumPromptBytes {
 		return ModelResponse{}, RequestNotSent(fmt.Errorf("OpenAI API prompt must contain 1 to %d valid UTF-8 bytes", openAIMaximumPromptBytes))
 	}
+	return a.completeInput(ctx, prompt)
+}
+
+func (a *OpenAIAPI) completeInput(ctx context.Context, input any) (ModelResponse, error) {
+	if ctx == nil {
+		return ModelResponse{}, RequestNotSent(fmt.Errorf("OpenAI API context is required"))
+	}
 	key, err := a.apiKey(ctx)
 	if err != nil {
 		return ModelResponse{}, RequestNotSent(fmt.Errorf("OpenAI API credential is unavailable"))
@@ -104,7 +111,7 @@ func (a *OpenAIAPI) Complete(ctx context.Context, prompt string) (ModelResponse,
 	}
 	body, err := json.Marshal(openAIRequest{
 		Model:           a.model,
-		Input:           prompt,
+		Input:           input,
 		Instructions:    openAIInstructions,
 		ToolChoice:      "none",
 		Tools:           []struct{}{},
@@ -165,7 +172,7 @@ func (a *OpenAIAPI) Complete(ctx context.Context, prompt string) (ModelResponse,
 
 type openAIRequest struct {
 	Model           string     `json:"model"`
-	Input           string     `json:"input"`
+	Input           any        `json:"input"`
 	Instructions    string     `json:"instructions"`
 	ToolChoice      string     `json:"tool_choice"`
 	Tools           []struct{} `json:"tools"`

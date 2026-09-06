@@ -52,6 +52,8 @@ modules:
     path: internal/lab
   - name: modelid
     path: internal/modelid
+  - name: modelinput
+    path: internal/modelinput
   - name: modeloutput
     path: internal/modeloutput
   - name: planning
@@ -74,6 +76,18 @@ modules:
 policy:
   default: deny
   allow:
+    - name: modelinput-json-boundary
+      from:
+        module: modelinput
+      to:
+        module: boundaryjson
+
+    - name: core-model-input
+      from:
+        module: core
+      to:
+        module: modelinput
+
     - name: execution-json-boundary
       from:
         module: execution
@@ -192,7 +206,7 @@ policy:
       from:
         module: execution
       to:
-        modules: [core, events, modelid]
+        modules: [core, events, modelid, modelinput]
 
     - name: bootstrap-model-identifiers
       from:
@@ -234,7 +248,7 @@ policy:
       from:
         module: intake
       to:
-        modules: [app, core, events, inference, inspection, modeloutput, replay]
+        modules: [app, core, events, inference, inspection, modelinput, modeloutput, replay]
 
     - name: knowledge-domain
       from:
@@ -265,7 +279,7 @@ policy:
       from:
         module: inference
       to:
-        modules: [events, execution]
+        modules: [events, execution, modelinput]
 
     - name: governance-inspection
       from:
@@ -295,7 +309,7 @@ policy:
       from:
         module: planning
       to:
-        modules: [core, events, modeloutput]
+        modules: [core, events, modelinput, modeloutput]
 
     - name: workflow-domain
       from:
@@ -308,7 +322,7 @@ policy:
         module: app
         tests: true
       to:
-        module: ledger
+        modules: [ledger, modelinput]
 
     - name: approvals-test-adapters
       from:
@@ -329,7 +343,7 @@ policy:
         module: gateway
         tests: true
       to:
-        modules: [app, approvals, effects, events, execution, ledger]
+        modules: [app, approvals, effects, events, execution, ledger, modelinput]
 
     - name: intake-test-adapter
       from:

@@ -302,6 +302,10 @@ func (a *CodexSubscription) Descriptor() ModelDescriptor {
 }
 
 func (a *CodexSubscription) Complete(ctx context.Context, prompt string) (response ModelResponse, err error) {
+	return a.completeInput(ctx, prompt, nil)
+}
+
+func (a *CodexSubscription) completeInput(ctx context.Context, prompt string, instructions *string) (response ModelResponse, err error) {
 	if ctx == nil {
 		return ModelResponse{}, RequestNotSent(fmt.Errorf("execution context is required"))
 	}
@@ -338,6 +342,7 @@ func (a *CodexSubscription) Complete(ctx context.Context, prompt string) (respon
 	sandbox := sdk.SandboxModeReadOnly
 	result, summary, err := a.run(runCtx, sdk.RunOptions{
 		Prompt:         prompt,
+		Instructions:   instructions,
 		Cwd:            &runDir,
 		Config:         json.RawMessage(codexThreadConfigJSON),
 		Model:          &model,

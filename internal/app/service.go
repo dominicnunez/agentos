@@ -2778,10 +2778,17 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 					EventRef: revisionEvent.EventID, ReviewerID: revision.ReviewerID, UntrustedText: revision.Feedback,
 				}
 			}
-			executionTask, executionInput, err = core.MaterializeAgentExecutionInput(inputContext)
-			if err != nil {
-				return core.ExecutionContextManifest{}, err
+			inputBinding, materializeErr := core.BindAgentExecutionInput(organizationID, executionID, inputContext)
+			if materializeErr != nil {
+				return core.ExecutionContextManifest{}, materializeErr
 			}
+			canonicalInput, canonicalErr := inputBinding.Request().Canonical()
+			if canonicalErr != nil {
+				return core.ExecutionContextManifest{}, canonicalErr
+			}
+			executionInput = string(canonicalInput)
+			executionTask = task
+			executionTask.ExecutionBrief = executionInput
 			inboxRefs := inboxEventRefs(inboxBatches)
 			eventRefs := append([]string(nil), strategyEventRefs...)
 			eventRefs = append(eventRefs, inboxRefs...)
@@ -2817,7 +2824,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 				ToolDefinitions:         []core.VersionedRef{},
 				ArtifactRefs:            []core.VersionedRef{},
 				AdditionalContextRefs:   strategyContextRefs,
-				ContextBuilderVersion:   "v3",
+				ContextBuilderVersion:   "v4",
 				CreatedAt:               selection.Started.CreatedAt,
 			}
 			manifest.ExecutionInputSHA256 = core.FingerprintExecutionInput(executionInput)

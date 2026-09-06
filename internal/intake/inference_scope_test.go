@@ -12,6 +12,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 )
 
 type intakeExecutionModel struct{ response string }
@@ -20,18 +21,20 @@ func (*intakeExecutionModel) Name() string { return "test/test-model" }
 func (*intakeExecutionModel) Descriptor() execution.ModelDescriptor {
 	return execution.ModelDescriptor{Provider: "test", Model: "test-model", ExecutionProfileVersion: "test-profile"}
 }
-func (m *intakeExecutionModel) Complete(context.Context, string) (execution.ModelResponse, error) {
+func (m *intakeExecutionModel) Complete(_ context.Context, _ string) (execution.ModelResponse, error) {
 	return execution.ModelResponse{Text: m.response, Usage: events.InferenceUsageRecordedPayload{Source: "test", Provider: "test", Model: "test-model"}}, nil
 }
 
-type guardedIntakeModel struct{ adapter execution.ModelAdapter }
+type guardedIntakeModel struct {
+	adapter execution.StructuredModelAdapter
+}
 
 func (m guardedIntakeModel) Descriptor() NormalizerDescriptor {
 	descriptor := m.adapter.Descriptor()
 	return NormalizerDescriptor{Provider: descriptor.Provider, Model: descriptor.Model, ExecutionProfileVersion: descriptor.ExecutionProfileVersion}
 }
-func (m guardedIntakeModel) CompleteText(ctx context.Context, prompt string) (TextCompletion, error) {
-	response, err := m.adapter.Complete(ctx, prompt)
+func (m guardedIntakeModel) CompleteRequest(ctx context.Context, request modelinput.Request) (TextCompletion, error) {
+	response, err := m.adapter.CompleteRequest(ctx, request)
 	return TextCompletion{Text: response.Text, Usage: response.Usage}, err
 }
 

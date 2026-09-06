@@ -11,18 +11,21 @@ import (
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 	"github.com/dominicnunez/agentos/internal/planning"
 )
 
-type guardedPlanningModel struct{ adapter execution.ModelAdapter }
+type guardedPlanningModel struct {
+	adapter execution.StructuredModelAdapter
+}
 
 func (m guardedPlanningModel) Descriptor() planning.Descriptor {
 	descriptor := m.adapter.Descriptor()
 	return planning.Descriptor{Provider: descriptor.Provider, Model: descriptor.Model, ExecutionProfileVersion: descriptor.ExecutionProfileVersion}
 }
 
-func (m guardedPlanningModel) CompleteText(ctx context.Context, prompt string) (planning.TextCompletion, error) {
-	response, err := m.adapter.Complete(ctx, prompt)
+func (m guardedPlanningModel) CompleteRequest(ctx context.Context, request modelinput.Request) (planning.TextCompletion, error) {
+	response, err := m.adapter.CompleteRequest(ctx, request)
 	return planning.TextCompletion{Text: response.Text, Usage: response.Usage}, err
 }
 

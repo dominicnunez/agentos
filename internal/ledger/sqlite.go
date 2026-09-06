@@ -1389,7 +1389,7 @@ func validateExecutionStartManifest(ctx context.Context, tx *sql.Tx, task core.T
 	if manifest.ExecutionID == "" || manifest.TaskID != task.ID || manifest.AgentID != task.AssigneeID ||
 		manifest.AgentBlueprintVersion == "" || manifest.ExecutionProfileVersion == "" || manifest.RuntimeAdapter == "" ||
 		manifest.Provider == "" || manifest.Model == "" || manifest.TaskContractVersion == "" || manifest.PromptVersion == "" ||
-		manifest.PolicyVersion == "" || manifest.ContextBuilderVersion != "v3" || manifest.CreatedAt.IsZero() || offset != 0 ||
+		manifest.PolicyVersion == "" || manifest.ContextBuilderVersion != "v4" || manifest.CreatedAt.IsZero() || offset != 0 ||
 		!manifest.CreatedAt.Equal(started.CreatedAt) || len(manifest.ExecutionInputSHA256) != sha256.Size*2 {
 		return fmt.Errorf("agent execution manifest identity and pinned runtime are invalid")
 	}

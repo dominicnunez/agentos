@@ -15,6 +15,7 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 )
 
 const PolicyVersion = 1
@@ -195,6 +196,10 @@ func WithScope(ctx context.Context, scope Scope) (context.Context, error) {
 	if err := scope.Validate(); err != nil {
 		return nil, err
 	}
+	ctx, err := modelinput.WithInvocation(ctx, scope.OrganizationID, scope.ExecutionID)
+	if err != nil {
+		return nil, err
+	}
 	return context.WithValue(ctx, scopeKey{}, scope), nil
 }
 
@@ -266,17 +271,23 @@ func (a *GuardedAdapter) Name() string { return a.adapter.Name() }
 func (a *GuardedAdapter) Descriptor() execution.ModelDescriptor { return a.adapter.Descriptor() }
 
 func (a *GuardedAdapter) Complete(ctx context.Context, prompt string) (execution.ModelResponse, error) {
+	digest := sha256.Sum256([]byte(prompt))
+	return a.complete(ctx, hex.EncodeToString(digest[:]), func() (execution.ModelResponse, error) {
+		return a.adapter.Complete(ctx, prompt)
+	})
+}
+
+func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call func() (execution.ModelResponse, error)) (execution.ModelResponse, error) {
 	scope, err := scopeFromContext(ctx)
 	if err != nil {
 		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, err)
 	}
-	digest := sha256.Sum256([]byte(prompt))
-	request := InferenceRequest{Scope: scope, Descriptor: a.adapter.Descriptor(), PromptSHA256: hex.EncodeToString(digest[:])}
+	request := InferenceRequest{Scope: scope, Descriptor: a.adapter.Descriptor(), PromptSHA256: fingerprint}
 	reservation, err := a.store.ReserveInference(ctx, request)
 	if err != nil {
 		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, err)
 	}
-	response, providerErr := a.adapter.Complete(ctx, prompt)
+	response, providerErr := call()
 	if providerErr != nil {
 		result := ReconciliationUncertain
 		if execution.WasRequestNotSent(providerErr) {

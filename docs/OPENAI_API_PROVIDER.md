@@ -19,6 +19,8 @@ selected, it:
   redirects, and uses a 20-second request deadline;
 - sends `tool_choice: "none"`, an empty tool list, `store: false`,
   `truncation: "disabled"`, and a 4,096-token output ceiling;
+- sends runtime instructions separately from user content and quoted evidence
+  using the [structured input contract](STRUCTURED_MODEL_INPUT.md);
 - accepts only completed assistant text plus non-authority-bearing reasoning
   metadata, rejecting tool calls, citations, refusals, incomplete responses,
   unexpected model identity, and changed execution-profile fields;
