@@ -11,12 +11,13 @@ import (
 // provider or model identity. Limits describe verified model capabilities;
 // they are not inferred from the configured budget or model name.
 type CatalogDefinition struct {
-	Capabilities  []Capability `json:"capabilities"`
-	Local         bool         `json:"local"`
-	ContextTokens int64        `json:"context_tokens"`
-	OutputTokens  int64        `json:"output_tokens"`
-	DataClasses   []string     `json:"data_classes"`
-	ValidUntil    time.Time    `json:"valid_until"`
+	Signals       *RoutingSignals `json:"signals,omitempty"`
+	Capabilities  []Capability    `json:"capabilities"`
+	Local         bool            `json:"local"`
+	ContextTokens int64           `json:"context_tokens"`
+	OutputTokens  int64           `json:"output_tokens"`
+	DataClasses   []string        `json:"data_classes"`
+	ValidUntil    time.Time       `json:"valid_until"`
 }
 
 func (c CatalogDefinition) Metadata(policy Policy) (RouteMetadata, error) {
@@ -28,6 +29,7 @@ func (c CatalogDefinition) Metadata(policy Policy) (RouteMetadata, error) {
 
 func (c CatalogDefinition) validateForPolicy(policy Policy) (RouteMetadata, error) {
 	metadata := RouteMetadata{
+		Signals:      cloneRoutingSignals(c.Signals),
 		ConnectionID: policy.ConnectionID,
 		Descriptor:   execution.ModelDescriptor{Provider: policy.Provider, Model: policy.Model, ExecutionProfileVersion: policy.ExecutionProfileVersion},
 		Capabilities: append([]Capability(nil), c.Capabilities...), Local: c.Local,

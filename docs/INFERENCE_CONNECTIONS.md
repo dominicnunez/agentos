@@ -262,3 +262,37 @@ normalization boundary retains its bounded unavailable diagnostic. No provider
 call follows a rejected selection. This covers runtime selection failures;
 installation/readiness errors and direct advisory broker calls do not create
 work-stream events.
+
+### Reviewed health, latency, and evaluation evidence
+
+An account catalog may include `signals` with `health` (`READY` or `UNAVAILABLE`),
+UTC `observed_at` and `valid_until`, and a bounded `evidence_ref`. Optional
+`expected_latency_milliseconds` is an estimate; zero means unknown. An optional
+`evaluation` identifies a metric, integer `score_basis_points` (0–10000),
+`evaluator_id`, and `evidence_ref`. Metric names must be versioned by the operator
+when their meaning or calibration changes. Scores from different metrics cannot
+satisfy one another's requirements.
+
+These are operator-reviewed catalog inputs bound by the account policy
+fingerprint. The runtime checks their shape, freshness, identity, and thresholds;
+it does not independently verify the referenced observation or calculate empirical
+scores. Model output cannot populate them. A future Lab integration must provide
+independent evidence before publishing reviewed updates. Refreshing signals uses
+the existing reviewed policy/configuration path and matching registry metadata.
+There is no new background probe or mutable health store.
+
+Requirements may set `require_healthy`, `max_latency_milliseconds` (1–86400000),
+and `evaluation: {"metric":"classification-v1","minimum_score_basis_points":9000}`.
+Missing evidence fails any constraint that needs it. A declared unavailable,
+expired, or future-dated signal makes an account ineligible even without caller
+opt-in. Legacy catalogs without signals retain their behavior only when no new
+constraint requires evidence. Task-key rules preserve health requirements, take
+the tighter latency ceiling and higher score threshold, and reject a changed
+metric. Existing locality, capability, identity, and budget constraints still apply.
+
+Selection, readiness, atomic reservation and historical replay use the same
+eligibility checks. Expiry between selection and dispatch rejects the call;
+expiry today does not invalidate an admission supported by valid evidence at its
+historical time. Latency estimates do not promise a response deadline. Provider
+retry/fallback attempt chains and automatic health measurement remain subsequent
+work; these fields do not enable either behavior.
