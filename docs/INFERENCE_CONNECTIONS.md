@@ -233,3 +233,32 @@ These tests do not constitute live-provider or confinement verification.
 Concurrent-submission tests verify that separate workflows preserve account
 identity in task manifests and usage. The service currently serializes execution;
 these tests do not claim parallel model calls.
+
+### Routing rejection evidence
+
+When task assignment, planning selection, or intake normalization selection fails,
+the runtime appends `INFERENCE_ROUTE_REJECTED` before returning the failure. The
+versioned payload contains a fixed category, an optional SHA-256 fingerprint of
+valid requirements, the purpose, and an earlier origin event in the same
+organization and work stream. Task assignment references `PLAN_CREATED` and its
+agent task key; planning references `WORK_CREATED`; normalization references the
+specific `INTAKE_MESSAGE_RECORDED` that triggered selection. Actor attribution is
+`runtime`; originating principal and work details remain in the linked evidence.
+
+These diagnostics carry no raw error strings, prompts, credentials, provider
+responses, or copied requirements. Invalid requirements and failures outside the
+registry may lack a requirements fingerprint. Unknown errors use
+`SELECTION_UNAVAILABLE`; cancellation uses `CANCELED`. The diagnostic does not
+reserve budget, start an invocation, authorize fallback or retries, or prove
+optimality or impossibility across configurations. Existing dispatch admission
+remains authoritative.
+
+Admission checks the bounded closed schema and origin linkage in its append
+transaction. Inference replay validates the same linkage against earlier events.
+Canceled requests get up to five seconds on a separate context to persist the
+record. Database failure can prevent persistence; task/planning callers receive
+that failure together with the original selection error, while the operator
+normalization boundary retains its bounded unavailable diagnostic. No provider
+call follows a rejected selection. This covers runtime selection failures;
+installation/readiness errors and direct advisory broker calls do not create
+work-stream events.

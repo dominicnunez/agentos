@@ -22,6 +22,10 @@ func TestRoutingFailureCategoriesDoNotExposeCauses(t *testing.T) {
 		if !errors.Is(err, cause) || strings.Contains(err.Error(), "synthetic-private-canary") {
 			t.Fatal("routing failure lost identity or leaked private cause", err)
 		}
+		fingerprint, _ := request.Fingerprint()
+		if RouteFailureFingerprint(err) != fingerprint {
+			t.Fatal("failure lost original requirements digest")
+		}
 		if got, want := RouteFailureCategory(err), RouteFailureCategory(cause); got != want {
 			t.Fatalf("code=%s want=%s", got, want)
 		}

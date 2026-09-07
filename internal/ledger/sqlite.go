@@ -4108,6 +4108,9 @@ func collectRecordBodies(rows *sql.Rows, err error) ([][]byte, error) {
 }
 
 func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Event, error) {
+	if d.EventType == "INFERENCE_ROUTE_REJECTED" {
+		return l.appendInferenceRouteRejection(ctx, d)
+	}
 	if err := events.ValidateOrdinaryEventPayload(d.Payload); err != nil {
 		return events.Event{}, err
 	}

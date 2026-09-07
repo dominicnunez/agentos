@@ -684,7 +684,8 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 			var binding *modelinput.RouteBinding
 			normalizer, binding, err = selector.SelectNormalizer(ctx, principal.OrganizationID)
 			if err != nil {
-				return View{}, fmt.Errorf("%w: select normalization route", ErrUnavailable)
+				err = s.app.RecordInferenceRouteRejection(ctx, principal.OrganizationID, stream[0].CorrelationID, "INTENT_NORMALIZATION", message.MessageID, err)
+				return View{}, fmt.Errorf("%w: select normalization route (%s)", ErrUnavailable, inference.RouteFailureCategory(err))
 			}
 			if normalizer == nil || binding == nil || binding.Validate() != nil || binding.Requirements.OrganizationID != principal.OrganizationID {
 				return View{}, fmt.Errorf("%w: normalization selection lacks organization requirements", ErrUnavailable)

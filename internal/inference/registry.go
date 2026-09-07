@@ -88,7 +88,13 @@ func (r *ConnectionRegistry) RequiresRouting(ctx context.Context, connectionID s
 // Select uses the same authority that admits this registry's provider calls.
 // Stores without routing support can serve explicit legacy connections, but
 // cannot silently substitute an unverified snapshot for capability selection.
-func (r *ConnectionRegistry) Select(ctx context.Context, requirements RouteRequirements) (RouteSelection, error) {
+func (r *ConnectionRegistry) Select(ctx context.Context, requirements RouteRequirements) (selection RouteSelection, resultErr error) {
+	fingerprint, _ := requirements.Fingerprint()
+	defer func() {
+		if resultErr != nil {
+			resultErr = &routeFailure{code: RouteFailureCategory(resultErr), cause: resultErr, requirementsFingerprint: fingerprint}
+		}
+	}()
 	if r == nil || r.selector == nil {
 		return RouteSelection{}, &routeFailure{code: RouteSelectionUnavailable}
 	}

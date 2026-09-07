@@ -1772,6 +1772,7 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 			}
 			route, routeErr := s.plannedAssignmentRoute(ctx, organizationID, planned)
 			if routeErr != nil {
+				routeErr = s.RecordInferenceRouteRejection(ctx, string(organizationID), correlationID, "TASK_ASSIGNMENT", planned.Key, routeErr)
 				return core.Intent{}, core.Work{}, core.Task{}, routeErr
 			}
 			assignments[planned.Key] = route
@@ -2036,6 +2037,7 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 			var binding *modelinput.RouteBinding
 			planner, binding, err = selector.SelectPlanner(ctx, string(organizationID))
 			if err != nil {
+				err = s.RecordInferenceRouteRejection(ctx, string(organizationID), correlationID, "PLANNING", "", err)
 				return core.Plan{}, fmt.Errorf("select planning route: %w", err)
 			}
 			if planner == nil || binding == nil || binding.Validate() != nil || binding.Requirements.OrganizationID != string(organizationID) {
