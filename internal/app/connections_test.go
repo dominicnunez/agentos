@@ -11,6 +11,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/modelinput"
 	"github.com/dominicnunez/agentos/internal/planning"
 	"github.com/dominicnunez/agentos/internal/projections"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -210,7 +211,7 @@ func testServiceRoutesTwoAccounts(t *testing.T, broker bool) {
 		if _, err := service.plannedAssignmentRoute(t.Context(), "other-org", planned); err == nil {
 			t.Fatal("task selection accepted another organization's requirements")
 		}
-		for _, mutate := range []func(*modelinput.RouteRequirements){
+		for index, mutate := range []func(*modelinput.RouteRequirements){
 			func(r *modelinput.RouteRequirements) { r.DataClass = "secret" },
 			func(r *modelinput.RouteRequirements) {
 				r.Capabilities = []modelinput.Capability{modelinput.Text, modelinput.Vision}
@@ -223,6 +224,39 @@ func testServiceRoutesTwoAccounts(t *testing.T, broker bool) {
 			denied, err := NewWithConnections(gateway, registry, TaskConnectionRouting{Default: "first", Requirements: &requirements}, routedTaskPlanner{})
 			if err != nil {
 				t.Fatal(err)
+			}
+			input := confirmedGoalSubmit(t, t.Context(), gateway, "denied-task-"+strconv.Itoa(index), "org-1", "goal-1", "perform governed work", core.ExecutionAgent)
+			if _, err := denied.Submit(t.Context(), input); err == nil {
+				t.Fatal("ineligible task was dispatched")
+			}
+			stream, err := denied.ExternalEvents(t.Context(), "org-1", input.RequestID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rejections := 0
+
+			for _, event := range stream {
+				if event.EventType == "INFERENCE_RESERVED" || event.EventType == "EXECUTION_CONTEXT_MANIFESTED" {
+					t.Fatal("rejected task acquired inference authority")
+				}
+				if event.EventType != "INFERENCE_ROUTE_REJECTED" {
+					continue
+				}
+				var payload events.InferenceRouteRejectedPayload
+				if err := json.Unmarshal(event.Payload, &payload); err != nil {
+					t.Fatal(err)
+				}
+				// The runtime supplies a default preference before selection.
+				effective := requirements.Clone()
+				effective.PreferredConnections = []string{"first"}
+				fingerprint, _ := effective.Fingerprint()
+				if payload.Purpose != "TASK_ASSIGNMENT" || payload.PlannedTaskKey != "root" || payload.RequirementsFingerprint != fingerprint || payload.OriginEventRef == "" {
+					t.Fatal("task rejection lost attribution", payload)
+				}
+				rejections++
+			}
+			if rejections != 1 {
+				t.Fatalf("task rejection count=%d", rejections)
 			}
 			if _, err := denied.plannedAssignmentRoute(t.Context(), "org-1", planned); err == nil {
 				t.Fatal("task selection weakened requirements to use the default account")

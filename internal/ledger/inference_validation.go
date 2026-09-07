@@ -90,6 +90,9 @@ func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx, pendin
 	if err != nil {
 		return fmt.Errorf("read inference admission events: %w", err)
 	}
+	if err := validateInferenceRouteRejections(stream); err != nil {
+		return err
+	}
 	eventsByID := make(map[string]events.Event, len(stream))
 	reservedEvents := make(map[string]events.Event)
 	reconciledEvents := make(map[string][]events.Event)

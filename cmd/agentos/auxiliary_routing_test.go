@@ -135,6 +135,62 @@ func TestAuxiliaryBrokerBindsSelectedAccountAndRequirements(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Both production auxiliary paths persist broker denials before returning.
+	blockedRequirements := route.requirements.Clone()
+	blockedRequirements.Capabilities = []modelinput.Capability{modelinput.Text, modelinput.Vision}
+	blockedRoute, err := newAuxiliaryRoute(registry, "first", blockedRequirements)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedService, err := app.NewWithConnections(events.NewGateway(store), registry, app.TaskConnectionRouting{Default: "first", Requirements: &route.requirements}, routedPlanner{Planner: basePlanner, route: blockedRoute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blockedService.Submit(t.Context(), app.Submit{RequestID: "denied-planning", OrganizationID: "org-1", Statement: "perform adaptive work", Kind: core.ExecutionAgent}); err == nil {
+		t.Fatal("ineligible planner called")
+	}
+	blockedNormalizer, err := intake.NewModelNormalizer(intakeModel{adapter: adapter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedOperator := intake.NewWithNormalizer(blockedService, routedNormalizer{Normalizer: blockedNormalizer, route: blockedRoute})
+	blockedPrincipal := intake.Principal{ID: "human", OrganizationID: "org-1", Kind: core.PrincipalHuman, Channel: intake.ChannelHumanDirect, WorkScope: intake.WorkScopeOrganization, Capabilities: []string{intake.CapabilitySubmitWork}}
+	if _, err := blockedOperator.Handle(t.Context(), blockedPrincipal, intake.Message{ConversationID: "denied-normalization", MessageID: "message", Text: "perform adaptive work"}); err == nil {
+		t.Fatal("ineligible normalizer called")
+	}
+	for requestID, purpose := range map[string]string{"denied-planning": "PLANNING", "denied-normalization": "INTENT_NORMALIZATION"} {
+		stream, err := blockedService.ExternalEvents(t.Context(), "org-1", requestID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rejections := 0
+		fingerprint, _ := blockedRequirements.Fingerprint()
+		for _, event := range stream {
+			if event.EventType == "INFERENCE_RESERVED" || event.EventType == "PLANNING_CONTEXT_MANIFESTED" || event.EventType == "INTENT_NORMALIZATION_CONTEXT_MANIFESTED" {
+				t.Fatal("ineligible auxiliary persisted model context")
+			}
+			if event.EventType != "INFERENCE_ROUTE_REJECTED" {
+				continue
+			}
+			var p events.InferenceRouteRejectedPayload
+			if err := json.Unmarshal(event.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			if p.Purpose != purpose || p.Category != "NO_ELIGIBLE_ACCOUNT" || p.RequirementsFingerprint != fingerprint || p.OriginEventRef == "" {
+				t.Fatal("auxiliary rejection lost attribution", p)
+			}
+			rejections++
+		}
+		if rejections != 1 {
+			t.Fatalf("auxiliary rejection count=%d", rejections)
+		}
+	}
+	if first.calls.Load() != 0 || second.calls.Load() != 0 {
+		t.Fatal("broker denial called provider")
+	}
+	if err := store.ValidateInferenceAdmissions(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	if composed, err := app.NewWithConnections(events.NewGateway(store), registry, app.TaskConnectionRouting{Default: "first", Requirements: &route.requirements}, basePlanner); err == nil || composed != nil {
 		t.Fatal("governed planner without selector accepted by constructor")
 	}

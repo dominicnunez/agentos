@@ -20,8 +20,19 @@ const (
 // routeFailure preserves error identity for trusted control flow while exposing
 // only a fixed diagnostic. Raw database or provider error text is not audit data.
 type routeFailure struct {
-	code  RouteFailureCode
-	cause error
+	code                    RouteFailureCode
+	cause                   error
+	requirementsFingerprint string
+}
+
+// RouteFailureFingerprint identifies valid selection requirements without
+// exposing their contents. Invalid or unavailable requirements have no digest.
+func RouteFailureFingerprint(err error) string {
+	var failure *routeFailure
+	if errors.As(err, &failure) {
+		return failure.requirementsFingerprint
+	}
+	return ""
 }
 
 func (e *routeFailure) Error() string {
