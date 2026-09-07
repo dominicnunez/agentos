@@ -27,6 +27,7 @@ const (
 // a guess based on a model name. Zero token limits mean unknown, never unlimited.
 // Local metadata describes placement; it does not attest confinement or identity.
 type RouteMetadata struct {
+	Signals       *RoutingSignals
 	ConnectionID  string
 	Descriptor    execution.ModelDescriptor
 	Capabilities  []Capability
@@ -101,6 +102,9 @@ func (r *ConnectionRegistry) SelectRoute(now time.Time, pools []Pool, request Ro
 }
 
 func (r RouteMetadata) Validate() error {
+	if r.Signals != nil && (r.Signals.Validate() != nil || r.Signals.ValidUntil.After(r.ValidUntil)) {
+		return fmt.Errorf("routing signals exceed their catalog validity")
+	}
 	if !ValidConnectionID(r.ConnectionID) || !validValue(r.Descriptor.Provider) ||
 		!validValue(r.Descriptor.Model) || !validValue(r.Descriptor.ExecutionProfileVersion) ||
 		!validCapabilities(r.Capabilities) || !validRouteValues(r.DataClasses) ||
@@ -177,7 +181,7 @@ func (b Broker) Select(now time.Time, request RouteRequirements, policy RoutePol
 			request.InputTokens > route.ContextTokens || request.OutputTokens > route.ContextTokens-request.InputTokens {
 			continue
 		}
-		if !allCapabilities(route.Capabilities, request.Capabilities) {
+		if !allCapabilities(route.Capabilities, request.Capabilities) || !routingSignalsAllow(now, route.Signals, request) {
 			continue
 		}
 		// Scope pools to this organization before asking the existing manager;
@@ -252,7 +256,7 @@ func (b Broker) Select(now time.Time, request RouteRequirements, policy RoutePol
 }
 
 func sameRouteMetadata(a, b RouteMetadata) bool {
-	return a.ConnectionID == b.ConnectionID && a.Descriptor == b.Descriptor && a.Local == b.Local &&
+	return sameRoutingSignals(a.Signals, b.Signals) && a.ConnectionID == b.ConnectionID && a.Descriptor == b.Descriptor && a.Local == b.Local &&
 		a.ContextTokens == b.ContextTokens && a.OutputTokens == b.OutputTokens && a.ValidUntil.Equal(b.ValidUntil) &&
 		slices.Equal(a.Capabilities, b.Capabilities) && slices.Equal(a.DataClasses, b.DataClasses)
 }

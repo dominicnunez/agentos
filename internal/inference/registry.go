@@ -131,6 +131,7 @@ func (r *ConnectionRegistry) Catalog() []RouteMetadata {
 }
 
 func cloneRouteMetadata(metadata RouteMetadata) RouteMetadata {
+	metadata.Signals = cloneRoutingSignals(metadata.Signals)
 	metadata.Capabilities = append([]Capability(nil), metadata.Capabilities...)
 	metadata.DataClasses = append([]string(nil), metadata.DataClasses...)
 	return metadata

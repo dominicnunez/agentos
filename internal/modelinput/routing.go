@@ -31,20 +31,27 @@ const (
 // RouteRequirements are runtime-owned constraints, not model-authored authority.
 // Canonical bytes can be bound in a manifest and checked by admission/replay.
 type RouteRequirements struct {
-	OrganizationID       string       `json:"organization_id"`
-	ConnectionID         string       `json:"connection_id,omitempty"`
-	Capabilities         []Capability `json:"capabilities"`
-	InputTokens          int64        `json:"input_tokens"`
-	OutputTokens         int64        `json:"output_tokens"`
-	Locality             Locality     `json:"locality"`
-	DataClass            string       `json:"data_class"`
-	AllowedProviders     []string     `json:"allowed_providers,omitempty"`
-	DeniedProviders      []string     `json:"denied_providers,omitempty"`
-	MaxCostNanoUSD       *int64       `json:"max_cost_nano_usd,omitempty"`
-	PreferredConnections []string     `json:"preferred_connections,omitempty"`
+	RequireHealthy         bool                   `json:"require_healthy,omitempty"`
+	MaxLatencyMilliseconds int64                  `json:"max_latency_milliseconds,omitempty"`
+	Evaluation             *EvaluationRequirement `json:"evaluation,omitempty"`
+	OrganizationID         string                 `json:"organization_id"`
+	ConnectionID           string                 `json:"connection_id,omitempty"`
+	Capabilities           []Capability           `json:"capabilities"`
+	InputTokens            int64                  `json:"input_tokens"`
+	OutputTokens           int64                  `json:"output_tokens"`
+	Locality               Locality               `json:"locality"`
+	DataClass              string                 `json:"data_class"`
+	AllowedProviders       []string               `json:"allowed_providers,omitempty"`
+	DeniedProviders        []string               `json:"denied_providers,omitempty"`
+	MaxCostNanoUSD         *int64                 `json:"max_cost_nano_usd,omitempty"`
+	PreferredConnections   []string               `json:"preferred_connections,omitempty"`
 }
 
 func (r RouteRequirements) Clone() RouteRequirements {
+	if r.Evaluation != nil {
+		evaluation := *r.Evaluation
+		r.Evaluation = &evaluation
+	}
 	r.Capabilities = slices.Clone(r.Capabilities)
 	r.AllowedProviders = slices.Clone(r.AllowedProviders)
 	r.DeniedProviders = slices.Clone(r.DeniedProviders)
@@ -70,6 +77,9 @@ func IntersectRouteRequirements(base, rule RouteRequirements) (RouteRequirements
 		return RouteRequirements{}, fmt.Errorf("task rule cannot change organization or data classification")
 	}
 	result := rule.Clone()
+	if err := intersectRoutingSignals(base, rule, &result); err != nil {
+		return RouteRequirements{}, err
+	}
 	if base.ConnectionID != "" {
 		if rule.ConnectionID != "" && rule.ConnectionID != base.ConnectionID {
 			return RouteRequirements{}, fmt.Errorf("task rule conflicts with default connection")
@@ -123,6 +133,9 @@ func IntersectRouteRequirements(base, rule RouteRequirements) (RouteRequirements
 }
 
 func (r RouteRequirements) Validate() error {
+	if err := r.validateSignals(); err != nil {
+		return err
+	}
 	if !validRoutingValue(r.OrganizationID) || !validRoutingValue(r.DataClass) ||
 		r.ConnectionID != "" && !validRoutingConnection(r.ConnectionID) ||
 		r.InputTokens < 1 || r.OutputTokens < 1 || r.InputTokens > math.MaxInt64-r.OutputTokens ||

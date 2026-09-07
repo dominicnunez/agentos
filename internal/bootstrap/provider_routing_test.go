@@ -47,6 +47,19 @@ func TestRoutingReadinessUsesCurrentCatalogValidity(t *testing.T) {
 	valid := *p.Catalog
 	valid.ValidUntil = now.Add(30 * time.Minute)
 	config.Providers[1].InferencePolicy.Catalog = &valid
+	// A current catalog does not make expired routing evidence usable.
+	valid.Signals = &inference.RoutingSignals{Health: "READY", ObservedAt: now.Add(-time.Minute), ValidUntil: now, EvidenceRef: "observation"}
+	config.Providers[1].InferencePolicy.Catalog = &valid
+	if err := routing.validateAt(config.Providers, now); err == nil {
+		t.Fatal("readiness ignored expired signals")
+	}
+	valid.Signals.ValidUntil = now.Add(time.Minute)
+	requirements.RequireHealthy = true
+	if err := routing.validateAt(config.Providers, now); err != nil {
+		t.Fatal("readiness rejected current healthy alternative", err)
+	}
+	valid.Signals = nil
+	requirements.RequireHealthy = false
 	if err := config.ValidateReady(); err != nil {
 		t.Fatal("startup rejected a current alternative catalog", err)
 	}
