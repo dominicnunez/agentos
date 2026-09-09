@@ -13,6 +13,60 @@ import (
 	"github.com/dominicnunez/agentos/internal/events"
 )
 
+func TestSecurityFreezeRejectsAllStaleExecutionOutputs(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	writer, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	appendTaskProjectionParents(t, ctx, store, "org-1", "held-outputs", "work-1")
+	agent, config := appendTaskAssignmentAgent(t, ctx, store, "org-1", "held-outputs", false)
+	task := appendPendingAgentExecutionTask(t, ctx, store, "held-outputs", "held-task", agent, config)
+	live, release, err := store.BeginExecutionContext(ctx, "org-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := startPendingAgentExecution(live, store, "held-outputs", task); err != nil {
+		t.Fatal(err)
+	}
+	appendInferenceFreeze(t, writer, "org-1", 1, true)
+	appendInferenceFreeze(t, writer, "org-1", 2, false)
+	before, err := store.Events(ctx, "held-outputs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, callCtx := range []context.Context{context.WithoutCancel(live), ctx} {
+		for _, eventType := range []string{"KNOWLEDGE_PROPOSED", "KNOWLEDGE_JUDGMENT_PUBLISHED", "SKILL_PROPOSED", "CUSTOM_EXECUTION_EVENT", "EVIDENCE_PUBLISHED", "MESSAGE"} {
+			draft := events.TrustedDraft{OrganizationID: "org-1", EventType: eventType, SourceActorID: string(agent.ID), SourceExecutionID: fmt.Sprintf("execution-%s-v2", task.ID), TaskID: string(task.ID), CorrelationID: "held-outputs", Payload: map[string]string{"claim": "untrusted"}}
+			if eventType == "MESSAGE" {
+				draft.RecipientScope, draft.RecipientID = events.RecipientAgent, string(agent.ID)
+			}
+			if eventType == "EVIDENCE_PUBLISHED" {
+				draft.ArtifactRefs = []string{"artifact-1"}
+				draft.Payload = events.EvidencePublishedPayload{Summary: "untrusted evidence", ArtifactRefs: draft.ArtifactRefs}
+				_, err = store.AppendAgentEvidence(callCtx, draft)
+			} else {
+				_, err = store.Append(callCtx, draft)
+			}
+			if !errors.Is(err, core.ErrOrganizationFrozen) {
+				t.Fatalf("%s did not enforce execution hold: %v", eventType, err)
+			}
+		}
+	}
+	after, err := store.Events(ctx, "held-outputs")
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("rejected execution outputs were persisted: %v", err)
+	}
+}
+
 func TestSecurityFreezeOtherHandleInvalidatesPreparationBeforeMonitor(t *testing.T) {
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "ledger.db")

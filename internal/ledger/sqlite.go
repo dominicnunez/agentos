@@ -4187,8 +4187,19 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		switch d.EventType {
+		case "TOOL_OUTCOME_RECORDED", "INFERENCE_USAGE_RECORDED", "EXECUTION_FINISHED":
+			// Runtime audit/accounting may finish after containment. Outcomes
+			// have their separate interruption-evidence validator below.
 		case "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_VERIFIED", "COMPLETION_REVIEW_REQUESTED":
 			if err := validateExecutionPublication(ctx, tx, d); err != nil {
+				return err
+			}
+		default:
+			if d.SourceExecutionID != "" {
+				if err := validateExecutionPublication(ctx, tx, d); err != nil {
+					return err
+				}
+			} else if err := validatePreparationGeneration(ctx, tx, d.OrganizationID); err != nil {
 				return err
 			}
 		}
@@ -4221,6 +4232,9 @@ func (l *SQLite) AppendAgentEvidence(ctx context.Context, draft events.TrustedDr
 	draft.Payload = json.RawMessage(append([]byte(nil), body...))
 	var appended events.Event
 	err = l.withTx(ctx, func(tx *sql.Tx) error {
+		if err := validateExecutionPublication(ctx, tx, draft); err != nil {
+			return err
+		}
 		start, task, taskVersion, stream, err := resolveAgentExecutionBoundary(ctx, tx, draft)
 		if err != nil {
 			return err
@@ -4470,15 +4484,8 @@ func (l *SQLite) appendAddressed(ctx context.Context, draft events.TrustedDraft)
 		return events.Event{}, fmt.Errorf("addressed event recipient is required")
 	}
 	return l.appendWithProjection(ctx, draft, func(tx *sql.Tx, event events.Event) error {
-		if err := validatePreparationGeneration(ctx, tx, event.OrganizationID); err != nil {
+		if err := validateExecutionPublication(ctx, tx, draft); err != nil {
 			return err
-		}
-		frozen, err := organizationFrozenAtSequence(ctx, tx, core.ID(event.OrganizationID), 0)
-		if err != nil {
-			return fmt.Errorf("validate coordination containment: %w", err)
-		}
-		if frozen {
-			return core.ErrOrganizationFrozen
 		}
 		return projectInbox(ctx, tx, event)
 	})
@@ -4510,6 +4517,9 @@ func (l *SQLite) ObserveInbox(ctx context.Context, draft events.TrustedDraft, re
 	}
 	var observation events.Event
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		if err := validateExecutionPublication(ctx, tx, draft); err != nil {
+			return err
+		}
 		startEvent, err := resolveInboxObservationExecution(ctx, tx, draft, recipientScope, recipientID)
 		if err != nil {
 			return err
