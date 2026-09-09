@@ -336,7 +336,7 @@ func (l *SQLite) ReconcileInference(ctx context.Context, reservation inference.R
 	if reservation.ID == "" || reservation.PolicyFingerprint == "" || reservation.Request.Scope.Validate() != nil {
 		return 0, fmt.Errorf("inference reservation is incomplete")
 	}
-	if result != inference.ReconciliationCompleted && result != inference.ReconciliationNotSent && result != inference.ReconciliationUncertain && result != inference.ReconciliationViolation {
+	if result != inference.ReconciliationCompleted && result != inference.ReconciliationNotSent && result != inference.ReconciliationUncertain && result != inference.ReconciliationViolation && result != inference.ReconciliationTerminalFailed && result != inference.ReconciliationTerminalIncomplete && result != inference.ReconciliationTerminalFailedNoUsage && result != inference.ReconciliationTerminalIncompleteNoUsage {
 		return 0, fmt.Errorf("inference reconciliation state is invalid")
 	}
 	chargedInput := reservation.ReservedInputTokens
@@ -345,13 +345,24 @@ func (l *SQLite) ReconcileInference(ctx context.Context, reservation inference.R
 	state := inferenceStateUncertain
 	usageMatches := usage != nil && usage.Valid() && usage.Provider == reservation.Request.Descriptor.Provider && usage.Model == reservation.Request.Descriptor.Model
 	switch result {
-	case inference.ReconciliationCompleted:
+	case inference.ReconciliationCompleted, inference.ReconciliationTerminalFailed, inference.ReconciliationTerminalIncomplete:
 		if !usageMatches {
 			return 0, fmt.Errorf("inference reconciliation usage is invalid")
 		}
+		if result != inference.ReconciliationCompleted && usage.ConnectionID != reservation.Request.ConnectionID {
+			return 0, fmt.Errorf("terminal inference usage connection differs from reservation")
+		}
+		if result != inference.ReconciliationCompleted && (int64(usage.InputTokens) > chargedInput || int64(usage.OutputTokens) > chargedOutput) {
+			return 0, fmt.Errorf("terminal inference usage exceeds reservation")
+		}
 		chargedInput = int64(usage.InputTokens)
 		chargedOutput = int64(usage.OutputTokens)
-		state = inferenceStateCompleted
+		state = string(result)
+	case inference.ReconciliationTerminalFailedNoUsage, inference.ReconciliationTerminalIncompleteNoUsage:
+		if usage != nil {
+			return 0, fmt.Errorf("unmeasured terminal inference cannot supply usage")
+		}
+		state = string(result)
 	case inference.ReconciliationViolation:
 		state = inferenceStateViolation
 		if usageMatches && int64(usage.InputTokens) > chargedInput {

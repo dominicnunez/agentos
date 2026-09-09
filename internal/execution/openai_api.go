@@ -234,14 +234,29 @@ func (a *OpenAIAPI) validateResponse(response openAIResponse) (ModelResponse, er
 	if response.Object != "response" || response.ID == "" || !canonicalASCII(response.ID, 512) {
 		return ModelResponse{}, fmt.Errorf("response identity is invalid")
 	}
-	if response.Status != "completed" || response.Error != nil || response.IncompleteDetails != nil {
-		return ModelResponse{}, fmt.Errorf("response did not complete")
-	}
 	if response.Model != a.model {
 		return ModelResponse{}, fmt.Errorf("response model does not match the configured snapshot")
 	}
 	if response.Store == nil || *response.Store || response.ToolChoice != "none" || response.Tools == nil || len(response.Tools) != 0 || response.Truncation != "disabled" || response.MaxOutputTokens == nil || *response.MaxOutputTokens != openAIMaximumOutputTokens {
 		return ModelResponse{}, fmt.Errorf("response did not preserve the model-only execution profile")
+	}
+	if response.Status == "incomplete" || response.Status == "failed" {
+		outcome := TerminalOutcome{Status: response.Status}
+		if response.Usage != nil {
+			usage := events.InferenceUsageRecordedPayload{
+				Source: "provider_api", Provider: openAIAPIProvider, Model: a.model,
+				InputTokens: response.Usage.InputTokens, OutputTokens: response.Usage.OutputTokens,
+				TotalTokens: response.Usage.TotalTokens,
+			}
+			if usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.TotalTokens > openAIMaximumUsageTokens || !usage.Valid() {
+				return ModelResponse{}, fmt.Errorf("terminal response contained invalid token usage")
+			}
+			outcome.Usage = &usage
+		}
+		return ModelResponse{}, &terminalResponseError{outcome: outcome}
+	}
+	if response.Status != "completed" || response.Error != nil || response.IncompleteDetails != nil {
+		return ModelResponse{}, fmt.Errorf("response did not complete")
 	}
 	if len(response.Output) == 0 || len(response.Output) > openAIMaximumOutputItems {
 		return ModelResponse{}, fmt.Errorf("response output item count is invalid")

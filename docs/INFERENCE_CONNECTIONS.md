@@ -180,6 +180,25 @@ release their reservations. Interrupted calls become uncertain and retain their
 full charge. Outstanding reservations continue to count across a window rollover.
 Usage that violates a reservation retains the conservative charge.
 
+The OpenAI Responses adapter distinguishes a definite terminal `failed` or
+`incomplete` response from transport uncertainty. After validating the response
+identity, configured model and execution profile, it retains bounded, validated
+token usage as error evidence. Partial output is never returned as successful
+model text. The guard checks that evidence against the exact reservation and
+supplies the connection identity from runtime composition.
+
+`TERMINAL_FAILED` and `TERMINAL_INCOMPLETE` record validated observed token charges
+and policy-priced cost. Their `_NO_USAGE` variants preserve the terminal status
+while retaining the full reserved token and cost charge. Malformed or untrusted
+responses remain conservatively accounted; over-reservation evidence cannot
+reduce charges. The ledger validates these distinctions across restart and
+historical admission checks. They do not satisfy Task completion or authorize a
+retry. Each request still permits only one provider invocation.
+
+Offline fixtures cover terminal responses with usage, including the published
+OpenAI-compatible 84-input/16-output-token incomplete-response shape. This does not
+establish that the official OpenAI endpoint currently emits that exact response.
+
 Every active connection must agree on organization limits. Use
 `SQLite.ActivateInferencePolicies` to change a reviewed set atomically. Members must
 belong to one organization, have distinct connection IDs, and share author,

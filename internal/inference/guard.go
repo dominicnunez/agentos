@@ -293,10 +293,14 @@ type Reservation struct {
 type Reconciliation string
 
 const (
-	ReconciliationCompleted Reconciliation = "COMPLETED"
-	ReconciliationNotSent   Reconciliation = "NOT_SENT"
-	ReconciliationUncertain Reconciliation = "UNCERTAIN"
-	ReconciliationViolation Reconciliation = "VIOLATION"
+	ReconciliationCompleted                 Reconciliation = "COMPLETED"
+	ReconciliationNotSent                   Reconciliation = "NOT_SENT"
+	ReconciliationUncertain                 Reconciliation = "UNCERTAIN"
+	ReconciliationViolation                 Reconciliation = "VIOLATION"
+	ReconciliationTerminalFailed            Reconciliation = "TERMINAL_FAILED"
+	ReconciliationTerminalIncomplete        Reconciliation = "TERMINAL_INCOMPLETE"
+	ReconciliationTerminalFailedNoUsage     Reconciliation = "TERMINAL_FAILED_NO_USAGE"
+	ReconciliationTerminalIncompleteNoUsage Reconciliation = "TERMINAL_INCOMPLETE_NO_USAGE"
 )
 
 type Store interface {
@@ -366,11 +370,14 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 	response, providerErr := call()
 	if providerErr != nil {
 		result := ReconciliationUncertain
+		var usage *events.InferenceUsageRecordedPayload
 		if execution.WasRequestNotSent(providerErr) {
 			result = ReconciliationNotSent
+		} else if terminal, ok := execution.TerminalResponseOutcome(providerErr); ok {
+			result, usage = terminalReconciliation(terminal, reservation)
 		}
 		reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reconciliationTimeout)
-		_, reconcileErr := a.store.ReconcileInference(reconcileCtx, reservation, nil, result)
+		_, reconcileErr := a.store.ReconcileInference(reconcileCtx, reservation, usage, result)
 		cancel()
 		code := execution.ModelCallFailed
 		if reconcileErr != nil {
