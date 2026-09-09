@@ -2971,7 +2971,9 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	executionResult, executionErr := handler.Execute(executionCtx, executionTask, manifest)
 	cancel()
 	reportedOutcome := executionResult.Outcome
+	executionInterrupted := false
 	interrupt := func(cause error) {
+		executionInterrupted = true
 		executionErr = cause
 		class := "execution_cancelled"
 		if errors.Is(executionErr, core.ErrOrganizationFrozen) {
@@ -3053,23 +3055,27 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		}
 		return taskRun{Outcome: outcome, ExecutionError: executionErr}, nil
 	}
-	resultEvent, err := s.publishTaskResult(ctx, organizationID, state.CorrelationID, executionID, task, outcome)
-	if err != nil {
-		return taskRun{}, err
-	}
-	candidatePayload := events.CandidateCompletePayload{ToolInvocationID: string(outcome.ToolInvocationID), ResultEventID: resultEvent.EventID, ArtifactRefs: outcome.ArtifactRefs}
-	candidate := events.TrustedDraft{OrganizationID: string(organizationID), EventType: "CANDIDATE_COMPLETE", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: candidatePayload, CorrelationID: state.CorrelationID}
-	var candidateEvent events.Event
-	if task.ExecutionKind == core.ExecutionAgent {
-		candidateEvent, err = s.gateway.PublishAgentDraft(ctx, string(organizationID), string(task.AssigneeID), string(executionID), state.CorrelationID, events.Draft{EventType: "CANDIDATE_COMPLETE", TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: candidate.Payload})
+	var resultEvent, candidateEvent events.Event
+	// Interrupted output is restricted audit evidence, never a task result or candidate.
+	if !executionInterrupted {
+		resultEvent, err = s.publishTaskResult(ctx, organizationID, state.CorrelationID, executionID, task, outcome)
 		if err != nil {
-			return taskRun{}, fmt.Errorf("persist completion candidate for task %s: %w", task.ID, err)
+			return taskRun{}, err
 		}
-	} else {
-		candidateEvent, err = s.gateway.PublishTrusted(ctx, candidate)
-		if err != nil {
-			return taskRun{}, fmt.Errorf("persist completion candidate for task %s: %w", task.ID, err)
+		candidatePayload := events.CandidateCompletePayload{ToolInvocationID: string(outcome.ToolInvocationID), ResultEventID: resultEvent.EventID, ArtifactRefs: outcome.ArtifactRefs}
+		candidate := events.TrustedDraft{OrganizationID: string(organizationID), EventType: "CANDIDATE_COMPLETE", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: candidatePayload, CorrelationID: state.CorrelationID}
+		if task.ExecutionKind == core.ExecutionAgent {
+			candidateEvent, err = s.gateway.PublishAgentDraft(ctx, string(organizationID), string(task.AssigneeID), string(executionID), state.CorrelationID, events.Draft{EventType: "CANDIDATE_COMPLETE", TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: candidate.Payload})
+			if err != nil {
+				return taskRun{}, fmt.Errorf("persist completion candidate for task %s: %w", task.ID, err)
+			}
+		} else {
+			candidateEvent, err = s.gateway.PublishTrusted(ctx, candidate)
+			if err != nil {
+				return taskRun{}, fmt.Errorf("persist completion candidate for task %s: %w", task.ID, err)
+			}
 		}
+
 	}
 
 	contract := core.VerifiedOutcomeCompletionContract(task.ID, state.Version+1)

@@ -143,6 +143,9 @@ func testSchedulerSecurityHold(t *testing.T, timing string) {
 	}
 	var recorded bool
 	for _, event := range stream {
+		if event.EventType == "RESULT_PUBLISHED" || event.EventType == "CANDIDATE_COMPLETE" {
+			t.Fatalf("interrupted execution published ordinary output: %s", event.EventType)
+		}
 		if event.EventType != "TOOL_OUTCOME_RECORDED" {
 			continue
 		}
