@@ -3277,7 +3277,7 @@ var projectionLifecycleContracts = map[string]projectionLifecycleContract{
 	"knowledge":               {initial: []string{"KNOWLEDGE_PROPOSED"}, revision: []string{"KNOWLEDGE_PROPOSED", "KNOWLEDGE_ACTIVATED", "KNOWLEDGE_SUPERSEDED", "KNOWLEDGE_STALE", "KNOWLEDGE_QUARANTINED"}},
 	"task": {
 		initial:  []string{"TASK_CREATED", "TASK_BLOCKED"},
-		revision: []string{"TASK_ASSIGNMENT_REVALIDATED", "TASK_BLOCKED", "TASK_RECOVERED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED"},
+		revision: []string{"TASK_ASSIGNMENT_REVALIDATED", "TASK_EXECUTION_SUSPENDED", "TASK_BLOCKED", "TASK_RECOVERED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED"},
 	},
 }
 
@@ -3698,7 +3698,7 @@ func ValidateTaskProjectionTarget(eventType string, version int, task core.Task)
 	switch eventType {
 	case "TASK_CREATED", "TASK_ASSIGNMENT_REVALIDATED", "TASK_RECOVERED", "TASK_RESUMED":
 		expected = core.TaskPending
-	case "TASK_BLOCKED":
+	case "TASK_BLOCKED", "TASK_EXECUTION_SUSPENDED":
 		expected = core.TaskBlocked
 	case "EXECUTION_STARTED":
 		expected = core.TaskRunning
@@ -3738,6 +3738,8 @@ func ValidateTaskProjectionTransition(eventType string, version int, previous *c
 	case "TASK_ASSIGNMENT_REVALIDATED", "TASK_RESUMED":
 		valid = previous.Status == core.TaskBlocked
 	case "TASK_RECOVERED":
+		valid = previous.Status == core.TaskRunning
+	case "TASK_EXECUTION_SUSPENDED":
 		valid = previous.Status == core.TaskRunning
 	case "TASK_BLOCKED":
 		valid = previous.Status == core.TaskPending || previous.Status == core.TaskRunning

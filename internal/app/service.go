@@ -2673,11 +2673,11 @@ func (s *Service) actionableRemediation(ctx context.Context, snapshot projection
 			if err != nil {
 				return nil, err
 			}
-			_, assignmentBlocked, err := recordedAssignmentBlock(streamByCorrelation[state.CorrelationID], organizationID, dependency)
+			blockedEvent, assignmentBlocked, err := recordedAssignmentBlock(streamByCorrelation[state.CorrelationID], organizationID, dependency)
 			if err != nil {
 				return nil, fmt.Errorf("validate remediation assignment block for task %s: %w", dependencyID, err)
 			}
-			if assignmentBlocked {
+			if assignmentBlocked || blockedEvent.EventType == "TASK_EXECUTION_SUSPENDED" {
 				blockedByIndependentBoundary = true
 				break
 			}
@@ -3022,6 +3022,19 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			return taskRun{}, fmt.Errorf("persist inference usage for task %s: %w", task.ID, err)
 		}
 	}
+	if executionInterrupted {
+		// Suspension is a runtime lifecycle transition, not a result, parent
+		// remediation request, or terminal failure of the task's contract.
+		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "EXECUTION_FINISHED", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: map[string]any{"status": outcome.Status}, CorrelationID: state.CorrelationID}); err != nil {
+			return taskRun{}, fmt.Errorf("persist interrupted execution finish: %w", err)
+		}
+		task.Status = core.TaskBlocked
+		detail := map[string]string{"outcome_event_ref": outcomeEvent.EventID, "reason": "execution interrupted; operator reconciliation required before resumption"}
+		if err := s.state.SaveTask(ctx, organizationID, "TASK_EXECUTION_SUSPENDED", "runtime", state.CorrelationID, state.Version+2, task, detail); err != nil {
+			return taskRun{}, fmt.Errorf("suspend interrupted task %s: %w", task.ID, err)
+		}
+		return taskRun{Outcome: outcome, ExecutionError: executionErr}, nil
+	}
 	for _, batch := range inboxBatches {
 		if len(batch.Events) == 0 {
 			continue
@@ -3056,26 +3069,22 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		return taskRun{Outcome: outcome, ExecutionError: executionErr}, nil
 	}
 	var resultEvent, candidateEvent events.Event
-	// Interrupted output is restricted audit evidence, never a task result or candidate.
-	if !executionInterrupted {
-		resultEvent, err = s.publishTaskResult(ctx, organizationID, state.CorrelationID, executionID, task, outcome)
+	resultEvent, err = s.publishTaskResult(ctx, organizationID, state.CorrelationID, executionID, task, outcome)
+	if err != nil {
+		return taskRun{}, err
+	}
+	candidatePayload := events.CandidateCompletePayload{ToolInvocationID: string(outcome.ToolInvocationID), ResultEventID: resultEvent.EventID, ArtifactRefs: outcome.ArtifactRefs}
+	candidate := events.TrustedDraft{OrganizationID: string(organizationID), EventType: "CANDIDATE_COMPLETE", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: candidatePayload, CorrelationID: state.CorrelationID}
+	if task.ExecutionKind == core.ExecutionAgent {
+		candidateEvent, err = s.gateway.PublishAgentDraft(ctx, string(organizationID), string(task.AssigneeID), string(executionID), state.CorrelationID, events.Draft{EventType: "CANDIDATE_COMPLETE", TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: candidate.Payload})
 		if err != nil {
-			return taskRun{}, err
+			return taskRun{}, fmt.Errorf("persist completion candidate for task %s: %w", task.ID, err)
 		}
-		candidatePayload := events.CandidateCompletePayload{ToolInvocationID: string(outcome.ToolInvocationID), ResultEventID: resultEvent.EventID, ArtifactRefs: outcome.ArtifactRefs}
-		candidate := events.TrustedDraft{OrganizationID: string(organizationID), EventType: "CANDIDATE_COMPLETE", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: candidatePayload, CorrelationID: state.CorrelationID}
-		if task.ExecutionKind == core.ExecutionAgent {
-			candidateEvent, err = s.gateway.PublishAgentDraft(ctx, string(organizationID), string(task.AssigneeID), string(executionID), state.CorrelationID, events.Draft{EventType: "CANDIDATE_COMPLETE", TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: candidate.Payload})
-			if err != nil {
-				return taskRun{}, fmt.Errorf("persist completion candidate for task %s: %w", task.ID, err)
-			}
-		} else {
-			candidateEvent, err = s.gateway.PublishTrusted(ctx, candidate)
-			if err != nil {
-				return taskRun{}, fmt.Errorf("persist completion candidate for task %s: %w", task.ID, err)
-			}
+	} else {
+		candidateEvent, err = s.gateway.PublishTrusted(ctx, candidate)
+		if err != nil {
+			return taskRun{}, fmt.Errorf("persist completion candidate for task %s: %w", task.ID, err)
 		}
-
 	}
 
 	contract := core.VerifiedOutcomeCompletionContract(task.ID, state.Version+1)
@@ -3632,7 +3641,7 @@ func recordedAssignmentBlock(stream []events.Event, organizationID core.ID, stat
 		return events.Event{}, false, fmt.Errorf("blocked task projection crosses its durable identity boundary")
 	}
 	if matched.EventType != "TASK_BLOCKED" {
-		return events.Event{}, false, nil
+		return matched, false, nil
 	}
 	var detail events.TaskBlockedPayload
 	if json.Unmarshal(payload.Detail, &detail) != nil {

@@ -134,8 +134,8 @@ func testSchedulerSecurityHold(t *testing.T, timing string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Tasks["task-request-a"].Value.Status == core.TaskCompleted {
-		t.Fatal("held handler completed task")
+	if snapshot.Tasks["task-request-a"].Value.Status != core.TaskBlocked || snapshot.Works["work-a"].Value.Status != core.WorkActive {
+		t.Fatal("interrupted task was not suspended with its work still active")
 	}
 	stream, err := gateway.Events(ctx, "request-a")
 	if err != nil {
@@ -177,6 +177,24 @@ func testSchedulerSecurityHold(t *testing.T, timing string) {
 	}
 	if !recorded {
 		t.Fatal("interruption evidence was not persisted")
+	}
+	if err := service.reconcileWorks(ctx); err != nil {
+		t.Fatal(err)
+	}
+	restarted := New(gateway)
+	recovered, err := restarted.Recover(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.TasksExecuted != 0 {
+		t.Fatal("restart replayed a suspended execution without reconciliation")
+	}
+	snapshot, err = repository.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tasks["task-request-a"].Value.Status != core.TaskBlocked || snapshot.Works["work-a"].Value.Status != core.WorkActive {
+		t.Fatal("restart terminalized suspended work")
 	}
 	_, freezes, err := gateway.KnowledgeAuthorityAdmissions(ctx)
 	if err != nil {
