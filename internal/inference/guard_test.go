@@ -3,6 +3,7 @@ package inference
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ type guardStore struct {
 	cost         int64
 	reserveErr   error
 	reconcileErr error
+	afterReserve func()
 }
 
 func (*guardStore) ActivateInferencePolicy(context.Context, Policy) error { return nil }
@@ -31,7 +33,34 @@ func (s *guardStore) ReserveInference(_ context.Context, request InferenceReques
 		ReservedInputTokens: 100, ReservedOutputTokens: 20, ReservedCostNanoUSD: 100,
 		WindowStartedAt: time.Now().UTC(), WindowExpiresAt: time.Now().UTC().Add(time.Hour),
 	}
+	if s.afterReserve != nil {
+		s.afterReserve()
+	}
 	return s.reservation, nil
+}
+
+func TestGuardedAdapterCancellationAfterReservationNeverInvokesProvider(t *testing.T) {
+	for _, accountingFails := range []bool{false, true} {
+		t.Run(fmt.Sprint(accountingFails), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(guardedContext(t))
+			defer cancel()
+			store := &guardStore{afterReserve: cancel}
+			wantClass := execution.ModelCallFailed
+			if accountingFails {
+				store.reconcileErr = errors.New("synthetic accounting failure")
+				wantClass = execution.InferenceRecordFailed
+			}
+			model := &guardModel{}
+			adapter, err := NewGuardedAdapter(store, model)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := adapter.Complete(ctx, "prompt")
+			if err == nil || model.called || response.Text != "" || store.result != ReconciliationNotSent || store.usage != nil || execution.ModelErrorClass(err) != string(wantClass) {
+				t.Fatalf("pre-dispatch cancellation mishandled: called=%v result=%s err=%v", model.called, store.result, err)
+			}
+		})
+	}
 }
 
 func (s *guardStore) ReconcileInference(_ context.Context, _ Reservation, usage *events.InferenceUsageRecordedPayload, result Reconciliation) (int64, error) {

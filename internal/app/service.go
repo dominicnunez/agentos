@@ -2523,13 +2523,23 @@ func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {
 		// Execute one Task, then reload authoritative state before choosing
 		// more work. A failure may make the root and remaining siblings
 		// unnecessary, and scheduling from a stale snapshot would waste work.
-		task := ready[0]
-		state := snapshot.Tasks[task.ID]
-		run, err := s.executeTask(ctx, snapshot, state, remediation)
-		if err != nil {
-			return nil, err
+		progressed := false
+		for _, task := range ready {
+			state := snapshot.Tasks[task.ID]
+			run, err := s.executeTask(ctx, snapshot, state, remediation)
+			if errors.Is(err, core.ErrOrganizationFrozen) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			runs[task.ID] = run
+			progressed = true
+			break
 		}
-		runs[task.ID] = run
+		if !progressed {
+			return runs, nil
+		}
 	}
 }
 
@@ -2685,6 +2695,11 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	if err != nil {
 		return taskRun{}, err
 	}
+	liveCtx, release, err := s.gateway.BeginExecutionContext(ctx, string(organizationID))
+	if err != nil {
+		return taskRun{}, err
+	}
+	defer release()
 	var selected assignment.Selection
 	var handler execution.Handler
 	switch task.ExecutionKind {
@@ -2902,8 +2917,11 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			manifest.ExecutionInputSHA256 = core.FingerprintExecutionInput(executionInput)
 			return manifest, nil
 		}
-		_, _, err = s.state.StartAgentExecution(ctx, organizationID, state.CorrelationID, state.Version+1, task, mode, inputEventRefs, strategyEventRefs, strategyContextRefs, actionBoundaryRoutes(snapshot, task), validateInput)
+		_, _, err = s.state.StartAgentExecution(liveCtx, organizationID, state.CorrelationID, state.Version+1, task, mode, inputEventRefs, strategyEventRefs, strategyContextRefs, actionBoundaryRoutes(snapshot, task), validateInput)
 		if err != nil {
+			if liveCtx.Err() != nil {
+				return taskRun{}, context.Cause(liveCtx)
+			}
 			if errors.Is(err, events.ErrStrategicContextChanged) {
 				if failErr := s.failStrategicTask(ctx, organizationID, state); failErr != nil {
 					return taskRun{}, fmt.Errorf("terminalize concurrently stale strategic task %s: %w", task.ID, failErr)
@@ -2920,7 +2938,10 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			}
 			return taskRun{}, fmt.Errorf("persist Agent execution start and inbox boundary for task %s: %w", task.ID, err)
 		}
-	} else if _, err := s.state.StartTaskExecution(ctx, organizationID, state.CorrelationID, state.Version+1, task, "", "", strategyEventRefs, strategyContextRefs); err != nil {
+	} else if _, err := s.state.StartTaskExecution(liveCtx, organizationID, state.CorrelationID, state.Version+1, task, "", "", strategyEventRefs, strategyContextRefs); err != nil {
+		if liveCtx.Err() != nil {
+			return taskRun{}, context.Cause(liveCtx)
+		}
 		if errors.Is(err, events.ErrStrategicContextChanged) {
 			if failErr := s.failStrategicTask(ctx, organizationID, state); failErr != nil {
 				return taskRun{}, fmt.Errorf("terminalize concurrently stale strategic task %s: %w", task.ID, failErr)
@@ -2930,10 +2951,10 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		return taskRun{}, fmt.Errorf("persist execution start for task %s: %w", task.ID, err)
 	}
 
-	executionCtx := ctx
+	executionCtx := liveCtx
 	cancel := func() {}
 	if task.ExecutionKind == core.ExecutionAgent {
-		executionCtx, cancel = context.WithTimeout(ctx, s.modelTurnTimeout)
+		executionCtx, cancel = context.WithTimeout(liveCtx, s.modelTurnTimeout)
 		executionCtx, err = inference.WithScope(executionCtx, inference.Scope{
 			OrganizationID: string(organizationID), Purpose: inference.PurposeTaskExecution,
 			Routing:         modelinput.CloneRouteRequirements(task.Routing),
@@ -2946,10 +2967,48 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			return taskRun{}, fmt.Errorf("bind inference scope for task %s: %w", task.ID, err)
 		}
 	}
+	handlerStartedAt := time.Now().UTC()
 	executionResult, executionErr := handler.Execute(executionCtx, executionTask, manifest)
 	cancel()
+	reportedOutcome := executionResult.Outcome
+	interrupt := func(cause error) {
+		executionErr = cause
+		class := "execution_cancelled"
+		if errors.Is(executionErr, core.ErrOrganizationFrozen) {
+			class = "security_hold"
+		}
+		if errors.Is(executionErr, core.ErrContainmentUnavailable) {
+			class = "containment_unavailable"
+		}
+		evidence := core.ExecutionInterruptionEvidence{
+			LocalExecutionStopped: true, ExternalEffectsStatus: "REQUIRES_RECONCILIATION",
+			ReportedOutcome: reportedOutcome,
+		}
+		var hold core.SecurityHoldCause
+		if errors.As(executionErr, &hold) {
+			evidence.Hold = &hold
+		}
+		executionResult.Outcome = core.ToolOutcome{
+			ToolInvocationID: core.ID("held-" + string(executionID)), ToolID: "runtime-containment",
+			Status: core.OutcomeFailed, PostconditionStatus: core.PostconditionNotChecked,
+			Retryability: core.NotRetryable, ErrorClass: class, ErrorDetail: "execution interrupted before result admission",
+			ObservedEffect: evidence,
+			StartedAt:      handlerStartedAt, FinishedAt: time.Now().UTC(),
+		}
+	}
+	if liveCtx.Err() != nil {
+		interrupt(context.Cause(liveCtx))
+	}
 	outcome, verifierAvailable := s.verifier.Verify(executionTask, executionResult.Outcome)
 	outcomeEvent, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: outcome, CorrelationID: state.CorrelationID})
+	var admissionHold core.SecurityHoldCause
+	if errors.As(err, &admissionHold) {
+		// Admission can observe a hold before the local cancellation monitor.
+		// Retry once with failed audit evidence, never with successful output.
+		interrupt(admissionHold)
+		outcome, verifierAvailable = s.verifier.Verify(executionTask, executionResult.Outcome)
+		outcomeEvent, err = s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: outcome, CorrelationID: state.CorrelationID})
+	}
 	if err != nil {
 		return taskRun{}, fmt.Errorf("persist outcome for task %s: %w", task.ID, err)
 	}

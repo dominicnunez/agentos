@@ -352,22 +352,51 @@ func (a *GuardedAdapter) Descriptor() execution.ModelDescriptor { return a.adapt
 
 func (a *GuardedAdapter) Complete(ctx context.Context, prompt string) (execution.ModelResponse, error) {
 	digest := sha256.Sum256([]byte(prompt))
-	return a.complete(ctx, hex.EncodeToString(digest[:]), func() (execution.ModelResponse, error) {
-		return a.adapter.Complete(ctx, prompt)
+	return a.complete(ctx, hex.EncodeToString(digest[:]), func(callCtx context.Context) (execution.ModelResponse, error) {
+		return a.adapter.Complete(callCtx, prompt)
 	})
 }
 
-func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call func() (execution.ModelResponse, error)) (execution.ModelResponse, error) {
+func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call func(context.Context) (execution.ModelResponse, error)) (execution.ModelResponse, error) {
 	scope, err := scopeFromContext(ctx)
 	if err != nil {
 		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, err)
 	}
 	request := InferenceRequest{ConnectionID: a.connectionID, Scope: scope, Descriptor: a.adapter.Descriptor(), PromptSHA256: fingerprint}
+	if containment, ok := a.store.(interface {
+		BeginInferenceContext(context.Context, string) (context.Context, func(), error)
+	}); ok {
+		callCtx, release, containmentErr := containment.BeginInferenceContext(ctx, scope.OrganizationID)
+		if containmentErr != nil {
+			return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, containmentErr)
+		}
+		defer release()
+		ctx = callCtx
+	}
 	reservation, err := a.store.ReserveInference(ctx, request)
 	if err != nil {
 		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, err)
 	}
-	response, providerErr := call()
+	var response execution.ModelResponse
+	var providerErr error
+	checkContainment := func() error {
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		if checker, ok := a.store.(interface {
+			CheckInferenceContext(context.Context, string) error
+		}); ok {
+			return checker.CheckInferenceContext(ctx, scope.OrganizationID)
+		}
+		return nil
+	}
+	if containmentErr := checkContainment(); containmentErr != nil {
+		// The runtime has not invoked the adapter; this is definite not-sent
+		// evidence, unlike cancellation after control reaches the provider.
+		providerErr = execution.RequestNotSent(containmentErr)
+	} else {
+		response, providerErr = call(ctx)
+	}
 	if providerErr != nil {
 		result := ReconciliationUncertain
 		var usage *events.InferenceUsageRecordedPayload
@@ -402,6 +431,9 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 	if reservation.Mode == MeteredAPI {
 		costUSD := float64(costNanoUSD) / 1_000_000_000
 		response.Usage.CostUSD = &costUSD
+	}
+	if containmentErr := checkContainment(); containmentErr != nil {
+		return execution.ModelResponse{}, execution.SafeModelError(execution.ModelCallFailed, containmentErr)
 	}
 	return response, nil
 }

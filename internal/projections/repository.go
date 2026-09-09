@@ -499,6 +499,12 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 
 func projectionKnowledgeAuthorityAdmissions(ctx context.Context, gateway *events.Gateway, stream []events.Event) ([]events.CapabilityLeaseAdmission, []events.OrganizationFreezeAdmission, error) {
 	for _, event := range stream {
+		if event.EventType == "TOOL_OUTCOME_RECORDED" {
+			var outcome core.ToolOutcome
+			if json.Unmarshal(event.Payload, &outcome) == nil && outcome.ErrorClass == "security_hold" {
+				return gateway.KnowledgeAuthorityAdmissions(ctx)
+			}
+		}
 		if events.RequiresAuthorityRecordAdmission(event.EventType) {
 			return gateway.KnowledgeAuthorityAdmissions(ctx)
 		}
@@ -507,6 +513,9 @@ func projectionKnowledgeAuthorityAdmissions(ctx context.Context, gateway *events
 }
 
 func validateProjectionEventAdmissions(stream []events.Event, inboxObservations map[string]events.InboxObservationBinding, leaseAdmissions []events.CapabilityLeaseAdmission, freezeAdmissions []events.OrganizationFreezeAdmission) error {
+	if err := events.ValidateSecurityHoldOutcomes(stream, freezeAdmissions); err != nil {
+		return err
+	}
 	eventIDs := make(map[string]struct{}, len(stream))
 	eventIndex := make(map[string]events.Event, len(stream))
 	sequences := make(map[int64]struct{}, len(stream))

@@ -197,6 +197,9 @@ func (l *SQLite) ReserveInference(ctx context.Context, request inference.Inferen
 	}
 	var reserved inference.Reservation
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		if err := validatePreparationGeneration(ctx, tx, request.Scope.OrganizationID); err != nil {
+			return err
+		}
 		if request.Scope.RoutingDecision != nil {
 			if err := validateInferenceAdmissionsSnapshot(ctx, tx, request); err != nil {
 				return err

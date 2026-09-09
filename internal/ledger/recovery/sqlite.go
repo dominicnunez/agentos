@@ -466,6 +466,9 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("validate authority record admissions: %w", err)
 	}
+	if err := events.ValidateSecurityHoldOutcomes(stream, freezeAdmissions); err != nil {
+		return err
+	}
 	for eventID := range admitted {
 		if _, found := used[eventID]; !found {
 			return fmt.Errorf("projection admission event %s has no materialized record", eventID)

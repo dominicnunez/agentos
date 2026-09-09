@@ -35,7 +35,7 @@ func (a *GuardedAdapter) CompleteRequest(ctx context.Context, request modelinput
 	if !ok {
 		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, fmt.Errorf("adapter does not support structured input"))
 	}
-	return a.complete(ctx, fingerprint, func() (execution.ModelResponse, error) {
-		return adapter.CompleteRequest(ctx, request)
+	return a.complete(ctx, fingerprint, func(callCtx context.Context) (execution.ModelResponse, error) {
+		return adapter.CompleteRequest(callCtx, request)
 	})
 }

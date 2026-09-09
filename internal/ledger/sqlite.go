@@ -26,6 +26,7 @@ import (
 )
 
 type SQLite struct {
+	live               liveContainment
 	db                 *sql.DB
 	newWorkCorrelation func() (string, error)
 	now                func() time.Time
@@ -138,6 +139,10 @@ type preparedProjection struct {
 // services own their validation. Every organizational projection namespace is
 // reserved for the typed, event-coupled admission paths below.
 func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, actorID, taskID string, authorizationRefs, artifactRefs []string, kind, id string, version int, value any) error {
+	if kind == "organization_freeze" {
+		l.live.mu.Lock()
+		defer l.live.mu.Unlock()
+	}
 	if kind == "" || id == "" || version < 1 {
 		return fmt.Errorf("kind, id, and positive version are required")
 	}
@@ -158,7 +163,8 @@ func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, ac
 		// different authority on the record and event serialization passes.
 		draft.Payload = json.RawMessage(append([]byte(nil), body...))
 	}
-	return l.withTx(ctx, func(tx *sql.Tx) error {
+	var committedHold *core.SecurityHoldCause
+	err = l.withTx(ctx, func(tx *sql.Tx) error {
 		if kind == "capability_lease" || kind == "organization_freeze" {
 			var priorVersion int
 			var priorBody []byte
@@ -184,8 +190,31 @@ func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, ac
 				return err
 			}
 		}
-		return appendRecord(ctx, tx, draft, kind, id, version, body)
+		if err := appendRecord(ctx, tx, draft, kind, id, version, body); err != nil {
+			return err
+		}
+		if kind == "organization_freeze" {
+			var freeze authority.FreezeState
+			if json.Unmarshal(body, &freeze) != nil {
+				return fmt.Errorf("invalid committed freeze payload")
+			}
+			if freeze.Frozen {
+				_, event, found, err := latestAuthorityAdmission(ctx, tx, kind, id)
+				if err != nil {
+					return err
+				}
+				if !found {
+					return fmt.Errorf("committed freeze lacks admission event")
+				}
+				committedHold = &core.SecurityHoldCause{OrganizationID: core.ID(organizationID), EventRef: event.EventID, Sequence: event.Sequence}
+			}
+		}
+		return nil
 	})
+	if err == nil && committedHold != nil {
+		l.cancelOrganizationLocked(organizationID, *committedHold)
+	}
+	return err
 }
 
 func genericRecordKindAllowed(kind string) bool {
@@ -1162,6 +1191,16 @@ func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.Projecti
 	var started events.Event
 	var selections []events.InboxSelection
 	err = l.withTx(ctx, func(tx *sql.Tx) error {
+		if err := validatePreparationGeneration(ctx, tx, draft.Event.OrganizationID); err != nil {
+			return err
+		}
+		frozen, err := organizationFrozenAtSequence(ctx, tx, core.ID(draft.Event.OrganizationID), 0)
+		if err != nil {
+			return fmt.Errorf("validate execution containment: %w", err)
+		}
+		if frozen {
+			return fmt.Errorf("execution start denied: %w", core.ErrOrganizationFrozen)
+		}
 		if err := validatePriorExecutionTask(ctx, tx, draft, task); err != nil {
 			return err
 		}
@@ -4139,6 +4178,11 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 	var appended events.Event
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
 		var err error
+		if d.EventType == "TOOL_OUTCOME_RECORDED" {
+			if err := validateContainedOutcome(ctx, tx, d); err != nil {
+				return err
+			}
+		}
 		appended, err = appendEvent(ctx, tx, d)
 		return err
 	})
@@ -4412,6 +4456,13 @@ func (l *SQLite) appendAddressed(ctx context.Context, draft events.TrustedDraft)
 		return events.Event{}, fmt.Errorf("addressed event recipient is required")
 	}
 	return l.appendWithProjection(ctx, draft, func(tx *sql.Tx, event events.Event) error {
+		frozen, err := organizationFrozenAtSequence(ctx, tx, core.ID(event.OrganizationID), 0)
+		if err != nil {
+			return fmt.Errorf("validate coordination containment: %w", err)
+		}
+		if frozen {
+			return core.ErrOrganizationFrozen
+		}
 		return projectInbox(ctx, tx, event)
 	})
 }
@@ -4852,10 +4903,34 @@ ORDER BY pending.request_sequence DESC LIMIT ?`, organizationID, cursorSequence,
 }
 
 func (l *SQLite) Inbox(ctx context.Context, recipientScope, recipientID string) ([]events.Event, error) {
-	return collectEvents(l.db.QueryContext(ctx, `SELECT e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version
+	tx, err := l.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	pending, err := collectEvents(tx.QueryContext(ctx, `SELECT e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version
 FROM inbox i JOIN events e ON e.event_id=i.event_id
 WHERE i.recipient_scope=? AND i.recipient_id=? AND i.observed_at=''
 ORDER BY e.sequence`, recipientScope, recipientID))
+	if err != nil {
+		return nil, err
+	}
+	held := map[string]bool{}
+	visible := make([]events.Event, 0, len(pending))
+	for _, event := range pending {
+		frozen, known := held[event.OrganizationID]
+		if !known {
+			frozen, err = organizationFrozenAtSequence(ctx, tx, core.ID(event.OrganizationID), 0)
+			if err != nil {
+				return nil, err
+			}
+			held[event.OrganizationID] = frozen
+		}
+		if !frozen {
+			visible = append(visible, event)
+		}
+	}
+	return visible, nil
 }
 
 func (l *SQLite) InboxObservations(ctx context.Context) (map[string]events.InboxObservationBinding, error) {
