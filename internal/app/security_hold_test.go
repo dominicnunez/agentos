@@ -13,6 +13,81 @@ import (
 	"github.com/dominicnunez/agentos/internal/projections"
 )
 
+func TestReleasedHoldAllowsHumanContinuations(t *testing.T) {
+	for _, structured := range []bool{false, true} {
+		name := "external-input"
+		if structured {
+			name = "human-completion"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			store, err := ledger.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			gateway := events.NewGateway(store)
+			repository := projections.New(gateway)
+			seedTestGoal(t, ctx, repository, "org-1", "mission-1", "goal-1", core.GoalActive)
+			service := New(gateway)
+			in := confirmedGoalSubmit(t, ctx, gateway, "released-human", "org-1", "goal-1", "provide a governed decision", core.ExecutionHuman)
+			result, err := service.Submit(ctx, in)
+			if err != nil || result.Task.Status != core.TaskBlocked {
+				t.Fatalf("prepare user task: %v", err)
+			}
+			if !structured {
+				intent := acceptedTestIntent("legacy-intent", "org-1", "provide input")
+				work := core.Work{ID: "legacy-work", IntentID: intent.ID, Objective: "provide input", Status: core.WorkActive}
+				task := result.Task
+				task.ID, task.WorkID, task.Status, task.CompletionContract = "task-legacy-input", work.ID, core.TaskPending, nil
+				if err := saveTestTaskGraph(ctx, repository, "org-1", "legacy-input", intent, work, task); err != nil {
+					t.Fatal(err)
+				}
+				if err := saveTestPlan(ctx, gateway, "legacy-input", intent, task); err != nil {
+					t.Fatal(err)
+				}
+				result.Task = task
+			}
+			for index, frozen := range []bool{true, false} {
+				state := struct {
+					OrganizationID core.ID   `json:"organization_id"`
+					Frozen         bool      `json:"frozen"`
+					UpdatedAt      time.Time `json:"updated_at"`
+				}{"org-1", frozen, time.Now().UTC()}
+				if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "released-human", nil, nil, "organization_freeze", "org-1", index+1, state); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if structured {
+				err = service.ProvideHumanCompletion(ctx, HumanCompletionInput{OrganizationID: "org-1", PrincipalID: "user-1", SourceChannel: "HUMAN_DIRECT", RequestID: "released-human", TaskID: string(result.Task.ID), Submission: core.HumanTaskSubmission{MessageID: "completion-1", Fields: map[string]string{"response": "completed input"}}})
+			} else {
+				input, publishErr := gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "A2A_INPUT_RECEIVED", SourceActorID: "agent-1", TaskID: string(result.Task.ID), CorrelationID: "legacy-input", Payload: events.OperatorInputReceivedPayload{MessageID: "input-1", Text: "completed input", SourcePrincipalID: "agent-1", SourcePrincipalKind: string(core.PrincipalExternalAgent), SourceChannel: "A2A"}})
+				if publishErr != nil {
+					t.Fatal(publishErr)
+				}
+				err = service.continueExternalInputTask(ctx, "org-1", result.Task.ID, "legacy-input", input)
+				if err == nil {
+					// Replay the durable legacy continuation itself. Current Work
+					// plan synthesis requires structured human completion contracts.
+					err = New(gateway).continueExternalInputTask(ctx, "org-1", result.Task.ID, "legacy-input", input)
+				}
+			}
+			if err != nil {
+				t.Fatalf("released continuation rejected: %v", err)
+			}
+			if structured {
+				if _, err := New(gateway).Recover(ctx); err != nil {
+					t.Fatalf("recover completed continuation: %v", err)
+				}
+			}
+			snapshot, err := repository.Load(ctx)
+			if err != nil || snapshot.Tasks[result.Task.ID].Value.Status != core.TaskCompleted {
+				t.Fatalf("continuation did not remain completed: %v", err)
+			}
+		})
+	}
+}
+
 func TestSchedulerLeavesHeldTenantPendingAndRunsOtherTenant(t *testing.T) {
 	for _, timing := range []string{"during-handler", "before-admission", "freeze-release-before-admission", "freeze-release-before-start"} {
 		t.Run(timing, func(t *testing.T) { testSchedulerSecurityHold(t, timing) })

@@ -2,10 +2,38 @@ package events
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/dominicnunez/agentos/internal/core"
 )
+
+// ContainmentExecutionID resolves the runtime identity from an admitted start.
+// Human continuations bind to their durable input, not a scheduler version ID.
+func ContainmentExecutionID(start Event) (string, error) {
+	payload, present, err := AdmittedProjection(start)
+	if err != nil {
+		return "", err
+	}
+	if start.EventType != "EXECUTION_STARTED" || !present || payload.Projection.ProjectionKind != "task" || payload.Projection.RecordID != start.TaskID {
+		return "", fmt.Errorf("containment requires an admitted task execution start")
+	}
+	var task core.Task
+	if err := json.Unmarshal(payload.Projection.Value, &task); err != nil {
+		return "", err
+	}
+	if task.ExecutionKind == core.ExecutionHuman {
+		detail, err := nonAgentExecutionStartDetail(start, core.ExecutionHuman)
+		if err != nil {
+			return "", err
+		}
+		if detail.Mode == "STRUCTURED_HUMAN_COMPLETION" {
+			return "human-completion-" + detail.InputEventRef, nil
+		}
+		return "external-input-" + detail.InputEventRef, nil
+	}
+	return fmt.Sprintf("execution-%s-v%d", start.TaskID, payload.Projection.Version), nil
+}
 
 // BeginExecutionContext delegates live containment to the authoritative ledger.
 // A ledger without containment support cannot admit running task handlers.
@@ -43,11 +71,11 @@ func ValidateSecurityHoldOutcomes(stream []Event, freezes []OrganizationFreezeAd
 			if start.EventType != "EXECUTION_STARTED" || start.OrganizationID != outcomeEvent.OrganizationID || start.TaskID != outcomeEvent.TaskID || start.CorrelationID != outcomeEvent.CorrelationID || start.Sequence >= outcomeEvent.Sequence {
 				continue
 			}
-			payload, present, err := AdmittedProjection(start)
+			executionID, err := ContainmentExecutionID(start)
 			if err != nil {
 				return err
 			}
-			if !present || payload.Projection.ProjectionKind != "task" || payload.Projection.RecordID != outcomeEvent.TaskID || fmt.Sprintf("execution-%s-v%d", outcomeEvent.TaskID, payload.Projection.Version) != outcomeEvent.SourceExecutionID {
+			if executionID != outcomeEvent.SourceExecutionID {
 				continue
 			}
 			if startSequence != 0 {

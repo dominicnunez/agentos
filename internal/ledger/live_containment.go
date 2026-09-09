@@ -318,11 +318,11 @@ func executionIntervalHold(ctx context.Context, tx *sql.Tx, draft events.Trusted
 	}
 	var startSequence int64
 	for _, start := range starts {
-		payload, present, err := events.AdmittedProjection(start)
+		executionID, err := events.ContainmentExecutionID(start)
 		if err != nil {
 			return nil, err
 		}
-		if !present || payload.Projection.ProjectionKind != "task" || payload.Projection.RecordID != draft.TaskID || fmt.Sprintf("execution-%s-v%d", draft.TaskID, payload.Projection.Version) != draft.SourceExecutionID {
+		if executionID != draft.SourceExecutionID {
 			continue
 		}
 		if startSequence != 0 {
