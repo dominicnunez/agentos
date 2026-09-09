@@ -189,3 +189,22 @@ func TestModelPlannerDoesNotApplyPromptLimitToDirectPlanning(t *testing.T) {
 		t.Fatalf("direct planning incorrectly used the model prompt boundary: result=%+v calls=%d err=%v", result, model.calls, err)
 	}
 }
+
+func TestModelPlannerRetainsOnlyMatchingReconciledUsage(t *testing.T) {
+	for _, mismatch := range []bool{false, true} {
+		usage := events.InferenceUsageRecordedPayload{Source: "provider", Provider: "test-provider", Model: "test-model", InputTokens: 2, OutputTokens: 1, TotalTokens: 3}
+		if mismatch {
+			usage.Provider = "other"
+		}
+		cause := core.ErrOrganizationFrozen
+		model := &plannerModel{err: events.WithReconciledUsage(cause, usage)}
+		planner, err := NewModelPlanner(model)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := planner.Build(planningTestContext(t), Input{Intent: acceptedDraft()}, core.ExecutionAgent)
+		if !errors.Is(err, cause) || (result.Usage != nil) == mismatch || len(result.Tasks) != 0 {
+			t.Fatalf("held plan=%+v err=%v mismatch=%v", result, err, mismatch)
+		}
+	}
+}

@@ -75,3 +75,19 @@ func TestAgentExecutionDoesNotExposeProviderDiagnostics(t *testing.T) {
 		t.Fatal("provider diagnostic crossed into work evidence or returned error")
 	}
 }
+
+func TestSafeModelErrorPreservesHoldWithoutDiagnostics(t *testing.T) {
+	hold := core.SecurityHoldCause{OrganizationID: "org-1", EventRef: "freeze-1", Sequence: 4}
+	secret := errors.New("private provider diagnostic")
+	err := errors.Join(secret, hold, context.Canceled)
+	for range 2 {
+		err = SafeModelError(ModelCallFailed, err)
+		var retained core.SecurityHoldCause
+		if !errors.Is(err, core.ErrOrganizationFrozen) || !errors.Is(err, context.Canceled) || !errors.As(err, &retained) || retained != hold {
+			t.Fatalf("hold control evidence lost: %v", err)
+		}
+		if errors.Is(err, secret) || errors.Unwrap(err) != nil || strings.Contains(err.Error(), secret.Error()) {
+			t.Fatal("provider diagnostics escaped sanitization")
+		}
+	}
+}

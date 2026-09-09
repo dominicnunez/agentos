@@ -601,6 +601,7 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		}
 		hasDurablePlan := false
 		planningAttemptRef := ""
+		planningExecutionID := ""
 		for _, event := range stream {
 			if event.EventType == "PLAN_CREATED" {
 				hasDurablePlan = true
@@ -611,6 +612,15 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 					return 0, fmt.Errorf("work %s has invalid durable planning context", workID)
 				}
 				planningAttemptRef = event.EventID
+				planningExecutionID = event.SourceExecutionID
+			}
+		}
+		if !hasDurablePlan && planningExecutionID != "" {
+			if err := s.gateway.CheckExecutionContainment(ctx, string(intentState.Value.OrganizationID), "task-"+workState.CorrelationID, workState.CorrelationID, planningExecutionID); err != nil {
+				if errors.Is(err, core.ErrOrganizationFrozen) {
+					continue
+				}
+				return 0, err
 			}
 		}
 		intent := intentState.Value
@@ -1776,7 +1786,7 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 	}
 	if err != nil {
 		var attemptErr *planningAttemptError
-		if work.Status == core.WorkActive {
+		if work.Status == core.WorkActive && !errors.Is(err, core.ErrOrganizationFrozen) {
 			code := "PLANNING_REJECTED"
 			reason := "the accepted Intent did not produce an admissible durable Task graph"
 			evidenceRef := ""
@@ -2059,6 +2069,9 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	inputRefs := append(append([]string(nil), intentInputRefs...), strategicEventRefs...)
 	attemptRef, attempted, attemptStateErr := recordedPlanningAttempt(stream, planID, intent, draft, inputRefs, strategicContextRefs)
 	if attempted {
+		if holdErr := s.gateway.CheckExecutionContainment(ctx, string(organizationID), "task-"+correlationID, correlationID, "planning-"+string(planID)+"-attempt-1"); holdErr != nil {
+			return core.Plan{}, holdErr
+		}
 		if attemptStateErr == nil {
 			attemptStateErr = fmt.Errorf("adaptive planning attempt has no validated durable plan")
 		}
@@ -2525,6 +2538,7 @@ func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {
 			return nil, fmt.Errorf("validate durable task graph failures: %w", err)
 		}
 		if len(failed) > 0 {
+			propagated := false
 			for _, task := range failed {
 				state := snapshot.Tasks[task.ID]
 				organizationID, err := taskOrganization(snapshot, task)
@@ -2535,10 +2549,16 @@ func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {
 				task.Status = core.TaskFailed
 				detail := dependencyFailureDetail{Code: "DEPENDENCY_FAILED", FailedDependencyIDs: dependencyIDs}
 				if err := s.state.SaveTask(ctx, organizationID, "TASK_DEPENDENCY_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); err != nil {
+					if errors.Is(err, core.ErrOrganizationFrozen) {
+						continue
+					}
 					return nil, fmt.Errorf("persist failed-dependency state for task %s: %w", task.ID, err)
 				}
+				propagated = true
 			}
-			continue
+			if propagated {
+				continue
+			}
 		}
 		ready, err := s.scheduler.Ready(tasks)
 		if err != nil {
@@ -2634,6 +2654,9 @@ func (s *Service) failTasksAfterRootFailure(ctx context.Context, snapshot projec
 		task.Status = core.TaskFailed
 		detail := rootFailureDetail{Code: "WORK_ROOT_FAILED", FailedRootTaskID: rootID}
 		if err := s.state.SaveTask(ctx, organizationID, "TASK_WORK_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); err != nil {
+			if errors.Is(err, core.ErrOrganizationFrozen) {
+				continue
+			}
 			return false, fmt.Errorf("terminalize task %s after root failure: %w", task.ID, err)
 		}
 		tasks[task.ID] = task

@@ -486,3 +486,14 @@ func executionIntervalHoldThrough(ctx context.Context, tx *sql.Tx, draft events.
 	}
 	return hold, nil
 }
+
+// CheckExecutionContainment lets recovery distinguish held model attempts from
+// ordinary failures without retrying inference or relying on a live context.
+func (l *SQLite) CheckExecutionContainment(ctx context.Context, organization, taskID, correlation, executionID string) error {
+	if organization == "" || taskID == "" || correlation == "" || executionID == "" {
+		return fmt.Errorf("complete execution identity is required")
+	}
+	return l.withTx(ctx, func(tx *sql.Tx) error {
+		return validateExecutionPublication(ctx, tx, events.TrustedDraft{OrganizationID: organization, TaskID: taskID, CorrelationID: correlation, SourceExecutionID: executionID})
+	})
+}

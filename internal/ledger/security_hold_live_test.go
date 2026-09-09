@@ -291,6 +291,10 @@ func TestSecurityFreezeCancelsAlreadyDispatchedInference(t *testing.T) {
 		if err == nil {
 			t.Fatal("security-held inference returned success")
 		}
+		var hold core.SecurityHoldCause
+		if !errors.As(err, &hold) || !errors.Is(err, core.ErrOrganizationFrozen) || hold.OrganizationID != "organization-1" || hold.EventRef == "" || hold.Sequence <= 0 {
+			t.Fatalf("provider cancellation lost the exact committed hold: %v", err)
+		}
 		if err = store.ValidateInferenceAdmissions(t.Context()); err != nil {
 			t.Fatal(err)
 		}

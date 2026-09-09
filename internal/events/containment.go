@@ -110,3 +110,14 @@ func ValidateSecurityHoldOutcomes(stream []Event, freezes []OrganizationFreezeAd
 	}
 	return nil
 }
+
+// CheckExecutionContainment reads the authoritative interval during recovery.
+func (g *Gateway) CheckExecutionContainment(ctx context.Context, organization, taskID, correlation, executionID string) error {
+	store, ok := g.ledger.(interface {
+		CheckExecutionContainment(context.Context, string, string, string, string) error
+	})
+	if !ok {
+		return core.ErrContainmentUnavailable
+	}
+	return store.CheckExecutionContainment(ctx, organization, taskID, correlation, executionID)
+}

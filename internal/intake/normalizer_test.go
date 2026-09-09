@@ -2,6 +2,7 @@ package intake
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -135,5 +136,32 @@ func TestModelNormalizerBindsExplicitReplacementWorkProvenance(t *testing.T) {
 				t.Fatal("untrusted replacement provenance was accepted")
 			}
 		})
+	}
+}
+
+type failedReconciledNormalization struct {
+	normalizationModel
+	usage events.InferenceUsageRecordedPayload
+	cause error
+}
+
+func (m failedReconciledNormalization) CompleteRequest(context.Context, modelinput.Request) (TextCompletion, error) {
+	return TextCompletion{Text: "suppressed"}, events.WithReconciledUsage(m.cause, m.usage)
+}
+func TestNormalizerRetainsOnlyMatchingReconciledUsage(t *testing.T) {
+	for _, mismatch := range []bool{false, true} {
+		usage := events.InferenceUsageRecordedPayload{Source: "provider", Provider: "test", Model: "test-model", InputTokens: 2, OutputTokens: 1, TotalTokens: 3}
+		if mismatch {
+			usage.Model = "other"
+		}
+		cause := errors.New("held call")
+		normalizer, err := NewModelNormalizer(failedReconciledNormalization{usage: usage, cause: cause})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := normalizer.Normalize(normalizationTestContext(t), []ConversationTurn{{MessageID: "message-1", Text: "release"}})
+		if !errors.Is(err, cause) || (result.Usage != nil) == mismatch || result.Reply != "" || result.Candidate.Objective != "" {
+			t.Fatalf("held normalization=%+v err=%v mismatch=%v", result, err, mismatch)
+		}
 	}
 }

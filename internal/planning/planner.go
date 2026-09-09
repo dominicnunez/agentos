@@ -176,7 +176,11 @@ func (p *ModelPlanner) Build(ctx context.Context, input Input, kind core.Executi
 	}
 	response, err := p.model.CompleteRequest(ctx, request)
 	if err != nil {
-		return Result{}, fmt.Errorf("plan accepted intent: %w", err)
+		var retained *events.InferenceUsageRecordedPayload
+		if usage, ok := events.ReconciledUsage(err); ok && usage.Valid() && usage.ConnectionID == p.descriptor.ConnectionID && usage.Provider == p.descriptor.Provider && usage.Model == p.descriptor.Model {
+			retained = &usage
+		}
+		return Result{Usage: retained}, fmt.Errorf("plan accepted intent: %w", err)
 	}
 	if response.Usage.ConnectionID != p.descriptor.ConnectionID || !response.Usage.Valid() || response.Usage.Provider != p.descriptor.Provider || response.Usage.Model != p.descriptor.Model {
 		return Result{}, fmt.Errorf("task planner returned invalid model usage")

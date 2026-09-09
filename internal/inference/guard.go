@@ -415,7 +415,7 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 		if reconcileErr != nil {
 			code = execution.InferenceRecordFailed
 		}
-		return execution.ModelResponse{}, execution.SafeModelError(code, errors.Join(providerErr, reconcileErr))
+		return execution.ModelResponse{}, execution.SafeModelError(code, errors.Join(providerErr, reconcileErr, context.Cause(ctx)))
 	}
 	// Account attribution belongs to runtime composition, not provider output.
 	response.Usage.ConnectionID = a.connectionID

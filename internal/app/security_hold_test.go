@@ -13,6 +13,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	"github.com/dominicnunez/agentos/internal/planning"
 	"github.com/dominicnunez/agentos/internal/projections"
 )
 
@@ -522,5 +523,103 @@ func TestIndependentReviewSurvivesLaterReleasedHold(t *testing.T) {
 				t.Fatalf("status=%s want=%s", got, want)
 			}
 		})
+	}
+}
+
+func TestFrozenFailurePropagationDoesNotBlockOtherTenants(t *testing.T) {
+	for _, eventType := range []string{"TASK_DEPENDENCY_FAILED", "TASK_WORK_FAILED"} {
+		t.Run(eventType, func(t *testing.T) {
+			ctx := t.Context()
+			store, err := ledger.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			intercepted := &failOnceProjectionEvent{SQLite: store, eventType: eventType}
+			model := &organizationLoopModel{plan: `{"tasks":[{"key":"a-fail","description":"first work","execution_kind":"AGENT","model_inference_policy":"REQUIRED","depends_on":[]},{"key":"z-unused","description":"unnecessary work","execution_kind":"AGENT","model_inference_policy":"REQUIRED","depends_on":[]}]}`}
+			service := NewWithModelAndPlanner(events.NewGateway(intercepted), &failingExecutionModel{}, newOrganizationPlanner(t, model))
+			if _, err := service.Submit(ctx, Submit{RequestID: "held-failure", OrganizationID: "org-1", Statement: "prepare a briefing", Kind: core.ExecutionAgent}); err == nil || !intercepted.failed {
+				t.Fatalf("missing injected propagation failure: %v", err)
+			}
+			state := struct {
+				OrganizationID core.ID   `json:"organization_id"`
+				Frozen         bool      `json:"frozen"`
+				UpdatedAt      time.Time `json:"updated_at"`
+			}{"org-1", true, time.Now().UTC()}
+			if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "held-failure", nil, nil, "organization_freeze", "org-1", 1, state); err != nil {
+				t.Fatal(err)
+			}
+			other := New(events.NewGateway(store))
+			result, err := other.Submit(ctx, Submit{RequestID: "unrelated", OrganizationID: "org-2", Statement: "echo independent", Kind: core.ExecutionDeterministic})
+			if err != nil || result.Task.Status != core.TaskCompleted {
+				t.Fatalf("unrelated task=%+v err=%v", result.Task, err)
+			}
+			if _, err := other.Recover(ctx); err != nil {
+				t.Fatalf("frozen propagation blocked recovery: %v", err)
+			}
+		})
+	}
+}
+
+type heldPlanningPlanner struct {
+	failingPlanningPlanner
+	freeze func()
+}
+
+func (p *heldPlanningPlanner) Build(ctx context.Context, input planning.Input, kind core.ExecutionKind) (planning.Result, error) {
+	result, _ := p.failingPlanningPlanner.Build(ctx, input, kind)
+	p.freeze()
+	return result, core.ErrOrganizationFrozen
+}
+func TestHeldPlanningRemainsActiveThroughReleasedRecovery(t *testing.T) {
+	ctx := t.Context()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	freeze := struct {
+		OrganizationID core.ID   `json:"organization_id"`
+		Frozen         bool      `json:"frozen"`
+		UpdatedAt      time.Time `json:"updated_at"`
+	}{"org-1", true, time.Now().UTC()}
+	planner := &heldPlanningPlanner{freeze: func() {
+		if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "held-planning", nil, nil, "organization_freeze", "org-1", 1, freeze); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	service := NewWithModelAndPlanner(events.NewGateway(store), execution.FakeModel{}, planner)
+	submission := Submit{RequestID: "held-planning", OrganizationID: "org-1", Statement: "perform adaptive work", Kind: core.ExecutionAgent}
+	if _, err := service.Submit(ctx, submission); !errors.Is(err, core.ErrOrganizationFrozen) {
+		t.Fatalf("planning error=%v", err)
+	}
+	freeze.Frozen = false
+	freeze.UpdatedAt = time.Now().UTC()
+	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "held-planning", nil, nil, "organization_freeze", "org-1", 2, freeze); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := service.Recover(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.Submit(ctx, submission); !errors.Is(err, core.ErrOrganizationFrozen) {
+			t.Fatalf("planning retry error=%v", err)
+		}
+	}
+	snapshot, err := service.state.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, work := range snapshot.Works {
+		if work.Value.Status != core.WorkActive {
+			t.Fatalf("held planning became terminal: %+v", work)
+		}
+	}
+	stream, err := service.ExternalEvents(ctx, "org-1", "held-planning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planner.calls != 1 || countEventType(stream, "INFERENCE_USAGE_RECORDED") != 1 || countEventType(stream, "WORK_PLANNING_FAILED") != 0 || len(snapshot.Tasks) != 0 {
+		t.Fatalf("held planning replayed, lost usage or materialized: calls=%d", planner.calls)
 	}
 }
