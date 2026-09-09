@@ -376,6 +376,19 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 		}
 	}
 	for _, state := range sortedTaskStates(snapshot.Tasks) {
+		if state.Value.Status == core.TaskRunning {
+			organizationID, err := taskOrganization(snapshot, state.Value)
+			if err != nil {
+				return RecoveryResult{}, err
+			}
+			suspended, err := s.gateway.SuspendHeldExecution(ctx, string(organizationID), string(state.Value.ID), state.CorrelationID, state.Version)
+			if err != nil {
+				return RecoveryResult{}, err
+			}
+			if suspended {
+				continue
+			}
+		}
 		stream, err := s.gateway.Events(ctx, state.CorrelationID)
 		if err != nil {
 			return RecoveryResult{}, err
@@ -412,6 +425,12 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 			return RecoveryResult{}, err
 		}
 		if state.Value.ExecutionKind == core.ExecutionHuman && state.Value.Status != core.TaskCompleted {
+			if suspended, err := s.executionSuspended(ctx, organizationID, state); err != nil {
+				return RecoveryResult{}, err
+			} else if suspended {
+				result.BlockedPreserved++
+				continue
+			}
 			stream, err := s.gateway.Events(ctx, state.CorrelationID)
 			if err != nil {
 				return RecoveryResult{}, err
@@ -512,6 +531,20 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 				saveErr = s.state.SaveTask(ctx, organizationID, eventType, "runtime", state.CorrelationID, state.Version+1, task, detail)
 			}
 			if saveErr != nil {
+				if errors.Is(saveErr, core.ErrOrganizationFrozen) {
+					suspended, err := s.gateway.SuspendHeldExecution(ctx, string(organizationID), string(task.ID), state.CorrelationID, state.Version)
+					if err != nil {
+						return RecoveryResult{}, err
+					}
+					if suspended {
+						if task.ExecutionKind == core.ExecutionDeterministic {
+							result.PendingFound--
+							result.BlockedPreserved++
+						}
+						result.RunningRecovered++
+						continue
+					}
+				}
 				return RecoveryResult{}, fmt.Errorf("persist recovery for task %s: %w", task.ID, saveErr)
 			}
 			result.RunningRecovered++
@@ -870,6 +903,9 @@ func (s *Service) continueHumanCompletionTask(ctx context.Context, organizationI
 		if !ok || state.CorrelationID != correlationID || state.Value.ExecutionKind != core.ExecutionHuman || state.Value.CompletionContract == nil {
 			return fmt.Errorf("user completion task is invalid")
 		}
+		if suspended, err := s.executionSuspended(ctx, organizationID, state); err != nil || suspended {
+			return err
+		}
 		task := state.Value
 		switch task.Status {
 		case core.TaskCompleted:
@@ -895,7 +931,7 @@ func (s *Service) continueHumanCompletionTask(ctx context.Context, organizationI
 				return nil
 			}
 		case core.TaskRunning:
-			return s.finishHumanCompletionTask(ctx, organizationID, state, completionEvent, payload)
+			return s.handleHeldContinuation(ctx, organizationID, state, s.finishHumanCompletionTask(ctx, organizationID, state, completionEvent, payload))
 		default:
 			return fmt.Errorf("user completion cannot advance task in status %s", task.Status)
 		}
@@ -1131,6 +1167,9 @@ func (s *Service) continueExternalInputTask(ctx context.Context, organizationID,
 		if !ok || state.CorrelationID != correlationID || state.Value.ExecutionKind != core.ExecutionHuman {
 			return fmt.Errorf("external input continuation task is invalid")
 		}
+		if suspended, err := s.executionSuspended(ctx, organizationID, state); err != nil || suspended {
+			return err
+		}
 		task := state.Value
 		switch task.Status {
 		case core.TaskCompleted:
@@ -1158,7 +1197,7 @@ func (s *Service) continueExternalInputTask(ctx context.Context, organizationID,
 			}
 			continue
 		case core.TaskRunning:
-			return s.finishExternalInputTask(ctx, organizationID, state, inputEvent)
+			return s.handleHeldContinuation(ctx, organizationID, state, s.finishExternalInputTask(ctx, organizationID, state, inputEvent))
 		default:
 			return fmt.Errorf("external input continuation cannot advance task in status %s", task.Status)
 		}
@@ -3626,6 +3665,32 @@ func (s *Service) failStrategicTask(ctx context.Context, organizationID core.ID,
 		Replacement: "submit replacement Work reviewed against the current active Mission and Goal",
 	}
 	return s.state.SaveTask(ctx, organizationID, "TASK_WORK_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail)
+}
+
+func (s *Service) executionSuspended(ctx context.Context, organizationID core.ID, state projections.Versioned[core.Task]) (bool, error) {
+	if state.Value.Status != core.TaskBlocked {
+		return false, nil
+	}
+	stream, err := s.gateway.Events(ctx, state.CorrelationID)
+	if err != nil {
+		return false, err
+	}
+	event, _, err := recordedAssignmentBlock(stream, organizationID, state)
+	return event.EventType == "TASK_EXECUTION_SUSPENDED", err
+}
+
+func (s *Service) handleHeldContinuation(ctx context.Context, organizationID core.ID, state projections.Versioned[core.Task], continuationErr error) error {
+	if !errors.Is(continuationErr, core.ErrOrganizationFrozen) {
+		return continuationErr
+	}
+	suspended, err := s.gateway.SuspendHeldExecution(ctx, string(organizationID), string(state.Value.ID), state.CorrelationID, state.Version)
+	if err != nil {
+		return err
+	}
+	if suspended {
+		return nil
+	}
+	return continuationErr
 }
 
 func (s *Service) saveBlockedTask(ctx context.Context, snapshot projections.Snapshot, previous projections.Versioned[core.Task], organizationID core.ID, blocked core.Task, detail events.TaskBlockedPayload) error {

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,14 @@ import (
 )
 
 func TestReleasedHoldAllowsHumanContinuations(t *testing.T) {
+	testHumanContinuations(t, false)
+}
+
+func TestHeldHumanContinuationsRemainSuspended(t *testing.T) {
+	testHumanContinuations(t, true)
+}
+
+func testHumanContinuations(t *testing.T, interrupt bool) {
 	for _, structured := range []bool{false, true} {
 		name := "external-input"
 		if structured {
@@ -27,7 +36,8 @@ func TestReleasedHoldAllowsHumanContinuations(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = store.Close() })
-			gateway := events.NewGateway(store)
+			interceptor := &humanHoldLedger{SQLite: store}
+			gateway := events.NewGateway(interceptor)
 			repository := projections.New(gateway)
 			seedTestGoal(t, ctx, repository, "org-1", "mission-1", "goal-1", core.GoalActive)
 			service := New(gateway)
@@ -59,6 +69,20 @@ func TestReleasedHoldAllowsHumanContinuations(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if interrupt {
+				interceptor.beforeOutcome = func() {
+					for index, frozen := range []bool{true, false} {
+						state := struct {
+							OrganizationID core.ID   `json:"organization_id"`
+							Frozen         bool      `json:"frozen"`
+							UpdatedAt      time.Time `json:"updated_at"`
+						}{"org-1", frozen, time.Now().UTC()}
+						if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "released-human", nil, nil, "organization_freeze", "org-1", index+3, state); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+			}
 			if structured {
 				err = service.ProvideHumanCompletion(ctx, HumanCompletionInput{OrganizationID: "org-1", PrincipalID: "user-1", SourceChannel: "HUMAN_DIRECT", RequestID: "released-human", TaskID: string(result.Task.ID), Submission: core.HumanTaskSubmission{MessageID: "completion-1", Fields: map[string]string{"response": "completed input"}}})
 			} else {
@@ -76,21 +100,39 @@ func TestReleasedHoldAllowsHumanContinuations(t *testing.T) {
 			if err != nil {
 				t.Fatalf("released continuation rejected: %v", err)
 			}
-			if structured {
+			if structured || interrupt {
 				if _, err := New(gateway).Recover(ctx); err != nil {
 					t.Fatalf("recover completed continuation: %v", err)
 				}
 			}
 			snapshot, err := repository.Load(ctx)
-			if err != nil || snapshot.Tasks[result.Task.ID].Value.Status != core.TaskCompleted {
+			wantStatus := core.TaskCompleted
+			if interrupt {
+				wantStatus = core.TaskBlocked
+			}
+			if err != nil || snapshot.Tasks[result.Task.ID].Value.Status != wantStatus {
 				t.Fatalf("continuation did not remain completed: %v", err)
 			}
 		})
 	}
 }
 
+type humanHoldLedger struct {
+	*ledger.SQLite
+	beforeOutcome func()
+}
+
+func (l *humanHoldLedger) Append(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {
+	if draft.EventType == "TOOL_OUTCOME_RECORDED" && l.beforeOutcome != nil {
+		before := l.beforeOutcome
+		l.beforeOutcome = nil
+		before()
+	}
+	return l.SQLite.Append(ctx, draft)
+}
+
 func TestSchedulerLeavesHeldTenantPendingAndRunsOtherTenant(t *testing.T) {
-	for _, timing := range []string{"during-handler", "before-admission", "freeze-release-before-admission", "freeze-release-before-start", "after-outcome", "freeze-release-after-outcome", "before-candidate", "before-completion", "freeze-release-before-completion"} {
+	for _, timing := range []string{"during-handler", "before-admission", "freeze-release-before-admission", "freeze-release-before-start", "after-outcome", "freeze-release-after-outcome", "before-candidate", "before-completion", "freeze-release-before-completion", "crash-before-suspension", "hold-during-recovery"} {
 		t.Run(timing, func(t *testing.T) { testSchedulerSecurityHold(t, timing) })
 	}
 }
@@ -174,6 +216,20 @@ func testSchedulerSecurityHold(t *testing.T, timing string) {
 		service.deterministic = holdDuringHandler{freeze: func() { t.Fatal("cancelled preparation dispatched handler") }}
 	case "during-handler":
 		service.deterministic = holdDuringHandler{freeze: commitHold}
+	case "crash-before-suspension":
+		service.deterministic = holdDuringHandler{freeze: commitHold}
+		interceptor.crashOnSuspension = true
+	case "hold-during-recovery":
+		interceptor.crashBeforeOutcome = true
+		interceptor.publicationEventType = "TASK_RECOVERED"
+		interceptor.beforePublication = func() {
+			commitHold()
+			freeze.Frozen = false
+			freeze.UpdatedAt = time.Now().UTC()
+			if err := store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "task-request-a", nil, nil, "organization_freeze", "org-a", 4, freeze); err != nil {
+				t.Fatal(err)
+			}
+		}
 	case "after-outcome", "freeze-release-after-outcome", "before-candidate", "before-completion", "freeze-release-before-completion":
 		interceptor.publicationEventType = "RESULT_PUBLISHED"
 		if timing == "before-candidate" {
@@ -205,6 +261,19 @@ func testSchedulerSecurityHold(t *testing.T, timing string) {
 		}
 	}
 	runs, err = service.runReady(ctx)
+	if timing == "crash-before-suspension" || timing == "hold-during-recovery" {
+		if !errors.Is(err, errSuspensionCrash) {
+			t.Fatalf("expected injected crash: %v", err)
+		}
+		if timing == "crash-before-suspension" {
+			freeze.Frozen = false
+			freeze.UpdatedAt = time.Now().UTC()
+			if err := store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "task-request-a", nil, nil, "organization_freeze", "org-a", 4, freeze); err != nil {
+				t.Fatal(err)
+			}
+		}
+		_, err = New(gateway).Recover(ctx)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +340,7 @@ func testSchedulerSecurityHold(t *testing.T, timing string) {
 		}
 		recorded = true
 	}
-	if !recorded {
+	if !recorded && timing != "hold-during-recovery" {
 		t.Fatal("interruption evidence was not persisted")
 	}
 	if err := service.reconcileWorks(ctx); err != nil {
@@ -291,6 +360,9 @@ func testSchedulerSecurityHold(t *testing.T, timing string) {
 	}
 	if snapshot.Tasks["task-request-a"].Value.Status != core.TaskBlocked || snapshot.Works["work-a"].Value.Status != core.WorkActive {
 		t.Fatal("restart terminalized suspended work")
+	}
+	if timing == "hold-during-recovery" {
+		return // This crash intentionally left no handler outcome to validate.
 	}
 	_, freezes, err := gateway.KnowledgeAuthorityAdmissions(ctx)
 	if err != nil {
@@ -345,7 +417,11 @@ type holdBeforeOutcomeLedger struct {
 	beforeStart          func()
 	beforePublication    func()
 	publicationEventType string
+	crashOnSuspension    bool
+	crashBeforeOutcome   bool
 }
+
+var errSuspensionCrash = errors.New("injected crash before suspension persistence")
 
 func (l *holdBeforeOutcomeLedger) AppendExecutionStart(ctx context.Context, draft events.ProjectionDraft, routes []events.InboxRoute, validate events.ExecutionStartValidator) (events.Event, []events.InboxSelection, error) {
 	if draft.Event.OrganizationID == "org-a" && l.beforeStart != nil {
@@ -357,6 +433,10 @@ func (l *holdBeforeOutcomeLedger) AppendExecutionStart(ctx context.Context, draf
 }
 
 func (l *holdBeforeOutcomeLedger) Append(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {
+	if draft.EventType == "TOOL_OUTCOME_RECORDED" && draft.OrganizationID == "org-a" && l.crashBeforeOutcome {
+		l.crashBeforeOutcome = false
+		return events.Event{}, errSuspensionCrash
+	}
 	if draft.EventType == l.publicationEventType && draft.OrganizationID == "org-a" && l.beforePublication != nil {
 		before := l.beforePublication
 		l.beforePublication = nil
@@ -371,6 +451,10 @@ func (l *holdBeforeOutcomeLedger) Append(ctx context.Context, draft events.Trust
 }
 
 func (l *holdBeforeOutcomeLedger) AppendProjection(ctx context.Context, draft events.ProjectionDraft) (events.Event, error) {
+	if draft.Event.EventType == "TASK_EXECUTION_SUSPENDED" && l.crashOnSuspension {
+		l.crashOnSuspension = false
+		return events.Event{}, errSuspensionCrash
+	}
 	if draft.Event.EventType == l.publicationEventType && draft.Event.OrganizationID == "org-a" && l.beforePublication != nil {
 		before := l.beforePublication
 		l.beforePublication = nil

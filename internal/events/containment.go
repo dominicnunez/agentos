@@ -47,6 +47,16 @@ func (g *Gateway) BeginExecutionContext(ctx context.Context, organization string
 	return store.BeginExecutionContext(ctx, organization)
 }
 
+func (g *Gateway) SuspendHeldExecution(ctx context.Context, organization, taskID, correlation string, version int) (bool, error) {
+	store, ok := g.ledger.(interface {
+		SuspendHeldExecution(context.Context, string, string, string, int) (bool, error)
+	})
+	if !ok {
+		return false, fmt.Errorf("execution hold recovery is unavailable")
+	}
+	return store.SuspendHeldExecution(ctx, organization, taskID, correlation, version)
+}
+
 // ValidateSecurityHoldOutcomes checks new containment audit evidence against
 // authority admissions already proven to match their durable records. Legacy
 // outcomes without a security-hold claim retain their original replay contract.

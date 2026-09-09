@@ -252,6 +252,47 @@ func (l *SQLite) cancelOrganizationLocked(organization string, cause error) {
 	}
 }
 
+// SuspendHeldExecution recovers a running revision from durable hold history.
+// It does not depend on an outcome event surviving the interrupted process.
+func (l *SQLite) SuspendHeldExecution(ctx context.Context, organization, taskID, correlation string, version int) (bool, error) {
+	suspended := false
+	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		record, task, found, err := latestProjectionRevision[core.Task](ctx, tx, "task", taskID)
+		if err != nil {
+			return err
+		}
+		if !found || record.Version != version || record.CorrelationID != correlation || task.Status != core.TaskRunning {
+			return fmt.Errorf("running execution changed before hold recovery")
+		}
+		start, err := exactProjectionTransition(ctx, tx, "EXECUTION_STARTED", record)
+		if err != nil {
+			return err
+		}
+		if start.OrganizationID != organization {
+			return fmt.Errorf("hold recovery crosses its execution organization")
+		}
+		executionID, err := events.ContainmentExecutionID(start)
+		if err != nil {
+			return err
+		}
+		hold, err := executionIntervalHold(ctx, tx, events.TrustedDraft{OrganizationID: organization, TaskID: taskID, CorrelationID: correlation, SourceExecutionID: executionID})
+		if err != nil || hold == nil {
+			return err
+		}
+		task.Status = core.TaskBlocked
+		item, err := prepareProjection(events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: organization, EventType: "TASK_EXECUTION_SUSPENDED", SourceActorID: "runtime", TaskID: taskID, CorrelationID: correlation, Payload: map[string]any{"hold": hold, "execution_start_ref": start.EventID, "reason": "committed hold interrupted execution; operator reconciliation required"}}, ProjectionKind: "task", RecordID: taskID, Version: version + 1, Value: task}, false, false)
+		if err != nil {
+			return err
+		}
+		if _, err := appendPreparedProjection(ctx, tx, item); err != nil {
+			return err
+		}
+		suspended = true
+		return nil
+	})
+	return suspended && err == nil, err
+}
+
 // validateContainedOutcome runs in the outcome writer transaction, so a
 // committed freeze cannot race the check and successful result admission.
 func validateContainedOutcome(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft) error {
@@ -333,7 +374,18 @@ func validateExecutionPublication(ctx context.Context, tx *sql.Tx, draft events.
 // Terminal task writes also prove the durable execution interval when callers
 // do not carry a live context (for example human continuation or recovery).
 func validateTerminalTaskContainment(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
-	if item.task == nil || item.task.Status != core.TaskCompleted && item.task.Status != core.TaskFailed {
+	if item.task == nil {
+		return nil
+	}
+	requiresCheck := item.task.Status == core.TaskCompleted || item.task.Status == core.TaskFailed || item.eventDraft.EventType == "TASK_RECOVERED"
+	if item.task.Status == core.TaskBlocked && item.eventDraft.EventType != "TASK_EXECUTION_SUSPENDED" {
+		_, previous, found, err := latestProjectionRevision[core.Task](ctx, tx, "task", item.record.RecordID)
+		if err != nil {
+			return err
+		}
+		requiresCheck = found && previous.Status == core.TaskRunning
+	}
+	if !requiresCheck {
 		return nil
 	}
 	draft := item.eventDraft
