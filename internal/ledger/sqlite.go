@@ -3081,7 +3081,7 @@ func intentRequiresConfirmation(intent core.Intent) bool {
 }
 
 func validateExternalIntentConfirmation(ctx context.Context, tx *sql.Tx, item preparedProjection, intent core.Intent) error {
-	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_DRAFTED','INTAKE_ABANDONED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, item.draft.Event.CorrelationID, events.ReviewedIntentEvidenceLimit+1))
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_NORMALIZATION_CONTEXT_MANIFESTED','INTENT_DRAFTED','INTAKE_ABANDONED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, item.draft.Event.CorrelationID, events.ReviewedIntentEvidenceLimit+1))
 	if err != nil {
 		return fmt.Errorf("read reviewed intent confirmation: %w", err)
 	}
@@ -3978,7 +3978,18 @@ func (l *SQLite) PendingApprovalRecords(ctx context.Context, organizationID stri
 }
 
 func (l *SQLite) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
-	tx, err := l.db.BeginTx(ctx, nil)
+	conn, err := l.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	// A containment snapshot on another handle can briefly hold a read lock.
+	// Apply the bounded busy handler to this exact connection, including any
+	// replacement connection, so committing authority waits for that reader.
+	if _, err := conn.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
+		return err
+	}
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -4190,7 +4201,7 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 		case "TOOL_OUTCOME_RECORDED", "INFERENCE_USAGE_RECORDED", "EXECUTION_FINISHED":
 			// Runtime audit/accounting may finish after containment. Outcomes
 			// have their separate interruption-evidence validator below.
-		case "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_VERIFIED", "COMPLETION_REVIEW_REQUESTED":
+		case "INTENT_DRAFTED", "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_VERIFIED", "COMPLETION_REVIEW_REQUESTED":
 			if err := validateExecutionPublication(ctx, tx, d); err != nil {
 				return err
 			}
@@ -4328,7 +4339,7 @@ func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.Trus
 	}
 	var event events.Event
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
-		stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_DRAFTED','INTAKE_ABANDONED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, draft.CorrelationID, events.ReviewedIntentEvidenceLimit+1))
+		stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_NORMALIZATION_CONTEXT_MANIFESTED','INTENT_DRAFTED','INTAKE_ABANDONED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, draft.CorrelationID, events.ReviewedIntentEvidenceLimit+1))
 		if err != nil {
 			return fmt.Errorf("read reviewed intent evidence: %w", err)
 		}

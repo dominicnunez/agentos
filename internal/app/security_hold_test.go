@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dominicnunez/agentos/internal/completion"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
@@ -473,4 +474,53 @@ func (h holdDuringHandler) Execute(ctx context.Context, task core.Task, manifest
 	// Return a superficially valid success despite cancellation. The runtime
 	// must independently reject it as task completion evidence.
 	return (execution.Deterministic{}).Execute(ctx, task, manifest)
+}
+
+func TestIndependentReviewSurvivesLaterReleasedHold(t *testing.T) {
+	for _, decision := range []completion.ReviewDecision{completion.ReviewApprove, completion.ReviewReject} {
+		t.Run(string(decision), func(t *testing.T) {
+			ctx := t.Context()
+			store, err := ledger.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			service := NewWithModel(events.NewGateway(store), describedModel{})
+			submitted, err := service.Submit(ctx, Submit{RequestID: "review-hold", OrganizationID: "org-1", Statement: "summarize", Kind: core.ExecutionAgent})
+			if err != nil {
+				t.Fatal(err)
+			}
+			view, found, err := service.CompletionReview(ctx, "org-1", string(submitted.Task.ID))
+			if err != nil || !found {
+				t.Fatalf("review: %v %v", found, err)
+			}
+			for index, frozen := range []bool{true, false} {
+				state := struct {
+					OrganizationID core.ID   `json:"organization_id"`
+					Frozen         bool      `json:"frozen"`
+					UpdatedAt      time.Time `json:"updated_at"`
+				}{OrganizationID: "org-1", Frozen: frozen, UpdatedAt: time.Now().UTC()}
+				if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "review-hold", nil, nil, "organization_freeze", "org-1", index+1, state); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := service.ReviewCompletion(ctx, reviewInput(view, decision, "Reviewed candidate")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.Recover(ctx); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := projections.New(events.NewGateway(store)).Load(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := core.TaskCompleted
+			if decision == completion.ReviewReject {
+				want = core.TaskFailed
+			}
+			if got := snapshot.Tasks[submitted.Task.ID].Value.Status; got != want {
+				t.Fatalf("status=%s want=%s", got, want)
+			}
+		})
+	}
 }

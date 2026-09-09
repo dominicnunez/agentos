@@ -348,7 +348,7 @@ func (s *Service) RecordIntentNormalizationUsage(ctx context.Context, organizati
 	return s.gateway.Events(ctx, correlationID)
 }
 
-func (s *Service) RecordIntentDraft(ctx context.Context, organizationID, requestID, sourceMessageID string, draft core.IntentDraft, reply string) ([]events.Event, error) {
+func (s *Service) RecordIntentDraft(ctx context.Context, organizationID, requestID, sourceMessageID, executionID string, draft core.IntentDraft, reply string) ([]events.Event, error) {
 	correlationID, found, err := s.gateway.ResolveExternalWork(ctx, organizationID, requestID)
 	if err != nil || !found {
 		return nil, fmt.Errorf("resolve intake work")
@@ -380,7 +380,7 @@ func (s *Service) RecordIntentDraft(ctx context.Context, organizationID, request
 	}
 	payload := events.IntentDraftedPayload{SourceMessageID: sourceMessageID, Draft: draft, Reply: reply}
 	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
-		OrganizationID: organizationID, EventType: "INTENT_DRAFTED", SourceActorID: "runtime",
+		OrganizationID: organizationID, EventType: "INTENT_DRAFTED", SourceActorID: "runtime", SourceExecutionID: executionID,
 		TaskID: "task-" + correlationID, CorrelationID: correlationID, Payload: payload,
 	}); err != nil {
 		return nil, fmt.Errorf("persist intent draft: %w", err)

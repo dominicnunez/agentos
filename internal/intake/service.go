@@ -797,7 +797,11 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 	if err != nil {
 		return View{}, fmt.Errorf("%w: fingerprint intent", ErrUnavailable)
 	}
-	stream, err = s.app.RecordIntentDraft(ctx, principal.OrganizationID, message.ConversationID, message.MessageID, draft, normalized.Reply)
+	draftExecutionID := ""
+	if usesModel {
+		draftExecutionID = executionID
+	}
+	stream, err = s.app.RecordIntentDraft(ctx, principal.OrganizationID, message.ConversationID, message.MessageID, draftExecutionID, draft, normalized.Reply)
 	if err != nil {
 		return View{}, fmt.Errorf("%w: persist intent draft", ErrUnavailable)
 	}
@@ -1334,7 +1338,7 @@ func streamTask(stream []events.Event) (core.Task, bool) {
 			continue
 		}
 		switch stream[index].EventType {
-		case "TASK_CREATED", "TASK_BLOCKED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED":
+		case "TASK_CREATED", "TASK_BLOCKED", "TASK_EXECUTION_SUSPENDED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED":
 		default:
 			continue
 		}
@@ -1384,7 +1388,7 @@ func externalState(stream []events.Event) string {
 			continue
 		}
 		switch event.EventType {
-		case "TASK_BLOCKED":
+		case "TASK_BLOCKED", "TASK_EXECUTION_SUSPENDED":
 			state = StateInputRequired
 		case "TASK_RESUMED":
 			state = StateWorking

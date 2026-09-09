@@ -226,3 +226,39 @@ func TestSecurityFreezeRejectsExecutionBeforeInboxSelection(t *testing.T) {
 		t.Fatalf("released task cannot start: %v", err)
 	}
 }
+
+func TestManifestExecutionContainmentAfterRelease(t *testing.T) {
+	for _, kind := range []string{"INTENT_NORMALIZATION_CONTEXT_MANIFESTED", "PLANNING_CONTEXT_MANIFESTED"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := t.Context()
+			store, err := Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			appendInferenceFreeze(t, store, "org-1", 1, true)
+			appendInferenceFreeze(t, store, "org-1", 2, false)
+			draft := events.TrustedDraft{OrganizationID: "org-1", EventType: kind, SourceActorID: "runtime", SourceExecutionID: "model-attempt-1", TaskID: "task-1", CorrelationID: "work-1", Payload: map[string]string{"source_message_id": "message-1"}}
+			if _, err := store.Append(ctx, draft); err != nil {
+				t.Fatalf("new manifest after release: %v", err)
+			}
+			draft.EventType = "INTENT_DRAFTED"
+			if _, err := store.Append(ctx, draft); err != nil {
+				t.Fatalf("new output after release: %v", err)
+			}
+			appendInferenceFreeze(t, store, "org-1", 3, true)
+			for _, released := range []bool{false, true} {
+				if released {
+					appendInferenceFreeze(t, store, "org-1", 4, false)
+				}
+				if _, err := store.Append(ctx, draft); !errors.Is(err, core.ErrOrganizationFrozen) {
+					t.Fatalf("stale output released=%v: %v", released, err)
+				}
+			}
+			draft.SourceExecutionID = "unknown-execution"
+			if _, err := store.Append(ctx, draft); err == nil {
+				t.Fatal("unmanifested execution accepted")
+			}
+		})
+	}
+}

@@ -353,7 +353,13 @@ func validateExecutionPublication(ctx context.Context, tx *sql.Tx, draft events.
 		return err
 	}
 	if draft.SourceExecutionID != "" {
-		hold, err := executionIntervalHold(ctx, tx, draft)
+		var boundary int64
+		if draft.EventType == "COMPLETION_VERIFIED" {
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MIN(sequence),0) FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type='COMPLETION_REVIEW_REQUESTED'`, draft.OrganizationID, draft.TaskID, draft.CorrelationID, draft.SourceExecutionID).Scan(&boundary); err != nil {
+				return err
+			}
+		}
+		hold, err := executionIntervalHoldThrough(ctx, tx, draft, boundary)
 		if err != nil {
 			return err
 		}
@@ -402,6 +408,26 @@ func validateTerminalTaskContainment(ctx context.Context, tx *sql.Tx, item prepa
 		if err != nil {
 			return err
 		}
+		if draft.EventType == "TASK_VERIFIED_COMPLETE" || draft.EventType == "COMPLETION_REJECTED" {
+			var boundary int64
+			err := tx.QueryRowContext(ctx, `SELECT COALESCE(MIN(sequence),0) FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type='COMPLETION_REVIEW_REQUESTED' AND sequence>?`, draft.OrganizationID, draft.TaskID, draft.CorrelationID, draft.SourceExecutionID, starts[0].Sequence).Scan(&boundary)
+			if err != nil {
+				return err
+			}
+			if boundary != 0 {
+				hold, err := executionIntervalHoldThrough(ctx, tx, draft, boundary)
+				if err != nil {
+					return err
+				}
+				if hold != nil {
+					return *hold
+				}
+				// Independent review acts on an already-admitted candidate.
+				// Current holds still block decisions; later released holds do
+				// not invalidate the finished execution's candidate.
+				draft.SourceExecutionID = ""
+			}
+		}
 	}
 	return validateExecutionPublication(ctx, tx, draft)
 }
@@ -409,19 +435,26 @@ func validateTerminalTaskContainment(ctx context.Context, tx *sql.Tx, item prepa
 // executionIntervalHold retains the earliest freeze after this exact execution
 // start, even if a release has since permitted a newer execution to run.
 func executionIntervalHold(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft) (*core.SecurityHoldCause, error) {
+	return executionIntervalHoldThrough(ctx, tx, draft, 0)
+}
+
+func executionIntervalHoldThrough(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft, endSequence int64) (*core.SecurityHoldCause, error) {
 	record, admission, found, err := latestAuthorityAdmission(ctx, tx, "organization_freeze", draft.OrganizationID)
 	if err != nil || !found {
 		return nil, err
 	}
-	starts, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND event_type='EXECUTION_STARTED' ORDER BY sequence`, draft.OrganizationID, draft.TaskID, draft.CorrelationID))
+	starts, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND (event_type='EXECUTION_STARTED' OR (event_type IN ('INTENT_NORMALIZATION_CONTEXT_MANIFESTED','PLANNING_CONTEXT_MANIFESTED') AND source_execution_id=?)) ORDER BY sequence`, draft.OrganizationID, draft.TaskID, draft.CorrelationID, draft.SourceExecutionID))
 	if err != nil {
 		return nil, err
 	}
 	var startSequence int64
 	for _, start := range starts {
-		executionID, err := events.ContainmentExecutionID(start)
-		if err != nil {
-			return nil, err
+		executionID := start.SourceExecutionID
+		if start.EventType == "EXECUTION_STARTED" {
+			executionID, err = events.ContainmentExecutionID(start)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if executionID != draft.SourceExecutionID {
 			continue
@@ -432,6 +465,9 @@ func executionIntervalHold(ctx context.Context, tx *sql.Tx, draft events.Trusted
 		startSequence = start.Sequence
 	}
 	if startSequence == 0 {
+		if draft.EventType == "INTENT_NORMALIZATION_CONTEXT_MANIFESTED" || draft.EventType == "PLANNING_CONTEXT_MANIFESTED" {
+			return nil, nil // This admission establishes the new interval.
+		}
 		return nil, fmt.Errorf("containment outcome lacks exact execution start")
 	}
 	var hold *core.SecurityHoldCause
@@ -440,7 +476,7 @@ func executionIntervalHold(ctx context.Context, tx *sql.Tx, draft events.Trusted
 		if decodeExactJSONBytes(record.Body, &state) != nil || string(state.OrganizationID) != draft.OrganizationID {
 			return nil, fmt.Errorf("invalid execution containment authority")
 		}
-		if state.Frozen {
+		if state.Frozen && (endSequence == 0 || admission.Sequence < endSequence) {
 			hold = &core.SecurityHoldCause{OrganizationID: state.OrganizationID, EventRef: admission.EventID, Sequence: admission.Sequence}
 		}
 		record, admission, found, err = authorityAdmissionAtBoundary(ctx, tx, "organization_freeze", draft.OrganizationID, admission.Sequence)

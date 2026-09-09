@@ -1916,3 +1916,82 @@ func countEvents(stream []events.Event, eventType string) int {
 	}
 	return count
 }
+
+func TestExternalViewShowsSuspendedExecutionNeedsInput(t *testing.T) {
+	at := time.Now().UTC()
+	task := core.Task{ID: "task-root", Status: core.TaskRunning}
+	stream := []events.Event{
+		{EventType: "INTAKE_MESSAGE_RECORDED", TaskID: string(task.ID), CreatedAt: at},
+		taskProjectionEvent(t, "EXECUTION_STARTED", task, at),
+	}
+	task.Status = core.TaskBlocked
+	stream = append(stream, taskProjectionEvent(t, "TASK_EXECUTION_SUSPENDED", task, at.Add(time.Second)))
+	projected, found := streamTask(stream)
+	if !found || projected.Status != core.TaskBlocked {
+		t.Fatalf("suspended task projection = %+v, found=%v", projected, found)
+	}
+	view := projectView("work-1", stream, true)
+	if view.State != StateInputRequired {
+		t.Fatalf("suspended external view = %+v", view)
+	}
+	child := core.Task{ID: "task-child", ParentID: task.ID, Status: core.TaskBlocked}
+	stream = append(stream[:2], taskProjectionEvent(t, "TASK_EXECUTION_SUSPENDED", child, at.Add(time.Second)))
+	if view := projectView("work-1", stream, true); view.State != StateWorking {
+		t.Fatalf("child suspension changed root state: %+v", view)
+	}
+}
+
+type heldNormalizer struct {
+	Normalizer
+	after func()
+}
+
+func (n heldNormalizer) Normalize(ctx context.Context, turns []ConversationTurn) (Normalization, error) {
+	result, err := n.Normalizer.Normalize(ctx, turns)
+	n.after()
+	return result, err
+}
+
+func TestIntentDraftRejectsHoldAfterNormalization(t *testing.T) {
+	for _, released := range []bool{false, true} {
+		t.Run(fmt.Sprintf("released=%v", released), func(t *testing.T) {
+			ctx := t.Context()
+			store, err := ledger.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			ready := `{"state":"READY_FOR_REVIEW","reply":"Review this intent.","intent":{"mode":"STANDARD","objective":"Prepare a Linux release","context":[],"deliverables":[{"value":"Linux binary","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Binary passes verification","origin":"EXPLICIT","source_message_id":"message-1"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
+			normalizer, err := NewModelNormalizer(normalizationModel{response: ready})
+			if err != nil {
+				t.Fatal(err)
+			}
+			principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+			held := heldNormalizer{Normalizer: normalizer, after: func() {
+				states := []bool{true}
+				if released {
+					states = append(states, false)
+				}
+				for index, frozen := range states {
+					state := struct {
+						OrganizationID core.ID   `json:"organization_id"`
+						Frozen         bool      `json:"frozen"`
+						UpdatedAt      time.Time `json:"updated_at"`
+					}{OrganizationID: core.ID(principal.OrganizationID), Frozen: frozen, UpdatedAt: time.Now().UTC()}
+					if err := store.AppendRecord(ctx, principal.OrganizationID, "FREEZE_SET", "user-1", "held-intake", nil, nil, "organization_freeze", principal.OrganizationID, index+1, state); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}}
+			service := NewWithNormalizer(app.New(events.NewGateway(store)), held)
+			_, err = service.Handle(ctx, principal, Message{ConversationID: "held-intake", MessageID: "message-1", Text: "Prepare a Linux release"})
+			if err == nil {
+				t.Fatal("held normalization returned a draft")
+			}
+			stream := externalStream(t, store, "held-intake")
+			if countEvents(stream, "INTENT_DRAFTED") != 0 || countEvents(stream, "INFERENCE_USAGE_RECORDED") != 1 {
+				t.Fatal("held draft escaped or usage disappeared")
+			}
+		})
+	}
+}

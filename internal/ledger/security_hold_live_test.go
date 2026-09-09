@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -451,5 +452,55 @@ func TestLiveContainmentReleaseOnlyDoesNotInventHold(t *testing.T) {
 	_, cause, err = store.containmentSince(t.Context(), "organization-1", next)
 	if err != nil || cause == nil || cause.Sequence <= next {
 		t.Fatalf("missed intervening freeze: cause=%v err=%v", cause, err)
+	}
+}
+
+func TestContainmentReaderAllowsAuthorityWriterToWait(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "contention.db")
+	reader, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	writer, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	snapshot, err := reader.db.BeginTx(t.Context(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = snapshot.Rollback() }()
+	var count int
+	if err := snapshot.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM events").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	written := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- writer.withTx(t.Context(), func(tx *sql.Tx) error {
+			if _, err := tx.ExecContext(t.Context(), "UPDATE events SET sequence=sequence WHERE 1=0"); err != nil {
+				return err
+			}
+			close(written)
+			return nil
+		})
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("writer failed before commit: %v", err)
+	case <-written:
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("writer did not wait for snapshot: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := snapshot.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("writer commit after reader release: %v", err)
 	}
 }

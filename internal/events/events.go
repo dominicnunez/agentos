@@ -40,7 +40,7 @@ func IndexReviewedIntentEvidence(stream []Event) ReviewedIntentEvidenceIndex {
 	index := make(ReviewedIntentEvidenceIndex)
 	for _, event := range stream {
 		switch event.EventType {
-		case "INTAKE_MESSAGE_RECORDED", "INTENT_DRAFTED", "INTAKE_ABANDONED", "INTENT_CONFIRMED":
+		case "INTAKE_MESSAGE_RECORDED", "INTENT_NORMALIZATION_CONTEXT_MANIFESTED", "INTENT_DRAFTED", "INTAKE_ABANDONED", "INTENT_CONFIRMED":
 			index[event.CorrelationID] = append(index[event.CorrelationID], event)
 		}
 	}
@@ -432,7 +432,7 @@ func validateReviewedIntent(stream []Event, confirmationEvent Event, confirmatio
 			latestIntakeSequence = event.Sequence
 		case "INTENT_DRAFTED":
 			var payload IntentDraftedPayload
-			if decodeExactEventJSON(event.Payload, &payload) != nil || event.OrganizationID != confirmationEvent.OrganizationID || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != confirmationEvent.TaskID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID != confirmationEvent.CorrelationID || event.SchemaVersion != SchemaVersion {
+			if decodeExactEventJSON(event.Payload, &payload) != nil || event.OrganizationID != confirmationEvent.OrganizationID || event.SourceActorID != "runtime" || !validIntentDraftExecution(stream, event, payload) || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != confirmationEvent.TaskID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 || event.CorrelationID != confirmationEvent.CorrelationID || event.SchemaVersion != SchemaVersion {
 				return fmt.Errorf("intent has invalid durable review draft")
 			}
 			draftCount++
@@ -4630,4 +4630,24 @@ func sameStrings(left, right []string) bool {
 		}
 	}
 	return true
+}
+
+// Legacy drafts have no execution identity. New model-backed drafts must bind
+// exactly one earlier normalization manifest for the same input and tenant.
+func validIntentDraftExecution(stream []Event, draft Event, payload IntentDraftedPayload) bool {
+	if draft.SourceExecutionID == "" {
+		return true
+	}
+	matches := 0
+	for _, event := range stream {
+		if event.EventType != "INTENT_NORMALIZATION_CONTEXT_MANIFESTED" || event.SourceExecutionID != draft.SourceExecutionID {
+			continue
+		}
+		var manifest IntentNormalizationContextPayload
+		if event.Sequence >= draft.Sequence || event.OrganizationID != draft.OrganizationID || event.TaskID != draft.TaskID || event.CorrelationID != draft.CorrelationID || event.SourceActorID != "runtime" || event.RecipientScope != "" || event.RecipientID != "" || event.SchemaVersion != SchemaVersion || decodeExactEventJSON(event.Payload, &manifest) != nil || manifest.SourceMessageID != payload.SourceMessageID {
+			return false
+		}
+		matches++
+	}
+	return matches == 1
 }
