@@ -348,11 +348,11 @@ func (r inferenceValidationRow) validate(policy inference.Policy) error {
 		return fmt.Errorf("inference reservation is not bound to work")
 	}
 	switch r.state {
-	case inferenceStateReserved, inferenceStateUncertain:
+	case inferenceStateReserved, inferenceStateUncertain, string(inference.ReconciliationTerminalFailedNoUsage), string(inference.ReconciliationTerminalIncompleteNoUsage):
 		if r.chargedInput != r.reservedInput || r.chargedOutput != r.reservedOutput || r.chargedCost != r.reservedCost {
 			return fmt.Errorf("unresolved inference reservation released resources")
 		}
-	case inferenceStateCompleted:
+	case inferenceStateCompleted, string(inference.ReconciliationTerminalFailed), string(inference.ReconciliationTerminalIncomplete):
 		if r.chargedInput > r.reservedInput || r.chargedOutput > r.reservedOutput {
 			return fmt.Errorf("completed inference reservation exceeded its limits")
 		}
