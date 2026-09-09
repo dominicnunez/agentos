@@ -4456,6 +4456,9 @@ func (l *SQLite) appendAddressed(ctx context.Context, draft events.TrustedDraft)
 		return events.Event{}, fmt.Errorf("addressed event recipient is required")
 	}
 	return l.appendWithProjection(ctx, draft, func(tx *sql.Tx, event events.Event) error {
+		if err := validatePreparationGeneration(ctx, tx, event.OrganizationID); err != nil {
+			return err
+		}
 		frozen, err := organizationFrozenAtSequence(ctx, tx, core.ID(event.OrganizationID), 0)
 		if err != nil {
 			return fmt.Errorf("validate coordination containment: %w", err)
