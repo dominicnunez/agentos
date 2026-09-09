@@ -158,8 +158,12 @@ func (a *AgentExecution) Execute(ctx context.Context, task core.Task, manifest c
 		response, err = a.model.Complete(ctx, prompt)
 	}
 	if err != nil {
+		var retainedUsage *events.InferenceUsageRecordedPayload
+		if usage, ok := ReconciledUsage(err); ok && usage.Valid() && usage.ConnectionID == a.connectionID && usage.Provider == a.descriptor.Provider && usage.Model == a.descriptor.Model {
+			retainedUsage = &usage
+		}
 		err = SafeModelError(ModelCallFailed, err)
-		return Result{Outcome: core.ToolOutcome{ToolInvocationID: core.ID("model-" + string(task.ID)), ToolID: a.model.Name(), Status: core.OutcomeFailed, PostconditionStatus: core.PostconditionNotChecked, Retryability: core.Retryable, ErrorClass: ModelErrorClass(err), ErrorDetail: err.Error(), StartedAt: started, FinishedAt: time.Now().UTC()}}, err
+		return Result{InferenceUsage: retainedUsage, Outcome: core.ToolOutcome{ToolInvocationID: core.ID("model-" + string(task.ID)), ToolID: a.model.Name(), Status: core.OutcomeFailed, PostconditionStatus: core.PostconditionNotChecked, Retryability: core.Retryable, ErrorClass: ModelErrorClass(err), ErrorDetail: err.Error(), StartedAt: started, FinishedAt: time.Now().UTC()}}, err
 	}
 	if response.Usage.ConnectionID != a.connectionID || !response.Usage.Valid() || response.Usage.Provider != a.descriptor.Provider || response.Usage.Model != a.descriptor.Model {
 		err := fmt.Errorf("model usage identity does not match the configured adapter")

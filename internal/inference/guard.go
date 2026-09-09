@@ -436,7 +436,7 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 		response.Usage.CostUSD = &costUSD
 	}
 	if containmentErr := checkContainment(); containmentErr != nil {
-		return execution.ModelResponse{}, execution.SafeModelError(execution.ModelCallFailed, containmentErr)
+		return execution.ModelResponse{}, execution.WithReconciledUsage(execution.SafeModelError(execution.ModelCallFailed, containmentErr), response.Usage)
 	}
 	return response, nil
 }

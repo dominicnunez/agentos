@@ -89,9 +89,14 @@ func TestSecurityFreezeOtherHandleSuppressesResponseButRetainsUsage(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := guard.Complete(ctx, "offline synthetic call")
-	if err == nil || response.Text != "" {
-		t.Fatal("held provider response escaped guard")
+	executor := execution.NewAgentExecution(guard)
+	descriptor := executor.Descriptor()
+	result, err := executor.Execute(ctx, core.Task{ID: "task-1", Description: "offline synthetic call", ModelInferencePolicy: core.InferenceAllowed}, core.ExecutionContextManifest{Provider: descriptor.Provider, Model: descriptor.Model, ExecutionProfileVersion: descriptor.ExecutionProfileVersion})
+	if err == nil || result.Outcome.Status != core.OutcomeFailed || result.Outcome.ObservedEffect != nil {
+		t.Fatal("held provider response escaped agent execution")
+	}
+	if result.InferenceUsage == nil || result.InferenceUsage.InputTokens != 1 || result.InferenceUsage.OutputTokens != 1 || !result.InferenceUsage.Valid() {
+		t.Fatal("agent execution lost reconciled usage telemetry")
 	}
 	var state string
 	var input, output int64
