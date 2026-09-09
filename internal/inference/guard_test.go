@@ -24,6 +24,43 @@ type guardStore struct {
 
 func (*guardStore) ActivateInferencePolicy(context.Context, Policy) error { return nil }
 
+func (*guardStore) BeginInferenceContext(ctx context.Context, _ string) (context.Context, func(), error) {
+	return ctx, func() {}, nil
+}
+
+func (*guardStore) CheckInferenceContext(ctx context.Context, _ string) error {
+	return context.Cause(ctx)
+}
+
+type registrationOnlyStore struct{ Store }
+
+func (registrationOnlyStore) BeginInferenceContext(ctx context.Context, _ string) (context.Context, func(), error) {
+	return ctx, func() {}, nil
+}
+
+type checkOnlyStore struct{ Store }
+
+func (checkOnlyStore) CheckInferenceContext(ctx context.Context, _ string) error {
+	return context.Cause(ctx)
+}
+
+func TestGuardedAdapterRejectsStoresWithoutCompleteContainment(t *testing.T) {
+	store := &guardStore{}
+	for name, wrapped := range map[string]Store{
+		"neither":           struct{ Store }{store},
+		"registration only": registrationOnlyStore{store},
+		"check only":        checkOnlyStore{store},
+	} {
+		t.Run(name, func(t *testing.T) {
+			model := &guardModel{}
+			adapter, err := NewGuardedAdapter(wrapped, model)
+			if err == nil || adapter != nil || model.called || store.reservation.ID != "" {
+				t.Fatalf("incomplete containment accepted: adapter=%v err=%v", adapter, err)
+			}
+		})
+	}
+}
+
 func (s *guardStore) ReserveInference(_ context.Context, request InferenceRequest) (Reservation, error) {
 	if s.reserveErr != nil {
 		return Reservation{}, s.reserveErr

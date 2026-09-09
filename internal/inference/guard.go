@@ -309,11 +309,19 @@ type Store interface {
 	ReconcileInference(context.Context, Reservation, *events.InferenceUsageRecordedPayload, Reconciliation) (int64, error)
 }
 
+// containmentStore is required at construction, including for wrappers of Store.
+// Both live cancellation and committed-generation checks protect provider calls.
+type containmentStore interface {
+	BeginInferenceContext(context.Context, string) (context.Context, func(), error)
+	CheckInferenceContext(context.Context, string) error
+}
+
 // GuardedAdapter is the single production provider boundary. It admits a
 // provider call only after a durable reservation and returns a response only
 // after the reservation is durably reconciled.
 type GuardedAdapter struct {
 	store        Store
+	containment  containmentStore
 	adapter      execution.ModelAdapter
 	connectionID string
 }
@@ -336,11 +344,15 @@ func NewGuardedAdapter(store Store, adapter execution.ModelAdapter) (*GuardedAda
 	if store == nil || adapter == nil {
 		return nil, fmt.Errorf("inference store and model adapter are required")
 	}
+	containment, ok := store.(containmentStore)
+	if !ok {
+		return nil, fmt.Errorf("inference store requires live containment and committed hold checks")
+	}
 	descriptor := adapter.Descriptor()
 	if !validValue(descriptor.Provider) || !validValue(descriptor.Model) || !validValue(descriptor.ExecutionProfileVersion) {
 		return nil, fmt.Errorf("model adapter descriptor is incomplete")
 	}
-	return &GuardedAdapter{store: store, adapter: adapter}, nil
+	return &GuardedAdapter{store: store, containment: containment, adapter: adapter}, nil
 }
 
 func (a *GuardedAdapter) Name() string { return a.adapter.Name() }
@@ -363,16 +375,12 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, err)
 	}
 	request := InferenceRequest{ConnectionID: a.connectionID, Scope: scope, Descriptor: a.adapter.Descriptor(), PromptSHA256: fingerprint}
-	if containment, ok := a.store.(interface {
-		BeginInferenceContext(context.Context, string) (context.Context, func(), error)
-	}); ok {
-		callCtx, release, containmentErr := containment.BeginInferenceContext(ctx, scope.OrganizationID)
-		if containmentErr != nil {
-			return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, containmentErr)
-		}
-		defer release()
-		ctx = callCtx
+	callCtx, release, containmentErr := a.containment.BeginInferenceContext(ctx, scope.OrganizationID)
+	if containmentErr != nil {
+		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, containmentErr)
 	}
+	defer release()
+	ctx = callCtx
 	reservation, err := a.store.ReserveInference(ctx, request)
 	if err != nil {
 		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, err)
@@ -383,12 +391,7 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 		if ctx.Err() != nil {
 			return context.Cause(ctx)
 		}
-		if checker, ok := a.store.(interface {
-			CheckInferenceContext(context.Context, string) error
-		}); ok {
-			return checker.CheckInferenceContext(ctx, scope.OrganizationID)
-		}
-		return nil
+		return a.containment.CheckInferenceContext(ctx, scope.OrganizationID)
 	}
 	if containmentErr := checkContainment(); containmentErr != nil {
 		// The runtime has not invoked the adapter; this is definite not-sent
