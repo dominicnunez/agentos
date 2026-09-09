@@ -2689,7 +2689,7 @@ func (s *Service) actionableRemediation(ctx context.Context, snapshot projection
 	return actionable, nil
 }
 
-func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot, state projections.Versioned[core.Task], remediation bool) (taskRun, error) {
+func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot, state projections.Versioned[core.Task], remediation bool) (resultRun taskRun, resultErr error) {
 	task := state.Value
 	organizationID, err := taskOrganization(snapshot, task)
 	if err != nil {
@@ -3035,6 +3035,30 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		}
 		return taskRun{Outcome: outcome, ExecutionError: executionErr}, nil
 	}
+	auditCtx := ctx
+	// Keep the execution generation even while durable bookkeeping ignores
+	// cancellation. Each action writer checks that generation transactionally.
+	ctx = context.WithoutCancel(liveCtx)
+	defer func() {
+		var hold core.SecurityHoldCause
+		if !errors.As(resultErr, &hold) {
+			return
+		}
+		interrupt(hold)
+		interruptedOutcome, _ := s.verifier.Verify(executionTask, executionResult.Outcome)
+		interruptedEvent, err := s.gateway.PublishTrusted(auditCtx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: interruptedOutcome, CorrelationID: state.CorrelationID})
+		if err != nil {
+			resultErr = fmt.Errorf("record late execution interruption: %w", err)
+			return
+		}
+		task.Status = core.TaskBlocked
+		detail := map[string]string{"outcome_event_ref": interruptedEvent.EventID, "reason": "execution interrupted during result admission; operator reconciliation required"}
+		if err := s.state.SaveTask(auditCtx, organizationID, "TASK_EXECUTION_SUSPENDED", "runtime", state.CorrelationID, state.Version+2, task, detail); err != nil {
+			resultErr = fmt.Errorf("suspend late-interrupted task: %w", err)
+			return
+		}
+		resultRun, resultErr = taskRun{Outcome: interruptedOutcome, ExecutionError: hold}, nil
+	}()
 	for _, batch := range inboxBatches {
 		if len(batch.Events) == 0 {
 			continue

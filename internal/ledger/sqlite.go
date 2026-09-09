@@ -1955,6 +1955,14 @@ func loadTaskAssignmentProfile(ctx context.Context, tx *sql.Tx, target map[core.
 
 func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProjection) (events.Event, error) {
 	admissionAt := time.Now().UTC()
+	if err := validateTerminalTaskContainment(ctx, tx, item); err != nil {
+		return events.Event{}, err
+	}
+	if item.task != nil && item.draft.Event.EventType != "TASK_EXECUTION_SUSPENDED" {
+		if err := validatePreparationGeneration(ctx, tx, item.eventDraft.OrganizationID); err != nil {
+			return events.Event{}, err
+		}
+	}
 	if err := validatePreparedProjectionRevision(ctx, tx, item, admissionAt); err != nil {
 		return events.Event{}, err
 	}
@@ -4178,6 +4186,12 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 	var appended events.Event
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
 		var err error
+		switch d.EventType {
+		case "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_VERIFIED", "COMPLETION_REVIEW_REQUESTED":
+			if err := validateExecutionPublication(ctx, tx, d); err != nil {
+				return err
+			}
+		}
 		if d.EventType == "TOOL_OUTCOME_RECORDED" {
 			if err := validateContainedOutcome(ctx, tx, d); err != nil {
 				return err

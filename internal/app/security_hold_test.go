@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,7 +90,7 @@ func TestReleasedHoldAllowsHumanContinuations(t *testing.T) {
 }
 
 func TestSchedulerLeavesHeldTenantPendingAndRunsOtherTenant(t *testing.T) {
-	for _, timing := range []string{"during-handler", "before-admission", "freeze-release-before-admission", "freeze-release-before-start"} {
+	for _, timing := range []string{"during-handler", "before-admission", "freeze-release-before-admission", "freeze-release-before-start", "after-outcome", "freeze-release-after-outcome", "before-candidate", "before-completion", "freeze-release-before-completion"} {
 		t.Run(timing, func(t *testing.T) { testSchedulerSecurityHold(t, timing) })
 	}
 }
@@ -173,6 +174,24 @@ func testSchedulerSecurityHold(t *testing.T, timing string) {
 		service.deterministic = holdDuringHandler{freeze: func() { t.Fatal("cancelled preparation dispatched handler") }}
 	case "during-handler":
 		service.deterministic = holdDuringHandler{freeze: commitHold}
+	case "after-outcome", "freeze-release-after-outcome", "before-candidate", "before-completion", "freeze-release-before-completion":
+		interceptor.publicationEventType = "RESULT_PUBLISHED"
+		if timing == "before-candidate" {
+			interceptor.publicationEventType = "CANDIDATE_COMPLETE"
+		}
+		if strings.HasSuffix(timing, "before-completion") {
+			interceptor.publicationEventType = "TASK_VERIFIED_COMPLETE"
+		}
+		interceptor.beforePublication = func() {
+			commitHold()
+			if strings.HasPrefix(timing, "freeze-release-") {
+				freeze.Frozen = false
+				freeze.UpdatedAt = time.Now().UTC()
+				if err := store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "task-request-a", nil, nil, "organization_freeze", "org-a", 4, freeze); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
 	default:
 		interceptor.beforeOutcome = func() {
 			commitHold()
@@ -218,7 +237,9 @@ func testSchedulerSecurityHold(t *testing.T, timing string) {
 	}
 	var recorded bool
 	for _, event := range stream {
-		if event.EventType == "RESULT_PUBLISHED" || event.EventType == "CANDIDATE_COMPLETE" {
+		allowResult := timing == "before-candidate" || strings.HasSuffix(timing, "before-completion")
+		allowCandidate := strings.HasSuffix(timing, "before-completion")
+		if event.EventType == "RESULT_PUBLISHED" && !allowResult || event.EventType == "CANDIDATE_COMPLETE" && !allowCandidate || event.EventType == "TASK_VERIFIED_COMPLETE" || event.EventType == "COMPLETION_REJECTED" {
 			t.Fatalf("interrupted execution published ordinary output: %s", event.EventType)
 		}
 		if event.EventType != "TOOL_OUTCOME_RECORDED" {
@@ -320,8 +341,10 @@ func testSchedulerSecurityHold(t *testing.T, timing string) {
 
 type holdBeforeOutcomeLedger struct {
 	*ledger.SQLite
-	beforeOutcome func()
-	beforeStart   func()
+	beforeOutcome        func()
+	beforeStart          func()
+	beforePublication    func()
+	publicationEventType string
 }
 
 func (l *holdBeforeOutcomeLedger) AppendExecutionStart(ctx context.Context, draft events.ProjectionDraft, routes []events.InboxRoute, validate events.ExecutionStartValidator) (events.Event, []events.InboxSelection, error) {
@@ -334,12 +357,29 @@ func (l *holdBeforeOutcomeLedger) AppendExecutionStart(ctx context.Context, draf
 }
 
 func (l *holdBeforeOutcomeLedger) Append(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {
+	if draft.EventType == l.publicationEventType && draft.OrganizationID == "org-a" && l.beforePublication != nil {
+		before := l.beforePublication
+		l.beforePublication = nil
+		before()
+	}
 	if draft.EventType == "TOOL_OUTCOME_RECORDED" && draft.OrganizationID == "org-a" && l.beforeOutcome != nil {
 		before := l.beforeOutcome
 		l.beforeOutcome = nil
 		before()
 	}
 	return l.SQLite.Append(ctx, draft)
+}
+
+func (l *holdBeforeOutcomeLedger) AppendProjection(ctx context.Context, draft events.ProjectionDraft) (events.Event, error) {
+	if draft.Event.EventType == l.publicationEventType && draft.Event.OrganizationID == "org-a" && l.beforePublication != nil {
+		before := l.beforePublication
+		l.beforePublication = nil
+		before()
+		// Model a recovery caller without the live context generation: the
+		// final writer must independently bind the durable start and hold.
+		ctx = context.Background()
+	}
+	return l.SQLite.AppendProjection(ctx, draft)
 }
 
 type holdDuringHandler struct{ freeze func() }

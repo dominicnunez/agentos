@@ -305,6 +305,55 @@ func validateContainedOutcome(ctx context.Context, tx *sql.Tx, draft events.Trus
 	return nil
 }
 
+// validateExecutionPublication protects each subsequent publication in its
+// writer transaction, including holds committed after outcome admission.
+func validateExecutionPublication(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft) error {
+	if err := validatePreparationGeneration(ctx, tx, draft.OrganizationID); err != nil {
+		return err
+	}
+	if draft.SourceExecutionID != "" {
+		hold, err := executionIntervalHold(ctx, tx, draft)
+		if err != nil {
+			return err
+		}
+		if hold != nil {
+			return *hold
+		}
+	}
+	frozen, err := organizationFrozenAtSequence(ctx, tx, core.ID(draft.OrganizationID), 0)
+	if err != nil {
+		return err
+	}
+	if frozen {
+		return core.ErrOrganizationFrozen
+	}
+	return nil
+}
+
+// Terminal task writes also prove the durable execution interval when callers
+// do not carry a live context (for example human continuation or recovery).
+func validateTerminalTaskContainment(ctx context.Context, tx *sql.Tx, item preparedProjection) error {
+	if item.task == nil || item.task.Status != core.TaskCompleted && item.task.Status != core.TaskFailed {
+		return nil
+	}
+	draft := item.eventDraft
+	_, _, found, err := latestAuthorityAdmission(ctx, tx, "organization_freeze", draft.OrganizationID)
+	if err != nil || !found {
+		return err
+	}
+	starts, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND event_type='EXECUTION_STARTED' ORDER BY sequence DESC LIMIT 1`, draft.OrganizationID, draft.TaskID, draft.CorrelationID))
+	if err != nil {
+		return err
+	}
+	if len(starts) != 0 {
+		draft.SourceExecutionID, err = events.ContainmentExecutionID(starts[0])
+		if err != nil {
+			return err
+		}
+	}
+	return validateExecutionPublication(ctx, tx, draft)
+}
+
 // executionIntervalHold retains the earliest freeze after this exact execution
 // start, even if a release has since permitted a newer execution to run.
 func executionIntervalHold(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft) (*core.SecurityHoldCause, error) {
