@@ -270,10 +270,10 @@ func validateContainedOutcome(ctx context.Context, tx *sql.Tx, draft events.Trus
 		}
 		return err
 	}
-	if historicalHold != nil && outcome.Status != core.OutcomeFailed {
+	if historicalHold != nil && outcome.ErrorClass != "security_hold" {
 		return *historicalHold
 	}
-	if frozen && outcome.Status != core.OutcomeFailed {
+	if frozen && outcome.ErrorClass != "security_hold" {
 		return core.ErrOrganizationFrozen
 	}
 	if outcome.ErrorClass != "security_hold" {

@@ -80,6 +80,15 @@ func TestSecurityFreezeReleaseCannotReviveOldOutcome(t *testing.T) {
 	if !errors.As(err, &cause) || cause.EventRef == "" {
 		t.Fatalf("released old execution admitted success: %v", err)
 	}
+	// A handler failure is still ordinary execution output. A committed hold
+	// must turn it into a suspension, not authorize terminal task failure.
+	outcome.Status = core.OutcomeFailed
+	outcome.PostconditionStatus = core.PostconditionNotChecked
+	outcome.ErrorClass = "provider_failure"
+	draft.Payload = outcome
+	if _, err := store.Append(ctx, draft); !errors.As(err, &cause) {
+		t.Fatalf("released old execution admitted ordinary failure: %v", err)
+	}
 	outcome.ToolID = "runtime-containment"
 	outcome.Status = core.OutcomeFailed
 	outcome.PostconditionStatus = core.PostconditionNotChecked
