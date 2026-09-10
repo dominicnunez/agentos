@@ -1428,7 +1428,7 @@ func TestRecoveryRechecksReplacementFailureAtConfirmationSequence(t *testing.T) 
 		_ = store.Close()
 		t.Fatal(err)
 	}
-	if _, err := application.RecordIntentDraft(ctx, "org-1", requestID, messageID, draft, "Review replacement Work."); err != nil {
+	if _, err := application.RecordIntentDraft(ctx, "org-1", requestID, messageID, "", draft, "Review replacement Work."); err != nil {
 		_ = store.Close()
 		t.Fatal(err)
 	}

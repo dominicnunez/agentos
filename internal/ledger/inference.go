@@ -185,6 +185,35 @@ func activateInferencePolicyInTx(ctx context.Context, tx *sql.Tx, policy inferen
 	return nil
 }
 
+// RecordInferenceNotSent closes an invocation only when no reservation could
+// conceal dispatched work. This typed boundary is owned by the inference guard.
+func (l *SQLite) RecordInferenceNotSent(ctx context.Context, request inference.InferenceRequest) error {
+	if err := request.Scope.Validate(); err != nil {
+		return err
+	}
+	if !validSHA256Hex(request.PromptSHA256) {
+		return fmt.Errorf("not-sent request fingerprint is required")
+	}
+	return l.withTx(ctx, func(tx *sql.Tx) error {
+		var uncertain bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM inference_reservations WHERE organization_id=? AND execution_id=? AND state<>?)`, request.Scope.OrganizationID, request.Scope.ExecutionID, inferenceStateNotSent).Scan(&uncertain); err != nil {
+			return err
+		}
+		if uncertain {
+			return fmt.Errorf("not-sent evidence conflicts with an outstanding or dispatched reservation")
+		}
+		var recorded bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type='INFERENCE_NOT_SENT')`, request.Scope.OrganizationID, request.Scope.TaskID, request.Scope.CorrelationID, request.Scope.ExecutionID).Scan(&recorded); err != nil {
+			return err
+		}
+		if recorded {
+			return nil
+		}
+		_, err := appendEvent(ctx, tx, events.TrustedDraft{OrganizationID: request.Scope.OrganizationID, EventType: "INFERENCE_NOT_SENT", SourceActorID: "runtime", TaskID: request.Scope.TaskID, CorrelationID: request.Scope.CorrelationID, SourceExecutionID: request.Scope.ExecutionID, Payload: map[string]string{"request_id": request.Scope.RequestID, "prompt_sha256": request.PromptSHA256}})
+		return err
+	})
+}
+
 func (l *SQLite) ReserveInference(ctx context.Context, request inference.InferenceRequest) (inference.Reservation, error) {
 	if request.ConnectionID != "" && !inference.ValidConnectionID(request.ConnectionID) {
 		return inference.Reservation{}, fmt.Errorf("inference connection identity is invalid")
@@ -197,6 +226,27 @@ func (l *SQLite) ReserveInference(ctx context.Context, request inference.Inferen
 	}
 	var reserved inference.Reservation
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		var closed bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE organization_id=? AND source_execution_id=? AND event_type='INFERENCE_NOT_SENT')`, request.Scope.OrganizationID, request.Scope.ExecutionID).Scan(&closed); err != nil {
+			return err
+		}
+		if closed {
+			return fmt.Errorf("inference invocation is durably closed as not sent")
+		}
+		if err := validatePreparationGeneration(ctx, tx, request.Scope.OrganizationID); err != nil {
+			return err
+		}
+		// Planning and normalization can enter the guard after their manifest
+		// without a live generation. A fresh generation cannot erase that start.
+		var manifested bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type IN ('PLANNING_CONTEXT_MANIFESTED','INTENT_NORMALIZATION_CONTEXT_MANIFESTED'))`, request.Scope.OrganizationID, request.Scope.TaskID, request.Scope.CorrelationID, request.Scope.ExecutionID).Scan(&manifested); err != nil {
+			return err
+		}
+		if manifested {
+			if err := validateExecutionPublication(ctx, tx, events.TrustedDraft{OrganizationID: request.Scope.OrganizationID, TaskID: request.Scope.TaskID, CorrelationID: request.Scope.CorrelationID, SourceExecutionID: request.Scope.ExecutionID}); err != nil {
+				return err
+			}
+		}
 		if request.Scope.RoutingDecision != nil {
 			if err := validateInferenceAdmissionsSnapshot(ctx, tx, request); err != nil {
 				return err

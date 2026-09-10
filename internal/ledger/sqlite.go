@@ -26,24 +26,55 @@ import (
 )
 
 type SQLite struct {
+	live               liveContainment
 	db                 *sql.DB
+	memoryKeepalive    *sql.DB
 	newWorkCorrelation func() (string, error)
 	now                func() time.Time
 }
 
 func Open(path string) (*SQLite, error) {
+	var keepalive *sql.DB
+	if path == ":memory:" {
+		id, err := randomWorkCorrelation()
+		if err != nil {
+			return nil, err
+		}
+		// A cancelled transaction can make database/sql discard its connection.
+		// Keep each private memory database alive independently of that pool,
+		// without sharing it with any other Open call or issuing keeper queries.
+		path = "file:agentos-memory-" + id + "?mode=memory&cache=shared"
+		keepalive, err = sql.Open("sqlite", path)
+		if err != nil {
+			return nil, err
+		}
+		keepalive.SetMaxOpenConns(1)
+		keepalive.SetMaxIdleConns(1)
+		if err := keepalive.PingContext(context.Background()); err != nil {
+			return nil, errors.Join(err, keepalive.Close())
+		}
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
+		if keepalive != nil {
+			err = errors.Join(err, keepalive.Close())
+		}
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	l := &SQLite{db: db, newWorkCorrelation: randomWorkCorrelation, now: time.Now}
+	l := &SQLite{db: db, memoryKeepalive: keepalive, newWorkCorrelation: randomWorkCorrelation, now: time.Now}
 	if err := l.migrate(context.Background()); err != nil {
-		return nil, errors.Join(err, db.Close())
+		return nil, errors.Join(err, l.Close())
 	}
 	return l, nil
 }
-func (l *SQLite) Close() error { return l.db.Close() }
+func (l *SQLite) Close() error {
+	err := l.db.Close()
+	if l.memoryKeepalive != nil {
+		err = errors.Join(err, l.memoryKeepalive.Close())
+	}
+	return err
+}
 func (l *SQLite) migrate(ctx context.Context) error {
 	if err := migrateStorage(ctx, l.db); err != nil {
 		return err
@@ -138,6 +169,10 @@ type preparedProjection struct {
 // services own their validation. Every organizational projection namespace is
 // reserved for the typed, event-coupled admission paths below.
 func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, actorID, taskID string, authorizationRefs, artifactRefs []string, kind, id string, version int, value any) error {
+	if kind == "organization_freeze" {
+		l.live.mu.Lock()
+		defer l.live.mu.Unlock()
+	}
 	if kind == "" || id == "" || version < 1 {
 		return fmt.Errorf("kind, id, and positive version are required")
 	}
@@ -158,7 +193,8 @@ func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, ac
 		// different authority on the record and event serialization passes.
 		draft.Payload = json.RawMessage(append([]byte(nil), body...))
 	}
-	return l.withTx(ctx, func(tx *sql.Tx) error {
+	var committedHold *core.SecurityHoldCause
+	err = l.withTx(ctx, func(tx *sql.Tx) error {
 		if kind == "capability_lease" || kind == "organization_freeze" {
 			var priorVersion int
 			var priorBody []byte
@@ -184,8 +220,31 @@ func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, ac
 				return err
 			}
 		}
-		return appendRecord(ctx, tx, draft, kind, id, version, body)
+		if err := appendRecord(ctx, tx, draft, kind, id, version, body); err != nil {
+			return err
+		}
+		if kind == "organization_freeze" {
+			var freeze authority.FreezeState
+			if json.Unmarshal(body, &freeze) != nil {
+				return fmt.Errorf("invalid committed freeze payload")
+			}
+			if freeze.Frozen {
+				_, event, found, err := latestAuthorityAdmission(ctx, tx, kind, id)
+				if err != nil {
+					return err
+				}
+				if !found {
+					return fmt.Errorf("committed freeze lacks admission event")
+				}
+				committedHold = &core.SecurityHoldCause{OrganizationID: core.ID(organizationID), EventRef: event.EventID, Sequence: event.Sequence}
+			}
+		}
+		return nil
 	})
+	if err == nil && committedHold != nil {
+		l.cancelOrganizationLocked(organizationID, *committedHold)
+	}
+	return err
 }
 
 func genericRecordKindAllowed(kind string) bool {
@@ -1162,6 +1221,16 @@ func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.Projecti
 	var started events.Event
 	var selections []events.InboxSelection
 	err = l.withTx(ctx, func(tx *sql.Tx) error {
+		if err := validatePreparationGeneration(ctx, tx, draft.Event.OrganizationID); err != nil {
+			return err
+		}
+		frozen, err := organizationFrozenAtSequence(ctx, tx, core.ID(draft.Event.OrganizationID), 0)
+		if err != nil {
+			return fmt.Errorf("validate execution containment: %w", err)
+		}
+		if frozen {
+			return fmt.Errorf("execution start denied: %w", core.ErrOrganizationFrozen)
+		}
 		if err := validatePriorExecutionTask(ctx, tx, draft, task); err != nil {
 			return err
 		}
@@ -1579,6 +1648,40 @@ func validatePriorExecutionTask(ctx context.Context, tx *sql.Tx, draft events.Pr
 	if !reflect.DeepEqual(prior, task) {
 		return fmt.Errorf("execution start changes the immutable task contract")
 	}
+	return validateResumedPreparation(ctx, tx, draft.Event.OrganizationID, record)
+}
+
+func validateResumedPreparation(ctx context.Context, tx *sql.Tx, organization string, record events.ProjectionRecord) error {
+	var resumed bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM records r JOIN events e ON e.event_id=r.admission_event_id WHERE r.kind='task' AND r.record_id=? AND r.version=? AND e.event_type='TASK_RESUMED')`, record.RecordID, record.Version).Scan(&resumed); err != nil {
+		return containmentReadFailure(err)
+	}
+	if resumed {
+		// The durable resume is the admission boundary, including after a
+		// process restart. A released hold cannot reset this pending interval.
+		resume, err := exactProjectionTransition(ctx, tx, "TASK_RESUMED", record)
+		if err != nil {
+			return containmentReadFailure(err)
+		}
+		if resume.OrganizationID != organization {
+			return fmt.Errorf("resumed execution crosses organizations")
+		}
+		_, admission, found, err := authorityAdmissionAtBoundary(ctx, tx, "organization_freeze", organization, resume.Sequence)
+		if err != nil {
+			return containmentReadFailure(err)
+		}
+		var epoch int64
+		if found {
+			epoch = admission.Sequence
+		}
+		_, hold, err := containmentSinceTx(ctx, tx, organization, epoch)
+		if err != nil {
+			return containmentReadFailure(err)
+		}
+		if hold != nil {
+			return *hold
+		}
+	}
 	return nil
 }
 
@@ -1916,6 +2019,30 @@ func loadTaskAssignmentProfile(ctx context.Context, tx *sql.Tx, target map[core.
 
 func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProjection) (events.Event, error) {
 	admissionAt := time.Now().UTC()
+	if item.task != nil {
+		record, previous, found, err := latestProjectionRevision[core.Task](ctx, tx, "task", item.record.RecordID)
+		if err != nil {
+			return events.Event{}, err
+		}
+		if found && previous.Status == core.TaskPending {
+			if err := validateResumedPreparation(ctx, tx, item.eventDraft.OrganizationID, record); err != nil {
+				return events.Event{}, err
+			}
+		}
+	}
+	if item.eventDraft.EventType == "TASK_RESUMED" || item.eventDraft.EventType == "WORK_PLANNING_FAILED" {
+		if err := validateExecutionPublication(ctx, tx, item.eventDraft); err != nil {
+			return events.Event{}, err
+		}
+	}
+	if err := validateTerminalTaskContainment(ctx, tx, item); err != nil {
+		return events.Event{}, err
+	}
+	if item.task != nil && item.draft.Event.EventType != "TASK_EXECUTION_SUSPENDED" {
+		if err := validatePreparationGeneration(ctx, tx, item.eventDraft.OrganizationID); err != nil {
+			return events.Event{}, err
+		}
+	}
 	if err := validatePreparedProjectionRevision(ctx, tx, item, admissionAt); err != nil {
 		return events.Event{}, err
 	}
@@ -3034,7 +3161,7 @@ func intentRequiresConfirmation(intent core.Intent) bool {
 }
 
 func validateExternalIntentConfirmation(ctx context.Context, tx *sql.Tx, item preparedProjection, intent core.Intent) error {
-	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_DRAFTED','INTAKE_ABANDONED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, item.draft.Event.CorrelationID, events.ReviewedIntentEvidenceLimit+1))
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_NORMALIZATION_CONTEXT_MANIFESTED','INTENT_DRAFTED','INTAKE_ABANDONED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, item.draft.Event.CorrelationID, events.ReviewedIntentEvidenceLimit+1))
 	if err != nil {
 		return fmt.Errorf("read reviewed intent confirmation: %w", err)
 	}
@@ -3931,7 +4058,18 @@ func (l *SQLite) PendingApprovalRecords(ctx context.Context, organizationID stri
 }
 
 func (l *SQLite) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
-	tx, err := l.db.BeginTx(ctx, nil)
+	conn, err := l.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	// A containment snapshot on another handle can briefly hold a read lock.
+	// Apply the bounded busy handler to this exact connection, including any
+	// replacement connection, so committing authority waits for that reader.
+	if _, err := conn.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
+		return err
+	}
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -4108,6 +4246,9 @@ func collectRecordBodies(rows *sql.Rows, err error) ([][]byte, error) {
 }
 
 func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Event, error) {
+	if d.EventType == "INFERENCE_NOT_SENT" {
+		return events.Event{}, fmt.Errorf("not-sent evidence requires typed inference admission")
+	}
 	if d.EventType == "INFERENCE_ROUTE_REJECTED" {
 		return l.appendInferenceRouteRejection(ctx, d)
 	}
@@ -4139,6 +4280,57 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 	var appended events.Event
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
 		var err error
+		switch d.EventType {
+		case "PLAN_CREATED":
+			var closed bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE organization_id=? AND source_execution_id=? AND event_type='INFERENCE_NOT_SENT')`, d.OrganizationID, d.SourceExecutionID).Scan(&closed); err != nil {
+				return err
+			}
+			if d.SourceExecutionID != "" && closed {
+				return fmt.Errorf("closed planning invocation cannot publish a plan")
+			}
+			if err := validateExecutionPublication(ctx, tx, d); err != nil {
+				return err
+			}
+		case "PLANNING_CONTEXT_MANIFESTED":
+			if err := validatePlanningRetry(ctx, tx, d); err != nil {
+				return err
+			}
+			if err := validateExecutionPublication(ctx, tx, d); err != nil {
+				return err
+			}
+		case "PLANNING_FAILED":
+			if err := bindPlanningFailureContainment(ctx, tx, &d); err != nil {
+				return err
+			}
+		case "INTENT_NORMALIZATION_CONTEXT_MANIFESTED":
+			if err := validateNormalizationRetry(ctx, tx, d); err != nil {
+				return err
+			}
+			if err := validateExecutionPublication(ctx, tx, d); err != nil {
+				return err
+			}
+		case "TOOL_OUTCOME_RECORDED", "INFERENCE_USAGE_RECORDED", "EXECUTION_FINISHED":
+			// Runtime audit/accounting may finish after containment. Outcomes
+			// have their separate interruption-evidence validator below.
+		case "INTENT_DRAFTED", "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_VERIFIED", "COMPLETION_REVIEW_REQUESTED":
+			if err := validateExecutionPublication(ctx, tx, d); err != nil {
+				return err
+			}
+		default:
+			if d.SourceExecutionID != "" {
+				if err := validateExecutionPublication(ctx, tx, d); err != nil {
+					return err
+				}
+			} else if err := validatePreparationGeneration(ctx, tx, d.OrganizationID); err != nil {
+				return err
+			}
+		}
+		if d.EventType == "TOOL_OUTCOME_RECORDED" {
+			if err := validateContainedOutcome(ctx, tx, d); err != nil {
+				return err
+			}
+		}
 		appended, err = appendEvent(ctx, tx, d)
 		return err
 	})
@@ -4163,6 +4355,9 @@ func (l *SQLite) AppendAgentEvidence(ctx context.Context, draft events.TrustedDr
 	draft.Payload = json.RawMessage(append([]byte(nil), body...))
 	var appended events.Event
 	err = l.withTx(ctx, func(tx *sql.Tx) error {
+		if err := validateExecutionPublication(ctx, tx, draft); err != nil {
+			return err
+		}
 		start, task, taskVersion, stream, err := resolveAgentExecutionBoundary(ctx, tx, draft)
 		if err != nil {
 			return err
@@ -4256,7 +4451,7 @@ func (l *SQLite) AppendIntentConfirmation(ctx context.Context, draft events.Trus
 	}
 	var event events.Event
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
-		stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_DRAFTED','INTAKE_ABANDONED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, draft.CorrelationID, events.ReviewedIntentEvidenceLimit+1))
+		stream, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE correlation_id=? AND event_type IN ('INTAKE_MESSAGE_RECORDED','INTENT_NORMALIZATION_CONTEXT_MANIFESTED','INTENT_DRAFTED','INTAKE_ABANDONED','INTENT_CONFIRMED') ORDER BY sequence LIMIT ?`, draft.CorrelationID, events.ReviewedIntentEvidenceLimit+1))
 		if err != nil {
 			return fmt.Errorf("read reviewed intent evidence: %w", err)
 		}
@@ -4412,6 +4607,9 @@ func (l *SQLite) appendAddressed(ctx context.Context, draft events.TrustedDraft)
 		return events.Event{}, fmt.Errorf("addressed event recipient is required")
 	}
 	return l.appendWithProjection(ctx, draft, func(tx *sql.Tx, event events.Event) error {
+		if err := validateExecutionPublication(ctx, tx, draft); err != nil {
+			return err
+		}
 		return projectInbox(ctx, tx, event)
 	})
 }
@@ -4442,6 +4640,9 @@ func (l *SQLite) ObserveInbox(ctx context.Context, draft events.TrustedDraft, re
 	}
 	var observation events.Event
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
+		if err := validateExecutionPublication(ctx, tx, draft); err != nil {
+			return err
+		}
 		startEvent, err := resolveInboxObservationExecution(ctx, tx, draft, recipientScope, recipientID)
 		if err != nil {
 			return err
@@ -4694,7 +4895,7 @@ WHERE pending_completion_reviews.request_sequence<excluded.request_sequence`, ev
 		if err != nil || changed != 1 {
 			return fmt.Errorf("terminal completion review lacks its pending durable request")
 		}
-	case "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED":
+	case "TASK_EXECUTION_SUSPENDED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED":
 		if event.OrganizationID == "" || event.TaskID == "" || event.CorrelationID == "" || event.Sequence < 1 {
 			return fmt.Errorf("terminal task projection identity is invalid")
 		}
@@ -4852,10 +5053,34 @@ ORDER BY pending.request_sequence DESC LIMIT ?`, organizationID, cursorSequence,
 }
 
 func (l *SQLite) Inbox(ctx context.Context, recipientScope, recipientID string) ([]events.Event, error) {
-	return collectEvents(l.db.QueryContext(ctx, `SELECT e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version
+	tx, err := l.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	pending, err := collectEvents(tx.QueryContext(ctx, `SELECT e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version
 FROM inbox i JOIN events e ON e.event_id=i.event_id
 WHERE i.recipient_scope=? AND i.recipient_id=? AND i.observed_at=''
 ORDER BY e.sequence`, recipientScope, recipientID))
+	if err != nil {
+		return nil, err
+	}
+	held := map[string]bool{}
+	visible := make([]events.Event, 0, len(pending))
+	for _, event := range pending {
+		frozen, known := held[event.OrganizationID]
+		if !known {
+			frozen, err = organizationFrozenAtSequence(ctx, tx, core.ID(event.OrganizationID), 0)
+			if err != nil {
+				return nil, err
+			}
+			held[event.OrganizationID] = frozen
+		}
+		if !frozen {
+			visible = append(visible, event)
+		}
+	}
+	return visible, nil
 }
 
 func (l *SQLite) InboxObservations(ctx context.Context) (map[string]events.InboxObservationBinding, error) {

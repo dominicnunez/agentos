@@ -14,6 +14,46 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 )
 
+func TestRetriedPlanRequiresExactNonDispatchChain(t *testing.T) {
+	for _, mutation := range []string{"none", "missing-proof", "late-proof", "other-organization", "closed-success", "wrong-attempt"} {
+		t.Run(mutation, func(t *testing.T) {
+			encode := func(value any) json.RawMessage {
+				t.Helper()
+				body, err := json.Marshal(value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return body
+			}
+			first := Event{EventID: "first", Sequence: 1, OrganizationID: "org", CorrelationID: "run", TaskID: "task-run", SourceActorID: "runtime", EventType: "PLANNING_CONTEXT_MANIFESTED", SourceExecutionID: "planning-plan-run-attempt-1", Payload: encode(PlanningContextPayload{PlanID: "plan-run", IntentID: "intent", IntentFingerprint: "fingerprint"})}
+			proof := first
+			proof.EventID, proof.EventType, proof.Sequence = "proof", "INFERENCE_NOT_SENT", 2
+			proof.Payload = encode(map[string]string{"request_id": first.SourceExecutionID, "prompt_sha256": strings.Repeat("a", 64)})
+			second := first
+			second.EventID, second.Sequence, second.SourceExecutionID = "second", 3, "planning-plan-run-attempt-2"
+			plan := second
+			plan.EventID, plan.EventType, plan.Sequence = "plan", "PLAN_CREATED", 5
+			plan.Payload = encode(core.Plan{ID: "plan-run", IntentID: "intent", IntentFingerprint: "fingerprint"})
+			stream := []Event{first, proof, second}
+			switch mutation {
+			case "missing-proof":
+				stream = []Event{first, second}
+			case "late-proof":
+				stream[1].Sequence = 4
+			case "other-organization":
+				stream[1].OrganizationID = "other"
+			case "closed-success":
+				plan.SourceExecutionID = first.SourceExecutionID
+			case "wrong-attempt":
+				plan.SourceExecutionID = "planning-plan-run-attempt-3"
+			}
+			if err := ValidatePlanExecution(plan, stream); (err == nil) != (mutation == "none") {
+				t.Fatalf("mutation=%s err=%v", mutation, err)
+			}
+		})
+	}
+}
+
 func TestProjectionLifecycleEventTypesAreClosedAndImmutable(t *testing.T) {
 	for kind, contract := range projectionLifecycleContracts {
 		exported := ProjectionLifecycleEventTypes(kind)

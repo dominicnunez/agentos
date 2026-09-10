@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -29,7 +30,42 @@ func (m guardedPlanningModel) CompleteRequest(ctx context.Context, request model
 	return planning.TextCompletion{Text: response.Text, Usage: response.Usage}, err
 }
 
+type initialPlanningDenialLedger struct {
+	*ledger.SQLite
+	deny           bool
+	loseProof      bool
+	loseSuspension bool
+}
+
+func (l *initialPlanningDenialLedger) BeginInferenceContext(ctx context.Context, organization string) (context.Context, func(), error) {
+	if l.deny {
+		l.deny = false
+		return nil, nil, core.ErrContainmentUnavailable
+	}
+	return l.SQLite.BeginInferenceContext(ctx, organization)
+}
+
+func (l *initialPlanningDenialLedger) RecordInferenceNotSent(ctx context.Context, request inference.InferenceRequest) error {
+	if l.loseProof {
+		return errors.New("injected non-dispatch proof loss")
+	}
+	return l.SQLite.RecordInferenceNotSent(ctx, request)
+}
+
+func (l *initialPlanningDenialLedger) Append(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {
+	if l.loseSuspension && draft.EventType == "PLANNING_CONTAINMENT_SUSPENDED" {
+		return events.Event{}, errors.New("injected suspension crash")
+	}
+	return l.SQLite.Append(ctx, draft)
+}
+
 func TestPlanningAndAgentExecutionUseDurableInferenceScope(t *testing.T) {
+	for _, mode := range []string{"normal", "initial-denial", "lost-proof", "lost-suspension"} {
+		t.Run(mode, func(t *testing.T) { testPlanningAndAgentExecutionUseDurableInferenceScope(t, mode) })
+	}
+}
+
+func testPlanningAndAgentExecutionUseDurableInferenceScope(t *testing.T, mode string) {
 	store, err := ledger.Open(filepath.Join(t.TempDir(), "ledger.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +83,8 @@ func TestPlanningAndAgentExecutionUseDurableInferenceScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw := &organizationLoopModel{}
-	guarded, err := inference.NewGuardedAdapter(store, raw)
+	writer := &initialPlanningDenialLedger{SQLite: store, deny: mode != "normal", loseProof: mode == "lost-proof", loseSuspension: mode == "lost-suspension"}
+	guarded, err := inference.NewGuardedAdapter(writer, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,13 +92,38 @@ func TestPlanningAndAgentExecutionUseDurableInferenceScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewWithModelAndPlanner(events.NewGateway(store), guarded, planner)
-	result, err := service.Submit(t.Context(), Submit{RequestID: "guarded-loop", OrganizationID: "org-1", Statement: "prepare a verified briefing", Kind: core.ExecutionAgent})
+	service := NewWithModelAndPlanner(events.NewGateway(writer), guarded, planner)
+	in := Submit{RequestID: "guarded-loop", OrganizationID: "org-1", Statement: "prepare a verified briefing", Kind: core.ExecutionAgent}
+	if mode != "normal" {
+		if _, err := service.Submit(t.Context(), in); !errors.Is(err, core.ErrContainmentUnavailable) || len(raw.prompts) != 0 {
+			t.Fatalf("denial dispatched planning: calls=%d err=%v", len(raw.prompts), err)
+		}
+		service = NewWithModelAndPlanner(events.NewGateway(store), guarded, planner)
+		for range 2 {
+			if _, err := service.Recover(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if mode == "lost-proof" {
+			if _, err := service.Submit(t.Context(), in); !errors.Is(err, core.ErrContainmentUnavailable) || len(raw.prompts) != 0 {
+				t.Fatalf("unproven retry dispatched: calls=%d err=%v", len(raw.prompts), err)
+			}
+			return
+		}
+	}
+	result, err := service.Submit(t.Context(), in)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Task.Status != core.TaskCompleted || len(raw.prompts) != 3 {
 		t.Fatalf("organization loop did not complete behind the gate: task=%+v calls=%d", result.Task, len(raw.prompts))
+	}
+	wantAttempts, wantProof := 1, 0
+	if mode != "normal" {
+		wantAttempts, wantProof = 2, 1
+	}
+	if countEventType(result.Events, "PLANNING_CONTEXT_MANIFESTED") != wantAttempts || countEventType(result.Events, "INFERENCE_NOT_SENT") != wantProof {
+		t.Fatal("planning retry lost exact attempt evidence")
 	}
 	reserved, reconciled := 0, 0
 	for _, event := range result.Events {

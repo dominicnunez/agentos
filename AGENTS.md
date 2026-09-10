@@ -44,6 +44,15 @@ Repository hooks and CI own routine formatting, lint, test, vet, and build enfor
 
 ## Commits, PRs, and review sequencing
 
+- Make local commits at logical, verified checkpoints instead of accumulating
+  all work until an entire issue or goal is complete. A checkpoint commit does
+  not imply PR readiness; record remaining work and obtain the required review
+  coverage before merge.
+- For all future commits, use the default configured Git author and committer.
+  Do not substitute a Codex identity through command-line configuration,
+  environment variables, or explicit author/committer overrides. If no default
+  identity is available, resolve that setup before committing instead of
+  inventing an identity.
 - Use [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/#specification)
   for every commit, including squash commit titles. Use
   `type(optional-scope): description`; use `feat` for features, `fix` for fixes,
@@ -78,6 +87,9 @@ Repository hooks and CI own routine formatting, lint, test, vet, and build enfor
 
 ## Findings outside the current PR
 
+- Open GitHub issues are the authoritative security-gap backlog. Local gap
+  Markdown files are historical/reference material; reconcile them with current
+  issues and code rather than treating them as a separate active backlog.
 - Create GitHub issues for confirmed code problems found outside the current PR
   scope. Track them separately, then work them to resolution and close them
   before proceeding to the next part of the broader goal.
@@ -104,9 +116,11 @@ Repository hooks and CI own routine formatting, lint, test, vet, and build enfor
 - After verifying a PR is merged, merged remote branches may be deleted. Prefer
   Git or an authenticated API over browser automation; the browser is an
   authorized fallback. Verify the branch and merged head before deleting it.
-- Preserve local clones, worktrees, and local branches, including unfinished
-  work. Remote branch cleanup is not permission to remove local work or delete
-  unmerged branches.
+- Delete local branches only after verifying they have merged into remote main.
+  Preserve checked-out branches, clones, worktrees, unfinished work, and unmerged
+  branches. Remote branch cleanup is not permission to remove local work.
+- Use the authenticated `gh` CLI for GitHub operations; it replaces the former
+  GitHub desktop plugins/apps in this workflow.
 - Existing GitHub authentication may be used for authorized repository actions.
   Never print, commit, or ask the user to paste a PAT into conversation.
 - Do not infer authorization for live provider calls/spending, releases,

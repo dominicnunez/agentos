@@ -3,6 +3,8 @@ package execution
 import (
 	"context"
 	"errors"
+
+	"github.com/dominicnunez/agentos/internal/core"
 )
 
 // ModelFaultCode is a runtime-owned failure category, never provider text.
@@ -16,9 +18,12 @@ const (
 )
 
 type modelFault struct {
-	code      ModelFaultCode
-	cancelled bool
-	deadline  bool
+	code                   ModelFaultCode
+	cancelled              bool
+	deadline               bool
+	frozen                 bool
+	containmentUnavailable bool
+	hold                   *core.SecurityHoldCause
 }
 
 func (f *modelFault) Error() string {
@@ -37,12 +42,22 @@ func (f *modelFault) Error() string {
 }
 
 func (f *modelFault) Is(target error) bool {
-	return target == context.Canceled && f.cancelled || target == context.DeadlineExceeded && f.deadline
+	return target == context.Canceled && f.cancelled || target == context.DeadlineExceeded && f.deadline || target == core.ErrOrganizationFrozen && f.frozen || target == core.ErrContainmentUnavailable && f.containmentUnavailable
+}
+
+// As exposes only the runtime-owned hold reference, never provider diagnostics.
+func (f *modelFault) As(target any) bool {
+	hold, ok := target.(*core.SecurityHoldCause)
+	if !ok || f.hold == nil {
+		return false
+	}
+	*hold = *f.hold
+	return true
 }
 
 // SafeModelError discards diagnostic text and the original error chain before
 // errors cross into work results, public responses, or durable evidence. Only
-// closed failure categories and cancellation/pre-send facts survive. In
+// closed failure categories, hold references and cancellation/pre-send facts survive. In
 // particular, cancellation is not evidence that a request was never sent.
 func SafeModelError(code ModelFaultCode, cause error) error {
 	if cause == nil {
@@ -59,7 +74,13 @@ func SafeModelError(code ModelFaultCode, cause error) error {
 	}
 	fault := &modelFault{
 		code: code, cancelled: errors.Is(cause, context.Canceled),
-		deadline: errors.Is(cause, context.DeadlineExceeded),
+		deadline:               errors.Is(cause, context.DeadlineExceeded),
+		frozen:                 errors.Is(cause, core.ErrOrganizationFrozen),
+		containmentUnavailable: errors.Is(cause, core.ErrContainmentUnavailable),
+	}
+	var hold core.SecurityHoldCause
+	if errors.As(cause, &hold) && hold.OrganizationID != "" && hold.EventRef != "" && hold.Sequence > 0 {
+		fault.hold = &hold
 	}
 	if WasRequestNotSent(cause) {
 		return RequestNotSent(fault)

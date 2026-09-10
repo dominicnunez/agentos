@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
@@ -286,13 +287,22 @@ func testServiceRoutesTwoAccounts(t *testing.T, broker bool) {
 	for range inputs {
 		completed := <-finished
 		if completed.err != nil {
-			t.Fatal(completed.err)
+			t.Fatalf("submit: %v; containment-unavailable=%t frozen=%t not-sent=%t", completed.err, errors.Is(completed.err, core.ErrContainmentUnavailable), errors.Is(completed.err, core.ErrOrganizationFrozen), execution.WasRequestNotSent(completed.err))
 		}
 		manifests, usage := map[string]int{}, map[string]int{}
+		eventCounts := map[string]int{}
+		outcomeClasses := map[string]string{}
 		decisions := map[string]*modelinput.RouteDecision{}
 		reservationDecisions := 0
 		for _, event := range completed.result.Events {
+			eventCounts[event.EventType]++
 			switch event.EventType {
+			case "TOOL_OUTCOME_RECORDED":
+				var payload core.ToolOutcome
+				if err := json.Unmarshal(event.Payload, &payload); err != nil {
+					t.Fatal(err)
+				}
+				outcomeClasses[event.TaskID] = payload.ErrorClass
 			case "EXECUTION_CONTEXT_MANIFESTED":
 				var payload core.ExecutionContextManifest
 				if err := json.Unmarshal(event.Payload, &payload); err != nil {
@@ -328,7 +338,7 @@ func testServiceRoutesTwoAccounts(t *testing.T, broker bool) {
 			}
 		}
 		if len(manifests) != 2 || manifests["first"] != 1 || manifests["second"] != 1 || len(usage) != 2 || usage["first"] != 1 || usage["second"] != 1 {
-			t.Fatalf("account attribution changed: manifests=%v usage=%v", manifests, usage)
+			t.Fatalf("account attribution changed: manifests=%v usage=%v root-status=%s events=%v outcome-classes=%v", manifests, usage, completed.result.Task.Status, eventCounts, outcomeClasses)
 		}
 		if broker && reservationDecisions != 2 {
 			t.Fatal("task decisions were not reserved exactly once")

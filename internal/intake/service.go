@@ -722,60 +722,90 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 		}
 	}
 	normalized, err := normalizer.Normalize(normalizationCtx, turns)
+	// A disconnected caller must not prevent runtime accounting or an ordinary
+	// failure boundary. Keep context values and a bounded bookkeeping lifetime;
+	// the ledger still rejects closure across an intervening security hold.
+	bookkeepingCtx, finishBookkeeping := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer finishBookkeeping()
+	// Only a proven ordinary rejection closes the attempt. Storage uncertainty
+	// and containment interruptions must retain the unresolved manifest.
+	reject := func(cause error) (View, error) {
+		if usesModel {
+			if finishErr := s.app.RecordIntentNormalizationFailure(bookkeepingCtx, principal.OrganizationID, message.ConversationID, executionID); finishErr != nil {
+				return View{}, fmt.Errorf("%w: persist failed normalization boundary", ErrUnavailable)
+			}
+		}
+		return View{}, cause
+	}
 	if normalized.Usage != nil {
-		_, usageErr := s.app.RecordIntentNormalizationUsage(ctx, principal.OrganizationID, message.ConversationID, executionID, *normalized.Usage)
+		_, usageErr := s.app.RecordIntentNormalizationUsage(bookkeepingCtx, principal.OrganizationID, message.ConversationID, executionID, *normalized.Usage)
 		if usageErr != nil {
 			return View{}, fmt.Errorf("%w: persist intent normalization usage", ErrUnavailable)
 		}
 	}
 	if err != nil {
+		if usesModel && errors.Is(err, core.ErrContainmentUnavailable) {
+			if suspendErr := s.app.RecordIntentNormalizationSuspension(bookkeepingCtx, principal.OrganizationID, message.ConversationID, executionID); suspendErr != nil {
+				return View{}, fmt.Errorf("%w: persist normalization suspension", ErrUnavailable)
+			}
+		} else if usesModel && !errors.Is(err, core.ErrOrganizationFrozen) {
+			if finishErr := s.app.RecordIntentNormalizationFailure(bookkeepingCtx, principal.OrganizationID, message.ConversationID, executionID); finishErr != nil {
+				return View{}, fmt.Errorf("%w: persist failed normalization boundary", ErrUnavailable)
+			}
+		}
 		return View{}, fmt.Errorf("%w: normalize intent", ErrUnavailable)
 	}
 	if err := validateNormalization(normalized); err != nil {
-		return View{}, fmt.Errorf("%w: validate normalized intent", ErrUnavailable)
+		return reject(fmt.Errorf("%w: validate normalized intent", ErrUnavailable))
 	}
 	if err := validateNormalizationProvenance(normalized, turns); err != nil {
-		return View{}, fmt.Errorf("%w: validate normalized intent provenance", ErrUnavailable)
+		return reject(fmt.Errorf("%w: validate normalized intent provenance", ErrUnavailable))
 	}
 	if usesModel != (normalized.Usage != nil) {
-		return View{}, fmt.Errorf("%w: intent normalizer model usage contract is inconsistent", ErrUnavailable)
+		return reject(fmt.Errorf("%w: intent normalizer model usage contract is inconsistent", ErrUnavailable))
 	}
 	selectedGoalID, err := selectedGoalBinding(stream)
 	if err != nil {
-		return View{}, fmt.Errorf("%w: load selected Goal binding", ErrUnavailable)
+		return reject(fmt.Errorf("%w: load selected Goal binding", ErrUnavailable))
 	}
 	if selectedGoalID != "" {
 		if err := s.app.ValidateSelectedGoal(ctx, core.ID(principal.OrganizationID), selectedGoalID); err != nil {
+			if errors.Is(err, app.ErrIntentBindingRejected) {
+				return reject(fmt.Errorf("%w: recheck selected Goal binding: %w", ErrConflict, err))
+			}
 			return View{}, fmt.Errorf("%w: recheck selected Goal binding: %w", ErrConflict, err)
 		}
 		if normalized.Candidate.Goal != nil && core.ID(normalized.Candidate.Goal.Value) != selectedGoalID {
-			return View{}, fmt.Errorf("%w: normalized Goal conflicts with the authenticated user selection", ErrConflict)
+			return reject(fmt.Errorf("%w: normalized Goal conflicts with the authenticated user selection", ErrConflict))
 		}
 		initial, found, intakeErr := initialIntakePayload(stream)
 		if intakeErr != nil || !found || initial.SelectedGoalID != string(selectedGoalID) {
-			return View{}, fmt.Errorf("%w: selected Goal lacks durable intake provenance", ErrUnavailable)
+			return reject(fmt.Errorf("%w: selected Goal lacks durable intake provenance", ErrUnavailable))
 		}
 		normalized.Candidate.Goal = &core.IntentValue{Value: string(selectedGoalID), Origin: "EXPLICIT", SourceMessageID: initial.MessageID}
 	}
 	if normalized.Candidate.ReplacesWork != nil {
 		goalID, resolveErr := s.app.ResolveReplacementGoal(ctx, principal.OrganizationID, core.ID(normalized.Candidate.ReplacesWork.Value))
 		if resolveErr != nil {
+			if errors.Is(resolveErr, app.ErrIntentBindingRejected) {
+				return reject(fmt.Errorf("%w: resolve replacement Work binding", ErrConflict))
+			}
 			return View{}, fmt.Errorf("%w: resolve replacement Work binding", ErrConflict)
 		}
 		if normalized.Candidate.Goal == nil && goalID != "" {
 			normalized.Candidate.Goal = &core.IntentValue{Value: string(goalID), Origin: "POLICY"}
 		} else if normalized.Candidate.Goal != nil && core.ID(normalized.Candidate.Goal.Value) != goalID {
-			return View{}, fmt.Errorf("%w: replacement Work Goal conflicts with its durable predecessor", ErrConflict)
+			return reject(fmt.Errorf("%w: replacement Work Goal conflicts with its durable predecessor", ErrConflict))
 		}
 	}
 	requestedKind, err := explicitRequestedKind(stream)
 	if err != nil {
-		return View{}, fmt.Errorf("%w: load explicit execution route", ErrUnavailable)
+		return reject(fmt.Errorf("%w: load explicit execution route", ErrUnavailable))
 	}
 	if requestedKind == "" {
 		requestedKind, err = s.router.Route(Message{Text: normalized.Candidate.Objective})
 		if err != nil {
-			return View{}, err
+			return reject(err)
 		}
 	}
 	status := core.IntentStatusAwaitingInput
@@ -795,9 +825,13 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 	}
 	draft.Fingerprint, err = core.FingerprintIntentDraft(draft)
 	if err != nil {
-		return View{}, fmt.Errorf("%w: fingerprint intent", ErrUnavailable)
+		return reject(fmt.Errorf("%w: fingerprint intent", ErrUnavailable))
 	}
-	stream, err = s.app.RecordIntentDraft(ctx, principal.OrganizationID, message.ConversationID, message.MessageID, draft, normalized.Reply)
+	draftExecutionID := ""
+	if usesModel {
+		draftExecutionID = executionID
+	}
+	stream, err = s.app.RecordIntentDraft(ctx, principal.OrganizationID, message.ConversationID, message.MessageID, draftExecutionID, draft, normalized.Reply)
 	if err != nil {
 		return View{}, fmt.Errorf("%w: persist intent draft", ErrUnavailable)
 	}
@@ -1334,7 +1368,7 @@ func streamTask(stream []events.Event) (core.Task, bool) {
 			continue
 		}
 		switch stream[index].EventType {
-		case "TASK_CREATED", "TASK_BLOCKED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED":
+		case "TASK_CREATED", "TASK_BLOCKED", "TASK_EXECUTION_SUSPENDED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED":
 		default:
 			continue
 		}
@@ -1384,7 +1418,7 @@ func externalState(stream []events.Event) string {
 			continue
 		}
 		switch event.EventType {
-		case "TASK_BLOCKED":
+		case "TASK_BLOCKED", "TASK_EXECUTION_SUSPENDED":
 			state = StateInputRequired
 		case "TASK_RESUMED":
 			state = StateWorking

@@ -307,6 +307,14 @@ type Store interface {
 	ActivateInferencePolicy(context.Context, Policy) error
 	ReserveInference(context.Context, InferenceRequest) (Reservation, error)
 	ReconcileInference(context.Context, Reservation, *events.InferenceUsageRecordedPayload, Reconciliation) (int64, error)
+	RecordInferenceNotSent(context.Context, InferenceRequest) error
+}
+
+// containmentStore is required at construction, including for wrappers of Store.
+// Both live cancellation and committed-generation checks protect provider calls.
+type containmentStore interface {
+	BeginInferenceContext(context.Context, string) (context.Context, func(), error)
+	CheckInferenceContext(context.Context, string) error
 }
 
 // GuardedAdapter is the single production provider boundary. It admits a
@@ -314,6 +322,7 @@ type Store interface {
 // after the reservation is durably reconciled.
 type GuardedAdapter struct {
 	store        Store
+	containment  containmentStore
 	adapter      execution.ModelAdapter
 	connectionID string
 }
@@ -336,11 +345,15 @@ func NewGuardedAdapter(store Store, adapter execution.ModelAdapter) (*GuardedAda
 	if store == nil || adapter == nil {
 		return nil, fmt.Errorf("inference store and model adapter are required")
 	}
+	containment, ok := store.(containmentStore)
+	if !ok {
+		return nil, fmt.Errorf("inference store requires live containment and committed hold checks")
+	}
 	descriptor := adapter.Descriptor()
 	if !validValue(descriptor.Provider) || !validValue(descriptor.Model) || !validValue(descriptor.ExecutionProfileVersion) {
 		return nil, fmt.Errorf("model adapter descriptor is incomplete")
 	}
-	return &GuardedAdapter{store: store, adapter: adapter}, nil
+	return &GuardedAdapter{store: store, containment: containment, adapter: adapter}, nil
 }
 
 func (a *GuardedAdapter) Name() string { return a.adapter.Name() }
@@ -352,22 +365,49 @@ func (a *GuardedAdapter) Descriptor() execution.ModelDescriptor { return a.adapt
 
 func (a *GuardedAdapter) Complete(ctx context.Context, prompt string) (execution.ModelResponse, error) {
 	digest := sha256.Sum256([]byte(prompt))
-	return a.complete(ctx, hex.EncodeToString(digest[:]), func() (execution.ModelResponse, error) {
-		return a.adapter.Complete(ctx, prompt)
+	return a.complete(ctx, hex.EncodeToString(digest[:]), func(callCtx context.Context) (execution.ModelResponse, error) {
+		return a.adapter.Complete(callCtx, prompt)
 	})
 }
 
-func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call func() (execution.ModelResponse, error)) (execution.ModelResponse, error) {
+func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call func(context.Context) (execution.ModelResponse, error)) (execution.ModelResponse, error) {
 	scope, err := scopeFromContext(ctx)
 	if err != nil {
-		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, err)
+		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, execution.RequestNotSent(err))
 	}
 	request := InferenceRequest{ConnectionID: a.connectionID, Scope: scope, Descriptor: a.adapter.Descriptor(), PromptSHA256: fingerprint}
+	recordNotSent := func(cause error) error {
+		persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reconciliationTimeout)
+		defer cancel()
+		return execution.RequestNotSent(errors.Join(cause, a.store.RecordInferenceNotSent(persistCtx, request)))
+	}
+	callCtx, release, containmentErr := a.containment.BeginInferenceContext(ctx, scope.OrganizationID)
+	if containmentErr != nil {
+		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, recordNotSent(containmentErr))
+	}
+	defer release()
+	ctx = callCtx
+	checkContainment := func() error {
+		// Caller cancellation may win before a committed freeze. Preserve the
+		// generation while checking durable history independently of that cause.
+		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reconciliationTimeout)
+		defer cancel()
+		holdErr := a.containment.CheckInferenceContext(checkCtx, scope.OrganizationID)
+		return errors.Join(context.Cause(ctx), holdErr)
+	}
 	reservation, err := a.store.ReserveInference(ctx, request)
 	if err != nil {
-		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, err)
+		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, recordNotSent(errors.Join(err, checkContainment())))
 	}
-	response, providerErr := call()
+	var response execution.ModelResponse
+	var providerErr error
+	if containmentErr := checkContainment(); containmentErr != nil {
+		// The runtime has not invoked the adapter; this is definite not-sent
+		// evidence, unlike cancellation after control reaches the provider.
+		providerErr = execution.RequestNotSent(containmentErr)
+	} else {
+		response, providerErr = call(ctx)
+	}
 	if providerErr != nil {
 		result := ReconciliationUncertain
 		var usage *events.InferenceUsageRecordedPayload
@@ -383,7 +423,10 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 		if reconcileErr != nil {
 			code = execution.InferenceRecordFailed
 		}
-		return execution.ModelResponse{}, execution.SafeModelError(code, errors.Join(providerErr, reconcileErr))
+		if result == ReconciliationNotSent && reconcileErr == nil {
+			providerErr = recordNotSent(providerErr)
+		}
+		return execution.ModelResponse{}, execution.SafeModelError(code, errors.Join(providerErr, reconcileErr, checkContainment()))
 	}
 	// Account attribution belongs to runtime composition, not provider output.
 	response.Usage.ConnectionID = a.connectionID
@@ -391,17 +434,20 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 		reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reconciliationTimeout)
 		_, reconcileErr := a.store.ReconcileInference(reconcileCtx, reservation, &response.Usage, ReconciliationViolation)
 		cancel()
-		return execution.ModelResponse{}, execution.SafeModelError(execution.ModelContractFailed, errors.Join(fmt.Errorf("provider usage exceeded its authorized inference reservation"), reconcileErr))
+		return execution.ModelResponse{}, execution.SafeModelError(execution.ModelContractFailed, errors.Join(fmt.Errorf("provider usage exceeded its authorized inference reservation"), reconcileErr, checkContainment()))
 	}
 	reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reconciliationTimeout)
 	costNanoUSD, err := a.store.ReconcileInference(reconcileCtx, reservation, &response.Usage, ReconciliationCompleted)
 	cancel()
 	if err != nil {
-		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceRecordFailed, err)
+		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceRecordFailed, errors.Join(err, checkContainment()))
 	}
 	if reservation.Mode == MeteredAPI {
 		costUSD := float64(costNanoUSD) / 1_000_000_000
 		response.Usage.CostUSD = &costUSD
+	}
+	if containmentErr := checkContainment(); containmentErr != nil {
+		return execution.ModelResponse{}, execution.WithReconciledUsage(execution.SafeModelError(execution.ModelCallFailed, containmentErr), response.Usage)
 	}
 	return response, nil
 }

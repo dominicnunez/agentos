@@ -3,6 +3,7 @@ package inference
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -18,9 +19,49 @@ type guardStore struct {
 	cost         int64
 	reserveErr   error
 	reconcileErr error
+	afterReserve func()
 }
 
 func (*guardStore) ActivateInferencePolicy(context.Context, Policy) error { return nil }
+
+func (*guardStore) RecordInferenceNotSent(context.Context, InferenceRequest) error { return nil }
+
+func (*guardStore) BeginInferenceContext(ctx context.Context, _ string) (context.Context, func(), error) {
+	return ctx, func() {}, nil
+}
+
+func (*guardStore) CheckInferenceContext(ctx context.Context, _ string) error {
+	return context.Cause(ctx)
+}
+
+type registrationOnlyStore struct{ Store }
+
+func (registrationOnlyStore) BeginInferenceContext(ctx context.Context, _ string) (context.Context, func(), error) {
+	return ctx, func() {}, nil
+}
+
+type checkOnlyStore struct{ Store }
+
+func (checkOnlyStore) CheckInferenceContext(ctx context.Context, _ string) error {
+	return context.Cause(ctx)
+}
+
+func TestGuardedAdapterRejectsStoresWithoutCompleteContainment(t *testing.T) {
+	store := &guardStore{}
+	for name, wrapped := range map[string]Store{
+		"neither":           struct{ Store }{store},
+		"registration only": registrationOnlyStore{store},
+		"check only":        checkOnlyStore{store},
+	} {
+		t.Run(name, func(t *testing.T) {
+			model := &guardModel{}
+			adapter, err := NewGuardedAdapter(wrapped, model)
+			if err == nil || adapter != nil || model.called || store.reservation.ID != "" {
+				t.Fatalf("incomplete containment accepted: adapter=%v err=%v", adapter, err)
+			}
+		})
+	}
+}
 
 func (s *guardStore) ReserveInference(_ context.Context, request InferenceRequest) (Reservation, error) {
 	if s.reserveErr != nil {
@@ -31,7 +72,34 @@ func (s *guardStore) ReserveInference(_ context.Context, request InferenceReques
 		ReservedInputTokens: 100, ReservedOutputTokens: 20, ReservedCostNanoUSD: 100,
 		WindowStartedAt: time.Now().UTC(), WindowExpiresAt: time.Now().UTC().Add(time.Hour),
 	}
+	if s.afterReserve != nil {
+		s.afterReserve()
+	}
 	return s.reservation, nil
+}
+
+func TestGuardedAdapterCancellationAfterReservationNeverInvokesProvider(t *testing.T) {
+	for _, accountingFails := range []bool{false, true} {
+		t.Run(fmt.Sprint(accountingFails), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(guardedContext(t))
+			defer cancel()
+			store := &guardStore{afterReserve: cancel}
+			wantClass := execution.ModelCallFailed
+			if accountingFails {
+				store.reconcileErr = errors.New("synthetic accounting failure")
+				wantClass = execution.InferenceRecordFailed
+			}
+			model := &guardModel{}
+			adapter, err := NewGuardedAdapter(store, model)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := adapter.Complete(ctx, "prompt")
+			if err == nil || model.called || response.Text != "" || store.result != ReconciliationNotSent || store.usage != nil || execution.ModelErrorClass(err) != string(wantClass) {
+				t.Fatalf("pre-dispatch cancellation mishandled: called=%v result=%s err=%v", model.called, store.result, err)
+			}
+		})
+	}
 }
 
 func (s *guardStore) ReconcileInference(_ context.Context, _ Reservation, usage *events.InferenceUsageRecordedPayload, result Reconciliation) (int64, error) {
@@ -78,7 +146,7 @@ func TestGuardedAdapterFailsClosedWithoutDurableScopeOrReservation(t *testing.T)
 		t.Fatalf("provider was called without scope: %v", err)
 	}
 	store.reserveErr = errors.New("budget exhausted")
-	if _, err := adapter.Complete(guardedContext(t), "prompt"); err == nil || model.called || execution.ModelErrorClass(err) != string(execution.InferenceDenied) || strings.Contains(err.Error(), "budget exhausted") {
+	if _, err := adapter.Complete(guardedContext(t), "prompt"); err == nil || model.called || !execution.WasRequestNotSent(err) || execution.ModelErrorClass(err) != string(execution.InferenceDenied) || strings.Contains(err.Error(), "budget exhausted") {
 		t.Fatalf("provider was called without a reservation: %v", err)
 	}
 }

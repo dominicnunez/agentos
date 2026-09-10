@@ -375,10 +375,48 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 			return RecoveryResult{}, fmt.Errorf("reload task graphs recovered from durable plans: %w", err)
 		}
 	}
+	verifiedRestored := 0
 	for _, state := range sortedTaskStates(snapshot.Tasks) {
+		if state.Value.Status == core.TaskBlocked {
+			organizationID, err := taskOrganization(snapshot, state.Value)
+			if err != nil {
+				return RecoveryResult{}, err
+			}
+			if suspended, err := s.executionSuspended(ctx, organizationID, state); err != nil {
+				return RecoveryResult{}, err
+			} else if suspended {
+				continue
+			}
+		}
+		if state.Value.Status == core.TaskRunning {
+			organizationID, err := taskOrganization(snapshot, state.Value)
+			if err != nil {
+				return RecoveryResult{}, err
+			}
+			suspended, err := s.gateway.SuspendHeldExecution(ctx, string(organizationID), string(state.Value.ID), state.CorrelationID, state.Version)
+			if err != nil {
+				return RecoveryResult{}, err
+			}
+			if suspended {
+				continue
+			}
+		}
 		stream, err := s.gateway.Events(ctx, state.CorrelationID)
 		if err != nil {
 			return RecoveryResult{}, err
+		}
+		if state.Value.Status == core.TaskRunning {
+			restored, err := s.restoreVerifiedTask(ctx, state, stream)
+			if err != nil {
+				if containmentInterrupted(err) {
+					continue
+				}
+				return RecoveryResult{}, err
+			}
+			if restored {
+				verifiedRestored++
+				continue
+			}
 		}
 		requests, decisions, err := completionReviewRecords(stream)
 		if err != nil {
@@ -396,6 +434,9 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 		}
 		if recorded, decided := decisions[latest.ID]; decided {
 			if err := s.continueCompletionReview(ctx, latest, recorded.Review, recorded.Event); err != nil {
+				if containmentInterrupted(err) {
+					continue
+				}
 				return RecoveryResult{}, fmt.Errorf("recover completion review for task %s: %w", state.Value.ID, err)
 			}
 		}
@@ -404,7 +445,7 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 	if err != nil {
 		return RecoveryResult{}, fmt.Errorf("reload durable runtime state after completion reviews: %w", err)
 	}
-	result := RecoveryResult{PlansMaterialized: plansMaterialized}
+	result := RecoveryResult{PlansMaterialized: plansMaterialized, RunningRecovered: verifiedRestored}
 	continuedInputs := 0
 	for _, state := range sortedTaskStates(snapshot.Tasks) {
 		organizationID, err := taskOrganization(snapshot, state.Value)
@@ -412,6 +453,12 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 			return RecoveryResult{}, err
 		}
 		if state.Value.ExecutionKind == core.ExecutionHuman && state.Value.Status != core.TaskCompleted {
+			if suspended, err := s.executionSuspended(ctx, organizationID, state); err != nil {
+				return RecoveryResult{}, err
+			} else if suspended {
+				result.BlockedPreserved++
+				continue
+			}
 			stream, err := s.gateway.Events(ctx, state.CorrelationID)
 			if err != nil {
 				return RecoveryResult{}, err
@@ -428,6 +475,15 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 					result.RunningRecovered++
 				}
 				if err := s.continueHumanCompletionTask(ctx, organizationID, state.Value.ID, state.CorrelationID, completionEvent, completionPayload); err != nil {
+					if containmentInterrupted(err) {
+						if state.Value.Status == core.TaskBlocked {
+							result.BlockedPreserved++
+						}
+						if state.Value.Status == core.TaskRunning {
+							result.RunningRecovered--
+						}
+						continue
+					}
 					return RecoveryResult{}, fmt.Errorf("recover user completion for task %s: %w", state.Value.ID, err)
 				}
 				continuedInputs++
@@ -445,6 +501,15 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 					result.RunningRecovered++
 				}
 				if err := s.continueExternalInputTask(ctx, organizationID, state.Value.ID, state.CorrelationID, inputEvent); err != nil {
+					if containmentInterrupted(err) {
+						if state.Value.Status == core.TaskBlocked {
+							result.BlockedPreserved++
+						}
+						if state.Value.Status == core.TaskRunning {
+							result.RunningRecovered--
+						}
+						continue
+					}
 					return RecoveryResult{}, fmt.Errorf("recover external input continuation for task %s: %w", state.Value.ID, err)
 				}
 				continuedInputs++
@@ -512,6 +577,26 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 				saveErr = s.state.SaveTask(ctx, organizationID, eventType, "runtime", state.CorrelationID, state.Version+1, task, detail)
 			}
 			if saveErr != nil {
+				if errors.Is(saveErr, core.ErrOrganizationFrozen) {
+					suspended, err := s.gateway.SuspendHeldExecution(ctx, string(organizationID), string(task.ID), state.CorrelationID, state.Version)
+					if err != nil {
+						return RecoveryResult{}, err
+					}
+					if suspended {
+						if task.ExecutionKind == core.ExecutionDeterministic {
+							result.PendingFound--
+							result.BlockedPreserved++
+						}
+						result.RunningRecovered++
+						continue
+					}
+					if task.ExecutionKind == core.ExecutionDeterministic {
+						result.PendingFound--
+					} else {
+						result.BlockedPreserved--
+					}
+					continue
+				}
 				return RecoveryResult{}, fmt.Errorf("persist recovery for task %s: %w", task.ID, saveErr)
 			}
 			result.RunningRecovered++
@@ -521,7 +606,7 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 	if err != nil {
 		return RecoveryResult{}, err
 	}
-	result.TasksExecuted = len(runs) + continuedInputs
+	result.TasksExecuted = len(runs) + continuedInputs + verifiedRestored
 	if err := s.reconcileWorks(ctx); err != nil {
 		return RecoveryResult{}, err
 	}
@@ -562,12 +647,23 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		if !ok || intentState.CorrelationID != workState.CorrelationID {
 			return 0, fmt.Errorf("work %s has invalid durable intent identity", workID)
 		}
+		_, release, containmentErr := s.gateway.BeginExecutionContext(ctx, string(intentState.Value.OrganizationID))
+		if containmentErr != nil {
+			if containmentInterrupted(containmentErr) {
+				continue
+			}
+			return 0, containmentErr
+		}
+		release()
 		stream, err := s.gateway.Events(ctx, workState.CorrelationID)
 		if err != nil {
 			return 0, err
 		}
 		hasDurablePlan := false
 		planningAttemptRef := ""
+		planningExecutionID := ""
+		planningProofs := events.PlanningNotSentExecutions(stream, string(intentState.Value.OrganizationID), workState.CorrelationID)
+		allPlanningNotSent := true
 		for _, event := range stream {
 			if event.EventType == "PLAN_CREATED" {
 				hasDurablePlan = true
@@ -578,6 +674,18 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 					return 0, fmt.Errorf("work %s has invalid durable planning context", workID)
 				}
 				planningAttemptRef = event.EventID
+				planningExecutionID = event.SourceExecutionID
+				if planningProofs[event.SourceExecutionID] <= event.Sequence {
+					allPlanningNotSent = false
+				}
+			}
+		}
+		if !hasDurablePlan && planningExecutionID != "" {
+			if err := s.gateway.CheckExecutionContainment(ctx, string(intentState.Value.OrganizationID), "task-"+workState.CorrelationID, workState.CorrelationID, planningExecutionID); err != nil {
+				if containmentInterrupted(err) {
+					continue
+				}
+				return 0, err
 			}
 		}
 		intent := intentState.Value
@@ -599,11 +707,17 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 			in.experimentSpec = &spec
 		}
 		if intent.SourceChannel == "INTERNAL" {
-			if !hasDurablePlan {
+			if !hasDurablePlan && (planningExecutionID == "" || !allPlanningNotSent) {
 				if err := s.failPlanningWork(ctx, intent.OrganizationID, workState, "PLANNING_RECOVERY_IDENTITY_INCOMPLETE", "planning could not be resumed because the requested execution kind was not durably recoverable", planningAttemptRef); err != nil {
+					if containmentInterrupted(err) {
+						continue
+					}
 					return 0, err
 				}
 				continue
+			}
+			if !hasDurablePlan {
+				in.Kind = core.ExecutionAgent
 			}
 			var plan core.Plan
 			for _, event := range stream {
@@ -630,6 +744,9 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		}
 		_, _, root, err := s.ensureSubmission(ctx, in)
 		if err != nil {
+			if containmentInterrupted(err) {
+				continue
+			}
 			current, loadErr := s.state.Load(ctx)
 			if loadErr != nil {
 				return 0, fmt.Errorf("recover Task DAG for work %s: %w", workID, err)
@@ -642,6 +759,9 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 				return 0, fmt.Errorf("recover Task DAG for work %s: %w", workID, err)
 			}
 			if failErr := s.failPlanningWork(ctx, intent.OrganizationID, currentWork, "PLANNING_RECOVERY_FAILED", "safe planning recovery did not produce a validated durable plan", ""); failErr != nil {
+				if containmentInterrupted(failErr) {
+					continue
+				}
 				combined := errors.Join(err, fmt.Errorf("persist planning failure: %w", failErr))
 				return 0, fmt.Errorf("recover Task DAG for work %s: %w", workID, combined)
 			}
@@ -653,6 +773,45 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		materialized++
 	}
 	return materialized, nil
+}
+
+// Finish a certified running revision without dispatching its handler again.
+func (s *Service) restoreVerifiedTask(ctx context.Context, state projections.Versioned[core.Task], stream []events.Event) (bool, error) {
+	for _, start := range stream {
+		if start.EventType != "EXECUTION_STARTED" || start.TaskID != string(state.Value.ID) {
+			continue
+		}
+		admitted, found, err := events.AdmittedProjection(start)
+		if err != nil {
+			return false, err
+		}
+		if !found || admitted.Projection.Version != state.Version {
+			continue
+		}
+		executionID, err := events.ContainmentExecutionID(start)
+		if err != nil {
+			return false, err
+		}
+		verified, found, err := continuationEvent(stream, "COMPLETION_VERIFIED", state.Value.ID, core.ID(executionID))
+		if err != nil || !found {
+			return false, err
+		}
+		if verified.Sequence <= start.Sequence || verified.OrganizationID != start.OrganizationID || verified.CorrelationID != state.CorrelationID {
+			return false, fmt.Errorf("completion recovery crosses execution identity")
+		}
+		var detail completionDetail
+		if err := json.Unmarshal(verified.Payload, &detail); err != nil {
+			return false, err
+		}
+		task := state.Value
+		task.Status = core.TaskCompleted
+		return true, s.state.SaveTask(ctx, core.ID(start.OrganizationID), "TASK_VERIFIED_COMPLETE", "runtime", state.CorrelationID, state.Version+1, task, detail)
+	}
+	return false, nil
+}
+
+func containmentInterrupted(err error) bool {
+	return errors.Is(err, core.ErrOrganizationFrozen) || errors.Is(err, core.ErrContainmentUnavailable)
 }
 
 func (s *Service) failPlanningWork(ctx context.Context, organizationID core.ID, state projections.Versioned[core.Work], code, reason, evidenceRef string) error {
@@ -870,6 +1029,9 @@ func (s *Service) continueHumanCompletionTask(ctx context.Context, organizationI
 		if !ok || state.CorrelationID != correlationID || state.Value.ExecutionKind != core.ExecutionHuman || state.Value.CompletionContract == nil {
 			return fmt.Errorf("user completion task is invalid")
 		}
+		if suspended, err := s.executionSuspended(ctx, organizationID, state); err != nil || suspended {
+			return err
+		}
 		task := state.Value
 		switch task.Status {
 		case core.TaskCompleted:
@@ -895,7 +1057,7 @@ func (s *Service) continueHumanCompletionTask(ctx context.Context, organizationI
 				return nil
 			}
 		case core.TaskRunning:
-			return s.finishHumanCompletionTask(ctx, organizationID, state, completionEvent, payload)
+			return s.handleHeldContinuation(ctx, organizationID, state, s.finishHumanCompletionTask(ctx, organizationID, state, completionEvent, payload))
 		default:
 			return fmt.Errorf("user completion cannot advance task in status %s", task.Status)
 		}
@@ -1131,6 +1293,9 @@ func (s *Service) continueExternalInputTask(ctx context.Context, organizationID,
 		if !ok || state.CorrelationID != correlationID || state.Value.ExecutionKind != core.ExecutionHuman {
 			return fmt.Errorf("external input continuation task is invalid")
 		}
+		if suspended, err := s.executionSuspended(ctx, organizationID, state); err != nil || suspended {
+			return err
+		}
 		task := state.Value
 		switch task.Status {
 		case core.TaskCompleted:
@@ -1158,7 +1323,7 @@ func (s *Service) continueExternalInputTask(ctx context.Context, organizationID,
 			}
 			continue
 		case core.TaskRunning:
-			return s.finishExternalInputTask(ctx, organizationID, state, inputEvent)
+			return s.handleHeldContinuation(ctx, organizationID, state, s.finishExternalInputTask(ctx, organizationID, state, inputEvent))
 		default:
 			return fmt.Errorf("external input continuation cannot advance task in status %s", task.Status)
 		}
@@ -1737,7 +1902,7 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 	}
 	if err != nil {
 		var attemptErr *planningAttemptError
-		if work.Status == core.WorkActive {
+		if work.Status == core.WorkActive && !containmentInterrupted(err) {
 			code := "PLANNING_REJECTED"
 			reason := "the accepted Intent did not produce an admissible durable Task graph"
 			evidenceRef := ""
@@ -2020,6 +2185,15 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	inputRefs := append(append([]string(nil), intentInputRefs...), strategicEventRefs...)
 	attemptRef, attempted, attemptStateErr := recordedPlanningAttempt(stream, planID, intent, draft, inputRefs, strategicContextRefs)
 	if attempted {
+		attemptID := ""
+		for _, event := range stream {
+			if event.EventID == attemptRef {
+				attemptID = event.SourceExecutionID
+			}
+		}
+		if holdErr := s.gateway.CheckExecutionContainment(ctx, string(organizationID), "task-"+correlationID, correlationID, attemptID); holdErr != nil {
+			return core.Plan{}, holdErr
+		}
 		if attemptStateErr == nil {
 			attemptStateErr = fmt.Errorf("adaptive planning attempt has no validated durable plan")
 		}
@@ -2065,7 +2239,13 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 				return core.Plan{}, fmt.Errorf("governed model planner requires a route selector")
 			}
 		}
-		executionID = core.ID(fmt.Sprintf("planning-%s-attempt-1", planID))
+		attempt := 1
+		for _, event := range stream {
+			if event.EventType == "PLANNING_CONTEXT_MANIFESTED" {
+				attempt++
+			}
+		}
+		executionID = core.ID(fmt.Sprintf("planning-%s-attempt-%d", planID, attempt))
 		contextPayload := events.PlanningContextPayload{
 			RoutingDecision: modelinput.CloneRouteDecision(routingDecision),
 			PlanID:          string(planID), IntentID: string(intent.ID), IntentFingerprint: draft.Fingerprint,
@@ -2085,6 +2265,14 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	attemptFailure := func(err error) error {
 		if planningContextRef == "" {
 			return err
+		}
+		if errors.Is(err, core.ErrContainmentUnavailable) {
+			_, persistErr := s.gateway.PublishTrusted(context.WithoutCancel(ctx), events.TrustedDraft{
+				OrganizationID: string(organizationID), EventType: "PLANNING_CONTAINMENT_SUSPENDED", SourceActorID: "runtime",
+				SourceExecutionID: string(executionID), TaskID: "task-" + correlationID, CorrelationID: correlationID,
+				Payload: map[string]string{"context_event_ref": planningContextRef},
+			})
+			err = errors.Join(err, persistErr)
 		}
 		return &planningAttemptError{EvidenceEventRef: planningContextRef, Err: err}
 	}
@@ -2107,13 +2295,13 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	cancel()
 	if result.Usage != nil {
 		if !usesModel || result.Usage.ConnectionID != descriptor.ConnectionID || !result.Usage.Valid() || result.Usage.Provider != descriptor.Provider || result.Usage.Model != descriptor.Model {
-			return core.Plan{}, attemptFailure(fmt.Errorf("planner returned usage outside its declared model boundary"))
+			return core.Plan{}, attemptFailure(errors.Join(buildErr, fmt.Errorf("planner returned usage outside its declared model boundary")))
 		}
 		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
 			OrganizationID: string(organizationID), EventType: "INFERENCE_USAGE_RECORDED", SourceActorID: "runtime",
 			SourceExecutionID: string(executionID), TaskID: "task-" + correlationID, Payload: result.Usage, CorrelationID: correlationID,
 		}); err != nil {
-			return core.Plan{}, attemptFailure(fmt.Errorf("persist planning inference usage: %w", err))
+			return core.Plan{}, attemptFailure(errors.Join(buildErr, fmt.Errorf("persist planning inference usage: %w", err)))
 		}
 	}
 	if buildErr != nil {
@@ -2145,6 +2333,7 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 
 func recordedPlanningAttempt(stream []events.Event, planID core.ID, intent core.Intent, draft core.IntentDraft, inputRefs []string, strategicContextRefs []core.VersionedRef) (string, bool, error) {
 	attemptRef := ""
+	proofs := events.PlanningNotSentExecutions(stream, string(intent.OrganizationID), strings.TrimPrefix(string(planID), "plan-"))
 	for _, event := range stream {
 		if event.EventType != "PLANNING_CONTEXT_MANIFESTED" {
 			continue
@@ -2152,13 +2341,15 @@ func recordedPlanningAttempt(stream []events.Event, planID core.ID, intent core.
 		if attemptRef != "" {
 			return attemptRef, true, fmt.Errorf("durable planning state contains multiple unfinished attempts")
 		}
-		attemptRef = event.EventID
 		var manifest events.PlanningContextPayload
 		if event.EventID == "" || event.SourceExecutionID == "" || event.TaskID != "task-"+event.CorrelationID ||
 			json.Unmarshal(event.Payload, &manifest) != nil || manifest.PlanID != string(planID) || manifest.IntentID != string(intent.ID) ||
 			manifest.IntentFingerprint != draft.Fingerprint || manifest.PromptVersion == "" || manifest.Provider == "" || manifest.Model == "" ||
 			manifest.ExecutionProfileVersion == "" || !slices.Equal(manifest.InputEventRefs, inputRefs) || !slices.Equal(manifest.StrategicContextRefs, strategicContextRefs) {
-			return attemptRef, true, fmt.Errorf("durable planning context does not match the accepted Intent")
+			return event.EventID, true, fmt.Errorf("durable planning context does not match the accepted Intent")
+		}
+		if proofs[event.SourceExecutionID] <= event.Sequence {
+			attemptRef = event.EventID
 		}
 	}
 	return attemptRef, attemptRef != "", nil
@@ -2486,6 +2677,7 @@ func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {
 			return nil, fmt.Errorf("validate durable task graph failures: %w", err)
 		}
 		if len(failed) > 0 {
+			propagated := false
 			for _, task := range failed {
 				state := snapshot.Tasks[task.ID]
 				organizationID, err := taskOrganization(snapshot, task)
@@ -2496,10 +2688,16 @@ func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {
 				task.Status = core.TaskFailed
 				detail := dependencyFailureDetail{Code: "DEPENDENCY_FAILED", FailedDependencyIDs: dependencyIDs}
 				if err := s.state.SaveTask(ctx, organizationID, "TASK_DEPENDENCY_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); err != nil {
+					if containmentInterrupted(err) {
+						continue
+					}
 					return nil, fmt.Errorf("persist failed-dependency state for task %s: %w", task.ID, err)
 				}
+				propagated = true
 			}
-			continue
+			if propagated {
+				continue
+			}
 		}
 		ready, err := s.scheduler.Ready(tasks)
 		if err != nil {
@@ -2523,13 +2721,23 @@ func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {
 		// Execute one Task, then reload authoritative state before choosing
 		// more work. A failure may make the root and remaining siblings
 		// unnecessary, and scheduling from a stale snapshot would waste work.
-		task := ready[0]
-		state := snapshot.Tasks[task.ID]
-		run, err := s.executeTask(ctx, snapshot, state, remediation)
-		if err != nil {
-			return nil, err
+		progressed := false
+		for _, task := range ready {
+			state := snapshot.Tasks[task.ID]
+			run, err := s.executeTask(ctx, snapshot, state, remediation)
+			if containmentInterrupted(err) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			runs[task.ID] = run
+			progressed = true
+			break
 		}
-		runs[task.ID] = run
+		if !progressed {
+			return runs, nil
+		}
 	}
 }
 
@@ -2585,6 +2793,9 @@ func (s *Service) failTasksAfterRootFailure(ctx context.Context, snapshot projec
 		task.Status = core.TaskFailed
 		detail := rootFailureDetail{Code: "WORK_ROOT_FAILED", FailedRootTaskID: rootID}
 		if err := s.state.SaveTask(ctx, organizationID, "TASK_WORK_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); err != nil {
+			if containmentInterrupted(err) {
+				continue
+			}
 			return false, fmt.Errorf("terminalize task %s after root failure: %w", task.ID, err)
 		}
 		tasks[task.ID] = task
@@ -2663,11 +2874,11 @@ func (s *Service) actionableRemediation(ctx context.Context, snapshot projection
 			if err != nil {
 				return nil, err
 			}
-			_, assignmentBlocked, err := recordedAssignmentBlock(streamByCorrelation[state.CorrelationID], organizationID, dependency)
+			blockedEvent, assignmentBlocked, err := recordedAssignmentBlock(streamByCorrelation[state.CorrelationID], organizationID, dependency)
 			if err != nil {
 				return nil, fmt.Errorf("validate remediation assignment block for task %s: %w", dependencyID, err)
 			}
-			if assignmentBlocked {
+			if assignmentBlocked || blockedEvent.EventType == "TASK_EXECUTION_SUSPENDED" {
 				blockedByIndependentBoundary = true
 				break
 			}
@@ -2679,12 +2890,17 @@ func (s *Service) actionableRemediation(ctx context.Context, snapshot projection
 	return actionable, nil
 }
 
-func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot, state projections.Versioned[core.Task], remediation bool) (taskRun, error) {
+func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot, state projections.Versioned[core.Task], remediation bool) (resultRun taskRun, resultErr error) {
 	task := state.Value
 	organizationID, err := taskOrganization(snapshot, task)
 	if err != nil {
 		return taskRun{}, err
 	}
+	liveCtx, release, err := s.gateway.BeginExecutionContext(ctx, string(organizationID))
+	if err != nil {
+		return taskRun{}, err
+	}
+	defer release()
 	var selected assignment.Selection
 	var handler execution.Handler
 	switch task.ExecutionKind {
@@ -2698,14 +2914,14 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
 		task.Status = core.TaskBlocked
 		detail := blockedDetail("execution kind is declared but unavailable in this V1 slice", "authorized runtime handler", "the worker cannot expand its own execution authority")
-		if err := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); err != nil {
+		if err := s.saveBlockedTask(liveCtx, snapshot, state, organizationID, task, detail); err != nil {
 			return taskRun{}, fmt.Errorf("persist blocked task %s: %w", task.ID, err)
 		}
 		return taskRun{}, nil
 	default:
 		task.Status = core.TaskBlocked
 		detail := blockedDetail("execution kind is unknown and unavailable", "recognized authorized runtime handler", "the worker cannot expand its own execution authority")
-		if err := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); err != nil {
+		if err := s.saveBlockedTask(liveCtx, snapshot, state, organizationID, task, detail); err != nil {
 			return taskRun{}, fmt.Errorf("persist blocked task %s: %w", task.ID, err)
 		}
 		return taskRun{}, nil
@@ -2734,7 +2950,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		if !intentFound || intentState.Value.OrganizationID != organizationID {
 			return taskRun{}, fmt.Errorf("load durable Intent context for task %s", task.ID)
 		}
-		correlationEvents, err = s.gateway.Events(ctx, state.CorrelationID)
+		correlationEvents, err = s.gateway.Events(liveCtx, state.CorrelationID)
 		if err != nil {
 			return taskRun{}, fmt.Errorf("load strategic execution context for task %s: %w", task.ID, err)
 		}
@@ -2743,7 +2959,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			strategy, planErr = snapshotStrategicContext(snapshot, organizationID, workState.Value, plan)
 		}
 		if planErr != nil || strategy == nil || strategy.Mission.Status != core.MissionActive || strategy.Goal.Status != core.GoalActive {
-			if failErr := s.failStrategicTask(ctx, organizationID, state); failErr != nil {
+			if failErr := s.failStrategicTask(liveCtx, organizationID, state); failErr != nil {
 				return taskRun{}, fmt.Errorf("terminalize stale strategic task %s: %w", task.ID, failErr)
 			}
 			return taskRun{}, nil
@@ -2757,7 +2973,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			task.Status = core.TaskBlocked
 			detail := blockedDetail("the durable Agent assignment is unavailable or no longer eligible", "an active same-organization Agent with the exact reviewed blueprint, execution profile, runtime adapter, and capability prerequisites", "the runtime cannot substitute another Agent, infer capabilities, or change provider identity at dispatch")
 			detail.Code = assignmentBlockedCode
-			if saveErr := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); saveErr != nil {
+			if saveErr := s.saveBlockedTask(liveCtx, snapshot, state, organizationID, task, detail); saveErr != nil {
 				return taskRun{}, fmt.Errorf("persist assignment block for task %s: %w", task.ID, saveErr)
 			}
 			return taskRun{}, nil
@@ -2769,25 +2985,25 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	if task.ExecutionKind == core.ExecutionHuman {
 		task.Status = core.TaskBlocked
 		detail := blockedDetail("user task is awaiting structured completion", "every field and artifact required by its CompletionContract", "the runtime cannot invent, infer, or waive required user evidence")
-		if err := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); err != nil {
+		if err := s.saveBlockedTask(liveCtx, snapshot, state, organizationID, task, detail); err != nil {
 			return taskRun{}, fmt.Errorf("persist input-required user task %s: %w", task.ID, err)
 		}
 		return taskRun{}, nil
 	}
 	if task.ExecutionKind == core.ExecutionAgent {
 		if remediation {
-			dependencyRefs, blockedDependencies, err = s.blockedDependencyContext(ctx, snapshot, state.CorrelationID, task)
+			dependencyRefs, blockedDependencies, err = s.blockedDependencyContext(liveCtx, snapshot, state.CorrelationID, task)
 			if err != nil {
 				return taskRun{}, fmt.Errorf("load blocked dependency evidence for task %s: %w", task.ID, err)
 			}
 		} else {
-			dependencyRefs, dependencyResults, err = s.dependencyResultContext(ctx, organizationID, snapshot, state.CorrelationID, task)
+			dependencyRefs, dependencyResults, err = s.dependencyResultContext(liveCtx, organizationID, snapshot, state.CorrelationID, task)
 			if err != nil {
 				return taskRun{}, fmt.Errorf("load dependency evidence for task %s: %w", task.ID, err)
 			}
 		}
 		if correlationEvents == nil {
-			correlationEvents, err = s.gateway.Events(ctx, state.CorrelationID)
+			correlationEvents, err = s.gateway.Events(liveCtx, state.CorrelationID)
 		}
 		if err != nil {
 			return taskRun{}, fmt.Errorf("load completion revision context for task %s: %w", task.ID, err)
@@ -2799,7 +3015,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		if err := core.ValidateStrategicExecutionContext(strategy); err != nil {
 			task.Status = core.TaskFailed
 			detail := strategicTaskFailureDetail{Code: "EXECUTION_CONTEXT_LIMIT_EXCEEDED", Reason: err.Error(), Replacement: "submit narrower replacement Work whose reviewed context fits the execution boundary"}
-			if saveErr := s.state.SaveTask(ctx, organizationID, "TASK_WORK_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); saveErr != nil {
+			if saveErr := s.state.SaveTask(liveCtx, organizationID, "TASK_WORK_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); saveErr != nil {
 				return taskRun{}, fmt.Errorf("terminalize oversized execution context for task %s: %w", task.ID, saveErr)
 			}
 			return taskRun{}, nil
@@ -2902,10 +3118,13 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			manifest.ExecutionInputSHA256 = core.FingerprintExecutionInput(executionInput)
 			return manifest, nil
 		}
-		_, _, err = s.state.StartAgentExecution(ctx, organizationID, state.CorrelationID, state.Version+1, task, mode, inputEventRefs, strategyEventRefs, strategyContextRefs, actionBoundaryRoutes(snapshot, task), validateInput)
+		_, _, err = s.state.StartAgentExecution(liveCtx, organizationID, state.CorrelationID, state.Version+1, task, mode, inputEventRefs, strategyEventRefs, strategyContextRefs, actionBoundaryRoutes(snapshot, task), validateInput)
 		if err != nil {
+			if liveCtx.Err() != nil {
+				return taskRun{}, context.Cause(liveCtx)
+			}
 			if errors.Is(err, events.ErrStrategicContextChanged) {
-				if failErr := s.failStrategicTask(ctx, organizationID, state); failErr != nil {
+				if failErr := s.failStrategicTask(liveCtx, organizationID, state); failErr != nil {
 					return taskRun{}, fmt.Errorf("terminalize concurrently stale strategic task %s: %w", task.ID, failErr)
 				}
 				return taskRun{}, nil
@@ -2913,16 +3132,19 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			if errors.Is(err, core.ErrExecutionContextLimitExceeded) {
 				task.Status = core.TaskFailed
 				detail := strategicTaskFailureDetail{Code: "EXECUTION_CONTEXT_LIMIT_EXCEEDED", Reason: err.Error(), Replacement: "submit narrower replacement Work whose reviewed context fits the execution boundary"}
-				if saveErr := s.state.SaveTask(ctx, organizationID, "TASK_WORK_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); saveErr != nil {
+				if saveErr := s.state.SaveTask(liveCtx, organizationID, "TASK_WORK_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); saveErr != nil {
 					return taskRun{}, fmt.Errorf("terminalize oversized execution input for task %s: %w", task.ID, saveErr)
 				}
 				return taskRun{}, nil
 			}
 			return taskRun{}, fmt.Errorf("persist Agent execution start and inbox boundary for task %s: %w", task.ID, err)
 		}
-	} else if _, err := s.state.StartTaskExecution(ctx, organizationID, state.CorrelationID, state.Version+1, task, "", "", strategyEventRefs, strategyContextRefs); err != nil {
+	} else if _, err := s.state.StartTaskExecution(liveCtx, organizationID, state.CorrelationID, state.Version+1, task, "", "", strategyEventRefs, strategyContextRefs); err != nil {
+		if liveCtx.Err() != nil {
+			return taskRun{}, context.Cause(liveCtx)
+		}
 		if errors.Is(err, events.ErrStrategicContextChanged) {
-			if failErr := s.failStrategicTask(ctx, organizationID, state); failErr != nil {
+			if failErr := s.failStrategicTask(liveCtx, organizationID, state); failErr != nil {
 				return taskRun{}, fmt.Errorf("terminalize concurrently stale strategic task %s: %w", task.ID, failErr)
 			}
 			return taskRun{}, nil
@@ -2930,10 +3152,10 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		return taskRun{}, fmt.Errorf("persist execution start for task %s: %w", task.ID, err)
 	}
 
-	executionCtx := ctx
+	executionCtx := liveCtx
 	cancel := func() {}
 	if task.ExecutionKind == core.ExecutionAgent {
-		executionCtx, cancel = context.WithTimeout(ctx, s.modelTurnTimeout)
+		executionCtx, cancel = context.WithTimeout(liveCtx, s.modelTurnTimeout)
 		executionCtx, err = inference.WithScope(executionCtx, inference.Scope{
 			OrganizationID: string(organizationID), Purpose: inference.PurposeTaskExecution,
 			Routing:         modelinput.CloneRouteRequirements(task.Routing),
@@ -2946,10 +3168,50 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			return taskRun{}, fmt.Errorf("bind inference scope for task %s: %w", task.ID, err)
 		}
 	}
+	handlerStartedAt := time.Now().UTC()
 	executionResult, executionErr := handler.Execute(executionCtx, executionTask, manifest)
 	cancel()
+	reportedOutcome := executionResult.Outcome
+	executionInterrupted := false
+	interrupt := func(cause error) {
+		executionInterrupted = true
+		executionErr = cause
+		class := "execution_cancelled"
+		if errors.Is(executionErr, core.ErrOrganizationFrozen) {
+			class = "security_hold"
+		}
+		if errors.Is(executionErr, core.ErrContainmentUnavailable) {
+			class = "containment_unavailable"
+		}
+		evidence := core.ExecutionInterruptionEvidence{
+			LocalExecutionStopped: true, ExternalEffectsStatus: "REQUIRES_RECONCILIATION",
+			ReportedOutcome: reportedOutcome,
+		}
+		var hold core.SecurityHoldCause
+		if errors.As(executionErr, &hold) {
+			evidence.Hold = &hold
+		}
+		executionResult.Outcome = core.ToolOutcome{
+			ToolInvocationID: core.ID("held-" + string(executionID)), ToolID: "runtime-containment",
+			Status: core.OutcomeFailed, PostconditionStatus: core.PostconditionNotChecked,
+			Retryability: core.NotRetryable, ErrorClass: class, ErrorDetail: "execution interrupted before result admission",
+			ObservedEffect: evidence,
+			StartedAt:      handlerStartedAt, FinishedAt: time.Now().UTC(),
+		}
+	}
+	if liveCtx.Err() != nil || errors.Is(executionErr, core.ErrContainmentUnavailable) || errors.Is(executionErr, core.ErrOrganizationFrozen) {
+		interrupt(errors.Join(context.Cause(liveCtx), executionErr))
+	}
 	outcome, verifierAvailable := s.verifier.Verify(executionTask, executionResult.Outcome)
 	outcomeEvent, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: outcome, CorrelationID: state.CorrelationID})
+	var admissionHold core.SecurityHoldCause
+	if errors.As(err, &admissionHold) {
+		// Admission can observe a hold before the local cancellation monitor.
+		// Retry once with failed audit evidence, never with successful output.
+		interrupt(admissionHold)
+		outcome, verifierAvailable = s.verifier.Verify(executionTask, executionResult.Outcome)
+		outcomeEvent, err = s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: outcome, CorrelationID: state.CorrelationID})
+	}
 	if err != nil {
 		return taskRun{}, fmt.Errorf("persist outcome for task %s: %w", task.ID, err)
 	}
@@ -2961,6 +3223,43 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			return taskRun{}, fmt.Errorf("persist inference usage for task %s: %w", task.ID, err)
 		}
 	}
+	if executionInterrupted {
+		// Suspension is a runtime lifecycle transition, not a result, parent
+		// remediation request, or terminal failure of the task's contract.
+		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "EXECUTION_FINISHED", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: map[string]any{"status": outcome.Status}, CorrelationID: state.CorrelationID}); err != nil {
+			return taskRun{}, fmt.Errorf("persist interrupted execution finish: %w", err)
+		}
+		task.Status = core.TaskBlocked
+		detail := map[string]string{"outcome_event_ref": outcomeEvent.EventID, "reason": "execution interrupted; operator reconciliation required before resumption"}
+		if err := s.state.SaveTask(ctx, organizationID, "TASK_EXECUTION_SUSPENDED", "runtime", state.CorrelationID, state.Version+2, task, detail); err != nil {
+			return taskRun{}, fmt.Errorf("suspend interrupted task %s: %w", task.ID, err)
+		}
+		return taskRun{Outcome: outcome, ExecutionError: executionErr}, nil
+	}
+	auditCtx := ctx
+	// Keep the execution generation even while durable bookkeeping ignores
+	// cancellation. Each action writer checks that generation transactionally.
+	ctx = context.WithoutCancel(liveCtx)
+	defer func() {
+		var hold core.SecurityHoldCause
+		if !errors.As(resultErr, &hold) {
+			return
+		}
+		interrupt(hold)
+		interruptedOutcome, _ := s.verifier.Verify(executionTask, executionResult.Outcome)
+		interruptedEvent, err := s.gateway.PublishTrusted(auditCtx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: interruptedOutcome, CorrelationID: state.CorrelationID})
+		if err != nil {
+			resultErr = fmt.Errorf("record late execution interruption: %w", err)
+			return
+		}
+		task.Status = core.TaskBlocked
+		detail := map[string]string{"outcome_event_ref": interruptedEvent.EventID, "reason": "execution interrupted during result admission; operator reconciliation required"}
+		if err := s.state.SaveTask(auditCtx, organizationID, "TASK_EXECUTION_SUSPENDED", "runtime", state.CorrelationID, state.Version+2, task, detail); err != nil {
+			resultErr = fmt.Errorf("suspend late-interrupted task: %w", err)
+			return
+		}
+		resultRun, resultErr = taskRun{Outcome: interruptedOutcome, ExecutionError: hold}, nil
+	}()
 	for _, batch := range inboxBatches {
 		if len(batch.Events) == 0 {
 			continue
@@ -2994,13 +3293,13 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		}
 		return taskRun{Outcome: outcome, ExecutionError: executionErr}, nil
 	}
-	resultEvent, err := s.publishTaskResult(ctx, organizationID, state.CorrelationID, executionID, task, outcome)
+	var resultEvent, candidateEvent events.Event
+	resultEvent, err = s.publishTaskResult(ctx, organizationID, state.CorrelationID, executionID, task, outcome)
 	if err != nil {
 		return taskRun{}, err
 	}
 	candidatePayload := events.CandidateCompletePayload{ToolInvocationID: string(outcome.ToolInvocationID), ResultEventID: resultEvent.EventID, ArtifactRefs: outcome.ArtifactRefs}
 	candidate := events.TrustedDraft{OrganizationID: string(organizationID), EventType: "CANDIDATE_COMPLETE", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: candidatePayload, CorrelationID: state.CorrelationID}
-	var candidateEvent events.Event
 	if task.ExecutionKind == core.ExecutionAgent {
 		candidateEvent, err = s.gateway.PublishAgentDraft(ctx, string(organizationID), string(task.AssigneeID), string(executionID), state.CorrelationID, events.Draft{EventType: "CANDIDATE_COMPLETE", TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: candidate.Payload})
 		if err != nil {
@@ -3236,7 +3535,7 @@ func workCompletionPlan(stream []events.Event, intent core.Intent, correlationID
 		if recorded.ID != "" {
 			return core.Plan{}, fmt.Errorf("run contains multiple terminal plans")
 		}
-		if event.OrganizationID != string(intent.OrganizationID) || event.SourceActorID != "runtime" || event.CorrelationID != correlationID || event.TaskID != "task-"+correlationID || event.SourceExecutionID != "" && event.SourceExecutionID != "planning-plan-"+correlationID+"-attempt-1" {
+		if event.OrganizationID != string(intent.OrganizationID) || event.SourceActorID != "runtime" || event.CorrelationID != correlationID || event.TaskID != "task-"+correlationID || events.ValidatePlanExecution(event, stream) != nil {
 			return core.Plan{}, fmt.Errorf("terminal plan event crosses its trust boundary")
 		}
 		if err := json.Unmarshal(event.Payload, &recorded); err != nil {
@@ -3530,6 +3829,32 @@ func (s *Service) failStrategicTask(ctx context.Context, organizationID core.ID,
 	return s.state.SaveTask(ctx, organizationID, "TASK_WORK_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail)
 }
 
+func (s *Service) executionSuspended(ctx context.Context, organizationID core.ID, state projections.Versioned[core.Task]) (bool, error) {
+	if state.Value.Status != core.TaskBlocked {
+		return false, nil
+	}
+	stream, err := s.gateway.Events(ctx, state.CorrelationID)
+	if err != nil {
+		return false, err
+	}
+	event, _, err := recordedAssignmentBlock(stream, organizationID, state)
+	return event.EventType == "TASK_EXECUTION_SUSPENDED", err
+}
+
+func (s *Service) handleHeldContinuation(ctx context.Context, organizationID core.ID, state projections.Versioned[core.Task], continuationErr error) error {
+	if !errors.Is(continuationErr, core.ErrOrganizationFrozen) {
+		return continuationErr
+	}
+	suspended, err := s.gateway.SuspendHeldExecution(ctx, string(organizationID), string(state.Value.ID), state.CorrelationID, state.Version)
+	if err != nil {
+		return err
+	}
+	if suspended {
+		return nil
+	}
+	return continuationErr
+}
+
 func (s *Service) saveBlockedTask(ctx context.Context, snapshot projections.Snapshot, previous projections.Versioned[core.Task], organizationID core.ID, blocked core.Task, detail events.TaskBlockedPayload) error {
 	if blocked.ParentID == "" {
 		return s.state.SaveTask(ctx, organizationID, "TASK_BLOCKED", "runtime", previous.CorrelationID, previous.Version+1, blocked, detail)
@@ -3567,7 +3892,7 @@ func recordedAssignmentBlock(stream []events.Event, organizationID core.ID, stat
 		return events.Event{}, false, fmt.Errorf("blocked task projection crosses its durable identity boundary")
 	}
 	if matched.EventType != "TASK_BLOCKED" {
-		return events.Event{}, false, nil
+		return matched, false, nil
 	}
 	var detail events.TaskBlockedPayload
 	if json.Unmarshal(payload.Detail, &detail) != nil {

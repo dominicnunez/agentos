@@ -111,7 +111,11 @@ func (n *ModelNormalizer) Normalize(ctx context.Context, turns []ConversationTur
 	}
 	response, err := n.complete(ctx, binding.Request())
 	if err != nil {
-		return Normalization{}, err
+		var retained *events.InferenceUsageRecordedPayload
+		if usage, ok := events.ReconciledUsage(err); ok && usage.Valid() && usage.ConnectionID == n.descriptor.ConnectionID && usage.Provider == n.descriptor.Provider && usage.Model == n.descriptor.Model {
+			retained = &usage
+		}
+		return Normalization{Usage: retained}, err
 	}
 	usage := response.Usage
 	failure := Normalization{Usage: &usage}

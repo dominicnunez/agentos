@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -77,6 +78,9 @@ func (s *Service) PendingCompletionReviews(ctx context.Context, organizationID s
 			return CompletionReviewPage{}, fmt.Errorf("pending completion review request is invalid")
 		}
 		view, found, err := s.completionReviewLocked(ctx, organizationID, string(indexed.TaskID))
+		if errors.Is(err, core.ErrOrganizationFrozen) {
+			continue
+		}
 		if err != nil {
 			return CompletionReviewPage{}, err
 		}
@@ -213,6 +217,11 @@ func (s *Service) completionReviewLocked(ctx context.Context, organizationID, ta
 	state, ok := snapshot.Tasks[view.Request.TaskID]
 	if !ok || state.Value.Status != core.TaskBlocked || state.CorrelationID != stream[0].CorrelationID {
 		return CompletionReviewView{}, false, nil
+	}
+	if suspended, err := s.executionSuspended(ctx, core.ID(organizationID), state); err != nil {
+		return CompletionReviewView{}, false, err
+	} else if suspended {
+		return CompletionReviewView{}, false, core.ErrOrganizationFrozen
 	}
 	return view, true, nil
 }
@@ -367,6 +376,11 @@ func (s *Service) continueCompletionReview(ctx context.Context, request completi
 	state, ok := snapshot.Tasks[request.TaskID]
 	if !ok || state.CorrelationID != stream[0].CorrelationID {
 		return fmt.Errorf("completion review task projection is unavailable")
+	}
+	if suspended, err := s.executionSuspended(ctx, request.OrganizationID, state); err != nil {
+		return err
+	} else if suspended {
+		return core.ErrOrganizationFrozen
 	}
 	task := state.Value
 	switch review.Decision {

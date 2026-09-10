@@ -36,6 +36,7 @@ type CapabilityLeaseAdmission struct {
 // Event Contract.
 type OrganizationFreezeAdmission struct {
 	OrganizationID core.ID
+	EventRef       string
 	Frozen         bool
 	Sequence       int64
 }
@@ -230,7 +231,7 @@ func resolveAuthorityAdmissions(stream []Event, records []AuthorityRecord, requi
 		case authorityKindFreeze:
 			var state organizationFreezePayload
 			_ = decodeExactEventJSON(record.Body, &state)
-			freezes = append(freezes, OrganizationFreezeAdmission{OrganizationID: state.OrganizationID, Frozen: state.Frozen, Sequence: event.Sequence})
+			freezes = append(freezes, OrganizationFreezeAdmission{OrganizationID: state.OrganizationID, EventRef: event.EventID, Frozen: state.Frozen, Sequence: event.Sequence})
 		}
 	}
 	for _, event := range stream {
