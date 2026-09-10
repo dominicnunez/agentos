@@ -497,3 +497,32 @@ func (l *SQLite) CheckExecutionContainment(ctx context.Context, organization, ta
 		return validateExecutionPublication(ctx, tx, events.TrustedDraft{OrganizationID: organization, TaskID: taskID, CorrelationID: correlation, SourceExecutionID: executionID})
 	})
 }
+
+// A new attempt ID cannot silently restart a held normalization of the same
+// operator input. Check prior attempts atomically with the new manifest write.
+func validateNormalizationRetry(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft) error {
+	var next events.IntentNormalizationContextPayload
+	if err := decodeExactJSON(draft.Payload, &next); err != nil {
+		return err
+	}
+	prior, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND event_type='INTENT_NORMALIZATION_CONTEXT_MANIFESTED' ORDER BY sequence`, draft.OrganizationID, draft.TaskID, draft.CorrelationID))
+	if err != nil {
+		return err
+	}
+	for _, event := range prior {
+		var recorded events.IntentNormalizationContextPayload
+		if err := decodeExactJSONBytes(event.Payload, &recorded); err != nil {
+			return err
+		}
+		if recorded.SourceMessageID != next.SourceMessageID {
+			continue
+		}
+		check := draft
+		check.EventType = "INTENT_DRAFTED"
+		check.SourceExecutionID = event.SourceExecutionID
+		if err := validateExecutionPublication(ctx, tx, check); err != nil {
+			return fmt.Errorf("normalization requires reconciliation or new input: %w", err)
+		}
+	}
+	return nil
+}

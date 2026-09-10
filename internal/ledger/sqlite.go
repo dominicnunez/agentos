@@ -4198,6 +4198,13 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		switch d.EventType {
+		case "INTENT_NORMALIZATION_CONTEXT_MANIFESTED":
+			if err := validateNormalizationRetry(ctx, tx, d); err != nil {
+				return err
+			}
+			if err := validateExecutionPublication(ctx, tx, d); err != nil {
+				return err
+			}
 		case "TOOL_OUTCOME_RECORDED", "INFERENCE_USAGE_RECORDED", "EXECUTION_FINISHED":
 			// Runtime audit/accounting may finish after containment. Outcomes
 			// have their separate interruption-evidence validator below.

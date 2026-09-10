@@ -1967,7 +1967,9 @@ func TestIntentDraftRejectsHoldAfterNormalization(t *testing.T) {
 				t.Fatal(err)
 			}
 			principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+			calls := 0
 			held := heldNormalizer{Normalizer: normalizer, after: func() {
+				calls++
 				states := []bool{true}
 				if released {
 					states = append(states, false)
@@ -1991,6 +1993,30 @@ func TestIntentDraftRejectsHoldAfterNormalization(t *testing.T) {
 			stream := externalStream(t, store, "held-intake")
 			if countEvents(stream, "INTENT_DRAFTED") != 0 || countEvents(stream, "INFERENCE_USAGE_RECORDED") != 1 {
 				t.Fatal("held draft escaped or usage disappeared")
+			}
+			if !released {
+				state := struct {
+					OrganizationID core.ID   `json:"organization_id"`
+					Frozen         bool      `json:"frozen"`
+					UpdatedAt      time.Time `json:"updated_at"`
+				}{core.ID(principal.OrganizationID), false, time.Now().UTC()}
+				if err := store.AppendRecord(ctx, principal.OrganizationID, "FREEZE_SET", "user-1", "held-intake", nil, nil, "organization_freeze", principal.OrganizationID, 2, state); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for range 2 {
+				if _, err := service.Handle(ctx, principal, Message{ConversationID: "held-intake", MessageID: "message-1", Text: "Prepare a Linux release"}); err == nil {
+					t.Fatal("held message retry was accepted")
+				}
+			}
+			stream = externalStream(t, store, "held-intake")
+			if calls != 1 || countEvents(stream, "INTENT_NORMALIZATION_CONTEXT_MANIFESTED") != 1 || countEvents(stream, "INFERENCE_USAGE_RECORDED") != 1 {
+				t.Fatal("held message retry repeated model work")
+			}
+			service = NewWithNormalizer(app.New(events.NewGateway(store)), normalizer)
+			view, err := service.Handle(ctx, principal, Message{ConversationID: "held-intake", MessageID: "message-2", Text: "Use the same release objective with this new input"})
+			if err != nil || view.Intent == nil {
+				t.Fatalf("new input after release was rejected: %v", err)
 			}
 		})
 	}
