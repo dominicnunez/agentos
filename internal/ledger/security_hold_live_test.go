@@ -17,6 +17,45 @@ import (
 
 type holdWaitingModel struct{ started chan struct{} }
 
+func TestPlanningRetryRequiresExactNonDispatchProof(t *testing.T) {
+	for _, proof := range []bool{false, true} {
+		t.Run(fmt.Sprintf("proof-%t", proof), func(t *testing.T) {
+			store, err := Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			request := testInferenceRequest("planning-attempt-1")
+			scope := request.Scope
+			draft := events.TrustedDraft{OrganizationID: scope.OrganizationID, EventType: "PLANNING_CONTEXT_MANIFESTED", SourceActorID: "runtime", SourceExecutionID: scope.ExecutionID, TaskID: scope.TaskID, CorrelationID: scope.CorrelationID, Payload: map[string]string{}}
+			if _, err := store.Append(t.Context(), draft); err != nil {
+				t.Fatal(err)
+			}
+			if proof {
+				if err := store.RecordInferenceNotSent(t.Context(), request); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := store.Append(t.Context(), draft); err == nil {
+				t.Fatal("same planning execution was admitted twice")
+			}
+			appendInferenceFreeze(t, store, scope.OrganizationID, 1, true)
+			draft.SourceExecutionID = "planning-attempt-2"
+			if _, err := store.Append(t.Context(), draft); err == nil {
+				t.Fatal("current freeze admitted planning")
+			}
+			appendInferenceFreeze(t, store, scope.OrganizationID, 2, false)
+			err = store.CheckExecutionContainment(t.Context(), scope.OrganizationID, scope.TaskID, scope.CorrelationID, scope.ExecutionID)
+			if (err == nil) != proof {
+				t.Fatalf("recovery proof=%t err=%v", proof, err)
+			}
+			if _, err := store.Append(t.Context(), draft); (err == nil) != proof {
+				t.Fatalf("retry proof=%t err=%v", proof, err)
+			}
+		})
+	}
+}
+
 func TestNotSentEvidenceRequiresClosedReservations(t *testing.T) {
 	for _, state := range []string{"no-reservation", "reserved", "NOT_SENT", "UNCERTAIN", "COMPLETED"} {
 		t.Run(state, func(t *testing.T) {

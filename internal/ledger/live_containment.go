@@ -593,6 +593,17 @@ func bindPlanningFailureContainment(ctx context.Context, tx *sql.Tx, draft *even
 	return validateExecutionPublication(ctx, tx, *draft)
 }
 
+func validatePlanningRetry(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft) error {
+	var unresolved bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events m WHERE m.organization_id=? AND m.correlation_id=? AND m.event_type='PLANNING_CONTEXT_MANIFESTED' AND (m.source_execution_id=? OR NOT EXISTS(SELECT 1 FROM events n WHERE n.event_type='INFERENCE_NOT_SENT' AND n.organization_id=m.organization_id AND n.task_id=m.task_id AND n.correlation_id=m.correlation_id AND n.source_execution_id=m.source_execution_id AND n.sequence>m.sequence)))`, draft.OrganizationID, draft.CorrelationID, draft.SourceExecutionID).Scan(&unresolved); err != nil {
+		return err
+	}
+	if unresolved {
+		return core.ErrContainmentUnavailable
+	}
+	return nil
+}
+
 // CheckExecutionContainment lets recovery distinguish held model attempts from
 // ordinary failures without retrying inference or relying on a live context.
 func (l *SQLite) CheckExecutionContainment(ctx context.Context, organization, taskID, correlation, executionID string) (resultErr error) {
@@ -602,6 +613,14 @@ func (l *SQLite) CheckExecutionContainment(ctx context.Context, organization, ta
 	}
 	return l.withTx(ctx, func(tx *sql.Tx) error {
 		draft := events.TrustedDraft{OrganizationID: organization, TaskID: taskID, CorrelationID: correlation, SourceExecutionID: executionID}
+		var notSent bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events n JOIN events m ON m.organization_id=n.organization_id AND m.task_id=n.task_id AND m.correlation_id=n.correlation_id AND m.source_execution_id=n.source_execution_id WHERE n.event_type='INFERENCE_NOT_SENT' AND m.event_type='PLANNING_CONTEXT_MANIFESTED' AND n.organization_id=? AND n.task_id=? AND n.correlation_id=? AND n.source_execution_id=? AND n.sequence>m.sequence)`, organization, taskID, correlation, executionID).Scan(&notSent); err != nil {
+			return err
+		}
+		if notSent {
+			draft.SourceExecutionID = ""
+			return validateExecutionPublication(ctx, tx, draft)
+		}
 		var suspended bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events s JOIN events m ON m.event_id=json_extract(s.payload,'$.context_event_ref') WHERE s.event_type='PLANNING_CONTAINMENT_SUSPENDED' AND s.organization_id=? AND s.task_id=? AND s.correlation_id=? AND s.source_execution_id=? AND m.event_type='PLANNING_CONTEXT_MANIFESTED' AND m.organization_id=s.organization_id AND m.task_id=s.task_id AND m.correlation_id=s.correlation_id AND m.source_execution_id=s.source_execution_id AND s.sequence>m.sequence)`, organization, taskID, correlation, executionID).Scan(&suspended); err != nil {
 			return err
