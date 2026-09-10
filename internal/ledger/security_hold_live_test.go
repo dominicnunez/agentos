@@ -17,6 +17,55 @@ import (
 
 type holdWaitingModel struct{ started chan struct{} }
 
+func TestNotSentEvidenceRequiresClosedReservations(t *testing.T) {
+	for _, state := range []string{"no-reservation", "reserved", "NOT_SENT", "UNCERTAIN", "COMPLETED"} {
+		t.Run(state, func(t *testing.T) {
+			store, err := Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			if err := store.ActivateInferencePolicy(t.Context(), testInferencePolicy(time.Now().UTC())); err != nil {
+				t.Fatal(err)
+			}
+			request := testInferenceRequest("not-sent-proof")
+			if state != "no-reservation" {
+				reservation, err := store.ReserveInference(t.Context(), request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if state != "reserved" {
+					var usage *events.InferenceUsageRecordedPayload
+					if state == "COMPLETED" {
+						value := testInferenceUsage()
+						usage = &value
+					}
+					if _, err := store.ReconcileInference(t.Context(), reservation, usage, inference.Reconciliation(state)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			err = store.RecordInferenceNotSent(t.Context(), request)
+			want := state == "no-reservation" || state == "NOT_SENT"
+			if (err == nil) != want {
+				t.Fatalf("not-sent evidence state=%s err=%v", state, err)
+			}
+			if want {
+				if err := store.RecordInferenceNotSent(t.Context(), request); err != nil {
+					t.Fatal(err)
+				}
+				request.Scope.RequestID = "replacement-request"
+				if _, err := store.ReserveInference(t.Context(), request); err == nil {
+					t.Fatal("closed invocation admitted new reservation")
+				}
+			}
+			if _, err := store.Append(t.Context(), events.TrustedDraft{OrganizationID: "organization-1", EventType: "INFERENCE_NOT_SENT", SourceActorID: "runtime", TaskID: "task-1", CorrelationID: "work-1", SourceExecutionID: "forged", Payload: map[string]string{"request_id": "forged"}}); err == nil {
+				t.Fatal("ordinary publication forged not-sent evidence")
+			}
+		})
+	}
+}
+
 func TestFrozenNestedAdmissionRetainsEarliestHold(t *testing.T) {
 	store, err := Open(":memory:")
 	if err != nil {

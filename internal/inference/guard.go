@@ -307,6 +307,7 @@ type Store interface {
 	ActivateInferencePolicy(context.Context, Policy) error
 	ReserveInference(context.Context, InferenceRequest) (Reservation, error)
 	ReconcileInference(context.Context, Reservation, *events.InferenceUsageRecordedPayload, Reconciliation) (int64, error)
+	RecordInferenceNotSent(context.Context, InferenceRequest) error
 }
 
 // containmentStore is required at construction, including for wrappers of Store.
@@ -375,9 +376,14 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, execution.RequestNotSent(err))
 	}
 	request := InferenceRequest{ConnectionID: a.connectionID, Scope: scope, Descriptor: a.adapter.Descriptor(), PromptSHA256: fingerprint}
+	recordNotSent := func(cause error) error {
+		persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reconciliationTimeout)
+		defer cancel()
+		return execution.RequestNotSent(errors.Join(cause, a.store.RecordInferenceNotSent(persistCtx, request)))
+	}
 	callCtx, release, containmentErr := a.containment.BeginInferenceContext(ctx, scope.OrganizationID)
 	if containmentErr != nil {
-		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, execution.RequestNotSent(containmentErr))
+		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, recordNotSent(containmentErr))
 	}
 	defer release()
 	ctx = callCtx
@@ -391,7 +397,7 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 	}
 	reservation, err := a.store.ReserveInference(ctx, request)
 	if err != nil {
-		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, execution.RequestNotSent(errors.Join(err, checkContainment())))
+		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, recordNotSent(errors.Join(err, checkContainment())))
 	}
 	var response execution.ModelResponse
 	var providerErr error
@@ -416,6 +422,9 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 		code := execution.ModelCallFailed
 		if reconcileErr != nil {
 			code = execution.InferenceRecordFailed
+		}
+		if result == ReconciliationNotSent && reconcileErr == nil {
+			providerErr = recordNotSent(providerErr)
 		}
 		return execution.ModelResponse{}, execution.SafeModelError(code, errors.Join(providerErr, reconcileErr, checkContainment()))
 	}

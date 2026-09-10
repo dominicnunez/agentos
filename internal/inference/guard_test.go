@@ -24,6 +24,8 @@ type guardStore struct {
 
 func (*guardStore) ActivateInferencePolicy(context.Context, Policy) error { return nil }
 
+func (*guardStore) RecordInferenceNotSent(context.Context, InferenceRequest) error { return nil }
+
 func (*guardStore) BeginInferenceContext(ctx context.Context, _ string) (context.Context, func(), error) {
 	return ctx, func() {}, nil
 }
