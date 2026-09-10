@@ -58,6 +58,15 @@ func TestSafeModelErrorPreservesSpecificFaultButAllowsAccountingFailure(t *testi
 
 type secretErrorModel struct{ FakeModel }
 
+func TestSafeModelErrorPreservesUnavailableContainment(t *testing.T) {
+	secret := errors.New("private ledger diagnostic")
+	err := SafeModelError(InferenceDenied, errors.Join(core.ErrContainmentUnavailable, secret))
+	err = SafeModelError(ModelCallFailed, err)
+	if !errors.Is(err, core.ErrContainmentUnavailable) || errors.Is(err, secret) || strings.Contains(err.Error(), secret.Error()) {
+		t.Fatal("sanitization lost containment control fact or retained diagnostics")
+	}
+}
+
 func (secretErrorModel) Complete(context.Context, string) (ModelResponse, error) {
 	return ModelResponse{}, errors.New("Authorization: Bearer synthetic-private-canary")
 }

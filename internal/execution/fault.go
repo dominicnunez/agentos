@@ -18,11 +18,12 @@ const (
 )
 
 type modelFault struct {
-	code      ModelFaultCode
-	cancelled bool
-	deadline  bool
-	frozen    bool
-	hold      *core.SecurityHoldCause
+	code                   ModelFaultCode
+	cancelled              bool
+	deadline               bool
+	frozen                 bool
+	containmentUnavailable bool
+	hold                   *core.SecurityHoldCause
 }
 
 func (f *modelFault) Error() string {
@@ -41,7 +42,7 @@ func (f *modelFault) Error() string {
 }
 
 func (f *modelFault) Is(target error) bool {
-	return target == context.Canceled && f.cancelled || target == context.DeadlineExceeded && f.deadline || target == core.ErrOrganizationFrozen && f.frozen
+	return target == context.Canceled && f.cancelled || target == context.DeadlineExceeded && f.deadline || target == core.ErrOrganizationFrozen && f.frozen || target == core.ErrContainmentUnavailable && f.containmentUnavailable
 }
 
 // As exposes only the runtime-owned hold reference, never provider diagnostics.
@@ -73,8 +74,9 @@ func SafeModelError(code ModelFaultCode, cause error) error {
 	}
 	fault := &modelFault{
 		code: code, cancelled: errors.Is(cause, context.Canceled),
-		deadline: errors.Is(cause, context.DeadlineExceeded),
-		frozen:   errors.Is(cause, core.ErrOrganizationFrozen),
+		deadline:               errors.Is(cause, context.DeadlineExceeded),
+		frozen:                 errors.Is(cause, core.ErrOrganizationFrozen),
+		containmentUnavailable: errors.Is(cause, core.ErrContainmentUnavailable),
 	}
 	var hold core.SecurityHoldCause
 	if errors.As(cause, &hold) && hold.OrganizationID != "" && hold.EventRef != "" && hold.Sequence > 0 {

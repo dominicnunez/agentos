@@ -798,3 +798,97 @@ func TestPreManifestPlanningHoldSurvivesRecovery(t *testing.T) {
 		t.Fatalf("other tenant blocked: %v", err)
 	}
 }
+
+func TestFinishedPlanningFailureSurvivesLaterReleasedHold(t *testing.T) {
+	ctx := t.Context()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	intercepted := &failOnceProjectionEvent{SQLite: store, eventType: "WORK_PLANNING_FAILED"}
+	planner := &failingPlanningPlanner{}
+	service := NewWithModelAndPlanner(events.NewGateway(intercepted), execution.FakeModel{}, planner)
+	if _, err := service.Submit(ctx, Submit{RequestID: "finished-planning", OrganizationID: "org-1", Statement: "prepare a note", Kind: core.ExecutionAgent}); err == nil || !intercepted.failed {
+		t.Fatalf("missing failure projection crash: %v", err)
+	}
+	for index, frozen := range []bool{true, false} {
+		state := struct {
+			OrganizationID core.ID   `json:"organization_id"`
+			Frozen         bool      `json:"frozen"`
+			UpdatedAt      time.Time `json:"updated_at"`
+		}{"org-1", frozen, time.Now().UTC()}
+		if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "finished-planning", nil, nil, "organization_freeze", "org-1", index+1, state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		if _, err := service.Recover(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := service.state.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Works) != 1 {
+		t.Fatalf("unexpected work count: %d", len(snapshot.Works))
+	}
+	for _, state := range snapshot.Works {
+		if state.Value.Status != core.WorkFailed {
+			t.Fatalf("finished planning failure remained active: %+v", state)
+		}
+	}
+	if planner.calls != 1 {
+		t.Fatal("finished planner was replayed")
+	}
+}
+
+type unavailablePlanningPlanner struct{ failingPlanningPlanner }
+
+func (p *unavailablePlanningPlanner) Build(context.Context, planning.Input, core.ExecutionKind) (planning.Result, error) {
+	p.calls++
+	return planning.Result{}, execution.SafeModelError(execution.ModelCallFailed, core.ErrContainmentUnavailable)
+}
+
+func TestUnavailablePlanningContainmentRemainsActive(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	planner := &unavailablePlanningPlanner{}
+	service := NewWithModelAndPlanner(events.NewGateway(store), execution.FakeModel{}, planner)
+	if _, err := service.Submit(t.Context(), Submit{RequestID: "unavailable-planning", OrganizationID: "org-1", Statement: "prepare a note", Kind: core.ExecutionAgent}); !errors.Is(err, core.ErrContainmentUnavailable) {
+		t.Fatalf("containment interruption lost: %v", err)
+	}
+	for range 2 {
+		if _, err := service.Recover(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := service.state.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Works) != 1 {
+		t.Fatalf("unexpected work count: %d", len(snapshot.Works))
+	}
+	for _, state := range snapshot.Works {
+		if state.Value.Status != core.WorkActive {
+			t.Fatal("unavailable containment terminalized planning work")
+		}
+	}
+	if planner.calls != 1 {
+		t.Fatal("suspended planner was replayed")
+	}
+	stream, err := store.Events(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range stream {
+		if event.EventType == "PLANNING_FAILED" || event.EventType == "WORK_PLANNING_FAILED" {
+			t.Fatal("safety interruption published planning failure")
+		}
+	}
+}

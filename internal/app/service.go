@@ -635,7 +635,7 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		}
 		_, release, containmentErr := s.gateway.BeginExecutionContext(ctx, string(intentState.Value.OrganizationID))
 		if containmentErr != nil {
-			if errors.Is(containmentErr, core.ErrOrganizationFrozen) {
+			if planningContainmentInterrupted(containmentErr) {
 				continue
 			}
 			return 0, containmentErr
@@ -663,7 +663,7 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		}
 		if !hasDurablePlan && planningExecutionID != "" {
 			if err := s.gateway.CheckExecutionContainment(ctx, string(intentState.Value.OrganizationID), "task-"+workState.CorrelationID, workState.CorrelationID, planningExecutionID); err != nil {
-				if errors.Is(err, core.ErrOrganizationFrozen) {
+				if planningContainmentInterrupted(err) {
 					continue
 				}
 				return 0, err
@@ -690,7 +690,7 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		if intent.SourceChannel == "INTERNAL" {
 			if !hasDurablePlan {
 				if err := s.failPlanningWork(ctx, intent.OrganizationID, workState, "PLANNING_RECOVERY_IDENTITY_INCOMPLETE", "planning could not be resumed because the requested execution kind was not durably recoverable", planningAttemptRef); err != nil {
-					if errors.Is(err, core.ErrOrganizationFrozen) {
+					if planningContainmentInterrupted(err) {
 						continue
 					}
 					return 0, err
@@ -722,7 +722,7 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		}
 		_, _, root, err := s.ensureSubmission(ctx, in)
 		if err != nil {
-			if errors.Is(err, core.ErrOrganizationFrozen) {
+			if planningContainmentInterrupted(err) {
 				continue
 			}
 			current, loadErr := s.state.Load(ctx)
@@ -737,7 +737,7 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 				return 0, fmt.Errorf("recover Task DAG for work %s: %w", workID, err)
 			}
 			if failErr := s.failPlanningWork(ctx, intent.OrganizationID, currentWork, "PLANNING_RECOVERY_FAILED", "safe planning recovery did not produce a validated durable plan", ""); failErr != nil {
-				if errors.Is(failErr, core.ErrOrganizationFrozen) {
+				if planningContainmentInterrupted(failErr) {
 					continue
 				}
 				combined := errors.Join(err, fmt.Errorf("persist planning failure: %w", failErr))
@@ -751,6 +751,10 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		materialized++
 	}
 	return materialized, nil
+}
+
+func planningContainmentInterrupted(err error) bool {
+	return errors.Is(err, core.ErrOrganizationFrozen) || errors.Is(err, core.ErrContainmentUnavailable)
 }
 
 func (s *Service) failPlanningWork(ctx context.Context, organizationID core.ID, state projections.Versioned[core.Work], code, reason, evidenceRef string) error {
@@ -1841,7 +1845,7 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 	}
 	if err != nil {
 		var attemptErr *planningAttemptError
-		if work.Status == core.WorkActive && !errors.Is(err, core.ErrOrganizationFrozen) {
+		if work.Status == core.WorkActive && !planningContainmentInterrupted(err) {
 			code := "PLANNING_REJECTED"
 			reason := "the accepted Intent did not produce an admissible durable Task graph"
 			evidenceRef := ""
@@ -2192,6 +2196,14 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	attemptFailure := func(err error) error {
 		if planningContextRef == "" {
 			return err
+		}
+		if errors.Is(err, core.ErrContainmentUnavailable) {
+			_, persistErr := s.gateway.PublishTrusted(context.WithoutCancel(ctx), events.TrustedDraft{
+				OrganizationID: string(organizationID), EventType: "PLANNING_CONTAINMENT_SUSPENDED", SourceActorID: "runtime",
+				SourceExecutionID: string(executionID), TaskID: "task-" + correlationID, CorrelationID: correlationID,
+				Payload: map[string]string{"context_event_ref": planningContextRef},
+			})
+			err = errors.Join(err, persistErr)
 		}
 		return &planningAttemptError{EvidenceEventRef: planningContextRef, Err: err}
 	}

@@ -520,7 +520,29 @@ func (l *SQLite) CheckExecutionContainment(ctx context.Context, organization, ta
 		return fmt.Errorf("complete execution identity is required")
 	}
 	return l.withTx(ctx, func(tx *sql.Tx) error {
-		return validateExecutionPublication(ctx, tx, events.TrustedDraft{OrganizationID: organization, TaskID: taskID, CorrelationID: correlation, SourceExecutionID: executionID})
+		draft := events.TrustedDraft{OrganizationID: organization, TaskID: taskID, CorrelationID: correlation, SourceExecutionID: executionID}
+		var suspended bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events s JOIN events m ON m.event_id=json_extract(s.payload,'$.context_event_ref') WHERE s.event_type='PLANNING_CONTAINMENT_SUSPENDED' AND s.organization_id=? AND s.task_id=? AND s.correlation_id=? AND s.source_execution_id=? AND m.event_type='PLANNING_CONTEXT_MANIFESTED' AND m.organization_id=s.organization_id AND m.task_id=s.task_id AND m.correlation_id=s.correlation_id AND m.source_execution_id=s.source_execution_id AND s.sequence>m.sequence)`, organization, taskID, correlation, executionID).Scan(&suspended); err != nil {
+			return err
+		}
+		if suspended {
+			return core.ErrContainmentUnavailable
+		}
+		var finish int64
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MIN(f.sequence),0) FROM events f JOIN events m ON m.event_id=json_extract(f.payload,'$.evidence_event_ref') WHERE f.event_type='PLANNING_FAILED' AND f.organization_id=? AND f.correlation_id=? AND m.event_type='PLANNING_CONTEXT_MANIFESTED' AND m.organization_id=f.organization_id AND m.correlation_id=f.correlation_id AND m.task_id=? AND m.source_execution_id=? AND f.sequence>m.sequence`, organization, correlation, taskID, executionID).Scan(&finish); err != nil {
+			return err
+		}
+		if finish != 0 {
+			hold, err := executionIntervalHoldThrough(ctx, tx, draft, finish)
+			if err != nil {
+				return err
+			}
+			if hold != nil {
+				return *hold
+			}
+			draft.SourceExecutionID = ""
+		}
+		return validateExecutionPublication(ctx, tx, draft)
 	})
 }
 
