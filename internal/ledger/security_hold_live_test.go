@@ -460,6 +460,115 @@ func TestLiveContainmentConnectionContentionDoesNotDestroyAuthority(t *testing.T
 	}
 }
 
+func TestContainmentSnapshotDeadlineBoundsDatabaseLockWait(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "snapshot-lock.db")
+	reader, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	appendInferenceFreeze(t, reader, "organization-1", 1, false)
+	writer, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	locked, err := writer.db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = locked.ExecContext(context.Background(), "ROLLBACK"); _ = locked.Close() }()
+	if _, err := locked.ExecContext(t.Context(), "BEGIN EXCLUSIVE"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if _, _, err := reader.containmentSince(ctx, "organization-1", 0); err == nil {
+		t.Fatal("locked authority snapshot succeeded")
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("snapshot ignored bounded cancellation: %s", elapsed)
+	}
+	if _, err := locked.ExecContext(t.Context(), "ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := reader.containmentSince(t.Context(), "organization-1", 0); err != nil {
+		t.Fatalf("snapshot failed after lock release: %v", err)
+	}
+	var timeout int
+	if err := reader.db.QueryRowContext(t.Context(), "PRAGMA busy_timeout").Scan(&timeout); err != nil || timeout != 5000 {
+		t.Fatalf("writer busy timeout changed: %d, %v", timeout, err)
+	}
+}
+
+func TestContainmentSnapshotCancellationPreservesPrivateMemoryAuthority(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	appendInferenceFreeze(t, store, "organization-1", 1, false)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	err = store.withContainmentSnapshot(ctx, func(tx *sql.Tx) error {
+		cancel()
+		var count int
+		return tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM records").Scan(&count)
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("snapshot ignored cancellation: %v", err)
+	}
+	epoch, frozen, err := store.containmentEpoch(t.Context(), "organization-1")
+	if err != nil || epoch <= 0 || frozen {
+		t.Fatalf("cancelled snapshot destroyed authority: epoch=%d frozen=%t err=%v", epoch, frozen, err)
+	}
+	appendInferenceFreeze(t, store, "organization-1", 2, true)
+}
+
+func TestLiveContainmentReleaseDoesNotWaitForLockedSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "release-lock.db")
+	reader, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	writer, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	call, release, err := reader.BeginExecutionContext(t.Context(), "organization-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked, err := writer.db.Conn(t.Context())
+	if err != nil {
+		release()
+		t.Fatal(err)
+	}
+	defer func() { _, _ = locked.ExecContext(context.Background(), "ROLLBACK"); _ = locked.Close() }()
+	if _, err := locked.ExecContext(t.Context(), "BEGIN EXCLUSIVE"); err != nil {
+		release()
+		t.Fatal(err)
+	}
+	select {
+	case <-call.Done():
+	case <-time.After(2 * containmentObservationTimeout):
+		t.Fatal("locked snapshot did not stop live execution")
+	}
+	if !errors.Is(context.Cause(call), core.ErrContainmentUnavailable) {
+		t.Fatalf("stop cause: %v", context.Cause(call))
+	}
+	done := make(chan struct{})
+	go func() { release(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("release remained blocked on cancelled snapshot")
+	}
+}
+
 type holdReturningModel struct {
 	holdWaitingModel
 	freeze func()

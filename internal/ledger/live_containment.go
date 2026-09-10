@@ -11,6 +11,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
+	"modernc.org/sqlite"
 )
 
 type liveContainment struct {
@@ -48,12 +49,9 @@ func (l *SQLite) CheckInferenceContext(ctx context.Context, organization string)
 	if _, ok := ctx.Value(containmentGenerationKey{}).(containmentGeneration); !ok {
 		return fmt.Errorf("inference containment generation is required")
 	}
-	tx, err := l.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	return validatePreparationGeneration(ctx, tx, organization)
+	return l.withContainmentSnapshot(ctx, func(tx *sql.Tx) error {
+		return validatePreparationGeneration(ctx, tx, organization)
+	})
 }
 
 // BeginInferenceContext registers before admission under the same lock used to
@@ -127,7 +125,7 @@ func (l *SQLite) BeginExecutionContext(ctx context.Context, organization string)
 				if checkErr != nil {
 					// Brief contention is tolerated only within the watchdog's
 					// bounded observation window; failed polls never renew it.
-					if errors.Is(checkErr, context.DeadlineExceeded) && callCtx.Err() == nil {
+					if containmentReadContended(checkErr) && callCtx.Err() == nil {
 						continue
 					}
 					cancel(core.ErrContainmentUnavailable)
@@ -156,22 +154,53 @@ func (l *SQLite) BeginExecutionContext(ctx context.Context, organization string)
 // containmentSince resolves every intervening authority revision in one
 // snapshot, retaining the first freeze even when a later release is visible.
 // A release alone is not evidence that this execution was held.
-func (l *SQLite) containmentSince(ctx context.Context, organization string, after int64) (int64, *core.SecurityHoldCause, error) {
-	// Bound connection acquisition, not the short snapshot transaction itself.
-	// database/sql may discard a connection when a transaction context is
-	// cancelled, destroying a private in-memory SQLite database in the process.
+func (l *SQLite) containmentSince(ctx context.Context, organization string, after int64) (next int64, cause *core.SecurityHoldCause, resultErr error) {
+	next = after
+	resultErr = l.withContainmentSnapshot(ctx, func(tx *sql.Tx) error {
+		var err error
+		next, cause, err = containmentSinceTx(ctx, tx, organization, after)
+		return err
+	})
+	return next, cause, resultErr
+}
+
+func (l *SQLite) withContainmentSnapshot(ctx context.Context, read func(*sql.Tx) error) (resultErr error) {
 	conn, err := l.db.Conn(ctx)
 	if err != nil {
-		return after, nil, err
+		return err
 	}
 	defer func() { _ = conn.Close() }()
+	// SQLite's busy handler may outlive a query cancellation. Bound each wait
+	// well inside the observation window, then restore this connection's setting.
+	var busyTimeout int
+	if err := conn.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, "PRAGMA busy_timeout=50"); err != nil {
+		return err
+	}
+	defer func() {
+		_, err := conn.ExecContext(context.WithoutCancel(ctx), fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeout))
+		resultErr = errors.Join(resultErr, err)
+	}()
+	// Keep only the transaction lifetime uncancelled: database/sql can discard
+	// a cancelled transaction's connection and destroy a private :memory: DB.
+	// The driver's read-only BEGIN is deferred and takes no database lock. All
+	// snapshot queries retain the caller's cancellation and deadline.
 	snapshotCtx := context.WithoutCancel(ctx)
-	tx, err := conn.BeginTx(snapshotCtx, nil)
+	tx, err := conn.BeginTx(snapshotCtx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return after, nil, err
+		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	return containmentSinceTx(snapshotCtx, tx, organization, after)
+	return read(tx)
+}
+
+func containmentReadContended(err error) bool {
+	var sqliteErr *sqlite.Error
+	// Extended SQLite error codes retain primary BUSY (5) / LOCKED (6) in
+	// their low byte. Retry only these transient lock failures or a deadline.
+	return errors.Is(err, context.DeadlineExceeded) || errors.As(err, &sqliteErr) && (sqliteErr.Code()&255 == 5 || sqliteErr.Code()&255 == 6)
 }
 
 func containmentSinceTx(ctx context.Context, tx *sql.Tx, organization string, after int64) (int64, *core.SecurityHoldCause, error) {
@@ -249,24 +278,20 @@ func validatePreparationGeneration(ctx context.Context, tx *sql.Tx, organization
 
 // containmentEpoch reads validated authority and its event sequence in one
 // snapshot. Sequence changes latch cancellation rather than resuming old calls.
-func (l *SQLite) containmentEpoch(ctx context.Context, organization string) (int64, bool, error) {
-	tx, err := l.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, false, err
-	}
-	defer func() { _ = tx.Rollback() }()
-	record, event, found, err := latestAuthorityAdmission(ctx, tx, "organization_freeze", organization)
-	if err != nil {
-		return 0, false, err
-	}
-	if !found {
-		return 0, false, nil
-	}
-	var state authority.FreezeState
-	if decodeExactJSONBytes(record.Body, &state) != nil || string(state.OrganizationID) != organization || event.OrganizationID != organization {
-		return 0, false, fmt.Errorf("invalid containment authority")
-	}
-	return event.Sequence, state.Frozen, nil
+func (l *SQLite) containmentEpoch(ctx context.Context, organization string) (epoch int64, frozen bool, resultErr error) {
+	resultErr = l.withContainmentSnapshot(ctx, func(tx *sql.Tx) error {
+		record, event, found, err := latestAuthorityAdmission(ctx, tx, "organization_freeze", organization)
+		if err != nil || !found {
+			return err
+		}
+		var state authority.FreezeState
+		if decodeExactJSONBytes(record.Body, &state) != nil || string(state.OrganizationID) != organization || event.OrganizationID != organization {
+			return fmt.Errorf("invalid containment authority")
+		}
+		epoch, frozen = event.Sequence, state.Frozen
+		return nil
+	})
+	return epoch, frozen, resultErr
 }
 
 func (l *SQLite) cancelOrganizationLocked(organization string, cause error) {
