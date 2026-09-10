@@ -663,6 +663,15 @@ func validateNormalizationRetry(ctx context.Context, tx *sql.Tx, draft events.Tr
 		check := draft
 		check.EventType = "INTENT_DRAFTED"
 		check.SourceExecutionID = event.SourceExecutionID
+		var notSent bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type='INFERENCE_NOT_SENT' AND sequence>?)`, draft.OrganizationID, draft.TaskID, draft.CorrelationID, event.SourceExecutionID, event.Sequence).Scan(&notSent); err != nil {
+			return err
+		}
+		if notSent {
+			// The guard closed this invocation without dispatch. A fresh
+			// attempt must still pass its own current containment admission.
+			continue
+		}
 		var suspended bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type='INTENT_NORMALIZATION_SUSPENDED' AND sequence>?)`, draft.OrganizationID, draft.TaskID, draft.CorrelationID, event.SourceExecutionID, event.Sequence).Scan(&suspended); err != nil {
 			return err
