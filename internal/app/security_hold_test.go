@@ -13,6 +13,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	"github.com/dominicnunez/agentos/internal/modelinput"
 	"github.com/dominicnunez/agentos/internal/planning"
 	"github.com/dominicnunez/agentos/internal/projections"
 )
@@ -889,6 +890,58 @@ func TestUnavailablePlanningContainmentRemainsActive(t *testing.T) {
 	for _, event := range stream {
 		if event.EventType == "PLANNING_FAILED" || event.EventType == "WORK_PLANNING_FAILED" {
 			t.Fatal("safety interruption published planning failure")
+		}
+	}
+}
+
+type unavailableTaskModel struct{}
+
+func (unavailableTaskModel) Name() string { return describedModel{}.Name() }
+func (unavailableTaskModel) Descriptor() execution.ModelDescriptor {
+	return describedModel{}.Descriptor()
+}
+
+func (unavailableTaskModel) Complete(context.Context, string) (execution.ModelResponse, error) {
+	return execution.ModelResponse{}, execution.SafeModelError(execution.ModelCallFailed, core.ErrContainmentUnavailable)
+}
+
+func (m unavailableTaskModel) CompleteRequest(ctx context.Context, _ modelinput.Request) (execution.ModelResponse, error) {
+	return m.Complete(ctx, "")
+}
+
+func TestInnerInferenceContainmentFailureSuspendsTask(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := NewWithModel(events.NewGateway(store), unavailableTaskModel{})
+	result, err := service.Submit(t.Context(), Submit{RequestID: "inner-unavailable", OrganizationID: "org-1", Statement: "prepare a note", Kind: core.ExecutionAgent})
+	if !errors.Is(err, core.ErrContainmentUnavailable) {
+		t.Fatalf("missing containment interruption: %v", err)
+	}
+	if result.Task.Status != core.TaskBlocked {
+		t.Fatalf("inner containment failure terminalized task: %s", result.Task.Status)
+	}
+	for range 2 {
+		if _, err := service.Recover(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stream, err := store.Events(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countEventType(stream, "TASK_EXECUTION_SUSPENDED") != 1 || countEventType(stream, "COMPLETION_REJECTED") != 0 || countEventType(stream, "TASK_RESULT_RECORDED") != 0 {
+		t.Fatal("inner containment failure published an ordinary result")
+	}
+	snapshot, err := service.state.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range snapshot.Works {
+		if state.Value.Status != core.WorkActive {
+			t.Fatal("inner containment failure failed Work")
 		}
 	}
 }

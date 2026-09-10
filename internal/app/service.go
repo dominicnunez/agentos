@@ -3127,8 +3127,8 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			StartedAt:      handlerStartedAt, FinishedAt: time.Now().UTC(),
 		}
 	}
-	if liveCtx.Err() != nil {
-		interrupt(context.Cause(liveCtx))
+	if liveCtx.Err() != nil || errors.Is(executionErr, core.ErrContainmentUnavailable) || errors.Is(executionErr, core.ErrOrganizationFrozen) {
+		interrupt(errors.Join(context.Cause(liveCtx), executionErr))
 	}
 	outcome, verifierAvailable := s.verifier.Verify(executionTask, executionResult.Outcome)
 	outcomeEvent, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: outcome, CorrelationID: state.CorrelationID})

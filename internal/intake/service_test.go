@@ -15,6 +15,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/app"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/ledger"
 	"github.com/dominicnunez/agentos/internal/modelinput"
 )
@@ -1964,6 +1965,48 @@ func TestExternalViewShowsSuspendedExecutionNeedsInput(t *testing.T) {
 type heldNormalizer struct {
 	Normalizer
 	after func()
+}
+
+type unavailableNormalizer struct {
+	Normalizer
+	calls *int
+}
+
+func (n unavailableNormalizer) Normalize(context.Context, []ConversationTurn) (Normalization, error) {
+	*n.calls++
+	return Normalization{}, execution.SafeModelError(execution.ModelCallFailed, core.ErrContainmentUnavailable)
+}
+
+func TestUnavailableNormalizationRemainsLatched(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	normalizer, err := NewModelNormalizer(normalizationModel{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	service := NewWithNormalizer(app.New(events.NewGateway(store)), unavailableNormalizer{Normalizer: normalizer, calls: &calls})
+	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
+	message := Message{ConversationID: "unavailable-intake", MessageID: "message-1", Text: "Prepare a Linux release"}
+	for range 3 {
+		if _, err := service.Handle(t.Context(), principal, message); err == nil {
+			t.Fatal("unavailable normalization succeeded")
+		}
+	}
+	stream := externalStream(t, store, message.ConversationID)
+	if calls != 1 || countEvents(stream, "INTENT_NORMALIZATION_FAILED") != 0 || countEvents(stream, "INTENT_NORMALIZATION_SUSPENDED") != 1 {
+		t.Fatalf("uncertain normalization replayed or finished: calls=%d", calls)
+	}
+	message.MessageID = "message-2"
+	if _, err := service.Handle(t.Context(), principal, message); err == nil {
+		t.Fatal("unavailable new normalization succeeded")
+	}
+	if calls != 2 {
+		t.Fatal("new operator input was incorrectly blocked")
+	}
 }
 
 func (n heldNormalizer) Normalize(ctx context.Context, turns []ConversationTurn) (Normalization, error) {

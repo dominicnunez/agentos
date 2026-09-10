@@ -729,7 +729,11 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 		}
 	}
 	if err != nil {
-		if usesModel && !errors.Is(err, core.ErrOrganizationFrozen) {
+		if usesModel && errors.Is(err, core.ErrContainmentUnavailable) {
+			if suspendErr := s.app.RecordIntentNormalizationSuspension(context.WithoutCancel(ctx), principal.OrganizationID, message.ConversationID, executionID); suspendErr != nil {
+				return View{}, fmt.Errorf("%w: persist normalization suspension", ErrUnavailable)
+			}
+		} else if usesModel && !errors.Is(err, core.ErrOrganizationFrozen) {
 			if finishErr := s.app.RecordIntentNormalizationFailure(ctx, principal.OrganizationID, message.ConversationID, executionID); finishErr != nil {
 				return View{}, fmt.Errorf("%w: persist failed normalization boundary", ErrUnavailable)
 			}

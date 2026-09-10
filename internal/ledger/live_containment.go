@@ -31,7 +31,12 @@ type containmentGeneration struct {
 
 // CheckInferenceContext rechecks committed containment at the adapter boundary.
 // It does not claim atomicity with a remote provider or undo a dispatched call.
-func (l *SQLite) CheckInferenceContext(ctx context.Context, organization string) error {
+func (l *SQLite) CheckInferenceContext(ctx context.Context, organization string) (resultErr error) {
+	defer func() {
+		if resultErr != nil && !errors.Is(resultErr, core.ErrOrganizationFrozen) {
+			resultErr = errors.Join(core.ErrContainmentUnavailable, resultErr)
+		}
+	}()
 	if _, ok := ctx.Value(containmentGenerationKey{}).(containmentGeneration); !ok {
 		return fmt.Errorf("inference containment generation is required")
 	}
@@ -568,6 +573,13 @@ func validateNormalizationRetry(ctx context.Context, tx *sql.Tx, draft events.Tr
 		check := draft
 		check.EventType = "INTENT_DRAFTED"
 		check.SourceExecutionID = event.SourceExecutionID
+		var suspended bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type='INTENT_NORMALIZATION_SUSPENDED' AND sequence>?)`, draft.OrganizationID, draft.TaskID, draft.CorrelationID, event.SourceExecutionID, event.Sequence).Scan(&suspended); err != nil {
+			return err
+		}
+		if suspended {
+			return core.ErrContainmentUnavailable
+		}
 		var finish int64
 		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MIN(sequence),0) FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type='INTENT_NORMALIZATION_FAILED' AND sequence>?`, draft.OrganizationID, draft.TaskID, draft.CorrelationID, event.SourceExecutionID, event.Sequence).Scan(&finish); err != nil {
 			return err

@@ -17,6 +17,30 @@ import (
 
 type holdWaitingModel struct{ started chan struct{} }
 
+func TestAuthorityReadFailureIsContainmentUnavailable(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx, release, err := store.BeginInferenceContext(t.Context(), "organization-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	conn, err := store.db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Millisecond)
+	defer cancel()
+	err = store.CheckInferenceContext(checkCtx, "organization-1")
+	if !errors.Is(err, core.ErrContainmentUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("authority timeout lost safety classification: %v", err)
+	}
+}
+
 func TestManifestHoldPreventsFreshGuardAdmission(t *testing.T) {
 	for _, kind := range []string{"PLANNING_CONTEXT_MANIFESTED", "INTENT_NORMALIZATION_CONTEXT_MANIFESTED"} {
 		t.Run(kind, func(t *testing.T) {
