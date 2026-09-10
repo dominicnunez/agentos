@@ -17,6 +17,71 @@ import (
 
 type holdWaitingModel struct{ started chan struct{} }
 
+type cancelledReturningModel struct {
+	holdReturningModel
+	providerError error
+}
+
+func (m *cancelledReturningModel) Complete(ctx context.Context, prompt string) (execution.ModelResponse, error) {
+	response, err := m.holdReturningModel.Complete(ctx, prompt)
+	if m.providerError != nil {
+		return execution.ModelResponse{}, m.providerError
+	}
+	return response, err
+}
+
+func TestCallerCancellationDoesNotHideReleasedDurableHold(t *testing.T) {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+		for _, providerFails := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%v/provider-error-%t", cause, providerFails), func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "ledger.db")
+				store, err := Open(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = store.Close() })
+				writer, err := Open(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = writer.Close() })
+				now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+				store.now = func() time.Time { return now }
+				if err := store.ActivateInferencePolicy(t.Context(), testInferencePolicy(now)); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancelCause(t.Context())
+				defer cancel(nil)
+				model := &cancelledReturningModel{holdReturningModel: holdReturningModel{freeze: func() {
+					cancel(cause)
+					appendInferenceFreeze(t, writer, "organization-1", 1, true)
+					appendInferenceFreeze(t, writer, "organization-1", 2, false)
+				}}}
+				if providerFails {
+					model.providerError = cause
+				}
+				guard, err := inference.NewGuardedAdapter(store, model)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, err = inference.WithScope(ctx, testInferenceRequest("cancelled-held-call").Scope)
+				if err != nil {
+					t.Fatal(err)
+				}
+				response, err := guard.Complete(ctx, "synthetic call")
+				var hold core.SecurityHoldCause
+				if !errors.Is(err, cause) || !errors.Is(err, core.ErrOrganizationFrozen) || !errors.As(err, &hold) || hold.OrganizationID != "organization-1" || hold.EventRef == "" || hold.Sequence == 0 || response.Text != "" {
+					t.Fatalf("local cancellation masked durable hold: %v", err)
+				}
+				if _, found := events.ReconciledUsage(err); found == providerFails {
+					t.Fatal("unexpected reconciled usage retention")
+				}
+			})
+		}
+	}
+
+}
+
 type failedHeldReconciliationStore struct {
 	*SQLite
 	freeze func()

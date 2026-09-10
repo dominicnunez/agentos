@@ -388,10 +388,12 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 	var response execution.ModelResponse
 	var providerErr error
 	checkContainment := func() error {
-		if ctx.Err() != nil {
-			return context.Cause(ctx)
-		}
-		return a.containment.CheckInferenceContext(ctx, scope.OrganizationID)
+		// Caller cancellation may win before a committed freeze. Preserve the
+		// generation while checking durable history independently of that cause.
+		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reconciliationTimeout)
+		defer cancel()
+		holdErr := a.containment.CheckInferenceContext(checkCtx, scope.OrganizationID)
+		return errors.Join(context.Cause(ctx), holdErr)
 	}
 	if containmentErr := checkContainment(); containmentErr != nil {
 		// The runtime has not invoked the adapter; this is definite not-sent
