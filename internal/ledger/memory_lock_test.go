@@ -67,7 +67,7 @@ func testMemoryExclusiveLockWait(t *testing.T, write bool) {
 		}
 		t.Fatal("memory snapshot ignored its deadline until the lock was released")
 	}
-	if _, _, err := store.containmentSince(t.Context(), "organization-1", 0); err != nil {
-		t.Fatalf("authority unavailable after lock release: %v", err)
+	if epoch, hold, err := store.containmentSince(t.Context(), "organization-1", 0); err != nil || epoch <= 0 || hold != nil {
+		t.Fatalf("authority changed after lock release: epoch=%d hold=%v err=%v", epoch, hold, err)
 	}
 }
