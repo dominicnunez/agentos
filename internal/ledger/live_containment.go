@@ -383,6 +383,13 @@ func validateTerminalTaskContainment(ctx context.Context, tx *sql.Tx, item prepa
 	if item.task == nil {
 		return nil
 	}
+	var suspended bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM records r JOIN events e ON e.event_id=r.admission_event_id WHERE r.kind='task' AND r.record_id=? AND r.version=(SELECT MAX(version) FROM records WHERE kind='task' AND record_id=?) AND e.event_type='TASK_EXECUTION_SUSPENDED')`, item.record.RecordID, item.record.RecordID).Scan(&suspended); err != nil {
+		return err
+	}
+	if suspended {
+		return fmt.Errorf("suspended execution requires security reconciliation: %w", core.ErrOrganizationFrozen)
+	}
 	requiresCheck := item.task.Status == core.TaskCompleted || item.task.Status == core.TaskFailed || item.eventDraft.EventType == "TASK_RECOVERED"
 	if item.task.Status == core.TaskBlocked && item.eventDraft.EventType != "TASK_EXECUTION_SUSPENDED" {
 		_, previous, found, err := latestProjectionRevision[core.Task](ctx, tx, "task", item.record.RecordID)
@@ -520,8 +527,16 @@ func validateNormalizationRetry(ctx context.Context, tx *sql.Tx, draft events.Tr
 		check := draft
 		check.EventType = "INTENT_DRAFTED"
 		check.SourceExecutionID = event.SourceExecutionID
-		if err := validateExecutionPublication(ctx, tx, check); err != nil {
-			return fmt.Errorf("normalization requires reconciliation or new input: %w", err)
+		var finish int64
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MIN(sequence),0) FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type='INTENT_NORMALIZATION_FAILED' AND sequence>?`, draft.OrganizationID, draft.TaskID, draft.CorrelationID, event.SourceExecutionID, event.Sequence).Scan(&finish); err != nil {
+			return err
+		}
+		hold, err := executionIntervalHoldThrough(ctx, tx, check, finish)
+		if err != nil {
+			return err
+		}
+		if hold != nil {
+			return fmt.Errorf("normalization requires reconciliation or new input: %w", *hold)
 		}
 	}
 	return nil

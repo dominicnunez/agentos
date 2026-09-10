@@ -623,3 +623,66 @@ func TestHeldPlanningRemainsActiveThroughReleasedRecovery(t *testing.T) {
 		t.Fatalf("held planning replayed, lost usage or materialized: calls=%d", planner.calls)
 	}
 }
+
+func TestCompletionReviewCannotResumeSuspendedExecution(t *testing.T) {
+	ctx := t.Context()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	freeze := struct {
+		OrganizationID core.ID   `json:"organization_id"`
+		Frozen         bool      `json:"frozen"`
+		UpdatedAt      time.Time `json:"updated_at"`
+	}{"org-a", true, time.Now().UTC()}
+	intercepted := &holdBeforeOutcomeLedger{SQLite: store, publicationEventType: "TASK_BLOCKED", beforePublication: func() {
+		if err := store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "held-review", nil, nil, "organization_freeze", "org-a", 1, freeze); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	service := NewWithModel(events.NewGateway(intercepted), describedModel{})
+	submitted, err := service.Submit(ctx, Submit{RequestID: "held-review", OrganizationID: "org-a", Statement: "prepare a note", Kind: core.ExecutionAgent})
+	if !errors.Is(err, core.ErrOrganizationFrozen) {
+		t.Fatalf("expected interrupted execution: %v", err)
+	}
+	if submitted.Task.Status != core.TaskBlocked {
+		t.Fatalf("task=%+v", submitted.Task)
+	}
+	requests, _, err := completionReviewRecords(submitted.Events)
+	if err != nil || len(requests) != 1 {
+		t.Fatalf("pending request missing: %v", err)
+	}
+	var request completion.ReviewRequest
+	for _, r := range requests {
+		request = r
+	}
+	for _, released := range []bool{false, true} {
+		if released {
+			freeze.Frozen = false
+			freeze.UpdatedAt = time.Now().UTC()
+			if err := store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "held-review", nil, nil, "organization_freeze", "org-a", 2, freeze); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if page, err := service.PendingCompletionReviews(ctx, "org-a", "", 10); err != nil || len(page.Reviews) != 0 {
+			t.Fatalf("suspension exposed ordinary review: page=%+v err=%v", page, err)
+		}
+		if _, err := service.ReviewCompletion(ctx, reviewInput(CompletionReviewView{Request: request}, completion.ReviewRevise, "try again")); err == nil {
+			t.Fatal("ordinary review resumed suspended task")
+		}
+		snapshot, err := service.state.Load(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state := snapshot.Tasks[submitted.Task.ID]
+		task := state.Value
+		task.Status = core.TaskPending
+		if err := service.state.SaveTask(ctx, "org-a", "TASK_RESUMED", "runtime", state.CorrelationID, state.Version+1, task, nil); !errors.Is(err, core.ErrOrganizationFrozen) {
+			t.Fatalf("direct resumption bypassed suspension: %v", err)
+		}
+		if _, err := service.Recover(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

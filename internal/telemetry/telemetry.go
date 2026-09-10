@@ -148,7 +148,7 @@ func Project(correlationID string, stream []events.Event) (Run, error) {
 			run.CompletionEvidenceEventRefs = append(run.CompletionEvidenceEventRefs, event.EventID)
 		case "MESSAGE":
 			run.Messages++
-		case "TASK_BLOCKED":
+		case "TASK_BLOCKED", "TASK_EXECUTION_SUSPENDED":
 			run.Blocks++
 		case "TASK_RECOVERED":
 			run.Retries++

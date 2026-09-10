@@ -4790,7 +4790,7 @@ WHERE pending_completion_reviews.request_sequence<excluded.request_sequence`, ev
 		if err != nil || changed != 1 {
 			return fmt.Errorf("terminal completion review lacks its pending durable request")
 		}
-	case "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED":
+	case "TASK_EXECUTION_SUSPENDED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED":
 		if event.OrganizationID == "" || event.TaskID == "" || event.CorrelationID == "" || event.Sequence < 1 {
 			return fmt.Errorf("terminal task projection identity is invalid")
 		}

@@ -127,3 +127,20 @@ func jsonBody(t *testing.T, value any) json.RawMessage {
 	}
 	return body
 }
+
+func TestExecutionSuspensionCountsAsTelemetryBlock(t *testing.T) {
+	at := time.Now().UTC()
+	task := core.Task{ID: "task-1", ExecutionKind: core.ExecutionAgent, Status: core.TaskBlocked}
+	projection := events.ProjectionEventPayload{Projection: events.ProjectionRecord{ProjectionKind: "task", RecordID: "task-1", Version: 1, Value: jsonBody(t, task)}}
+	task.Status = core.TaskCompleted
+	completed := events.ProjectionEventPayload{Projection: events.ProjectionRecord{ProjectionKind: "task", RecordID: "task-1", Version: 2, Value: jsonBody(t, task)}}
+	stream := []events.Event{
+		testEvent(t, "e1", "TASK_CREATED", "task-1", "", at, projection),
+		testEvent(t, "e2", "TASK_EXECUTION_SUSPENDED", "task-1", "", at.Add(time.Second), projection),
+		testEvent(t, "e3", "TASK_VERIFIED_COMPLETE", "task-1", "", at.Add(2*time.Second), completed),
+	}
+	run, err := Project("request-1", stream)
+	if err != nil || run.Blocks != 1 {
+		t.Fatalf("suspension blocks=%d err=%v", run.Blocks, err)
+	}
+}

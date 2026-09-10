@@ -376,6 +376,17 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 		}
 	}
 	for _, state := range sortedTaskStates(snapshot.Tasks) {
+		if state.Value.Status == core.TaskBlocked {
+			organizationID, err := taskOrganization(snapshot, state.Value)
+			if err != nil {
+				return RecoveryResult{}, err
+			}
+			if suspended, err := s.executionSuspended(ctx, organizationID, state); err != nil {
+				return RecoveryResult{}, err
+			} else if suspended {
+				continue
+			}
+		}
 		if state.Value.Status == core.TaskRunning {
 			organizationID, err := taskOrganization(snapshot, state.Value)
 			if err != nil {

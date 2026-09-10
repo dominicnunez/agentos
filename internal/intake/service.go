@@ -729,6 +729,11 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 		}
 	}
 	if err != nil {
+		if usesModel && !errors.Is(err, core.ErrOrganizationFrozen) {
+			if finishErr := s.app.RecordIntentNormalizationFailure(ctx, principal.OrganizationID, message.ConversationID, executionID); finishErr != nil {
+				return View{}, fmt.Errorf("%w: persist failed normalization boundary", ErrUnavailable)
+			}
+		}
 		return View{}, fmt.Errorf("%w: normalize intent", ErrUnavailable)
 	}
 	if err := validateNormalization(normalized); err != nil {

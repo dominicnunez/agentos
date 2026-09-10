@@ -852,6 +852,26 @@ func TestInvalidNormalizationStillRecordsProviderUsage(t *testing.T) {
 	if countEvents(stream, "INTENT_NORMALIZATION_CONTEXT_MANIFESTED") != 1 || countEvents(stream, "INFERENCE_USAGE_RECORDED") != 1 || countEvents(stream, "INTENT_DRAFTED") != 0 {
 		t.Fatalf("invalid normalization audit events=%+v", stream)
 	}
+	if countEvents(stream, "INTENT_NORMALIZATION_FAILED") != 1 {
+		t.Fatal("completed invalid normalization lacks its finish boundary")
+	}
+	for index, frozen := range []bool{true, false} {
+		state := struct {
+			OrganizationID core.ID   `json:"organization_id"`
+			Frozen         bool      `json:"frozen"`
+			UpdatedAt      time.Time `json:"updated_at"`
+		}{core.ID(principal.OrganizationID), frozen, time.Now().UTC()}
+		if err := store.AppendRecord(ctx, principal.OrganizationID, "FREEZE_SET", "user-1", message.ConversationID, nil, nil, "organization_freeze", principal.OrganizationID, index+1, state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := service.Handle(ctx, principal, message); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("invalid retry error=%v", err)
+	}
+	stream = externalStream(t, store, message.ConversationID)
+	if countEvents(stream, "INTENT_NORMALIZATION_CONTEXT_MANIFESTED") != 2 || countEvents(stream, "INFERENCE_USAGE_RECORDED") != 2 || countEvents(stream, "INTENT_NORMALIZATION_FAILED") != 2 {
+		t.Fatal("later hold prevented retry of an already-finished failed normalization")
+	}
 }
 
 func TestIntentConversationLimitsRejectBeforeAppending(t *testing.T) {

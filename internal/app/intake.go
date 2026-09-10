@@ -559,3 +559,33 @@ func streamHasIntakeEvent(stream []events.Event, eventType string) bool {
 	}
 	return false
 }
+
+// RecordIntentNormalizationFailure closes a failed attempt without publishing
+// model output. A committed hold prevents this ordinary finish admission.
+func (s *Service) RecordIntentNormalizationFailure(ctx context.Context, organizationID, requestID, executionID string) error {
+	correlation, found, err := s.gateway.ResolveExternalWork(ctx, organizationID, requestID)
+	if err != nil || !found || executionID == "" {
+		return fmt.Errorf("resolve failed normalization identity")
+	}
+	stream, err := s.gateway.Events(ctx, correlation)
+	if err != nil {
+		return err
+	}
+	manifested := false
+	for _, event := range stream {
+		if event.SourceExecutionID != executionID {
+			continue
+		}
+		if event.EventType == "INTENT_NORMALIZATION_CONTEXT_MANIFESTED" {
+			manifested = true
+		}
+		if event.EventType == "INTENT_NORMALIZATION_FAILED" {
+			return nil
+		}
+	}
+	if !manifested {
+		return fmt.Errorf("failed normalization lacks its manifest")
+	}
+	_, err = s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: organizationID, EventType: "INTENT_NORMALIZATION_FAILED", SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: "task-" + correlation, CorrelationID: correlation, Payload: struct{}{}})
+	return err
+}
