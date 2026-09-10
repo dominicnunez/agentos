@@ -301,7 +301,7 @@ func (l *SQLite) SuspendHeldExecution(ctx context.Context, organization, taskID,
 			return err
 		}
 		var boundary int64
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MIN(sequence),0) FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type='COMPLETION_REVIEW_REQUESTED' AND sequence>?`, organization, taskID, correlation, executionID, start.Sequence).Scan(&boundary); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MIN(sequence),0) FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type IN ('COMPLETION_REVIEW_REQUESTED','COMPLETION_VERIFIED') AND sequence>?`, organization, taskID, correlation, executionID, start.Sequence).Scan(&boundary); err != nil {
 			return err
 		}
 		hold, err := executionIntervalHoldThrough(ctx, tx, events.TrustedDraft{OrganizationID: organization, TaskID: taskID, CorrelationID: correlation, SourceExecutionID: executionID}, boundary)
@@ -467,7 +467,7 @@ func validateTerminalTaskContainment(ctx context.Context, tx *sql.Tx, item prepa
 		}
 		if draft.EventType == "TASK_VERIFIED_COMPLETE" || draft.EventType == "COMPLETION_REJECTED" || draft.EventType == "TASK_BLOCKED" {
 			var boundary int64
-			err := tx.QueryRowContext(ctx, `SELECT COALESCE(MIN(sequence),0) FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type='COMPLETION_REVIEW_REQUESTED' AND sequence>?`, draft.OrganizationID, draft.TaskID, draft.CorrelationID, draft.SourceExecutionID, starts[0].Sequence).Scan(&boundary)
+			err := tx.QueryRowContext(ctx, `SELECT COALESCE(MIN(sequence),0) FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type IN ('COMPLETION_REVIEW_REQUESTED','COMPLETION_VERIFIED') AND sequence>?`, draft.OrganizationID, draft.TaskID, draft.CorrelationID, draft.SourceExecutionID, starts[0].Sequence).Scan(&boundary)
 			if err != nil {
 				return err
 			}

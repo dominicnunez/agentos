@@ -321,7 +321,7 @@ func testSchedulerSecurityHold(t *testing.T, timing string) {
 			interceptor.publicationEventType = "CANDIDATE_COMPLETE"
 		}
 		if strings.HasSuffix(timing, "before-completion") {
-			interceptor.publicationEventType = "TASK_VERIFIED_COMPLETE"
+			interceptor.publicationEventType = "COMPLETION_VERIFIED"
 		}
 		interceptor.beforePublication = func() {
 			commitHold()
@@ -552,6 +552,67 @@ func (l *holdBeforeOutcomeLedger) AppendProjection(ctx context.Context, draft ev
 }
 
 type holdDuringHandler struct{ freeze func() }
+
+func TestVerifiedCompletionSurvivesLaterHoldAndRecovery(t *testing.T) {
+	for _, crash := range []bool{false, true} {
+		t.Run(fmt.Sprintf("crash-%t", crash), func(t *testing.T) {
+			store, err := ledger.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			writer := &holdBeforeOutcomeLedger{SQLite: store, publicationEventType: "TASK_VERIFIED_COMPLETE", beforePublication: func() {
+				for version, frozen := range []bool{true, false} {
+					state := struct {
+						OrganizationID core.ID   `json:"organization_id"`
+						Frozen         bool      `json:"frozen"`
+						UpdatedAt      time.Time `json:"updated_at"`
+					}{"org-a", frozen, time.Now().UTC()}
+					if err := store.AppendRecord(t.Context(), "org-a", "FREEZE_SET", "user-1", "verified-hold", nil, nil, "organization_freeze", "org-a", version+1, state); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}}
+			gateway := events.NewGateway(writer)
+			if crash {
+				gateway = events.NewGateway(&failOnceProjectionEvent{SQLite: store, eventType: "TASK_VERIFIED_COMPLETE"})
+			}
+			service := New(gateway)
+			_, submitErr := service.Submit(t.Context(), Submit{RequestID: "verified-hold", OrganizationID: "org-a", Statement: "echo verified", Kind: core.ExecutionDeterministic})
+			if crash {
+				if submitErr == nil {
+					t.Fatal("missing crash")
+				}
+				writer.beforePublication()
+			} else if submitErr != nil {
+				t.Fatal(submitErr)
+			}
+			service = New(events.NewGateway(store))
+			service.deterministic = holdDuringHandler{freeze: func() { t.Fatal("verified execution dispatched again during recovery") }}
+			for range 2 {
+				if _, err := service.Recover(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			snapshot, err := service.state.Load(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, task := range snapshot.Tasks {
+				if task.Value.Status != core.TaskCompleted {
+					t.Fatalf("verified execution lost completion: %s", task.Value.Status)
+				}
+			}
+			stream, err := store.Events(t.Context(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if countEventType(stream, "COMPLETION_VERIFIED") != 1 || countEventType(stream, "TASK_EXECUTION_SUSPENDED") != 0 {
+				t.Fatal("completed execution was repeated or suspended")
+			}
+		})
+	}
+}
 
 func (h holdDuringHandler) Execute(ctx context.Context, task core.Task, manifest core.ExecutionContextManifest) (execution.Result, error) {
 	h.freeze()

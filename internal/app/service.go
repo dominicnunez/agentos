@@ -404,6 +404,18 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 		if err != nil {
 			return RecoveryResult{}, err
 		}
+		if state.Value.Status == core.TaskRunning {
+			restored, err := s.restoreVerifiedTask(ctx, state, stream)
+			if err != nil {
+				if containmentInterrupted(err) {
+					continue
+				}
+				return RecoveryResult{}, err
+			}
+			if restored {
+				continue
+			}
+		}
 		requests, decisions, err := completionReviewRecords(stream)
 		if err != nil {
 			return RecoveryResult{}, fmt.Errorf("validate completion review recovery for task %s: %w", state.Value.ID, err)
@@ -751,6 +763,41 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		materialized++
 	}
 	return materialized, nil
+}
+
+// Finish a certified running revision without dispatching its handler again.
+func (s *Service) restoreVerifiedTask(ctx context.Context, state projections.Versioned[core.Task], stream []events.Event) (bool, error) {
+	for _, start := range stream {
+		if start.EventType != "EXECUTION_STARTED" || start.TaskID != string(state.Value.ID) {
+			continue
+		}
+		admitted, found, err := events.AdmittedProjection(start)
+		if err != nil {
+			return false, err
+		}
+		if !found || admitted.Projection.Version != state.Version {
+			continue
+		}
+		executionID, err := events.ContainmentExecutionID(start)
+		if err != nil {
+			return false, err
+		}
+		verified, found, err := continuationEvent(stream, "COMPLETION_VERIFIED", state.Value.ID, core.ID(executionID))
+		if err != nil || !found {
+			return false, err
+		}
+		if verified.Sequence <= start.Sequence || verified.OrganizationID != start.OrganizationID || verified.CorrelationID != state.CorrelationID {
+			return false, fmt.Errorf("completion recovery crosses execution identity")
+		}
+		var detail completionDetail
+		if err := json.Unmarshal(verified.Payload, &detail); err != nil {
+			return false, err
+		}
+		task := state.Value
+		task.Status = core.TaskCompleted
+		return true, s.state.SaveTask(ctx, core.ID(start.OrganizationID), "TASK_VERIFIED_COMPLETE", "runtime", state.CorrelationID, state.Version+1, task, detail)
+	}
+	return false, nil
 }
 
 func containmentInterrupted(err error) bool {
