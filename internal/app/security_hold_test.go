@@ -553,6 +553,117 @@ func (l *holdBeforeOutcomeLedger) AppendProjection(ctx context.Context, draft ev
 
 type holdDuringHandler struct{ freeze func() }
 
+// Preserve the registered generation but strip cancellation, exercising the
+// authoritative writer check even if the live monitor has already signalled.
+type preparationHoldLedger struct {
+	*ledger.SQLite
+	beforeWrite func()
+}
+
+func (l *preparationHoldLedger) AppendProjection(ctx context.Context, draft events.ProjectionDraft) (events.Event, error) {
+	if l.beforeWrite != nil {
+		before := l.beforeWrite
+		l.beforeWrite = nil
+		before()
+		ctx = context.WithoutCancel(ctx)
+	}
+	return l.SQLite.AppendProjection(ctx, draft)
+}
+
+func TestPreStartExitsRetainContainmentGeneration(t *testing.T) {
+	for _, name := range []string{"HUMAN", "TOOL", "TEAM", "MIXED", "DETERMINISTIC", "AGENT", "stale-strategy"} {
+		t.Run(name, func(t *testing.T) {
+			kind := core.ExecutionKind(name)
+			if name == "stale-strategy" {
+				kind = core.ExecutionHuman
+			}
+			for _, held := range []bool{false, true} {
+				t.Run(fmt.Sprintf("held=%t", held), func(t *testing.T) {
+					ctx := t.Context()
+					store, err := ledger.Open(":memory:")
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = store.Close() })
+					writer := &preparationHoldLedger{SQLite: store}
+					gateway := events.NewGateway(writer)
+					repository := projections.New(gateway)
+					if name == "stale-strategy" {
+						seedTestGoal(t, ctx, repository, "org-a", "mission-preparation", "goal-preparation", core.GoalActive)
+					} else if err := repository.SaveOrganization(ctx, "ORGANIZATION_CREATED", "runtime", "preparation", 1, core.Organization{ID: "org-a", Name: "Preparation", PolicyVersion: "v1"}, nil); err != nil {
+						t.Fatal(err)
+					}
+					intent := acceptedTestIntent("intent-preparation", "org-a", "provide bounded work")
+					work := core.Work{ID: "work-preparation", IntentID: intent.ID, Objective: "provide bounded work", Status: core.WorkActive}
+					task := core.Task{ID: "task-preparation", WorkID: work.ID, Description: "provide bounded work", AcceptanceCriteria: intent.CompletionCriteria, ExecutionKind: kind, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
+					if name == "stale-strategy" {
+						in := confirmedGoalSubmit(t, ctx, gateway, "preparation", "org-a", "goal-preparation", "provide bounded work", core.ExecutionHuman)
+						result, err := New(gateway).Submit(ctx, in)
+						if err != nil {
+							t.Fatal(err)
+						}
+						task = result.Task
+						prepared, err := repository.Load(ctx)
+						if err != nil {
+							t.Fatal(err)
+						}
+						goalState := prepared.Goals["goal-preparation"]
+						goal := goalState.Value
+						goal.Status = core.GoalPaused
+						if err := repository.SaveGoal(ctx, "GOAL_PAUSED", "runtime", goalState.CorrelationID, goalState.Version+1, goal, nil); err != nil {
+							t.Fatal(err)
+						}
+					} else if err := saveTestTaskGraph(ctx, repository, "org-a", "preparation", intent, work, task); err != nil {
+						t.Fatal(err)
+					}
+					snapshot, err := repository.Load(ctx)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if held {
+						writer.beforeWrite = func() {
+							for index, frozen := range []bool{true, false} {
+								state := struct {
+									OrganizationID core.ID   `json:"organization_id"`
+									Frozen         bool      `json:"frozen"`
+									UpdatedAt      time.Time `json:"updated_at"`
+								}{"org-a", frozen, time.Now().UTC()}
+								if err := store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "preparation", nil, nil, "organization_freeze", "org-a", index+1, state); err != nil {
+									t.Fatal(err)
+								}
+							}
+						}
+					}
+					_, err = New(gateway).executeTask(ctx, snapshot, snapshot.Tasks[task.ID], false)
+					if held && !errors.Is(err, core.ErrOrganizationFrozen) {
+						t.Fatalf("released hold admitted pre-start mutation: %v", err)
+					}
+					if !held && err != nil {
+						t.Fatalf("ordinary preparation exit: %v", err)
+					}
+					after, err := repository.Load(ctx)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want := core.TaskBlocked
+					if name == "stale-strategy" {
+						want = core.TaskFailed
+					}
+					if held {
+						want = task.Status
+					}
+					if after.Tasks[task.ID].Value.Status != want {
+						t.Fatalf("status = %s, want %s", after.Tasks[task.ID].Value.Status, want)
+					}
+					if writer.beforeWrite != nil {
+						t.Fatal("preparation mutation was not reached")
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestVerifiedCompletionSurvivesLaterHoldAndRecovery(t *testing.T) {
 	for _, crash := range []bool{false, true} {
 		t.Run(fmt.Sprintf("crash-%t", crash), func(t *testing.T) {

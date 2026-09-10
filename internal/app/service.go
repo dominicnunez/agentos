@@ -2914,14 +2914,14 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	case core.ExecutionTool, core.ExecutionTeam, core.ExecutionMixed:
 		task.Status = core.TaskBlocked
 		detail := blockedDetail("execution kind is declared but unavailable in this V1 slice", "authorized runtime handler", "the worker cannot expand its own execution authority")
-		if err := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); err != nil {
+		if err := s.saveBlockedTask(liveCtx, snapshot, state, organizationID, task, detail); err != nil {
 			return taskRun{}, fmt.Errorf("persist blocked task %s: %w", task.ID, err)
 		}
 		return taskRun{}, nil
 	default:
 		task.Status = core.TaskBlocked
 		detail := blockedDetail("execution kind is unknown and unavailable", "recognized authorized runtime handler", "the worker cannot expand its own execution authority")
-		if err := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); err != nil {
+		if err := s.saveBlockedTask(liveCtx, snapshot, state, organizationID, task, detail); err != nil {
 			return taskRun{}, fmt.Errorf("persist blocked task %s: %w", task.ID, err)
 		}
 		return taskRun{}, nil
@@ -2950,7 +2950,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		if !intentFound || intentState.Value.OrganizationID != organizationID {
 			return taskRun{}, fmt.Errorf("load durable Intent context for task %s", task.ID)
 		}
-		correlationEvents, err = s.gateway.Events(ctx, state.CorrelationID)
+		correlationEvents, err = s.gateway.Events(liveCtx, state.CorrelationID)
 		if err != nil {
 			return taskRun{}, fmt.Errorf("load strategic execution context for task %s: %w", task.ID, err)
 		}
@@ -2959,7 +2959,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			strategy, planErr = snapshotStrategicContext(snapshot, organizationID, workState.Value, plan)
 		}
 		if planErr != nil || strategy == nil || strategy.Mission.Status != core.MissionActive || strategy.Goal.Status != core.GoalActive {
-			if failErr := s.failStrategicTask(ctx, organizationID, state); failErr != nil {
+			if failErr := s.failStrategicTask(liveCtx, organizationID, state); failErr != nil {
 				return taskRun{}, fmt.Errorf("terminalize stale strategic task %s: %w", task.ID, failErr)
 			}
 			return taskRun{}, nil
@@ -2973,7 +2973,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			task.Status = core.TaskBlocked
 			detail := blockedDetail("the durable Agent assignment is unavailable or no longer eligible", "an active same-organization Agent with the exact reviewed blueprint, execution profile, runtime adapter, and capability prerequisites", "the runtime cannot substitute another Agent, infer capabilities, or change provider identity at dispatch")
 			detail.Code = assignmentBlockedCode
-			if saveErr := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); saveErr != nil {
+			if saveErr := s.saveBlockedTask(liveCtx, snapshot, state, organizationID, task, detail); saveErr != nil {
 				return taskRun{}, fmt.Errorf("persist assignment block for task %s: %w", task.ID, saveErr)
 			}
 			return taskRun{}, nil
@@ -2985,25 +2985,25 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 	if task.ExecutionKind == core.ExecutionHuman {
 		task.Status = core.TaskBlocked
 		detail := blockedDetail("user task is awaiting structured completion", "every field and artifact required by its CompletionContract", "the runtime cannot invent, infer, or waive required user evidence")
-		if err := s.saveBlockedTask(ctx, snapshot, state, organizationID, task, detail); err != nil {
+		if err := s.saveBlockedTask(liveCtx, snapshot, state, organizationID, task, detail); err != nil {
 			return taskRun{}, fmt.Errorf("persist input-required user task %s: %w", task.ID, err)
 		}
 		return taskRun{}, nil
 	}
 	if task.ExecutionKind == core.ExecutionAgent {
 		if remediation {
-			dependencyRefs, blockedDependencies, err = s.blockedDependencyContext(ctx, snapshot, state.CorrelationID, task)
+			dependencyRefs, blockedDependencies, err = s.blockedDependencyContext(liveCtx, snapshot, state.CorrelationID, task)
 			if err != nil {
 				return taskRun{}, fmt.Errorf("load blocked dependency evidence for task %s: %w", task.ID, err)
 			}
 		} else {
-			dependencyRefs, dependencyResults, err = s.dependencyResultContext(ctx, organizationID, snapshot, state.CorrelationID, task)
+			dependencyRefs, dependencyResults, err = s.dependencyResultContext(liveCtx, organizationID, snapshot, state.CorrelationID, task)
 			if err != nil {
 				return taskRun{}, fmt.Errorf("load dependency evidence for task %s: %w", task.ID, err)
 			}
 		}
 		if correlationEvents == nil {
-			correlationEvents, err = s.gateway.Events(ctx, state.CorrelationID)
+			correlationEvents, err = s.gateway.Events(liveCtx, state.CorrelationID)
 		}
 		if err != nil {
 			return taskRun{}, fmt.Errorf("load completion revision context for task %s: %w", task.ID, err)
@@ -3015,7 +3015,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		if err := core.ValidateStrategicExecutionContext(strategy); err != nil {
 			task.Status = core.TaskFailed
 			detail := strategicTaskFailureDetail{Code: "EXECUTION_CONTEXT_LIMIT_EXCEEDED", Reason: err.Error(), Replacement: "submit narrower replacement Work whose reviewed context fits the execution boundary"}
-			if saveErr := s.state.SaveTask(ctx, organizationID, "TASK_WORK_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); saveErr != nil {
+			if saveErr := s.state.SaveTask(liveCtx, organizationID, "TASK_WORK_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); saveErr != nil {
 				return taskRun{}, fmt.Errorf("terminalize oversized execution context for task %s: %w", task.ID, saveErr)
 			}
 			return taskRun{}, nil
@@ -3124,7 +3124,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 				return taskRun{}, context.Cause(liveCtx)
 			}
 			if errors.Is(err, events.ErrStrategicContextChanged) {
-				if failErr := s.failStrategicTask(ctx, organizationID, state); failErr != nil {
+				if failErr := s.failStrategicTask(liveCtx, organizationID, state); failErr != nil {
 					return taskRun{}, fmt.Errorf("terminalize concurrently stale strategic task %s: %w", task.ID, failErr)
 				}
 				return taskRun{}, nil
@@ -3132,7 +3132,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			if errors.Is(err, core.ErrExecutionContextLimitExceeded) {
 				task.Status = core.TaskFailed
 				detail := strategicTaskFailureDetail{Code: "EXECUTION_CONTEXT_LIMIT_EXCEEDED", Reason: err.Error(), Replacement: "submit narrower replacement Work whose reviewed context fits the execution boundary"}
-				if saveErr := s.state.SaveTask(ctx, organizationID, "TASK_WORK_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); saveErr != nil {
+				if saveErr := s.state.SaveTask(liveCtx, organizationID, "TASK_WORK_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); saveErr != nil {
 					return taskRun{}, fmt.Errorf("terminalize oversized execution input for task %s: %w", task.ID, saveErr)
 				}
 				return taskRun{}, nil
@@ -3144,7 +3144,7 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			return taskRun{}, context.Cause(liveCtx)
 		}
 		if errors.Is(err, events.ErrStrategicContextChanged) {
-			if failErr := s.failStrategicTask(ctx, organizationID, state); failErr != nil {
+			if failErr := s.failStrategicTask(liveCtx, organizationID, state); failErr != nil {
 				return taskRun{}, fmt.Errorf("terminalize concurrently stale strategic task %s: %w", task.ID, failErr)
 			}
 			return taskRun{}, nil
