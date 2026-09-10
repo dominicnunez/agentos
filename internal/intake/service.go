@@ -722,29 +722,34 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 		}
 	}
 	normalized, err := normalizer.Normalize(normalizationCtx, turns)
+	// A disconnected caller must not prevent runtime accounting or an ordinary
+	// failure boundary. Keep context values and a bounded bookkeeping lifetime;
+	// the ledger still rejects closure across an intervening security hold.
+	bookkeepingCtx, finishBookkeeping := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer finishBookkeeping()
 	// Only a proven ordinary rejection closes the attempt. Storage uncertainty
 	// and containment interruptions must retain the unresolved manifest.
 	reject := func(cause error) (View, error) {
 		if usesModel {
-			if finishErr := s.app.RecordIntentNormalizationFailure(ctx, principal.OrganizationID, message.ConversationID, executionID); finishErr != nil {
+			if finishErr := s.app.RecordIntentNormalizationFailure(bookkeepingCtx, principal.OrganizationID, message.ConversationID, executionID); finishErr != nil {
 				return View{}, fmt.Errorf("%w: persist failed normalization boundary", ErrUnavailable)
 			}
 		}
 		return View{}, cause
 	}
 	if normalized.Usage != nil {
-		_, usageErr := s.app.RecordIntentNormalizationUsage(ctx, principal.OrganizationID, message.ConversationID, executionID, *normalized.Usage)
+		_, usageErr := s.app.RecordIntentNormalizationUsage(bookkeepingCtx, principal.OrganizationID, message.ConversationID, executionID, *normalized.Usage)
 		if usageErr != nil {
 			return View{}, fmt.Errorf("%w: persist intent normalization usage", ErrUnavailable)
 		}
 	}
 	if err != nil {
 		if usesModel && errors.Is(err, core.ErrContainmentUnavailable) {
-			if suspendErr := s.app.RecordIntentNormalizationSuspension(context.WithoutCancel(ctx), principal.OrganizationID, message.ConversationID, executionID); suspendErr != nil {
+			if suspendErr := s.app.RecordIntentNormalizationSuspension(bookkeepingCtx, principal.OrganizationID, message.ConversationID, executionID); suspendErr != nil {
 				return View{}, fmt.Errorf("%w: persist normalization suspension", ErrUnavailable)
 			}
 		} else if usesModel && !errors.Is(err, core.ErrOrganizationFrozen) {
-			if finishErr := s.app.RecordIntentNormalizationFailure(ctx, principal.OrganizationID, message.ConversationID, executionID); finishErr != nil {
+			if finishErr := s.app.RecordIntentNormalizationFailure(bookkeepingCtx, principal.OrganizationID, message.ConversationID, executionID); finishErr != nil {
 				return View{}, fmt.Errorf("%w: persist failed normalization boundary", ErrUnavailable)
 			}
 		}

@@ -786,8 +786,9 @@ func TestIntentNormalizationManifestsModelUseAndReplaysWithoutInference(t *testi
 }
 
 type retryNormalizationModel struct {
-	response string
-	calls    int
+	response      string
+	calls         int
+	beforeFailure func()
 }
 
 func (*retryNormalizationModel) Descriptor() NormalizerDescriptor {
@@ -797,13 +798,23 @@ func (*retryNormalizationModel) Descriptor() NormalizerDescriptor {
 func (m *retryNormalizationModel) CompleteRequest(_ context.Context, request modelinput.Request) (TextCompletion, error) {
 	m.calls++
 	if m.calls == 1 {
+		if m.beforeFailure != nil {
+			m.beforeFailure()
+		}
 		return TextCompletion{}, errors.New("temporary provider failure")
 	}
 	return TextCompletion{Text: testNormalizationResponse(m.response, request), Usage: events.InferenceUsageRecordedPayload{Source: "test", Provider: "test", Model: "test-model"}}, nil
 }
 
 func TestIntentNormalizationRetryCompletesAnInterruptedDraftOnce(t *testing.T) {
-	ctx := context.Background()
+	for _, cancelled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancelled=%t", cancelled), func(t *testing.T) { testIntentNormalizationRetry(t, cancelled) })
+	}
+}
+
+func testIntentNormalizationRetry(t *testing.T, cancelled bool) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	store, err := ledger.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -811,6 +822,9 @@ func TestIntentNormalizationRetryCompletesAnInterruptedDraftOnce(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	ready := `{"state":"READY_FOR_REVIEW","reply":"Review this intent.","intent":{"mode":"STANDARD","objective":"Prepare a Linux release","context":[],"deliverables":[{"value":"Linux binary","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Binary passes verification","origin":"EXPLICIT","source_message_id":"message-1"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
 	model := &retryNormalizationModel{response: ready}
+	if cancelled {
+		model.beforeFailure = cancel
+	}
 	normalizer, err := NewModelNormalizer(model)
 	if err != nil {
 		t.Fatal(err)
@@ -822,13 +836,19 @@ func TestIntentNormalizationRetryCompletesAnInterruptedDraftOnce(t *testing.T) {
 	if _, err := service.Handle(ctx, principal, message); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("first normalization err=%v", err)
 	}
-	view, err := service.Handle(ctx, principal, message)
+	// A fresh service and request context must recognize the durable ordinary
+	// failure even when its original caller disconnected during the model call.
+	service = NewWithNormalizer(app.New(events.NewGateway(store)), normalizer)
+	view, err := service.Handle(t.Context(), principal, message)
 	if err != nil || view.State != StateAwaitingConfirmation || model.calls != 2 {
 		t.Fatalf("retried view=%+v calls=%d err=%v", view, model.calls, err)
 	}
 	stream := externalStream(t, store, message.ConversationID)
 	if countEvents(stream, "INTAKE_MESSAGE_RECORDED") != 1 || countEvents(stream, "INTENT_NORMALIZATION_CONTEXT_MANIFESTED") != 2 || countEvents(stream, "INFERENCE_USAGE_RECORDED") != 1 || countEvents(stream, "INTENT_DRAFTED") != 1 {
 		t.Fatalf("interrupted retry did not preserve distinct attempts: %+v", stream)
+	}
+	if countEvents(stream, "INTENT_NORMALIZATION_FAILED") != 1 {
+		t.Fatal("ordinary cancellation retry lacks its durable failure boundary")
 	}
 }
 
@@ -1984,9 +2004,11 @@ func (n *rejectedOutputNormalizer) Normalize(ctx context.Context, turns []Conver
 
 func TestPostNormalizationRejectionPermitsCorrectedRetry(t *testing.T) {
 	for name, mutate := range map[string]func(*Normalization){
-		"lost-finish":        func(n *Normalization) { n.Candidate.Objective = "" },
-		"invalid-output":     func(n *Normalization) { n.Candidate.Objective = "" },
-		"invalid-provenance": func(n *Normalization) { n.Candidate.Deliverables[0].SourceMessageID = "missing-message" },
+		"cancelled-invalid-output":      func(n *Normalization) { n.Candidate.Objective = "" },
+		"cancelled-held-invalid-output": func(n *Normalization) { n.Candidate.Objective = "" },
+		"lost-finish":                   func(n *Normalization) { n.Candidate.Objective = "" },
+		"invalid-output":                func(n *Normalization) { n.Candidate.Objective = "" },
+		"invalid-provenance":            func(n *Normalization) { n.Candidate.Deliverables[0].SourceMessageID = "missing-message" },
 		"conflicting-goal": func(n *Normalization) {
 			n.Candidate.Goal = &core.IntentValue{Value: "goal-other", Origin: "EXPLICIT", SourceMessageID: "message-1"}
 		},
@@ -1995,6 +2017,12 @@ func TestPostNormalizationRejectionPermitsCorrectedRetry(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
+			requestCtx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if name == "cancelled-invalid-output" {
+				original := mutate
+				mutate = func(n *Normalization) { original(n); cancel() }
+			}
 			store, err := ledger.Open(":memory:")
 			if err != nil {
 				t.Fatal(err)
@@ -2002,6 +2030,23 @@ func TestPostNormalizationRejectionPermitsCorrectedRetry(t *testing.T) {
 			t.Cleanup(func() { _ = store.Close() })
 			gateway := events.NewGateway(store)
 			seedIntakeGoal(t, t.Context(), gateway, "org-1", "goal-1", core.GoalActive)
+			if name == "cancelled-held-invalid-output" {
+				original := mutate
+				mutate = func(n *Normalization) {
+					original(n)
+					for index, frozen := range []bool{true, false} {
+						state := struct {
+							OrganizationID core.ID   `json:"organization_id"`
+							Frozen         bool      `json:"frozen"`
+							UpdatedAt      time.Time `json:"updated_at"`
+						}{"org-1", frozen, time.Now().UTC()}
+						if err := store.AppendRecord(t.Context(), "org-1", "FREEZE_SET", "user-1", "cancelled-normalization", nil, nil, "organization_freeze", "org-1", index+1, state); err != nil {
+							t.Fatal(err)
+						}
+					}
+					cancel()
+				}
+			}
 			if name == "lost-finish" {
 				gateway = events.NewGateway(&failOnceOrdinaryEvent{SQLite: store, eventType: "INTENT_NORMALIZATION_FAILED"})
 			}
@@ -2014,11 +2059,14 @@ func TestPostNormalizationRejectionPermitsCorrectedRetry(t *testing.T) {
 			service := NewWithNormalizer(app.New(gateway), normalizer)
 			principal := testPrincipal("user-1", core.PrincipalHuman, ChannelHumanDirect)
 			message := Message{ConversationID: "rejected-output", MessageID: "message-1", Text: "Prepare a Linux release using goal-other and work-missing", SelectedGoalID: "goal-1"}
-			if _, err := service.Handle(t.Context(), principal, message); err == nil {
+			if _, err := service.Handle(requestCtx, principal, message); err == nil {
 				t.Fatal("invalid output was accepted")
 			}
 			stream := externalStream(t, store, message.ConversationID)
-			if name == "lost-finish" {
+			if name == "lost-finish" || name == "cancelled-held-invalid-output" {
+				if countEvents(stream, "INFERENCE_USAGE_RECORDED") != 1 {
+					t.Fatal("unresolved normalization lost provider usage")
+				}
 				if countEvents(stream, "INTENT_NORMALIZATION_FAILED") != 0 {
 					t.Fatal("failed finish unexpectedly persisted")
 				}
