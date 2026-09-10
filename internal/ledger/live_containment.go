@@ -589,7 +589,21 @@ func (l *SQLite) CheckExecutionContainment(ctx context.Context, organization, ta
 			}
 			draft.SourceExecutionID = ""
 		}
-		return validateExecutionPublication(ctx, tx, draft)
+		if err := validateExecutionPublication(ctx, tx, draft); err != nil {
+			return err
+		}
+		if finish == 0 {
+			var unfinished bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events m WHERE m.event_type='PLANNING_CONTEXT_MANIFESTED' AND m.organization_id=? AND m.task_id=? AND m.correlation_id=? AND m.source_execution_id=? AND NOT EXISTS(SELECT 1 FROM events p WHERE p.event_type='PLAN_CREATED' AND p.organization_id=m.organization_id AND p.task_id=m.task_id AND p.correlation_id=m.correlation_id AND p.source_execution_id=m.source_execution_id AND p.sequence>m.sequence))`, organization, taskID, correlation, executionID).Scan(&unfinished); err != nil {
+				return err
+			}
+			if unfinished {
+				// A crash can lose the interruption marker. A manifest alone
+				// proves admission, not an ordinary failure or a completed plan.
+				return core.ErrContainmentUnavailable
+			}
+		}
+		return nil
 	})
 }
 

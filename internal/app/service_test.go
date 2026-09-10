@@ -3437,8 +3437,8 @@ func TestRecoveryDoesNotReplayInterruptedAdaptivePlanning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Works[work.ID].Value.Status != "FAILED" || len(snapshot.Tasks) != 0 {
-		t.Fatalf("interrupted planning remained executable: work=%+v tasks=%+v", snapshot.Works[work.ID], snapshot.Tasks)
+	if snapshot.Works[work.ID].Value.Status != core.WorkActive || len(snapshot.Tasks) != 0 {
+		t.Fatalf("unresolved planning was terminalized or materialized: work=%+v tasks=%+v", snapshot.Works[work.ID], snapshot.Tasks)
 	}
 	stream, err := gateway.Events(ctx, "planning-interrupted")
 	if err != nil {
@@ -3446,18 +3446,13 @@ func TestRecoveryDoesNotReplayInterruptedAdaptivePlanning(t *testing.T) {
 	}
 	found := false
 	for _, event := range stream {
-		if event.EventType != "WORK_PLANNING_FAILED" {
-			continue
+		if event.EventType == "WORK_PLANNING_FAILED" || event.EventType == "PLANNING_FAILED" {
+			t.Fatal("unresolved planning published ordinary failure")
 		}
-		var projection events.ProjectionEventPayload
-		var detail planningFailureDetail
-		if json.Unmarshal(event.Payload, &projection) != nil || json.Unmarshal(projection.Detail, &detail) != nil || detail.Code != "PLANNING_INTERRUPTED" || detail.EvidenceEventRef != contextEvent.EventID {
-			t.Fatalf("planning failure evidence=%+v", detail)
-		}
-		found = true
+		found = found || event.EventID == contextEvent.EventID
 	}
 	if !found {
-		t.Fatal("interrupted planning was not durably terminalized")
+		t.Fatal("interrupted planning lost its admission evidence")
 	}
 }
 

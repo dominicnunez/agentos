@@ -930,17 +930,38 @@ func TestInitialContainmentFailureDefersOnlyAffectedOrganization(t *testing.T) {
 	}
 }
 
+type lostPlanningSuspensionLedger struct{ *ledger.SQLite }
+
+func (l lostPlanningSuspensionLedger) Append(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {
+	if draft.EventType == "PLANNING_CONTAINMENT_SUSPENDED" {
+		return events.Event{}, errSuspensionCrash
+	}
+	return l.SQLite.Append(ctx, draft)
+}
+
 func TestUnavailablePlanningContainmentRemainsActive(t *testing.T) {
+	for _, lostMarker := range []bool{false, true} {
+		t.Run(fmt.Sprintf("lost-marker-%t", lostMarker), func(t *testing.T) { testUnavailablePlanningContainmentRemainsActive(t, lostMarker) })
+	}
+}
+
+func testUnavailablePlanningContainmentRemainsActive(t *testing.T, lostMarker bool) {
 	store, err := ledger.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	planner := &unavailablePlanningPlanner{}
-	service := NewWithModelAndPlanner(events.NewGateway(store), execution.FakeModel{}, planner)
+	gateway := events.NewGateway(store)
+	if lostMarker {
+		gateway = events.NewGateway(lostPlanningSuspensionLedger{store})
+	}
+	service := NewWithModelAndPlanner(gateway, execution.FakeModel{}, planner)
 	if _, err := service.Submit(t.Context(), Submit{RequestID: "unavailable-planning", OrganizationID: "org-1", Statement: "prepare a note", Kind: core.ExecutionAgent}); !errors.Is(err, core.ErrContainmentUnavailable) {
 		t.Fatalf("containment interruption lost: %v", err)
 	}
+	// Reconstruct the service without the failing writer or original call context.
+	service = NewWithModelAndPlanner(events.NewGateway(store), execution.FakeModel{}, planner)
 	for range 2 {
 		if _, err := service.Recover(t.Context()); err != nil {
 			t.Fatal(err)
@@ -969,6 +990,12 @@ func TestUnavailablePlanningContainmentRemainsActive(t *testing.T) {
 		if event.EventType == "PLANNING_FAILED" || event.EventType == "WORK_PLANNING_FAILED" {
 			t.Fatal("safety interruption published planning failure")
 		}
+	}
+	if lostMarker && countEventType(stream, "PLANNING_CONTAINMENT_SUSPENDED") != 0 {
+		t.Fatal("lost-marker scenario unexpectedly retained a suspension marker")
+	}
+	if _, err := service.Submit(t.Context(), Submit{RequestID: "unavailable-planning", OrganizationID: "org-1", Statement: "prepare a note", Kind: core.ExecutionAgent}); !errors.Is(err, core.ErrContainmentUnavailable) || planner.calls != 1 {
+		t.Fatalf("retry failed to retain unresolved admission: calls=%d err=%v", planner.calls, err)
 	}
 }
 
