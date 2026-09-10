@@ -4251,6 +4251,17 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		switch d.EventType {
+		case "PLAN_CREATED":
+			var closed bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE organization_id=? AND source_execution_id=? AND event_type='INFERENCE_NOT_SENT')`, d.OrganizationID, d.SourceExecutionID).Scan(&closed); err != nil {
+				return err
+			}
+			if d.SourceExecutionID != "" && closed {
+				return fmt.Errorf("closed planning invocation cannot publish a plan")
+			}
+			if err := validateExecutionPublication(ctx, tx, d); err != nil {
+				return err
+			}
 		case "PLANNING_CONTEXT_MANIFESTED":
 			if err := validatePlanningRetry(ctx, tx, d); err != nil {
 				return err

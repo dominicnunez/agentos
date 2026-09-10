@@ -916,7 +916,7 @@ func resolvePlan(organizationID, correlationID string, work core.Work, intent co
 		}
 		var candidate core.Plan
 		if selected.EventID != "" || event.OrganizationID != organizationID || event.SourceActorID != "runtime" || event.RecipientScope != "" || event.RecipientID != "" || event.TaskID != "task-"+correlationID || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 ||
-			event.SourceExecutionID != "" && event.SourceExecutionID != "planning-plan-"+correlationID+"-attempt-1" || decodeExactEventJSON(event.Payload, &candidate) != nil {
+			ValidatePlanExecution(event, stream) != nil || decodeExactEventJSON(event.Payload, &candidate) != nil {
 			return core.Plan{}, Event{}, fmt.Errorf("strategic Plan event is invalid")
 		}
 		selected, plan = event, candidate
@@ -1299,7 +1299,7 @@ func completionEvidencePlan(binding WorkCompletionBinding, evidence WorkCompleti
 	if planEvent.EventID == "" || plan.ID != evidence.PlanID || plan.Version != evidence.PlanVersion || plan.IntentID != binding.Intent.ID || plan.IntentFingerprint != binding.Intent.AcceptedFingerprint || plan.Fingerprint == "" {
 		return core.Plan{}, fmt.Errorf("work completion evidence lacks its exact durable plan")
 	}
-	if planEvent.SourceExecutionID != "" && planEvent.SourceExecutionID != "planning-"+string(plan.ID)+"-attempt-1" {
+	if ValidatePlanExecution(planEvent, stream) != nil {
 		return core.Plan{}, fmt.Errorf("work completion plan execution identity is invalid")
 	}
 	fingerprint, err := core.FingerprintPlan(plan)

@@ -375,6 +375,7 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 			return RecoveryResult{}, fmt.Errorf("reload task graphs recovered from durable plans: %w", err)
 		}
 	}
+	verifiedRestored := 0
 	for _, state := range sortedTaskStates(snapshot.Tasks) {
 		if state.Value.Status == core.TaskBlocked {
 			organizationID, err := taskOrganization(snapshot, state.Value)
@@ -413,6 +414,7 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 				return RecoveryResult{}, err
 			}
 			if restored {
+				verifiedRestored++
 				continue
 			}
 		}
@@ -443,7 +445,7 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 	if err != nil {
 		return RecoveryResult{}, fmt.Errorf("reload durable runtime state after completion reviews: %w", err)
 	}
-	result := RecoveryResult{PlansMaterialized: plansMaterialized}
+	result := RecoveryResult{PlansMaterialized: plansMaterialized, RunningRecovered: verifiedRestored}
 	continuedInputs := 0
 	for _, state := range sortedTaskStates(snapshot.Tasks) {
 		organizationID, err := taskOrganization(snapshot, state.Value)
@@ -604,7 +606,7 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 	if err != nil {
 		return RecoveryResult{}, err
 	}
-	result.TasksExecuted = len(runs) + continuedInputs
+	result.TasksExecuted = len(runs) + continuedInputs + verifiedRestored
 	if err := s.reconcileWorks(ctx); err != nil {
 		return RecoveryResult{}, err
 	}
@@ -660,6 +662,8 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		hasDurablePlan := false
 		planningAttemptRef := ""
 		planningExecutionID := ""
+		planningProofs := events.PlanningNotSentExecutions(stream, string(intentState.Value.OrganizationID), workState.CorrelationID)
+		allPlanningNotSent := true
 		for _, event := range stream {
 			if event.EventType == "PLAN_CREATED" {
 				hasDurablePlan = true
@@ -671,6 +675,9 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 				}
 				planningAttemptRef = event.EventID
 				planningExecutionID = event.SourceExecutionID
+				if planningProofs[event.SourceExecutionID] <= event.Sequence {
+					allPlanningNotSent = false
+				}
 			}
 		}
 		if !hasDurablePlan && planningExecutionID != "" {
@@ -700,7 +707,7 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 			in.experimentSpec = &spec
 		}
 		if intent.SourceChannel == "INTERNAL" {
-			if !hasDurablePlan {
+			if !hasDurablePlan && (planningExecutionID == "" || !allPlanningNotSent) {
 				if err := s.failPlanningWork(ctx, intent.OrganizationID, workState, "PLANNING_RECOVERY_IDENTITY_INCOMPLETE", "planning could not be resumed because the requested execution kind was not durably recoverable", planningAttemptRef); err != nil {
 					if containmentInterrupted(err) {
 						continue
@@ -708,6 +715,9 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 					return 0, err
 				}
 				continue
+			}
+			if !hasDurablePlan {
+				in.Kind = core.ExecutionAgent
 			}
 			var plan core.Plan
 			for _, event := range stream {
@@ -2175,7 +2185,13 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	inputRefs := append(append([]string(nil), intentInputRefs...), strategicEventRefs...)
 	attemptRef, attempted, attemptStateErr := recordedPlanningAttempt(stream, planID, intent, draft, inputRefs, strategicContextRefs)
 	if attempted {
-		if holdErr := s.gateway.CheckExecutionContainment(ctx, string(organizationID), "task-"+correlationID, correlationID, "planning-"+string(planID)+"-attempt-1"); holdErr != nil {
+		attemptID := ""
+		for _, event := range stream {
+			if event.EventID == attemptRef {
+				attemptID = event.SourceExecutionID
+			}
+		}
+		if holdErr := s.gateway.CheckExecutionContainment(ctx, string(organizationID), "task-"+correlationID, correlationID, attemptID); holdErr != nil {
 			return core.Plan{}, holdErr
 		}
 		if attemptStateErr == nil {
@@ -2223,7 +2239,13 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 				return core.Plan{}, fmt.Errorf("governed model planner requires a route selector")
 			}
 		}
-		executionID = core.ID(fmt.Sprintf("planning-%s-attempt-1", planID))
+		attempt := 1
+		for _, event := range stream {
+			if event.EventType == "PLANNING_CONTEXT_MANIFESTED" {
+				attempt++
+			}
+		}
+		executionID = core.ID(fmt.Sprintf("planning-%s-attempt-%d", planID, attempt))
 		contextPayload := events.PlanningContextPayload{
 			RoutingDecision: modelinput.CloneRouteDecision(routingDecision),
 			PlanID:          string(planID), IntentID: string(intent.ID), IntentFingerprint: draft.Fingerprint,
@@ -2311,6 +2333,7 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 
 func recordedPlanningAttempt(stream []events.Event, planID core.ID, intent core.Intent, draft core.IntentDraft, inputRefs []string, strategicContextRefs []core.VersionedRef) (string, bool, error) {
 	attemptRef := ""
+	proofs := events.PlanningNotSentExecutions(stream, string(intent.OrganizationID), strings.TrimPrefix(string(planID), "plan-"))
 	for _, event := range stream {
 		if event.EventType != "PLANNING_CONTEXT_MANIFESTED" {
 			continue
@@ -2318,13 +2341,15 @@ func recordedPlanningAttempt(stream []events.Event, planID core.ID, intent core.
 		if attemptRef != "" {
 			return attemptRef, true, fmt.Errorf("durable planning state contains multiple unfinished attempts")
 		}
-		attemptRef = event.EventID
 		var manifest events.PlanningContextPayload
 		if event.EventID == "" || event.SourceExecutionID == "" || event.TaskID != "task-"+event.CorrelationID ||
 			json.Unmarshal(event.Payload, &manifest) != nil || manifest.PlanID != string(planID) || manifest.IntentID != string(intent.ID) ||
 			manifest.IntentFingerprint != draft.Fingerprint || manifest.PromptVersion == "" || manifest.Provider == "" || manifest.Model == "" ||
 			manifest.ExecutionProfileVersion == "" || !slices.Equal(manifest.InputEventRefs, inputRefs) || !slices.Equal(manifest.StrategicContextRefs, strategicContextRefs) {
-			return attemptRef, true, fmt.Errorf("durable planning context does not match the accepted Intent")
+			return event.EventID, true, fmt.Errorf("durable planning context does not match the accepted Intent")
+		}
+		if proofs[event.SourceExecutionID] <= event.Sequence {
+			attemptRef = event.EventID
 		}
 	}
 	return attemptRef, attemptRef != "", nil
@@ -3510,7 +3535,7 @@ func workCompletionPlan(stream []events.Event, intent core.Intent, correlationID
 		if recorded.ID != "" {
 			return core.Plan{}, fmt.Errorf("run contains multiple terminal plans")
 		}
-		if event.OrganizationID != string(intent.OrganizationID) || event.SourceActorID != "runtime" || event.CorrelationID != correlationID || event.TaskID != "task-"+correlationID || event.SourceExecutionID != "" && event.SourceExecutionID != "planning-plan-"+correlationID+"-attempt-1" {
+		if event.OrganizationID != string(intent.OrganizationID) || event.SourceActorID != "runtime" || event.CorrelationID != correlationID || event.TaskID != "task-"+correlationID || events.ValidatePlanExecution(event, stream) != nil {
 			return core.Plan{}, fmt.Errorf("terminal plan event crosses its trust boundary")
 		}
 		if err := json.Unmarshal(event.Payload, &recorded); err != nil {

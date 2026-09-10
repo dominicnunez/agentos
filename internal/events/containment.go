@@ -8,6 +8,64 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 )
 
+// PlanningNotSentExecutions indexes guard-owned closure evidence for one run.
+func PlanningNotSentExecutions(stream []Event, organization, correlation string) map[string]int64 {
+	proofs := map[string]int64{}
+	for _, event := range stream {
+		if event.EventType != "INFERENCE_NOT_SENT" || event.SourceActorID != "runtime" || event.OrganizationID != organization || event.CorrelationID != correlation || event.TaskID != "task-"+correlation {
+			continue
+		}
+		var payload struct {
+			RequestID    string `json:"request_id"`
+			PromptSHA256 string `json:"prompt_sha256"`
+		}
+		if decodeExactPayload(event.Payload, &payload) != nil || payload.RequestID != event.SourceExecutionID || len(payload.PromptSHA256) != 64 {
+			continue
+		}
+		proofs[event.SourceExecutionID] = event.Sequence
+	}
+	return proofs
+}
+
+// ValidatePlanExecution preserves the original plan identity and requires a
+// complete no-dispatch chain for plans produced by a later planning attempt.
+func ValidatePlanExecution(planEvent Event, stream []Event) error {
+	if planEvent.SourceExecutionID == "" {
+		return nil
+	}
+	proofs := PlanningNotSentExecutions(stream, planEvent.OrganizationID, planEvent.CorrelationID)
+	if planEvent.SourceExecutionID == "planning-plan-"+planEvent.CorrelationID+"-attempt-1" {
+		if proofs[planEvent.SourceExecutionID] != 0 {
+			return fmt.Errorf("closed planning invocation cannot publish a plan")
+		}
+		return nil
+	}
+	var plan core.Plan
+	if decodeExactPayload(planEvent.Payload, &plan) != nil {
+		return fmt.Errorf("invalid retried plan")
+	}
+	attempt := 0
+	var prior Event
+	for _, manifest := range stream {
+		if manifest.EventType != "PLANNING_CONTEXT_MANIFESTED" || manifest.OrganizationID != planEvent.OrganizationID || manifest.CorrelationID != planEvent.CorrelationID || manifest.Sequence >= planEvent.Sequence {
+			continue
+		}
+		attempt++
+		var payload PlanningContextPayload
+		if manifest.SourceActorID != "runtime" || manifest.TaskID != planEvent.TaskID || manifest.SourceExecutionID != fmt.Sprintf("planning-%s-attempt-%d", plan.ID, attempt) || decodeExactPayload(manifest.Payload, &payload) != nil || payload.PlanID != string(plan.ID) || payload.IntentID != string(plan.IntentID) || payload.IntentFingerprint != plan.IntentFingerprint {
+			return fmt.Errorf("retried plan manifest identity is invalid")
+		}
+		if prior.EventID != "" && (proofs[prior.SourceExecutionID] <= prior.Sequence || proofs[prior.SourceExecutionID] >= manifest.Sequence) {
+			return fmt.Errorf("retried plan lacks prior non-dispatch proof")
+		}
+		prior = manifest
+	}
+	if prior.EventID == "" || prior.SourceExecutionID != planEvent.SourceExecutionID || proofs[prior.SourceExecutionID] > prior.Sequence {
+		return fmt.Errorf("plan does not belong to its open planning attempt")
+	}
+	return nil
+}
+
 // ContainmentExecutionID resolves the runtime identity from an admitted start.
 // Human continuations bind to their durable input, not a scheduler version ID.
 func ContainmentExecutionID(start Event) (string, error) {
