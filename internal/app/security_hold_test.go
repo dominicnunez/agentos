@@ -897,6 +897,69 @@ func TestFinishedPlanningFailureSurvivesLaterReleasedHold(t *testing.T) {
 
 type unavailablePlanningPlanner struct{ failingPlanningPlanner }
 
+type holdBeforePlanningFailureLedger struct {
+	*ledger.SQLite
+	before func()
+}
+
+func (l *holdBeforePlanningFailureLedger) Append(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {
+	if draft.EventType == "PLANNING_FAILED" && l.before != nil {
+		before := l.before
+		l.before = nil
+		before()
+		ctx = context.Background() // The durable writer must not depend on a live generation.
+	}
+	return l.SQLite.Append(ctx, draft)
+}
+
+func TestHoldBeforePlanningFailurePreventsOrdinaryFinish(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	writer := &holdBeforePlanningFailureLedger{SQLite: store, before: func() {
+		for index, frozen := range []bool{true, false} {
+			state := struct {
+				OrganizationID core.ID   `json:"organization_id"`
+				Frozen         bool      `json:"frozen"`
+				UpdatedAt      time.Time `json:"updated_at"`
+			}{"org-1", frozen, time.Now().UTC()}
+			if err := store.AppendRecord(t.Context(), "org-1", "FREEZE_SET", "user-1", "planning-finish-race", nil, nil, "organization_freeze", "org-1", index+1, state); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}}
+	planner := &failingPlanningPlanner{}
+	service := NewWithModelAndPlanner(events.NewGateway(writer), execution.FakeModel{}, planner)
+	in := Submit{RequestID: "planning-finish-race", OrganizationID: "org-1", Statement: "prepare a note", Kind: core.ExecutionAgent}
+	if _, err := service.Submit(t.Context(), in); !errors.Is(err, core.ErrOrganizationFrozen) {
+		t.Fatalf("held ordinary failure admitted: %v", err)
+	}
+	service = NewWithModelAndPlanner(events.NewGateway(store), execution.FakeModel{}, planner)
+	for range 2 {
+		if _, err := service.Recover(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := service.state.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, work := range snapshot.Works {
+		if work.Value.Status != core.WorkActive {
+			t.Fatal("held failure terminalized Work")
+		}
+	}
+	stream, err := store.Events(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planner.calls != 1 || countEventType(stream, "PLANNING_FAILED") != 0 || countEventType(stream, "WORK_PLANNING_FAILED") != 0 {
+		t.Fatal("held planning replayed or published ordinary failure")
+	}
+}
+
 func (p *unavailablePlanningPlanner) Build(context.Context, planning.Input, core.ExecutionKind) (planning.Result, error) {
 	p.calls++
 	return planning.Result{}, execution.SafeModelError(execution.ModelCallFailed, core.ErrContainmentUnavailable)

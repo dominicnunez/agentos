@@ -559,6 +559,40 @@ func executionIntervalHoldThrough(ctx context.Context, tx *sql.Tx, draft events.
 	return hold, nil
 }
 
+// Bind ordinary failure to its manifested interval inside the admitting writer.
+// Callers cannot turn a held attempt into an ordinary finish by omitting scope.
+func bindPlanningFailureContainment(ctx context.Context, tx *sql.Tx, draft *events.TrustedDraft) error {
+	var detail struct {
+		Code             string `json:"code"`
+		Reason           string `json:"reason"`
+		EvidenceEventRef string `json:"evidence_event_ref,omitempty"`
+	}
+	if draft.SourceActorID != "runtime" || decodeExactJSON(draft.Payload, &detail) != nil || detail.Code == "" || detail.Reason == "" {
+		return fmt.Errorf("invalid planning failure boundary")
+	}
+	manifests, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? AND correlation_id=? AND event_type='PLANNING_CONTEXT_MANIFESTED' ORDER BY sequence`, draft.OrganizationID, draft.CorrelationID))
+	if err != nil {
+		return containmentReadFailure(err)
+	}
+	if len(manifests) != 0 {
+		var matched bool
+		for _, manifest := range manifests {
+			if manifest.EventID != detail.EvidenceEventRef {
+				continue
+			}
+			if manifest.SourceExecutionID == "" || manifest.TaskID == "" || draft.SourceExecutionID != "" && draft.SourceExecutionID != manifest.SourceExecutionID || draft.TaskID != "" && draft.TaskID != manifest.TaskID {
+				return fmt.Errorf("planning failure crosses manifest identity")
+			}
+			draft.SourceExecutionID, draft.TaskID = manifest.SourceExecutionID, manifest.TaskID
+			matched = true
+		}
+		if !matched {
+			return fmt.Errorf("planning failure lacks its exact manifested attempt")
+		}
+	}
+	return validateExecutionPublication(ctx, tx, *draft)
+}
+
 // CheckExecutionContainment lets recovery distinguish held model attempts from
 // ordinary failures without retrying inference or relying on a live context.
 func (l *SQLite) CheckExecutionContainment(ctx context.Context, organization, taskID, correlation, executionID string) (resultErr error) {

@@ -4248,6 +4248,10 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		switch d.EventType {
+		case "PLANNING_FAILED":
+			if err := bindPlanningFailureContainment(ctx, tx, &d); err != nil {
+				return err
+			}
 		case "INTENT_NORMALIZATION_CONTEXT_MANIFESTED":
 			if err := validateNormalizationRetry(ctx, tx, d); err != nil {
 				return err
