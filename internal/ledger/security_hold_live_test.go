@@ -17,6 +17,54 @@ import (
 
 type holdWaitingModel struct{ started chan struct{} }
 
+func TestFrozenNestedAdmissionRetainsEarliestHold(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx, release, err := store.BeginExecutionContext(t.Context(), "organization-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	appendInferenceFreeze(t, store, "organization-1", 1, true)
+	var first core.SecurityHoldCause
+	if !errors.As(context.Cause(ctx), &first) {
+		t.Fatalf("missing initial cancellation: %v", context.Cause(ctx))
+	}
+	appendInferenceFreeze(t, store, "organization-1", 2, false)
+	appendInferenceFreeze(t, store, "organization-1", 3, true)
+	// Reconciliation may remove cancellation, but must retain the original generation.
+	_, _, err = store.BeginInferenceContext(context.WithoutCancel(ctx), "organization-1")
+	var actual core.SecurityHoldCause
+	if !errors.As(err, &actual) || actual != first {
+		t.Fatalf("nested admission replaced earliest hold: got %v, want %v", err, first)
+	}
+}
+
+func TestInitialFrozenAdmissionRetainsExactHold(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	appendInferenceFreeze(t, store, "organization-1", 1, true)
+	guard, err := inference.NewGuardedAdapter(store, &holdReturningModel{freeze: func() { t.Fatal("frozen admission invoked provider") }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := inference.WithScope(t.Context(), testInferenceRequest("initial-frozen").Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = guard.Complete(ctx, "prompt")
+	var hold core.SecurityHoldCause
+	if !errors.As(err, &hold) || !errors.Is(err, core.ErrOrganizationFrozen) || hold.OrganizationID != "organization-1" || hold.EventRef == "" || hold.Sequence == 0 {
+		t.Fatalf("initial frozen admission lost exact evidence: %v", err)
+	}
+}
+
 func TestProlongedAuthorityContentionStopsLiveCall(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ledger.db")
 	store, err := Open(path)

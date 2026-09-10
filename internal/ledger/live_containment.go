@@ -75,9 +75,6 @@ func (l *SQLite) BeginExecutionContext(ctx context.Context, organization string)
 	if err != nil {
 		return nil, nil, containmentReadFailure(err)
 	}
-	if frozen {
-		return nil, nil, core.ErrOrganizationFrozen
-	}
 	generation := containmentGeneration{organization: organization, epoch: epoch}
 	if prior, ok := ctx.Value(containmentGenerationKey{}).(containmentGeneration); ok {
 		if prior.organization != organization {
@@ -91,6 +88,16 @@ func (l *SQLite) BeginExecutionContext(ctx context.Context, organization string)
 		if hold != nil {
 			return nil, nil, *hold
 		}
+	}
+	if frozen {
+		_, hold, err := l.containmentSince(ctx, organization, epoch-1)
+		if err != nil {
+			return nil, nil, containmentReadFailure(err)
+		}
+		if hold == nil {
+			return nil, nil, containmentReadFailure(fmt.Errorf("frozen admission lost its authority identity"))
+		}
+		return nil, nil, *hold
 	}
 	epoch = generation.epoch
 	callCtx, cancel := context.WithCancelCause(context.WithValue(ctx, containmentGenerationKey{}, generation))
