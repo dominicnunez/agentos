@@ -1978,6 +1978,12 @@ func (n unavailableNormalizer) Normalize(context.Context, []ConversationTurn) (N
 }
 
 func TestUnavailableNormalizationRemainsLatched(t *testing.T) {
+	for _, loseMarker := range []bool{false, true} {
+		t.Run(fmt.Sprintf("lose-marker-%t", loseMarker), func(t *testing.T) { testUnavailableNormalizationRemainsLatched(t, loseMarker) })
+	}
+}
+
+func testUnavailableNormalizationRemainsLatched(t *testing.T, loseMarker bool) {
 	store, err := ledger.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -1988,7 +1994,11 @@ func TestUnavailableNormalizationRemainsLatched(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := 0
-	service := NewWithNormalizer(app.New(events.NewGateway(store)), unavailableNormalizer{Normalizer: normalizer, calls: &calls})
+	intercepted := &failOnceOrdinaryEvent{SQLite: store}
+	if loseMarker {
+		intercepted.eventType = "INTENT_NORMALIZATION_SUSPENDED"
+	}
+	service := NewWithNormalizer(app.New(events.NewGateway(intercepted)), unavailableNormalizer{Normalizer: normalizer, calls: &calls})
 	principal := testPrincipal("human-1", core.PrincipalHuman, ChannelHumanDirect)
 	message := Message{ConversationID: "unavailable-intake", MessageID: "message-1", Text: "Prepare a Linux release"}
 	for range 3 {
@@ -1997,7 +2007,11 @@ func TestUnavailableNormalizationRemainsLatched(t *testing.T) {
 		}
 	}
 	stream := externalStream(t, store, message.ConversationID)
-	if calls != 1 || countEvents(stream, "INTENT_NORMALIZATION_FAILED") != 0 || countEvents(stream, "INTENT_NORMALIZATION_SUSPENDED") != 1 {
+	wantMarkers := 1
+	if loseMarker {
+		wantMarkers = 0
+	}
+	if calls != 1 || countEvents(stream, "INTENT_NORMALIZATION_FAILED") != 0 || countEvents(stream, "INTENT_NORMALIZATION_SUSPENDED") != wantMarkers {
 		t.Fatalf("uncertain normalization replayed or finished: calls=%d", calls)
 	}
 	message.MessageID = "message-2"

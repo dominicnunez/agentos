@@ -29,13 +29,21 @@ type containmentGeneration struct {
 	epoch        int64
 }
 
+// Bound how long admitted work can continue without a successful authority read.
+const containmentObservationTimeout = time.Second
+
+func containmentReadFailure(err error) error {
+	if err == nil || errors.Is(err, core.ErrOrganizationFrozen) {
+		return err
+	}
+	return errors.Join(core.ErrContainmentUnavailable, err)
+}
+
 // CheckInferenceContext rechecks committed containment at the adapter boundary.
 // It does not claim atomicity with a remote provider or undo a dispatched call.
 func (l *SQLite) CheckInferenceContext(ctx context.Context, organization string) (resultErr error) {
 	defer func() {
-		if resultErr != nil && !errors.Is(resultErr, core.ErrOrganizationFrozen) {
-			resultErr = errors.Join(core.ErrContainmentUnavailable, resultErr)
-		}
+		resultErr = containmentReadFailure(resultErr)
 	}()
 	if _, ok := ctx.Value(containmentGenerationKey{}).(containmentGeneration); !ok {
 		return fmt.Errorf("inference containment generation is required")
@@ -65,7 +73,7 @@ func (l *SQLite) BeginExecutionContext(ctx context.Context, organization string)
 	defer l.live.mu.Unlock()
 	epoch, frozen, err := l.containmentEpoch(ctx, organization)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, containmentReadFailure(err)
 	}
 	if frozen {
 		return nil, nil, core.ErrOrganizationFrozen
@@ -78,7 +86,7 @@ func (l *SQLite) BeginExecutionContext(ctx context.Context, organization string)
 		generation = prior
 		_, hold, err := l.containmentSince(ctx, organization, prior.epoch)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, containmentReadFailure(err)
 		}
 		if hold != nil {
 			return nil, nil, *hold
@@ -93,8 +101,12 @@ func (l *SQLite) BeginExecutionContext(ctx context.Context, organization string)
 	id := l.live.next
 	l.live.calls[id] = liveCall{organization, cancel}
 	done := make(chan struct{})
+	// The watchdog is independent of the poll: even a stalled snapshot cannot
+	// leave the provider running indefinitely. Only a successful read renews it.
+	watchdog := time.AfterFunc(containmentObservationTimeout, func() { cancel(core.ErrContainmentUnavailable) })
 	go func() {
 		defer close(done)
+		defer watchdog.Stop()
 		ticker := time.NewTicker(50 * time.Millisecond)
 		defer ticker.Stop()
 		for {
@@ -106,8 +118,8 @@ func (l *SQLite) BeginExecutionContext(ctx context.Context, organization string)
 				next, cause, checkErr := l.containmentSince(checkCtx, organization, epoch)
 				stop()
 				if checkErr != nil {
-					// Waiting for the shared connection is not evidence that
-					// authority was lost. Admission checks still fail closed.
+					// Brief contention is tolerated only within the watchdog's
+					// bounded observation window; failed polls never renew it.
 					if errors.Is(checkErr, context.DeadlineExceeded) && callCtx.Err() == nil {
 						continue
 					}
@@ -121,6 +133,7 @@ func (l *SQLite) BeginExecutionContext(ctx context.Context, organization string)
 					return
 				}
 				epoch = next
+				watchdog.Reset(containmentObservationTimeout)
 			}
 		}
 	}()
@@ -285,11 +298,32 @@ func (l *SQLite) SuspendHeldExecution(ctx context.Context, organization, taskID,
 			return err
 		}
 		hold, err := executionIntervalHoldThrough(ctx, tx, events.TrustedDraft{OrganizationID: organization, TaskID: taskID, CorrelationID: correlation, SourceExecutionID: executionID}, boundary)
-		if err != nil || hold == nil {
+		if err != nil {
 			return err
 		}
+		outcomeRef := ""
+		if hold == nil {
+			outcomes, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type='TOOL_OUTCOME_RECORDED' AND sequence>? AND json_extract(payload,'$.error_class')='containment_unavailable' ORDER BY sequence`, organization, taskID, correlation, executionID, start.Sequence))
+			if err != nil {
+				return err
+			}
+			for _, event := range outcomes {
+				if boundary != 0 && event.Sequence >= boundary {
+					continue
+				}
+				var outcome core.ToolOutcome
+				var evidence core.ExecutionInterruptionEvidence
+				if event.SourceActorID != "runtime" || decodeExactJSONBytes(event.Payload, &outcome) != nil || !outcome.Valid() || outcome.ToolID != "runtime-containment" || outcome.Status != core.OutcomeFailed || outcome.PostconditionStatus != core.PostconditionNotChecked || outcome.Retryability != core.NotRetryable || decodeExactJSON(outcome.ObservedEffect, &evidence) != nil || !evidence.LocalExecutionStopped || evidence.ExternalEffectsStatus != "REQUIRES_RECONCILIATION" {
+					return fmt.Errorf("invalid containment-unavailable recovery evidence")
+				}
+				outcomeRef = event.EventID
+			}
+			if outcomeRef == "" {
+				return nil
+			}
+		}
 		task.Status = core.TaskBlocked
-		item, err := prepareProjection(events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: organization, EventType: "TASK_EXECUTION_SUSPENDED", SourceActorID: "runtime", TaskID: taskID, CorrelationID: correlation, Payload: map[string]any{"hold": hold, "execution_start_ref": start.EventID, "reason": "committed hold interrupted execution; operator reconciliation required"}}, ProjectionKind: "task", RecordID: taskID, Version: version + 1, Value: task}, false, false)
+		item, err := prepareProjection(events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: organization, EventType: "TASK_EXECUTION_SUSPENDED", SourceActorID: "runtime", TaskID: taskID, CorrelationID: correlation, Payload: map[string]any{"hold": hold, "outcome_event_ref": outcomeRef, "execution_start_ref": start.EventID, "reason": "containment interrupted execution; operator reconciliation required"}}, ProjectionKind: "task", RecordID: taskID, Version: version + 1, Value: task}, false, false)
 		if err != nil {
 			return err
 		}
@@ -520,7 +554,8 @@ func executionIntervalHoldThrough(ctx context.Context, tx *sql.Tx, draft events.
 
 // CheckExecutionContainment lets recovery distinguish held model attempts from
 // ordinary failures without retrying inference or relying on a live context.
-func (l *SQLite) CheckExecutionContainment(ctx context.Context, organization, taskID, correlation, executionID string) error {
+func (l *SQLite) CheckExecutionContainment(ctx context.Context, organization, taskID, correlation, executionID string) (resultErr error) {
+	defer func() { resultErr = containmentReadFailure(resultErr) }()
 	if organization == "" || taskID == "" || correlation == "" || executionID == "" {
 		return fmt.Errorf("complete execution identity is required")
 	}
@@ -590,6 +625,11 @@ func validateNormalizationRetry(ctx context.Context, tx *sql.Tx, draft events.Tr
 		}
 		if hold != nil {
 			return fmt.Errorf("normalization requires reconciliation or new input: %w", *hold)
+		}
+		if finish == 0 {
+			// A crash can lose the suspension marker after dispatch. Absence of
+			// a proven ordinary finish is not permission to repeat model work.
+			return core.ErrContainmentUnavailable
 		}
 	}
 	return nil

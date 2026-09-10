@@ -17,6 +17,72 @@ import (
 
 type holdWaitingModel struct{ started chan struct{} }
 
+func TestProlongedAuthorityContentionStopsLiveCall(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ledger.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	writer, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	call, release, err := store.BeginExecutionContext(t.Context(), "organization-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	// Healthy observations must renew the lease, not expire it from creation.
+	select {
+	case <-call.Done():
+		t.Fatalf("healthy observation expired: %v", context.Cause(call))
+	case <-time.After(containmentObservationTimeout + 100*time.Millisecond):
+	}
+	conn, err := store.db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	appendInferenceFreeze(t, writer, "organization-1", 1, true)
+	appendInferenceFreeze(t, writer, "organization-1", 2, false)
+	select {
+	case <-call.Done():
+		if !errors.Is(context.Cause(call), core.ErrContainmentUnavailable) {
+			t.Fatalf("unexpected stop cause: %v", context.Cause(call))
+		}
+	case <-time.After(2 * containmentObservationTimeout):
+		t.Fatal("unobserved authority left work running")
+	}
+}
+
+func TestInitialContainmentReadFailurePreventsDispatch(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	conn, err := store.db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	guard, err := inference.NewGuardedAdapter(store, &holdReturningModel{freeze: func() { t.Fatal("unavailable initial authority invoked provider") }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	ctx, err = inference.WithScope(ctx, testInferenceRequest("initial-unavailable").Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := guard.Complete(ctx, "prompt"); !errors.Is(err, core.ErrContainmentUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("initial authority error lost classification: %v", err)
+	}
+}
+
 func TestAuthorityReadFailureIsContainmentUnavailable(t *testing.T) {
 	store, err := Open(":memory:")
 	if err != nil {

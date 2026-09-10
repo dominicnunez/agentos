@@ -420,7 +420,7 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 		}
 		if recorded, decided := decisions[latest.ID]; decided {
 			if err := s.continueCompletionReview(ctx, latest, recorded.Review, recorded.Event); err != nil {
-				if errors.Is(err, core.ErrOrganizationFrozen) {
+				if containmentInterrupted(err) {
 					continue
 				}
 				return RecoveryResult{}, fmt.Errorf("recover completion review for task %s: %w", state.Value.ID, err)
@@ -461,7 +461,7 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 					result.RunningRecovered++
 				}
 				if err := s.continueHumanCompletionTask(ctx, organizationID, state.Value.ID, state.CorrelationID, completionEvent, completionPayload); err != nil {
-					if errors.Is(err, core.ErrOrganizationFrozen) {
+					if containmentInterrupted(err) {
 						if state.Value.Status == core.TaskBlocked {
 							result.BlockedPreserved++
 						}
@@ -487,7 +487,7 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 					result.RunningRecovered++
 				}
 				if err := s.continueExternalInputTask(ctx, organizationID, state.Value.ID, state.CorrelationID, inputEvent); err != nil {
-					if errors.Is(err, core.ErrOrganizationFrozen) {
+					if containmentInterrupted(err) {
 						if state.Value.Status == core.TaskBlocked {
 							result.BlockedPreserved++
 						}
@@ -635,7 +635,7 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		}
 		_, release, containmentErr := s.gateway.BeginExecutionContext(ctx, string(intentState.Value.OrganizationID))
 		if containmentErr != nil {
-			if planningContainmentInterrupted(containmentErr) {
+			if containmentInterrupted(containmentErr) {
 				continue
 			}
 			return 0, containmentErr
@@ -663,7 +663,7 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		}
 		if !hasDurablePlan && planningExecutionID != "" {
 			if err := s.gateway.CheckExecutionContainment(ctx, string(intentState.Value.OrganizationID), "task-"+workState.CorrelationID, workState.CorrelationID, planningExecutionID); err != nil {
-				if planningContainmentInterrupted(err) {
+				if containmentInterrupted(err) {
 					continue
 				}
 				return 0, err
@@ -690,7 +690,7 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		if intent.SourceChannel == "INTERNAL" {
 			if !hasDurablePlan {
 				if err := s.failPlanningWork(ctx, intent.OrganizationID, workState, "PLANNING_RECOVERY_IDENTITY_INCOMPLETE", "planning could not be resumed because the requested execution kind was not durably recoverable", planningAttemptRef); err != nil {
-					if planningContainmentInterrupted(err) {
+					if containmentInterrupted(err) {
 						continue
 					}
 					return 0, err
@@ -722,7 +722,7 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		}
 		_, _, root, err := s.ensureSubmission(ctx, in)
 		if err != nil {
-			if planningContainmentInterrupted(err) {
+			if containmentInterrupted(err) {
 				continue
 			}
 			current, loadErr := s.state.Load(ctx)
@@ -737,7 +737,7 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 				return 0, fmt.Errorf("recover Task DAG for work %s: %w", workID, err)
 			}
 			if failErr := s.failPlanningWork(ctx, intent.OrganizationID, currentWork, "PLANNING_RECOVERY_FAILED", "safe planning recovery did not produce a validated durable plan", ""); failErr != nil {
-				if planningContainmentInterrupted(failErr) {
+				if containmentInterrupted(failErr) {
 					continue
 				}
 				combined := errors.Join(err, fmt.Errorf("persist planning failure: %w", failErr))
@@ -753,7 +753,7 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 	return materialized, nil
 }
 
-func planningContainmentInterrupted(err error) bool {
+func containmentInterrupted(err error) bool {
 	return errors.Is(err, core.ErrOrganizationFrozen) || errors.Is(err, core.ErrContainmentUnavailable)
 }
 
@@ -1845,7 +1845,7 @@ func (s *Service) ensureSubmission(ctx context.Context, in Submit) (core.Intent,
 	}
 	if err != nil {
 		var attemptErr *planningAttemptError
-		if work.Status == core.WorkActive && !planningContainmentInterrupted(err) {
+		if work.Status == core.WorkActive && !containmentInterrupted(err) {
 			code := "PLANNING_REJECTED"
 			reason := "the accepted Intent did not produce an admissible durable Task graph"
 			evidenceRef := ""
@@ -2226,13 +2226,13 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	cancel()
 	if result.Usage != nil {
 		if !usesModel || result.Usage.ConnectionID != descriptor.ConnectionID || !result.Usage.Valid() || result.Usage.Provider != descriptor.Provider || result.Usage.Model != descriptor.Model {
-			return core.Plan{}, attemptFailure(fmt.Errorf("planner returned usage outside its declared model boundary"))
+			return core.Plan{}, attemptFailure(errors.Join(buildErr, fmt.Errorf("planner returned usage outside its declared model boundary")))
 		}
 		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
 			OrganizationID: string(organizationID), EventType: "INFERENCE_USAGE_RECORDED", SourceActorID: "runtime",
 			SourceExecutionID: string(executionID), TaskID: "task-" + correlationID, Payload: result.Usage, CorrelationID: correlationID,
 		}); err != nil {
-			return core.Plan{}, attemptFailure(fmt.Errorf("persist planning inference usage: %w", err))
+			return core.Plan{}, attemptFailure(errors.Join(buildErr, fmt.Errorf("persist planning inference usage: %w", err)))
 		}
 	}
 	if buildErr != nil {
@@ -2616,7 +2616,7 @@ func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {
 				task.Status = core.TaskFailed
 				detail := dependencyFailureDetail{Code: "DEPENDENCY_FAILED", FailedDependencyIDs: dependencyIDs}
 				if err := s.state.SaveTask(ctx, organizationID, "TASK_DEPENDENCY_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); err != nil {
-					if errors.Is(err, core.ErrOrganizationFrozen) {
+					if containmentInterrupted(err) {
 						continue
 					}
 					return nil, fmt.Errorf("persist failed-dependency state for task %s: %w", task.ID, err)
@@ -2653,7 +2653,7 @@ func (s *Service) runReady(ctx context.Context) (map[core.ID]taskRun, error) {
 		for _, task := range ready {
 			state := snapshot.Tasks[task.ID]
 			run, err := s.executeTask(ctx, snapshot, state, remediation)
-			if errors.Is(err, core.ErrOrganizationFrozen) {
+			if containmentInterrupted(err) {
 				continue
 			}
 			if err != nil {
@@ -2721,7 +2721,7 @@ func (s *Service) failTasksAfterRootFailure(ctx context.Context, snapshot projec
 		task.Status = core.TaskFailed
 		detail := rootFailureDetail{Code: "WORK_ROOT_FAILED", FailedRootTaskID: rootID}
 		if err := s.state.SaveTask(ctx, organizationID, "TASK_WORK_FAILED", "runtime", state.CorrelationID, state.Version+1, task, detail); err != nil {
-			if errors.Is(err, core.ErrOrganizationFrozen) {
+			if containmentInterrupted(err) {
 				continue
 			}
 			return false, fmt.Errorf("terminalize task %s after root failure: %w", task.ID, err)

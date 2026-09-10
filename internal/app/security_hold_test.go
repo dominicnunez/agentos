@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -852,6 +853,83 @@ func (p *unavailablePlanningPlanner) Build(context.Context, planning.Input, core
 	return planning.Result{}, execution.SafeModelError(execution.ModelCallFailed, core.ErrContainmentUnavailable)
 }
 
+type unavailableUsagePlanner struct{ failingPlanningPlanner }
+
+func (p *unavailableUsagePlanner) Build(ctx context.Context, in planning.Input, kind core.ExecutionKind) (planning.Result, error) {
+	result, _ := p.failingPlanningPlanner.Build(ctx, in, kind)
+	return result, core.ErrContainmentUnavailable
+}
+
+type failUsageLedger struct{ *ledger.SQLite }
+
+func (l failUsageLedger) Append(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {
+	if draft.EventType == "INFERENCE_USAGE_RECORDED" {
+		return events.Event{}, errors.New("injected usage persistence failure")
+	}
+	return l.SQLite.Append(ctx, draft)
+}
+
+func TestPlanningUsageFailurePreservesSafetyInterruption(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	planner := &unavailableUsagePlanner{}
+	service := NewWithModelAndPlanner(events.NewGateway(failUsageLedger{store}), execution.FakeModel{}, planner)
+	if _, err := service.Submit(t.Context(), Submit{RequestID: "usage-unavailable", OrganizationID: "org-1", Statement: "prepare a note", Kind: core.ExecutionAgent}); !errors.Is(err, core.ErrContainmentUnavailable) {
+		t.Fatalf("usage error masked safety interruption: %v", err)
+	}
+	for range 2 {
+		if _, err := service.Recover(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := service.state.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range snapshot.Works {
+		if state.Value.Status != core.WorkActive {
+			t.Fatal("usage error terminalized interrupted planning")
+		}
+	}
+	if planner.calls != 1 {
+		t.Fatal("interrupted planning replayed")
+	}
+}
+
+type unavailableOrganizationLedger struct{ *ledger.SQLite }
+
+func (l unavailableOrganizationLedger) BeginExecutionContext(ctx context.Context, organization string) (context.Context, func(), error) {
+	if organization == "org-a" {
+		return nil, nil, core.ErrContainmentUnavailable
+	}
+	return l.SQLite.BeginExecutionContext(ctx, organization)
+}
+
+func TestInitialContainmentFailureDefersOnlyAffectedOrganization(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := New(events.NewGateway(unavailableOrganizationLedger{store}))
+	held, err := service.Submit(t.Context(), Submit{RequestID: "deferred", OrganizationID: "org-a", Statement: "echo pending", Kind: core.ExecutionDeterministic})
+	if err != nil || held.Task.Status != core.TaskPending {
+		t.Fatalf("unavailable authority did not preserve pending work: %+v %v", held.Task, err)
+	}
+	other, err := service.Submit(t.Context(), Submit{RequestID: "independent", OrganizationID: "org-b", Statement: "echo ready", Kind: core.ExecutionDeterministic})
+	if err != nil || other.Task.Status != core.TaskCompleted {
+		t.Fatalf("unavailable authority blocked other organization: %v", err)
+	}
+	for range 2 {
+		if _, err := service.Recover(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestUnavailablePlanningContainmentRemainsActive(t *testing.T) {
 	store, err := ledger.Open(":memory:")
 	if err != nil {
@@ -910,17 +988,30 @@ func (m unavailableTaskModel) CompleteRequest(ctx context.Context, _ modelinput.
 }
 
 func TestInnerInferenceContainmentFailureSuspendsTask(t *testing.T) {
+	for _, crash := range []bool{false, true} {
+		t.Run(fmt.Sprintf("crash-%t", crash), func(t *testing.T) { testInnerInferenceContainmentFailureSuspendsTask(t, crash) })
+	}
+}
+
+func testInnerInferenceContainmentFailureSuspendsTask(t *testing.T, crash bool) {
 	store, err := ledger.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	service := NewWithModel(events.NewGateway(store), unavailableTaskModel{})
+	intercepted := &failOnceProjectionEvent{SQLite: store}
+	if crash {
+		intercepted.eventType = "TASK_EXECUTION_SUSPENDED"
+	}
+	service := NewWithModel(events.NewGateway(intercepted), unavailableTaskModel{})
 	result, err := service.Submit(t.Context(), Submit{RequestID: "inner-unavailable", OrganizationID: "org-1", Statement: "prepare a note", Kind: core.ExecutionAgent})
-	if !errors.Is(err, core.ErrContainmentUnavailable) {
+	if crash && (err == nil || !intercepted.failed) {
+		t.Fatalf("missing suspension crash: %v", err)
+	}
+	if !crash && !errors.Is(err, core.ErrContainmentUnavailable) {
 		t.Fatalf("missing containment interruption: %v", err)
 	}
-	if result.Task.Status != core.TaskBlocked {
+	if !crash && result.Task.Status != core.TaskBlocked {
 		t.Fatalf("inner containment failure terminalized task: %s", result.Task.Status)
 	}
 	for range 2 {
