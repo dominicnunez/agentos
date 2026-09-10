@@ -20,13 +20,48 @@ Agent OS is a Go modular monolith for operating persistent AI-assisted organizat
 - A2A is an external operator boundary, not internal IPC or implicit administrative authority.
 - Keep deferred architecture deferred unless a human explicitly promotes it from the handoff scope.
 
-Repository hooks and CI own routine formatting, lint, test, vet, and build enforcement.
+Run the appropriate repository checks before a review push; hooks and CI provide
+independent enforcement rather than replacing local verification.
+
+## Engineering quality workflow
+
+1. Before editing, identify the intended behavior and scope. Trace affected
+   entry points, alternate compositions, durable writers and readers, output
+   consumers, and retry, recovery, and replay paths.
+2. Maintain a compact local evidence matrix for relevant identity, missing or
+   invalid metadata, cancellation, authority failure, timing between writes,
+   and crash boundaries. Distinguish proven, contradicted, missing, and
+   inapplicable coverage; a passing package suite is not exhaustive evidence.
+3. Enforce invariants at their authoritative boundary before dispatch or durable
+   publication. Validate relationships in both directions and cover supported
+   direct composition as well as the production setup.
+4. Implement a complete, cohesive invariant across its callers. Prefer an
+   existing shared boundary that owns the rule over multiple partial fixes.
+5. Exercise realistic failure paths through actual entry points and durable
+   state. Verify forbidden calls and writes do not occur, necessary evidence
+   survives, retry and restart behave correctly, and other tenants are unaffected.
+   Test doubles must implement the interfaces production calls. Where feasible,
+   verify regressions fail for the intended defect against the prior behavior.
+6. Inspect query and loop costs when history or candidate counts grow. Avoid
+   repeated full-history validation per item without a demonstrated need.
+7. Before each review push, audit the whole changed invariant and diff, address
+   confirmed related gaps, and run the required checks. A review finding triggers
+   a class-wide audit of sibling callers and failure modes before the next push.
+   Record concrete evidence; external review is an independent gate.
+8. Keep PRs cohesive and bounded without omitting necessary callers merely to
+   reduce diff size. Track independent confirmed defects under the issue policy
+   below and resolve them before proceeding to later goal parts.
 
 ## Standing user instructions and goal continuity
 
 - These instructions persist across tasks and context compaction. Later explicit
   user decisions supersede earlier conflicting instructions; do not revive a
   superseded policy from an old handoff or task summary.
+- Replace contradictory active instructions at their source when adopting a
+  new workflow. Do not stack competing overrides. Clearly label historical
+  records; preserve immutable handoff evidence.
+- Keep user-facing messages minimal. Report meaningful outcomes, blockers, and
+  decisions rather than routine local commits or repeated compliance statements.
 - Use the project Markdown documents to guide task work and maintain the
   user-requested goal and evidence of remaining work. Completing one PR does not
   complete the broader goal; do not silently narrow it to the current PR.
@@ -48,6 +83,9 @@ Repository hooks and CI own routine formatting, lint, test, vet, and build enfor
   all work until an entire issue or goal is complete. A checkpoint commit does
   not imply PR readiness; record remaining work and obtain the required review
   coverage before merge.
+- Choose PR opening time based on cohesion and readiness. An issue does not
+  require an immediate PR; implementation may fully resolve it before opening.
+  Local checkpoint commits continue throughout either approach.
 - For all future commits, use the default configured Git author and committer.
   Do not substitute a Codex identity through command-line configuration,
   environment variables, or explicit author/committer overrides. If no default
@@ -60,13 +98,18 @@ Repository hooks and CI own routine formatting, lint, test, vet, and build enfor
   Mark breaking changes with `!` before the colon or a `BREAKING CHANGE:` footer.
 - Every commit needs review. Review and check evidence must cover the final PR
   head; an approval for an earlier head does not cover subsequent changes.
-- General code reviews are configured to run automatically on pushes. Observe
-  the automatic review before considering a manual request. If it demonstrably
+- General code reviews run automatically on pushes to ready PRs. Move a draft
+  PR to ready before expecting automatic review. Observe the automatic review
+  before considering a manual request. If it demonstrably
   did not start and a manual general review is necessary, comment `@codex review`.
   Do not request a redundant general review for a push already under review.
 - Once a review is requested or running, wait for its reply before continuing
   implementation or pushing further changes. Do not request additional reviews
   while waiting for the current review. Read-only review/CI status checks are OK.
+- Track review start/completion times, review type, and change size in a local
+  project file outside the repository. Estimate the first status check from
+  comparable observations and adjust as evidence changes; avoid frequent fixed
+  polling and never treat an estimated completion time as an actual reply.
 - Security-sensitive code requires a security review. Request it by commenting
   `@codex security review` only after general review has returned with no
   outstanding issues. This supersedes the earlier permission to request security
@@ -113,12 +156,10 @@ Repository hooks and CI own routine formatting, lint, test, vet, and build enfor
 
 ## Branch cleanup and operational boundaries
 
-- After verifying a PR is merged, merged remote branches may be deleted. Prefer
-  Git or an authenticated API over browser automation; the browser is an
-  authorized fallback. Verify the branch and merged head before deleting it.
-- Delete local branches only after verifying they have merged into remote main.
+- Delete only local branches verified merged into remote main. Prefer Git over
+  browser automation. Remote branch deletion requires new explicit authorization.
   Preserve checked-out branches, clones, worktrees, unfinished work, and unmerged
-  branches. Remote branch cleanup is not permission to remove local work.
+  branches. A squash merge alone is not proof of Git ancestry into remote main.
 - Use the authenticated `gh` CLI for GitHub operations; it replaces the former
   GitHub desktop plugins/apps in this workflow.
 - Existing GitHub authentication may be used for authorized repository actions.
