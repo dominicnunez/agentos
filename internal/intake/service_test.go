@@ -1967,6 +1967,79 @@ type heldNormalizer struct {
 	after func()
 }
 
+type rejectedOutputNormalizer struct {
+	Normalizer
+	calls  int
+	mutate func(*Normalization)
+}
+
+func (n *rejectedOutputNormalizer) Normalize(ctx context.Context, turns []ConversationTurn) (Normalization, error) {
+	n.calls++
+	result, err := n.Normalizer.Normalize(ctx, turns)
+	if err == nil && n.calls == 1 {
+		n.mutate(&result)
+	}
+	return result, err
+}
+
+func TestPostNormalizationRejectionPermitsCorrectedRetry(t *testing.T) {
+	for name, mutate := range map[string]func(*Normalization){
+		"lost-finish":        func(n *Normalization) { n.Candidate.Objective = "" },
+		"invalid-output":     func(n *Normalization) { n.Candidate.Objective = "" },
+		"invalid-provenance": func(n *Normalization) { n.Candidate.Deliverables[0].SourceMessageID = "missing-message" },
+		"conflicting-goal": func(n *Normalization) {
+			n.Candidate.Goal = &core.IntentValue{Value: "goal-other", Origin: "EXPLICIT", SourceMessageID: "message-1"}
+		},
+		"missing-predecessor": func(n *Normalization) {
+			n.Candidate.ReplacesWork = &core.IntentValue{Value: "work-missing", Origin: "EXPLICIT", SourceMessageID: "message-1"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, err := ledger.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			gateway := events.NewGateway(store)
+			seedIntakeGoal(t, t.Context(), gateway, "org-1", "goal-1", core.GoalActive)
+			if name == "lost-finish" {
+				gateway = events.NewGateway(&failOnceOrdinaryEvent{SQLite: store, eventType: "INTENT_NORMALIZATION_FAILED"})
+			}
+			ready := `{"state":"READY_FOR_REVIEW","reply":"Review this intent.","intent":{"mode":"STANDARD","objective":"Prepare a Linux release","context":[],"deliverables":[{"value":"Linux binary","origin":"EXPLICIT","source_message_id":"message-1"}],"completion_criteria":[{"value":"Binary passes verification","origin":"EXPLICIT","source_message_id":"message-1"}],"constraints":[],"resolved_decisions":[],"consequence_candidates":[],"missing_user_inputs":[]}}`
+			base, err := NewModelNormalizer(normalizationModel{response: ready})
+			if err != nil {
+				t.Fatal(err)
+			}
+			normalizer := &rejectedOutputNormalizer{Normalizer: base, mutate: mutate}
+			service := NewWithNormalizer(app.New(gateway), normalizer)
+			principal := testPrincipal("user-1", core.PrincipalHuman, ChannelHumanDirect)
+			message := Message{ConversationID: "rejected-output", MessageID: "message-1", Text: "Prepare a Linux release using goal-other and work-missing", SelectedGoalID: "goal-1"}
+			if _, err := service.Handle(t.Context(), principal, message); err == nil {
+				t.Fatal("invalid output was accepted")
+			}
+			stream := externalStream(t, store, message.ConversationID)
+			if name == "lost-finish" {
+				if countEvents(stream, "INTENT_NORMALIZATION_FAILED") != 0 {
+					t.Fatal("failed finish unexpectedly persisted")
+				}
+				service = NewWithNormalizer(app.New(events.NewGateway(store)), normalizer)
+				if _, err := service.Handle(t.Context(), principal, message); err == nil || normalizer.calls != 1 {
+					t.Fatalf("uncertain finish authorized retry: calls=%d err=%v", normalizer.calls, err)
+				}
+				return
+			}
+			if countEvents(stream, "INTENT_NORMALIZATION_FAILED") != 1 || containsEvent(stream, "INTENT_DRAFTED") {
+				t.Fatal("ordinary rejection lacks an exclusive finish")
+			}
+			service = NewWithNormalizer(app.New(gateway), normalizer)
+			view, err := service.Handle(t.Context(), principal, message)
+			if err != nil || view.Intent == nil || normalizer.calls != 2 {
+				t.Fatalf("corrected retry blocked: calls=%d err=%v", normalizer.calls, err)
+			}
+		})
+	}
+}
+
 type unavailableNormalizer struct {
 	Normalizer
 	calls *int

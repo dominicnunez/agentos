@@ -901,6 +901,30 @@ func TestPlanningUsageFailurePreservesSafetyInterruption(t *testing.T) {
 
 type unavailableOrganizationLedger struct{ *ledger.SQLite }
 
+func TestIntentBindingRejectionDistinguishesUnavailableState(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	service := New(events.NewGateway(store))
+	check := func(wantRejected bool) {
+		t.Helper()
+		goalErr := service.ValidateSelectedGoal(t.Context(), "org-1", "goal-missing")
+		_, replacementErr := service.ResolveReplacementGoal(t.Context(), "org-1", "work-missing")
+		for _, err := range []error{goalErr, replacementErr} {
+			if err == nil || errors.Is(err, ErrIntentBindingRejected) != wantRejected {
+				t.Fatalf("incorrect binding failure classification: %v", err)
+			}
+		}
+	}
+	check(true)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	check(false)
+}
+
 func (l unavailableOrganizationLedger) BeginExecutionContext(ctx context.Context, organization string) (context.Context, func(), error) {
 	if organization == "org-a" {
 		return nil, nil, core.ErrContainmentUnavailable

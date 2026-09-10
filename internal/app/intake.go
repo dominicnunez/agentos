@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -12,6 +13,10 @@ import (
 	"github.com/dominicnunez/agentos/internal/modelinput"
 	"github.com/dominicnunez/agentos/internal/planning"
 )
+
+// ErrIntentBindingRejected identifies a semantic rejection after reading state;
+// storage failures intentionally do not carry this classification.
+var ErrIntentBindingRejected = errors.New("intent binding rejected")
 
 type IntakeMessage struct {
 	RequestID           string
@@ -63,7 +68,7 @@ type IntentNormalizationContext struct {
 // boundary against the current projection state.
 func (s *Service) ResolveReplacementGoal(ctx context.Context, organizationID string, workID core.ID) (core.ID, error) {
 	if ctx == nil || organizationID == "" || workID == "" {
-		return "", fmt.Errorf("organization and replacement Work are required")
+		return "", fmt.Errorf("%w: organization and replacement Work are required", ErrIntentBindingRejected)
 	}
 	snapshot, err := s.state.Load(ctx)
 	if err != nil {
@@ -71,15 +76,15 @@ func (s *Service) ResolveReplacementGoal(ctx context.Context, organizationID str
 	}
 	predecessor, found := snapshot.Works[workID]
 	if !found || predecessor.Value.ID != workID || predecessor.Value.Status != core.WorkFailed {
-		return "", fmt.Errorf("replacement requires an existing failed Work")
+		return "", fmt.Errorf("%w: replacement requires an existing failed Work", ErrIntentBindingRejected)
 	}
 	predecessorIntent, found := snapshot.Intents[predecessor.Value.IntentID]
 	if !found || predecessorIntent.Value.ID != predecessor.Value.IntentID || predecessorIntent.Value.OrganizationID != core.ID(organizationID) {
-		return "", fmt.Errorf("replacement Work crosses its organization boundary")
+		return "", fmt.Errorf("%w: replacement Work crosses its organization boundary", ErrIntentBindingRejected)
 	}
 	for existingID, existing := range snapshot.Works {
 		if existingID != workID && existing.Value.ReplacesWorkID == workID {
-			return "", fmt.Errorf("failed Work already has a durable replacement")
+			return "", fmt.Errorf("%w: failed Work already has a durable replacement", ErrIntentBindingRejected)
 		}
 	}
 	goalID := predecessor.Value.GoalID
@@ -88,11 +93,11 @@ func (s *Service) ResolveReplacementGoal(ctx context.Context, organizationID str
 	}
 	goal, found := snapshot.Goals[goalID]
 	if !found || goal.Value.ID != goalID || goal.Value.OrganizationID != core.ID(organizationID) || goal.Value.Status != core.GoalActive {
-		return "", fmt.Errorf("replacement requires its predecessor's active Goal")
+		return "", fmt.Errorf("%w: replacement requires its predecessor's active Goal", ErrIntentBindingRejected)
 	}
 	mission, found := snapshot.Missions[goal.Value.MissionID]
 	if !found || mission.Value.ID != goal.Value.MissionID || mission.Value.OrganizationID != core.ID(organizationID) || mission.Value.Status != core.MissionActive {
-		return "", fmt.Errorf("replacement requires its predecessor Goal's active Mission")
+		return "", fmt.Errorf("%w: replacement requires its predecessor Goal's active Mission", ErrIntentBindingRejected)
 	}
 	return goalID, nil
 }
@@ -199,7 +204,7 @@ func (s *Service) RecordIntakeMessage(ctx context.Context, in IntakeMessage) ([]
 // revise the Goal or its Mission and both must still be active.
 func (s *Service) ValidateSelectedGoal(ctx context.Context, organizationID, goalID core.ID) error {
 	if ctx == nil || organizationID == "" || goalID == "" || !core.ValidGoalReferenceID(string(goalID)) {
-		return fmt.Errorf("valid organization and selected Goal are required")
+		return fmt.Errorf("%w: valid organization and selected Goal are required", ErrIntentBindingRejected)
 	}
 	snapshot, err := s.state.Load(ctx)
 	if err != nil {
@@ -207,11 +212,11 @@ func (s *Service) ValidateSelectedGoal(ctx context.Context, organizationID, goal
 	}
 	goal, found := snapshot.Goals[goalID]
 	if !found || goal.Value.ID != goalID || goal.Value.OrganizationID != organizationID || goal.Value.Status != core.GoalActive {
-		return fmt.Errorf("selected Goal is not active in this organization")
+		return fmt.Errorf("%w: selected Goal is not active in this organization", ErrIntentBindingRejected)
 	}
 	mission, found := snapshot.Missions[goal.Value.MissionID]
 	if !found || mission.Value.ID != goal.Value.MissionID || mission.Value.OrganizationID != organizationID || mission.Value.Status != core.MissionActive {
-		return fmt.Errorf("selected Goal does not belong to an active Mission")
+		return fmt.Errorf("%w: selected Goal does not belong to an active Mission", ErrIntentBindingRejected)
 	}
 	return nil
 }
