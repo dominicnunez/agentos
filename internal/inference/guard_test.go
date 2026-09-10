@@ -144,7 +144,7 @@ func TestGuardedAdapterFailsClosedWithoutDurableScopeOrReservation(t *testing.T)
 		t.Fatalf("provider was called without scope: %v", err)
 	}
 	store.reserveErr = errors.New("budget exhausted")
-	if _, err := adapter.Complete(guardedContext(t), "prompt"); err == nil || model.called || execution.ModelErrorClass(err) != string(execution.InferenceDenied) || strings.Contains(err.Error(), "budget exhausted") {
+	if _, err := adapter.Complete(guardedContext(t), "prompt"); err == nil || model.called || !execution.WasRequestNotSent(err) || execution.ModelErrorClass(err) != string(execution.InferenceDenied) || strings.Contains(err.Error(), "budget exhausted") {
 		t.Fatalf("provider was called without a reservation: %v", err)
 	}
 }

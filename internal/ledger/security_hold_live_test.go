@@ -126,7 +126,7 @@ func TestInitialContainmentReadFailurePreventsDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := guard.Complete(ctx, "prompt"); !errors.Is(err, core.ErrContainmentUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := guard.Complete(ctx, "prompt"); !errors.Is(err, core.ErrContainmentUnavailable) || !errors.Is(err, context.DeadlineExceeded) || !execution.WasRequestNotSent(err) {
 		t.Fatalf("initial authority error lost classification: %v", err)
 	}
 }

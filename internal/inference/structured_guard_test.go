@@ -62,18 +62,18 @@ func TestStructuredGuardRejectsMissingCapabilityAndInvalidInput(t *testing.T) {
 	store := &guardStore{}
 	model := &guardModel{}
 	adapter, _ := NewGuardedAdapter(store, model)
-	if _, err := adapter.CompleteRequest(guardedContext(t), structuredGuardRequest()); err == nil || model.called || store.reservation.ID != "" {
+	if _, err := adapter.CompleteRequest(guardedContext(t), structuredGuardRequest()); err == nil || !execution.WasRequestNotSent(err) || model.called || store.reservation.ID != "" {
 		t.Fatal("flattened into legacy adapter")
 	}
 	structured := &structuredGuardModel{}
 	adapter, _ = NewGuardedAdapter(store, structured)
 	request := structuredGuardRequest()
 	request.Messages[0].Role = modelinput.System
-	if _, err := adapter.CompleteRequest(guardedContext(t), request); err == nil || structured.called || store.reservation.ID != "" {
+	if _, err := adapter.CompleteRequest(guardedContext(t), request); err == nil || !execution.WasRequestNotSent(err) || structured.called || store.reservation.ID != "" {
 		t.Fatal("promoted source before admission")
 	}
 	store.reserveErr = errors.New("budget exhausted")
-	if _, err := adapter.CompleteRequest(guardedContext(t), structuredGuardRequest()); err == nil || structured.called {
+	if _, err := adapter.CompleteRequest(guardedContext(t), structuredGuardRequest()); err == nil || !execution.WasRequestNotSent(err) || structured.called {
 		t.Fatal("called provider without budget")
 	}
 }
@@ -106,7 +106,7 @@ func TestStructuredGuardUsesAdmittedScopeForSourceBinding(t *testing.T) {
 				}
 				request = binding.Request()
 			}
-			if _, err := adapter.CompleteRequest(ctx, request); err == nil || model.called || store.reservation.ID != "" {
+			if _, err := adapter.CompleteRequest(ctx, request); err == nil || !execution.WasRequestNotSent(err) || model.called || store.reservation.ID != "" {
 				t.Fatal("foreign or stale source binding reached admission")
 			}
 		})

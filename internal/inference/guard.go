@@ -372,12 +372,12 @@ func (a *GuardedAdapter) Complete(ctx context.Context, prompt string) (execution
 func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call func(context.Context) (execution.ModelResponse, error)) (execution.ModelResponse, error) {
 	scope, err := scopeFromContext(ctx)
 	if err != nil {
-		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, err)
+		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, execution.RequestNotSent(err))
 	}
 	request := InferenceRequest{ConnectionID: a.connectionID, Scope: scope, Descriptor: a.adapter.Descriptor(), PromptSHA256: fingerprint}
 	callCtx, release, containmentErr := a.containment.BeginInferenceContext(ctx, scope.OrganizationID)
 	if containmentErr != nil {
-		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, containmentErr)
+		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, execution.RequestNotSent(containmentErr))
 	}
 	defer release()
 	ctx = callCtx
@@ -391,7 +391,7 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 	}
 	reservation, err := a.store.ReserveInference(ctx, request)
 	if err != nil {
-		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, errors.Join(err, checkContainment()))
+		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, execution.RequestNotSent(errors.Join(err, checkContainment())))
 	}
 	var response execution.ModelResponse
 	var providerErr error
