@@ -381,12 +381,6 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 	}
 	defer release()
 	ctx = callCtx
-	reservation, err := a.store.ReserveInference(ctx, request)
-	if err != nil {
-		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, err)
-	}
-	var response execution.ModelResponse
-	var providerErr error
 	checkContainment := func() error {
 		// Caller cancellation may win before a committed freeze. Preserve the
 		// generation while checking durable history independently of that cause.
@@ -395,6 +389,12 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 		holdErr := a.containment.CheckInferenceContext(checkCtx, scope.OrganizationID)
 		return errors.Join(context.Cause(ctx), holdErr)
 	}
+	reservation, err := a.store.ReserveInference(ctx, request)
+	if err != nil {
+		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceDenied, errors.Join(err, checkContainment()))
+	}
+	var response execution.ModelResponse
+	var providerErr error
 	if containmentErr := checkContainment(); containmentErr != nil {
 		// The runtime has not invoked the adapter; this is definite not-sent
 		// evidence, unlike cancellation after control reaches the provider.

@@ -17,6 +17,83 @@ import (
 
 type holdWaitingModel struct{ started chan struct{} }
 
+func TestManifestHoldPreventsFreshGuardAdmission(t *testing.T) {
+	for _, kind := range []string{"PLANNING_CONTEXT_MANIFESTED", "INTENT_NORMALIZATION_CONTEXT_MANIFESTED"} {
+		t.Run(kind, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "ledger.db")
+			store, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			writer, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = writer.Close() })
+			request := testInferenceRequest("manifest-held")
+			scope := request.Scope
+			_, err = store.Append(t.Context(), events.TrustedDraft{OrganizationID: scope.OrganizationID, EventType: kind, SourceActorID: "runtime", SourceExecutionID: scope.ExecutionID, TaskID: scope.TaskID, CorrelationID: scope.CorrelationID, Payload: map[string]string{"source_message_id": "message-1"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			appendInferenceFreeze(t, writer, scope.OrganizationID, 1, true)
+			appendInferenceFreeze(t, writer, scope.OrganizationID, 2, false)
+			guard, err := inference.NewGuardedAdapter(store, &holdReturningModel{freeze: func() { t.Fatal("held manifest invoked provider") }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, err := inference.WithScope(t.Context(), scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := guard.Complete(ctx, "prompt"); !errors.Is(err, core.ErrOrganizationFrozen) {
+				t.Fatalf("fresh generation bypassed manifested hold: %v", err)
+			}
+			var reservations int
+			if err := store.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM inference_reservations`).Scan(&reservations); err != nil || reservations != 0 {
+				t.Fatalf("held manifest reserved inference: %d %v", reservations, err)
+			}
+		})
+	}
+}
+
+type cancelledReservationStore struct {
+	*SQLite
+	freeze func()
+}
+
+func (s cancelledReservationStore) ReserveInference(context.Context, inference.InferenceRequest) (inference.Reservation, error) {
+	s.freeze()
+	return inference.Reservation{}, context.Canceled
+}
+
+func TestCancelledReservationPreservesReleasedHold(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	wrapped := cancelledReservationStore{SQLite: store, freeze: func() {
+		appendInferenceFreeze(t, store, "organization-1", 1, true)
+		appendInferenceFreeze(t, store, "organization-1", 2, false)
+	}}
+	model := &holdReturningModel{freeze: func() { t.Fatal("failed reservation invoked provider") }}
+	guard, err := inference.NewGuardedAdapter(wrapped, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := inference.WithScope(t.Context(), testInferenceRequest("cancelled-reservation").Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = guard.Complete(ctx, "prompt")
+	var hold core.SecurityHoldCause
+	if !errors.Is(err, core.ErrOrganizationFrozen) || !errors.As(err, &hold) || hold.EventRef == "" || hold.Sequence == 0 {
+		t.Fatalf("reservation error lost hold identity: %v", err)
+	}
+}
+
 type cancelledReturningModel struct {
 	holdReturningModel
 	providerError error
