@@ -18,14 +18,18 @@ import (
 )
 
 func TestReleasedHoldAllowsHumanContinuations(t *testing.T) {
-	testHumanContinuations(t, false)
+	testHumanContinuations(t, false, false)
 }
 
 func TestHeldHumanContinuationsRemainSuspended(t *testing.T) {
-	testHumanContinuations(t, true)
+	testHumanContinuations(t, true, false)
 }
 
-func testHumanContinuations(t *testing.T, interrupt bool) {
+func TestFrozenHumanContinuationsRemainBlocked(t *testing.T) {
+	testHumanContinuations(t, false, true)
+}
+
+func testHumanContinuations(t *testing.T, interrupt, beforeStart bool) {
 	for _, structured := range []bool{false, true} {
 		name := "external-input"
 		if structured {
@@ -60,8 +64,17 @@ func testHumanContinuations(t *testing.T, interrupt bool) {
 					t.Fatal(err)
 				}
 				result.Task = task
+				if beforeStart {
+					task.Status = core.TaskBlocked
+					if err := repository.SaveTask(ctx, "org-1", "TASK_BLOCKED", "runtime", "legacy-input", 2, task, nil); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			for index, frozen := range []bool{true, false} {
+				if beforeStart && !frozen {
+					break
+				}
 				state := struct {
 					OrganizationID core.ID   `json:"organization_id"`
 					Frozen         bool      `json:"frozen"`
@@ -98,6 +111,25 @@ func testHumanContinuations(t *testing.T, interrupt bool) {
 					// plan synthesis requires structured human completion contracts.
 					err = New(gateway).continueExternalInputTask(ctx, "org-1", result.Task.ID, "legacy-input", input)
 				}
+			}
+			if beforeStart {
+				if !errors.Is(err, core.ErrOrganizationFrozen) {
+					t.Fatalf("held continuation was admitted: %v", err)
+				}
+				for range 2 {
+					if _, err := New(gateway).Recover(ctx); err != nil {
+						t.Fatalf("held continuation blocked recovery: %v", err)
+					}
+				}
+				snapshot, err := repository.Load(ctx)
+				if err != nil || snapshot.Tasks[result.Task.ID].Value.Status != core.TaskBlocked {
+					t.Fatalf("held continuation left blocked state: %v", err)
+				}
+				other, err := New(gateway).Submit(ctx, Submit{RequestID: "other-human-hold", OrganizationID: "org-2", Statement: "echo independent", Kind: core.ExecutionDeterministic})
+				if err != nil || other.Task.Status != core.TaskCompleted {
+					t.Fatalf("held human input blocked unrelated tenant: %v", err)
+				}
+				return
 			}
 			if err != nil {
 				t.Fatalf("released continuation rejected: %v", err)
@@ -684,5 +716,85 @@ func TestCompletionReviewCannotResumeSuspendedExecution(t *testing.T) {
 		if _, err := service.Recover(ctx); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestReviewRequestSurvivesCrashAndLaterReleasedHold(t *testing.T) {
+	ctx := t.Context()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	intercepted := &failOnceProjectionEvent{SQLite: store, eventType: "TASK_BLOCKED"}
+	service := NewWithModel(events.NewGateway(intercepted), describedModel{})
+	if _, err := service.Submit(ctx, Submit{RequestID: "review-crash", OrganizationID: "org-1", Statement: "prepare a note", Kind: core.ExecutionAgent}); !errors.Is(err, errProjectionWrite) {
+		t.Fatalf("crash missing: %v", err)
+	}
+	for index, frozen := range []bool{true, false} {
+		state := struct {
+			OrganizationID core.ID   `json:"organization_id"`
+			Frozen         bool      `json:"frozen"`
+			UpdatedAt      time.Time `json:"updated_at"`
+		}{"org-1", frozen, time.Now().UTC()}
+		if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "review-crash", nil, nil, "organization_freeze", "org-1", index+1, state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recovered := NewWithModel(events.NewGateway(store), describedModel{})
+	if _, err := recovered.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	page, err := recovered.PendingCompletionReviews(ctx, "org-1", "", 10)
+	if err != nil || len(page.Reviews) != 1 {
+		t.Fatalf("finished candidate lost its review: %+v %v", page, err)
+	}
+	if _, err := recovered.ReviewCompletion(ctx, reviewInput(page.Reviews[0], completion.ReviewApprove, "")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPreManifestPlanningHoldSurvivesRecovery(t *testing.T) {
+	ctx := t.Context()
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	intercepted := &holdBeforeOutcomeLedger{SQLite: store, publicationEventType: "PLANNING_CONTEXT_MANIFESTED", beforePublication: func() {
+		state := struct {
+			OrganizationID core.ID   `json:"organization_id"`
+			Frozen         bool      `json:"frozen"`
+			UpdatedAt      time.Time `json:"updated_at"`
+		}{"org-a", true, time.Now().UTC()}
+		if err := store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "pre-manifest", nil, nil, "organization_freeze", "org-a", 1, state); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	planner := &failingPlanningPlanner{}
+	service := NewWithModelAndPlanner(events.NewGateway(intercepted), execution.FakeModel{}, planner)
+	if _, err := service.Submit(ctx, Submit{RequestID: "pre-manifest", OrganizationID: "org-a", Statement: "prepare a note", Kind: core.ExecutionAgent}); !errors.Is(err, core.ErrOrganizationFrozen) {
+		t.Fatalf("missing hold: %v", err)
+	}
+	for range 2 {
+		if _, err := service.Recover(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := service.state.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range snapshot.Works {
+		if state.Value.Status != core.WorkActive {
+			t.Fatal("pre-manifest held Work became terminal")
+		}
+	}
+	if planner.calls != 0 {
+		t.Fatal("held planner was invoked")
+	}
+	other := New(events.NewGateway(store))
+	if result, err := other.Submit(ctx, Submit{RequestID: "other-work", OrganizationID: "org-b", Statement: "echo independent", Kind: core.ExecutionDeterministic}); err != nil || result.Task.Status != core.TaskCompleted {
+		t.Fatalf("other tenant blocked: %v", err)
 	}
 }

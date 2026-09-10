@@ -17,6 +17,48 @@ import (
 
 type holdWaitingModel struct{ started chan struct{} }
 
+type failedHeldReconciliationStore struct {
+	*SQLite
+	freeze func()
+}
+
+func (s failedHeldReconciliationStore) ReconcileInference(context.Context, inference.Reservation, *events.InferenceUsageRecordedPayload, inference.Reconciliation) (int64, error) {
+	s.freeze()
+	return 0, errors.New("accounting unavailable")
+}
+
+func TestReconciliationFailurePreservesConcurrentHold(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	if err := store.ActivateInferencePolicy(t.Context(), testInferencePolicy(now)); err != nil {
+		t.Fatal(err)
+	}
+	wrapped := failedHeldReconciliationStore{SQLite: store, freeze: func() {
+		appendInferenceFreeze(t, store, "organization-1", 1, true)
+	}}
+	guard, err := inference.NewGuardedAdapter(wrapped, &holdReturningModel{freeze: func() {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := inference.WithScope(t.Context(), testInferenceRequest("held-accounting").Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := guard.Complete(ctx, "prompt")
+	var hold core.SecurityHoldCause
+	if !errors.Is(err, core.ErrOrganizationFrozen) || !errors.As(err, &hold) || hold.OrganizationID != "organization-1" || hold.EventRef == "" || hold.Sequence == 0 || response.Text != "" {
+		t.Fatalf("hold lost on reconciliation failure: %v", err)
+	}
+	if _, found := events.ReconciledUsage(err); found {
+		t.Fatal("failed accounting advertised reconciled usage")
+	}
+}
+
 func TestLiveContainmentConnectionContentionDoesNotDestroyAuthority(t *testing.T) {
 	store, err := Open(":memory:")
 	if err != nil {

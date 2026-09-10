@@ -415,7 +415,7 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 		if reconcileErr != nil {
 			code = execution.InferenceRecordFailed
 		}
-		return execution.ModelResponse{}, execution.SafeModelError(code, errors.Join(providerErr, reconcileErr, context.Cause(ctx)))
+		return execution.ModelResponse{}, execution.SafeModelError(code, errors.Join(providerErr, reconcileErr, checkContainment()))
 	}
 	// Account attribution belongs to runtime composition, not provider output.
 	response.Usage.ConnectionID = a.connectionID
@@ -423,13 +423,13 @@ func (a *GuardedAdapter) complete(ctx context.Context, fingerprint string, call 
 		reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reconciliationTimeout)
 		_, reconcileErr := a.store.ReconcileInference(reconcileCtx, reservation, &response.Usage, ReconciliationViolation)
 		cancel()
-		return execution.ModelResponse{}, execution.SafeModelError(execution.ModelContractFailed, errors.Join(fmt.Errorf("provider usage exceeded its authorized inference reservation"), reconcileErr))
+		return execution.ModelResponse{}, execution.SafeModelError(execution.ModelContractFailed, errors.Join(fmt.Errorf("provider usage exceeded its authorized inference reservation"), reconcileErr, checkContainment()))
 	}
 	reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reconciliationTimeout)
 	costNanoUSD, err := a.store.ReconcileInference(reconcileCtx, reservation, &response.Usage, ReconciliationCompleted)
 	cancel()
 	if err != nil {
-		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceRecordFailed, err)
+		return execution.ModelResponse{}, execution.SafeModelError(execution.InferenceRecordFailed, errors.Join(err, checkContainment()))
 	}
 	if reservation.Mode == MeteredAPI {
 		costUSD := float64(costNanoUSD) / 1_000_000_000

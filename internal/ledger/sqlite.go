@@ -1955,6 +1955,11 @@ func loadTaskAssignmentProfile(ctx context.Context, tx *sql.Tx, target map[core.
 
 func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProjection) (events.Event, error) {
 	admissionAt := time.Now().UTC()
+	if item.eventDraft.EventType == "TASK_RESUMED" || item.eventDraft.EventType == "WORK_PLANNING_FAILED" {
+		if err := validateExecutionPublication(ctx, tx, item.eventDraft); err != nil {
+			return events.Event{}, err
+		}
+	}
 	if err := validateTerminalTaskContainment(ctx, tx, item); err != nil {
 		return events.Event{}, err
 	}

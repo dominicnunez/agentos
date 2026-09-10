@@ -275,7 +275,11 @@ func (l *SQLite) SuspendHeldExecution(ctx context.Context, organization, taskID,
 		if err != nil {
 			return err
 		}
-		hold, err := executionIntervalHold(ctx, tx, events.TrustedDraft{OrganizationID: organization, TaskID: taskID, CorrelationID: correlation, SourceExecutionID: executionID})
+		var boundary int64
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MIN(sequence),0) FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type='COMPLETION_REVIEW_REQUESTED' AND sequence>?`, organization, taskID, correlation, executionID, start.Sequence).Scan(&boundary); err != nil {
+			return err
+		}
+		hold, err := executionIntervalHoldThrough(ctx, tx, events.TrustedDraft{OrganizationID: organization, TaskID: taskID, CorrelationID: correlation, SourceExecutionID: executionID}, boundary)
 		if err != nil || hold == nil {
 			return err
 		}
@@ -415,7 +419,7 @@ func validateTerminalTaskContainment(ctx context.Context, tx *sql.Tx, item prepa
 		if err != nil {
 			return err
 		}
-		if draft.EventType == "TASK_VERIFIED_COMPLETE" || draft.EventType == "COMPLETION_REJECTED" {
+		if draft.EventType == "TASK_VERIFIED_COMPLETE" || draft.EventType == "COMPLETION_REJECTED" || draft.EventType == "TASK_BLOCKED" {
 			var boundary int64
 			err := tx.QueryRowContext(ctx, `SELECT COALESCE(MIN(sequence),0) FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type='COMPLETION_REVIEW_REQUESTED' AND sequence>?`, draft.OrganizationID, draft.TaskID, draft.CorrelationID, draft.SourceExecutionID, starts[0].Sequence).Scan(&boundary)
 			if err != nil {
@@ -428,6 +432,21 @@ func validateTerminalTaskContainment(ctx context.Context, tx *sql.Tx, item prepa
 				}
 				if hold != nil {
 					return *hold
+				}
+				if draft.EventType == "TASK_BLOCKED" {
+					frozen, err := organizationFrozenAtSequence(ctx, tx, core.ID(draft.OrganizationID), 0)
+					if err != nil {
+						return err
+					}
+					if frozen {
+						hold, err := executionIntervalHold(ctx, tx, draft)
+						if err != nil {
+							return err
+						}
+						if hold != nil {
+							return *hold
+						}
+					}
 				}
 				// Independent review acts on an already-admitted candidate.
 				// Current holds still block decisions; later released holds do

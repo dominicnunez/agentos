@@ -420,6 +420,9 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 		}
 		if recorded, decided := decisions[latest.ID]; decided {
 			if err := s.continueCompletionReview(ctx, latest, recorded.Review, recorded.Event); err != nil {
+				if errors.Is(err, core.ErrOrganizationFrozen) {
+					continue
+				}
 				return RecoveryResult{}, fmt.Errorf("recover completion review for task %s: %w", state.Value.ID, err)
 			}
 		}
@@ -458,6 +461,15 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 					result.RunningRecovered++
 				}
 				if err := s.continueHumanCompletionTask(ctx, organizationID, state.Value.ID, state.CorrelationID, completionEvent, completionPayload); err != nil {
+					if errors.Is(err, core.ErrOrganizationFrozen) {
+						if state.Value.Status == core.TaskBlocked {
+							result.BlockedPreserved++
+						}
+						if state.Value.Status == core.TaskRunning {
+							result.RunningRecovered--
+						}
+						continue
+					}
 					return RecoveryResult{}, fmt.Errorf("recover user completion for task %s: %w", state.Value.ID, err)
 				}
 				continuedInputs++
@@ -475,6 +487,15 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 					result.RunningRecovered++
 				}
 				if err := s.continueExternalInputTask(ctx, organizationID, state.Value.ID, state.CorrelationID, inputEvent); err != nil {
+					if errors.Is(err, core.ErrOrganizationFrozen) {
+						if state.Value.Status == core.TaskBlocked {
+							result.BlockedPreserved++
+						}
+						if state.Value.Status == core.TaskRunning {
+							result.RunningRecovered--
+						}
+						continue
+					}
 					return RecoveryResult{}, fmt.Errorf("recover external input continuation for task %s: %w", state.Value.ID, err)
 				}
 				continuedInputs++
@@ -555,6 +576,12 @@ func (s *Service) Recover(ctx context.Context) (RecoveryResult, error) {
 						result.RunningRecovered++
 						continue
 					}
+					if task.ExecutionKind == core.ExecutionDeterministic {
+						result.PendingFound--
+					} else {
+						result.BlockedPreserved--
+					}
+					continue
 				}
 				return RecoveryResult{}, fmt.Errorf("persist recovery for task %s: %w", task.ID, saveErr)
 			}
@@ -606,6 +633,14 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		if !ok || intentState.CorrelationID != workState.CorrelationID {
 			return 0, fmt.Errorf("work %s has invalid durable intent identity", workID)
 		}
+		_, release, containmentErr := s.gateway.BeginExecutionContext(ctx, string(intentState.Value.OrganizationID))
+		if containmentErr != nil {
+			if errors.Is(containmentErr, core.ErrOrganizationFrozen) {
+				continue
+			}
+			return 0, containmentErr
+		}
+		release()
 		stream, err := s.gateway.Events(ctx, workState.CorrelationID)
 		if err != nil {
 			return 0, err
@@ -655,6 +690,9 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		if intent.SourceChannel == "INTERNAL" {
 			if !hasDurablePlan {
 				if err := s.failPlanningWork(ctx, intent.OrganizationID, workState, "PLANNING_RECOVERY_IDENTITY_INCOMPLETE", "planning could not be resumed because the requested execution kind was not durably recoverable", planningAttemptRef); err != nil {
+					if errors.Is(err, core.ErrOrganizationFrozen) {
+						continue
+					}
 					return 0, err
 				}
 				continue
@@ -684,6 +722,9 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 		}
 		_, _, root, err := s.ensureSubmission(ctx, in)
 		if err != nil {
+			if errors.Is(err, core.ErrOrganizationFrozen) {
+				continue
+			}
 			current, loadErr := s.state.Load(ctx)
 			if loadErr != nil {
 				return 0, fmt.Errorf("recover Task DAG for work %s: %w", workID, err)
@@ -696,6 +737,9 @@ func (s *Service) recoverValidatedPlans(ctx context.Context, snapshot projection
 				return 0, fmt.Errorf("recover Task DAG for work %s: %w", workID, err)
 			}
 			if failErr := s.failPlanningWork(ctx, intent.OrganizationID, currentWork, "PLANNING_RECOVERY_FAILED", "safe planning recovery did not produce a validated durable plan", ""); failErr != nil {
+				if errors.Is(failErr, core.ErrOrganizationFrozen) {
+					continue
+				}
 				combined := errors.Join(err, fmt.Errorf("persist planning failure: %w", failErr))
 				return 0, fmt.Errorf("recover Task DAG for work %s: %w", workID, combined)
 			}
