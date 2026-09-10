@@ -20,18 +20,22 @@ import (
 )
 
 func TestReleasedHoldAllowsHumanContinuations(t *testing.T) {
-	testHumanContinuations(t, false, false)
+	testHumanContinuations(t, false, false, false)
 }
 
 func TestHeldHumanContinuationsRemainSuspended(t *testing.T) {
-	testHumanContinuations(t, true, false)
+	testHumanContinuations(t, true, false, false)
 }
 
 func TestFrozenHumanContinuationsRemainBlocked(t *testing.T) {
-	testHumanContinuations(t, false, true)
+	testHumanContinuations(t, false, true, false)
 }
 
-func testHumanContinuations(t *testing.T, interrupt, beforeStart bool) {
+func TestReleasedHoldBetweenResumeAndStartRemainsLatched(t *testing.T) {
+	testHumanContinuations(t, false, false, true)
+}
+
+func testHumanContinuations(t *testing.T, interrupt, beforeStart, resumeGap bool) {
 	for _, structured := range []bool{false, true} {
 		name := "external-input"
 		if structured {
@@ -66,7 +70,7 @@ func testHumanContinuations(t *testing.T, interrupt, beforeStart bool) {
 					t.Fatal(err)
 				}
 				result.Task = task
-				if beforeStart {
+				if beforeStart || resumeGap {
 					task.Status = core.TaskBlocked
 					if err := repository.SaveTask(ctx, "org-1", "TASK_BLOCKED", "runtime", "legacy-input", 2, task, nil); err != nil {
 						t.Fatal(err)
@@ -86,7 +90,7 @@ func testHumanContinuations(t *testing.T, interrupt, beforeStart bool) {
 					t.Fatal(err)
 				}
 			}
-			if interrupt {
+			if interrupt || resumeGap {
 				interceptor.beforeOutcome = func() {
 					for index, frozen := range []bool{true, false} {
 						state := struct {
@@ -98,6 +102,10 @@ func testHumanContinuations(t *testing.T, interrupt, beforeStart bool) {
 							t.Fatal(err)
 						}
 					}
+				}
+				if resumeGap {
+					interceptor.afterResume = interceptor.beforeOutcome
+					interceptor.beforeOutcome = nil
 				}
 			}
 			if structured {
@@ -114,7 +122,7 @@ func testHumanContinuations(t *testing.T, interrupt, beforeStart bool) {
 					err = New(gateway).continueExternalInputTask(ctx, "org-1", result.Task.ID, "legacy-input", input)
 				}
 			}
-			if beforeStart {
+			if beforeStart || resumeGap {
 				if !errors.Is(err, core.ErrOrganizationFrozen) {
 					t.Fatalf("held continuation was admitted: %v", err)
 				}
@@ -123,8 +131,38 @@ func testHumanContinuations(t *testing.T, interrupt, beforeStart bool) {
 						t.Fatalf("held continuation blocked recovery: %v", err)
 					}
 				}
+				if resumeGap {
+					stream, readErr := store.Events(ctx, "")
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					var resumeSequence int64
+					for _, event := range stream {
+						if event.TaskID != string(result.Task.ID) {
+							continue
+						}
+						if event.EventType == "TASK_RESUMED" {
+							resumeSequence = event.Sequence
+						}
+						if resumeSequence != 0 && event.EventType == "EXECUTION_STARTED" {
+							t.Fatal("held resume admitted execution after recovery")
+						}
+						if !structured && event.EventType == "A2A_INPUT_RECEIVED" {
+							if retryErr := New(gateway).continueExternalInputTask(ctx, "org-1", result.Task.ID, "legacy-input", event); !errors.Is(retryErr, core.ErrOrganizationFrozen) {
+								t.Fatalf("restarted continuation bypassed hold: %v", retryErr)
+							}
+						}
+					}
+					if resumeSequence == 0 {
+						t.Fatal("test did not reach durable resume")
+					}
+				}
 				snapshot, err := repository.Load(ctx)
-				if err != nil || snapshot.Tasks[result.Task.ID].Value.Status != core.TaskBlocked {
+				want := core.TaskBlocked
+				if resumeGap {
+					want = core.TaskPending
+				}
+				if err != nil || snapshot.Tasks[result.Task.ID].Value.Status != want {
 					t.Fatalf("held continuation left blocked state: %v", err)
 				}
 				other, err := New(gateway).Submit(ctx, Submit{RequestID: "other-human-hold", OrganizationID: "org-2", Statement: "echo independent", Kind: core.ExecutionDeterministic})
@@ -156,6 +194,17 @@ func testHumanContinuations(t *testing.T, interrupt, beforeStart bool) {
 type humanHoldLedger struct {
 	*ledger.SQLite
 	beforeOutcome func()
+	afterResume   func()
+}
+
+func (l *humanHoldLedger) AppendProjection(ctx context.Context, draft events.ProjectionDraft) (events.Event, error) {
+	event, err := l.SQLite.AppendProjection(ctx, draft)
+	if err == nil && draft.Event.EventType == "TASK_RESUMED" && l.afterResume != nil {
+		after := l.afterResume
+		l.afterResume = nil
+		after()
+	}
+	return event, err
 }
 
 func (l *humanHoldLedger) Append(ctx context.Context, draft events.TrustedDraft) (events.Event, error) {

@@ -1618,6 +1618,40 @@ func validatePriorExecutionTask(ctx context.Context, tx *sql.Tx, draft events.Pr
 	if !reflect.DeepEqual(prior, task) {
 		return fmt.Errorf("execution start changes the immutable task contract")
 	}
+	return validateResumedPreparation(ctx, tx, draft.Event.OrganizationID, record)
+}
+
+func validateResumedPreparation(ctx context.Context, tx *sql.Tx, organization string, record events.ProjectionRecord) error {
+	var resumed bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM records r JOIN events e ON e.event_id=r.admission_event_id WHERE r.kind='task' AND r.record_id=? AND r.version=? AND e.event_type='TASK_RESUMED')`, record.RecordID, record.Version).Scan(&resumed); err != nil {
+		return containmentReadFailure(err)
+	}
+	if resumed {
+		// The durable resume is the admission boundary, including after a
+		// process restart. A released hold cannot reset this pending interval.
+		resume, err := exactProjectionTransition(ctx, tx, "TASK_RESUMED", record)
+		if err != nil {
+			return containmentReadFailure(err)
+		}
+		if resume.OrganizationID != organization {
+			return fmt.Errorf("resumed execution crosses organizations")
+		}
+		_, admission, found, err := authorityAdmissionAtBoundary(ctx, tx, "organization_freeze", organization, resume.Sequence)
+		if err != nil {
+			return containmentReadFailure(err)
+		}
+		var epoch int64
+		if found {
+			epoch = admission.Sequence
+		}
+		_, hold, err := containmentSinceTx(ctx, tx, organization, epoch)
+		if err != nil {
+			return containmentReadFailure(err)
+		}
+		if hold != nil {
+			return *hold
+		}
+	}
 	return nil
 }
 
@@ -1955,6 +1989,17 @@ func loadTaskAssignmentProfile(ctx context.Context, tx *sql.Tx, target map[core.
 
 func appendPreparedProjection(ctx context.Context, tx *sql.Tx, item preparedProjection) (events.Event, error) {
 	admissionAt := time.Now().UTC()
+	if item.task != nil {
+		record, previous, found, err := latestProjectionRevision[core.Task](ctx, tx, "task", item.record.RecordID)
+		if err != nil {
+			return events.Event{}, err
+		}
+		if found && previous.Status == core.TaskPending {
+			if err := validateResumedPreparation(ctx, tx, item.eventDraft.OrganizationID, record); err != nil {
+				return events.Event{}, err
+			}
+		}
+	}
 	if item.eventDraft.EventType == "TASK_RESUMED" || item.eventDraft.EventType == "WORK_PLANNING_FAILED" {
 		if err := validateExecutionPublication(ctx, tx, item.eventDraft); err != nil {
 			return events.Event{}, err
