@@ -28,23 +28,53 @@ import (
 type SQLite struct {
 	live               liveContainment
 	db                 *sql.DB
+	memoryKeepalive    *sql.DB
 	newWorkCorrelation func() (string, error)
 	now                func() time.Time
 }
 
 func Open(path string) (*SQLite, error) {
+	var keepalive *sql.DB
+	if path == ":memory:" {
+		id, err := randomWorkCorrelation()
+		if err != nil {
+			return nil, err
+		}
+		// A cancelled transaction can make database/sql discard its connection.
+		// Keep each private memory database alive independently of that pool,
+		// without sharing it with any other Open call or issuing keeper queries.
+		path = "file:agentos-memory-" + id + "?mode=memory&cache=shared"
+		keepalive, err = sql.Open("sqlite", path)
+		if err != nil {
+			return nil, err
+		}
+		keepalive.SetMaxOpenConns(1)
+		keepalive.SetMaxIdleConns(1)
+		if err := keepalive.PingContext(context.Background()); err != nil {
+			return nil, errors.Join(err, keepalive.Close())
+		}
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
+		if keepalive != nil {
+			err = errors.Join(err, keepalive.Close())
+		}
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	l := &SQLite{db: db, newWorkCorrelation: randomWorkCorrelation, now: time.Now}
+	l := &SQLite{db: db, memoryKeepalive: keepalive, newWorkCorrelation: randomWorkCorrelation, now: time.Now}
 	if err := l.migrate(context.Background()); err != nil {
-		return nil, errors.Join(err, db.Close())
+		return nil, errors.Join(err, l.Close())
 	}
 	return l, nil
 }
-func (l *SQLite) Close() error { return l.db.Close() }
+func (l *SQLite) Close() error {
+	err := l.db.Close()
+	if l.memoryKeepalive != nil {
+		err = errors.Join(err, l.memoryKeepalive.Close())
+	}
+	return err
+}
 func (l *SQLite) migrate(ctx context.Context) error {
 	if err := migrateStorage(ctx, l.db); err != nil {
 		return err

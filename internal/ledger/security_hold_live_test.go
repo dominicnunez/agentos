@@ -3,6 +3,7 @@ package ledger
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -524,6 +525,56 @@ func TestContainmentSnapshotCancellationPreservesPrivateMemoryAuthority(t *testi
 		t.Fatalf("cancelled snapshot destroyed authority: epoch=%d frozen=%t err=%v", epoch, frozen, err)
 	}
 	appendInferenceFreeze(t, store, "organization-1", 2, true)
+}
+
+func TestCancelledWriterPreservesPrivateMemoryLedger(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	appendInferenceFreeze(t, store, "organization-1", 1, false)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM records"); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	// Wait for asynchronous rollback, then explicitly inject connection disposal:
+	// cancellation may reuse or discard the connection depending on its timing.
+	conn, err := store.db.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Raw(func(any) error { return driver.ErrBadConn }); !errors.Is(err, driver.ErrBadConn) {
+		t.Fatalf("inject connection disposal: %v", err)
+	}
+	_ = conn.Close()
+	var count int
+	err = store.db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM records WHERE kind='organization_freeze'").Scan(&count)
+	if err != nil || count != 1 {
+		t.Fatalf("cancelled writer erased committed authority: count=%d err=%v", count, err)
+	}
+	other, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = other.Close() }()
+	epoch, _, err := other.containmentEpoch(t.Context(), "organization-1")
+	if err != nil || epoch != 0 {
+		t.Fatalf("private memory databases shared authority: epoch=%d err=%v", epoch, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if store.memoryKeepalive.Stats().OpenConnections != 0 {
+		t.Fatal("closed ledger retained its memory keeper")
+	}
 }
 
 func TestLiveContainmentReleaseDoesNotWaitForLockedSnapshot(t *testing.T) {

@@ -183,12 +183,9 @@ func (l *SQLite) withContainmentSnapshot(ctx context.Context, read func(*sql.Tx)
 		_, err := conn.ExecContext(context.WithoutCancel(ctx), fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeout))
 		resultErr = errors.Join(resultErr, err)
 	}()
-	// Keep only the transaction lifetime uncancelled: database/sql can discard
-	// a cancelled transaction's connection and destroy a private :memory: DB.
-	// The driver's read-only BEGIN is deferred and takes no database lock. All
-	// snapshot queries retain the caller's cancellation and deadline.
-	snapshotCtx := context.WithoutCancel(ctx)
-	tx, err := conn.BeginTx(snapshotCtx, &sql.TxOptions{ReadOnly: true})
+	// The entire snapshot retains cancellation, including transaction begin.
+	// Open keeps private-memory authority alive across discarded connections.
+	tx, err := conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return err
 	}
