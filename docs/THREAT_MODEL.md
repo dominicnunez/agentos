@@ -8,7 +8,7 @@ The principal assets are organization, Mission, Goal, Work, Task, identity, know
 
 There is no published release yet according to `SECURITY.md`, so release-publication risk is prospective. The intended default is a single-machine system installation with a restricted `agentos` service account and one verified Linux owner. User-mode installations run with the owner's authority. Organization scoping remains security-relevant for external actors, ledger objects, model context, and budgets, without implying strong hosted multi-tenant isolation.
 
-This model describes commit `ea2868f0e495a8339e1b9a0d60c300f9be948e18`. Implemented controls, incomplete controls, and prerequisites for unsupported execution mechanisms are distinguished below. A passing test is evidence for a control, not proof of comprehensive security.
+This model describes runtime commit `e57e792069c3bc5b39c4b7b884af6a741adb626f`. Implemented controls, incomplete controls, and prerequisites for unsupported execution mechanisms are distinguished below. A passing test is evidence for a control, not proof of comprehensive security.
 
 # 2. Threat model, Trust boundaries and assumptions
 
@@ -134,6 +134,8 @@ An attacker or misaligned execution may try to continue inference, publish outpu
 
 Organization freezes are durable and checked during new inference and protected-operation admission. The current implementation also cancels matching cooperative live contexts, observes committed hold history, and retains an intervening freeze across subsequent release. Dispatch and publication checks suppress affected ordinary output and completion candidates. Interrupted Tasks can enter a durable suspended state requiring security reconciliation. Planning and normalization bind their attempts and interruption state to durable context records. An independent watchdog requests cancellation when authoritative containment state cannot be observed within its bounded window.
 
+Authority observation uses a separate database connection so unrelated writer validation does not block safety reads. Actual database unavailability still triggers bounded local cancellation; the separate reader does not bypass committed authority or extend the watchdog's deadline.
+
 Accounting and interruption evidence remain necessary while frozen. Actual returned usage is retained; definitely unsent calls require appropriate evidence before zero-charge reconciliation. A committed completion-verification boundary can support recovery of that already-verified transition without rerunning the handler.
 
 This is partial active containment, not comprehensive quarantine. Exact authorized release and suspended-task resumption, the complete coordination/output and external-effect audit, and complete dispatch/cancellation timelines and historical enforcement remain unfinished under issue #178. Execution-, Agent-, and Work-scoped quarantine is not claimed.
@@ -147,6 +149,8 @@ Secrets use protected credential sources, including systemd credential loading a
 Artifacts are size/count bounded, content-addressed, private, origin-labelled, and MIME-sniffed. Names cannot authorize path traversal. Artifacts are not malware-scanned and must remain untrusted to future renderers or execution mechanisms.
 
 SQLite uses parameterized access, schema/application-ID checks, ordered migration, and event-coupled projection validation. A one-to-one SHA-256 chain binds exact stored event bytes and ordering. Startup, verification, backup, and restore detect inconsistent chains and invalid causal admissions. Recovery also validates authority, identities, organization scope, manifests, and applicable historical accounting and completion rules.
+
+Cancelled queries release their database resources, and private in-memory authority survives discarded working or observation connections. These controls preserve observable committed state during cancellation; they do not make an unavailable database authoritative or provide durable storage for an in-memory ledger.
 
 The chain is not a signature or external checkpoint. Removing a valid suffix with its integrity records can leave an internally consistent shorter history. A sufficiently privileged attacker can replace the database and recompute the chain. At-rest confidentiality, secure deletion, externally anchored rollback detection, and signed audit attestation remain external or unimplemented.
 

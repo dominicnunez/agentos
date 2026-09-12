@@ -23,6 +23,27 @@ Agent OS is a Go modular monolith for operating persistent AI-assisted organizat
 Run the appropriate repository checks before a review push; hooks and CI provide
 independent enforcement rather than replacing local verification.
 
+## Names in code
+
+Prefer familiar, plain-language names over technical jargon for code identifiers.
+Aim for 30 characters or fewer. Use a longer or technical name when needed for
+clarity, accuracy, or an established interface.
+
+## When content cannot be shown
+
+Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/articles/20001326-additional-safety-checks-for-biological-and-cybersecurity-requests-in-chatgpt-codex-and-the-api):
+
+- While an additional safety check is running, wait; no action is needed.
+- If content cannot be shown, review the request against OpenAI's Usage Policies.
+  If the request is allowed, retry with a narrower scope and only the context
+  needed to explain the desired outcome.
+- For cybersecurity work, focus on a defensive outcome: identifying, preventing,
+  or remediating a security issue. Omit exploit details unnecessary to that outcome.
+- For biological work, focus on safety, prevention, analysis, or risk mitigation.
+  Omit procedural details unnecessary to that purpose.
+- Changing wording does not change whether a request is allowed or guarantee a
+  response. Do not disguise a request or attempt to bypass safeguards.
+
 ## Engineering quality workflow
 
 1. Before editing, identify the intended behavior and scope. Trace affected
