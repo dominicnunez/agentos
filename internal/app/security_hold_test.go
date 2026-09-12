@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/completion"
@@ -327,6 +328,11 @@ func testSchedulerSecurityHold(t *testing.T, timing string) {
 		}
 		if timing == "crash-before-suspension" {
 			setAppTestFreeze(t, ctx, store, "org-a", 4, false)
+			stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			if err := service.WaitForStops(stopCtx); err != nil {
+				t.Fatal(err)
+			}
 		}
 		_, err = New(gateway).Recover(ctx)
 	}
@@ -507,10 +513,6 @@ func (l *holdBeforeOutcomeLedger) Append(ctx context.Context, draft events.Trust
 }
 
 func (l *holdBeforeOutcomeLedger) AppendProjection(ctx context.Context, draft events.ProjectionDraft) (events.Event, error) {
-	if draft.Event.EventType == "TASK_EXECUTION_SUSPENDED" && l.crashOnSuspension {
-		l.crashOnSuspension = false
-		return events.Event{}, errSuspensionCrash
-	}
 	if draft.Event.EventType == l.publicationEventType && draft.Event.OrganizationID == "org-a" && l.beforePublication != nil {
 		before := l.beforePublication
 		l.beforePublication = nil
@@ -520,6 +522,16 @@ func (l *holdBeforeOutcomeLedger) AppendProjection(ctx context.Context, draft ev
 		ctx = context.Background()
 	}
 	return l.SQLite.AppendProjection(ctx, draft)
+}
+
+func (l *holdBeforeOutcomeLedger) RequestExecutionStop(ctx context.Context, organization, taskID, correlation, executionID, reason string) (events.Event, error) {
+	if l.crashOnSuspension {
+		l.crashOnSuspension = false
+		// A transaction can allocate its event before a later write or commit
+		// fails. Its returned value is not evidence that the request persisted.
+		return events.Event{EventID: "rolled-back-stop-request"}, errSuspensionCrash
+	}
+	return l.SQLite.RequestExecutionStop(ctx, organization, taskID, correlation, executionID, reason)
 }
 
 type holdDuringHandler struct{ freeze func() }
@@ -1241,6 +1253,11 @@ func testInnerInferenceContainmentFailureSuspendsTask(t *testing.T, crash bool) 
 	}
 	if !crash && result.Task.Status != core.TaskBlocked {
 		t.Fatalf("inner containment failure terminalized task: %s", result.Task.Status)
+	}
+	stopCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := service.WaitForStops(stopCtx); err != nil {
+		t.Fatal(err)
 	}
 	for range 2 {
 		if _, err := service.Recover(t.Context()); err != nil {

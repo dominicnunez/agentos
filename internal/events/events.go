@@ -4155,6 +4155,9 @@ func (g *Gateway) PublishAgentDraft(ctx context.Context, organizationID, actorID
 	return g.ledger.Append(ctx, trusted)
 }
 func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event, error) {
+	if RequiresExecutionStopAdmission(draft.EventType) {
+		return Event{}, fmt.Errorf("execution stop events require typed execution stop admission")
+	}
 	if draft.EventType == "INFERENCE_ROUTE_REJECTED" {
 		if err := ValidateInferenceRouteRejection(draft); err != nil {
 			return Event{}, err

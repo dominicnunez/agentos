@@ -53,6 +53,8 @@ type CodexSubscription struct {
 	close       func() error
 	isolatedDir string
 	runPermit   chan struct{}
+	lifecycleMu sync.RWMutex
+	closed      bool
 	closeOnce   sync.Once
 	closeErr    error
 }
@@ -196,6 +198,12 @@ func (a *CodexSubscription) AvailableModels(ctx context.Context) ([]ModelChoice,
 		return nil, err
 	}
 	defer func() { <-a.runPermit }()
+	a.lifecycleMu.RLock()
+	closed, models := a.closed, a.models
+	a.lifecycleMu.RUnlock()
+	if closed || models == nil {
+		return nil, fmt.Errorf("codex model discovery is unavailable")
+	}
 	const maximumPages = 20
 	limit := uint32(100)
 	var cursor *string
@@ -203,7 +211,7 @@ func (a *CodexSubscription) AvailableModels(ctx context.Context) ([]ModelChoice,
 	seenModels := make(map[string]struct{})
 	choices := make([]ModelChoice, 0)
 	for page := 0; page < maximumPages; page++ {
-		response, err := a.models(ctx, protocol.ModelListParams{Cursor: cursor, Limit: &limit})
+		response, err := models(ctx, protocol.ModelListParams{Cursor: cursor, Limit: &limit})
 		if err != nil {
 			return nil, fmt.Errorf("list Codex models: %w", err)
 		}
@@ -324,23 +332,26 @@ func (a *CodexSubscription) completeInput(ctx context.Context, prompt string, in
 	case <-runCtx.Done():
 		return ModelResponse{}, RequestNotSent(fmt.Errorf("wait for confined Codex turn: %w", runCtx.Err()))
 	}
-	if a.run == nil || a.isolatedDir == "" {
+	a.lifecycleMu.RLock()
+	closed, run, isolatedDir := a.closed, a.run, a.isolatedDir
+	a.lifecycleMu.RUnlock()
+	if closed || run == nil || isolatedDir == "" {
 		return ModelResponse{}, RequestNotSent(fmt.Errorf("codex subscription adapter is closed"))
 	}
 
-	runDir, err := os.MkdirTemp(a.isolatedDir, "run-")
+	runDir, err := os.MkdirTemp(isolatedDir, "run-")
 	if err != nil {
 		return ModelResponse{}, RequestNotSent(fmt.Errorf("create isolated Codex turn directory: %w", err))
 	}
 	defer func() {
-		err = errors.Join(err, removeOwnedCodexDirectory(a.isolatedDir, runDir, "run-"))
+		err = errors.Join(err, removeOwnedCodexDirectory(isolatedDir, runDir, "run-"))
 	}()
 
 	includeDefaults := false
 	model := a.model
 	var approval sdk.AskForApproval = sdk.ApprovalPolicyNever
 	sandbox := sdk.SandboxModeReadOnly
-	result, summary, err := a.run(runCtx, sdk.RunOptions{
+	result, summary, err := run(runCtx, sdk.RunOptions{
 		Prompt:         prompt,
 		Instructions:   instructions,
 		Cwd:            &runDir,
@@ -354,6 +365,9 @@ func (a *CodexSubscription) completeInput(ctx context.Context, prompt string, in
 		}}},
 	})
 	if err != nil {
+		if stop, found := StopOutcome(err); found && stop.LocalProcessStopAttempted {
+			err = errors.Join(err, a.Close())
+		}
 		return ModelResponse{}, fmt.Errorf("run confined Codex turn: %w", err)
 	}
 	return validatedCodexResponse(a.model, result, summary)
@@ -422,17 +436,14 @@ func codexTokenCount(value int64) (int, error) {
 
 func (a *CodexSubscription) Close() error {
 	a.closeOnce.Do(func() {
-		if a.runPermit == nil {
-			return
-		}
-		a.runPermit <- struct{}{}
-		defer func() { <-a.runPermit }()
-		if a.close != nil {
-			a.closeErr = a.close()
-		}
+		a.lifecycleMu.Lock()
+		a.closed = true
+		closeProcess := a.close
 		a.close = nil
-		a.run = nil
-		a.isolatedDir = ""
+		a.lifecycleMu.Unlock()
+		if closeProcess != nil {
+			a.closeErr = closeProcess()
+		}
 	})
 	return a.closeErr
 }

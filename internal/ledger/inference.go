@@ -236,6 +236,14 @@ func (l *SQLite) ReserveInference(ctx context.Context, request inference.Inferen
 		if err := validatePreparationGeneration(ctx, tx, request.Scope.OrganizationID); err != nil {
 			return err
 		}
+		if request.Scope.Purpose == inference.PurposeTaskExecution {
+			if err := validateExecutionNotStopped(ctx, tx, events.TrustedDraft{
+				OrganizationID: request.Scope.OrganizationID, TaskID: request.Scope.TaskID,
+				CorrelationID: request.Scope.CorrelationID, SourceExecutionID: request.Scope.ExecutionID,
+			}); err != nil {
+				return err
+			}
+		}
 		// Planning and normalization can enter the guard after their manifest
 		// without a live generation. A fresh generation cannot erase that start.
 		var manifested bool

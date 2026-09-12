@@ -9,10 +9,90 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/dominicnunez/codex-sdk-go/appserver"
 	protocol "github.com/dominicnunez/codex-sdk-go/appserver/protocol"
 )
+
+func TestCodexSubscriptionCloseDoesNotWaitForRunningTurn(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	processClosed := make(chan struct{})
+	adapter := &CodexSubscription{
+		model:       "gpt-test",
+		isolatedDir: t.TempDir(),
+		runPermit:   make(chan struct{}, 1),
+		run: func(context.Context, sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error) {
+			close(started)
+			<-release
+			return nil, codexRunSummary{}, context.Canceled
+		},
+		close: func() error {
+			close(processClosed)
+			return nil
+		},
+	}
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		_, _ = adapter.Complete(t.Context(), "bounded prompt")
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not start")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- adapter.Close() }()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		close(release)
+		<-runDone
+		t.Fatal("Close waited for the ordinary turn permit")
+	}
+	select {
+	case <-processClosed:
+	default:
+		t.Fatal("Close returned without invoking owned process shutdown")
+	}
+	close(release)
+	<-runDone
+}
+
+func TestCodexSubscriptionFailedHardStopPreventsAnotherTurn(t *testing.T) {
+	var calls, closes int
+	adapter := &CodexSubscription{
+		model:       "gpt-test",
+		isolatedDir: t.TempDir(),
+		runPermit:   make(chan struct{}, 1),
+		run: func(context.Context, sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error) {
+			calls++
+			return nil, codexRunSummary{}, withModelStopOutcome(context.Canceled, ModelStopOutcome{
+				LocalProcessStopAttempted: true,
+				RemoteStatus:              RemoteStopUncertain,
+			})
+		},
+		close: func() error {
+			closes++
+			return nil
+		},
+	}
+	if _, err := adapter.Complete(t.Context(), "first turn"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first turn error=%v", err)
+	}
+	if _, err := adapter.Complete(t.Context(), "second turn"); err == nil || !WasRequestNotSent(err) {
+		t.Fatalf("unsafe adapter accepted another turn: %v", err)
+	}
+	if calls != 1 || closes != 1 {
+		t.Fatalf("calls=%d closes=%d", calls, closes)
+	}
+}
 
 func TestCodexSubscriptionAppliesFailClosedRunProfile(t *testing.T) {
 	root := t.TempDir()

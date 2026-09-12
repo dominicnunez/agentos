@@ -33,7 +33,7 @@ type containmentGeneration struct {
 const containmentObservationTimeout = time.Second
 
 func containmentReadFailure(err error) error {
-	if err == nil || errors.Is(err, core.ErrOrganizationFrozen) {
+	if err == nil || errors.Is(err, core.ErrOrganizationFrozen) || errors.Is(err, core.ErrExecutionStopped) {
 		return err
 	}
 	return errors.Join(core.ErrContainmentUnavailable, err)
@@ -367,16 +367,25 @@ func (l *SQLite) SuspendHeldExecution(ctx context.Context, organization, taskID,
 				return nil
 			}
 		}
-		task.Status = core.TaskBlocked
-		item, err := prepareProjection(events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: organization, EventType: "TASK_EXECUTION_SUSPENDED", SourceActorID: "runtime", TaskID: taskID, CorrelationID: correlation, Payload: map[string]any{"hold": hold, "outcome_event_ref": outcomeRef, "execution_start_ref": start.EventID, "reason": "containment interrupted execution; operator reconciliation required"}}, ProjectionKind: "task", RecordID: taskID, Version: version + 1, Value: task}, false, false)
+		reason := "containment_unavailable"
+		if hold != nil {
+			reason = "security_hold"
+		}
+		request, err := requestExecutionStop(ctx, tx, organization, taskID, correlation, executionID, reason)
 		if err != nil {
 			return err
 		}
-		if _, err := appendPreparedProjection(ctx, tx, item); err != nil {
+		// A restarted runtime cannot observe the old handler's termination.
+		// Preserve uncertainty until an explicit reconciliation path can prove it.
+		if _, err := appendEvent(ctx, tx, events.TrustedDraft{
+			OrganizationID: organization, TaskID: taskID, CorrelationID: correlation,
+			SourceActorID: "runtime", SourceExecutionID: executionID, EventType: "EXECUTION_STOP_UNCERTAIN",
+			Payload: events.ExecutionStopResult{StopRequestRef: request.EventID},
+		}); err != nil {
 			return err
 		}
 		suspended = true
-		return nil
+		return validateStopHistory(ctx, tx, request)
 	})
 	return suspended && err == nil, err
 }
@@ -387,6 +396,9 @@ func validateContainedOutcome(ctx context.Context, tx *sql.Tx, draft events.Trus
 	var outcome core.ToolOutcome
 	if decodeExactJSON(draft.Payload, &outcome) != nil || !outcome.Valid() {
 		return fmt.Errorf("invalid containment outcome")
+	}
+	if events.HasExecutionStopEvidence(outcome) {
+		return fmt.Errorf("stop outcomes require typed execution stop admission")
 	}
 	history, err := loadFreezeHistory(ctx, tx, draft.OrganizationID)
 	if err != nil {
@@ -434,6 +446,9 @@ func validateContainedOutcome(ctx context.Context, tx *sql.Tx, draft events.Trus
 // validateExecutionPublication protects each subsequent publication in its
 // writer transaction, including holds committed after outcome admission.
 func validateExecutionPublication(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft) error {
+	if err := validateExecutionNotStopped(ctx, tx, draft); err != nil {
+		return err
+	}
 	if err := validatePreparationGeneration(ctx, tx, draft.OrganizationID); err != nil {
 		return err
 	}

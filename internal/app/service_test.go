@@ -1646,7 +1646,7 @@ func (timeoutExecutionModel) Complete(ctx context.Context, _ string) (execution.
 	return execution.ModelResponse{}, ctx.Err()
 }
 
-func TestTimedOutProviderTurnPersistsTerminalFailure(t *testing.T) {
+func TestTimedOutProviderTurnStaysSuspended(t *testing.T) {
 	l, err := ledger.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -1658,11 +1658,17 @@ func TestTimedOutProviderTurnPersistsTerminalFailure(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("execution error=%v", err)
 	}
-	if result.Task.Status != core.TaskFailed || result.Work.Status != "FAILED" {
+	if result.Task.Status != core.TaskBlocked || result.Work.Status != core.WorkActive {
 		t.Fatalf("task=%+v work=%+v", result.Task, result.Work)
 	}
-	if !hasEventType(result.Events, "EXECUTION_FINISHED") || !hasEventType(result.Events, "COMPLETION_REJECTED") {
-		t.Fatalf("timed-out turn lacked durable terminal events: %+v", result.Events)
+	if countEventType(result.Events, "EXECUTION_STOP_REQUESTED") != 1 || countEventType(result.Events, "EXECUTION_STOP_CONFIRMED") != 1 ||
+		!hasEventType(result.Events, "EXECUTION_FINISHED") || hasEventType(result.Events, "RESULT_PUBLISHED") || hasEventType(result.Events, "CANDIDATE_COMPLETE") || hasEventType(result.Events, "COMPLETION_REJECTED") {
+		t.Fatal("timed-out turn lacked local stop evidence or published ordinary output")
+	}
+	for range 2 {
+		if recovered, err := service.Recover(t.Context()); err != nil || recovered.TasksExecuted != 0 {
+			t.Fatalf("timed-out turn replayed: %+v err=%v", recovered, err)
+		}
 	}
 }
 
@@ -1881,6 +1887,14 @@ type failOnceProjectionEvent struct {
 	*ledger.SQLite
 	eventType string
 	failed    bool
+}
+
+func (f *failOnceProjectionEvent) RequestExecutionStop(ctx context.Context, organization, taskID, correlation, executionID, reason string) (events.Event, error) {
+	if f.eventType == "TASK_EXECUTION_SUSPENDED" && !f.failed {
+		f.failed = true
+		return events.Event{}, errProjectionWrite
+	}
+	return f.SQLite.RequestExecutionStop(ctx, organization, taskID, correlation, executionID, reason)
 }
 
 func (f *failOnceProjectionEvent) AppendProjection(ctx context.Context, draft events.ProjectionDraft) (events.Event, error) {

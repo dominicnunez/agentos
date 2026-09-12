@@ -17,14 +17,27 @@ import (
 
 type codexRunSummary struct {
 	sdk.StreamSummary
-	EffectiveModel string
+	EffectiveModel   string
+	stopRequired     bool
+	localTurnStopped bool
 }
 
 // The high-level SDK run API discards ThreadStartResponse.Model. Use the typed
 // lifecycle so the model-only turn cannot start without observed identity.
 func sdkStreamRun(process *codexProcess, protocolErrors *codexProtocolErrors) codexRun {
 	return func(ctx context.Context, options sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error) {
-		return runObservedCodexTurn(ctx, process.Client, process.wire, protocolErrors, options)
+		result, summary, err := runObservedCodexTurn(ctx, process.Client, process.wire, protocolErrors, options)
+		if err == nil || !summary.stopRequired || summary.localTurnStopped {
+			return result, summary, err
+		}
+		processStopped, stopErr := process.Abort()
+		outcome := ModelStopOutcome{
+			LocalTurnStopped:          processStopped,
+			LocalProcessStopAttempted: true,
+			LocalProcessStopped:       processStopped,
+			RemoteStatus:              RemoteStopUncertain,
+		}
+		return nil, summary, withModelStopOutcome(errors.Join(err, stopErr), outcome)
 	}
 }
 
@@ -38,7 +51,7 @@ func runObservedCodexTurn(ctx context.Context, client *protocol.Client, source c
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	observer := &codexTurnObserver{done: make(chan struct{}), cancel: cancel}
+	observer := &codexTurnObserver{done: make(chan struct{}), terminalDone: make(chan struct{}), cancel: cancel}
 	if err := source.attach(observer); err != nil {
 		return nil, empty, RequestNotSent(err)
 	}
@@ -66,6 +79,7 @@ func runObservedCodexTurn(ctx context.Context, client *protocol.Client, source c
 	if priorErr != nil {
 		return nil, empty, RequestNotSent(priorErr)
 	}
+	turnAttempted := true
 	turn, err := client.Turn.Start(runCtx, protocol.TurnStartParams{
 		ThreadID: thread.Thread.ID, Input: []protocol.UserInput{&protocol.TextUserInput{Text: options.Prompt}},
 		Model: options.Model, Cwd: options.Cwd, ApprovalPolicy: options.ApprovalPolicy,
@@ -95,18 +109,27 @@ func runObservedCodexTurn(ctx context.Context, client *protocol.Client, source c
 	}
 	observer.mu.Lock()
 	err = errors.Join(err, runCtx.Err(), observer.err, protocolErrors.take())
-	observer.detached = true
 	turnID := observer.turnID
 	completed, items, usage := observer.completed, observer.items, observer.usage
+	terminalStopped := observer.terminalStopped
 	observer.mu.Unlock()
 	if err != nil {
-		if turnID != "" {
-			interruptCtx, interruptCancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer interruptCancel()
-			_, _ = client.Turn.Interrupt(interruptCtx, protocol.TurnInterruptParams{ThreadID: thread.Thread.ID, TurnID: turnID})
+		empty.stopRequired = turnAttempted
+		if !terminalStopped {
+			terminalStopped = interruptObservedCodexTurn(client, observer, thread.Thread.ID, turnID)
+		}
+		observer.mu.Lock()
+		observer.detached = true
+		observer.mu.Unlock()
+		empty.localTurnStopped = terminalStopped
+		if terminalStopped {
+			err = withModelStopOutcome(err, ModelStopOutcome{LocalTurnStopped: true, RemoteStatus: RemoteStopUncertain})
 		}
 		return nil, empty, err
 	}
+	observer.mu.Lock()
+	observer.detached = true
+	observer.mu.Unlock()
 	if completed == nil {
 		return nil, empty, fmt.Errorf("codex turn has no completion evidence")
 	}
@@ -117,6 +140,26 @@ func runObservedCodexTurn(ctx context.Context, client *protocol.Client, source c
 		}
 	}
 	return result, codexRunSummary{StreamSummary: sdk.StreamSummary{LatestTokenUsage: usage}, EffectiveModel: thread.Model}, nil
+}
+
+func interruptObservedCodexTurn(client *protocol.Client, observer *codexTurnObserver, threadID, turnID string) bool {
+	if turnID == "" {
+		return false
+	}
+	interruptCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := client.Turn.Interrupt(interruptCtx, protocol.TurnInterruptParams{ThreadID: threadID, TurnID: turnID}); err != nil {
+		return false
+	}
+	select {
+	case <-observer.terminalDone:
+		observer.mu.Lock()
+		stopped := observer.terminalStopped
+		observer.mu.Unlock()
+		return stopped
+	case <-interruptCtx.Done():
+		return false
+	}
 }
 
 // Only one fresh thread is active in the isolated process. Foreign or changing
@@ -131,11 +174,20 @@ type codexTurnObserver struct {
 	usage            *sdk.ThreadTokenUsage
 	err              error
 	done             chan struct{}
+	terminalDone     chan struct{}
 	finished         bool
+	terminalStopped  bool
 	detached         bool
 	cancel           context.CancelFunc
 	bytes, notices   int
 	budget           codexStreamBudget
+}
+
+func (o *codexTurnObserver) finishTerminal() {
+	if !o.terminalStopped {
+		close(o.terminalDone)
+		o.terminalStopped = true
+	}
 }
 
 type codexNotificationSource interface {
@@ -208,7 +260,7 @@ func (o *codexTurnObserver) observe(notice protocol.Notification) {
 		}
 	case "turn/started", "turn/completed":
 		var n protocol.TurnCompletedNotification
-		if json.Unmarshal(notice.Params, &n) != nil || !o.scope(n.ThreadID, n.Turn.ID) || n.Turn.Error != nil {
+		if json.Unmarshal(notice.Params, &n) != nil || !o.scope(n.ThreadID, n.Turn.ID) {
 			o.fail("codex turn notification identity is invalid")
 			return
 		}
@@ -219,7 +271,17 @@ func (o *codexTurnObserver) observe(notice protocol.Notification) {
 			}
 		}
 		if notice.Method == "turn/completed" {
-			if o.completed != nil || n.Turn.Status != sdk.TurnStatusCompleted {
+			switch n.Turn.Status {
+			case sdk.TurnStatusCompleted, sdk.TurnStatusInterrupted, sdk.TurnStatusFailed:
+				o.finishTerminal()
+			case protocol.TurnStatusInProgress:
+				o.fail("codex completion is still in progress")
+				return
+			default:
+				o.fail("codex completion is invalid")
+				return
+			}
+			if o.completed != nil || n.Turn.Status != sdk.TurnStatusCompleted || n.Turn.Error != nil {
 				o.fail("codex completion is invalid")
 				return
 			}
