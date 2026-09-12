@@ -19,15 +19,16 @@ CREATE TRIGGER freeze_records_insert_change BEFORE INSERT ON records
 WHEN NEW.kind='organization_freeze' OR
   (NEW.admission_event_id<>'' AND EXISTS(SELECT 1 FROM freeze_changes)) BEGIN
   INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT NEW.record_id,randomblob(32),randomblob(32)
-  WHERE NEW.kind='organization_freeze' AND NEW.record_id<>'' AND EXISTS(
-    SELECT 1 FROM records r WHERE r.kind=NEW.kind AND r.record_id=NEW.record_id AND r.version=NEW.version
-  )
-  ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
-  INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT DISTINCT r.record_id,randomblob(32),randomblob(32) FROM records r
-  WHERE r.kind='organization_freeze' AND r.record_id<>'' AND NEW.admission_event_id<>'' AND
-    r.admission_event_id<>'' AND r.admission_event_id=NEW.admission_event_id
+  SELECT organization_id,randomblob(32),randomblob(32) FROM (
+    SELECT NEW.record_id AS organization_id
+    WHERE NEW.kind='organization_freeze' AND NEW.record_id<>'' AND EXISTS(
+      SELECT 1 FROM records r WHERE r.kind=NEW.kind AND r.record_id=NEW.record_id AND r.version=NEW.version
+    )
+    UNION
+    SELECT r.record_id FROM records r
+    WHERE r.kind='organization_freeze' AND r.record_id<>'' AND NEW.admission_event_id<>'' AND
+      r.admission_event_id<>'' AND r.admission_event_id=NEW.admission_event_id
+  ) WHERE organization_id<>''
   ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
   INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
   SELECT NEW.record_id,randomblob(32),randomblob(32)
@@ -43,18 +44,18 @@ CREATE TRIGGER freeze_records_update_change BEFORE UPDATE ON records
 WHEN OLD.kind='organization_freeze' OR NEW.kind='organization_freeze' OR
   EXISTS(SELECT 1 FROM freeze_changes) BEGIN
   INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT OLD.record_id,randomblob(32),randomblob(32)
-  WHERE OLD.kind='organization_freeze' AND OLD.record_id<>''
-  ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
-  INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT NEW.record_id,randomblob(32),randomblob(32)
-  WHERE NEW.kind='organization_freeze' AND NEW.record_id<>''
-  ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
-  INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT DISTINCT r.record_id,randomblob(32),randomblob(32) FROM records r
-  WHERE r.kind='organization_freeze' AND r.record_id<>'' AND NEW.admission_event_id<>'' AND
-    r.admission_event_id<>'' AND r.admission_event_id=NEW.admission_event_id AND
-    NOT (r.kind=OLD.kind AND r.record_id=OLD.record_id AND r.version=OLD.version)
+  SELECT organization_id,randomblob(32),randomblob(32) FROM (
+    SELECT OLD.record_id AS organization_id
+    WHERE OLD.kind='organization_freeze' AND OLD.record_id<>''
+    UNION
+    SELECT NEW.record_id
+    WHERE NEW.kind='organization_freeze' AND NEW.record_id<>''
+    UNION
+    SELECT r.record_id FROM records r
+    WHERE r.kind='organization_freeze' AND r.record_id<>'' AND NEW.admission_event_id<>'' AND
+      r.admission_event_id<>'' AND r.admission_event_id=NEW.admission_event_id AND
+      NOT (r.kind=OLD.kind AND r.record_id=OLD.record_id AND r.version=OLD.version)
+  ) WHERE organization_id<>''
   ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
 END;
 
@@ -68,32 +69,30 @@ END;
 CREATE TRIGGER freeze_events_insert_conflict BEFORE INSERT ON events
 WHEN NEW.event_type='FREEZE_SET' OR EXISTS(SELECT 1 FROM freeze_changes) BEGIN
   INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT e.organization_id,randomblob(32),randomblob(32) FROM events e
-  WHERE e.event_id=NEW.event_id AND e.event_type='FREEZE_SET' AND e.organization_id<>''
-  ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
-  INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT e.organization_id,randomblob(32),randomblob(32) FROM events e
-  WHERE e.sequence=NEW.sequence AND e.event_id<>NEW.event_id AND
-    e.event_type='FREEZE_SET' AND e.organization_id<>''
-  ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
-  INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT DISTINCT r.record_id,randomblob(32),randomblob(32) FROM records r
-  WHERE r.kind='organization_freeze' AND r.record_id<>'' AND r.admission_event_id<>'' AND
-    r.admission_event_id=NEW.event_id
-  ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
-  INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT DISTINCT r.record_id,randomblob(32),randomblob(32) FROM events e
-  JOIN records r ON r.admission_event_id=e.event_id AND r.admission_event_id<>''
-  WHERE e.sequence=NEW.sequence AND e.event_id<>NEW.event_id AND
-    r.kind='organization_freeze' AND r.record_id<>''
+  SELECT organization_id,randomblob(32),randomblob(32) FROM (
+    SELECT e.organization_id FROM events e
+    WHERE e.event_id=NEW.event_id AND e.event_type='FREEZE_SET' AND e.organization_id<>''
+    UNION
+    SELECT e.organization_id FROM events e
+    WHERE e.sequence=NEW.sequence AND e.event_id<>NEW.event_id AND
+      e.event_type='FREEZE_SET' AND e.organization_id<>''
+    UNION
+    SELECT r.record_id FROM records r
+    WHERE r.kind='organization_freeze' AND r.record_id<>'' AND r.admission_event_id<>'' AND
+      r.admission_event_id=NEW.event_id
+    UNION
+    SELECT r.record_id FROM events e
+    JOIN records r ON r.admission_event_id=e.event_id AND r.admission_event_id<>''
+    WHERE e.sequence=NEW.sequence AND e.event_id<>NEW.event_id AND
+      r.kind='organization_freeze' AND r.record_id<>''
+  ) WHERE organization_id<>''
   ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
 END;
 
 CREATE TRIGGER freeze_events_insert_change AFTER INSERT ON events
 WHEN NEW.event_type='FREEZE_SET' AND NEW.organization_id<>'' BEGIN
   INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT NEW.organization_id,randomblob(32),randomblob(32)
-  WHERE NEW.event_type='FREEZE_SET' AND NEW.organization_id<>''
+  VALUES(NEW.organization_id,randomblob(32),randomblob(32))
   ON CONFLICT(organization_id) DO UPDATE SET
     generation=randomblob(32),
     rewrite_generation=CASE WHEN NEW.sequence=(SELECT MAX(sequence) FROM events)
@@ -104,51 +103,48 @@ CREATE TRIGGER freeze_events_update_change BEFORE UPDATE ON events
 WHEN OLD.event_type='FREEZE_SET' OR NEW.event_type='FREEZE_SET' OR
   EXISTS(SELECT 1 FROM freeze_changes) BEGIN
   INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT OLD.organization_id,randomblob(32),randomblob(32)
-  WHERE OLD.event_type='FREEZE_SET' AND OLD.organization_id<>''
-  ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
-  INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT NEW.organization_id,randomblob(32),randomblob(32)
-  WHERE NEW.event_type='FREEZE_SET' AND NEW.organization_id<>''
-  ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
-  INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT DISTINCT r.record_id,randomblob(32),randomblob(32) FROM records r
-  WHERE r.kind='organization_freeze' AND r.record_id<>'' AND
-    r.admission_event_id<>'' AND r.admission_event_id=OLD.event_id
-  ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
-  INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT DISTINCT r.record_id,randomblob(32),randomblob(32) FROM records r
-  WHERE r.kind='organization_freeze' AND r.record_id<>'' AND NEW.event_id<>OLD.event_id AND
-    r.admission_event_id<>'' AND r.admission_event_id=NEW.event_id
-  ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
-  INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT e.organization_id,randomblob(32),randomblob(32) FROM events e
-  WHERE e.event_id=NEW.event_id AND e.event_id<>OLD.event_id AND
-    e.event_type='FREEZE_SET' AND e.organization_id<>''
-  ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
-  INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT e.organization_id,randomblob(32),randomblob(32) FROM events e
-  WHERE e.sequence=NEW.sequence AND e.event_id<>OLD.event_id AND e.event_id<>NEW.event_id AND
-    e.event_type='FREEZE_SET' AND e.organization_id<>''
-  ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
-  INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT DISTINCT r.record_id,randomblob(32),randomblob(32) FROM events e
-  JOIN records r ON r.admission_event_id=e.event_id AND r.admission_event_id<>''
-  WHERE e.sequence=NEW.sequence AND e.event_id<>OLD.event_id AND e.event_id<>NEW.event_id AND
-    r.kind='organization_freeze' AND r.record_id<>''
+  SELECT organization_id,randomblob(32),randomblob(32) FROM (
+    SELECT OLD.organization_id AS organization_id
+    WHERE OLD.event_type='FREEZE_SET' AND OLD.organization_id<>''
+    UNION
+    SELECT NEW.organization_id
+    WHERE NEW.event_type='FREEZE_SET' AND NEW.organization_id<>''
+    UNION
+    SELECT r.record_id FROM records r
+    WHERE r.kind='organization_freeze' AND r.record_id<>'' AND
+      r.admission_event_id<>'' AND r.admission_event_id=OLD.event_id
+    UNION
+    SELECT r.record_id FROM records r
+    WHERE r.kind='organization_freeze' AND r.record_id<>'' AND NEW.event_id<>OLD.event_id AND
+      r.admission_event_id<>'' AND r.admission_event_id=NEW.event_id
+    UNION
+    SELECT e.organization_id FROM events e
+    WHERE e.event_id=NEW.event_id AND e.event_id<>OLD.event_id AND
+      e.event_type='FREEZE_SET' AND e.organization_id<>''
+    UNION
+    SELECT e.organization_id FROM events e
+    WHERE e.sequence=NEW.sequence AND e.event_id<>OLD.event_id AND e.event_id<>NEW.event_id AND
+      e.event_type='FREEZE_SET' AND e.organization_id<>''
+    UNION
+    SELECT r.record_id FROM events e
+    JOIN records r ON r.admission_event_id=e.event_id AND r.admission_event_id<>''
+    WHERE e.sequence=NEW.sequence AND e.event_id<>OLD.event_id AND e.event_id<>NEW.event_id AND
+      r.kind='organization_freeze' AND r.record_id<>''
+  ) WHERE organization_id<>''
   ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
 END;
 
 CREATE TRIGGER freeze_events_delete_change BEFORE DELETE ON events
 WHEN OLD.event_type='FREEZE_SET' OR EXISTS(SELECT 1 FROM freeze_changes) BEGIN
   INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT OLD.organization_id,randomblob(32),randomblob(32)
-  WHERE OLD.event_type='FREEZE_SET' AND OLD.organization_id<>''
-  ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
-  INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
-  SELECT DISTINCT r.record_id,randomblob(32),randomblob(32) FROM records r
-  WHERE r.kind='organization_freeze' AND r.record_id<>'' AND r.admission_event_id<>'' AND
-    r.admission_event_id=OLD.event_id
+  SELECT organization_id,randomblob(32),randomblob(32) FROM (
+    SELECT OLD.organization_id AS organization_id
+    WHERE OLD.event_type='FREEZE_SET' AND OLD.organization_id<>''
+    UNION
+    SELECT r.record_id FROM records r
+    WHERE r.kind='organization_freeze' AND r.record_id<>'' AND r.admission_event_id<>'' AND
+      r.admission_event_id=OLD.event_id
+  ) WHERE organization_id<>''
   ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
 END;`
 

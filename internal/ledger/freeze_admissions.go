@@ -24,18 +24,17 @@ WHERE kind='capability_lease' ORDER BY record_id,version`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read capability records: %w", err)
 	}
+	defer func() { _ = rows.Close() }()
 	var records []events.AuthorityRecord
 	for rows.Next() {
 		var record events.AuthorityRecord
 		if err := rows.Scan(&record.Kind, &record.RecordID, &record.Version, &record.Body, &record.AdmissionEventID); err != nil {
-			_ = rows.Close()
 			return nil, nil, fmt.Errorf("scan capability record: %w", err)
 		}
 		record.Body = append([]byte(nil), record.Body...)
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
 		return nil, nil, fmt.Errorf("iterate capability records: %w", err)
 	}
 	if err := rows.Close(); err != nil {
@@ -54,17 +53,16 @@ WHERE kind='capability_lease' ORDER BY record_id,version`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read freeze organizations: %w", err)
 	}
+	defer func() { _ = organizations.Close() }()
 	var organizationIDs []string
 	for organizations.Next() {
 		var organization string
 		if err := organizations.Scan(&organization); err != nil {
-			_ = organizations.Close()
 			return nil, nil, fmt.Errorf("scan freeze organization: %w", err)
 		}
 		organizationIDs = append(organizationIDs, organization)
 	}
 	if err := organizations.Err(); err != nil {
-		_ = organizations.Close()
 		return nil, nil, fmt.Errorf("iterate freeze organizations: %w", err)
 	}
 	if err := organizations.Close(); err != nil {
