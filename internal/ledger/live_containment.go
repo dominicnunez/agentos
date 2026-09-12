@@ -165,7 +165,7 @@ func (l *SQLite) containmentSince(ctx context.Context, organization string, afte
 }
 
 func (l *SQLite) withContainmentSnapshot(ctx context.Context, read func(*sql.Tx) error) (resultErr error) {
-	conn, err := l.db.Conn(ctx)
+	conn, err := l.watchDB.Conn(ctx)
 	if err != nil {
 		return err
 	}
