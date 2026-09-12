@@ -1,6 +1,9 @@
 package ledger
 
 import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -8,15 +11,54 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/core"
+	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/inference"
 )
 
-func appendInferenceFreeze(t *testing.T, store *SQLite, organization string, version int, frozen bool) {
+func appendInferenceFreeze(t *testing.T, store *SQLite, organization string, version int, frozen bool) authority.FreezeSnapshot {
 	t.Helper()
-	state := authority.FreezeState{OrganizationID: core.ID(organization), Frozen: frozen, Reason: "security hold", UpdatedAt: store.nowUTC()}
-	if err := store.AppendRecord(t.Context(), organization, "FREEZE_SET", "user-1", "task-1", nil, nil, "organization_freeze", organization, version, state); err != nil {
+	current, err := store.ReadFreeze(t.Context(), core.ID(organization))
+	if err != nil {
 		t.Fatal(err)
 	}
+	if current.Version != version-1 {
+		t.Fatalf("freeze predecessor version=%d want=%d", current.Version, version-1)
+	}
+	updated, err := store.SetFreeze(t.Context(), core.ID(organization), "owner-1", core.PrincipalHuman, authority.FreezeChange{
+		Frozen: frozen, Reason: "security hold", ExpectedEventRef: current.EventRef, ExpectedVersion: current.Version,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Version != version || updated.State.Frozen != frozen {
+		t.Fatalf("freeze state=%+v version=%d want frozen=%t version=%d", updated.State, updated.Version, frozen, version)
+	}
+	return updated
+}
+
+func appendHistoricalInferenceFreeze(t *testing.T, store *SQLite, organization string, version int, frozen bool) authority.FreezeSnapshot {
+	t.Helper()
+	state := authority.FreezeState{OrganizationID: core.ID(organization), Frozen: frozen, Reason: "historical security hold", UpdatedAt: store.nowUTC()}
+	body, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = store.withTx(t.Context(), func(tx *sql.Tx) error {
+		return appendRecord(t.Context(), tx, events.TrustedDraft{
+			OrganizationID: organization, EventType: "FREEZE_SET", SourceActorID: "historical-runtime", Payload: json.RawMessage(body),
+		}, "organization_freeze", organization, version, body)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.ReadFreeze(t.Context(), core.ID(organization))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Version != version || snapshot.State.Frozen != frozen {
+		t.Fatalf("historical freeze state=%+v version=%d want frozen=%t version=%d", snapshot.State, snapshot.Version, frozen, version)
+	}
+	return snapshot
 }
 
 func TestInferenceRejectsFrozenOrganization(t *testing.T) {
@@ -141,7 +183,7 @@ func TestInferenceRejectsMalformedFreezeAuthority(t *testing.T) {
 	if err := store.ActivateInferencePolicy(t.Context(), testInferencePolicy(now)); err != nil {
 		t.Fatal(err)
 	}
-	appendInferenceFreeze(t, store, "organization-1", 1, false)
+	appendHistoricalInferenceFreeze(t, store, "organization-1", 1, false)
 	if _, err := store.db.ExecContext(t.Context(), `UPDATE records SET body='{}' WHERE kind='organization_freeze'`); err != nil {
 		t.Fatal(err)
 	}
@@ -165,13 +207,22 @@ func TestInferenceFreezeAndReservationShareTransactionOrder(t *testing.T) {
 		if err := store.ActivateInferencePolicy(t.Context(), testInferencePolicy(now)); err != nil {
 			t.Fatal(err)
 		}
+		current, err := store.ReadFreeze(t.Context(), "organization-1")
+		if err != nil || current.Version != 0 || current.EventRef != "" {
+			t.Fatalf("initial freeze snapshot=%+v err=%v", current, err)
+		}
 		start := make(chan struct{})
 		frozen := make(chan error, 1)
 		reserved := make(chan error, 1)
 		go func() {
 			<-start
-			state := authority.FreezeState{OrganizationID: "organization-1", Frozen: true, UpdatedAt: now}
-			frozen <- store.AppendRecord(t.Context(), "organization-1", "FREEZE_SET", "user-1", "task-1", nil, nil, "organization_freeze", "organization-1", 1, state)
+			updated, err := store.SetFreeze(t.Context(), "organization-1", "owner-1", core.PrincipalHuman, authority.FreezeChange{
+				Frozen: true, ExpectedEventRef: current.EventRef, ExpectedVersion: current.Version,
+			})
+			if err == nil && (updated.Version != 1 || !updated.State.Frozen) {
+				err = fmt.Errorf("freeze state=%+v version=%d", updated.State, updated.Version)
+			}
+			frozen <- err
 		}()
 		go func() {
 			<-start

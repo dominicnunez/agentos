@@ -39,14 +39,11 @@ type OrganizationFreezeAdmission struct {
 	EventRef       string
 	Frozen         bool
 	Sequence       int64
+	Version        int
+	Control        *core.FreezeEvidence
 }
 
-type organizationFreezePayload struct {
-	OrganizationID core.ID   `json:"organization_id"`
-	Frozen         bool      `json:"frozen"`
-	Reason         string    `json:"reason,omitempty"`
-	UpdatedAt      time.Time `json:"updated_at"`
-}
+type organizationFreezePayload = core.FreezeState
 
 // RequiresAuthorityRecordAdmission identifies authority lifecycle labels that
 // must be written atomically with a closed durable record. Bare labels never
@@ -63,6 +60,16 @@ func RequiresAuthorityRecordAdmission(eventType string) bool {
 // ValidateAuthorityRecordDraft rejects malformed authority before either the
 // Event Contract or its durable state can be committed.
 func ValidateAuthorityRecordDraft(draft TrustedDraft, kind, recordID string, version int, body []byte) error {
+	return validateAuthorityDraft(draft, kind, recordID, version, body, true)
+}
+
+// ValidateStoredAuthorityDraft preserves the legacy freeze envelope only while
+// reading already-admitted history. New writes must use the strict draft check.
+func ValidateStoredAuthorityDraft(draft TrustedDraft, kind, recordID string, version int, body []byte) error {
+	return validateAuthorityDraft(draft, kind, recordID, version, body, false)
+}
+
+func validateAuthorityDraft(draft TrustedDraft, kind, recordID string, version int, body []byte, requireControl bool) error {
 	if RequiresAuthorityRecordAdmission(draft.EventType) && kind != authorityKindLease && kind != authorityKindFreeze {
 		return fmt.Errorf("authority event type does not match its record kind")
 	}
@@ -98,6 +105,14 @@ func ValidateAuthorityRecordDraft(draft TrustedDraft, kind, recordID string, ver
 			string(state.OrganizationID) != recordID || state.UpdatedAt.IsZero() ||
 			draft.EventType != "FREEZE_SET" || draft.OrganizationID != recordID {
 			return fmt.Errorf("organization freeze record admission is invalid")
+		}
+		if requireControl && state.Control == nil {
+			return fmt.Errorf("new organization freeze requires owner control evidence")
+		}
+		if state.Control != nil && (state.Control.ActorID == "" ||
+			state.Control.ActorKind != core.PrincipalHuman || string(state.Control.ActorID) != draft.SourceActorID ||
+			draft.TaskID != "" || len(draft.AuthorizationRefs) != 0) {
+			return fmt.Errorf("organization control crosses its human owner envelope")
 		}
 	default:
 		if RequiresAuthorityRecordAdmission(draft.EventType) {
@@ -195,6 +210,7 @@ func resolveAuthorityAdmissions(stream []Event, records []AuthorityRecord, requi
 	usedEvents := make(map[string]struct{})
 	eventIndex := indexAuthorityEvents(stream)
 	priorBodies := make(map[string][]byte)
+	priorRecords := make(map[string]AuthorityRecord)
 	priorSequences := make(map[string]int64)
 	organizations := make(map[string]string)
 	versions := make(map[string]int)
@@ -209,6 +225,11 @@ func resolveAuthorityAdmissions(stream []Event, records []AuthorityRecord, requi
 		if err := validateAuthorityRecordTransition(record.Kind, record.RecordID, record.Version, record.Body, priorBodies[key], false); err != nil {
 			return nil, nil, nil, fmt.Errorf("authority record %s/%s/%d: %w", record.Kind, record.RecordID, record.Version, err)
 		}
+		if record.Kind == authorityKindFreeze {
+			if err := ValidateFreezeRecord(record, priorRecords[key]); err != nil {
+				return nil, nil, nil, err
+			}
+		}
 		if requireBound && record.AdmissionEventID == "" {
 			return nil, nil, nil, fmt.Errorf("authority record %s/%s/%d lacks its admission event identity", record.Kind, record.RecordID, record.Version)
 		}
@@ -217,6 +238,7 @@ func resolveAuthorityAdmissions(stream []Event, records []AuthorityRecord, requi
 			return nil, nil, nil, err
 		}
 		record.AdmissionEventID = event.EventID
+		priorRecords[key] = record
 		bound = append(bound, record)
 		versions[key] = record.Version
 		priorBodies[key] = append([]byte(nil), record.Body...)
@@ -231,7 +253,7 @@ func resolveAuthorityAdmissions(stream []Event, records []AuthorityRecord, requi
 		case authorityKindFreeze:
 			var state organizationFreezePayload
 			_ = decodeExactEventJSON(record.Body, &state)
-			freezes = append(freezes, OrganizationFreezeAdmission{OrganizationID: state.OrganizationID, EventRef: event.EventID, Frozen: state.Frozen, Sequence: event.Sequence})
+			freezes = append(freezes, OrganizationFreezeAdmission{OrganizationID: state.OrganizationID, EventRef: event.EventID, Frozen: state.Frozen, Sequence: event.Sequence, Version: record.Version, Control: state.Control})
 		}
 	}
 	for _, event := range stream {
@@ -290,6 +312,13 @@ func matchAuthorityEvent(index authorityEventIndex, record AuthorityRecord, orga
 			continue
 		}
 		if record.Kind == authorityKindFreeze && event.OrganizationID != record.RecordID {
+			continue
+		}
+		if record.Kind == authorityKindFreeze && ValidateStoredAuthorityDraft(TrustedDraft{
+			OrganizationID: event.OrganizationID, EventType: event.EventType, SourceActorID: event.SourceActorID,
+			SourceExecutionID: event.SourceExecutionID, TaskID: event.TaskID, AuthorizationRefs: event.AuthorizationRefs,
+			ArtifactRefs: event.ArtifactRefs, RecipientID: event.RecipientID, RecipientScope: event.RecipientScope,
+		}, record.Kind, record.RecordID, record.Version, record.Body) != nil {
 			continue
 		}
 		if matched.EventID != "" {

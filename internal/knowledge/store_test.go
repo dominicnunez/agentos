@@ -9,10 +9,32 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/ledger"
 )
+
+func setKnowledgeTestFreeze(t *testing.T, ctx context.Context, store *ledger.SQLite, organization core.ID, version int, frozen bool) authority.FreezeSnapshot {
+	t.Helper()
+	current, err := store.ReadFreeze(ctx, organization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Version != version-1 {
+		t.Fatalf("freeze predecessor version=%d want=%d", current.Version, version-1)
+	}
+	updated, err := store.SetFreeze(ctx, organization, "owner-1", core.PrincipalHuman, authority.FreezeChange{
+		Frozen: frozen, Reason: "incident", ExpectedEventRef: current.EventRef, ExpectedVersion: current.Version,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Version != version || updated.State.Frozen != frozen {
+		t.Fatalf("freeze state=%+v version=%d want frozen=%t version=%d", updated.State, updated.Version, frozen, version)
+	}
+	return updated
+}
 
 func TestStoreAdmitsValidatedKnowledgeAndRetrievesOnlyActiveTenantScope(t *testing.T) {
 	ctx := context.Background()
@@ -331,16 +353,7 @@ func TestStoreBindsJudgmentToPriorLeaseAndFreezeState(t *testing.T) {
 	if _, err := service.Activate(ctx, active); err == nil {
 		t.Fatal("knowledge judgment from a different task used task-scoped authorization")
 	}
-	frozenAt := time.Now().UTC()
-	freeze := struct {
-		OrganizationID core.ID   `json:"organization_id"`
-		Frozen         bool      `json:"frozen"`
-		Reason         string    `json:"reason,omitempty"`
-		UpdatedAt      time.Time `json:"updated_at"`
-	}{OrganizationID: "org-1", Frozen: true, Reason: "incident", UpdatedAt: frozenAt}
-	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", string(lease.OriginTaskID), nil, nil, "organization_freeze", "org-1", 1, freeze); err != nil {
-		t.Fatal(err)
-	}
+	setKnowledgeTestFreeze(t, ctx, store, "org-1", 1, true)
 	frozenStatement := publishKnowledgeHumanStatement(t, ctx, gateway, "org-1", candidate.KnowledgeID, lease.ActorID, lease.OriginTaskID, judgment.EventID, "work-judgment-order")
 	active.ValidationRefs = []string{judgment.EventID, frozenStatement.EventID}
 	verifiedAt = time.Now().UTC()
@@ -348,11 +361,7 @@ func TestStoreBindsJudgmentToPriorLeaseAndFreezeState(t *testing.T) {
 	if _, err := service.Activate(ctx, active); err == nil {
 		t.Fatal("knowledge activation while the organization was frozen was accepted")
 	}
-	freeze.Frozen = false
-	freeze.UpdatedAt = time.Now().UTC()
-	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", string(lease.OriginTaskID), nil, nil, "organization_freeze", "org-1", 2, freeze); err != nil {
-		t.Fatal(err)
-	}
+	setKnowledgeTestFreeze(t, ctx, store, "org-1", 2, false)
 	if _, err := service.Activate(ctx, active); err == nil {
 		t.Fatal("judgment emitted during a temporary freeze was accepted after unfreeze")
 	}

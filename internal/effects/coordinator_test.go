@@ -382,17 +382,22 @@ func TestRevocationBlocksEffect(t *testing.T) {
 	}
 	persistApproval(t, l, reader.approval)
 	now := time.Now().UTC()
-	freeze := authority.FreezeState{OrganizationID: "org-1", Frozen: true, Reason: "incident", UpdatedAt: now}
-	if err := l.AppendRecord(ctx, "org-1", "FREEZE_SET", "human-1", "task-1", nil, nil, "organization_freeze", "org-1", 1, freeze); err != nil {
-		t.Fatal(err)
+	current, err := l.ReadFreeze(ctx, "org-1")
+	if err != nil || current.Version != 0 {
+		t.Fatalf("initial freeze snapshot=%+v err=%v", current, err)
+	}
+	freeze, err := l.SetFreeze(ctx, "org-1", "owner-1", core.PrincipalHuman, authority.FreezeChange{
+		Frozen: true, Reason: "incident", ExpectedEventRef: current.EventRef, ExpectedVersion: current.Version,
+	})
+	if err != nil || freeze.Version != 1 || !freeze.State.Frozen {
+		t.Fatalf("set freeze=%+v err=%v", freeze, err)
 	}
 	if _, err := coordinator.Execute(ctx, obligation); !errors.Is(err, ErrEffectUnauthorized) || adapter.called {
 		t.Fatalf("frozen organization reached effect adapter: called=%v err=%v", adapter.called, err)
 	}
-	freeze.Frozen = false
-	freeze.UpdatedAt = now.Add(time.Second)
-	if err := l.AppendRecord(ctx, "org-1", "FREEZE_SET", "human-1", "task-1", nil, nil, "organization_freeze", "org-1", 2, freeze); err != nil {
-		t.Fatal(err)
+	released, err := l.SetFreeze(ctx, "org-1", "owner-1", core.PrincipalHuman, authority.FreezeChange{Frozen: false, Reason: "incident", ExpectedEventRef: freeze.EventRef, ExpectedVersion: freeze.Version})
+	if err != nil || released.Version != 2 || released.State.Frozen {
+		t.Fatalf("release freeze=%+v err=%v", released, err)
 	}
 	revokedAt := now.Add(2 * time.Second)
 	lease.RevokedAt = &revokedAt
