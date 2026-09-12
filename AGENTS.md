@@ -77,8 +77,16 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
    survives, retry and restart behave correctly, and other tenants are unaffected.
    Test doubles must implement the interfaces production calls. Where feasible,
    verify regressions fail for the intended defect against the prior behavior.
-6. Inspect query and loop costs when history or candidate counts grow. Avoid
-   repeated full-history validation per item without a demonstrated need.
+   When validation depends on earlier events, test an invalid earlier event
+   followed by plausible later events, and compare live reads with full replay.
+6. For changes whose cost grows with history or candidate counts, check a complete
+   public operation at representative small and large sizes before review.
+   Account for nested calls, repeated polls and concurrent callers; one scan per
+   transaction can still mean one scan per poll. Measure relevant allocations,
+   query counts or latency, including cold and warm paths when caching is used.
+   Preserve snapshot, invalidation, rollback and tenant-isolation guarantees.
+   Distinguish necessary full replay from repeated runtime work. Investigate CI
+   timeouts before changing their budget; a longer timeout is not a performance fix.
 7. Before each review push, audit the whole changed invariant and diff, address
    confirmed related gaps, and run the required checks. A review finding triggers
    a class-wide audit of sibling callers and failure modes before the next push.
@@ -97,6 +105,20 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
    and Criticality calibration. Retain
    its subsection structure, explanatory prose, and severity lists when updating
    the corresponding content.
+10. Use PR findings and verification/review costs as ongoing learning evidence.
+    Update or create relevant skills and revise `AGENTS.md` when a reusable
+    lesson changes how work should be done. Replace contradictory instructions
+    at their source. Prefer targeted changes over growing generic checklists;
+    assess later work for repeated defect classes and avoid claiming improvement
+    merely because guidance was added or a review found nothing.
+11. Use current, relevant skills and adapt them when observed failures justify a
+    reusable improvement. Delegate only a concrete subtask whose independent
+    coverage or time savings justify its inference cost; choose a sufficiently
+    capable model for the risk. Name applicable skills in each assignment and
+    have the agent read them. Require inspected entry points, evidence, exclusions
+    and uncertainty in its result. For an independent audit, provide the contract
+    and raw artifacts without steering it toward the implementer's conclusions.
+    The parent remains responsible for combined coverage and verification.
 
 ## Standing user instructions and goal continuity
 
