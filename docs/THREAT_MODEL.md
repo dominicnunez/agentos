@@ -8,7 +8,7 @@ The principal assets are organization, Mission, Goal, Work, Task, identity, know
 
 There is no published release yet according to `SECURITY.md`, so release-publication risk is prospective. The intended default is a single-machine system installation with a restricted `agentos` service account and one verified Linux owner. User-mode installations run with the owner's authority. Organization scoping remains security-relevant for external actors, ledger objects, model context, and budgets, without implying strong hosted multi-tenant isolation.
 
-This model describes runtime commit `e57e792069c3bc5b39c4b7b884af6a741adb626f`. Implemented controls, incomplete controls, and prerequisites for unsupported execution mechanisms are distinguished below. A passing test is evidence for a control, not proof of comprehensive security.
+This model describes code commit `fcef695b591259b2c16b5790b59bb0d5fa09c1b5`, including its CI controls. Implemented controls, incomplete controls, and prerequisites for unsupported execution mechanisms are distinguished below. A passing test is evidence for a control, not proof of comprehensive security.
 
 # 2. Threat model, Trust boundaries and assumptions
 
@@ -163,6 +163,8 @@ Sustained valid submissions, artifacts, histories, and expensive verification ca
 Setup faces wrong-owner binding, PATH substitution, symlink replacement, unsafe service units, and partial installation. Critical commands use fixed paths; sensitive writes are atomic; directory ownership, modes, executable provenance, and runtime locations are validated. Systemd applies a dedicated account and restrictive service settings. User mode intentionally retains the owner's authority.
 
 CI pins actions and tool versions, controls frontend dependency installation, audits dependencies, verifies embedded assets, exercises race/adversarial tests and bounded fuzzing, checks architecture, and builds reproducible archives with checksums, SBOMs, licenses, provenance, and corresponding source.
+
+Ordinary documentation-only changes skip code-related steps while retaining document validation and required job results. The classifier checks a complete local Git diff, including deleted paths and file modes; scripts, schemas, workflows, dependencies, configuration, executable files, and unknown paths still require full checks. Uncertain classification also requires full checks. Release verification fails when its frontend prerequisite does not succeed. Required reviews remain independent, including security review for threat-model changes. The classifier and workflow definitions remain trusted source inputs subject to review; adding a code consumer of an allowed document path requires revisiting that classification. See `docs/development/CI.md` for the exact scope.
 
 These checks do not prove live-provider behavior, deployment safety, or absence of vulnerabilities. Provenance is unsigned, publication is separately controlled, and compromise of repository administration, builders, toolchains, or dependency sources remains a supply-chain threat.
 
