@@ -46,10 +46,14 @@ func TestCancelledQueriesReleaseAuthorityLocks(t *testing.T) {
 			cancelled := 0
 			for i := 0; i < 500; i++ {
 				ctx, cancel := context.WithTimeout(t.Context(), time.Duration(100+i%20*100)*time.Microsecond)
-				rows, queryErr := store.db.QueryContext(ctx, query)
-				if rows != nil {
-					_ = rows.Close()
-				}
+				queryErr := func() error {
+					rows, err := store.db.QueryContext(ctx, query)
+					if err != nil {
+						return err
+					}
+					defer func() { _ = rows.Close() }()
+					return rows.Err()
+				}()
 				cancel()
 				if errors.Is(queryErr, context.DeadlineExceeded) {
 					cancelled++
