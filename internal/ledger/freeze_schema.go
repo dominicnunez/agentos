@@ -1,5 +1,8 @@
 package ledger
 
+// Migration seeds every existing freeze record or event, and the first new
+// freeze mutation creates a row. An empty table therefore lets ordinary writes
+// skip conflict work while preserving every freeze and REPLACE path.
 const storageSchemaV11SQL = `CREATE TABLE freeze_changes (
 organization_id TEXT PRIMARY KEY CHECK(organization_id<>''),
 generation BLOB NOT NULL CHECK(typeof(generation)='blob' AND length(generation)=32),
@@ -13,7 +16,8 @@ SELECT organization_id,randomblob(32),randomblob(32) FROM (
 );
 
 CREATE TRIGGER freeze_records_insert_change BEFORE INSERT ON records
-WHEN NEW.kind='organization_freeze' OR NEW.admission_event_id<>'' BEGIN
+WHEN NEW.kind='organization_freeze' OR
+  (NEW.admission_event_id<>'' AND EXISTS(SELECT 1 FROM freeze_changes)) BEGIN
   INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
   SELECT NEW.record_id,randomblob(32),randomblob(32)
   WHERE NEW.kind='organization_freeze' AND NEW.record_id<>'' AND EXISTS(
@@ -35,7 +39,9 @@ WHEN NEW.kind='organization_freeze' OR NEW.admission_event_id<>'' BEGIN
     THEN freeze_changes.rewrite_generation ELSE randomblob(32) END;
 END;
 
-CREATE TRIGGER freeze_records_update_change BEFORE UPDATE ON records BEGIN
+CREATE TRIGGER freeze_records_update_change BEFORE UPDATE ON records
+WHEN OLD.kind='organization_freeze' OR NEW.kind='organization_freeze' OR
+  EXISTS(SELECT 1 FROM freeze_changes) BEGIN
   INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
   SELECT OLD.record_id,randomblob(32),randomblob(32)
   WHERE OLD.kind='organization_freeze' AND OLD.record_id<>''
@@ -59,7 +65,8 @@ WHEN OLD.kind='organization_freeze' AND OLD.record_id<>'' BEGIN
   ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
 END;
 
-CREATE TRIGGER freeze_events_insert_conflict BEFORE INSERT ON events BEGIN
+CREATE TRIGGER freeze_events_insert_conflict BEFORE INSERT ON events
+WHEN NEW.event_type='FREEZE_SET' OR EXISTS(SELECT 1 FROM freeze_changes) BEGIN
   INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
   SELECT e.organization_id,randomblob(32),randomblob(32) FROM events e
   WHERE e.event_id=NEW.event_id AND e.event_type='FREEZE_SET' AND e.organization_id<>''
@@ -82,7 +89,8 @@ CREATE TRIGGER freeze_events_insert_conflict BEFORE INSERT ON events BEGIN
   ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
 END;
 
-CREATE TRIGGER freeze_events_insert_change AFTER INSERT ON events BEGIN
+CREATE TRIGGER freeze_events_insert_change AFTER INSERT ON events
+WHEN NEW.event_type='FREEZE_SET' AND NEW.organization_id<>'' BEGIN
   INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
   SELECT NEW.organization_id,randomblob(32),randomblob(32)
   WHERE NEW.event_type='FREEZE_SET' AND NEW.organization_id<>''
@@ -92,7 +100,9 @@ CREATE TRIGGER freeze_events_insert_change AFTER INSERT ON events BEGIN
       THEN freeze_changes.rewrite_generation ELSE randomblob(32) END;
 END;
 
-CREATE TRIGGER freeze_events_update_change BEFORE UPDATE ON events BEGIN
+CREATE TRIGGER freeze_events_update_change BEFORE UPDATE ON events
+WHEN OLD.event_type='FREEZE_SET' OR NEW.event_type='FREEZE_SET' OR
+  EXISTS(SELECT 1 FROM freeze_changes) BEGIN
   INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
   SELECT OLD.organization_id,randomblob(32),randomblob(32)
   WHERE OLD.event_type='FREEZE_SET' AND OLD.organization_id<>''
@@ -129,7 +139,8 @@ CREATE TRIGGER freeze_events_update_change BEFORE UPDATE ON events BEGIN
   ON CONFLICT(organization_id) DO UPDATE SET generation=randomblob(32),rewrite_generation=randomblob(32);
 END;
 
-CREATE TRIGGER freeze_events_delete_change BEFORE DELETE ON events BEGIN
+CREATE TRIGGER freeze_events_delete_change BEFORE DELETE ON events
+WHEN OLD.event_type='FREEZE_SET' OR EXISTS(SELECT 1 FROM freeze_changes) BEGIN
   INSERT INTO freeze_changes(organization_id,generation,rewrite_generation)
   SELECT OLD.organization_id,randomblob(32),randomblob(32)
   WHERE OLD.event_type='FREEZE_SET' AND OLD.organization_id<>''

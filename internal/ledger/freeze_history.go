@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/authority"
@@ -42,11 +43,11 @@ WHERE r.kind='organization_freeze' AND r.record_id=?
 AND (e.event_id IS NULL OR e.event_type<>'FREEZE_SET' OR e.organization_id<>?)
 ORDER BY 3,7`
 
-// loadFreezeHistory reads one organization's records and Event Contracts in a
+// readFreezeHistory reads one organization's records and Event Contracts in a
 // single query. The event-led arm retains orphan FREEZE_SET events; the second
 // arm retains records whose event is missing or crosses the expected envelope.
 // This lets the shared full resolver reject either half of a broken binding.
-func loadFreezeHistory(ctx context.Context, tx *sql.Tx, organization string) (freezeHistory, error) {
+func readFreezeHistory(ctx context.Context, tx *sql.Tx, organization string) (freezeHistory, error) {
 	records, stream, err := readFreezeRows(ctx, tx, freezeHistorySQL, organization, organization, organization, organization)
 	if err != nil {
 		return freezeHistory{}, err
@@ -195,12 +196,16 @@ func (history freezeHistory) latest() (freezeRevision, bool) {
 }
 
 func (history freezeHistory) before(sequence int64) (freezeRevision, bool) {
-	for i := len(history.revisions) - 1; i >= 0; i-- {
-		if history.revisions[i].event.Sequence < sequence {
-			return history.revisions[i], true
-		}
+	index := sort.Search(len(history.revisions), func(i int) bool { return history.revisions[i].event.Sequence >= sequence })
+	if index != 0 {
+		return history.revisions[index-1], true
 	}
 	return freezeRevision{}, false
+}
+
+func (history freezeHistory) after(sequence int64) []freezeRevision {
+	index := sort.Search(len(history.revisions), func(i int) bool { return history.revisions[i].event.Sequence > sequence })
+	return history.revisions[index:]
 }
 
 func (history freezeHistory) version(version int) (freezeRevision, bool) {

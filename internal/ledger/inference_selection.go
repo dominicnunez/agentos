@@ -60,6 +60,7 @@ func (l *SQLite) SelectInferenceRoute(ctx context.Context, registry *inference.C
 		return inference.RouteSelection{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	ctx = l.freezeContext(ctx, tx)
 	if err := validateInferenceAdmissionsSnapshot(ctx, tx); err != nil {
 		return inference.RouteSelection{}, err
 	}

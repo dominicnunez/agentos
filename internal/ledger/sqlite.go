@@ -1222,7 +1222,7 @@ func (l *SQLite) AppendExecutionStart(ctx context.Context, draft events.Projecti
 	}
 	var started events.Event
 	var selections []events.InboxSelection
-	err = l.withTx(ctx, func(tx *sql.Tx) error {
+	err = l.withFreezeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := validatePreparationGeneration(ctx, tx, draft.Event.OrganizationID); err != nil {
 			return err
 		}
@@ -1877,7 +1877,7 @@ func prepareProjection(draft events.ProjectionDraft, allowWorkCompletion, allowG
 
 func (l *SQLite) appendPreparedProjections(ctx context.Context, prepared []preparedProjection) ([]events.Event, error) {
 	appended := make([]events.Event, 0, len(prepared))
-	err := l.withTx(ctx, func(tx *sql.Tx) error {
+	err := l.withFreezeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		containsTask := false
 		for _, item := range prepared {
 			event, err := appendPreparedProjection(ctx, tx, item)
@@ -3515,7 +3515,7 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, obligation
 		return core.AuthorizationTrace{}, fmt.Errorf("encode authorized effect record: %w", err)
 	}
 	var trace core.AuthorizationTrace
-	err = l.withTx(ctx, func(tx *sql.Tx) error {
+	err = l.withFreezeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := validateEffectTrajectory(ctx, tx, obligation); err != nil {
 			return fmt.Errorf("validate protected effect trajectory: %w", err)
 		}
@@ -3787,6 +3787,11 @@ func latestRecordBody(ctx context.Context, tx *sql.Tx, kind, id string) ([]byte,
 }
 
 func authorityAdmissionsSnapshot(ctx context.Context, queryer rowsQueryer) ([]events.CapabilityLeaseAdmission, []events.OrganizationFreezeAdmission, error) {
+	if tx, ok := queryer.(*sql.Tx); ok {
+		if scope, ok := ctx.Value(freezeScopeKey{}).(*freezeReadScope); ok && scope.tx == tx {
+			return scopedAuthorityAdmissions(ctx, tx, scope)
+		}
+	}
 	stream, err := collectEvents(queryer.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version
 FROM events WHERE event_type IN ('CAPABILITY_GRANTED','CAPABILITY_REVOKED','FREEZE_SET') ORDER BY sequence`))
 	if err != nil {
@@ -4331,7 +4336,7 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 		return l.appendAddressed(ctx, d)
 	}
 	var appended events.Event
-	err := l.withTx(ctx, func(tx *sql.Tx) error {
+	err := l.withFreezeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		var err error
 		switch d.EventType {
 		case "PLAN_CREATED":
@@ -4407,7 +4412,7 @@ func (l *SQLite) AppendAgentEvidence(ctx context.Context, draft events.TrustedDr
 	}
 	draft.Payload = json.RawMessage(append([]byte(nil), body...))
 	var appended events.Event
-	err = l.withTx(ctx, func(tx *sql.Tx) error {
+	err = l.withFreezeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := validateExecutionPublication(ctx, tx, draft); err != nil {
 			return err
 		}
@@ -4659,7 +4664,7 @@ func (l *SQLite) appendAddressed(ctx context.Context, draft events.TrustedDraft)
 	if draft.RecipientScope == "" || draft.RecipientID == "" {
 		return events.Event{}, fmt.Errorf("addressed event recipient is required")
 	}
-	return l.appendWithProjection(ctx, draft, func(tx *sql.Tx, event events.Event) error {
+	return l.appendWithProjection(ctx, draft, func(ctx context.Context, tx *sql.Tx, event events.Event) error {
 		if err := validateExecutionPublication(ctx, tx, draft); err != nil {
 			return err
 		}
@@ -4692,7 +4697,7 @@ func (l *SQLite) ObserveInbox(ctx context.Context, draft events.TrustedDraft, re
 		return events.Event{}, fmt.Errorf("observation event ids must be distinct")
 	}
 	var observation events.Event
-	err := l.withTx(ctx, func(tx *sql.Tx) error {
+	err := l.withFreezeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := validateExecutionPublication(ctx, tx, draft); err != nil {
 			return err
 		}
@@ -4802,15 +4807,15 @@ func resolveAgentExecutionBoundary(ctx context.Context, tx *sql.Tx, draft events
 // appendWithProjection commits the authoritative event before its derived
 // availability/state rows inside the same transaction. Any projection failure
 // rolls the event back as well.
-func (l *SQLite) appendWithProjection(ctx context.Context, draft events.TrustedDraft, project func(*sql.Tx, events.Event) error) (events.Event, error) {
+func (l *SQLite) appendWithProjection(ctx context.Context, draft events.TrustedDraft, project func(context.Context, *sql.Tx, events.Event) error) (events.Event, error) {
 	var event events.Event
-	err := l.withTx(ctx, func(tx *sql.Tx) error {
+	err := l.withFreezeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		var err error
 		event, err = appendEvent(ctx, tx, draft)
 		if err != nil {
 			return err
 		}
-		return project(tx, event)
+		return project(ctx, tx, event)
 	})
 	return event, err
 }

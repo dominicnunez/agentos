@@ -225,7 +225,7 @@ func (l *SQLite) ReserveInference(ctx context.Context, request inference.Inferen
 		return inference.Reservation{}, fmt.Errorf("inference request identity is incomplete")
 	}
 	var reserved inference.Reservation
-	err := l.withTx(ctx, func(tx *sql.Tx) error {
+	err := l.withFreezeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		var closed bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE organization_id=? AND source_execution_id=? AND event_type='INFERENCE_NOT_SENT')`, request.Scope.OrganizationID, request.Scope.ExecutionID).Scan(&closed); err != nil {
 			return err

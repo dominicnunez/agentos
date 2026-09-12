@@ -15,7 +15,7 @@ func (l *SQLite) ActivateInferencePolicies(ctx context.Context, policies []infer
 	if err := inference.ValidatePolicySet(policies); err != nil {
 		return err
 	}
-	return l.withTx(ctx, func(tx *sql.Tx) error {
+	return l.withFreezeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		if err := validateInferenceAdmissionsSnapshot(ctx, tx); err != nil {
 			return err
 		}

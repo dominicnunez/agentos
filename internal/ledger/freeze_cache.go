@@ -123,11 +123,14 @@ func (l *SQLite) freezeSchema(ctx context.Context, tx *sql.Tx, version int) erro
 // generation proves the immutable cached chain still describes this snapshot;
 // an unchanged rewrite token permits validating only an appended suffix.
 func (l *SQLite) freezeView(ctx context.Context, tx *sql.Tx, organization string, allowFull bool) (*freezeView, error) {
+	return l.resolveFreezeView(ctx, tx, organization, l.freezes.get(organization), allowFull)
+}
+
+func (l *SQLite) resolveFreezeView(ctx context.Context, tx *sql.Tx, organization string, prior *freezeView, allowFull bool) (*freezeView, error) {
 	view, err := l.freezeHeader(ctx, tx, organization)
 	if err != nil {
 		return nil, err
 	}
-	prior := l.freezes.get(organization)
 	if prior != nil && prior.schema == view.schema {
 		if bytes.Equal(prior.generation, view.generation) && bytes.Equal(prior.rewrite, view.rewrite) {
 			return prior, ctx.Err()
@@ -147,7 +150,7 @@ func (l *SQLite) freezeView(ctx context.Context, tx *sql.Tx, organization string
 	if !allowFull {
 		return nil, core.ErrContainmentUnavailable
 	}
-	view.history, err = loadFreezeHistory(ctx, tx, organization)
+	view.history, err = readFreezeHistory(ctx, tx, organization)
 	if err != nil {
 		return nil, err
 	}

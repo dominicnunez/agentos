@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -130,6 +131,26 @@ func TestFreezeChangeTriggersClassifyAppendAndRewrite(t *testing.T) {
 	if afterAudit := readFreezeChange(t, store.db, "org-1"); !sameFreezeChange(beforeAudit, afterAudit) {
 		t.Fatal("unrelated event invalidated freeze history")
 	}
+}
+
+func TestFreezeChangeFastPathInitializesFirstFreeze(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.Append(t.Context(), events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", Payload: map[string]string{"state": "ordinary"}}); err != nil {
+		t.Fatal(err)
+	}
+	var changes int
+	if err := store.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM freeze_changes`).Scan(&changes); err != nil {
+		t.Fatal(err)
+	}
+	if changes != 0 {
+		t.Fatalf("ordinary history created %d freeze change rows", changes)
+	}
+	appendHistoricalInferenceFreeze(t, store, "org-1", 1, true)
+	_ = readFreezeChange(t, store.db, "org-1")
 }
 
 func TestFreezeEventChangesDirtyEveryAffectedTenant(t *testing.T) {
@@ -413,4 +434,35 @@ CREATE TRIGGER freeze_events_delete_change BEFORE DELETE ON events BEGIN SELECT 
 	if _, err := ValidateStorageContract(t.Context(), store.db); err == nil || !strings.Contains(err.Error(), "schema fingerprint does not match") {
 		t.Fatalf("changed freeze trigger was not rejected: %v", err)
 	}
+}
+
+func BenchmarkFreezeOrdinaryWrites(b *testing.B) {
+	store, err := Open(":memory:")
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = store.Close() })
+	tx, err := store.db.BeginTx(b.Context(), nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	created := "2026-09-12T00:00:00Z"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		id := "ordinary-" + strconv.Itoa(i)
+		if _, err := tx.ExecContext(b.Context(), `INSERT INTO events(event_id,organization_id,event_type,source_actor_id,authorization_refs,artifact_refs,payload,created_at,schema_version)
+VALUES(?,'org-1','AUDIT_NOTE','runtime','[]','[]','{}',?,?)`, id, created, events.SchemaVersion); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := tx.ExecContext(b.Context(), `UPDATE events SET payload=payload WHERE event_id=?`, id); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := tx.ExecContext(b.Context(), `INSERT INTO records(kind,record_id,version,body,admission_event_id,admission_fingerprint,created_at)
+VALUES('benchmark',?,1,'{}',?,'benchmark',?)`, id, id, created); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
 }

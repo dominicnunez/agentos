@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"sort"
 	"sync"
 	"time"
 
@@ -256,8 +255,7 @@ func containmentSinceHistory(history freezeHistory, after int64) (int64, *core.S
 	if latest.event.Sequence == after {
 		return after, nil, nil
 	}
-	first := sort.Search(len(history.revisions), func(i int) bool { return history.revisions[i].event.Sequence > after })
-	for _, revision := range history.revisions[first:] {
+	for _, revision := range history.after(after) {
 		if revision.state.Frozen {
 			return latest.event.Sequence, &core.SecurityHoldCause{OrganizationID: core.ID(history.organization), EventRef: revision.event.EventID, Sequence: revision.event.Sequence}, nil
 		}
@@ -321,7 +319,7 @@ func (l *SQLite) cancelOrganizationLocked(organization string, cause error) {
 // It does not depend on an outcome event surviving the interrupted process.
 func (l *SQLite) SuspendHeldExecution(ctx context.Context, organization, taskID, correlation string, version int) (bool, error) {
 	suspended := false
-	err := l.withTx(ctx, func(tx *sql.Tx) error {
+	err := l.withFreezeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		record, task, found, err := latestProjectionRevision[core.Task](ctx, tx, "task", taskID)
 		if err != nil {
 			return err
@@ -590,10 +588,7 @@ func executionHoldInHistory(ctx context.Context, tx *sql.Tx, draft events.Truste
 		}
 		return nil, fmt.Errorf("containment outcome lacks exact execution start")
 	}
-	for _, revision := range history.revisions {
-		if revision.event.Sequence <= startSequence {
-			continue
-		}
+	for _, revision := range history.after(startSequence) {
 		if endSequence != 0 && revision.event.Sequence >= endSequence {
 			break
 		}
@@ -656,7 +651,7 @@ func (l *SQLite) CheckExecutionContainment(ctx context.Context, organization, ta
 	if organization == "" || taskID == "" || correlation == "" || executionID == "" {
 		return fmt.Errorf("complete execution identity is required")
 	}
-	return l.withTx(ctx, func(tx *sql.Tx) error {
+	return l.withFreezeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		draft := events.TrustedDraft{OrganizationID: organization, TaskID: taskID, CorrelationID: correlation, SourceExecutionID: executionID}
 		var notSent bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events n JOIN events m ON m.organization_id=n.organization_id AND m.task_id=n.task_id AND m.correlation_id=n.correlation_id AND m.source_execution_id=n.source_execution_id WHERE n.event_type='INFERENCE_NOT_SENT' AND m.event_type='PLANNING_CONTEXT_MANIFESTED' AND n.organization_id=? AND n.task_id=? AND n.correlation_id=? AND n.source_execution_id=? AND n.sequence>m.sequence)`, organization, taskID, correlation, executionID).Scan(&notSent); err != nil {
