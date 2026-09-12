@@ -25,7 +25,7 @@ const (
 	// not identify or publish an Agent OS release.
 	OldestSupportedStorageVersion = 1
 	// CurrentStorageVersion is the only layout accepted after runtime startup.
-	CurrentStorageVersion = 10
+	CurrentStorageVersion = 11
 	// AuthorityAdmissionBindingStorageVersion is the first storage contract in
 	// which every capability and freeze record names its exact admitting event.
 	AuthorityAdmissionBindingStorageVersion = 7
@@ -69,6 +69,10 @@ var storageColumnsV6 = map[string][]string{
 
 var storageColumnsV8 = map[string][]string{
 	"legacy_knowledge_quarantine": {"record_id", "version", "body", "source_created_at", "reason"},
+}
+
+var storageColumnsV11 = map[string][]string{
+	"freeze_changes": {"organization_id", "generation", "rewrite_generation"},
 }
 
 var storageIndexes = map[string]string{
@@ -327,6 +331,11 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 			return err
 		}
 		return advanceProjectionStorageContract(ctx, tx, from, to, "inference-connections")
+	case from == 10 && to == 11:
+		if _, err := tx.ExecContext(ctx, storageSchemaV11SQL); err != nil {
+			return err
+		}
+		return advanceProjectionStorageContract(ctx, tx, from, to, "freeze-history-freshness")
 	default:
 		return fmt.Errorf("no reviewed storage migration exists")
 	}
@@ -544,7 +553,11 @@ func ValidateStorageContract(ctx context.Context, db *sql.DB) (StorageContract, 
 	if ctx == nil || db == nil {
 		return StorageContract{}, fmt.Errorf("storage validation requires context and database")
 	}
-	applicationID, version, err := sqliteStorageHeader(ctx, db)
+	return validateStorageContract(ctx, db)
+}
+
+func validateStorageContract(ctx context.Context, query storageQueryer) (StorageContract, error) {
+	applicationID, version, err := sqliteStorageHeader(ctx, query)
 	if err != nil {
 		return StorageContract{}, err
 	}
@@ -554,7 +567,7 @@ func ValidateStorageContract(ctx context.Context, db *sql.DB) (StorageContract, 
 	if version < OldestSupportedStorageVersion || version > CurrentStorageVersion {
 		return StorageContract{}, fmt.Errorf("storage schema version %d is unsupported; supported range is %d through %d", version, OldestSupportedStorageVersion, CurrentStorageVersion)
 	}
-	return validateStorageLayout(ctx, db, version)
+	return validateStorageLayout(ctx, query, version)
 }
 
 type storageQueryer interface {
@@ -609,6 +622,11 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 			expected[table] = append(slices.Clone(expected[table]), "connection_id")
 		}
 	}
+	if version >= 11 {
+		for table, columns := range storageColumnsV11 {
+			expected[table] = columns
+		}
+	}
 	tables, err := userStorageTables(ctx, query)
 	if err != nil {
 		return StorageContract{}, err
@@ -658,6 +676,17 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 			}
 			if count != 1 {
 				return StorageContract{}, fmt.Errorf("storage schema version %d lacks exact index %s", version, index)
+			}
+		}
+	}
+	if version >= 11 {
+		for trigger, table := range storageTriggersV11 {
+			var count int
+			if err := query.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND name=? AND tbl_name=?`, trigger, table).Scan(&count); err != nil {
+				return StorageContract{}, fmt.Errorf("inspect storage trigger %s: %w", trigger, err)
+			}
+			if count != 1 {
+				return StorageContract{}, fmt.Errorf("storage schema version %d lacks exact trigger %s", version, trigger)
 			}
 		}
 	}

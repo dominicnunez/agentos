@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/completion"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
@@ -18,6 +18,27 @@ import (
 	"github.com/dominicnunez/agentos/internal/planning"
 	"github.com/dominicnunez/agentos/internal/projections"
 )
+
+func setAppTestFreeze(t *testing.T, ctx context.Context, store *ledger.SQLite, organization core.ID, version int, frozen bool) authority.FreezeSnapshot {
+	t.Helper()
+	current, err := store.ReadFreeze(ctx, organization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Version != version-1 {
+		t.Fatalf("freeze predecessor version=%d want=%d", current.Version, version-1)
+	}
+	updated, err := store.SetFreeze(ctx, organization, "owner-1", core.PrincipalHuman, authority.FreezeChange{
+		Frozen: frozen, Reason: "security hold", ExpectedEventRef: current.EventRef, ExpectedVersion: current.Version,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Version != version || updated.State.Frozen != frozen {
+		t.Fatalf("freeze state=%+v version=%d want frozen=%t version=%d", updated.State, updated.Version, frozen, version)
+	}
+	return updated
+}
 
 func TestReleasedHoldAllowsHumanContinuations(t *testing.T) {
 	testHumanContinuations(t, false, false, false)
@@ -81,26 +102,12 @@ func testHumanContinuations(t *testing.T, interrupt, beforeStart, resumeGap bool
 				if beforeStart && !frozen {
 					break
 				}
-				state := struct {
-					OrganizationID core.ID   `json:"organization_id"`
-					Frozen         bool      `json:"frozen"`
-					UpdatedAt      time.Time `json:"updated_at"`
-				}{"org-1", frozen, time.Now().UTC()}
-				if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "released-human", nil, nil, "organization_freeze", "org-1", index+1, state); err != nil {
-					t.Fatal(err)
-				}
+				setAppTestFreeze(t, ctx, store, "org-1", index+1, frozen)
 			}
 			if interrupt || resumeGap {
 				interceptor.beforeOutcome = func() {
 					for index, frozen := range []bool{true, false} {
-						state := struct {
-							OrganizationID core.ID   `json:"organization_id"`
-							Frozen         bool      `json:"frozen"`
-							UpdatedAt      time.Time `json:"updated_at"`
-						}{"org-1", frozen, time.Now().UTC()}
-						if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "released-human", nil, nil, "organization_freeze", "org-1", index+3, state); err != nil {
-							t.Fatal(err)
-						}
+						setAppTestFreeze(t, ctx, store, "org-1", index+3, frozen)
 					}
 				}
 				if resumeGap {
@@ -249,15 +256,7 @@ func testSchedulerSecurityHold(t *testing.T, timing string) {
 			t.Fatal(err)
 		}
 	}
-	freeze := struct {
-		OrganizationID core.ID   `json:"organization_id"`
-		Frozen         bool      `json:"frozen"`
-		Reason         string    `json:"reason,omitempty"`
-		UpdatedAt      time.Time `json:"updated_at"`
-	}{OrganizationID: "org-a", Frozen: true, Reason: "security hold", UpdatedAt: time.Now().UTC()}
-	if err = store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "task-request-a", nil, nil, "organization_freeze", "org-a", 1, freeze); err != nil {
-		t.Fatal(err)
-	}
+	setAppTestFreeze(t, ctx, store, "org-a", 1, true)
 	service := New(gateway)
 	runs, err := service.runReady(ctx)
 	if err != nil {
@@ -276,27 +275,15 @@ func testSchedulerSecurityHold(t *testing.T, timing string) {
 	if snapshot.Tasks["task-request-a"].Value.Status != core.TaskPending || snapshot.Tasks["task-request-b"].Value.Status != core.TaskCompleted {
 		t.Fatal("scheduler changed held task or failed unrelated task")
 	}
-	freeze.Frozen = false
-	freeze.UpdatedAt = time.Now().UTC()
-	if err = store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "task-request-a", nil, nil, "organization_freeze", "org-a", 2, freeze); err != nil {
-		t.Fatal(err)
-	}
+	setAppTestFreeze(t, ctx, store, "org-a", 2, false)
 	commitHold := func() {
-		freeze.Frozen = true
-		freeze.UpdatedAt = time.Now().UTC()
-		if err := store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "task-request-a", nil, nil, "organization_freeze", "org-a", 3, freeze); err != nil {
-			t.Fatal(err)
-		}
+		setAppTestFreeze(t, ctx, store, "org-a", 3, true)
 	}
 	switch timing {
 	case "freeze-release-before-start":
 		interceptor.beforeStart = func() {
 			commitHold()
-			freeze.Frozen = false
-			freeze.UpdatedAt = time.Now().UTC()
-			if err := store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "task-request-a", nil, nil, "organization_freeze", "org-a", 4, freeze); err != nil {
-				t.Fatal(err)
-			}
+			setAppTestFreeze(t, ctx, store, "org-a", 4, false)
 		}
 		service.deterministic = holdDuringHandler{freeze: func() { t.Fatal("cancelled preparation dispatched handler") }}
 	case "during-handler":
@@ -309,11 +296,7 @@ func testSchedulerSecurityHold(t *testing.T, timing string) {
 		interceptor.publicationEventType = "TASK_RECOVERED"
 		interceptor.beforePublication = func() {
 			commitHold()
-			freeze.Frozen = false
-			freeze.UpdatedAt = time.Now().UTC()
-			if err := store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "task-request-a", nil, nil, "organization_freeze", "org-a", 4, freeze); err != nil {
-				t.Fatal(err)
-			}
+			setAppTestFreeze(t, ctx, store, "org-a", 4, false)
 		}
 	case "after-outcome", "freeze-release-after-outcome", "before-candidate", "before-completion", "freeze-release-before-completion":
 		interceptor.publicationEventType = "RESULT_PUBLISHED"
@@ -326,22 +309,14 @@ func testSchedulerSecurityHold(t *testing.T, timing string) {
 		interceptor.beforePublication = func() {
 			commitHold()
 			if strings.HasPrefix(timing, "freeze-release-") {
-				freeze.Frozen = false
-				freeze.UpdatedAt = time.Now().UTC()
-				if err := store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "task-request-a", nil, nil, "organization_freeze", "org-a", 4, freeze); err != nil {
-					t.Fatal(err)
-				}
+				setAppTestFreeze(t, ctx, store, "org-a", 4, false)
 			}
 		}
 	default:
 		interceptor.beforeOutcome = func() {
 			commitHold()
 			if timing == "freeze-release-before-admission" {
-				freeze.Frozen = false
-				freeze.UpdatedAt = time.Now().UTC()
-				if err := store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "task-request-a", nil, nil, "organization_freeze", "org-a", 4, freeze); err != nil {
-					t.Fatal(err)
-				}
+				setAppTestFreeze(t, ctx, store, "org-a", 4, false)
 			}
 		}
 	}
@@ -351,11 +326,7 @@ func testSchedulerSecurityHold(t *testing.T, timing string) {
 			t.Fatalf("expected injected crash: %v", err)
 		}
 		if timing == "crash-before-suspension" {
-			freeze.Frozen = false
-			freeze.UpdatedAt = time.Now().UTC()
-			if err := store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "task-request-a", nil, nil, "organization_freeze", "org-a", 4, freeze); err != nil {
-				t.Fatal(err)
-			}
+			setAppTestFreeze(t, ctx, store, "org-a", 4, false)
 		}
 		_, err = New(gateway).Recover(ctx)
 	}
@@ -623,14 +594,7 @@ func TestPreStartExitsRetainContainmentGeneration(t *testing.T) {
 					if held {
 						writer.beforeWrite = func() {
 							for index, frozen := range []bool{true, false} {
-								state := struct {
-									OrganizationID core.ID   `json:"organization_id"`
-									Frozen         bool      `json:"frozen"`
-									UpdatedAt      time.Time `json:"updated_at"`
-								}{"org-a", frozen, time.Now().UTC()}
-								if err := store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "preparation", nil, nil, "organization_freeze", "org-a", index+1, state); err != nil {
-									t.Fatal(err)
-								}
+								setAppTestFreeze(t, ctx, store, "org-a", index+1, frozen)
 							}
 						}
 					}
@@ -674,14 +638,7 @@ func TestVerifiedCompletionSurvivesLaterHoldAndRecovery(t *testing.T) {
 			t.Cleanup(func() { _ = store.Close() })
 			writer := &holdBeforeOutcomeLedger{SQLite: store, publicationEventType: "TASK_VERIFIED_COMPLETE", beforePublication: func() {
 				for version, frozen := range []bool{true, false} {
-					state := struct {
-						OrganizationID core.ID   `json:"organization_id"`
-						Frozen         bool      `json:"frozen"`
-						UpdatedAt      time.Time `json:"updated_at"`
-					}{"org-a", frozen, time.Now().UTC()}
-					if err := store.AppendRecord(t.Context(), "org-a", "FREEZE_SET", "user-1", "verified-hold", nil, nil, "organization_freeze", "org-a", version+1, state); err != nil {
-						t.Fatal(err)
-					}
+					setAppTestFreeze(t, t.Context(), store, "org-a", version+1, frozen)
 				}
 			}}
 			gateway := events.NewGateway(writer)
@@ -751,14 +708,7 @@ func TestIndependentReviewSurvivesLaterReleasedHold(t *testing.T) {
 				t.Fatalf("review: %v %v", found, err)
 			}
 			for index, frozen := range []bool{true, false} {
-				state := struct {
-					OrganizationID core.ID   `json:"organization_id"`
-					Frozen         bool      `json:"frozen"`
-					UpdatedAt      time.Time `json:"updated_at"`
-				}{OrganizationID: "org-1", Frozen: frozen, UpdatedAt: time.Now().UTC()}
-				if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "review-hold", nil, nil, "organization_freeze", "org-1", index+1, state); err != nil {
-					t.Fatal(err)
-				}
+				setAppTestFreeze(t, ctx, store, "org-1", index+1, frozen)
 			}
 			if _, err := service.ReviewCompletion(ctx, reviewInput(view, decision, "Reviewed candidate")); err != nil {
 				t.Fatal(err)
@@ -796,14 +746,7 @@ func TestFrozenFailurePropagationDoesNotBlockOtherTenants(t *testing.T) {
 			if _, err := service.Submit(ctx, Submit{RequestID: "held-failure", OrganizationID: "org-1", Statement: "prepare a briefing", Kind: core.ExecutionAgent}); err == nil || !intercepted.failed {
 				t.Fatalf("missing injected propagation failure: %v", err)
 			}
-			state := struct {
-				OrganizationID core.ID   `json:"organization_id"`
-				Frozen         bool      `json:"frozen"`
-				UpdatedAt      time.Time `json:"updated_at"`
-			}{"org-1", true, time.Now().UTC()}
-			if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "held-failure", nil, nil, "organization_freeze", "org-1", 1, state); err != nil {
-				t.Fatal(err)
-			}
+			setAppTestFreeze(t, ctx, store, "org-1", 1, true)
 			other := New(events.NewGateway(store))
 			result, err := other.Submit(ctx, Submit{RequestID: "unrelated", OrganizationID: "org-2", Statement: "echo independent", Kind: core.ExecutionDeterministic})
 			if err != nil || result.Task.Status != core.TaskCompleted {
@@ -833,26 +776,15 @@ func TestHeldPlanningRemainsActiveThroughReleasedRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	freeze := struct {
-		OrganizationID core.ID   `json:"organization_id"`
-		Frozen         bool      `json:"frozen"`
-		UpdatedAt      time.Time `json:"updated_at"`
-	}{"org-1", true, time.Now().UTC()}
 	planner := &heldPlanningPlanner{freeze: func() {
-		if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "held-planning", nil, nil, "organization_freeze", "org-1", 1, freeze); err != nil {
-			t.Fatal(err)
-		}
+		setAppTestFreeze(t, ctx, store, "org-1", 1, true)
 	}}
 	service := NewWithModelAndPlanner(events.NewGateway(store), execution.FakeModel{}, planner)
 	submission := Submit{RequestID: "held-planning", OrganizationID: "org-1", Statement: "perform adaptive work", Kind: core.ExecutionAgent}
 	if _, err := service.Submit(ctx, submission); !errors.Is(err, core.ErrOrganizationFrozen) {
 		t.Fatalf("planning error=%v", err)
 	}
-	freeze.Frozen = false
-	freeze.UpdatedAt = time.Now().UTC()
-	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "held-planning", nil, nil, "organization_freeze", "org-1", 2, freeze); err != nil {
-		t.Fatal(err)
-	}
+	setAppTestFreeze(t, ctx, store, "org-1", 2, false)
 	for range 2 {
 		if _, err := service.Recover(ctx); err != nil {
 			t.Fatal(err)
@@ -886,15 +818,8 @@ func TestCompletionReviewCannotResumeSuspendedExecution(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	freeze := struct {
-		OrganizationID core.ID   `json:"organization_id"`
-		Frozen         bool      `json:"frozen"`
-		UpdatedAt      time.Time `json:"updated_at"`
-	}{"org-a", true, time.Now().UTC()}
 	intercepted := &holdBeforeOutcomeLedger{SQLite: store, publicationEventType: "TASK_BLOCKED", beforePublication: func() {
-		if err := store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "held-review", nil, nil, "organization_freeze", "org-a", 1, freeze); err != nil {
-			t.Fatal(err)
-		}
+		setAppTestFreeze(t, ctx, store, "org-a", 1, true)
 	}}
 	service := NewWithModel(events.NewGateway(intercepted), describedModel{})
 	submitted, err := service.Submit(ctx, Submit{RequestID: "held-review", OrganizationID: "org-a", Statement: "prepare a note", Kind: core.ExecutionAgent})
@@ -914,11 +839,7 @@ func TestCompletionReviewCannotResumeSuspendedExecution(t *testing.T) {
 	}
 	for _, released := range []bool{false, true} {
 		if released {
-			freeze.Frozen = false
-			freeze.UpdatedAt = time.Now().UTC()
-			if err := store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "held-review", nil, nil, "organization_freeze", "org-a", 2, freeze); err != nil {
-				t.Fatal(err)
-			}
+			setAppTestFreeze(t, ctx, store, "org-a", 2, false)
 		}
 		if page, err := service.PendingCompletionReviews(ctx, "org-a", "", 10); err != nil || len(page.Reviews) != 0 {
 			t.Fatalf("suspension exposed ordinary review: page=%+v err=%v", page, err)
@@ -955,14 +876,7 @@ func TestReviewRequestSurvivesCrashAndLaterReleasedHold(t *testing.T) {
 		t.Fatalf("crash missing: %v", err)
 	}
 	for index, frozen := range []bool{true, false} {
-		state := struct {
-			OrganizationID core.ID   `json:"organization_id"`
-			Frozen         bool      `json:"frozen"`
-			UpdatedAt      time.Time `json:"updated_at"`
-		}{"org-1", frozen, time.Now().UTC()}
-		if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "review-crash", nil, nil, "organization_freeze", "org-1", index+1, state); err != nil {
-			t.Fatal(err)
-		}
+		setAppTestFreeze(t, ctx, store, "org-1", index+1, frozen)
 	}
 	recovered := NewWithModel(events.NewGateway(store), describedModel{})
 	if _, err := recovered.Recover(ctx); err != nil {
@@ -985,14 +899,7 @@ func TestPreManifestPlanningHoldSurvivesRecovery(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	intercepted := &holdBeforeOutcomeLedger{SQLite: store, publicationEventType: "PLANNING_CONTEXT_MANIFESTED", beforePublication: func() {
-		state := struct {
-			OrganizationID core.ID   `json:"organization_id"`
-			Frozen         bool      `json:"frozen"`
-			UpdatedAt      time.Time `json:"updated_at"`
-		}{"org-a", true, time.Now().UTC()}
-		if err := store.AppendRecord(ctx, "org-a", "FREEZE_SET", "user-1", "pre-manifest", nil, nil, "organization_freeze", "org-a", 1, state); err != nil {
-			t.Fatal(err)
-		}
+		setAppTestFreeze(t, ctx, store, "org-a", 1, true)
 	}}
 	planner := &failingPlanningPlanner{}
 	service := NewWithModelAndPlanner(events.NewGateway(intercepted), execution.FakeModel{}, planner)
@@ -1036,14 +943,7 @@ func TestFinishedPlanningFailureSurvivesLaterReleasedHold(t *testing.T) {
 		t.Fatalf("missing failure projection crash: %v", err)
 	}
 	for index, frozen := range []bool{true, false} {
-		state := struct {
-			OrganizationID core.ID   `json:"organization_id"`
-			Frozen         bool      `json:"frozen"`
-			UpdatedAt      time.Time `json:"updated_at"`
-		}{"org-1", frozen, time.Now().UTC()}
-		if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "finished-planning", nil, nil, "organization_freeze", "org-1", index+1, state); err != nil {
-			t.Fatal(err)
-		}
+		setAppTestFreeze(t, ctx, store, "org-1", index+1, frozen)
 	}
 	for range 2 {
 		if _, err := service.Recover(ctx); err != nil {
@@ -1092,14 +992,7 @@ func TestHoldBeforePlanningFailurePreventsOrdinaryFinish(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	writer := &holdBeforePlanningFailureLedger{SQLite: store, before: func() {
 		for index, frozen := range []bool{true, false} {
-			state := struct {
-				OrganizationID core.ID   `json:"organization_id"`
-				Frozen         bool      `json:"frozen"`
-				UpdatedAt      time.Time `json:"updated_at"`
-			}{"org-1", frozen, time.Now().UTC()}
-			if err := store.AppendRecord(t.Context(), "org-1", "FREEZE_SET", "user-1", "planning-finish-race", nil, nil, "organization_freeze", "org-1", index+1, state); err != nil {
-				t.Fatal(err)
-			}
+			setAppTestFreeze(t, t.Context(), store, "org-1", index+1, frozen)
 		}
 	}}
 	planner := &failingPlanningPlanner{}

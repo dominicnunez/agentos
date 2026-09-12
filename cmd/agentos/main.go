@@ -23,6 +23,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/app"
 	"github.com/dominicnunez/agentos/internal/approvals"
 	"github.com/dominicnunez/agentos/internal/artifacts"
+	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/bootstrap"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/effects"
@@ -180,10 +181,19 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 	if err != nil {
 		return err
 	}
+	freezeService, err := authority.NewFreezeControl(l, owner.OrganizationID, owner.ID)
+	if err != nil {
+		return err
+	}
+	freezeControl, err := gateway.NewFreezeControl(freezeService, owner)
+	if err != nil {
+		return err
+	}
 	userMux := http.NewServeMux()
 	userMux.Handle("/v1/user/", userGateway)
 	userMux.Handle("/v1/control/approvals", approvalControl)
 	userMux.Handle("/v1/control/approvals/", approvalControl)
+	userMux.Handle("/v1/control/freeze", freezeControl)
 	userServer := newHTTPServer("", userMux, nil)
 	userServer.ConnContext = localConnContext
 	userListener, err := listenLocalHuman(ctx, config.Paths.UserSocket, config.Owner.UID, config.Owner.GID)

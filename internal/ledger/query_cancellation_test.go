@@ -22,7 +22,7 @@ func TestCancelledQueriesReleaseAuthorityLocks(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = store.Close() })
-			appendInferenceFreeze(t, store, "organization-1", 1, false)
+			appendHistoricalInferenceFreeze(t, store, "organization-1", 1, false)
 			observer := store.memoryKeepalive
 			if observer == nil {
 				observer, err = sql.Open("sqlite", path)

@@ -82,17 +82,8 @@ func testKnowledgeContextAdmission(t *testing.T, kind core.KnowledgeType, contex
 		_ = store.Close()
 		t.Fatal(err)
 	}
-	freeze := recoveryFreezeState("org-1", true, "incident")
-	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", "task-validation", nil, nil, "organization_freeze", "org-1", 1, freeze); err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
-	freeze.Frozen = false
-	freeze.UpdatedAt = time.Now().UTC()
-	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", "task-validation", nil, nil, "organization_freeze", "org-1", 2, freeze); err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
+	setRecoveryFreeze(t, ctx, store, "org-1", 1, true, "incident")
+	setRecoveryFreeze(t, ctx, store, "org-1", 2, false, "incident")
 	active := candidate
 	active.Version = 2
 	active.Status = core.KnowledgeActive

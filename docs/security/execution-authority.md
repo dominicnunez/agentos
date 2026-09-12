@@ -651,10 +651,79 @@ reservation admitted while that organization was frozen.
 An inference reservation that commits before the freeze remains an admitted
 call. Its usage or uncertain outcome must still be reconciled while frozen;
 the freeze does not establish that the request was never sent. This admission
-boundary does not cancel an already-dispatched provider request or implement
-execution-, Agent-, or Work-scoped active quarantine. Active context cancellation,
-coordination suspension, and controlled release remain prerequisites for a
-broader runtime security hold before long-running high-autonomy execution.
+boundary alone cannot undo an already-dispatched provider request. Matching live
+contexts are also cancelled after the hold commits; a separate observer retains
+intervening holds across rapid release and fails closed when authority cannot be
+observed. These are cooperative controls, not execution-, Agent-, or Work-scoped
+quarantine or proof that a remote provider stopped computing.
+
+The configured Linux owner can inspect and change the organization hold through
+`GET` and `POST /v1/control/freeze` on the private user socket. The service binds
+the organization and human identity from installation configuration after the
+transport verifies the peer UID. Model content, headers, capability references,
+notifications, and the external A2A listener cannot supply this authority.
+
+A change names the exact current `expected_event_ref` and `expected_version`.
+The first hold uses an empty reference and version zero. Release requires the
+current frozen revision; a newer hold makes an old release conflict. An identical
+retry of the last committed command returns its original result without another
+record. Read the state again after a conflict before deciding on another command.
+Release permits new independently admitted work but never revives old cancelled
+contexts or resumes suspended Tasks. An unknown response does not prove a hold or
+release committed; inspect the durable state before deciding what to do next.
+
+The typed ledger writer derives the new version and timestamp, records the human
+actor and exact predecessor, commits, then signals matching local contexts. It
+rejects new generic freeze writes. Readers and replay preserve old metadata-free
+records without changing their bytes, permit upgrade to owner evidence, and
+reject removal of that evidence in later history. New control envelopes cannot
+carry Task, execution, recipient, artifact, or capability authority.
+
+Cold admission validates the complete organization freeze history on the ordinary
+database pool before registering live work. Live observations share an immutable
+validated prefix per organization. Storage v11 triggers update observation
+tokens in the same transaction as relevant record or event changes, including
+rewrites, deletions, and conflicting replacements. Each poll reads tokens and any
+new admissions in one snapshot: unchanged history reuses the proof; an appended
+suffix must pass the same validation as full replay. Rewritten history cannot
+reuse the prefix, and live observations fail closed until a fresh full validation
+is available. Schema changes require revalidation of the storage contract and
+trigger definitions. Status reads and the typed writer can rebuild the proof;
+the writer publishes a candidate only after successful commit. Active work pins
+its organization's cache entry; at most eight inactive entries are retained.
+Cold validation and copying a changed history grow with history size, but idle
+polls do not replay it. Unavailable or expired observations never renew the
+containment watchdog.
+
+Runtime read and write transactions reuse one validated freeze history per
+organization across nested admission, retry, publication, and policy checks. This
+includes inbox polling, knowledge authority reads, routing, and inference
+validation. The scope binds the exact SQL transaction; a derived context
+cannot transfer its proof to a different transaction. Each use still checks the
+transaction's freshness tokens, so appending or rewriting freeze authority
+invalidates the prior view. These transaction-local views are discarded on
+rollback and are never published into the shared live cache. Capability and
+policy validation still runs at its required boundaries.
+
+Full suspended-task reconciliation/resumption, independent abort reliability,
+and complete coordination/output/effect and cancellation-timeline coverage remain
+unfinished under [issue #178](https://github.com/dominicnunez/agentos/issues/178).
+
+For example, after reading the current head, the owner sends this JSON with
+`Content-Type: application/json` on the private user socket. Substitute the
+observed version and event reference; all four fields must be present. The
+endpoint accepts no query parameters and bounds the request to 4 KiB, with a
+reason of at most 2,048 UTF-8 bytes. This endpoint is not exposed by the dashboard
+bridge in this change.
+
+```json
+{
+  "frozen": false,
+  "reason": "Owner completed the release assessment",
+  "expected_event_ref": "the-observed-hold-event",
+  "expected_version": 1
+}
+```
 
 | Control | Status |
 |---|---|

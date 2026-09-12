@@ -242,7 +242,7 @@ policy:
       from:
         module: gateway
       to:
-        modules: [approvals, artifacts, core, intake, trustconfig]
+        modules: [approvals, artifacts, authority, core, intake, trustconfig]
 
     - name: operator-intake
       from:
@@ -322,7 +322,7 @@ policy:
         module: app
         tests: true
       to:
-        modules: [ledger, modelinput]
+        modules: [authority, ledger, modelinput]
 
     - name: approvals-test-adapters
       from:
@@ -350,14 +350,14 @@ policy:
         module: intake
         tests: true
       to:
-        modules: [execution, ledger]
+        modules: [authority, execution, ledger]
 
     - name: knowledge-test-adapter
       from:
         module: knowledge
         tests: true
       to:
-        module: ledger
+        modules: [authority, ledger]
 
     - name: ledger-recovery-test-adapter
       from:

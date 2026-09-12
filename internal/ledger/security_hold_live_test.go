@@ -468,7 +468,7 @@ func TestContainmentSnapshotDeadlineBoundsDatabaseLockWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reader.Close() })
-	appendInferenceFreeze(t, reader, "organization-1", 1, false)
+	appendHistoricalInferenceFreeze(t, reader, "organization-1", 1, false)
 	writer, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -509,7 +509,7 @@ func TestContainmentSnapshotCancellationPreservesPrivateMemoryAuthority(t *testi
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	appendInferenceFreeze(t, store, "organization-1", 1, false)
+	appendHistoricalInferenceFreeze(t, store, "organization-1", 1, false)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	err = store.withContainmentSnapshot(ctx, func(tx *sql.Tx) error {
@@ -542,7 +542,7 @@ func TestCancelledWriterPreservesPrivateMemoryLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	appendInferenceFreeze(t, store, "organization-1", 1, false)
+	appendHistoricalInferenceFreeze(t, store, "organization-1", 1, false)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	tx, err := store.db.BeginTx(ctx, nil)
@@ -574,6 +574,10 @@ func TestCancelledWriterPreservesPrivateMemoryLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = other.Close() }()
+	// Cold admission prepares the validated view before using the watch pool.
+	if _, err := other.prepareFreeze(t.Context(), "organization-1"); err != nil {
+		t.Fatal(err)
+	}
 	epoch, _, err := other.containmentEpoch(t.Context(), "organization-1")
 	if err != nil || epoch != 0 {
 		t.Fatalf("private memory databases shared authority: epoch=%d err=%v", epoch, err)
@@ -1025,7 +1029,7 @@ func TestLiveContainmentReleaseOnlyDoesNotInventHold(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	appendInferenceFreeze(t, store, "organization-1", 1, false)
+	appendHistoricalInferenceFreeze(t, store, "organization-1", 1, false)
 	next, cause, err := store.containmentSince(t.Context(), "organization-1", 0)
 	if err != nil || cause != nil || next <= 0 {
 		t.Fatalf("release-only observation: next=%d cause=%v err=%v", next, cause, err)

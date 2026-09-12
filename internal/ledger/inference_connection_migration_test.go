@@ -12,7 +12,15 @@ import (
 
 func removeConnectionColumnsForLegacyFixture(t *testing.T, db *sql.DB) {
 	t.Helper()
-	if _, err := db.ExecContext(t.Context(), `DROP INDEX inference_policies_active_idx;
+	if _, err := db.ExecContext(t.Context(), `DROP TRIGGER IF EXISTS freeze_events_delete_change;
+DROP TRIGGER IF EXISTS freeze_events_insert_change;
+DROP TRIGGER IF EXISTS freeze_events_insert_conflict;
+DROP TRIGGER IF EXISTS freeze_events_update_change;
+DROP TRIGGER IF EXISTS freeze_records_delete_change;
+DROP TRIGGER IF EXISTS freeze_records_insert_change;
+DROP TRIGGER IF EXISTS freeze_records_update_change;
+DROP TABLE IF EXISTS freeze_changes;
+DROP INDEX inference_policies_active_idx;
 ALTER TABLE inference_policies DROP COLUMN connection_id;
 ALTER TABLE inference_reservations DROP COLUMN connection_id;
 CREATE UNIQUE INDEX inference_policies_active_idx ON inference_policies(organization_id) WHERE active=1;`); err != nil {
@@ -48,13 +56,7 @@ func TestInferenceConnectionMigrationPreservesLegacyReservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Reconstruct the exact v9 layout; do not pretend that relabeling v10 is v9.
-	_, err = db.ExecContext(ctx, `DROP INDEX inference_policies_active_idx;
-ALTER TABLE inference_policies DROP COLUMN connection_id;
-ALTER TABLE inference_reservations DROP COLUMN connection_id;
-CREATE UNIQUE INDEX inference_policies_active_idx ON inference_policies(organization_id) WHERE active=1;`)
-	if err != nil {
-		t.Fatal(err)
-	}
+	removeConnectionColumnsForLegacyFixture(t, db)
 	fingerprint, err := storageSchemaFingerprint(ctx, db)
 	if err != nil {
 		t.Fatal(err)

@@ -329,11 +329,7 @@ func TestVerifyRejectsOrganizationMismatchedFreezeRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := map[string]any{"organization_id": "org-1", "frozen": true, "reason": "incident", "updated_at": time.Now().UTC()}
-	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "task-1", nil, nil, "organization_freeze", "org-1", 1, state); err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
+	setRecoveryFreeze(t, ctx, store, "org-1", 1, true, "incident")
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +337,17 @@ func TestVerifyRejectsOrganizationMismatchedFreezeRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state["organization_id"] = "org-2"
+	var state core.FreezeState
+	var stored []byte
+	if err := db.QueryRowContext(ctx, `SELECT body FROM records WHERE kind='organization_freeze' AND record_id='org-1'`).Scan(&stored); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(stored, &state); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	state.OrganizationID = "org-2"
 	body, err := json.Marshal(state)
 	if err != nil {
 		_ = db.Close()

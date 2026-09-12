@@ -13,12 +13,34 @@ import (
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/app"
+	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/ledger"
 	"github.com/dominicnunez/agentos/internal/modelinput"
 )
+
+func setIntakeTestFreeze(t *testing.T, ctx context.Context, store *ledger.SQLite, organization core.ID, version int, frozen bool) authority.FreezeSnapshot {
+	t.Helper()
+	current, err := store.ReadFreeze(ctx, organization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Version != version-1 {
+		t.Fatalf("freeze predecessor version=%d want=%d", current.Version, version-1)
+	}
+	updated, err := store.SetFreeze(ctx, organization, "owner-1", core.PrincipalHuman, authority.FreezeChange{
+		Frozen: frozen, Reason: "security hold", ExpectedEventRef: current.EventRef, ExpectedVersion: current.Version,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Version != version || updated.State.Frozen != frozen {
+		t.Fatalf("freeze state=%+v version=%d want frozen=%t version=%d", updated.State, updated.Version, frozen, version)
+	}
+	return updated
+}
 
 func TestRouterUsesLeastNondeterministicAvailableMechanism(t *testing.T) {
 	router := Router{}
@@ -877,14 +899,7 @@ func TestInvalidNormalizationStillRecordsProviderUsage(t *testing.T) {
 		t.Fatal("completed invalid normalization lacks its finish boundary")
 	}
 	for index, frozen := range []bool{true, false} {
-		state := struct {
-			OrganizationID core.ID   `json:"organization_id"`
-			Frozen         bool      `json:"frozen"`
-			UpdatedAt      time.Time `json:"updated_at"`
-		}{core.ID(principal.OrganizationID), frozen, time.Now().UTC()}
-		if err := store.AppendRecord(ctx, principal.OrganizationID, "FREEZE_SET", "user-1", message.ConversationID, nil, nil, "organization_freeze", principal.OrganizationID, index+1, state); err != nil {
-			t.Fatal(err)
-		}
+		setIntakeTestFreeze(t, ctx, store, core.ID(principal.OrganizationID), index+1, frozen)
 	}
 	if _, err := service.Handle(ctx, principal, message); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("invalid retry error=%v", err)
@@ -2035,14 +2050,7 @@ func TestPostNormalizationRejectionPermitsCorrectedRetry(t *testing.T) {
 				mutate = func(n *Normalization) {
 					original(n)
 					for index, frozen := range []bool{true, false} {
-						state := struct {
-							OrganizationID core.ID   `json:"organization_id"`
-							Frozen         bool      `json:"frozen"`
-							UpdatedAt      time.Time `json:"updated_at"`
-						}{"org-1", frozen, time.Now().UTC()}
-						if err := store.AppendRecord(t.Context(), "org-1", "FREEZE_SET", "user-1", "cancelled-normalization", nil, nil, "organization_freeze", "org-1", index+1, state); err != nil {
-							t.Fatal(err)
-						}
+						setIntakeTestFreeze(t, t.Context(), store, "org-1", index+1, frozen)
 					}
 					cancel()
 				}
@@ -2173,14 +2181,7 @@ func TestIntentDraftRejectsHoldAfterNormalization(t *testing.T) {
 					states = append(states, false)
 				}
 				for index, frozen := range states {
-					state := struct {
-						OrganizationID core.ID   `json:"organization_id"`
-						Frozen         bool      `json:"frozen"`
-						UpdatedAt      time.Time `json:"updated_at"`
-					}{OrganizationID: core.ID(principal.OrganizationID), Frozen: frozen, UpdatedAt: time.Now().UTC()}
-					if err := store.AppendRecord(ctx, principal.OrganizationID, "FREEZE_SET", "user-1", "held-intake", nil, nil, "organization_freeze", principal.OrganizationID, index+1, state); err != nil {
-						t.Fatal(err)
-					}
+					setIntakeTestFreeze(t, ctx, store, core.ID(principal.OrganizationID), index+1, frozen)
 				}
 			}}
 			service := NewWithNormalizer(app.New(events.NewGateway(store)), held)
@@ -2193,14 +2194,7 @@ func TestIntentDraftRejectsHoldAfterNormalization(t *testing.T) {
 				t.Fatal("held draft escaped or usage disappeared")
 			}
 			if !released {
-				state := struct {
-					OrganizationID core.ID   `json:"organization_id"`
-					Frozen         bool      `json:"frozen"`
-					UpdatedAt      time.Time `json:"updated_at"`
-				}{core.ID(principal.OrganizationID), false, time.Now().UTC()}
-				if err := store.AppendRecord(ctx, principal.OrganizationID, "FREEZE_SET", "user-1", "held-intake", nil, nil, "organization_freeze", principal.OrganizationID, 2, state); err != nil {
-					t.Fatal(err)
-				}
+				setIntakeTestFreeze(t, ctx, store, core.ID(principal.OrganizationID), 2, false)
 			}
 			for range 2 {
 				if _, err := service.Handle(ctx, principal, Message{ConversationID: "held-intake", MessageID: "message-1", Text: "Prepare a Linux release"}); err == nil {

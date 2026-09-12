@@ -133,7 +133,7 @@ jobs:
 
       - name: Race-tested unit tests
         if: steps.scope.outputs.code != 'false'
-        run: go test -race ./...
+        run: go test -race -timeout=20m ./...
 
       - name: Bounded operator-boundary fuzzing
         if: steps.scope.outputs.code != 'false'

@@ -18,7 +18,7 @@ func testMemoryExclusiveLockWait(t *testing.T, write bool) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	appendInferenceFreeze(t, store, "organization-1", 1, false)
+	appendHistoricalInferenceFreeze(t, store, "organization-1", 1, false)
 	keeper, err := store.memoryKeepalive.Conn(t.Context())
 	if err != nil {
 		t.Fatal(err)

@@ -2606,18 +2606,21 @@ func TestAppendRecordRejectsMalformedAuthorityHistoryAtomically(t *testing.T) {
 		t.Fatalf("valid terminal revocation was rejected: %v", err)
 	}
 
-	freezeAt := time.Now().UTC()
-	wrongTenant := authority.FreezeState{OrganizationID: "org-2", Frozen: true, Reason: "incident", UpdatedAt: freezeAt}
-	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "task-1", nil, nil, "organization_freeze", "org-1", 1, wrongTenant); err == nil {
-		t.Fatal("organization-mismatched freeze was admitted")
-	}
-	freeze := authority.FreezeState{OrganizationID: "org-1", Frozen: true, Reason: "incident", UpdatedAt: freezeAt}
-	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "task-1", nil, nil, "organization_freeze", "org-1", 1, freeze); err != nil {
+	freeze := appendInferenceFreeze(t, store, "org-1", 1, true)
+	malformed := freeze.State
+	malformed.OrganizationID = "org-2"
+	malformedBody, err := json.Marshal(malformed)
+	if err != nil {
 		t.Fatal(err)
 	}
-	freeze.Frozen = false
-	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "user-1", "task-1", nil, nil, "organization_freeze", "org-1", 2, freeze); err == nil {
-		t.Fatal("freeze revision reused a non-increasing timestamp")
+	if _, err := store.db.ExecContext(ctx, `UPDATE records SET body=? WHERE kind='organization_freeze' AND record_id='org-1'`, malformedBody); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReadFreeze(ctx, "org-1"); err == nil {
+		t.Fatal("organization-mismatched historical freeze was accepted")
+	}
+	if _, err := store.SetFreeze(ctx, "org-1", "owner-1", core.PrincipalHuman, authority.FreezeChange{Frozen: false, ExpectedEventRef: freeze.EventRef, ExpectedVersion: freeze.Version}); err == nil {
+		t.Fatal("organization-mismatched historical freeze admitted a revision")
 	}
 
 	var authorityEvents, authorityRecords int
@@ -3926,15 +3929,20 @@ func TestAppendRecordRejectsMalformedAuthorityBeforeCommit(t *testing.T) {
 		t.Fatal("revoked capability state was admitted as a grant")
 	}
 	assertCounts(1)
-	freeze := struct {
-		OrganizationID core.ID   `json:"organization_id"`
-		Frozen         bool      `json:"frozen"`
-		UpdatedAt      time.Time `json:"updated_at"`
-	}{OrganizationID: "org-other", Frozen: true, UpdatedAt: time.Now().UTC()}
-	if err := l.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", "task-1", nil, nil, "organization_freeze", "org-1", 1, freeze); err == nil {
-		t.Fatal("cross-organization freeze record was admitted")
+	freeze := appendInferenceFreeze(t, l, "org-1", 1, true)
+	malformed := freeze.State
+	malformed.OrganizationID = "org-other"
+	body, err := json.Marshal(malformed)
+	if err != nil {
+		t.Fatal(err)
 	}
-	assertCounts(1)
+	if _, err := l.db.ExecContext(ctx, `UPDATE records SET body=? WHERE kind='organization_freeze' AND record_id='org-1'`, body); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.ReadFreeze(ctx, "org-1"); err == nil {
+		t.Fatal("cross-organization historical freeze record was accepted")
+	}
+	assertCounts(2)
 }
 
 func TestAgentKnowledgeCreatorLifetimeUsesLiveLedgerHistory(t *testing.T) {

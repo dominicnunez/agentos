@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/app"
+	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
@@ -23,6 +24,27 @@ import (
 	"github.com/dominicnunez/agentos/internal/ledger"
 	_ "modernc.org/sqlite"
 )
+
+func setRecoveryFreeze(t *testing.T, ctx context.Context, store *ledger.SQLite, organization core.ID, version int, frozen bool, reason string) authority.FreezeSnapshot {
+	t.Helper()
+	current, err := store.ReadFreeze(ctx, organization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Version != version-1 {
+		t.Fatalf("freeze predecessor version=%d want=%d", current.Version, version-1)
+	}
+	updated, err := store.SetFreeze(ctx, organization, "owner-1", core.PrincipalHuman, authority.FreezeChange{
+		Frozen: frozen, Reason: reason, ExpectedEventRef: current.EventRef, ExpectedVersion: current.Version,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Version != version || updated.State.Frozen != frozen {
+		t.Fatalf("freeze state=%+v version=%d want frozen=%t version=%d", updated.State, updated.Version, frozen, version)
+	}
+	return updated
+}
 
 func TestVerifyMigratesPreBindingAuthoritySnapshotWithoutChangingSource(t *testing.T) {
 	ctx := t.Context()
@@ -412,17 +434,8 @@ func TestVerifyRejectsKnowledgeWhenValidatorLeaseRecordIsMissing(t *testing.T) {
 		_ = store.Close()
 		t.Fatal(err)
 	}
-	freeze := recoveryFreezeState("org-1", true, "incident")
-	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", "task-validation", nil, nil, "organization_freeze", "org-1", 1, freeze); err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
-	freeze.Frozen = false
-	freeze.UpdatedAt = time.Now().UTC()
-	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", "task-validation", nil, nil, "organization_freeze", "org-1", 2, freeze); err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
+	setRecoveryFreeze(t, ctx, store, "org-1", 1, true, "incident")
+	setRecoveryFreeze(t, ctx, store, "org-1", 2, false, "incident")
 	active := candidate
 	active.Version = 2
 	active.Status = core.KnowledgeActive
@@ -469,11 +482,7 @@ func TestVerifyRejectsFreezeEventWithoutDurableState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := recoveryFreezeState("org-1", true, "incident")
-	if err := store.AppendRecord(ctx, "org-1", "FREEZE_SET", "runtime", "task-incident", nil, nil, "organization_freeze", "org-1", 1, state); err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
+	setRecoveryFreeze(t, ctx, store, "org-1", 1, true, "incident")
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -497,20 +506,6 @@ func TestVerifyRejectsFreezeEventWithoutDurableState(t *testing.T) {
 }
 
 func recoveryIntPointer(value int) *int { return &value }
-
-func recoveryFreezeState(organizationID core.ID, frozen bool, reason string) struct {
-	OrganizationID core.ID   `json:"organization_id"`
-	Frozen         bool      `json:"frozen"`
-	Reason         string    `json:"reason,omitempty"`
-	UpdatedAt      time.Time `json:"updated_at"`
-} {
-	return struct {
-		OrganizationID core.ID   `json:"organization_id"`
-		Frozen         bool      `json:"frozen"`
-		Reason         string    `json:"reason,omitempty"`
-		UpdatedAt      time.Time `json:"updated_at"`
-	}{OrganizationID: organizationID, Frozen: frozen, Reason: reason, UpdatedAt: time.Now().UTC()}
-}
 
 func TestVerifyRejectsSemanticallyValidEventPayloadTampering(t *testing.T) {
 	ctx := t.Context()
@@ -710,7 +705,15 @@ func testStorageSchemaFingerprint(ctx context.Context, db *sql.DB) (string, erro
 
 func removeConnectionColumnsForLegacyFixture(t *testing.T, db *sql.DB) {
 	t.Helper()
-	if _, err := db.ExecContext(t.Context(), `DROP INDEX inference_policies_active_idx;
+	if _, err := db.ExecContext(t.Context(), `DROP TRIGGER IF EXISTS freeze_events_delete_change;
+DROP TRIGGER IF EXISTS freeze_events_insert_change;
+DROP TRIGGER IF EXISTS freeze_events_insert_conflict;
+DROP TRIGGER IF EXISTS freeze_events_update_change;
+DROP TRIGGER IF EXISTS freeze_records_delete_change;
+DROP TRIGGER IF EXISTS freeze_records_insert_change;
+DROP TRIGGER IF EXISTS freeze_records_update_change;
+DROP TABLE IF EXISTS freeze_changes;
+DROP INDEX inference_policies_active_idx;
 ALTER TABLE inference_policies DROP COLUMN connection_id;
 ALTER TABLE inference_reservations DROP COLUMN connection_id;
 CREATE UNIQUE INDEX inference_policies_active_idx ON inference_policies(organization_id) WHERE active=1`); err != nil {
