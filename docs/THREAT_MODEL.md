@@ -1,153 +1,204 @@
-# V1 threat model
+# 1. Overview
 
-## Scope
+Agent OS is a Linux-only Go modular monolith for operating persistent organizations of human and AI actors. Its authoritative state is an append-oriented SQLite event ledger with versioned projections and a SHA-256 event-integrity chain. Work enters through an installation-owner dashboard/private Unix-socket API or an optional A2A JSON-RPC gateway. The runtime normalizes intent, requires explicit confirmation, creates bounded Task DAGs, dispatches supported execution mechanisms, records results, and separates completion review and consequential-effect approval from model output.
 
-This model covers the Linux-only Agent OS V1 runtime, resumable setup, embedded
-web dashboard, private user gateway, A2A intake, provider adapters, artifact store,
-SQLite ledger and recovery command, exact-effect approvals, completion review,
-and release pipeline.
+The runtime supports multiple configured provider connections, including multiple accounts using the same provider and model. Explicit installation rules or a policy-constrained broker select connections independently for intent normalization, planning, and Task execution. Supported production model adapters remain OpenAI API and Codex subscription. Exact connection identities, immutable execution profiles, routing requirements, and shared organization budgets constrain selection and dispatch. Automatic cross-provider fallback and general tool-using model execution are not implemented.
 
-A passing test is evidence for a control, not proof that every deployment is
-safe. A user with root access already controls the machine and can replace the
-binary, configuration, service, ledger, or kernel identity result. Agent OS
-does not claim to defend against a compromised operating-system administrator.
+The principal assets are organization, Mission, Goal, Work, Task, identity, knowledge, approval, capability, freeze, effect, completion, inference-policy, budget, and audit records; provider and A2A credentials; private prompts/results/artifacts; and release artifacts. V1 has no production effect-writing adapter, and its model adapters are intentionally model-only. Prompt injection cannot directly invoke a shipped shell or external-effect mechanism, but it can influence bounded work, consume inference budget, disclose selected context to a provider, poison later decisions, or mislead an operator.
 
-## Protected assets
+There is no published release yet according to `SECURITY.md`, so release-publication risk is prospective. The intended default is a single-machine system installation with a restricted `agentos` service account and one verified Linux owner. User-mode installations run with the owner's authority. Organization scoping remains security-relevant for external actors, ledger objects, model context, and budgets, without implying strong hosted multi-tenant isolation.
 
-- Event Contracts and durable organization, Mission, Goal, Work, and Task state;
-- capabilities, freezes, approvals, completion decisions, and effect obligations;
-- provider, A2A, and ephemeral dashboard bearer credentials;
-- tenant-confined work, results, artifacts, and model context;
-- effect idempotency, reconciliation evidence, and audit history;
-- release binaries, source identity, checksums, SBOMs, and provenance.
+This model describes runtime commit `e57e792069c3bc5b39c4b7b884af6a741adb626f`. Implemented controls, incomplete controls, and prerequisites for unsupported execution mechanisms are distinguished below. A passing test is evidence for a control, not proof of comprehensive security.
+
+# 2. Threat model, Trust boundaries and assumptions
+
+## Assets and security objectives
+
+* Preserve organization-confined ledger state, results, artifacts, knowledge, approvals, and model context.
+* Prevent content or model output from becoming identity, capability, policy, execution, approval, completion, or effect authority.
+* Bind every model invocation to its authorized organization, purpose, connection, model, profile, source context, and resource reservation.
+* Prevent provider selection from weakening confidentiality, locality, capability, or shared-budget requirements.
+* Protect provider, A2A, reconciliation, TLS, and dashboard credentials, including separation between configured provider accounts.
+* Prevent duplicate or unauthorized consequential effects and conservatively account for uncertain effects and provider calls.
+* Preserve exact evidence and valid provenance across dispatch, result admission, completion, Goal evaluation, and recovery.
+* Contain affected live work after a committed organization freeze without treating cancellation as proof that remote computation stopped or external effects were reversed.
+* Detect inconsistent ledger modification, stale or cross-organization admissions, and unsupported or partially migrated state.
 
 ## Trust boundaries
 
-1. **Setup to installed authority.** The account that starts setup becomes the
-   local owner. Elevation must preserve and verify that account rather than
-   accepting a typed username.
-2. **Local process to user gateway.** Linux peer credentials on a mode-`0600`
-   Unix socket establish the configured owner. No local bearer file exists.
-3. **Browser to local process.** An owner-launched, one-time credential
-   establishes an expiring dashboard session on an ephemeral IPv4 loopback
-   bridge. The bridge is not the private user gateway.
-4. **Network to A2A.** A reviewed Agent record and unique server-owned bearer
-   establish the exact principal, tenant, role, scope, expiry, and limits.
-5. **Content to authority.** Conversation, model, and artifact content remain
-   untrusted. They cannot create approval, capability, policy, or completion
-   authority. Content also cannot create execution authority, and trust does
-   not propagate through a reference to another source or artifact.
-6. **User decision to effect.** Approval and subjective completion bind exact
-   ledger evidence and are separate from natural-language work.
-7. **Runtime to provider.** Only the configured model adapter receives bounded
-   execution context and its service-managed credential.
-8. **Runtime to persistence.** SQLite is authoritative. Security-sensitive
-   time-of-use checks and attempted-effect state share a transaction.
-9. **Source to release.** Pinned builders create reproducible, checksummed Linux
-   artifacts with corresponding source and dependency-license evidence.
+1. **Setup/elevation to installation:** Setup binds authority to the verified invoking Linux account. System setup accepts direct root or validates `SUDO_UID`, `SUDO_GID`, and `SUDO_USER` through fixed-path `getent`. Configuration, provider catalogs, routing policies, inference limits, A2A registries, certificates, and reconciliation registries are operator-controlled trusted inputs. Their declarations do not independently prove provider capabilities, effective containment, or backend privilege.
 
-## Attack surfaces and controls
+2. **Local process to private gateway:** The gateway is an absolute-path Unix socket, mode `0600`, owned by the configured user. Linux `SO_PEERCRED` is captured at accept time and checked by local-access authorization. Request headers cannot establish this identity. The restricted service account does not acquire owner approval authority merely by running the service.
 
-| Surface | Main threats | V1 controls | Residual risk |
-|---|---|---|---|
-| Setup and elevation | binding the wrong owner, PATH substitution, partial setup, symlink overwrite | system mode is the resumable default; `sudo` origin is verified with `getent`; direct root is allowed; privileged tools use fixed system paths; configuration writes are bounded, atomic, and reject symlinks | root or a compromised system utility can subvert setup |
-| Private user gateway | remote exposure, local impersonation, service-account self-approval | Unix socket only; socket activation; owner UID and mode `0600`; kernel `SO_PEERCRED`; the restricted service account cannot connect as the owner; request limits | compromise of the owner account or kernel defeats the boundary |
-| Web dashboard | loopback impersonation, DNS rebinding, CSRF, XSS, session theft, lost-response replay, direct ledger mutation | exact IPv4 loopback Host; one-time 256-bit bootstrap in a mode-`0600` temporary page; no credential in terminal output or launcher arguments; expiring in-memory bearer; exact Origin on bootstrap and cross-origin rejection thereafter; no CORS grants or cookies; allowlisted routes; response limits; server-owned recovery from authenticated durable intake, confirmation, input, approval, and review records; hash-bound CSP, frame denial, and no direct persistence access | compromise of the owner account or browser session can act within that owner's V1 authority |
-| AIMS evidence export | cross-tenant disclosure, unbounded ledger dump, prompt/result/credential leakage, false certification or control-effectiveness claim, stale contract index, tampered or incomplete downloaded artifact | authenticated local-owner capability; exact read-only allowlisted route with no query expansion; tenant-scoped bounded public projection; aggregate lifecycle counts; source contracts derived from the closed runtime projection lifecycle sets and limited to projections actually exported; no raw events or payloads, prompts, results, artifacts, approvals, capabilities, or authority records; explicit open gaps and non-certification claim; `PROJECTION_AVAILABLE` does not assert effectiveness; dashboard verifies the gateway checksum over exact response bytes and bundles the JSON plus detached `.sha256` into one tar download; no-store response | the local owner can disclose the downloaded inventory; the checksum detects artifact-byte changes but is not a signed ledger attestation or conformity assessment |
-| Governance inspection | cross-tenant findings, projection/event races, partial or tampered evidence, raw payload disclosure, report amplification, findings treated as authority or certification | authenticated local-user-only capability; no A2A route; exact read-only route without query expansion; one bounded tenant event slice read in the same transaction as complete-ledger chain verification; exact current-projection-to-latest-admission matching; deterministic registered rules; stable exact evidence references; payload-free report; response and selected-event bounds; exact-byte checksum; explicit no-repair, no-authority, and non-certification boundary | a valid finding still requires competent user interpretation and management-system action; the report digest and gateway checksum are not signatures or external attestations |
-| A2A | stolen bearer, tenant traversal, replay, authority-shaped input, method confusion, substituted trust files | official A2A v1.0 types behind strict authentication and decoding; exact roles/scopes; expiry, rate, and concurrency limits; opaque tenant-scoped IDs; recursive authority-field rejection; only `SendMessage` and `GetTask`; registry, TLS material, and encrypted token sources are confined, ownership-checked, mode-checked, and imported through systemd credentials | bearers remain replayable until rotation or revocation; internet-edge filtering is external |
-| Provider setup and use | plaintext secrets, ambient credentials, wrong model, hidden tools, cost or data egress | no `.env` requirement; OpenAI keys use systemd encrypted credentials; rotating Codex credentials use an authenticated encrypted state file with a separately protected systemd key and a private runtime copy; exact tested provider required; dated OpenAI snapshots; provider tools, redirects, storage, and automatic billable retries disabled | credentials and approved prompts exist in process memory; providers receive approved context |
-| Semantic intake | invented operator choices, hidden or switched Goal, replacement, or Lab-mode substitution, confirmation replay, lifecycle race, or stranded intake after strategic deactivation | strict bounded output; explicit `STANDARD`/`EXPERIMENT` mode in the complete draft fingerprint; runtime-owned Lab containment only; unsupported adaptive experiments rejected before confirmation; local-user Goal selection recorded identically across every intake event, required to match the accepted Intent Goal at admission, and denied to A2A; exact selected-Goal equality on initial-message retries; exact-ID source provenance for natural-language Goal and replacement references; active same-tenant Goal and Mission rechecks plus failed same-Goal predecessor admission in the confirmation transaction; immutable Intent, Goal, and replacement binding; typed local-user abandonment serialized against confirmation and retained as audit history | an authorized operator can explicitly confirm the wrong eligible Goal, predecessor, or reviewed mode |
-| Controlled replanning | in-place Plan mutation, reopened Tasks, hidden predecessor selection, replacement forks or cycles, cross-tenant lineage, authority or evidence inheritance | authenticated Work-ID disclosure; one explicit predecessor displayed in the reviewed Intent; deterministic predecessor Goal binding; prior failed state rechecked at confirmation sequence during write and recovery; same organization and Goal; one direct successor; fresh Intent, Work, Plan, and Task DAG; atomic admission and replay validation; no inherited approval, capability, effect permission, artifacts, completion, or execution state; Lab replacement rejected at application, durable admission, and replay boundaries | replacement lineage records deliberate recovery but cannot guarantee that the new plan is effective |
-| Task-DAG planning | prompt injection, authority invention, graph bombs, dependency cycles, strategic-context substitution, partial persistence, mislabeled lifecycle state, internal-task disclosure | exact accepted-Intent fingerprint; exact same-tenant Mission/Goal events and versions in Goal-bound model input and Plan fingerprint; bounded closed-schema output; runtime-owned root; execution-kind allowlist; 16-Task ceiling; deterministic handler registry; cycle and dependency validation; atomic graph commit; immutable Task contracts; exact event/status transitions at write, replay, and recovery; root-only A2A lookup | a valid but poor Plan can waste bounded model work or require independent review |
-| Execution admission | strategic time-of-check/time-of-use races, oversized strategic context, deactivation race, stale or substituted Agent configuration, cross-tenant roster reference, unrelated manifest event injection, replayed start authority, crash between start and context persistence | one typed SQLite start transaction requires the accepted Intent fingerprint and current Mission/Goal revisions to match the immutable Plan for Agent, deterministic, and user-operated work; Agent input size is checked before start; Agent starts also reload the exact active Agent, blueprint, execution profile, pending Task revision, bounded Team history, inbox, active knowledge, and same-Work peer Tasks, then require the manifest's ordered event refs and versioned context refs to equal the transaction-selected strategic, inbox, dependency, revision, knowledge, and coordination inputs before atomically persisting the manifest and running transition; sealed admission and replay reject stale, superseded, malformed, incomplete, or cross-organization bindings; these bindings grant no capability or effect authority | a strategic or roster change committed after dispatch may affect only future dispatches; interrupted adaptive provider contact remains uncertain |
-| Shared coordination | cross-Work or cross-tenant Task disclosure, stale or substituted peer state, graph amplification, peer status treated as authority or completion evidence | transaction-selected latest admitted same-Work Task revisions; own Task excluded; deterministic identity ordering; 15-peer and aggregate 256 KiB limits; exact ID/version manifest bindings under context-builder v3; completion-time reconstruction from pre-start sealed Task Event Contracts; immutable Task-revision validation; no A2A route or mutation path; explicit non-authority instructions | durable status can be correct while the peer's result is poor or misleading; Agents must still use exact dependency and completion evidence |
-| Agent-published evidence | model-authored evidence without a Task, substituted execution identity, unbounded or mismatched artifact claims, unknown payload fields, recovery treating malformed evidence as durable proof | one closed bounded payload; nonempty exact artifact references; authenticated Agent, current running Task revision, and exact admitted execution-start binding checked atomically at append and deterministically during recovery; evidence remains an untrusted claim and grants no authority or completion | referenced artifact bytes and provenance still require their own runtime validation before a later decision relies on them |
-| Organizational knowledge | forged authorship or validator kind, internal/A2A Agent conflation, self-validation, future or cross-tenant evidence, lineage omission, revoked validation authority, pagination races, live/recovery validator drift, stale or out-of-scope execution context, knowledge-content prompt injection | distinct `AGENT` and `EXTERNAL_AGENT` kinds; creator provenance bound to authenticated gateways or exact admitted Agent executions; exact validator-kind capability traces with transactional expiry/revocation/freeze recheck; nonempty exact active lineage for derived knowledge; one-snapshot bounded retrieval that excludes invalidated transitive lineage; transaction-bound execution selection from exact active Organization/Agent/Team scope; deterministic relevance, ordering, count, and byte limits; exact-version manifest plus completion-time replay and input-digest verification; one shared Event-Contract validator with verified lease history for startup materialization and offline verification | validly authorized user or independent-Agent judgment can still be mistaken; selected content remains explicitly untrusted model context and downstream capability, approval, effect, and completion checks remain mandatory |
-| Structured user completion | self-reported completion, missing documents, duplicate evidence, media spoofing, oversized files, lost-response identity conflict | durable CompletionContract; exact fields, roles, counts, and media types; duplicate-reference rejection; 16 MiB file and 32 MiB request totals; content sniffing; SHA-256 private storage; authenticated origin binding; explicit recovery from the existing durable submission without re-upload | files may still contain malicious content and remain untrusted to later consumers |
-| Model completion review | Agent self-certification, stale or orphaned review, substituted revision continuation, result disclosure, ephemeral-origin loss, unbounded history scans | owner-only private control; exact candidate/evidence fingerprint; no-store responses; durable idempotent decision and recovery for root and locally reviewable child Tasks; transactionally maintained tenant-scoped pending projection removed by decisions and authoritative terminal Task transitions; sequence-indexed pending and terminal reads bounded before exact stream validation; exact sealed decision-to-resume binding for progressed revisions | the user's subjective judgment can be wrong |
-| Goal progress | worker self-certification, forged, stale, or causally reordered Goal, Mission, or Work evidence, tenant crossing, duplicate terminal transitions, unbounded continuous history | ledger-selected current Work witnesses bounded by Goal criteria; exact active Goal revision and active-at-evaluation Mission binding; causal sequence checks; deterministic criterion coverage; fingerprinted evaluation; atomic target achievement; continuous Goals remain non-terminal; generic writers reject terminal evidence names; event-only rebuild revalidates the chain | exact criterion equality may require a reviewed Goal refinement when independently valid evidence uses different wording or provenance |
-| Exact-effect approval | approval through chat, changed effect, stale or expired decision, clock-rollback ordering, ephemeral-origin loss, unbounded terminal-history scans | owner-only private control; full ledger-sourced effect view; typed confirmation; immutable fingerprint; revalidation on every transition and at transactional use; transactionally maintained tenant-scoped pending projection with indexed expiry purge; sequence-indexed terminal decisions; explicit expired-binding reconciliation | a compromised owner can approve within that account's V1 authority |
-| SQLite and recovery | corruption, partial event alteration/deletion/insertion/reordering, wrong-database confusion, unsupported or partial migration, Event Contract drift, forged projection-shaped events, copied or orphaned admission, identity or tenant substitution, mislabeled Agent, Mission, Goal, Work, or Task state, missing terminal evidence, lost input response, unsafe overwrite, unauthorized access | Agent OS SQLite application ID; exact versioned layouts; source validation before one-transaction ordered migration; storage/Event schema metadata and layout fingerprint; frozen oldest-supported fixture; no inferred unversioned compatibility; append-only events and versioned records; one-to-one stored-byte SHA-256 event chain checked during startup, verification, backup, and restore; one-to-one event-coupled projection fingerprints; exact identity, parent, correlation, prior/resulting state, and terminal Work/Goal evidence validation during write, replay, startup, backup, restore, and explicit bodyless recovery from durable completion or user-input events; read-only verification; no-overwrite backup and restore; private data paths; service umask `0077` | host file access can reveal data; deletion of the final event with its integrity record or a privileged full-database replacement can leave or recompute an internally consistent chain because the head is not yet signed, timestamped, or externally anchored; storage encryption remains external |
-| Incident replay | cross-tenant history or activity disclosure, raw prompt/result disclosure, private-correlation exposure, unbounded history reads or response amplification, false causal or root-cause claims, replay confused with re-execution | authenticated local-user organization scope only; durable public-conversation mapping; one read transaction with complete event-chain verification; global head hash and positions withheld; 256-event, 1,024-reference-per-event, 4 KiB envelope-field, and 2 MiB JSON fail-closed bounds; payload digests instead of raw payloads; stream-local order; only explicit stream, Task, and execution predecessor links; no A2A route and no mutation or execution dependency | predecessor order is evidence, not root-cause analysis; operator incident decisions remain external |
-| Consequential effects | duplicate action, cross-tenant or malformed lease use, principal-kind confusion under a shared text ID, malformed freeze/revocation history, unbounded authority replay, crash after send, false success | persist-before-effect obligation with fingerprinted actor ID and principal kind; exact kind-bound lease matching; closed capability/freeze Event Contracts with atomic records bound to exact admission event IDs; original-tenant checks before every revision; indexed current-state reads limited to at most 64 distinct referenced leases plus the tenant freeze; contiguous immutable grant-to-revocation history; deterministic read-only recovery validation for legacy uncertain effects; exact approval checks; single-use consumption; idempotency key; evidence-required confirmation; no blind resend | production effect-writing adapters remain absent |
-| Executable-code boundaries | trusted-content instruction laundering, package substitution, download-and-run, generic shell/file authority reuse, malicious workflow or manifest mutation, hidden tool capability, cumulative approval chain | separate closed `CODE_INTRODUCTION` and `EXECUTION_SURFACE_MUTATION` bindings; exact artifact and before/after digests; exact staged promotion; observable runtime-owned influence refs; fingerprinted Task-local effect trajectory; exact top-level and consequential capability closure; protected path classifier; code introduction denied before adapters while hostile-code isolation is unavailable | no package/code/container/plugin execution or staged coding runtime is supported; external publisher and source-root attestation remain unavailable |
-| Adaptive execution environment | configured sandbox differs from host reality, ambient secrets, writable cross-execution channels, untrusted project metadata triggers implicit execution | requested/effective environment contract; exact profile digests, roots, egress, brokers, credential classes, runtime/isolation identity, resources, and verification refs; writable adaptive state restricted to an exact execution-private workspace; tool definitions bind all model-visible content and consequential capabilities | production environment attestation and hostile-code isolation are prerequisites, not implemented controls; low-bandwidth covert channels are out of scope |
-| Release pipeline | dependency substitution, missing source/license, unreproducible archive, artifact mix-up | pinned Go, Node, pnpm, Python, and actions; lockfile, module hash, and compiled Go/browser license checks; reproducible embedded dashboard; embedded Apache-2.0 license, project notice, and source identity; vendored Go corresponding source; offline Linux source tests; independent byte comparison; checksums, SBOMs, and provenance | provenance is unsigned and publication remains separately approved |
+3. **Browser to dashboard bridge:** An owner-launched process exposes an ephemeral IPv4 loopback HTTP listener, separate from the private gateway. A 256-bit one-time bootstrap token establishes an expiring bearer session. Browser content, extensions, websites, and other local processes are untrusted.
 
-## Security invariants
+4. **Network to A2A:** Requests, headers, JSON-RPC IDs, message text, Task IDs, extension metadata, and timing are attacker-controlled when A2A is enabled. A reviewed registry maps a server-side bearer to an exact actor, organization, role, scope, expiry, concurrency limit, and rate limit. Remote exposure requires explicit enablement and TLS.
 
-- Model, user, Agent, and artifact content never become trusted state directly.
-- Content cannot create execution authority, and introducing executable code is
-  itself a protected consequence.
-- Trust does not propagate through references. Authentication of an instruction
-  does not authenticate the third-party artifact it names.
-- Generic shell or file-write capability does not authorize code introduction
-  or protected execution-surface mutation; those remain distinct consequences.
-- An allowed tool cannot launder consequential capabilities unavailable to the
-  requesting principal.
-- Configured containment is not proof of effective containment. Arbitrary
-  external-code execution remains unavailable until runtime verification can
-  prove filesystem, process, network, credential, identity, and resource bounds.
-- Shared writable execution infrastructure is not an Agent communication
-  channel. Adaptive mutation requires exact execution-private staged state.
-- Approval of individual effects does not imply approval of their cumulative
-  trajectory.
-- A model-proposed Plan is coordination data only; it cannot grant authority,
-  approve an effect, add an execution mechanism, or make its children public.
-- A principal cannot expand its own capability or inherit authority through a
-  Task relationship.
-- An authority Event Contract without its exact tenant-bound record is inert;
-  neither an event label nor payload-shaped content can grant or revoke authority.
-- A dispatch binding authorizes one exact Agent invocation only; it cannot be
-  reused, substituted, or treated as approval, capability, or effect authority.
-- Acknowledgement is not approval; approval binds one immutable effect.
-- A ToolOutcome is not proof of an external effect, and nonempty model text is
-  not proof of completion.
-- Work may join a Goal only through an explicit, reviewed, tenant-checked
-  Intent reference. Work completion supplies evidence but cannot certify Goal
-  achievement; only the atomic Goal evaluator may admit the terminal state.
-- Replacement Work requires a new reviewed Intent naming one exact failed
-  predecessor. Its lineage grants no authority or evidence, and the predecessor
-  cannot be mutated, reopened, forked, or replaced across tenant or Goal bounds.
-- User-originated `HUMAN` Tasks require their structured CompletionContract;
-  an A2A Agent cannot complete them through a text continuation.
-- Unknown roles, fields, states, grants, boundaries, and execution mechanisms
-  fail closed.
-- Interrupted uncertain effects are reconciled without automatic resend.
-- Remote A2A requires explicit enablement and TLS. The user gateway never binds
-  TCP. The owner-launched dashboard bridge is a separate, ephemeral IPv4
-  loopback process and exposes only an allowlist of user-gateway operations.
-- Runtime and credential directories reject symlink traversal, unexpected
-  ownership, and broader-than-required permissions before the service opens
-  provider credentials or the ledger.
+5. **Content to authority:** Operator text, A2A text, model output, dependency results, knowledge content, and artifacts are untrusted data. Runtime-generated event envelopes, admitted identities, source bindings, fingerprints, authorization records, and typed decisions are control data. Authentication of an instruction does not authenticate an artifact it references. Source handles establish invocation membership, not authority or factual truth.
 
-## Verification
+6. **Persistent knowledge to model context:** Stored knowledge can influence future executions. New model context requires independently admitted factual-reference classification and exact valid source lineage. Reusable behavioral instructions do not become eligible merely because they are stored as Knowledge, feedback, or reference material.
 
-Model-call diagnostics are not work data. The shared inference guard returns
-fixed runtime-owned failure categories for authorization, provider, contract,
-and accounting failures; Agent execution also sanitizes adapter failures before
-creating a `ToolOutcome`. Original error text and error chains are discarded,
-so provider bodies, credentials, and backend diagnostics cannot enter new work
-evidence through those failures. Planning and intake use the same guarded
-provider boundary. Cancellation/deadline and definite pre-send facts survive
-without retaining diagnostic text. Cancellation alone never releases an
-uncertain inference reservation or proves that a request was not sent.
+7. **Runtime to provider connection/subprocess:** Bounded context and credentials cross into the selected OpenAI or Codex connection. Account identity is distinct from provider/model identity. The runtime depends on provider transport and availability but does not trust provider output for authority or semantic correctness. Disclosure of authorized context to the selected cloud provider is inherent. Codex is an operator-selected executable and dependency.
 
-This boundary does not redact model output, setup diagnostics, or historical
-events. Existing ledger history remains immutable; operators must handle any
-previously retained sensitive material under their incident procedures.
+8. **Committed authority to live execution:** Organization freeze records are durable authority; running contexts, provider calls, scheduler activity, and output publication are separate runtime mechanisms. Containment must observe committed history and retain an intervening hold even if a later release is visible. Cancellation is cooperative and cannot be atomic with remote receipt.
 
-CI covers reproducible SvelteKit generation, compiled frontend license
-evidence, dependency audit, type checks, formatting, module consistency, builds, vet, lint, race tests,
-bounded gateway fuzzing, vulnerability scanning, official A2A client tests,
-architecture boundaries, deterministic release construction, dependency
-licenses, corresponding-source offline tests, and packaged Linux binary smoke
-checks. Recovery, restart, approval, completion review, provider confinement,
-UID authentication, and structured artifact behavior have adversarial unit or
-integration tests.
+9. **Runtime to persistence and inspection:** SQLite and private artifact files hold authoritative state and sensitive content. Event-chain and admission validation detect inconsistent retained state but do not protect against complete privileged replacement. Dashboard inspection, incident replay, and evidence exports are separate disclosure surfaces that must expose only authorized bounded projections.
 
-Real-provider testing, deployment, release publication/signing, and the first
-reversible external effect remain separate approval gates.
+10. **Effect/reconciliation and executable material:** External destinations and configured status services are separate trust domains. Code introduction and protected execution-surface mutation are distinct governed consequences. A declared tool capability set does not prove that its backend credential has no additional authority. Production effect writers, dynamic credentialed tools, and hostile-code execution remain unavailable.
 
-Report suspected vulnerabilities using [SECURITY.md](../SECURITY.md).
+11. **Source/build/release:** Repository code, pinned workflow definitions, lockfiles, and build scripts are developer-controlled. Pull-request content and dependencies are untrusted supply-chain inputs. CI and reproducibility provide evidence; they do not establish production authorization or signed release identity.
+
+## Assumptions and exclusions
+
+Root, the configured owner account, the kernel, and trusted service utilities are assumed uncompromised. Root can replace the binary, socket, ledger, credentials, configuration, or peer-credential result and is out of scope as an adversary. The owner deliberately possesses organization-management, review, and approval authority; preventing that owner from making an informed but bad decision is not an authorization goal.
+
+This exclusion does not excuse a bug that lets an ordinary website, external actor, model response, or lower-privileged process obtain owner authority or redirect approved context without authorization.
+
+Developer fixtures and fake adapters are not production network paths. V1 does not claim hostile-code container/process isolation. Arbitrary shell execution, package installation, external code, container images, MCP tools, plugins, and executable Skills cannot be enabled merely through plan text or configuration declarations. General Skill activation and its behavioral-policy evaluator are not implemented.
+
+Strong hostile-tenant isolation, host-administrator resistance, encrypted general ledger/artifact storage, external audit anchoring, comprehensive incident response, and prevention of covert timing channels are outside the present implementation claim.
+
+# 3. Attack surface, mitigations and attacker stories
+
+## Local gateway and dashboard
+
+A malicious local user may try to connect to the private API and approve effects. Socket ownership and mode, socket-activation validation, kernel peer credentials, bounded concurrency, and request limits reject unauthorized UIDs. Compromise of the owner account defeats this boundary by design.
+
+A malicious website may target loopback through CSRF or DNS rebinding, and a local process may race bootstrap establishment. The bridge requires the exact IPv4 loopback Host, exact Origin for bootstrap, rejects conflicting Origins afterward, uses no cookies or CORS grant, and authorizes an allowlist of routes. Bootstrap/session credentials are kept out of launcher arguments and terminal output. The bootstrap page is private, bootstrap use is bounded, and the session expires. CSP, frame denial, no-referrer, `nosniff`, and escaped frontend rendering reduce session theft.
+
+An XSS or malicious extension that steals the bearer can exercise the available owner UI authority. Severity depends on the reachable actions and disclosed data, not merely on requiring an open dashboard. Durable intake, input, approval, and review records support recovery from lost responses without treating a repeated request as a new decision.
+
+## A2A, exact JSON, and organization authorization
+
+A remote attacker may guess or steal a bearer, replay it, enumerate Task IDs, cross organizations, submit authority-shaped JSON, or exhaust inference budget. The A2A gateway enforces narrow body limits, JSON content type, supported methods and extensions, strict schemas, a restricted message-part shape, and recursive rejection of authority-like fields. Actor credentials have minimum length, uniqueness, expiry, status, rate, and concurrency requirements. In-memory authentication uses hashed lookup keys. Capabilities are checked separately for submission, confirmation, status, result, and input; Task resolution is organization-scoped and exposes only runtime root Tasks.
+
+Shared security-boundary JSON decoding rejects duplicate members, escaped duplicate spellings, case aliases for closed fields, unknown closed-schema fields, invalid UTF-8, excessive nesting, and trailing top-level values. Domain limits may be stricter. Open provider metadata and intentional raw data remain open where required; the implementation does not claim every JSON decoder is a closed schema. Decoder failures use fixed categories instead of echoing attacker-controlled names or values.
+
+Bearers remain replayable while valid until expiry or an effective registry update/rotation. Internet-edge volumetric protection is external. Per-process limits do not prevent aggregate abuse by many provisioned actors. An organization-binding or capability error can expose durable results or spend another organization's provider budget even when the submitted JSON is well formed.
+
+## Prompt injection, planning, and execution admission
+
+An attacker may embed instructions to invent authority, switch Goals, substitute a predecessor Work item, alter reviewed execution mode, expand scope, create graph bombs, or claim completion. Intake and planning use bounded structured contracts, exact source provenance, explicit confirmation, closed output schemas, a 16-Task ceiling, execution-kind allowlists, and DAG validation. Goal, Mission, and replacement references are rechecked transactionally. Replacement Work creates fresh reviewed state and does not inherit prior approvals, capabilities, effects, or completion evidence.
+
+Production model requests separate runtime instructions, operator/task messages, and low-privilege strategy, knowledge, coordination, and dependency data. Runtime-issued source handles bind the organization, invocation, complete input, and message position. Digests and fingerprints bind the structured request. Unknown or substituted handles fail validation, and adapters without structured-input support are rejected rather than receiving an unbound flattened prompt.
+
+Transport envelopes and role separation are defense in depth. Neither current transport supplies a native privilege level below user for every data message, and classification does not prove model resistance to prompt injection.
+
+Execution admission binds the accepted Intent, current strategic revisions, exact Agent/blueprint/profile, pending Task revision, and transaction-selected context to the execution manifest and start transition. Shared coordination is bounded and limited to admitted same-Work peers. Model-authored evidence requires an exact running execution and remains an untrusted claim. Completion and Goal achievement require their own deterministic evidence and authorization checks.
+
+OpenAI disables model tools and automatic billable retries and constrains response identity and transport behavior. Codex uses private adapter/turn state, a sanitized environment, requested read-only confinement, disabled tool features, and rejection of side-effect stream items. These measures do not establish hostile-code isolation. Prompt injection can still produce poor bounded work, bias review, or misuse context already supplied to the provider.
+
+## Knowledge, Skills, and persistent behavioral influence
+
+An attacker may try to preserve malicious instructions as institutional knowledge, forge independent validation, omit an invalidated ancestor, or reuse stale knowledge after execution starts.
+
+New execution context requires exact `ACTIVE` knowledge revisions with independently human-admitted `FACTUAL_REFERENCE` classification. A human author cannot classify their own candidate. Missing classification, behavioral-policy classification, or invalid transitive lineage excludes the record from new model context. Ordinary search and historical records retain their own contracts and do not silently acquire this eligibility.
+
+Selection is organization- and Agent/Team-scope constrained, deterministic, bounded, and bound into the execution manifest. Knowledge and lineage validity are checked at relevant inference, outcome, Task/Work completion, and Goal-evaluation boundaries. Historical replay evaluates the state at those boundaries rather than rewriting history using present-day classifications.
+
+Factual classification is accountable human judgment, not a semantic proof or keyword filter. Eligible knowledge can still be false or adversarially persuasive. Knowledge cannot grant capabilities, authorize effects, or certify completion.
+
+Skills and other reusable behavioral-policy material require separate integrity and activation evidence. Current execution manifests require empty Skill references; a Lab promotion candidate is not activation. The broader evaluator and activation runtime remain prerequisites. Unsupported policy materialization must not be described as an implemented, proven-safe Skill system.
+
+## Provider routing, credentials, and inference spend
+
+An attacker may try to select a more permissive account, substitute credentials for another connection, exploit a model-generated Task key, bypass locality/data-class restrictions, use stale catalog evidence, or reset spending limits by changing providers.
+
+Each named connection binds an exact provider, model, profile, reviewed policy, and credential source. Runtime composition restricts each adapter to its configured secret reference and private connection directory; mutable Codex credential stores cannot be shared. Tasks retain immutable assigned profiles and routing requirements. Planning and normalization select a connection for each admitted attempt.
+
+Routing intersects Task-specific requirements with mandatory defaults. Preferences do not override eligibility. Provider allow/deny rules, locality, data class, capability, capacity, cost, and applicable health/evaluation constraints are checked against reviewed policy. Catalog claims and health/evaluation references are operator-reviewed inputs, not independently measured runtime facts. Configuration cannot activate unsupported transports.
+
+Selection is advisory. Dispatch revalidates the binding and reserves resources transactionally. Shared organization token, monetary, and concurrency limits include other configured accounts and relevant historical usage. Account addition, model changes, policy changes, and accounting-window transitions must not erase outstanding charges. Historical validation reconstructs admission-time eligibility; a later refund cannot justify an earlier overspend.
+
+Each request permits one provider invocation. There is no implicit cross-account fallback. Fresh application attempts require the applicable lifecycle and non-dispatch/retry evidence; cancellation or a new request ID alone does not authorize repetition.
+
+Completed and validated terminal responses retain applicable observed usage. Requests proven unsent release reservations; uncertain calls retain conservative charges. A failed or incomplete response is not successful model output or completion evidence.
+
+Provider failures are reduced to fixed runtime-owned categories before entering new work evidence. Original diagnostic text and error chains are discarded while required cancellation, non-dispatch, and usage facts are retained. This does not redact model output, setup diagnostics, or historical ledger contents.
+
+## Approval, capabilities, effects, and executable-code boundaries
+
+A worker may attempt approval laundering, principal-kind substitution, stale approval reuse, effect substitution, cumulative escalation, or duplicate send. Authority requires exact current leases matching the principal, originating Task, action, resource, and scope; positive authority does not inherit. Approvals bind the organization, Task, effect obligation, boundary, fingerprint, expiry, and decision identity.
+
+Transactional effect admission rereads approval, freeze, and capability authority, consumes applicable single-use approval, and persists `ATTEMPTED` before adapter invocation. Uncertain effects require reconciliation rather than blind resend. A ToolOutcome or nonempty result is not proof of an external effect.
+
+`CODE_INTRODUCTION` and `EXECUTION_SURFACE_MUTATION` are separate protected consequences. Generic shell or file-write authority does not satisfy either. Their contracts bind exact artifact bytes or before/after state, staged-promotion evidence, runtime-known influence references, declared consequential capabilities, and Task-local cumulative effect context.
+
+Declared capability closure does not prove the effective privilege of a backend credential. Backend-principal authority attestation, production effective-environment verification, and hostile-code isolation remain prerequisites for future credentialed tools and external-code execution. No production effect-writing adapter, general dynamic tool runtime, or mutable coding runtime is present.
+
+The optional reconciliation adapter uses an operator-reviewed HTTPS endpoint and fixed read-only request contract with redirects disabled. Its configured endpoint is not restricted from private network addresses. An SSRF or token-disclosure report must establish how an attacker controls the destination or request beyond the trusted configuration boundary.
+
+## Organization freezes and active containment
+
+An attacker or misaligned execution may try to continue inference, publish output, coordinate with peers, or resume old work after a freeze or a rapid freeze/release sequence.
+
+Organization freezes are durable and checked during new inference and protected-operation admission. The current implementation also cancels matching cooperative live contexts, observes committed hold history, and retains an intervening freeze across subsequent release. Dispatch and publication checks suppress affected ordinary output and completion candidates. Interrupted Tasks can enter a durable suspended state requiring security reconciliation. Planning and normalization bind their attempts and interruption state to durable context records. An independent watchdog requests cancellation when authoritative containment state cannot be observed within its bounded window.
+
+Authority observation uses a separate database connection so unrelated writer validation does not block safety reads. Actual database unavailability still triggers bounded local cancellation; the separate reader does not bypass committed authority or extend the watchdog's deadline.
+
+Accounting and interruption evidence remain necessary while frozen. Actual returned usage is retained; definitely unsent calls require appropriate evidence before zero-charge reconciliation. A committed completion-verification boundary can support recovery of that already-verified transition without rerunning the handler.
+
+This is partial active containment, not comprehensive quarantine. Exact authorized release and suspended-task resumption, the complete coordination/output and external-effect audit, and complete dispatch/cancellation timelines and historical enforcement remain unfinished under issue #178. Execution-, Agent-, and Work-scoped quarantine is not claimed.
+
+Local cancellation cannot be atomic with provider receipt, force a noncooperative remote service to stop, or reverse an external effect. The watchdog bounds the local cancellation decision; it is not a hard guarantee of remote termination. These limits must remain explicit before broader long-running or high-autonomy execution is enabled.
+
+## Secrets, artifacts, persistence, inspection, and recovery
+
+Secrets use protected credential sources, including systemd credential loading and authenticated encrypted Codex state with a separately protected key. Sensitive readers enforce relevant ownership, permissions, regular-file, size, symlink, and race checks. Credentials still exist in process memory and provider requests.
+
+Artifacts are size/count bounded, content-addressed, private, origin-labelled, and MIME-sniffed. Names cannot authorize path traversal. Artifacts are not malware-scanned and must remain untrusted to future renderers or execution mechanisms.
+
+SQLite uses parameterized access, schema/application-ID checks, ordered migration, and event-coupled projection validation. A one-to-one SHA-256 chain binds exact stored event bytes and ordering. Startup, verification, backup, and restore detect inconsistent chains and invalid causal admissions. Recovery also validates authority, identities, organization scope, manifests, and applicable historical accounting and completion rules.
+
+Cancelled queries release their database resources, and private in-memory authority survives discarded working or observation connections. These controls preserve observable committed state during cancellation; they do not make an unavailable database authoritative or provide durable storage for an in-memory ledger.
+
+The chain is not a signature or external checkpoint. Removing a valid suffix with its integrity records can leave an internally consistent shorter history. A sufficiently privileged attacker can replace the database and recompute the chain. At-rest confidentiality, secure deletion, externally anchored rollback detection, and signed audit attestation remain external or unimplemented.
+
+Governance inspection, incident replay, and evidence export are authenticated local-owner surfaces with organization scoping, bounded payloads, and restricted projections. They do not expose a general raw-ledger query interface. Replay reports evidence relationships, not proven root cause, and does not re-execute work. Export checksums detect byte changes but do not establish signed origin, control effectiveness, or certification.
+
+Sustained valid submissions, artifacts, histories, and expensive verification can still consume disk or processing capacity. Operational capacity monitoring and filesystem quotas remain necessary.
+
+## Setup and supply chain
+
+Setup faces wrong-owner binding, PATH substitution, symlink replacement, unsafe service units, and partial installation. Critical commands use fixed paths; sensitive writes are atomic; directory ownership, modes, executable provenance, and runtime locations are validated. Systemd applies a dedicated account and restrictive service settings. User mode intentionally retains the owner's authority.
+
+CI pins actions and tool versions, controls frontend dependency installation, audits dependencies, verifies embedded assets, exercises race/adversarial tests and bounded fuzzing, checks architecture, and builds reproducible archives with checksums, SBOMs, licenses, provenance, and corresponding source.
+
+These checks do not prove live-provider behavior, deployment safety, or absence of vulnerabilities. Provenance is unsigned, publication is separately controlled, and compromise of repository administration, builders, toolchains, or dependency sources remains a supply-chain threat.
+
+# 4. Criticality calibration
+
+Severity follows the demonstrated attacker-controlled path, crossed trust boundary, reachable authority, affected data, and deployment configuration. Unsupported future adapters must not inflate current exploit impact; their absence must not excuse present authorization, confidentiality, or durable-control corruption.
+
+## Critical
+
+* Remote or low-privileged compromise leading to root/system-owner code execution, broad credential theft, or arbitrary modification of trusted service binaries/configuration.
+* A release-pipeline compromise producing distributed backdoored binaries under the expected trusted release identity.
+* A ledger, approval, or execution-boundary bypass enabling arbitrary high-impact irreversible effects when a production effect mechanism is actually available.
+
+Critical generally requires broad compromise, trusted release compromise, or demonstrated high-impact execution/effects. Prompt injection alone is not Critical in the current model-only runtime. Priority to finish a prerequisite before future high-autonomy operation is distinct from current vulnerability severity.
+
+## High
+
+* A2A authentication or authorization bypass exposing another organization's private results, permitting victim-budget inference, or confirming/continuing Work as another actor.
+* Provider-routing or account-binding bypass disclosing sensitive context to an unauthorized destination, crossing credential boundaries, or materially defeating organization-wide resource authorization.
+* Dashboard bootstrap/session compromise or XSS that enables attacker-controlled use of owner approval, review, or sensitive-data access.
+* Capability, approval, provenance, or completion-admission bypass granting durable authority or accepting attacker-controlled evidence as trusted completion.
+* Provider confinement failure allowing model-controlled shell, filesystem, or network execution under the service account.
+* Freeze/release or suspended-execution bypass with demonstrated access to substantial continued computation, sensitive publication, or consequential operations.
+
+## Medium
+
+* Authenticated denial of service through bypassed request, Task, history, token, or response bounds; persistent disk exhaustion; or meaningful bounded inference overspend.
+* Knowledge poisoning or prompt injection that influences bounded work or operator judgment without bypassing runtime authorization or disclosing highly sensitive data.
+* Partial containment failures whose demonstrated impact is continued bounded model work or suppressed-output handling, without a higher-impact execution path.
+* Artifact or inspection-output confusion that materially misleads review without obtaining owner authority.
+* Recovery-validation gaps requiring restricted database write access, where the attacker gains meaningful impact beyond that access itself.
+* SSRF through configuration writable by a delegated actor who was not authorized to choose network destinations.
+
+## Low
+
+* Minor metadata disclosure, bounded error/timing differences, or terminal/log manipulation without credential or authority impact.
+* Missing hardening headers on a non-browser response or harmless acceptance differences without a demonstrated security consequence.
+* Local denial of service requiring the configured owner's own account, absent a meaningful additional trust-boundary crossing.
+* Claims requiring developer-only fixtures, deliberate root-controlled configuration, or execution mechanisms absent from V1 are not applicable to the production threat model unless a real attacker-controlled path is established. Any independently demonstrated low-impact weakness should be assessed on its actual effect.
