@@ -2,27 +2,17 @@
 
 Agent OS is a Go modular monolith for operating persistent AI-assisted organizations.
 
-## Authoritative sources
-
-- Start with [`docs/handoff/QUICK_START.md`](docs/handoff/QUICK_START.md).
-- Treat [`docs/handoff/IMPLEMENTATION_SCOPE.yaml`](docs/handoff/IMPLEMENTATION_SCOPE.yaml) as the scope authority.
-- Use [`docs/handoff/docs/29_V1_BUILD_CONTRACT.md`](docs/handoff/docs/29_V1_BUILD_CONTRACT.md) for implementation requirements.
-- Consult the remaining preserved handoff only when the current work needs its detail.
-- Preserve `docs/handoff/` as the immutable architecture source. Publish any
-  strengthened active runtime contract outside that tree instead of silently
-  rewriting the handoff snapshot.
-- Keep repository files self-contained. Do not reference workspace-only project
-  files, local planning notes, attachments, or machine-specific project paths.
-  Cite tracked repository files or publicly accessible sources instead. Put any
-  necessary requirement directly in the appropriate repository document.
-
 ## Project-wide boundaries
 
 - Internal coordination uses runtime-owned Event Contracts over one authoritative ledger; model-generated content is untrusted.
 - Actual work determines the Task DAG and execution structure. Use model inference only where adaptive intelligence is justified.
 - Authority and completion fail closed: workers cannot expand their own capabilities or certify their own completion.
 - A2A is an external operator boundary, not internal IPC or implicit administrative authority.
-- Keep deferred architecture deferred unless a human explicitly promotes it from the handoff scope.
+- Keep deferred architecture deferred unless a human explicitly authorizes its implementation.
+- Keep repository files self-contained. Do not reference workspace-only project
+  files, local planning notes, attachments, or machine-specific project paths.
+  Cite tracked repository files or publicly accessible sources instead. Put any
+  necessary requirement directly in the appropriate repository document.
 
 Run the appropriate repository checks before a review push; hooks and CI provide
 independent enforcement rather than replacing local verification.
@@ -92,7 +82,7 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
   superseded policy from an old handoff or task summary.
 - Replace contradictory active instructions at their source when adopting a
   new workflow. Do not stack competing overrides. Clearly label historical
-  records; preserve immutable handoff evidence.
+  records; preserve historical evidence.
 - Keep user-facing messages minimal. Report meaningful outcomes, blockers, and
   decisions rather than routine local commits or repeated compliance statements.
 - Use tracked project documentation to guide task work and maintain the

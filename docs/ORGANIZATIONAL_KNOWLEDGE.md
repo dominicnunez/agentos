@@ -13,8 +13,7 @@ promotion.
 The current runtime wire contract is
 [`schemas/knowledge-record.schema.json`](schemas/knowledge-record.schema.json).
 CI compares that closed schema's property and required-field sets with the Go
-`KnowledgeRecord` type. The preserved handoff schema records the earlier design
-snapshot and is not the active serialization contract.
+`KnowledgeRecord` type. This schema is the active serialization contract.
 
 ## Lifecycle
 

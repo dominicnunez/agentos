@@ -7,5 +7,3 @@
 - [ISO/IEC 42001 readiness](ISO_IEC_42001_READINESS.md) — continuing software controls, indefinitely deferred non-code work, preserved evidence, and certification claim boundary.
 - [Controlled AIMS information](../../governance/aims/README.md) — draft governance records, lifecycle manifest, verification, and bounded public assessment bundle.
 - [Competitive readiness](COMPETITIVE_READINESS.md) — verified product comparison and delivery priorities.
-
-The original architecture handoff remains preserved separately under [`docs/handoff/`](../handoff/README.md).

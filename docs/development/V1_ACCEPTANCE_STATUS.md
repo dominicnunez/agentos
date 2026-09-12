@@ -1,8 +1,7 @@
 # V1 acceptance status
 
-This compact index maps the normative checklist in
-`docs/handoff/docs/08_IMPLEMENTATION_ROADMAP_AND_ACCEPTANCE.md` to current
-automated evidence. A passing row is architecture evidence, not authorization
+This compact index maps V1 acceptance requirements to current automated
+evidence. A passing row is architecture evidence, not authorization
 to deploy or publish.
 
 | # | Requirement | Evidence |

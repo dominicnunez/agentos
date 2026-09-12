@@ -262,14 +262,10 @@ can use exact version and purpose review, deterministic functional and authority
 checks, and authorized human judgment without held-out A/B testing. Classification
 must consider actual behavior, not a Skill's label: selection, ranking and
 tie-breaking guidance require the behavioral path below. The active security
-requirement intentionally adds this gate for discretionary Skills; the preserved
-handoff's deferral of automated evaluation does not waive it.
-Scope authorization: the project owner's requested engineering work includes
-GAP-030, "Skills must preserve declared behavioral-policy integrity," from the
-supplied `agent-os-security-gaps-complete.md`. Its explicit requirement for
-controlled held-out with-Skill/without-Skill evidence promotes that prerequisite
-for discretionary Skill activation. This active amendment records that human
-direction while preserving the handoff snapshot; it does not promote unrelated
+requirement intentionally adds this gate for discretionary Skills; deferring
+automated evaluation does not waive it. Discretionary Skill activation requires
+controlled held-out with-Skill/without-Skill evidence to preserve declared
+behavioral-policy integrity. This prerequisite does not authorize unrelated
 Lab automation or experimentation features.
 The non-discretionary classification requires independently authorized,
 version-bound evidence covering the exact content, materialization, composition
