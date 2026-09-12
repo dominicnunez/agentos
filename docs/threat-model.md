@@ -8,7 +8,7 @@ The principal assets are organization, Mission, Goal, Work, Task, identity, know
 
 There is no published release yet according to `SECURITY.md`, so release-publication risk is prospective. The intended default is a single-machine system installation with a restricted `agentos` service account and one verified Linux owner. User-mode installations run with the owner's authority. Organization scoping remains security-relevant for external actors, ledger objects, model context, and budgets, without implying strong hosted multi-tenant isolation.
 
-This model describes code commit `cd45e21f8378d7054355ff455c250c638d52632a`, including its CI controls. Implemented controls, incomplete controls, and prerequisites for unsupported execution mechanisms are distinguished below. A passing test is evidence for a control, not proof of comprehensive security.
+This model describes code commit `6395d019548d0332b0771f766e8f43f2400134ee`, including its CI controls. Implemented controls, incomplete controls, and prerequisites for unsupported execution mechanisms are distinguished below. A passing test is evidence for a control, not proof of comprehensive security.
 
 # 2. Threat model, Trust boundaries and assumptions
 
