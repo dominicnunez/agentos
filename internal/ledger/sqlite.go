@@ -1667,15 +1667,15 @@ func validateResumedPreparation(ctx context.Context, tx *sql.Tx, organization st
 		if resume.OrganizationID != organization {
 			return fmt.Errorf("resumed execution crosses organizations")
 		}
-		_, admission, found, err := authorityAdmissionAtBoundary(ctx, tx, "organization_freeze", organization, resume.Sequence)
+		history, err := loadFreezeHistory(ctx, tx, organization)
 		if err != nil {
 			return containmentReadFailure(err)
 		}
 		var epoch int64
-		if found {
-			epoch = admission.Sequence
+		if revision, found := history.before(resume.Sequence); found {
+			epoch = revision.event.Sequence
 		}
-		_, hold, err := containmentSinceTx(ctx, tx, organization, epoch)
+		_, hold, err := containmentSinceHistory(history, epoch)
 		if err != nil {
 			return containmentReadFailure(err)
 		}
@@ -3880,6 +3880,17 @@ func capabilityLeaseAtBoundary(ctx context.Context, queryer *sql.Tx, organizatio
 }
 
 func latestAuthorityAdmission(ctx context.Context, queryer *sql.Tx, kind, recordID string) (events.AuthorityRecord, events.Event, bool, error) {
+	if kind == "organization_freeze" {
+		history, err := loadFreezeHistory(ctx, queryer, recordID)
+		if err != nil {
+			return events.AuthorityRecord{}, events.Event{}, false, err
+		}
+		revision, found := history.latest()
+		if !found {
+			return events.AuthorityRecord{}, events.Event{}, false, nil
+		}
+		return revision.record, revision.event, true, nil
+	}
 	var record events.AuthorityRecord
 	err := queryer.QueryRowContext(ctx, `SELECT kind,record_id,version,body,admission_event_id FROM records WHERE kind=? AND record_id=? ORDER BY version DESC LIMIT 1`, kind, recordID).
 		Scan(&record.Kind, &record.RecordID, &record.Version, &record.Body, &record.AdmissionEventID)
@@ -3893,6 +3904,23 @@ func latestAuthorityAdmission(ctx context.Context, queryer *sql.Tx, kind, record
 }
 
 func authorityAdmissionAtBoundary(ctx context.Context, queryer *sql.Tx, kind, recordID string, beforeSequence int64) (events.AuthorityRecord, events.Event, bool, error) {
+	if kind == "organization_freeze" {
+		history, err := loadFreezeHistory(ctx, queryer, recordID)
+		if err != nil {
+			return events.AuthorityRecord{}, events.Event{}, false, err
+		}
+		var revision freezeRevision
+		var found bool
+		if beforeSequence == 0 {
+			revision, found = history.latest()
+		} else {
+			revision, found = history.before(beforeSequence)
+		}
+		if !found {
+			return events.AuthorityRecord{}, events.Event{}, false, nil
+		}
+		return revision.record, revision.event, true, nil
+	}
 	if beforeSequence == 0 {
 		return latestAuthorityAdmission(ctx, queryer, kind, recordID)
 	}
@@ -3919,6 +3947,21 @@ ORDER BY e.sequence DESC LIMIT 1`, kind, recordID, beforeSequence).
 }
 
 func validateSelectedAuthorityAdmission(ctx context.Context, queryer *sql.Tx, record events.AuthorityRecord, allowLaterVersions bool) (events.AuthorityRecord, events.Event, bool, error) {
+	if record.Kind == "organization_freeze" {
+		history, err := loadFreezeHistory(ctx, queryer, record.RecordID)
+		if err != nil {
+			return events.AuthorityRecord{}, events.Event{}, false, err
+		}
+		revision, found := history.version(record.Version)
+		if !found || revision.record.Kind != record.Kind || revision.record.RecordID != record.RecordID ||
+			revision.record.AdmissionEventID != record.AdmissionEventID || !bytes.Equal(revision.record.Body, record.Body) {
+			return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("selected organization freeze revision is inconsistent")
+		}
+		if latest, found := history.latest(); !allowLaterVersions && (!found || latest.record.Version != record.Version) {
+			return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("organization freeze history has later revisions")
+		}
+		return revision.record, revision.event, true, nil
+	}
 	var count int
 	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*) FROM records WHERE kind=? AND record_id=? AND version<=?`, record.Kind, record.RecordID, record.Version).Scan(&count); err != nil || count != record.Version {
 		return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("authority record %s/%s history is noncontiguous", record.Kind, record.RecordID)
@@ -3937,23 +3980,9 @@ func validateSelectedAuthorityAdmission(ctx context.Context, queryer *sql.Tx, re
 	if err := events.ValidateAuthorityRecordTransition(record.Kind, record.RecordID, record.Version, record.Body, prior.Body); err != nil {
 		return events.AuthorityRecord{}, events.Event{}, false, err
 	}
-	if record.Kind == "organization_freeze" {
-		if err := events.ValidateFreezeRecord(record, prior); err != nil {
-			return events.AuthorityRecord{}, events.Event{}, false, err
-		}
-		if err := validateFreezeControlOrder(ctx, queryer, record.RecordID, record.Version); err != nil {
-			return events.AuthorityRecord{}, events.Event{}, false, err
-		}
-	}
 	admission, err := authorityRecordEvent(ctx, queryer, record)
 	if err != nil {
 		return events.AuthorityRecord{}, events.Event{}, false, err
-	}
-	if record.Kind == "organization_freeze" && record.Version > 1 {
-		previous, err := authorityRecordEvent(ctx, queryer, prior)
-		if err != nil || previous.OrganizationID != admission.OrganizationID || previous.Sequence >= admission.Sequence {
-			return events.AuthorityRecord{}, events.Event{}, false, fmt.Errorf("freeze predecessor admission is invalid")
-		}
 	}
 	record.Body = append([]byte(nil), record.Body...)
 	return record, admission, true, nil

@@ -115,22 +115,3 @@ func readFreeze(ctx context.Context, tx *sql.Tx, organization core.ID) (authorit
 	}
 	return authority.FreezeSnapshot{State: state, EventRef: event.EventID, Version: record.Version}, record, event, nil
 }
-
-func validateFreezeControlOrder(ctx context.Context, tx *sql.Tx, organization string, version int) error {
-	var firstControl, lastLegacy sql.NullInt64
-	// Both lookups use the versioned expression index. Merely checking the
-	// selected pair would accept controlled -> legacy -> legacy corruption.
-	if err := tx.QueryRowContext(ctx, `SELECT MIN(version) FROM records WHERE kind='organization_freeze' AND record_id=? AND `+freezeControlPresent+`=1 AND version<=?`, organization, version).Scan(&firstControl); err != nil {
-		return fmt.Errorf("read freeze control boundary: %w", err)
-	}
-	if !firstControl.Valid {
-		return nil
-	}
-	if err := tx.QueryRowContext(ctx, `SELECT MAX(version) FROM records WHERE kind='organization_freeze' AND record_id=? AND `+freezeControlPresent+`=0 AND version<=?`, organization, version).Scan(&lastLegacy); err != nil {
-		return fmt.Errorf("read legacy freeze boundary: %w", err)
-	}
-	if lastLegacy.Valid && lastLegacy.Int64 > firstControl.Int64 {
-		return fmt.Errorf("freeze control evidence was removed from history")
-	}
-	return nil
-}

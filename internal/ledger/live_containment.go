@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"modernc.org/sqlite"
@@ -201,55 +200,34 @@ func containmentReadContended(err error) bool {
 }
 
 func containmentSinceTx(ctx context.Context, tx *sql.Tx, organization string, after int64) (int64, *core.SecurityHoldCause, error) {
-	_, latest, found, err := latestAuthorityAdmission(ctx, tx, "organization_freeze", organization)
+	history, err := loadFreezeHistory(ctx, tx, organization)
 	if err != nil {
 		return after, nil, err
 	}
+	return containmentSinceHistory(history, after)
+}
+
+func containmentSinceHistory(history freezeHistory, after int64) (int64, *core.SecurityHoldCause, error) {
+	latest, found := history.latest()
 	if !found {
 		if after != 0 {
 			return after, nil, fmt.Errorf("containment authority disappeared")
 		}
 		return after, nil, nil
 	}
-	if latest.Sequence < after {
+	if latest.event.Sequence < after {
 		return after, nil, fmt.Errorf("containment authority regressed")
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT r.kind,r.record_id,r.version,r.body,r.admission_event_id
-FROM records r JOIN events e ON e.event_id=r.admission_event_id
-WHERE r.kind='organization_freeze' AND r.record_id=? AND e.sequence>? AND e.sequence<=?
-ORDER BY e.sequence`, organization, after, latest.Sequence)
-	if err != nil {
-		return after, nil, err
-	}
-	var records []events.AuthorityRecord
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var record events.AuthorityRecord
-		if err := rows.Scan(&record.Kind, &record.RecordID, &record.Version, &record.Body, &record.AdmissionEventID); err != nil {
-			return after, nil, err
-		}
-		records = append(records, record)
-	}
-	err = rows.Err()
-	_ = rows.Close()
-	if err != nil {
-		return after, nil, err
-	}
 	var cause *core.SecurityHoldCause
-	for _, record := range records {
-		_, admission, _, err := validateSelectedAuthorityAdmission(ctx, tx, record, true)
-		if err != nil {
-			return after, nil, err
+	for _, revision := range history.revisions {
+		if revision.event.Sequence <= after {
+			continue
 		}
-		var state authority.FreezeState
-		if decodeExactJSONBytes(record.Body, &state) != nil || string(state.OrganizationID) != organization || admission.OrganizationID != organization {
-			return after, nil, fmt.Errorf("invalid containment authority")
-		}
-		if state.Frozen && cause == nil {
-			cause = &core.SecurityHoldCause{OrganizationID: core.ID(organization), EventRef: admission.EventID, Sequence: admission.Sequence}
+		if revision.state.Frozen && cause == nil {
+			cause = &core.SecurityHoldCause{OrganizationID: core.ID(history.organization), EventRef: revision.event.EventID, Sequence: revision.event.Sequence}
 		}
 	}
-	return latest.Sequence, cause, nil
+	return latest.event.Sequence, cause, nil
 }
 
 // validatePreparationGeneration uses the writer snapshot, independent of the
@@ -277,15 +255,15 @@ func validatePreparationGeneration(ctx context.Context, tx *sql.Tx, organization
 // snapshot. Sequence changes latch cancellation rather than resuming old calls.
 func (l *SQLite) containmentEpoch(ctx context.Context, organization string) (epoch int64, frozen bool, resultErr error) {
 	resultErr = l.withContainmentSnapshot(ctx, func(tx *sql.Tx) error {
-		record, event, found, err := latestAuthorityAdmission(ctx, tx, "organization_freeze", organization)
-		if err != nil || !found {
+		history, err := loadFreezeHistory(ctx, tx, organization)
+		if err != nil {
 			return err
 		}
-		var state authority.FreezeState
-		if decodeExactJSONBytes(record.Body, &state) != nil || string(state.OrganizationID) != organization || event.OrganizationID != organization {
-			return fmt.Errorf("invalid containment authority")
+		revision, found := history.latest()
+		if !found {
+			return nil
 		}
-		epoch, frozen = event.Sequence, state.Frozen
+		epoch, frozen = revision.event.Sequence, revision.state.Frozen
 		return nil
 	})
 	return epoch, frozen, resultErr
@@ -372,11 +350,13 @@ func validateContainedOutcome(ctx context.Context, tx *sql.Tx, draft events.Trus
 	if decodeExactJSON(draft.Payload, &outcome) != nil || !outcome.Valid() {
 		return fmt.Errorf("invalid containment outcome")
 	}
-	frozen, err := organizationFrozenAtSequence(ctx, tx, core.ID(draft.OrganizationID), 0)
+	history, err := loadFreezeHistory(ctx, tx, draft.OrganizationID)
 	if err != nil {
 		return err
 	}
-	historicalHold, err := executionIntervalHold(ctx, tx, draft)
+	latest, found := history.latest()
+	frozen := found && latest.state.Frozen
+	historicalHold, err := executionHoldInHistory(ctx, tx, draft, 0, history)
 	if err != nil {
 		if frozen {
 			return fmt.Errorf("%w: %w", core.ErrOrganizationFrozen, err)
@@ -403,16 +383,11 @@ func validateContainedOutcome(ctx context.Context, tx *sql.Tx, draft events.Trus
 	if string(hold.OrganizationID) != draft.OrganizationID || hold.EventRef == "" || hold.Sequence <= 0 {
 		return fmt.Errorf("invalid security hold identity")
 	}
-	var record events.AuthorityRecord
-	if err := tx.QueryRowContext(ctx, `SELECT kind,record_id,version,body,admission_event_id FROM records WHERE kind='organization_freeze' AND record_id=? AND admission_event_id=?`, draft.OrganizationID, hold.EventRef).Scan(&record.Kind, &record.RecordID, &record.Version, &record.Body, &record.AdmissionEventID); err != nil {
-		return fmt.Errorf("security hold lacks authority record: %w", err)
+	revision, found := history.event(hold.EventRef)
+	if !found {
+		return fmt.Errorf("security hold lacks authority record")
 	}
-	_, admission, _, err := validateSelectedAuthorityAdmission(ctx, tx, record, true)
-	if err != nil {
-		return err
-	}
-	var state authority.FreezeState
-	if decodeExactJSONBytes(record.Body, &state) != nil || !state.Frozen || state.OrganizationID != hold.OrganizationID || admission.Sequence != hold.Sequence {
+	if !revision.state.Frozen || revision.state.OrganizationID != hold.OrganizationID || revision.event.Sequence != hold.Sequence {
 		return fmt.Errorf("security hold reference is not a committed freeze")
 	}
 	return nil
@@ -424,6 +399,10 @@ func validateExecutionPublication(ctx context.Context, tx *sql.Tx, draft events.
 	if err := validatePreparationGeneration(ctx, tx, draft.OrganizationID); err != nil {
 		return err
 	}
+	history, err := loadFreezeHistory(ctx, tx, draft.OrganizationID)
+	if err != nil {
+		return err
+	}
 	if draft.SourceExecutionID != "" {
 		var boundary int64
 		if draft.EventType == "COMPLETION_VERIFIED" {
@@ -431,7 +410,7 @@ func validateExecutionPublication(ctx context.Context, tx *sql.Tx, draft events.
 				return err
 			}
 		}
-		hold, err := executionIntervalHoldThrough(ctx, tx, draft, boundary)
+		hold, err := executionHoldInHistory(ctx, tx, draft, boundary, history)
 		if err != nil {
 			return err
 		}
@@ -439,11 +418,7 @@ func validateExecutionPublication(ctx context.Context, tx *sql.Tx, draft events.
 			return *hold
 		}
 	}
-	frozen, err := organizationFrozenAtSequence(ctx, tx, core.ID(draft.OrganizationID), 0)
-	if err != nil {
-		return err
-	}
-	if frozen {
+	if latest, found := history.latest(); found && latest.state.Frozen {
 		return core.ErrOrganizationFrozen
 	}
 	return nil
@@ -474,9 +449,12 @@ func validateTerminalTaskContainment(ctx context.Context, tx *sql.Tx, item prepa
 		return nil
 	}
 	draft := item.eventDraft
-	_, _, found, err := latestAuthorityAdmission(ctx, tx, "organization_freeze", draft.OrganizationID)
-	if err != nil || !found {
+	history, err := loadFreezeHistory(ctx, tx, draft.OrganizationID)
+	if err != nil {
 		return err
+	}
+	if _, found := history.latest(); !found {
+		return nil
 	}
 	starts, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND event_type='EXECUTION_STARTED' ORDER BY sequence DESC LIMIT 1`, draft.OrganizationID, draft.TaskID, draft.CorrelationID))
 	if err != nil {
@@ -494,7 +472,7 @@ func validateTerminalTaskContainment(ctx context.Context, tx *sql.Tx, item prepa
 				return err
 			}
 			if boundary != 0 {
-				hold, err := executionIntervalHoldThrough(ctx, tx, draft, boundary)
+				hold, err := executionHoldInHistory(ctx, tx, draft, boundary, history)
 				if err != nil {
 					return err
 				}
@@ -502,12 +480,10 @@ func validateTerminalTaskContainment(ctx context.Context, tx *sql.Tx, item prepa
 					return *hold
 				}
 				if draft.EventType == "TASK_BLOCKED" {
-					frozen, err := organizationFrozenAtSequence(ctx, tx, core.ID(draft.OrganizationID), 0)
-					if err != nil {
-						return err
-					}
+					latest, _ := history.latest()
+					frozen := latest.state.Frozen
 					if frozen {
-						hold, err := executionIntervalHold(ctx, tx, draft)
+						hold, err := executionHoldInHistory(ctx, tx, draft, 0, history)
 						if err != nil {
 							return err
 						}
@@ -533,9 +509,19 @@ func executionIntervalHold(ctx context.Context, tx *sql.Tx, draft events.Trusted
 }
 
 func executionIntervalHoldThrough(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft, endSequence int64) (*core.SecurityHoldCause, error) {
-	record, admission, found, err := latestAuthorityAdmission(ctx, tx, "organization_freeze", draft.OrganizationID)
-	if err != nil || !found {
+	history, err := loadFreezeHistory(ctx, tx, draft.OrganizationID)
+	if err != nil {
 		return nil, err
+	}
+	return executionHoldInHistory(ctx, tx, draft, endSequence, history)
+}
+
+func executionHoldInHistory(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft, endSequence int64, history freezeHistory) (*core.SecurityHoldCause, error) {
+	if history.organization != draft.OrganizationID {
+		return nil, fmt.Errorf("execution containment crosses organizations")
+	}
+	if _, found := history.latest(); !found {
+		return nil, nil
 	}
 	starts, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND (event_type='EXECUTION_STARTED' OR (event_type IN ('INTENT_NORMALIZATION_CONTEXT_MANIFESTED','PLANNING_CONTEXT_MANIFESTED') AND source_execution_id=?)) ORDER BY sequence`, draft.OrganizationID, draft.TaskID, draft.CorrelationID, draft.SourceExecutionID))
 	if err != nil {
@@ -564,21 +550,18 @@ func executionIntervalHoldThrough(ctx context.Context, tx *sql.Tx, draft events.
 		}
 		return nil, fmt.Errorf("containment outcome lacks exact execution start")
 	}
-	var hold *core.SecurityHoldCause
-	for found && admission.Sequence > startSequence {
-		var state authority.FreezeState
-		if decodeExactJSONBytes(record.Body, &state) != nil || string(state.OrganizationID) != draft.OrganizationID {
-			return nil, fmt.Errorf("invalid execution containment authority")
+	for _, revision := range history.revisions {
+		if revision.event.Sequence <= startSequence {
+			continue
 		}
-		if state.Frozen && (endSequence == 0 || admission.Sequence < endSequence) {
-			hold = &core.SecurityHoldCause{OrganizationID: state.OrganizationID, EventRef: admission.EventID, Sequence: admission.Sequence}
+		if endSequence != 0 && revision.event.Sequence >= endSequence {
+			break
 		}
-		record, admission, found, err = authorityAdmissionAtBoundary(ctx, tx, "organization_freeze", draft.OrganizationID, admission.Sequence)
-		if err != nil {
-			return nil, err
+		if revision.state.Frozen {
+			return &core.SecurityHoldCause{OrganizationID: revision.state.OrganizationID, EventRef: revision.event.EventID, Sequence: revision.event.Sequence}, nil
 		}
 	}
-	return hold, nil
+	return nil, nil
 }
 
 // Bind ordinary failure to its manifested interval inside the admitting writer.

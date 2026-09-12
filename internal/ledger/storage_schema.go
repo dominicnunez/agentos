@@ -25,7 +25,7 @@ const (
 	// not identify or publish an Agent OS release.
 	OldestSupportedStorageVersion = 1
 	// CurrentStorageVersion is the only layout accepted after runtime startup.
-	CurrentStorageVersion = 11
+	CurrentStorageVersion = 10
 	// AuthorityAdmissionBindingStorageVersion is the first storage contract in
 	// which every capability and freeze record names its exact admitting event.
 	AuthorityAdmissionBindingStorageVersion = 7
@@ -96,11 +96,6 @@ const storageSchemaV10SQL = `ALTER TABLE inference_policies ADD COLUMN connectio
 ALTER TABLE inference_reservations ADD COLUMN connection_id TEXT NOT NULL DEFAULT '';
 DROP INDEX inference_policies_active_idx;
 CREATE UNIQUE INDEX inference_policies_active_idx ON inference_policies(organization_id,connection_id) WHERE active=1;`
-
-// Index evidence presence separately from version so selected reads can detect
-// a buried metadata downgrade without decoding every historical freeze body.
-const freezeControlPresent = `(json_type(CAST(body AS TEXT),'$.control') IS NOT NULL AND json_type(CAST(body AS TEXT),'$.control')<>'null')`
-const storageSchemaV11SQL = `CREATE INDEX records_freeze_control_idx ON records(record_id,` + freezeControlPresent + `,version) WHERE kind='organization_freeze';`
 
 const storageSchemaV1SQL = `CREATE TABLE events (
 sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, organization_id TEXT NOT NULL,
@@ -332,11 +327,6 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 			return err
 		}
 		return advanceProjectionStorageContract(ctx, tx, from, to, "inference-connections")
-	case from == 10 && to == 11:
-		if _, err := tx.ExecContext(ctx, storageSchemaV11SQL); err != nil {
-			return err
-		}
-		return advanceProjectionStorageContract(ctx, tx, from, to, "freeze-control-index")
 	default:
 		return fmt.Errorf("no reviewed storage migration exists")
 	}
@@ -672,12 +662,6 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 		}
 	}
 	var unsupportedEvents int
-	if version >= 11 {
-		var count int
-		if err := query.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name='records_freeze_control_idx' AND tbl_name='records'`).Scan(&count); err != nil || count != 1 {
-			return StorageContract{}, fmt.Errorf("storage schema version %d lacks freeze control index", version)
-		}
-	}
 	if err := query.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE schema_version<>?`, expectedEventVersion).Scan(&unsupportedEvents); err != nil {
 		return StorageContract{}, fmt.Errorf("inspect durable Event Contract versions: %w", err)
 	}

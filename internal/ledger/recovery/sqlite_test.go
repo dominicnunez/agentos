@@ -705,8 +705,7 @@ func testStorageSchemaFingerprint(ctx context.Context, db *sql.DB) (string, erro
 
 func removeConnectionColumnsForLegacyFixture(t *testing.T, db *sql.DB) {
 	t.Helper()
-	if _, err := db.ExecContext(t.Context(), `DROP INDEX records_freeze_control_idx;
-DROP INDEX inference_policies_active_idx;
+	if _, err := db.ExecContext(t.Context(), `DROP INDEX inference_policies_active_idx;
 ALTER TABLE inference_policies DROP COLUMN connection_id;
 ALTER TABLE inference_reservations DROP COLUMN connection_id;
 CREATE UNIQUE INDEX inference_policies_active_idx ON inference_policies(organization_id) WHERE active=1`); err != nil {
