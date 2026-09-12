@@ -705,8 +705,29 @@ invalidates the prior view. These transaction-local views are discarded on
 rollback and are never published into the shared live cache. Capability and
 policy validation still runs at its required boundaries.
 
-Full suspended-task reconciliation/resumption, independent abort reliability,
-and complete coordination/output/effect and cancellation-timeline coverage remain
+Each interrupted running Task receives an atomic stop request and suspension
+before its supervisor waits for handler acknowledgement. A bounded wait can end
+with an uncertain stop record; local completion is confirmed only after the
+handler returns. Confirmation binds the original request, interrupted outcome,
+optional usage, and finish evidence. Later returned usage remains accounting
+evidence and cannot authorize ordinary output or completion. Generic writers
+cannot mint these stop records or reopen a suspended Task. Replay checks the
+same identity, ordering, and suspension requirements.
+
+Protected-effect admission checks the Task's latest admitted suspension before
+consuming approval or recording a new attempt, including legacy suspensions.
+Already attempted effects retain their separate reconciliation path.
+
+The Codex adapter attempts owned-process termination if a matching terminal turn
+notification does not confirm cooperative interruption. A hard-stop attempt
+closes that shared adapter to later calls even when termination is uncertain.
+Local handler return, local turn completion, process termination, and remote
+provider uncertainty remain distinct. Shutdown cancels active Task supervisors,
+closes providers, then boundedly drains stop evidence before closing the ledger.
+A persistent storage outage or noncooperative remote service remains a limit.
+
+Full suspended-task reconciliation/resumption, planning and normalization stop
+acknowledgement, and complete coordination/output/effect and cancellation-timeline coverage remain
 unfinished under [issue #178](https://github.com/dominicnunez/agentos/issues/178).
 
 For example, after reading the current head, the owner sends this JSON with

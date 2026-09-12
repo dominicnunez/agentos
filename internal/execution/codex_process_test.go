@@ -44,6 +44,11 @@ func serveCodexTestProcess(mode string) error {
 			result = json.RawMessage(`{"codexHome":"/isolated","platformFamily":"test","platformOs":"test","userAgent":"test"}`)
 		case "initialized":
 			initialized = true
+			if mode == "linger" {
+				for {
+					time.Sleep(time.Hour)
+				}
+			}
 			continue
 		case "thread/start":
 			if !initialized {
@@ -64,6 +69,11 @@ func serveCodexTestProcess(mode string) error {
 				return err
 			}
 		case "turn/start":
+			if mode == "hang" {
+				for {
+					time.Sleep(time.Hour)
+				}
+			}
 			if mode == "auth" {
 				if err := e.Encode(map[string]any{"id": "refresh-1", "method": "account/chatgptAuthTokens/refresh", "params": map[string]string{"reason": "unauthorized"}}); err != nil {
 					return err
@@ -110,6 +120,104 @@ func serveCodexTestProcess(mode string) error {
 		if err := e.Encode(map[string]any{"id": req.ID, "result": result}); err != nil {
 			return err
 		}
+	}
+}
+
+func TestCodexProcessReapsOnlyAfterTransportReaderStops(t *testing.T) {
+	readerStopped := make(chan struct{})
+	waitCalled := make(chan struct{})
+	waitDone := make(chan struct{})
+	go reapCodexProcess(readerStopped, func() error {
+		close(waitCalled)
+		return nil
+	}, waitDone)
+
+	select {
+	case <-waitCalled:
+		t.Fatal("process was reaped before the transport reader stopped")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(readerStopped)
+	select {
+	case <-waitDone:
+	case <-time.After(time.Second):
+		t.Fatal("process was not reaped after the transport reader stopped")
+	}
+}
+
+func TestCodexUnconfirmedInterruptHardStopsOwnedProcess(t *testing.T) {
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	startCtx, stopStart := context.WithTimeout(t.Context(), 5*time.Second)
+	defer stopStart()
+	p, err := startCodexProcess(startCtx, &sdk.ProcessOptions{BinaryPath: binary, Dir: t.TempDir(), Env: []string{"AGENTOS_CODEX_TEST_PROCESS=hang", "GORACE=atexit_sleep_ms=0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	if _, err := p.Initialize(startCtx); err != nil {
+		t.Fatal(err)
+	}
+	model, cwd := "gpt-test", t.TempDir()
+	var approval sdk.AskForApproval = sdk.ApprovalPolicyNever
+	sandbox := sdk.SandboxModeReadOnly
+	turnCtx, cancelTurn := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancelTurn()
+	result, _, err := sdkStreamRun(p, &codexProtocolErrors{})(turnCtx, sdk.RunOptions{
+		Model: &model, Cwd: &cwd, Prompt: "test", ApprovalPolicy: &approval, Sandbox: &sandbox, SandboxPolicy: sdk.SandboxPolicyReadOnly{},
+	})
+	stop, found := StopOutcome(err)
+	if result != nil || !errors.Is(err, context.DeadlineExceeded) || !found {
+		t.Fatalf("unconfirmed interruption result=%v stop=%+v found=%v err=%v", result, stop, found, err)
+	}
+	if !stop.LocalTurnStopped || !stop.LocalProcessStopAttempted || !stop.LocalProcessStopped || stop.RemoteStatus != RemoteStopUncertain {
+		t.Fatalf("hard-stop evidence=%+v", stop)
+	}
+	if p.cmd.ProcessState == nil {
+		t.Fatal("owned process was not reaped")
+	}
+}
+
+func TestCodexAbortInterruptsConcurrentGracefulClose(t *testing.T) {
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	p, err := startCodexProcess(ctx, &sdk.ProcessOptions{BinaryPath: binary, Dir: t.TempDir(), Env: []string{"AGENTOS_CODEX_TEST_PROCESS=linger", "GORACE=atexit_sleep_ms=0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	if _, err := p.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	killCalled := make(chan struct{})
+	killTree := p.killTree
+	p.killTree = func() error {
+		close(killCalled)
+		return killTree()
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- p.Close() }()
+	select {
+	case <-killCalled:
+		t.Fatal("graceful close skipped its grace before abort")
+	case <-time.After(100 * time.Millisecond):
+	}
+	started := time.Now()
+	stopped, abortErr := p.Abort()
+	if abortErr != nil || !stopped {
+		t.Fatalf("abort stopped=%v err=%v", stopped, abortErr)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("abort waited through graceful close: %v", elapsed)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatal(err)
 	}
 }
 

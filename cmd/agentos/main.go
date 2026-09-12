@@ -123,12 +123,22 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 	if err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, models.close()) }()
+	var service *app.Service
+	defer func() {
+		if service != nil {
+			service.StopExecutions()
+		}
+		err = errors.Join(err, models.close())
+		if service != nil {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err = errors.Join(err, service.WaitForStops(stopCtx))
+		}
+	}()
 	planner, err := planning.NewModelPlanner(planningModel{adapter: models.planning})
 	if err != nil {
 		return err
 	}
-	var service *app.Service
 	var selectedPlanner planning.Planner = planner
 	if models.registry != nil && config.Routing.PlanningRequirements != nil {
 		route, err := newAuxiliaryRoute(models.registry, config.Routing.Planning, *config.Routing.PlanningRequirements)

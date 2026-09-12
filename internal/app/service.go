@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/assignment"
@@ -99,6 +100,12 @@ func (e *planningAttemptError) Unwrap() error {
 }
 
 type Service struct {
+	stops              sync.WaitGroup
+	activeExecutions   sync.WaitGroup
+	stopMu             sync.Mutex
+	stopErr            error
+	stopping           bool
+	runningExecutions  map[*runningExecution]struct{}
 	permit             chan struct{}
 	gateway            *events.Gateway
 	state              *projections.Repository
@@ -811,7 +818,7 @@ func (s *Service) restoreVerifiedTask(ctx context.Context, state projections.Ver
 }
 
 func containmentInterrupted(err error) bool {
-	return errors.Is(err, core.ErrOrganizationFrozen) || errors.Is(err, core.ErrContainmentUnavailable)
+	return errors.Is(err, core.ErrOrganizationFrozen) || errors.Is(err, core.ErrContainmentUnavailable) || errors.Is(err, core.ErrExecutionStopped)
 }
 
 func (s *Service) failPlanningWork(ctx context.Context, organizationID core.ID, state projections.Versioned[core.Work], code, reason, evidenceRef string) error {
@@ -1674,8 +1681,21 @@ func (s *Service) acquire(ctx context.Context) error {
 	if ctx == nil {
 		return fmt.Errorf("service context is required")
 	}
+	s.stopMu.Lock()
+	stopping := s.stopping
+	s.stopMu.Unlock()
+	if stopping {
+		return core.ErrExecutionStopped
+	}
 	select {
 	case s.permit <- struct{}{}:
+		s.stopMu.Lock()
+		stopping = s.stopping
+		s.stopMu.Unlock()
+		if stopping {
+			s.release()
+			return core.ErrExecutionStopped
+		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -2891,6 +2911,11 @@ func (s *Service) actionableRemediation(ctx context.Context, snapshot projection
 }
 
 func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot, state projections.Versioned[core.Task], remediation bool) (resultRun taskRun, resultErr error) {
+	ctx, releaseTask, err := s.trackExecution(ctx)
+	if err != nil {
+		return taskRun{}, err
+	}
+	defer releaseTask()
 	task := state.Value
 	organizationID, err := taskOrganization(snapshot, task)
 	if err != nil {
@@ -3169,49 +3194,36 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		}
 	}
 	handlerStartedAt := time.Now().UTC()
-	executionResult, executionErr := handler.Execute(executionCtx, executionTask, manifest)
-	cancel()
-	reportedOutcome := executionResult.Outcome
-	executionInterrupted := false
-	interrupt := func(cause error) {
-		executionInterrupted = true
-		executionErr = cause
-		class := "execution_cancelled"
-		if errors.Is(executionErr, core.ErrOrganizationFrozen) {
-			class = "security_hold"
+	stopRun := stoppedExecution{organization: organizationID, taskID: task.ID, executionID: executionID, correlation: state.CorrelationID, startedAt: handlerStartedAt}
+	pending := make(chan handlerResult, 1)
+	go func() {
+		result, err := handler.Execute(executionCtx, executionTask, manifest)
+		pending <- handlerResult{result: result, err: err, finishedAt: time.Now().UTC()}
+	}()
+	var returned handlerResult
+	select {
+	case returned = <-pending:
+		cause := executionStopCause(liveCtx, executionCtx, returned.err)
+		cancel()
+		if cause != nil {
+			return s.stopExecution(ctx, stopRun, cause, nil, &returned)
 		}
-		if errors.Is(executionErr, core.ErrContainmentUnavailable) {
-			class = "containment_unavailable"
-		}
-		evidence := core.ExecutionInterruptionEvidence{
-			LocalExecutionStopped: true, ExternalEffectsStatus: "REQUIRES_RECONCILIATION",
-			ReportedOutcome: reportedOutcome,
-		}
-		var hold core.SecurityHoldCause
-		if errors.As(executionErr, &hold) {
-			evidence.Hold = &hold
-		}
-		executionResult.Outcome = core.ToolOutcome{
-			ToolInvocationID: core.ID("held-" + string(executionID)), ToolID: "runtime-containment",
-			Status: core.OutcomeFailed, PostconditionStatus: core.PostconditionNotChecked,
-			Retryability: core.NotRetryable, ErrorClass: class, ErrorDetail: "execution interrupted before result admission",
-			ObservedEffect: evidence,
-			StartedAt:      handlerStartedAt, FinishedAt: time.Now().UTC(),
-		}
+	case <-executionCtx.Done():
+		cause := executionStopCause(liveCtx, executionCtx, nil)
+		cancel()
+		return s.stopExecution(ctx, stopRun, cause, pending, nil)
 	}
-	if liveCtx.Err() != nil || errors.Is(executionErr, core.ErrContainmentUnavailable) || errors.Is(executionErr, core.ErrOrganizationFrozen) {
-		interrupt(errors.Join(context.Cause(liveCtx), executionErr))
-	}
+	executionResult, executionErr := returned.result, returned.err
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		if cause := executionStopCause(liveCtx, liveCtx, resultErr); cause != nil {
+			resultRun, resultErr = s.stopExecution(ctx, stopRun, cause, nil, &returned)
+		}
+	}()
 	outcome, verifierAvailable := s.verifier.Verify(executionTask, executionResult.Outcome)
 	outcomeEvent, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: outcome, CorrelationID: state.CorrelationID})
-	var admissionHold core.SecurityHoldCause
-	if errors.As(err, &admissionHold) {
-		// Admission can observe a hold before the local cancellation monitor.
-		// Retry once with failed audit evidence, never with successful output.
-		interrupt(admissionHold)
-		outcome, verifierAvailable = s.verifier.Verify(executionTask, executionResult.Outcome)
-		outcomeEvent, err = s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: outcome, CorrelationID: state.CorrelationID})
-	}
 	if err != nil {
 		return taskRun{}, fmt.Errorf("persist outcome for task %s: %w", task.ID, err)
 	}
@@ -3223,43 +3235,9 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			return taskRun{}, fmt.Errorf("persist inference usage for task %s: %w", task.ID, err)
 		}
 	}
-	if executionInterrupted {
-		// Suspension is a runtime lifecycle transition, not a result, parent
-		// remediation request, or terminal failure of the task's contract.
-		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "EXECUTION_FINISHED", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: map[string]any{"status": outcome.Status}, CorrelationID: state.CorrelationID}); err != nil {
-			return taskRun{}, fmt.Errorf("persist interrupted execution finish: %w", err)
-		}
-		task.Status = core.TaskBlocked
-		detail := map[string]string{"outcome_event_ref": outcomeEvent.EventID, "reason": "execution interrupted; operator reconciliation required before resumption"}
-		if err := s.state.SaveTask(ctx, organizationID, "TASK_EXECUTION_SUSPENDED", "runtime", state.CorrelationID, state.Version+2, task, detail); err != nil {
-			return taskRun{}, fmt.Errorf("suspend interrupted task %s: %w", task.ID, err)
-		}
-		return taskRun{Outcome: outcome, ExecutionError: executionErr}, nil
-	}
-	auditCtx := ctx
 	// Keep the execution generation even while durable bookkeeping ignores
 	// cancellation. Each action writer checks that generation transactionally.
 	ctx = context.WithoutCancel(liveCtx)
-	defer func() {
-		var hold core.SecurityHoldCause
-		if !errors.As(resultErr, &hold) {
-			return
-		}
-		interrupt(hold)
-		interruptedOutcome, _ := s.verifier.Verify(executionTask, executionResult.Outcome)
-		interruptedEvent, err := s.gateway.PublishTrusted(auditCtx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: interruptedOutcome, CorrelationID: state.CorrelationID})
-		if err != nil {
-			resultErr = fmt.Errorf("record late execution interruption: %w", err)
-			return
-		}
-		task.Status = core.TaskBlocked
-		detail := map[string]string{"outcome_event_ref": interruptedEvent.EventID, "reason": "execution interrupted during result admission; operator reconciliation required"}
-		if err := s.state.SaveTask(auditCtx, organizationID, "TASK_EXECUTION_SUSPENDED", "runtime", state.CorrelationID, state.Version+2, task, detail); err != nil {
-			resultErr = fmt.Errorf("suspend late-interrupted task: %w", err)
-			return
-		}
-		resultRun, resultErr = taskRun{Outcome: interruptedOutcome, ExecutionError: hold}, nil
-	}()
 	for _, batch := range inboxBatches {
 		if len(batch.Events) == 0 {
 			continue

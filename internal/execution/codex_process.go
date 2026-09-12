@@ -23,7 +23,12 @@ type codexProcess struct {
 	cmd       *exec.Cmd
 	killTree  func() error
 	closeTree func() error
-	once      sync.Once
+	stopOnce  sync.Once
+	abortOnce sync.Once
+	abort     chan struct{}
+	stopped   chan struct{}
+	waitDone  chan struct{}
+	localStop bool
 	err       error
 }
 
@@ -59,11 +64,18 @@ func startCodexProcess(ctx context.Context, options *sdk.ProcessOptions) (*codex
 	wire := newCodexWireReader(stdout)
 	tr := transport.NewStdioTransport(wire, stdin)
 	p := &codexProcess{Client: sdk.NewClient(tr, options.ClientOptions...), wire: wire, transport: tr,
-		stdin: stdin, cmd: cmd, killTree: killTree, closeTree: closeTree}
+		stdin: stdin, cmd: cmd, killTree: killTree, closeTree: closeTree, abort: make(chan struct{}), stopped: make(chan struct{}), waitDone: make(chan struct{})}
+	go reapCodexProcess(tr.ReaderStopped(), cmd.Wait, p.waitDone)
 	if err := ctx.Err(); err != nil {
 		return nil, errors.Join(err, p.Close())
 	}
 	return p, nil
+}
+
+func reapCodexProcess(readerStopped <-chan struct{}, wait func() error, waitDone chan<- struct{}) {
+	<-readerStopped
+	_ = wait()
+	close(waitDone)
 }
 
 func (p *codexProcess) Initialize(ctx context.Context) (sdk.InitializeResponse, error) {
@@ -75,19 +87,50 @@ func (p *codexProcess) Initialize(ctx context.Context) (sdk.InitializeResponse, 
 }
 
 func (p *codexProcess) Close() error {
-	p.once.Do(func() {
+	p.stopOnce.Do(func() {
+		p.stop(true)
+	})
+	<-p.stopped
+	return p.err
+}
+
+// Abort bypasses the graceful stdin drain and stops the owned process tree.
+// A concurrent graceful Close observes the abort signal and skips its grace.
+func (p *codexProcess) Abort() (bool, error) {
+	p.abortOnce.Do(func() { close(p.abort) })
+	p.stopOnce.Do(func() {
+		p.stop(false)
+	})
+	<-p.stopped
+	return p.localStop, p.err
+}
+
+func (p *codexProcess) stop(graceful bool) {
+	defer close(p.stopped)
+	if graceful {
 		// Close input first, giving the CLI a bounded opportunity to exit. Keep
 		// stdout open until the reader drains or the grace period expires.
 		_ = p.stdin.Close()
 		select {
 		case <-p.transport.ReaderStopped():
 		case <-time.After(3 * time.Second):
+		case <-p.abort:
 		}
-		// Kill the tree even if the parent has exited: descendants may survive
-		// after closing stdout. The platform helper treats an absent tree as success.
-		p.err = errors.Join(p.killTree(), p.transport.Close())
-		_ = p.cmd.Wait()
-		p.err = errors.Join(p.err, p.closeTree())
-	})
-	return p.err
+	} else {
+		_ = p.stdin.Close()
+	}
+	// Kill the tree even if the parent has exited: descendants may survive
+	// after closing stdout. The platform helper treats an absent tree as success.
+	killErr := p.killTree()
+	transportErr := p.transport.Close()
+	waitErr := error(nil)
+	if killErr == nil {
+		select {
+		case <-p.waitDone:
+			p.localStop = p.cmd.ProcessState != nil
+		case <-time.After(3 * time.Second):
+			waitErr = errors.New("codex process tree termination was not observed")
+		}
+	}
+	p.err = errors.Join(killErr, transportErr, waitErr, p.closeTree())
 }
