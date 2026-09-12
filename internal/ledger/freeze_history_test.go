@@ -1,8 +1,10 @@
 package ledger
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -12,6 +14,28 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 )
+
+func TestFreezeSnapshotLateCancel(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	err = store.withContainmentSnapshot(ctx, func(tx *sql.Tx) error {
+		if _, err := loadFreezeHistory(ctx, tx, "org-1"); err != nil {
+			return err
+		}
+		// Emulate cancellation after the final database read, while the
+		// snapshot callback still processes its in-memory authority evidence.
+		cancel()
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expired snapshot reported successful observation: %v", err)
+	}
+}
 
 func TestOwnerFreezeBuriedControl(t *testing.T) {
 	for _, defect := range []string{"actor", "kind", "prior-event", "prior-version", "release-without-hold", "time"} {

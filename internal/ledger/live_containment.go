@@ -189,7 +189,12 @@ func (l *SQLite) withContainmentSnapshot(ctx context.Context, read func(*sql.Tx)
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	return read(tx)
+	if err := read(tx); err != nil {
+		return err
+	}
+	// Validation can continue on CPU after the last SQL read. An expired
+	// snapshot must not count as a successful observation or renew the watchdog.
+	return ctx.Err()
 }
 
 func containmentReadContended(err error) bool {

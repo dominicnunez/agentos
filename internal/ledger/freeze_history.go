@@ -76,6 +76,9 @@ func loadFreezeHistory(ctx context.Context, tx *sql.Tx, organization string) (fr
 	if err != nil {
 		return history, fmt.Errorf("resolve organization freeze history: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return history, err
+	}
 	if len(admissions) != len(records) {
 		return history, fmt.Errorf("organization freeze history has incomplete admissions")
 	}
@@ -102,7 +105,7 @@ func loadFreezeHistory(ctx context.Context, tx *sql.Tx, organization string) (fr
 		history.revisions = append(history.revisions, freezeRevision{record: record, event: event, state: state})
 		history.byEvent[event.EventID] = index
 	}
-	return history, nil
+	return history, ctx.Err()
 }
 
 func scanFreezeHistoryRow(row rowScanner) (events.AuthorityRecord, events.Event, bool, bool, error) {
