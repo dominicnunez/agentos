@@ -29,18 +29,17 @@ Prefer familiar, plain-language names over technical jargon for code identifiers
 Aim for 30 characters or fewer. Use a longer or technical name when needed for
 clarity, accuracy, or an established interface.
 
-## When content cannot be shown
+## Scope security work clearly
 
 Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/articles/20001326-additional-safety-checks-for-biological-and-cybersecurity-requests-in-chatgpt-codex-and-the-api):
 
-- While an additional safety check is running, wait; no action is needed.
-- If content cannot be shown, review the request against OpenAI's Usage Policies.
-  If the request is allowed, retry with a narrower scope and only the context
-  needed to explain the desired outcome.
-- For cybersecurity work, focus on a defensive outcome: identifying, preventing,
-  or remediating a security issue. Omit exploit details unnecessary to that outcome.
-- For biological work, focus on safety, prevention, analysis, or risk mitigation.
-  Omit procedural details unnecessary to that purpose.
+- From the outset, state the authorized defensive outcome: identifying,
+  preventing, or remediating a security issue in Agent OS.
+- Keep each request focused on that outcome and include only relevant context.
+  Retain the technical details needed to diagnose, fix, and verify the issue;
+  omit exploit details unnecessary to that work.
+- Check that the request complies with OpenAI's Usage Policies. Clear scope
+  should explain the legitimate work, not conceal its purpose or effects.
 - Changing wording does not change whether a request is allowed or guarantee a
   response. Do not disguise a request or attempt to bypass safeguards.
 
