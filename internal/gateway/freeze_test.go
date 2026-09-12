@@ -98,7 +98,7 @@ func TestFreezeControlRejectsUntrustedIdentityBeforeStore(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			store := &gatewayFreezeStore{}
 			handler := newGatewayFreezeControl(t, store, LocalHuman{UID: 1000, ID: "owner-1", OrganizationID: "org-1"})
-			request := httptest.NewRequest(http.MethodPost, "/v1/control/freeze", strings.NewReader(`{"frozen":true,"reason":"incident","expected_event_ref":"","expected_version":0}`))
+			request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/control/freeze", strings.NewReader(`{"frozen":true,"reason":"incident","expected_event_ref":"","expected_version":0}`))
 			if test.uid != nil {
 				request = request.WithContext(ContextWithPeerUID(request.Context(), *test.uid))
 			}
