@@ -14,7 +14,7 @@ import (
 // InferenceConnectionRequiresRouting conservatively checks every organization
 // using this account because app composition does not bind one organization.
 func (l *SQLite) InferenceConnectionRequiresRouting(ctx context.Context, connectionID string) (bool, error) {
-	tx, err := l.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	ctx, tx, err := l.beginFreezeRead(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -55,12 +55,11 @@ func (l *SQLite) SelectInferenceRoute(ctx context.Context, registry *inference.C
 	if l == nil || l.db == nil || registry == nil {
 		return inference.RouteSelection{}, fmt.Errorf("inference selection dependencies are required")
 	}
-	tx, err := l.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	ctx, tx, err := l.beginFreezeRead(ctx)
 	if err != nil {
 		return inference.RouteSelection{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	ctx = l.freezeContext(ctx, tx)
 	if err := validateInferenceAdmissionsSnapshot(ctx, tx); err != nil {
 		return inference.RouteSelection{}, err
 	}

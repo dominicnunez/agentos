@@ -32,7 +32,7 @@ func (l *SQLite) RecoverInferenceReservations(ctx context.Context, organizationI
 		return 0, fmt.Errorf("inference recovery organization is required")
 	}
 	recovered := 0
-	err := l.withTx(ctx, func(tx *sql.Tx) error {
+	err := l.withFreezeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		now := l.nowUTC()
 		if err := validateInferenceAdmissionsSnapshot(ctx, tx); err != nil {
 			return fmt.Errorf("validate inference recovery accounting: %w", err)
@@ -429,7 +429,7 @@ func (l *SQLite) ReconcileInference(ctx context.Context, reservation inference.R
 		chargedCost = 0
 	}
 	violated := state == inferenceStateViolation
-	err := l.withTx(ctx, func(tx *sql.Tx) error {
+	err := l.withFreezeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		now := l.nowUTC()
 		policy, fingerprint, err := activeInferencePolicy(ctx, tx, reservation.Request.Scope.OrganizationID, reservation.Request.ConnectionID)
 		if err != nil {

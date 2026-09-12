@@ -695,9 +695,10 @@ Cold validation and copying a changed history grow with history size, but idle
 polls do not replay it. Unavailable or expired observations never renew the
 containment watchdog.
 
-Protected writer transactions and route-selection snapshots reuse one validated
-freeze history per organization across nested admission, retry, publication, and
-policy checks. The scope binds the exact SQL transaction; a derived context
+Runtime read and write transactions reuse one validated freeze history per
+organization across nested admission, retry, publication, and policy checks. This
+includes inbox polling, knowledge authority reads, routing, and inference
+validation. The scope binds the exact SQL transaction; a derived context
 cannot transfer its proof to a different transaction. Each use still checks the
 transaction's freshness tokens, so appending or rewriting freeze authority
 invalidates the prior view. These transaction-local views are discarded on

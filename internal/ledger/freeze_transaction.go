@@ -8,7 +8,7 @@ import (
 
 type freezeScopeKey struct{}
 
-// This scope belongs to one writer transaction. Uncommitted views never enter
+// This scope belongs to one database transaction. Uncommitted views never enter
 // the live cache, and derived contexts cannot transfer proof to another tx.
 type freezeReadScope struct {
 	store *SQLite
@@ -21,6 +21,16 @@ func (l *SQLite) withFreezeTx(ctx context.Context, fn func(context.Context, *sql
 	return l.withTx(ctx, func(tx *sql.Tx) error {
 		return fn(l.freezeContext(ctx, tx), tx)
 	})
+}
+
+// Runtime readers of freeze authority start here so their snapshot also carries
+// the exact-transaction scope needed to reuse a validated history.
+func (l *SQLite) beginFreezeRead(ctx context.Context) (context.Context, *sql.Tx, error) {
+	tx, err := l.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return ctx, nil, err
+	}
+	return l.freezeContext(ctx, tx), tx, nil
 }
 
 func (l *SQLite) freezeContext(ctx context.Context, tx *sql.Tx) context.Context {

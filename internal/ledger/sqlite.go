@@ -4971,7 +4971,7 @@ func (l *SQLite) Events(ctx context.Context, correlationID string) ([]events.Eve
 // exact event-and-record snapshot. Event labels alone never grant replay
 // authority.
 func (l *SQLite) KnowledgeAuthorityAdmissions(ctx context.Context) ([]events.CapabilityLeaseAdmission, []events.OrganizationFreezeAdmission, error) {
-	tx, err := l.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	ctx, tx, err := l.beginFreezeRead(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("begin knowledge authority snapshot: %w", err)
 	}
@@ -5111,7 +5111,7 @@ ORDER BY pending.request_sequence DESC LIMIT ?`, organizationID, cursorSequence,
 }
 
 func (l *SQLite) Inbox(ctx context.Context, recipientScope, recipientID string) ([]events.Event, error) {
-	tx, err := l.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	ctx, tx, err := l.beginFreezeRead(ctx)
 	if err != nil {
 		return nil, err
 	}

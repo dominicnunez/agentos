@@ -22,7 +22,7 @@ func (l *SQLite) ValidateInferenceRouteBinding(ctx context.Context, binding mode
 	if err := binding.Validate(); err != nil {
 		return err
 	}
-	tx, err := l.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	ctx, tx, err := l.beginFreezeRead(ctx)
 	if err != nil {
 		return err
 	}
@@ -40,7 +40,15 @@ func (l *SQLite) ValidateInferenceAdmissions(ctx context.Context) error {
 	if l == nil || l.db == nil {
 		return fmt.Errorf("inference admission ledger is required")
 	}
-	return ValidateInferenceAdmissions(ctx, l.db)
+	ctx, tx, err := l.beginFreezeRead(ctx)
+	if err != nil {
+		return fmt.Errorf("begin inference admission snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateInferenceAdmissionsSnapshot(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ValidateInferenceAdmissions proves that every durable policy and reservation
