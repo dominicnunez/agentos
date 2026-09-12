@@ -18,7 +18,7 @@ the event ledger.
 Model normalization receives separate instruction and operator messages.
 Model-proposed provenance must cite a handle issued for this invocation;
 intake resolves it to the original durable message ID before accepting the
-candidate. See [Structured model input](STRUCTURED_MODEL_INPUT.md).
+candidate. See [Structured model input](../integrations/structured-model-input.md).
 
 The Mission/Goal link is optional for ad hoc Work. When present, it must point
 to an active Goal under an active Mission in the same organization and cannot
@@ -64,7 +64,7 @@ Run `agentos` with no arguments to start or resume setup. System installation
 is the default. `agentos init --user` selects the current-account alternative.
 Initial setup verifies the selected real model provider. Existing installations
 can configure additional connections and explicit task, planning, and normalization
-routes as described in [Inference connections](INFERENCE_CONNECTIONS.md).
+routes as described in [Inference connections](../integrations/inference-connections.md).
 `agentos setup providers` validates and applies that complete configuration;
 offline doctor checks every configured policy and credential.
 
@@ -292,7 +292,7 @@ are `SUBMITTER`, `COLLABORATOR`, `OBSERVER`, `RESULT_READER`, and `OPERATOR`.
 `OWN` scope is the default; `ORGANIZATION` scope deliberately allows access to
 other principals' work within the same organization.
 
-See [A2A interoperability](A2A_INTEROP.md) for the wire contract and Agent Card.
+See [A2A interoperability](../integrations/a2a-interop.md) for the wire contract and Agent Card.
 Remote A2A binding must be explicitly enabled and requires TLS plus an HTTPS
 public URL. The local user socket remains separate.
 

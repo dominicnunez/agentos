@@ -59,7 +59,7 @@ private user gateway, and SQLite ledger integrity. In system mode, run
 
 ## Documentation
 
-Start with the [five-minute governed workflow](docs/QUICKSTART.md). Operator,
+Start with the [five-minute governed workflow](docs/guides/quickstart.md). Operator,
 integration, security, recovery, provider, release, and development
 documentation is indexed in [`docs/`](docs/README.md).
 
@@ -77,7 +77,7 @@ External code contributions and pull requests are not currently accepted. Contri
 {
   "purpose": "Install, configure, and verify Agent OS for the user.",
   "release_page": "https://github.com/dominicnunez/agentos/releases",
-  "operator_documentation_url_template": "https://github.com/dominicnunez/agentos/blob/{release_tag}/docs/OPERATOR_INTAKE.md",
+  "operator_documentation_url_template": "https://github.com/dominicnunez/agentos/blob/{release_tag}/docs/guides/operator-intake.md",
   "platform": "Linux",
   "installation": [
     "Use the immutable release version selected by the user.",

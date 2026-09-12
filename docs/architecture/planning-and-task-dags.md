@@ -41,7 +41,7 @@ integration Task itself.
 
 The `task-planner-v2` input contract separates runtime instructions, accepted
 Intent, and low-privilege strategic evidence. Each source is bound to the
-admitted invocation; see [Structured model input](STRUCTURED_MODEL_INPUT.md).
+admitted invocation; see [Structured model input](../integrations/structured-model-input.md).
 
 Every accepted Plan records:
 

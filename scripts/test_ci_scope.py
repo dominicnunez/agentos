@@ -60,7 +60,7 @@ class ScopeTests(unittest.TestCase):
                 before = head
 
     def test_code_and_unknown_files(self):
-        paths = ["internal/main.go", "docs/schemas/knowledge-record.schema.json",
+        paths = ["internal/main.go", "schemas/knowledge-record.schema.json",
                  "docs/example.py", ".github/workflows/ci.yml", "go.mod", "LICENSE",
                  "NOTICE", "web/dashboard/src/app.ts", "unknown.md"]
         before = self.base

@@ -10,7 +10,7 @@ import (
 )
 
 func TestKnowledgeRecordMatchesActiveSchemaProperties(t *testing.T) {
-	body, err := os.ReadFile("../../docs/schemas/knowledge-record.schema.json")
+	body, err := os.ReadFile("../../schemas/knowledge-record.schema.json")
 	if err != nil {
 		t.Fatal(err)
 	}

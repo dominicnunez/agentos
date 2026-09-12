@@ -1,5 +1,9 @@
 # A2A Agent interoperability profile
 
+The task-metadata namespace shown below retains its original URI as a stable
+wire identifier. Moving this document does not change that identifier or require
+existing A2A clients to change their metadata keys.
+
 The Agent OS Operator Gateway is vendor-neutral. An external Agent must have
 A2A v1.0 client capabilities to use it: Agent Card discovery, JSON-RPC 2.0,
 the A2A `SendMessage` and `GetTask` methods, and support for A2A `Message`,

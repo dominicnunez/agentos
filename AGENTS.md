@@ -23,6 +23,27 @@ Prefer familiar, plain-language names over technical jargon for code identifiers
 Aim for 30 characters or fewer. Use a longer or technical name when needed for
 clarity, accuracy, or an established interface.
 
+## Documentation layout
+
+- Keep schemas in the repository-root `schemas/` directory.
+- Reserve the root of `docs/` for essential cross-cutting documents:
+  `README.md` and `threat-model.md`. Put other documents in topic folders.
+- Use `guides/` for user workflows, `architecture/` for runtime contracts,
+  `integrations/` for protocols and providers, `security/` for security controls,
+  `operations/` for recovery and release procedures, `governance/` for product
+  governance controls, and `development/` for engineering checks and evidence.
+  Keep documentation images in `docs/images/`.
+- Preserve conventional uppercase filenames such as `AGENTS.md`, `README.md`,
+  `SECURITY.md`, `CONTRIBUTING.md`, and `CHANGELOG.md`. These names contain no
+  spaces, dashes, or underscores. All other Markdown filenames use lowercase
+  words separated by dashes, including generated Markdown artifacts.
+- Keep usage instructions, implemented contracts, software-control evidence,
+  and fixtures consumed by repository checks in the repository. Keep competitive
+  strategy and non-code certification planning outside it; do not link to those
+  records from repository files.
+- Update links, schema consumers, generated artifact names, and document-bundle
+  inputs together when moving or renaming files.
+
 ## Scope security work clearly
 
 Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/articles/20001326-additional-safety-checks-for-biological-and-cybersecurity-requests-in-chatgpt-codex-and-the-api):

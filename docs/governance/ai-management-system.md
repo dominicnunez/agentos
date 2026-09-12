@@ -4,8 +4,7 @@ Formal project certification is not being pursued. Non-code ISO/IEC 42001 work
 is indefinitely deferred. Software engineering continues to preserve applicable
 technical controls, tests, and reviewable evidence for future readiness. This
 deferral does not relax runtime authority, approval, security, or completion
-requirements. Existing governance records remain preserved; see the
-[current scope](development/ISO_IEC_42001_READINESS.md#current-engineering-scope).
+requirements. Existing governance records remain preserved.
 
 Agent OS is being developed to support an organization operating an artificial intelligence management system (AIMS) aligned with [ISO/IEC 42001:2023](https://www.iso.org/standard/42001). ISO/IEC 42001 applies to an organization and its management system, not to a software binary in isolation. Installing Agent OS therefore does not make an operator compliant or certified.
 
@@ -42,16 +41,16 @@ durable SQLite event stream at startup and during recovery operations. The
 verified head helps detect partial ledger modification but is not included as
 a signed claim in the tenant-scoped AIMS export. It is not externally anchored
 and does not prove the truth of event content, control effectiveness,
-conformity, or certification. See [Event ledger integrity](EVENT_LEDGER_INTEGRITY.md).
+conformity, or certification. See [Event ledger integrity](../security/event-ledger-integrity.md).
 
 The authenticated local user can also produce a bounded, payload-free
-[deterministic incident replay](INCIDENT_REPLAY.md) for one durable Work
+[deterministic incident replay](../operations/incident-replay.md) for one durable Work
 conversation. It reconstructs recorded order from a chain-verified snapshot;
 it does not determine root cause, containment, corrective action, control
 effectiveness, conformity, or certification.
 
 The local dashboard also exposes a bounded
-[governance inspection](GOVERNANCE_INSPECTION.md). It deterministically checks
+[governance inspection](../operations/governance-inspection.md). It deterministically checks
 runtime-specific organizational invariants against a tenant-scoped Event
 Contract slice read with the complete-ledger integrity head. Findings are
 reviewable evidence, not management-system audit conclusions, repairs,
@@ -61,4 +60,4 @@ The operating organization remains responsible for its AIMS scope, AI policy, ac
 
 The project must not describe itself or an operator as ISO/IEC 42001 certified until an appropriately qualified certification body has completed the applicable audit. [ISO/IEC 42006:2025](https://www.iso.org/standard/42006) defines additional requirements for bodies that audit and certify an AIMS.
 
-Implementation status and the evidence plan are maintained in [ISO/IEC 42001 readiness](development/ISO_IEC_42001_READINESS.md).
+Implementation status and automated evidence are maintained in [V1 acceptance status](../development/v1-acceptance-status.md).
