@@ -122,6 +122,8 @@ A worker may attempt approval laundering, principal-kind substitution, stale app
 
 Transactional effect admission rereads approval, freeze, and capability authority, consumes applicable single-use approval, and persists `ATTEMPTED` before adapter invocation. Uncertain effects require reconciliation rather than blind resend. A ToolOutcome or nonempty result is not proof of an external effect.
 
+An error, cancellation, or timeout returned by the effect adapter preserves `ATTEMPTED` and explicit uncertainty, even if partial evidence accompanies the error. Read-only destination reconciliation can later establish success or failure with evidence. Earlier terminal records are not automatically reclassified; this control does not establish their destination outcome retroactively.
+
 `CODE_INTRODUCTION` and `EXECUTION_SURFACE_MUTATION` are separate protected consequences. Generic shell or file-write authority does not satisfy either. Their contracts bind exact artifact bytes or before/after state, staged-promotion evidence, runtime-known influence references, declared consequential capabilities, and Task-local cumulative effect context.
 
 Declared capability closure does not prove the effective privilege of a backend credential. Backend-principal authority attestation, production effective-environment verification, and hostile-code isolation remain prerequisites for future credentialed tools and external-code execution. No production effect-writing adapter, general dynamic tool runtime, or mutable coding runtime is present.
