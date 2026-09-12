@@ -14,6 +14,16 @@ jobs:
     if: github.event_name != 'push' || github.event.deleted != true
     runs-on: ubuntu-latest
     steps:
+      # A force-push can make its previous head unreachable from fetched refs.
+      # Fetch it with checkout's temporary authentication before checking out
+      # the assessed head. No commands run from the previous source tree.
+      - name: Fetch previous push history
+        if: github.event_name == 'push' && github.ref_type == 'branch' && github.event.before != '0000000000000000000000000000000000000000'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.before }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -63,6 +73,7 @@ jobs:
           python3 scripts/verify_aims_documents.py
           python3 -m unittest scripts/test_verify_aims_documents.py
           python3 -m unittest scripts/test_build_aims_assessment_bundle.py
+          python3 -m unittest scripts/test_ci_push_history.py
           mkdir -p work/aims-first work/aims-second
           assessment_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           baseline_before_commit() {
@@ -89,6 +100,8 @@ jobs:
               if [ "$history_baseline" = "${GITHUB_SHA}" ]; then
                 history_baseline=$(baseline_before_commit "${GITHUB_SHA}")
               fi
+            else
+              history_baseline=$(python3 scripts/ci_push_history.py "$history_baseline" "$GITHUB_SHA")
             fi
           fi
           python3 scripts/build_aims_assessment_bundle.py --commit "${GITHUB_SHA}" --assessment-at "$assessment_at" --history-baseline "$history_baseline" --output work/aims-first/agentos-aims-assessment.tar.gz
