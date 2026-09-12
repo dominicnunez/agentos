@@ -67,6 +67,8 @@ def code_checks_needed(repo: Path, event_name: str, event: dict, head: str, ref:
             return True
         for index in range(0, len(parts), 2):
             metadata, path = parts[index:index + 2]
+            # Release source archives require every tracked name to be UTF-8.
+            path.decode("utf-8")
             fields = metadata.removeprefix(b":").split()
             if not metadata.startswith(b":") or len(fields) != 5 or fields[4] not in (b"A", b"D", b"M"):
                 return True

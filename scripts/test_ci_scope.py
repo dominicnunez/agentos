@@ -20,6 +20,8 @@ class ScopeTests(unittest.TestCase):
         self.git("config", "user.name", "Scope Test")
         self.git("config", "user.email", "scope@example.invalid")
         self.git("config", "core.autocrlf", "false")
+        # Detached maintenance must not outlive these short-lived repositories.
+        self.git("config", "maintenance.auto", "false")
         self.write("README.md", "readme")
         self.write("docs/guide.md", "guide")
         self.write("internal/main.go", "package main")
@@ -47,7 +49,8 @@ class ScopeTests(unittest.TestCase):
 
     def test_ordinary_documents(self):
         paths = ["docs/guide.md", "docs/image.svg", "AGENTS.md", "README.md",
-                 "SECURITY.md", "governance/aims/records/scope.md", "docs/a\nname.md"]
+                 "SECURITY.md", "governance/aims/records/scope.md", "docs/a\nname.md",
+                 "docs/caf\u00e9.md"]
         before = self.base
         for path in paths:
             with self.subTest(path=path):
@@ -77,6 +80,16 @@ class ScopeTests(unittest.TestCase):
         self.assertTrue(self.scope(renamed, base=head))
         (self.repo / "README.md").unlink()
         self.assertTrue(self.scope(self.commit(), base=renamed))
+
+    def test_invalid_utf8_path_runs_code(self):
+        # Git permits byte filenames that the source archive builder rejects.
+        path = os.fsencode(self.repo) + b"/docs/\xff.md"
+        with open(path, "wb") as document:
+            document.write(b"text")
+        head = self.commit()
+        self.assertTrue(self.scope(head))
+        event = {"pull_request": {"base": {"sha": self.base}}}
+        self.assertTrue(code_checks_needed(self.repo, "pull_request", event, head, "refs/pull/1/merge"))
 
     def test_executable_or_link_docs(self):
         target = self.repo / "docs/guide.md"
