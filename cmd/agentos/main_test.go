@@ -242,7 +242,7 @@ func TestServeAllStopsBothListenersWhenRuntimeContextIsCancelled(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- serveAll(ctx, bindings) }()
+	go func() { done <- serveAll(ctx, bindings, nil) }()
 	for _, listener := range listeners {
 		response, err := http.Get("http://" + listener.Addr().String()) //nolint:gosec,noctx // loopback listener owned by this test
 		if err != nil {

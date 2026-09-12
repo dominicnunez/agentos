@@ -15,10 +15,16 @@ const (
 )
 
 type executionStopBinding struct {
+	// Every field participates in Go's struct equality for the execution map
+	// key; these implicit comparisons are not visible to Gallow's field reads.
+	// gallow-ignore-next-line unused-field
 	organization string
-	taskID       string
-	correlation  string
-	executionID  string
+	// gallow-ignore-next-line unused-field
+	taskID string
+	// gallow-ignore-next-line unused-field
+	correlation string
+	// gallow-ignore-next-line unused-field
+	executionID string
 }
 
 type executionStopHistoryState struct {
