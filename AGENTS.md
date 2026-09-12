@@ -143,16 +143,23 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
   security review. Request it by commenting `@codex security review` only after
   general review has returned with no outstanding issues. This supersedes the
   earlier permission to request security review before general review finishes.
-  CI need not finish before requesting security review, but must pass before merge.
+  Applicable checks need not finish before requesting security review, but must
+  pass before merge.
 - If automation has already started a security review, do not duplicate it.
   Wait for running reviews and verify their coverage of the final head.
 - Address review findings, run appropriate checks, and obtain review of each
   follow-up commit. Resolve findings with evidence rather than treating silence
   or an unfinished review as approval.
 - Merge only after required general/security reviews are clean, review threads
-  are resolved, and all required checks for the final head pass, including both
-  push and PR CI where configured. Finish relevant edge-case checks before
-  presenting a branch as ready for merge.
+  are resolved, and all applicable checks for the final head pass. For code
+  changes, this includes both push and PR CI where configured. Finish relevant
+  edge-case checks before presenting a branch as ready for merge.
+- Documentation-only PRs may skip code-related workflows, such as builds, code
+  tests, and release-artifact checks. Run applicable documentation checks and
+  obtain all required reviews, including security review for threat-model changes.
+  In mixed workflows, retain document validation when skipping code checks.
+  Changes to executable scripts, CI workflows, dependencies, or runtime
+  configuration are code-related changes, not documentation-only changes.
 - Use PRs for normal work. The user explicitly authorized the 2026-09-07
   `AGENTS.md` rules consolidation directly on `main` without a PR. That is a
   one-time exception, not standing permission to bypass PRs or review rules.
