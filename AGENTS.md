@@ -51,6 +51,15 @@ independent enforcement rather than replacing local verification.
 8. Keep PRs cohesive and bounded without omitting necessary callers merely to
    reduce diff size. Track independent confirmed defects under the issue policy
    below and resolve them before proceeding to later goal parts.
+9. Keep `docs/THREAT_MODEL.md` aligned with code changes affecting architecture,
+   trust boundaries, attack surfaces, security controls, prerequisites, residual
+   risks, or severity. Update it in the same PR as relevant code and keep its
+   stated baseline accurate. Distinguish implemented controls from incomplete
+   controls and future prerequisites. Preserve the supplied draft's four numbered
+   sections: Overview; Threat model, Trust boundaries and assumptions; Attack
+   surface, mitigations and attacker stories; and Criticality calibration. Retain
+   its subsection structure, explanatory prose, and severity lists when updating
+   the corresponding content.
 
 ## Standing user instructions and goal continuity
 
