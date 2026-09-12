@@ -139,11 +139,11 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
   project file outside the repository. Estimate the first status check from
   comparable observations and adjust as evidence changes; avoid frequent fixed
   polling and never treat an estimated completion time as an actual reply.
-- Security-sensitive code requires a security review. Request it by commenting
-  `@codex security review` only after general review has returned with no
-  outstanding issues. This supersedes the earlier permission to request security
-  review before general review finishes. CI need not finish before requesting
-  security review, but must pass before merge.
+- Security-sensitive code and any PR changing `docs/THREAT_MODEL.md` require a
+  security review. Request it by commenting `@codex security review` only after
+  general review has returned with no outstanding issues. This supersedes the
+  earlier permission to request security review before general review finishes.
+  CI need not finish before requesting security review, but must pass before merge.
 - If automation has already started a security review, do not duplicate it.
   Wait for running reviews and verify their coverage of the final head.
 - Address review findings, run appropriate checks, and obtain review of each
