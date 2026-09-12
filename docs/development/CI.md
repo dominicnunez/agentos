@@ -23,6 +23,8 @@ code-related inputs even when a file is under `docs/`. Deleting the packaged
 root `README.md`, changing a document into an executable or symbolic link, or
 moving code into a document path also runs full checks. When adding a new code
 consumer of document files, update the classifier and its tests in the same PR.
+Filenames must be valid UTF-8, as required by the source archive builder;
+otherwise full checks run even for a path with a documentation extension.
 
 Missing or invalid revisions, failed Git inspection, an empty diff, and unknown
 events require full checks. Tag pushes and manual release-artifact verification
