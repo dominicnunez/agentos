@@ -233,7 +233,7 @@ influence, Task-local effect trajectories, and recovery validation. Tool-backed
 effects additionally require an exact lease for every declared consequential
 capability; the top-level tool lease cannot launder network, credential, write,
 or other downstream authority. See
-[Execution authority](../EXECUTION_AUTHORITY.md).
+[Execution authority](../security/execution-authority.md).
 
 Startup discovers durable `ATTEMPTED` obligations before serving. Reconciliation
 uses a separate read-only destination-status interface and never invokes the

@@ -34,7 +34,7 @@ Each package contains:
 - `agentos`;
 - `agentos-recovery`;
 - the complete `Apache-2.0` `LICENSE` and Agent OS `NOTICE`;
-- `SOURCE.md`, identifying the repository, exact commit, and immutable release
+- `source.md`, identifying the repository, exact commit, and immutable release
   tag;
 - `THIRD_PARTY_LICENSES/`, containing a deterministic manifest and root license
   evidence for every external Go module compiled into either supported target;
@@ -42,7 +42,7 @@ Each package contains:
 - the target's CycloneDX 1.6 module SBOM.
 
 The output directory also contains a deterministic corresponding-source
-archive, a standalone deterministic third-party-license bundle, `SOURCE.md`,
+archive, a standalone deterministic third-party-license bundle, `source.md`,
 every target SBOM, `SHA256SUMS`, and one deterministic in-toto/SLSA provenance
 statement. The source archive contains the exact tracked Agent OS source and a
 generated `vendor/` tree with the source of every external Go module needed to
@@ -90,4 +90,4 @@ tag.
 
 Release publication does not authorize deployment, consequential effects, or a
 real model provider. Those gates remain separate in
-[V1_RELEASE_READINESS.md](development/V1_RELEASE_READINESS.md).
+[V1_RELEASE_READINESS.md](../development/v1-release-readiness.md).

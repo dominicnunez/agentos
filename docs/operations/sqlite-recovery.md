@@ -1,7 +1,7 @@
 # SQLite recovery
 
 Agent OS V1 includes a local, operator-controlled recovery utility. Every
-current event is covered by the [cryptographic event chain](EVENT_LEDGER_INTEGRITY.md),
+current event is covered by the [cryptographic event chain](../security/event-ledger-integrity.md),
 but the utility is not a signed checkpoint, trusted timestamp, scheduled
 off-site backup, or externally anchored ledger system.
 

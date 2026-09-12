@@ -21,7 +21,7 @@ The list is ordered by Task identity, limited to 15 peers, and included in the
 existing 256 KiB aggregate Agent-input limit. The execution-context manifest
 records every selected Task ID and version under `coordination_refs` using
 context-builder version `v4`. The canonical request preserves source roles and
-invocation-bound handles; see [Structured model input](STRUCTURED_MODEL_INPUT.md).
+invocation-bound handles; see [Structured model input](../integrations/structured-model-input.md).
 
 Completion and recovery reconstruct the same pre-start snapshot from sealed
 Task Event Contracts. A peer revision admitted after the execution start does

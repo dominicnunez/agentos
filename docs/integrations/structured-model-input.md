@@ -72,7 +72,7 @@ New Agent executions require context-builder `v5`, whose manifest fingerprints
 the canonical, invocation-bound request. Replay reconstructs those bytes from
 the selected durable sources. v5 additionally requires the independently
 admitted factual-reference classification described in
-[`ORGANIZATIONAL_KNOWLEDGE.md`](ORGANIZATIONAL_KNOWLEDGE.md#execution-context-status).
+[`ORGANIZATIONAL_KNOWLEDGE.md`](../architecture/organizational-knowledge.md#execution-context-status).
 Historical `v1`, `v2`, `v3`, and `v4` manifests retain
 their original materialization rules; new executions cannot select them.
 Planning uses prompt contract `task-planner-v2` with separate accepted-Intent

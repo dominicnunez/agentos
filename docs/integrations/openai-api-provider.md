@@ -20,7 +20,7 @@ selected, it:
 - sends `tool_choice: "none"`, an empty tool list, `store: false`,
   `truncation: "disabled"`, and a 4,096-token output ceiling;
 - sends runtime instructions separately from user content and quoted evidence
-  using the [structured input contract](STRUCTURED_MODEL_INPUT.md);
+  using the [structured input contract](structured-model-input.md);
 - accepts only completed assistant text plus non-authority-bearing reasoning
   metadata, rejecting tool calls, citations, refusals, incomplete responses,
   unexpected model identity, and changed execution-profile fields;
@@ -44,7 +44,7 @@ verifier exists for its CompletionContract. It emits
 `COMPLETION_REVIEW_REQUESTED` instead of converting nonempty model text into
 deterministic proof. The output can become verified completion only through an
 authenticated user decision bound to the exact recorded evidence.
-That path is described in [Completion review](COMPLETION_REVIEW.md); it records
+That path is described in [Completion review](../guides/completion-review.md); it records
 `HUMAN_JUDGMENT` and never changes the ToolOutcome into deterministic proof.
 
 ## Setup

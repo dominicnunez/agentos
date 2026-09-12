@@ -106,7 +106,7 @@ jobs:
             listing=$(tar --list --gzip --file "$archive")
             grep --fixed-strings --line-regexp "$root/LICENSE" <<<"$listing"
             grep --fixed-strings --line-regexp "$root/NOTICE" <<<"$listing"
-            grep --fixed-strings --line-regexp "$root/SOURCE.md" <<<"$listing"
+            grep --fixed-strings --line-regexp "$root/source.md" <<<"$listing"
             grep --fixed-strings --line-regexp \
               "$root/THIRD_PARTY_LICENSES/manifest.json" <<<"$listing"
             grep --fixed-strings --line-regexp \
@@ -120,7 +120,7 @@ jobs:
             --directory "$source_directory"
           test -f "$source_root/LICENSE"
           test -f "$source_root/NOTICE"
-          test -f "$source_root/SOURCE.md"
+          test -f "$source_root/source.md"
           test -f "$source_root/vendor/modules.txt"
           cd "$source_root"
           GOPROXY=off GOSUMDB=off go test -mod=vendor ./...

@@ -21,7 +21,7 @@ systemctl --version
 ```
 
 If the first line reports a version below 258, use the system-mode installation
-described in the [operator guide](OPERATOR_INTAKE.md) instead of this
+described in the [operator guide](operator-intake.md) instead of this
 walkthrough. If the
 [release page](https://github.com/dominicnunez/agentos/releases) has no approved
 binary release, there is no supported public installation to use for this
@@ -30,7 +30,7 @@ walkthrough yet.
 ## 1. Install and initialize
 
 Download, verify, and extract the matching approved release archive as described
-in the [README](../README.md#install-agent-os). Install only the two binaries at
+in the [README](../../README.md#install-agent-os). Install only the two binaries at
 this stage; do not run the README's final bare `agentos` command, because that
 starts system-mode setup:
 
@@ -127,6 +127,6 @@ approval-gated and fail closed.
 CI exercises the same dashboard bridge, kernel-authenticated user gateway,
 durable strategy creation, Intent confirmation, Work/Task admission, execution,
 result recovery, and organization projection in
-[`TestDashboardCompletesDurableAgentWorkThroughKernelAuthenticatedGateway`](../cmd/agentos/dashboard_loop_linux_test.go).
+[`TestDashboardCompletesDurableAgentWorkThroughKernelAuthenticatedGateway`](../../cmd/agentos/dashboard_loop_linux_test.go).
 The CI adapter is non-network test infrastructure and cannot be configured by a
 production installation.

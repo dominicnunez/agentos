@@ -5,7 +5,7 @@ It does not attest filesystem, process, network, credential, or resource
 isolation and cannot authorize package installation, external-code execution,
 untrusted repository builds, containers, MCP servers, plugins, or executable
 Skills. Those capabilities remain fail-closed until the effective-environment
-and staged-promotion prerequisites in [Execution authority](EXECUTION_AUTHORITY.md)
+and staged-promotion prerequisites in [Execution authority](../security/execution-authority.md)
 are implemented by a real isolated runtime.
 
 The Lab lets the organization try a bounded approach without treating the

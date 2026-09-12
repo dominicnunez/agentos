@@ -8,7 +8,7 @@ The principal assets are organization, Mission, Goal, Work, Task, identity, know
 
 There is no published release yet according to `SECURITY.md`, so release-publication risk is prospective. The intended default is a single-machine system installation with a restricted `agentos` service account and one verified Linux owner. User-mode installations run with the owner's authority. Organization scoping remains security-relevant for external actors, ledger objects, model context, and budgets, without implying strong hosted multi-tenant isolation.
 
-This model describes code commit `fcef695b591259b2c16b5790b59bb0d5fa09c1b5`, including its CI controls. Implemented controls, incomplete controls, and prerequisites for unsupported execution mechanisms are distinguished below. A passing test is evidence for a control, not proof of comprehensive security.
+This model describes code commit `1cc542b3729b4dbf7165cf62d63df4f6299ec57d`, including its CI controls. Implemented controls, incomplete controls, and prerequisites for unsupported execution mechanisms are distinguished below. A passing test is evidence for a control, not proof of comprehensive security.
 
 # 2. Threat model, Trust boundaries and assumptions
 
@@ -164,7 +164,7 @@ Setup faces wrong-owner binding, PATH substitution, symlink replacement, unsafe 
 
 CI pins actions and tool versions, controls frontend dependency installation, audits dependencies, verifies embedded assets, exercises race/adversarial tests and bounded fuzzing, checks architecture, and builds reproducible archives with checksums, SBOMs, licenses, provenance, and corresponding source.
 
-Ordinary documentation-only changes skip code-related steps while retaining document validation and required job results. The classifier checks a complete local Git diff, including deleted paths and file modes; scripts, schemas, workflows, dependencies, configuration, executable files, and unknown paths still require full checks. Uncertain classification also requires full checks. Release verification fails when its frontend prerequisite does not succeed. Required reviews remain independent, including security review for threat-model changes. The classifier and workflow definitions remain trusted source inputs subject to review; adding a code consumer of an allowed document path requires revisiting that classification. See `docs/development/CI.md` for the exact scope.
+Ordinary documentation-only changes skip code-related steps while retaining document validation and required job results. The classifier checks a complete local Git diff, including deleted paths and file modes; scripts, schemas, workflows, dependencies, configuration, executable files, and unknown paths still require full checks. Uncertain classification also requires full checks. Release verification fails when its frontend prerequisite does not succeed. Required reviews remain independent, including security review for threat-model changes. The classifier and workflow definitions remain trusted source inputs subject to review; adding a code consumer of an allowed document path requires revisiting that classification. See `docs/development/ci.md` for the exact scope.
 
 These checks do not prove live-provider behavior, deployment safety, or absence of vulnerabilities. Provenance is unsigned, publication is separately controlled, and compromise of repository administration, builders, toolchains, or dependency sources remains a supply-chain threat.
 

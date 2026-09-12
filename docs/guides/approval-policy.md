@@ -21,7 +21,7 @@ one effect never grants broader authority.
 Code introduction and execution-surface mutation are separate approval
 boundaries. Approval for one cannot satisfy the other, and neither approval
 makes hostile-code execution available while effective isolation is absent.
-See [Execution authority](EXECUTION_AUTHORITY.md).
+See [Execution authority](../security/execution-authority.md).
 
 Before requesting attention, the runtime persists a replay-complete
 EffectObligation in `PENDING`. Single-use approval consumption and transition
@@ -36,4 +36,4 @@ failure, unknown status, missing evidence, or a changed attempt remains
 `ATTEMPTED` for operator resolution.
 
 No natural-language work channel can decide an approval. The local dashboard uses
-the separate exact-effect control described in [Approval control](APPROVAL_CONTROL.md).
+the separate exact-effect control described in [Approval control](approval-control.md).

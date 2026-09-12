@@ -11,7 +11,7 @@ vector database, semantic retrieval, automatic consolidation, or model-driven
 promotion.
 
 The current runtime wire contract is
-[`schemas/knowledge-record.schema.json`](schemas/knowledge-record.schema.json).
+[`schemas/knowledge-record.schema.json`](../../schemas/knowledge-record.schema.json).
 CI compares that closed schema's property and required-field sets with the Go
 `KnowledgeRecord` type. This schema is the active serialization contract.
 
@@ -153,7 +153,7 @@ An absent classification remains valid for historical records and ordinary
 knowledge search, but is excluded from new model context. Explicit
 `BEHAVIORAL_POLICY` records are also excluded: generic knowledge validation
 does not supply the independent behavioral evidence required by
-[`EXECUTION_AUTHORITY.md`](EXECUTION_AUTHORITY.md#skill-behavioral-policy-integrity).
+[`EXECUTION_AUTHORITY.md`](../security/execution-authority.md#skill-behavioral-policy-integrity).
 Agent judgments and deterministic validation cannot substitute for the human
 factual classification. The same requirement applies to every transitive
 Knowledge source of a selected derivative. No Skill reference is needed for
