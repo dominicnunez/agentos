@@ -42,3 +42,10 @@ Skipping code checks does not waive reviews. Follow `AGENTS.md` for review
 sequencing; changes to `docs/threat-model.md` still require security review after
 a clean general review. Workflow changes themselves require full code checks
 and security review.
+
+## Race-test duration
+
+The race suite has a twenty-minute timeout per Go package. Large SQLite history
+tests incur substantial overhead under the race detector, and hosted runners
+vary in speed. Run `go test -race -timeout=20m ./...` to match CI. Assertion
+failures, data races, and expiry of this timeout fail the check.
