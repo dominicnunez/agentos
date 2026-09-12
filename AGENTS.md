@@ -11,6 +11,10 @@ Agent OS is a Go modular monolith for operating persistent AI-assisted organizat
 - Preserve `docs/handoff/` as the immutable architecture source. Publish any
   strengthened active runtime contract outside that tree instead of silently
   rewriting the handoff snapshot.
+- Keep repository files self-contained. Do not reference workspace-only project
+  files, local planning notes, attachments, or machine-specific project paths.
+  Cite tracked repository files or publicly accessible sources instead. Put any
+  necessary requirement directly in the appropriate repository document.
 
 ## Project-wide boundaries
 
@@ -91,20 +95,16 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
   records; preserve immutable handoff evidence.
 - Keep user-facing messages minimal. Report meaningful outcomes, blockers, and
   decisions rather than routine local commits or repeated compliance statements.
-- Use the project Markdown documents to guide task work and maintain the
+- Use tracked project documentation to guide task work and maintain the
   user-requested goal and evidence of remaining work. Completing one PR does not
   complete the broader goal; do not silently narrow it to the current PR.
-- Incorporate `multi-llm-provider-architecture-prompt.md` into the provider goal.
-  Agent OS should support all providers Hermes offers where feasible, and use
+- Agent OS should support all providers Hermes offers where feasible, and use
   multiple configured providers/models for different agent tasks according to
   what the user has available. Do not constrain an organization to one provider.
   Record feasibility limits and unfinished coverage explicitly.
-- Assess `AGENT_OS_ARCHITECTURAL_IMPROVEMENTS.md` for merit after the current
-  task/PR, preserving the architecture and scope boundaries above. Treat
-  proposals as proposals to evaluate, not automatically approved implementation.
-- These project planning files may be supplied in the parent workspace rather
-  than tracked in a checkout. Consult the supplied originals and maintain
-  traceable status; do not modify the immutable `docs/handoff/` snapshot.
+- Assess proposed architectural improvements for merit after the current task/PR,
+  preserving the architecture and scope boundaries above. Treat proposals as
+  proposals to evaluate, not automatically approved implementation.
 
 ## Commits, PRs, and review sequencing
 
