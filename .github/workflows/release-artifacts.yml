@@ -19,15 +19,23 @@ jobs:
     name: Dashboard frontend
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Select applicable checks
+        id: scope
+        run: python3 scripts/ci_scope.py
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        if: steps.scope.outputs.code != 'false'
         with:
           node-version: 24.19.0
           package-manager-cache: false
       - name: Reproduce embedded dashboard and license evidence
+        if: steps.scope.outputs.code != 'false'
         working-directory: web/dashboard
         run: |
           corepack enable
@@ -43,20 +51,30 @@ jobs:
   verify:
     name: Release artifact verification
     needs: frontend
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Require successful prerequisite
+        if: needs.frontend.result != 'success'
+        run: |
+          echo 'Frontend check did not complete successfully.' >&2
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.frontend.outputs.code != 'false'
         with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: needs.frontend.outputs.code != 'false'
         with:
           go-version-file: go.mod
           cache: false
       - uses: actions/setup-python@8549b9f8f590ad24eab7482f36f6e1e24d34597b # 2026-08-03
+        if: needs.frontend.outputs.code != 'false'
         with:
           python-version-file: .python-version
       - name: Build and verify release-candidate artifacts
+        if: needs.frontend.outputs.code != 'false'
         env:
           GOCACHE: ${{ runner.temp }}/agentos-gocache-a
           GOMODCACHE: ${{ runner.temp }}/agentos-gomodcache-a
@@ -65,6 +83,7 @@ jobs:
           (cd "$RUNNER_TEMP/agentos-release-a" && sha256sum --check SHA256SUMS)
 
       - name: Verify byte reproducibility
+        if: needs.frontend.outputs.code != 'false'
         env:
           GOCACHE: ${{ runner.temp }}/agentos-gocache-b
           GOMODCACHE: ${{ runner.temp }}/agentos-gomodcache-b
@@ -75,6 +94,7 @@ jobs:
             "$RUNNER_TEMP/agentos-release-b"
 
       - name: Verify packaged licenses and corresponding source
+        if: needs.frontend.outputs.code != 'false'
         env:
           GOCACHE: ${{ runner.temp }}/agentos-source-gocache
           GOMODCACHE: ${{ runner.temp }}/agentos-source-gomodcache
@@ -106,6 +126,7 @@ jobs:
           GOPROXY=off GOSUMDB=off go test -mod=vendor ./...
 
       - name: Smoke-test packaged Linux amd64 binaries
+        if: needs.frontend.outputs.code != 'false'
         run: |
           version=$(tr -d '\r\n' < VERSION)
           package_directory="$RUNNER_TEMP/agentos-package"
@@ -122,6 +143,7 @@ jobs:
           grep --fixed-strings "No valid installation" "$RUNNER_TEMP/agentos-doctor.log"
 
       - name: Exercise installed Linux system lifecycle offline
+        if: needs.frontend.outputs.code != 'false'
         env:
           GOCACHE: ${{ runner.temp }}/agentos-installed-gocache
           GOMODCACHE: ${{ runner.temp }}/agentos-installed-gomodcache
