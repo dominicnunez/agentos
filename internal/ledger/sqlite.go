@@ -28,6 +28,7 @@ import (
 type SQLite struct {
 	live               liveContainment
 	db                 *sql.DB
+	watchDB            *sql.DB
 	memoryKeepalive    *sql.DB
 	newWorkCorrelation func() (string, error)
 	now                func() time.Time
@@ -68,10 +69,27 @@ func Open(path string) (*SQLite, error) {
 	if err := l.migrate(context.Background()); err != nil {
 		return nil, errors.Join(err, l.Close())
 	}
+	// Authority observations must not queue behind unrelated writer validation.
+	// This pool reads the same committed ledger with the usual snapshot bounds.
+	l.watchDB, err = sql.Open("sqlite", path)
+	if err != nil {
+		return nil, errors.Join(err, l.Close())
+	}
+	l.watchDB.SetMaxOpenConns(1)
+	l.watchDB.SetMaxIdleConns(1)
+	// Also reject connection-private URI databases: a second connection must
+	// see the migrated ledger, never an empty substitute for its authority.
+	var hasEvents bool
+	if err := l.watchDB.QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM events)").Scan(&hasEvents); err != nil {
+		return nil, errors.Join(fmt.Errorf("open authority reader: %w", err), l.Close())
+	}
 	return l, nil
 }
 func (l *SQLite) Close() error {
 	err := l.db.Close()
+	if l.watchDB != nil {
+		err = errors.Join(err, l.watchDB.Close())
+	}
 	if l.memoryKeepalive != nil {
 		err = errors.Join(err, l.memoryKeepalive.Close())
 	}

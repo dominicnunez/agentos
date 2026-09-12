@@ -177,7 +177,7 @@ func TestProlongedAuthorityContentionStopsLiveCall(t *testing.T) {
 		t.Fatalf("healthy observation expired: %v", context.Cause(call))
 	case <-time.After(containmentObservationTimeout + 100*time.Millisecond):
 	}
-	conn, err := store.db.Conn(t.Context())
+	conn, err := store.watchDB.Conn(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestInitialContainmentReadFailurePreventsDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	conn, err := store.db.Conn(t.Context())
+	conn, err := store.watchDB.Conn(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestAuthorityReadFailureIsContainmentUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	conn, err := store.db.Conn(t.Context())
+	conn, err := store.watchDB.Conn(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,11 +439,11 @@ func TestLiveContainmentConnectionContentionDoesNotDestroyAuthority(t *testing.T
 		t.Fatal(err)
 	}
 	defer release()
-	conn, err := store.db.Conn(t.Context())
+	conn, err := store.watchDB.Conn(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Occupy the single connection beyond a monitor acquisition deadline.
+	// Occupy the observation connection beyond a monitor acquisition deadline.
 	timer := time.NewTimer(400 * time.Millisecond)
 	select {
 	case <-call.Done():
@@ -520,6 +520,15 @@ func TestContainmentSnapshotCancellationPreservesPrivateMemoryAuthority(t *testi
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("snapshot ignored cancellation: %v", err)
 	}
+	// Force disposal even if this cancellation happened to reuse the connection.
+	conn, err := store.watchDB.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Raw(func(any) error { return driver.ErrBadConn }); !errors.Is(err, driver.ErrBadConn) {
+		t.Fatalf("discard observation connection: %v", err)
+	}
+	_ = conn.Close()
 	epoch, frozen, err := store.containmentEpoch(t.Context(), "organization-1")
 	if err != nil || epoch <= 0 || frozen {
 		t.Fatalf("cancelled snapshot destroyed authority: epoch=%d frozen=%t err=%v", epoch, frozen, err)
