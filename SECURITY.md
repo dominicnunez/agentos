@@ -35,5 +35,5 @@ issue tracker is enabled.
 The V1 runtime treats model output and operator text as untrusted, separates
 work, completion-review, and approval credentials, and keeps real providers and
 consequential adapters disabled by default. See
-[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for trust boundaries, controls,
+[docs/threat-model.md](docs/threat-model.md) for trust boundaries, controls,
 known residual risks, and verification expectations.

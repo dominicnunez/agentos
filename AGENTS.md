@@ -71,7 +71,7 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
 8. Keep PRs cohesive and bounded without omitting necessary callers merely to
    reduce diff size. Track independent confirmed defects under the issue policy
    below and resolve them before proceeding to later goal parts.
-9. Keep `docs/THREAT_MODEL.md` aligned with code changes affecting architecture,
+9. Keep `docs/threat-model.md` aligned with code changes affecting architecture,
    trust boundaries, attack surfaces, security controls, prerequisites, residual
    risks, or severity. Update it in the same PR as relevant code and keep its
    stated baseline accurate. Distinguish implemented controls from incomplete
@@ -139,7 +139,7 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
   project file outside the repository. Estimate the first status check from
   comparable observations and adjust as evidence changes; avoid frequent fixed
   polling and never treat an estimated completion time as an actual reply.
-- Security-sensitive code and any PR changing `docs/THREAT_MODEL.md` require a
+- Security-sensitive code and any PR changing `docs/threat-model.md` require a
   security review. Request it by commenting `@codex security review` only after
   general review has returned with no outstanding issues. This supersedes the
   earlier permission to request security review before general review finishes.
