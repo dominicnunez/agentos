@@ -196,6 +196,16 @@ func BindAuthorityAdmissions(stream []Event, records []AuthorityRecord) ([]Autho
 }
 
 func resolveAuthorityAdmissions(stream []Event, records []AuthorityRecord, requireBound bool) ([]CapabilityLeaseAdmission, []OrganizationFreezeAdmission, []AuthorityRecord, error) {
+	streamEventIDs := make(map[string]struct{})
+	for _, event := range stream {
+		if !RequiresAuthorityRecordAdmission(event.EventType) || event.EventID == "" {
+			continue
+		}
+		if _, duplicate := streamEventIDs[event.EventID]; duplicate {
+			return nil, nil, nil, fmt.Errorf("authority admission event %s is duplicated", event.EventID)
+		}
+		streamEventIDs[event.EventID] = struct{}{}
+	}
 	ordered := append([]AuthorityRecord(nil), records...)
 	sort.Slice(ordered, func(i, j int) bool {
 		if ordered[i].Kind != ordered[j].Kind {
@@ -210,10 +220,10 @@ func resolveAuthorityAdmissions(stream []Event, records []AuthorityRecord, requi
 	usedEvents := make(map[string]struct{})
 	eventIndex := indexAuthorityEvents(stream)
 	priorBodies := make(map[string][]byte)
-	priorRecords := make(map[string]AuthorityRecord)
 	priorSequences := make(map[string]int64)
 	organizations := make(map[string]string)
 	versions := make(map[string]int)
+	freezeCursors := make(map[string]FreezeCursor)
 	leasing := make([]CapabilityLeaseAdmission, 0)
 	freezes := make([]OrganizationFreezeAdmission, 0)
 	bound := make([]AuthorityRecord, 0, len(ordered))
@@ -222,12 +232,9 @@ func resolveAuthorityAdmissions(stream []Event, records []AuthorityRecord, requi
 		if record.Version != versions[key]+1 {
 			return nil, nil, nil, fmt.Errorf("authority record %s/%s/%d is noncontiguous", record.Kind, record.RecordID, record.Version)
 		}
-		if err := validateAuthorityRecordTransition(record.Kind, record.RecordID, record.Version, record.Body, priorBodies[key], false); err != nil {
-			return nil, nil, nil, fmt.Errorf("authority record %s/%s/%d: %w", record.Kind, record.RecordID, record.Version, err)
-		}
-		if record.Kind == authorityKindFreeze {
-			if err := ValidateFreezeRecord(record, priorRecords[key]); err != nil {
-				return nil, nil, nil, err
+		if record.Kind != authorityKindFreeze {
+			if err := validateAuthorityRecordTransition(record.Kind, record.RecordID, record.Version, record.Body, priorBodies[key], false); err != nil {
+				return nil, nil, nil, fmt.Errorf("authority record %s/%s/%d: %w", record.Kind, record.RecordID, record.Version, err)
 			}
 		}
 		if requireBound && record.AdmissionEventID == "" {
@@ -238,7 +245,15 @@ func resolveAuthorityAdmissions(stream []Event, records []AuthorityRecord, requi
 			return nil, nil, nil, err
 		}
 		record.AdmissionEventID = event.EventID
-		priorRecords[key] = record
+		var freezeAdmission OrganizationFreezeAdmission
+		if record.Kind == authorityKindFreeze {
+			next, admission, err := appendFreezePair(freezeCursors[key], record, event, usedEvents)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			freezeCursors[key] = next
+			freezeAdmission = admission
+		}
 		bound = append(bound, record)
 		versions[key] = record.Version
 		priorBodies[key] = append([]byte(nil), record.Body...)
@@ -251,9 +266,7 @@ func resolveAuthorityAdmissions(stream []Event, records []AuthorityRecord, requi
 			_ = decodeExactEventJSON(record.Body, &lease)
 			leasing = append(leasing, CapabilityLeaseAdmission{Lease: lease, OrganizationID: core.ID(event.OrganizationID), Sequence: event.Sequence})
 		case authorityKindFreeze:
-			var state organizationFreezePayload
-			_ = decodeExactEventJSON(record.Body, &state)
-			freezes = append(freezes, OrganizationFreezeAdmission{OrganizationID: state.OrganizationID, EventRef: event.EventID, Frozen: state.Frozen, Sequence: event.Sequence, Version: record.Version, Control: state.Control})
+			freezes = append(freezes, freezeAdmission)
 		}
 	}
 	for _, event := range stream {

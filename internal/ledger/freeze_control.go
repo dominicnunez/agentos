@@ -18,16 +18,12 @@ func (l *SQLite) ReadFreeze(ctx context.Context, organization core.ID) (authorit
 	if organization == "" {
 		return authority.FreezeSnapshot{}, authority.ErrFreezeInvalid
 	}
-	var snapshot authority.FreezeSnapshot
-	err := l.withContainmentSnapshot(ctx, func(tx *sql.Tx) error {
-		var err error
-		snapshot, _, _, err = readFreeze(ctx, tx, organization)
-		return err
-	})
+	view, err := l.prepareFreeze(ctx, string(organization))
 	if err != nil {
 		return authority.FreezeSnapshot{}, err
 	}
-	return snapshot, nil
+	snapshot, _, _, err := freezeSnapshot(view.history, organization)
+	return snapshot, err
 }
 
 func (l *SQLite) SetFreeze(ctx context.Context, organization, actorID core.ID, actorKind core.PrincipalKind, change authority.FreezeChange) (authority.FreezeSnapshot, error) {
@@ -43,8 +39,13 @@ func (l *SQLite) SetFreeze(ctx context.Context, organization, actorID core.ID, a
 	defer l.live.mu.Unlock()
 	var result authority.FreezeSnapshot
 	var hold *core.SecurityHoldCause
+	var committed *freezeView
 	err := l.withTx(ctx, func(tx *sql.Tx) error {
-		current, prior, _, err := readFreeze(ctx, tx, organization)
+		view, err := l.freezeView(ctx, tx, string(organization), true)
+		if err != nil {
+			return err
+		}
+		current, prior, _, err := freezeSnapshot(view.history, organization)
 		if err != nil {
 			return err
 		}
@@ -55,6 +56,7 @@ func (l *SQLite) SetFreeze(ctx context.Context, organization, actorID core.ID, a
 			proof.PriorVersion == change.ExpectedVersion && proof.PriorEventRef == change.ExpectedEventRef &&
 			current.State.Frozen == change.Frozen && current.State.Reason == change.Reason {
 			result = current
+			committed = view
 			return nil
 		}
 		if current.Version != change.ExpectedVersion || current.EventRef != change.ExpectedEventRef ||
@@ -82,8 +84,14 @@ func (l *SQLite) SetFreeze(ctx context.Context, organization, actorID core.ID, a
 		if err := appendRecord(ctx, tx, draft, record.Kind, record.RecordID, record.Version, body); err != nil {
 			return err
 		}
+		// The already validated prefix is private until commit, including when
+		// this was a cold read. Validate the one appended revision directly.
+		committed, err = l.appendFreezeView(ctx, tx, view)
+		if err != nil {
+			return err
+		}
 		var event events.Event
-		result, _, event, err = readFreeze(ctx, tx, organization)
+		result, _, event, err = freezeSnapshot(committed.history, organization)
 		if err != nil {
 			return err
 		}
@@ -95,6 +103,7 @@ func (l *SQLite) SetFreeze(ctx context.Context, organization, actorID core.ID, a
 	if err != nil {
 		return authority.FreezeSnapshot{}, err
 	}
+	l.freezes.put(committed)
 	if hold != nil {
 		l.cancelOrganizationLocked(string(organization), *hold)
 	}
@@ -102,16 +111,26 @@ func (l *SQLite) SetFreeze(ctx context.Context, organization, actorID core.ID, a
 }
 
 func readFreeze(ctx context.Context, tx *sql.Tx, organization core.ID) (authority.FreezeSnapshot, events.AuthorityRecord, events.Event, error) {
-	record, event, found, err := latestAuthorityAdmission(ctx, tx, "organization_freeze", string(organization))
+	history, err := loadFreezeHistory(ctx, tx, string(organization))
 	if err != nil {
-		return authority.FreezeSnapshot{}, record, event, err
+		return authority.FreezeSnapshot{}, events.AuthorityRecord{}, events.Event{}, err
 	}
+	return freezeSnapshot(history, organization)
+}
+
+func freezeSnapshot(history freezeHistory, organization core.ID) (authority.FreezeSnapshot, events.AuthorityRecord, events.Event, error) {
+	revision, found := history.latest()
+	record, event := revision.record, revision.event
 	if !found {
 		return authority.FreezeSnapshot{State: core.FreezeState{OrganizationID: organization}}, record, event, nil
 	}
-	var state core.FreezeState
-	if decodeExactJSONBytes(record.Body, &state) != nil || state.OrganizationID != organization || event.OrganizationID != string(organization) {
+	state := revision.state
+	if state.OrganizationID != organization || event.OrganizationID != string(organization) {
 		return authority.FreezeSnapshot{}, record, event, fmt.Errorf("freeze state crosses its organization")
+	}
+	if state.Control != nil {
+		proof := *state.Control
+		state.Control = &proof
 	}
 	return authority.FreezeSnapshot{State: state, EventRef: event.EventID, Version: record.Version}, record, event, nil
 }

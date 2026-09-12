@@ -37,6 +37,56 @@ func TestFreezeSnapshotLateCancel(t *testing.T) {
 	}
 }
 
+func TestFreezeHistoryLivePolling(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	seedFreezeHistory(t, store, 4096)
+	var calls []context.Context
+	for range 32 {
+		live, finish, err := store.BeginExecutionContext(t.Context(), "org-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(finish)
+		calls = append(calls, live)
+	}
+	// Inactive lookups may evict idle views, but cannot evict this live org.
+	for i := range 12 {
+		if _, err := store.ReadFreeze(t.Context(), core.ID(fmt.Sprintf("idle-%d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Healthy released history must survive multiple real watchdog windows.
+	// This exercises the production deadline, not a microbenchmark threshold.
+	observation := time.NewTimer(2 * containmentObservationTimeout)
+	defer observation.Stop()
+	<-observation.C
+	for _, live := range calls {
+		if live.Err() != nil {
+			t.Fatalf("healthy shared history cancelled live work: %v", context.Cause(live))
+		}
+	}
+	current, err := store.ReadFreeze(t.Context(), "org-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold, err := store.SetFreeze(t.Context(), "org-1", "owner-1", core.PrincipalHuman, authority.FreezeChange{
+		Frozen: true, ExpectedVersion: current.Version, ExpectedEventRef: current.EventRef,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, live := range calls {
+		var cause core.SecurityHoldCause
+		if !errors.As(context.Cause(live), &cause) || cause.EventRef != hold.EventRef {
+			t.Fatalf("appended hold did not cancel shared live work: %v", context.Cause(live))
+		}
+	}
+}
+
 func TestOwnerFreezeBuriedControl(t *testing.T) {
 	for _, defect := range []string{"actor", "kind", "prior-event", "prior-version", "release-without-hold", "time"} {
 		t.Run(defect, func(t *testing.T) {
@@ -183,12 +233,21 @@ func seedFreezeHistory(t testing.TB, store *SQLite, count int) {
 }
 
 func TestFreezeHistoryQueryPlan(t *testing.T) {
+	checkFreezeQueryPlan(t, freezeHistorySQL, []any{"org-1", "org-1", "org-1", "org-1"}, "records_admission_event_idx (admission_event_id=?)")
+}
+
+func TestFreezeTailQueryPlan(t *testing.T) {
+	checkFreezeQueryPlan(t, freezeTailSQL, []any{"org-1", "org-1", 4096, "org-1", 4096, "org-1", 4096}, "events_recent_commit_idx (organization_id=? AND event_type=? AND sequence>?)")
+}
+
+func checkFreezeQueryPlan(t *testing.T, query string, args []any, expected string) {
+	t.Helper()
 	store, err := Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	rows, err := store.db.QueryContext(t.Context(), "EXPLAIN QUERY PLAN "+freezeHistorySQL, "org-1", "org-1", "org-1", "org-1")
+	rows, err := store.db.QueryContext(t.Context(), "EXPLAIN QUERY PLAN "+query, args...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,12 +266,12 @@ func TestFreezeHistoryQueryPlan(t *testing.T) {
 	}
 	plan := strings.Join(plans, "\n")
 	t.Log(plan)
-	if strings.Contains(plan, "SCAN r") || strings.Contains(plan, "SCAN e") || !strings.Contains(plan, "records_admission_event_idx (admission_event_id=?)") {
+	if strings.Contains(plan, "SCAN r") || strings.Contains(plan, "SCAN e") || !strings.Contains(plan, expected) {
 		t.Fatalf("history query lost bounded tenant or exact-event lookup:\n%s", plan)
 	}
 }
 
-func BenchmarkFreezeHistory(b *testing.B) {
+func BenchmarkFreezeColdHistory(b *testing.B) {
 	for _, count := range []int{16, 256, 4096} {
 		b.Run(fmt.Sprint(count), func(b *testing.B) {
 			store, err := Open(":memory:")
@@ -241,6 +300,45 @@ func BenchmarkFreezeHistory(b *testing.B) {
 						})
 						if err != nil {
 							b.Fatal(err)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func BenchmarkFreezeLiveHistory(b *testing.B) {
+	for _, count := range []int{16, 256, 4096} {
+		b.Run(fmt.Sprint(count), func(b *testing.B) {
+			store, err := Open(":memory:")
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.Cleanup(func() { _ = store.Close() })
+			seedFreezeHistory(b, store, count)
+			if _, err := store.ReadFreeze(b.Context(), "org-1"); err != nil {
+				b.Fatal(err)
+			}
+			for _, operation := range []string{"status", "idle", "interval"} {
+				b.Run(operation, func(b *testing.B) {
+					b.ReportAllocs()
+					for b.Loop() {
+						if operation == "status" {
+							state, err := store.ReadFreeze(b.Context(), "org-1")
+							if err != nil || state.Version != count || state.State.Frozen {
+								b.Fatalf("history status incorrect: %+v %v", state, err)
+							}
+							continue
+						}
+						after := int64(count)
+						if operation == "interval" {
+							after = 0
+						}
+						epoch, hold, err := store.containmentSince(b.Context(), "org-1", after)
+						if err != nil || epoch != int64(count) || (operation == "idle" && hold != nil) ||
+							(operation == "interval" && (hold == nil || hold.Sequence != 1)) {
+							b.Fatalf("history interval incorrect: epoch=%d hold=%v err=%v", epoch, hold, err)
 						}
 					}
 				})

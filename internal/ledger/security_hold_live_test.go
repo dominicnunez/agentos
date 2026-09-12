@@ -574,6 +574,10 @@ func TestCancelledWriterPreservesPrivateMemoryLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = other.Close() }()
+	// Cold admission prepares the validated view before using the watch pool.
+	if _, err := other.prepareFreeze(t.Context(), "organization-1"); err != nil {
+		t.Fatal(err)
+	}
 	epoch, _, err := other.containmentEpoch(t.Context(), "organization-1")
 	if err != nil || epoch != 0 {
 		t.Fatalf("private memory databases shared authority: epoch=%d err=%v", epoch, err)

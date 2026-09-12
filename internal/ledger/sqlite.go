@@ -27,6 +27,7 @@ import (
 
 type SQLite struct {
 	live               liveContainment
+	freezes            freezeCache
 	db                 *sql.DB
 	watchDB            *sql.DB
 	memoryKeepalive    *sql.DB

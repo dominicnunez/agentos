@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -45,12 +46,18 @@ func (l *SQLite) CheckInferenceContext(ctx context.Context, organization string)
 	defer func() {
 		resultErr = containmentReadFailure(resultErr)
 	}()
-	if _, ok := ctx.Value(containmentGenerationKey{}).(containmentGeneration); !ok {
+	generation, ok := ctx.Value(containmentGenerationKey{}).(containmentGeneration)
+	if !ok || generation.organization != organization {
 		return fmt.Errorf("inference containment generation is required")
 	}
-	return l.withContainmentSnapshot(ctx, func(tx *sql.Tx) error {
-		return validatePreparationGeneration(ctx, tx, organization)
-	})
+	_, hold, err := l.containmentSince(ctx, organization, generation.epoch)
+	if err != nil {
+		return err
+	}
+	if hold != nil {
+		return *hold
+	}
+	return nil
 }
 
 // BeginInferenceContext registers before admission under the same lock used to
@@ -65,6 +72,16 @@ func (l *SQLite) BeginInferenceContext(ctx context.Context, organization string)
 func (l *SQLite) BeginExecutionContext(ctx context.Context, organization string) (context.Context, func(), error) {
 	if ctx == nil || organization == "" {
 		return nil, nil, fmt.Errorf("live inference scope is required")
+	}
+	l.freezes.retain(organization)
+	registered := false
+	defer func() {
+		if !registered {
+			l.freezes.release(organization)
+		}
+	}()
+	if _, err := l.prepareFreeze(ctx, organization); err != nil {
+		return nil, nil, containmentReadFailure(err)
 	}
 	l.live.mu.Lock()
 	defer l.live.mu.Unlock()
@@ -141,12 +158,17 @@ func (l *SQLite) BeginExecutionContext(ctx context.Context, organization string)
 			}
 		}
 	}()
+	registered = true
+	var finishOnce sync.Once
 	return callCtx, func() {
-		cancel(nil)
-		<-done
-		l.live.mu.Lock()
-		delete(l.live.calls, id)
-		l.live.mu.Unlock()
+		finishOnce.Do(func() {
+			cancel(nil)
+			<-done
+			l.live.mu.Lock()
+			delete(l.live.calls, id)
+			l.live.mu.Unlock()
+			l.freezes.release(organization)
+		})
 	}, nil
 }
 
@@ -155,11 +177,19 @@ func (l *SQLite) BeginExecutionContext(ctx context.Context, organization string)
 // A release alone is not evidence that this execution was held.
 func (l *SQLite) containmentSince(ctx context.Context, organization string, after int64) (next int64, cause *core.SecurityHoldCause, resultErr error) {
 	next = after
+	var view *freezeView
 	resultErr = l.withContainmentSnapshot(ctx, func(tx *sql.Tx) error {
 		var err error
-		next, cause, err = containmentSinceTx(ctx, tx, organization, after)
+		view, err = l.freezeView(ctx, tx, organization, false)
+		if err != nil {
+			return err
+		}
+		next, cause, err = containmentSinceHistory(view.history, after)
 		return err
 	})
+	if resultErr == nil {
+		l.freezes.put(view)
+	}
 	return next, cause, resultErr
 }
 
@@ -223,16 +253,16 @@ func containmentSinceHistory(history freezeHistory, after int64) (int64, *core.S
 	if latest.event.Sequence < after {
 		return after, nil, fmt.Errorf("containment authority regressed")
 	}
-	var cause *core.SecurityHoldCause
-	for _, revision := range history.revisions {
-		if revision.event.Sequence <= after {
-			continue
-		}
-		if revision.state.Frozen && cause == nil {
-			cause = &core.SecurityHoldCause{OrganizationID: core.ID(history.organization), EventRef: revision.event.EventID, Sequence: revision.event.Sequence}
+	if latest.event.Sequence == after {
+		return after, nil, nil
+	}
+	first := sort.Search(len(history.revisions), func(i int) bool { return history.revisions[i].event.Sequence > after })
+	for _, revision := range history.revisions[first:] {
+		if revision.state.Frozen {
+			return latest.event.Sequence, &core.SecurityHoldCause{OrganizationID: core.ID(history.organization), EventRef: revision.event.EventID, Sequence: revision.event.Sequence}, nil
 		}
 	}
-	return latest.event.Sequence, cause, nil
+	return latest.event.Sequence, nil, nil
 }
 
 // validatePreparationGeneration uses the writer snapshot, independent of the
@@ -259,18 +289,23 @@ func validatePreparationGeneration(ctx context.Context, tx *sql.Tx, organization
 // containmentEpoch reads validated authority and its event sequence in one
 // snapshot. Sequence changes latch cancellation rather than resuming old calls.
 func (l *SQLite) containmentEpoch(ctx context.Context, organization string) (epoch int64, frozen bool, resultErr error) {
+	var view *freezeView
 	resultErr = l.withContainmentSnapshot(ctx, func(tx *sql.Tx) error {
-		history, err := loadFreezeHistory(ctx, tx, organization)
+		var err error
+		view, err = l.freezeView(ctx, tx, organization, false)
 		if err != nil {
 			return err
 		}
-		revision, found := history.latest()
+		revision, found := view.history.latest()
 		if !found {
 			return nil
 		}
 		epoch, frozen = revision.event.Sequence, revision.state.Frozen
 		return nil
 	})
+	if resultErr == nil {
+		l.freezes.put(view)
+	}
 	return epoch, frozen, resultErr
 }
 

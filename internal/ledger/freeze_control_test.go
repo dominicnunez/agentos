@@ -185,7 +185,7 @@ func TestOwnerFreezeConcurrentRelease(t *testing.T) {
 	}
 }
 
-func TestOwnerFreezeFailedCommit(t *testing.T) {
+func TestOwnerFreezeCancelledWrite(t *testing.T) {
 	store, err := Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -196,12 +196,13 @@ func TestOwnerFreezeFailedCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer finish()
-	_, err = store.db.ExecContext(t.Context(), `CREATE TRIGGER reject_test_freeze BEFORE INSERT ON records WHEN NEW.kind='organization_freeze' BEGIN SELECT RAISE(ABORT,'test persistence failure'); END`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := store.SetFreeze(t.Context(), "org-1", "owner-1", core.PrincipalHuman, authority.FreezeChange{Frozen: true})
-	if err == nil || result.EventRef != "" || result.Version != 0 {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	// The writer obtains time after validating current authority, immediately
+	// before constructing its new admission. Cancel at that persistence boundary.
+	store.now = func() time.Time { cancel(); return time.Now().UTC() }
+	result, err := store.SetFreeze(ctx, "org-1", "owner-1", core.PrincipalHuman, authority.FreezeChange{Frozen: true})
+	if !errors.Is(err, context.Canceled) || result.EventRef != "" || result.Version != 0 {
 		t.Fatalf("failed transaction reported durable success: %+v %v", result, err)
 	}
 	if active.Err() != nil {

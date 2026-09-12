@@ -25,6 +25,7 @@ type freezeHistory struct {
 	organization string
 	revisions    []freezeRevision
 	byEvent      map[string]int
+	cursor       events.FreezeCursor
 }
 
 const freezeHistorySQL = `SELECT r.kind,r.record_id,r.version,r.body,r.admission_event_id,
@@ -46,21 +47,25 @@ ORDER BY 3,7`
 // arm retains records whose event is missing or crosses the expected envelope.
 // This lets the shared full resolver reject either half of a broken binding.
 func loadFreezeHistory(ctx context.Context, tx *sql.Tx, organization string) (freezeHistory, error) {
-	history := freezeHistory{organization: organization}
-	if organization == "" {
-		return history, fmt.Errorf("freeze history organization is required")
-	}
-	rows, err := tx.QueryContext(ctx, freezeHistorySQL, organization, organization, organization, organization)
+	records, stream, err := readFreezeRows(ctx, tx, freezeHistorySQL, organization, organization, organization, organization)
 	if err != nil {
-		return history, fmt.Errorf("read organization freeze history: %w", err)
+		return freezeHistory{}, err
+	}
+	return resolveFreezeRows(ctx, organization, records, stream, nil)
+}
+
+func readFreezeRows(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]events.AuthorityRecord, []events.Event, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read organization freeze history: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	records := make([]events.AuthorityRecord, 0)
-	stream := make([]events.Event, 0)
+	var records []events.AuthorityRecord
+	var stream []events.Event
 	for rows.Next() {
 		record, event, hasRecord, hasEvent, err := scanFreezeHistoryRow(rows)
 		if err != nil {
-			return history, fmt.Errorf("scan organization freeze history: %w", err)
+			return nil, nil, fmt.Errorf("scan organization freeze history: %w", err)
 		}
 		if hasRecord {
 			records = append(records, record)
@@ -69,10 +74,22 @@ func loadFreezeHistory(ctx context.Context, tx *sql.Tx, organization string) (fr
 			stream = append(stream, event)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return history, fmt.Errorf("iterate organization freeze history: %w", err)
+	return records, stream, rows.Err()
+}
+
+func resolveFreezeRows(ctx context.Context, organization string, records []events.AuthorityRecord, stream []events.Event, prior *freezeHistory) (freezeHistory, error) {
+	history := freezeHistory{organization: organization}
+	if organization == "" {
+		return history, fmt.Errorf("freeze history organization is required")
 	}
-	_, admissions, err := events.ResolveAuthorityAdmissions(stream, records)
+	var cursor events.FreezeCursor
+	if prior != nil {
+		if prior.organization != organization {
+			return history, fmt.Errorf("freeze prefix crosses organizations")
+		}
+		cursor = prior.cursor
+	}
+	cursor, admissions, err := cursor.Append(stream, records)
 	if err != nil {
 		return history, fmt.Errorf("resolve organization freeze history: %w", err)
 	}
@@ -91,6 +108,13 @@ func loadFreezeHistory(ctx context.Context, tx *sql.Tx, organization string) (fr
 	}
 	history.revisions = make([]freezeRevision, 0, len(records))
 	history.byEvent = make(map[string]int, len(records))
+	if prior != nil {
+		history.revisions = append(history.revisions, prior.revisions...)
+		for eventRef, index := range prior.byEvent {
+			history.byEvent[eventRef] = index
+		}
+	}
+	history.cursor = cursor
 	for i, record := range records {
 		admission := admissions[i]
 		event, found := eventsByID[admission.EventRef]

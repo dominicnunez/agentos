@@ -679,6 +679,22 @@ records without changing their bytes, permit upgrade to owner evidence, and
 reject removal of that evidence in later history. New control envelopes cannot
 carry Task, execution, recipient, artifact, or capability authority.
 
+Cold admission validates the complete organization freeze history on the ordinary
+database pool before registering live work. Live observations share an immutable
+validated prefix per organization. Storage v11 triggers update observation
+tokens in the same transaction as relevant record or event changes, including
+rewrites, deletions, and conflicting replacements. Each poll reads tokens and any
+new admissions in one snapshot: unchanged history reuses the proof; an appended
+suffix must pass the same validation as full replay. Rewritten history cannot
+reuse the prefix, and live observations fail closed until a fresh full validation
+is available. Schema changes require revalidation of the storage contract and
+trigger definitions. Status reads and the typed writer can rebuild the proof;
+the writer publishes a candidate only after successful commit. Active work pins
+its organization's cache entry; at most eight inactive entries are retained.
+Cold validation and copying a changed history grow with history size, but idle
+polls do not replay it. Unavailable or expired observations never renew the
+containment watchdog.
+
 Full suspended-task reconciliation/resumption, independent abort reliability,
 and complete coordination/output/effect and cancellation-timeline coverage remain
 unfinished under [issue #178](https://github.com/dominicnunez/agentos/issues/178).
