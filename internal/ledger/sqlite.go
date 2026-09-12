@@ -43,7 +43,9 @@ func Open(path string) (*SQLite, error) {
 		// A cancelled transaction can make database/sql discard its connection.
 		// Keep each private memory database alive independently of that pool,
 		// without sharing it with any other Open call or issuing keeper queries.
-		path = "file:agentos-memory-" + id + "?mode=memory&cache=shared"
+		// memdb shares storage without shared-cache table locks, whose driver's
+		// unlock-notify retry does not observe cancellation or busy timeouts.
+		path = "file:/agentos-memory-" + id + "?vfs=memdb"
 		keepalive, err = sql.Open("sqlite", path)
 		if err != nil {
 			return nil, err
