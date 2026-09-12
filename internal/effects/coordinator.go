@@ -19,6 +19,8 @@ type Records interface {
 	Records(context.Context, string, string) ([][]byte, error)
 }
 type Adapter interface {
+	// Apply is called after ATTEMPTED is durable. An error does not prove that
+	// the effect failed or was not applied; destination reconciliation is required.
 	Apply(context.Context, core.EffectObligation) ([]string, error)
 }
 type ApprovalReader interface {
@@ -158,9 +160,7 @@ func (c *Coordinator) Execute(ctx context.Context, o core.EffectObligation) (cor
 	o = attempt
 	evidence, err := c.adapter.Apply(ctx, o)
 	if err != nil {
-		o.Status = core.EffectFailed
-		_ = c.record(ctx, o, version+2)
-		return o, err
+		return o, errors.Join(ErrEffectUncertain, err)
 	}
 	evidence = normalizedEvidence(evidence)
 	if len(evidence) == 0 {

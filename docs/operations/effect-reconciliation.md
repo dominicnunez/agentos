@@ -1,8 +1,16 @@
 # Effect reconciliation
 
-Agent OS reconciles crash-ambiguous `ATTEMPTED` effects through a separate,
+Agent OS reconciles uncertain `ATTEMPTED` effects through a separate,
 read-only status boundary. Reconciliation never calls the adapter that performs
 the effect and has no resend operation.
+
+Once an attempt is durable, an adapter error, cancellation, or timeout leaves it
+`ATTEMPTED`: a lost response does not prove that the destination failed to apply
+the effect. The coordinator returns `ErrEffectUncertain` together with the
+underlying error, including when the adapter also returns partial evidence.
+Restart recovery discovers the attempt and requires destination evidence before
+recording success or failure. Existing historical terminal records are preserved;
+this rule does not retroactively reclassify earlier `FAILED` records.
 
 The boundary is disabled unless `AGENTOS_EFFECT_RECONCILERS_FILE` names a
 reviewed registry. Each binding is exact for one organization, action, and
