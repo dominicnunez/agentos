@@ -57,7 +57,7 @@ class BuildAIMSAssessmentBundleTest(unittest.TestCase):
             "docs/ORGANIZATIONAL_KNOWLEDGE.md",
             "docs/SHARED_COORDINATION.md",
             "docs/SQLITE_RECOVERY.md",
-            "docs/THREAT_MODEL.md",
+            "docs/threat-model.md",
             "docs/development/BUILD_CONTRACT.md",
             "docs/development/ISO_IEC_42001_READINESS.md",
             "docs/development/V1_ACCEPTANCE_STATUS.md",

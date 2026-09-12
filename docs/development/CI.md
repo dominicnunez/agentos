@@ -39,6 +39,6 @@ history and assessment-bundle checks, and classifier regressions remain active.
 The existing history-verification rules are unchanged.
 
 Skipping code checks does not waive reviews. Follow `AGENTS.md` for review
-sequencing; changes to `docs/THREAT_MODEL.md` still require security review after
+sequencing; changes to `docs/threat-model.md` still require security review after
 a clean general review. Workflow changes themselves require full code checks
 and security review.

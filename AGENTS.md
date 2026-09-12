@@ -11,6 +11,10 @@ Agent OS is a Go modular monolith for operating persistent AI-assisted organizat
 - Preserve `docs/handoff/` as the immutable architecture source. Publish any
   strengthened active runtime contract outside that tree instead of silently
   rewriting the handoff snapshot.
+- Keep repository files self-contained. Do not reference workspace-only project
+  files, local planning notes, attachments, or machine-specific project paths.
+  Cite tracked repository files or publicly accessible sources instead. Put any
+  necessary requirement directly in the appropriate repository document.
 
 ## Project-wide boundaries
 
@@ -71,7 +75,7 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
 8. Keep PRs cohesive and bounded without omitting necessary callers merely to
    reduce diff size. Track independent confirmed defects under the issue policy
    below and resolve them before proceeding to later goal parts.
-9. Keep `docs/THREAT_MODEL.md` aligned with code changes affecting architecture,
+9. Keep `docs/threat-model.md` aligned with code changes affecting architecture,
    trust boundaries, attack surfaces, security controls, prerequisites, residual
    risks, or severity. Update it in the same PR as relevant code and keep its
    stated baseline accurate. Distinguish implemented controls from incomplete
@@ -91,20 +95,16 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
   records; preserve immutable handoff evidence.
 - Keep user-facing messages minimal. Report meaningful outcomes, blockers, and
   decisions rather than routine local commits or repeated compliance statements.
-- Use the project Markdown documents to guide task work and maintain the
+- Use tracked project documentation to guide task work and maintain the
   user-requested goal and evidence of remaining work. Completing one PR does not
   complete the broader goal; do not silently narrow it to the current PR.
-- Incorporate `multi-llm-provider-architecture-prompt.md` into the provider goal.
-  Agent OS should support all providers Hermes offers where feasible, and use
+- Agent OS should support all providers Hermes offers where feasible, and use
   multiple configured providers/models for different agent tasks according to
   what the user has available. Do not constrain an organization to one provider.
   Record feasibility limits and unfinished coverage explicitly.
-- Assess `AGENT_OS_ARCHITECTURAL_IMPROVEMENTS.md` for merit after the current
-  task/PR, preserving the architecture and scope boundaries above. Treat
-  proposals as proposals to evaluate, not automatically approved implementation.
-- These project planning files may be supplied in the parent workspace rather
-  than tracked in a checkout. Consult the supplied originals and maintain
-  traceable status; do not modify the immutable `docs/handoff/` snapshot.
+- Assess proposed architectural improvements for merit after the current task/PR,
+  preserving the architecture and scope boundaries above. Treat proposals as
+  proposals to evaluate, not automatically approved implementation.
 
 ## Commits, PRs, and review sequencing
 
@@ -139,7 +139,7 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
   project file outside the repository. Estimate the first status check from
   comparable observations and adjust as evidence changes; avoid frequent fixed
   polling and never treat an estimated completion time as an actual reply.
-- Security-sensitive code and any PR changing `docs/THREAT_MODEL.md` require a
+- Security-sensitive code and any PR changing `docs/threat-model.md` require a
   security review. Request it by commenting `@codex security review` only after
   general review has returned with no outstanding issues. This supersedes the
   earlier permission to request security review before general review finishes.

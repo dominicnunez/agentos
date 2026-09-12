@@ -59,7 +59,7 @@ EVIDENCE_FILES = {
     "docs/ORGANIZATIONAL_KNOWLEDGE.md": "organizational-memory",
     "docs/SHARED_COORDINATION.md": "shared-coordination",
     "docs/SQLITE_RECOVERY.md": "resilience-and-recovery",
-    "docs/THREAT_MODEL.md": "ai-and-security-risk",
+    "docs/threat-model.md": "ai-and-security-risk",
     "docs/development/BUILD_CONTRACT.md": "lifecycle-controls",
     "docs/development/ISO_IEC_42001_READINESS.md": "readiness-register",
     "docs/development/V1_ACCEPTANCE_STATUS.md": "acceptance-evidence",
