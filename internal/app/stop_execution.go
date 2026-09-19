@@ -56,9 +56,10 @@ func (s *Service) trackExecution(ctx context.Context) (context.Context, func(), 
 	}, nil
 }
 
-// StopExecutions closes task admission and asks each active task supervisor to
-// record a durable stop independently of whether its handler has returned.
-// Close owned providers next, then call WaitForStops before closing the ledger.
+// StopExecutions closes work admission and cancels active adaptive planning and
+// task execution. Task supervisors record a durable stop independently of
+// whether their handlers return. Close owned providers next, then call
+// WaitForStops before closing the ledger.
 func (s *Service) StopExecutions() {
 	s.stopMu.Lock()
 	defer s.stopMu.Unlock()
@@ -179,8 +180,10 @@ func (s *Service) recordStopped(ctx context.Context, run stoppedExecution, reque
 	return outcome, err
 }
 
-// WaitForStops drains late audit writes after callers have stopped dispatching
-// work and closed owned providers. It does not claim to terminate a handler.
+// WaitForStops joins locally returned planning calls and task handlers, including
+// late task audit writes, after callers stop dispatching work and close owned
+// providers. It does not claim a provider-side stop or durable planning stop
+// acknowledgement.
 func (s *Service) WaitForStops(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() { s.activeExecutions.Wait(); s.stops.Wait(); close(done) }()

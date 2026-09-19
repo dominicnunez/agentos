@@ -727,10 +727,16 @@ Failed recreation leaves the old runtime unavailable, and deliberate adapter
 shutdown prevents recreation. Replacement does not prove the old process or
 remote work stopped; its original uncertainty and accounting remain intact.
 Local handler return, local turn completion, process termination, and remote
-provider uncertainty remain distinct. Runtime cancellation stops Task supervisors
-during startup recovery and before HTTP request draining. Listener failure also
-stops active Tasks before draining other listeners. Shutdown then closes providers
-and boundedly drains stop evidence before closing the ledger.
+provider uncertainty remain distinct. Runtime cancellation stops adaptive planning
+and Task supervisors during startup recovery and before HTTP request draining.
+Listener failure also stops active work before draining other listeners. HTTP
+request contexts receive shutdown cancellation so active normalization can stop
+cooperatively; accounting still uses its bounded bookkeeping context. Task result
+admission remains cancellable until `COMPLETION_VERIFIED` commits. Completing
+that already-verified Task projection remains permitted after cancellation.
+Shutdown then closes providers and boundedly drains stop evidence before closing
+the ledger. Joining a returned planning call does not establish a durable planning
+stop acknowledgement or prove remote termination.
 A persistent storage outage or noncooperative remote service remains a limit.
 
 Full suspended-task reconciliation/resumption, planning and normalization stop
