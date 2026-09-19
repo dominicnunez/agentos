@@ -62,7 +62,10 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
 
 1. Before editing, identify the intended behavior and scope. Trace affected
    entry points, alternate compositions, durable writers and readers, output
-   consumers, and retry, recovery, and replay paths.
+   consumers, and retry, recovery, and replay paths. For lifecycle changes, map
+   the owners and phases from request admission through preparation, model calls,
+   and durable result admission. Identify the authoritative completion boundary;
+   a handler return does not necessarily end the operation.
 2. Maintain a compact local evidence matrix for relevant identity, missing or
    invalid metadata, cancellation, authority failure, timing between writes,
    and crash boundaries. Distinguish proven, contradicted, missing, and
@@ -79,6 +82,10 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
    verify regressions fail for the intended defect against the prior behavior.
    When validation depends on earlier events, test an invalid earlier event
    followed by plausible later events, and compare live reads with full replay.
+   For cancellation changes, exercise the real transport/runtime shutdown path
+   and interruptions across relevant admission writes. Distinguish stop causes,
+   forbidden publication, required accounting, and any already-committed decision
+   that recovery must preserve; one authority generation is not every stop signal.
 6. For changes whose cost grows with history or candidate counts, check a complete
    public operation at representative small and large sizes before review.
    Account for nested calls, repeated polls and concurrent callers; one scan per
@@ -113,8 +120,10 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
     merely because guidance was added or a review found nothing.
 11. Use current, relevant skills and adapt them when observed failures justify a
     reusable improvement. Delegate only a concrete subtask whose independent
-    coverage or time savings justify its inference cost; choose a sufficiently
-    capable model for the risk. Name applicable skills in each assignment and
+    coverage or time savings justify its inference cost. Use Astra (`gpt-6-astra`)
+    for planning agents. For other assignments, choose a model and reasoning
+    level suited to the difficulty and security risk, balancing speed and cost
+    without compromising quality. Name applicable skills in each assignment and
     have the agent read them. Require inspected entry points, evidence, exclusions
     and uncertainty in its result. For an independent audit, provide the contract
     and raw artifacts without steering it toward the implementer's conclusions.
