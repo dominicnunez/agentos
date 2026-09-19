@@ -30,14 +30,14 @@ func ModelUndispatchedExecutions(stream []Event, organization, correlation strin
 		proofs[execution] = sequence
 	}
 	for _, event := range stream {
-		if event.EventType != "INFERENCE_NOT_SENT" || event.SourceActorID != "runtime" || event.OrganizationID != organization || event.CorrelationID != correlation || event.TaskID != "task-"+correlation {
+		if event.EventType != "INFERENCE_NOT_SENT" || !validModelStopEnvelope(event) || event.OrganizationID != organization || event.CorrelationID != correlation {
 			continue
 		}
 		var payload struct {
 			RequestID    string `json:"request_id"`
 			PromptSHA256 string `json:"prompt_sha256"`
 		}
-		if decodeExactPayload(event.Payload, &payload) != nil || payload.RequestID != event.SourceExecutionID || len(payload.PromptSHA256) != 64 {
+		if decodeExactPayload(event.Payload, &payload) != nil || payload.RequestID != event.SourceExecutionID || !validSHA256(payload.PromptSHA256) {
 			continue
 		}
 		proofs[event.SourceExecutionID] = event.Sequence
@@ -49,6 +49,9 @@ func ModelUndispatchedExecutions(stream []Event, organization, correlation strin
 // complete no-dispatch chain for plans produced by a later planning attempt.
 func ValidatePlanExecution(planEvent Event, stream []Event) error {
 	if planEvent.SourceExecutionID == "" {
+		if !validLegacyModelResult(planEvent, stream) {
+			return fmt.Errorf("model plan omits its manifested execution")
+		}
 		return nil
 	}
 	proofs := PlanningUndispatchedExecutions(stream, planEvent.OrganizationID, planEvent.CorrelationID)

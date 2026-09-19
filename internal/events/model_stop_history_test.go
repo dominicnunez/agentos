@@ -2,11 +2,158 @@ package events
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/core"
 )
+
+func TestModelStopRetryRequiresPriorEvidence(t *testing.T) {
+	for _, normalization := range []bool{false, true} {
+		for _, evidence := range []string{"not_started", "not_sent", "ordinary_failure", "ordinary_success"} {
+			for _, earlyRetry := range []bool{false, true} {
+				t.Run(fmt.Sprintf("normalization=%t/%s/early=%t", normalization, evidence, earlyRetry), func(t *testing.T) {
+					fixture := modelStopHistoryFixture(t)
+					first := fixture[0]
+					if normalization {
+						first.EventType = "INTENT_NORMALIZATION_CONTEXT_MANIFESTED"
+						first.Payload, _ = json.Marshal(IntentNormalizationContextPayload{SourceMessageID: "message", PromptVersion: "v1", Provider: "provider", Model: "model", ExecutionProfileVersion: "v1", InputEventRefs: []string{"input"}})
+					}
+					next := first
+					next.EventID, next.SourceExecutionID = "next", "model-2"
+					var closure []Event
+					switch evidence {
+					case "not_started":
+						confirmed := fixture[4]
+						confirmed.Payload, _ = json.Marshal(ModelStopResult{StopRequestRef: "request", LocalState: "NOT_STARTED"})
+						closure = []Event{fixture[1], confirmed}
+					case "not_sent":
+						proof := first
+						proof.EventID, proof.EventType = "proof", "INFERENCE_NOT_SENT"
+						proof.Payload, _ = json.Marshal(map[string]string{"request_id": first.SourceExecutionID, "prompt_sha256": strings.Repeat("a", 64)})
+						closure = []Event{proof}
+					case "ordinary_failure":
+						failure := first
+						failure.EventID, failure.EventType = "failure", "PLANNING_FAILED"
+						failure.TaskID, failure.SourceExecutionID = "", ""
+						failure.Payload = []byte(`{"code":"FAILED","reason":"ordinary failure","evidence_event_ref":"context"}`)
+						if normalization {
+							failure.EventType, failure.TaskID, failure.SourceExecutionID = "INTENT_NORMALIZATION_FAILED", first.TaskID, first.SourceExecutionID
+							failure.Payload = []byte(`{}`)
+						}
+						closure = []Event{failure}
+					case "ordinary_success":
+						success := first
+						success.EventID, success.EventType = "success", "PLAN_CREATED"
+						plan := core.Plan{ID: "plan-run", IntentID: "intent-run", IntentFingerprint: "fingerprint", Version: 1, CreatedAt: first.CreatedAt}
+						plan.Fingerprint, _ = core.FingerprintPlan(plan)
+						success.Payload, _ = json.Marshal(plan)
+						if normalization {
+							draft := core.IntentDraft{ID: "intent-run", OrganizationID: "org", Version: 1, CreatedAt: first.CreatedAt}
+							draft.Fingerprint, _ = core.FingerprintIntentDraft(draft)
+							success.EventType = "INTENT_DRAFTED"
+							success.Payload, _ = json.Marshal(IntentDraftedPayload{SourceMessageID: "message", Draft: draft})
+						}
+						closure = []Event{success}
+					}
+					stream := []Event{first}
+					if earlyRetry {
+						stream = append(stream, next)
+					}
+					stream = append(stream, closure...)
+					if !earlyRetry {
+						stream = append(stream, next)
+					}
+					for i := range stream {
+						stream[i].Sequence = int64(i + 1)
+					}
+					wantDenied := earlyRetry || evidence == "ordinary_success" || evidence == "ordinary_failure" && !normalization
+					if err := ValidateModelStops(stream, nil); (err != nil) != wantDenied {
+						t.Fatalf("retry denied=%t want=%t; validation error=%v", err != nil, wantDenied, err)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestModelUndispatchedRejectsMalformedGuardProof(t *testing.T) {
+	for _, defect := range []string{"nonhex", "schema", "recipient", "authority", "artifact"} {
+		t.Run(defect, func(t *testing.T) {
+			manifest := modelStopHistoryFixture(t)[0]
+			proof := manifest
+			proof.EventID, proof.EventType, proof.Sequence = "proof", "INFERENCE_NOT_SENT", 2
+			hash := strings.Repeat("a", 64)
+			switch defect {
+			case "nonhex":
+				hash = strings.Repeat("z", 64)
+			case "schema":
+				proof.SchemaVersion++
+			case "recipient":
+				proof.RecipientID = "other"
+			case "authority":
+				proof.AuthorizationRefs = []string{"unexpected"}
+			case "artifact":
+				proof.ArtifactRefs = []string{"unexpected"}
+			}
+			proof.Payload, _ = json.Marshal(map[string]string{"request_id": proof.SourceExecutionID, "prompt_sha256": hash})
+			stream := []Event{manifest, proof}
+			if got := ModelUndispatchedExecutions(stream, manifest.OrganizationID, manifest.CorrelationID); len(got) != 0 {
+				t.Fatalf("malformed proof granted retry: %v", got)
+			}
+			valid := manifest
+			valid.EventID, valid.EventType, valid.Sequence = "valid-proof", "INFERENCE_NOT_SENT", 3
+			valid.Payload, _ = json.Marshal(map[string]string{"request_id": valid.SourceExecutionID, "prompt_sha256": strings.Repeat("a", 64)})
+			next := manifest
+			next.EventID, next.SourceExecutionID, next.Sequence = "next", "model-2", 4
+			if err := ValidateModelStops(append(stream, valid, next), nil); err == nil {
+				t.Fatal("later valid proof erased malformed earlier retry evidence")
+			}
+		})
+	}
+}
+
+func TestModelResultCannotOmitManifestedExecution(t *testing.T) {
+	for _, normalization := range []bool{false, true} {
+		for _, state := range []string{"legacy", "manifested", "stopped", "different_input"} {
+			t.Run(fmt.Sprintf("normalization=%t/%s", normalization, state), func(t *testing.T) {
+				stream := modelStopHistoryFixture(t)
+				result := stream[0]
+				result.EventID, result.Sequence, result.SourceExecutionID = "result", 6, ""
+				result.EventType, result.Payload = "PLAN_CREATED", []byte(`{}`)
+				payload := IntentDraftedPayload{SourceMessageID: "message"}
+				if normalization {
+					stream[0].EventType = "INTENT_NORMALIZATION_CONTEXT_MANIFESTED"
+					stream[0].Payload, _ = json.Marshal(IntentNormalizationContextPayload{SourceMessageID: "message", PromptVersion: "v1", Provider: "provider", Model: "model", ExecutionProfileVersion: "v1", InputEventRefs: []string{"input"}})
+					if state == "different_input" {
+						payload.SourceMessageID = "new-message"
+					}
+					result.EventType = "INTENT_DRAFTED"
+					result.Payload, _ = json.Marshal(payload)
+				}
+				switch state {
+				case "legacy":
+					stream = nil
+				case "manifested", "different_input":
+					stream = stream[:1]
+				}
+				want := state == "legacy" || normalization && state == "different_input"
+				if err := ValidateModelStops(append(stream, result), nil); (err == nil) != want {
+					t.Fatalf("full replay allowed=%t want=%t err=%v", err == nil, want, err)
+				}
+				if normalization {
+					if got := validIntentDraftExecution(stream, result, payload); got != want {
+						t.Fatalf("filtered draft reader allowed=%t want=%t", got, want)
+					}
+				} else if err := ValidatePlanExecution(result, stream); (err == nil) != want {
+					t.Fatalf("filtered plan reader allowed=%t want=%t err=%v", err == nil, want, err)
+				}
+			})
+		}
+	}
+}
 
 func modelStopHistoryFixture(t *testing.T) []Event {
 	t.Helper()

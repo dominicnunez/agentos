@@ -196,6 +196,72 @@ func TestPlanningDeadlineRetainsStop(t *testing.T) {
 	}
 }
 
+type failedModelStopLedger struct {
+	*ledger.SQLite
+	failure error
+}
+
+func (l failedModelStopLedger) RequestModelStop(context.Context, string, string) (events.Event, bool, error) {
+	return events.Event{}, false, l.failure
+}
+
+func TestPlanningStopWriteFailureKeepsCallOwned(t *testing.T) {
+	store, err := ledger.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	failure := errors.New("stop writer unavailable")
+	planner := &shutdownPlanningPlanner{started: make(chan struct{}), cancelled: make(chan struct{}), release: make(chan struct{})}
+	service := NewWithModelAndPlanner(events.NewGateway(failedModelStopLedger{SQLite: store, failure: failure}), execution.FakeModel{}, planner)
+	finished := make(chan error, 1)
+	go func() {
+		_, err := service.Submit(t.Context(), Submit{RequestID: "failed-stop-write", OrganizationID: "org-1", Statement: "prepare a note", Kind: core.ExecutionAgent})
+		finished <- err
+	}()
+	t.Cleanup(func() {
+		planner.finish()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := service.WaitForStops(ctx); err != nil && !errors.Is(err, failure) {
+			t.Error(err)
+		}
+	})
+	select {
+	case <-planner.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("planner did not start")
+	}
+	service.StopExecutions()
+	select {
+	case err := <-finished:
+		if !errors.Is(err, failure) || !errors.Is(err, core.ErrExecutionStopped) {
+			t.Fatalf("stop failure lost: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("failed evidence write retained caller")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	err = service.WaitForStops(ctx)
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("failed write released unreturned call ownership: %v", err)
+	}
+	planner.finish()
+	ctx, cancel = context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := service.WaitForStops(ctx); !errors.Is(err, failure) {
+		t.Fatalf("drain hid persistence failure: %v", err)
+	}
+	stream, err := store.Events(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countEventType(stream, "MODEL_STOP_CONFIRMED") != 0 || countEventType(stream, "PLAN_CREATED") != 0 || countEventType(stream, "PLANNING_FAILED") != 0 {
+		t.Fatal("failed stop persistence admitted a result or false acknowledgement")
+	}
+}
+
 type completedPlanningPlanner struct {
 	calls int
 	err   error

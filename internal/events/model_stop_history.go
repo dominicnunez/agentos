@@ -118,25 +118,30 @@ func ModelStopCompletion(event, manifest Event) (bool, error) {
 	return true, nil
 }
 
-// ValidateModelStops validates new model stop claims in one ordered pass.
-// Legacy histories without these claims retain their existing contract.
+// ValidateModelStops validates model stop claims and auxiliary retry chronology
+// in one ordered pass. Ordinary legacy closures retain their existing meaning.
 func ValidateModelStops(stream []Event, freezes []OrganizationFreezeAdmission) error {
 	index := make(map[string]executionStopEventIndex, len(stream))
 	targets := map[executionStopBinding]bool{}
 	invoked := map[executionStopBinding]bool{}
 	contextCounts := map[executionStopBinding]int{}
+	retryCounts := map[[4]string]int{}
 	notSent := map[executionStopBinding]int64{}
+	invalidNotSent := map[executionStopBinding]bool{}
 	for _, event := range stream {
 		if event.EventType == "PLANNING_CONTEXT_MANIFESTED" || event.EventType == "INTENT_NORMALIZATION_CONTEXT_MANIFESTED" {
 			contextCounts[modelStopBinding(event)]++
+			retryCounts[modelRetryKey(event)]++
 		}
-		if event.EventType == "INFERENCE_NOT_SENT" && validModelStopEnvelope(event) {
+		if event.EventType == "INFERENCE_NOT_SENT" {
 			var payload struct {
 				RequestID    string `json:"request_id"`
 				PromptSHA256 string `json:"prompt_sha256"`
 			}
-			if decodeExactPayload(event.Payload, &payload) == nil && payload.RequestID == event.SourceExecutionID && validSHA256(payload.PromptSHA256) {
+			if validModelStopEnvelope(event) && decodeExactPayload(event.Payload, &payload) == nil && payload.RequestID == event.SourceExecutionID && validSHA256(payload.PromptSHA256) && notSent[modelStopBinding(event)] == 0 {
 				notSent[modelStopBinding(event)] = event.Sequence
+			} else {
+				invalidNotSent[modelStopBinding(event)] = true
 			}
 		}
 		if event.EventType == "INFERENCE_RESERVED" || event.EventType == "INFERENCE_RECONCILED" || event.EventType == "INFERENCE_NOT_SENT" {
@@ -153,14 +158,28 @@ func ValidateModelStops(stream []Event, freezes []OrganizationFreezeAdmission) e
 			index[event.EventID] = executionStopEventIndex{event: event}
 		}
 	}
+	for _, event := range stream {
+		if (event.EventType == "PLANNING_CONTEXT_MANIFESTED" || event.EventType == "INTENT_NORMALIZATION_CONTEXT_MANIFESTED") && retryCounts[modelRetryKey(event)] > 1 {
+			targets[modelStopBinding(event)] = true
+		}
+	}
+	for binding := range invalidNotSent {
+		if targets[binding] || contextCounts[binding] != 0 {
+			return fmt.Errorf("model lifecycle has invalid or duplicate non-dispatch evidence")
+		}
+	}
 	freezeIndex := indexExecutionStopFreezes(freezes)
 	states := map[executionStopBinding]*modelStopState{}
 	manifests := map[executionStopBinding]Event{}
-	closed := map[executionStopBinding]bool{}
+	closed := map[executionStopBinding]int64{}
+	retryClosed := map[executionStopBinding]int64{}
 	usages := map[executionStopBinding][]Event{}
-	priorStops := map[[4]string]*modelStopState{}
+	priorManifests := map[[4]string]Event{}
 	for _, event := range stream {
 		binding := modelStopBinding(event)
+		if key, result := modelResultRetryKey(event); result && event.SourceExecutionID == "" && priorManifests[key].EventID != "" {
+			return fmt.Errorf("model result %s omits its manifested execution", event.EventID)
+		}
 		if event.EventType == "PLANNING_FAILED" {
 			var value struct {
 				Code             string `json:"code"`
@@ -179,16 +198,24 @@ func ValidateModelStops(stream []Event, freezes []OrganizationFreezeAdmission) e
 			}
 		}
 		if event.EventType == "PLANNING_CONTEXT_MANIFESTED" || event.EventType == "INTENT_NORMALIZATION_CONTEXT_MANIFESTED" {
-			if prior := priorStops[modelRetryKey(event)]; prior != nil {
-				proof := notSent[modelStopBinding(prior.request)]
-				allowed := prior.notStarted || proof > prior.manifest.Sequence && proof < event.Sequence
-				if !allowed && event.EventType == "INTENT_NORMALIZATION_CONTEXT_MANIFESTED" && prior.result.EventType == "MODEL_STOP_CONFIRMED" && prior.payload.ReasonClass != "security_hold" && prior.payload.ReasonClass != "containment_unavailable" {
-					allowed = firstExecutionStopFreeze(freezeIndex[event.OrganizationID], prior.manifest.Sequence, prior.result.Sequence) == nil
+			if prior := priorManifests[modelRetryKey(event)]; prior.EventID != "" {
+				priorBinding := modelStopBinding(prior)
+				proof := notSent[priorBinding]
+				allowed := proof > prior.Sequence && proof < event.Sequence
+				if finish := retryClosed[priorBinding]; !allowed && finish > prior.Sequence {
+					allowed = firstExecutionStopFreeze(freezeIndex[event.OrganizationID], prior.Sequence, finish) == nil
+				}
+				if state := states[priorBinding]; state != nil {
+					allowed = allowed || state.notStarted
+					if !allowed && event.EventType == "INTENT_NORMALIZATION_CONTEXT_MANIFESTED" && state.result.EventType == "MODEL_STOP_CONFIRMED" && state.payload.ReasonClass != "security_hold" && state.payload.ReasonClass != "containment_unavailable" {
+						allowed = firstExecutionStopFreeze(freezeIndex[event.OrganizationID], prior.Sequence, state.result.Sequence) == nil
+					}
 				}
 				if !allowed {
-					return fmt.Errorf("model context %s retries unresolved stop %s", event.EventID, prior.request.EventID)
+					return fmt.Errorf("model context %s retries unresolved context %s", event.EventID, prior.EventID)
 				}
 			}
+			priorManifests[modelRetryKey(event)] = event
 		}
 		if !targets[binding] {
 			continue
@@ -206,7 +233,7 @@ func ValidateModelStops(stream []Event, freezes []OrganizationFreezeAdmission) e
 				return fmt.Errorf("invalid or duplicate model stop request %s", event.EventID)
 			}
 			context, found := index[payload.ContextEventRef]
-			if !found || context.duplicate || contextCounts[binding] != 1 || ValidateModelStopContext(context.event) != nil || !sameExecutionStopEventBinding(event, context.event) || context.event.Sequence >= event.Sequence || manifests[binding].EventID != context.event.EventID || closed[binding] {
+			if !found || context.duplicate || contextCounts[binding] != 1 || ValidateModelStopContext(context.event) != nil || !sameExecutionStopEventBinding(event, context.event) || context.event.Sequence >= event.Sequence || manifests[binding].EventID != context.event.EventID || closed[binding] != 0 {
 				return fmt.Errorf("model stop request %s lacks its unfinished exact context", event.EventID)
 			}
 			first := firstExecutionStopFreeze(freezeIndex[event.OrganizationID], context.event.Sequence, event.Sequence)
@@ -214,7 +241,6 @@ func ValidateModelStops(stream []Event, freezes []OrganizationFreezeAdmission) e
 				return fmt.Errorf("model stop request %s does not bind its earliest hold", event.EventID)
 			}
 			states[binding] = &modelStopState{manifest: context.event, request: event, payload: payload}
-			priorStops[modelRetryKey(context.event)] = states[binding]
 			continue
 		}
 		if RequiresModelStopAdmission(event.EventType) {
@@ -275,7 +301,10 @@ func ValidateModelStops(stream []Event, freezes []OrganizationFreezeAdmission) e
 				return err
 			}
 			if complete {
-				closed[binding] = true
+				closed[binding] = event.Sequence
+				if event.EventType == "INTENT_NORMALIZATION_FAILED" {
+					retryClosed[binding] = event.Sequence
+				}
 			}
 		}
 	}
@@ -296,18 +325,19 @@ func ValidateModelStopSuspension(event, request Event) error {
 	if decodeExactPayload(request.Payload, &detail) != nil || detail.ReasonClass != "containment_unavailable" || !sameExecutionStopEventBinding(event, request) || event.SourceActorID != "runtime" || event.RecipientScope != "" || event.RecipientID != "" || len(event.AuthorizationRefs) != 0 || len(event.ArtifactRefs) != 0 {
 		return fmt.Errorf("model suspension lacks exact containment stop")
 	}
-	if event.EventType == "INTENT_NORMALIZATION_SUSPENDED" {
+	switch event.EventType {
+	case "INTENT_NORMALIZATION_SUSPENDED":
 		if decodeExactPayload(event.Payload, &struct{}{}) != nil {
 			return fmt.Errorf("invalid normalization suspension")
 		}
-	} else if event.EventType == "PLANNING_CONTAINMENT_SUSPENDED" {
+	case "PLANNING_CONTAINMENT_SUSPENDED":
 		var payload struct {
 			ContextEventRef string `json:"context_event_ref"`
 		}
 		if decodeExactPayload(event.Payload, &payload) != nil || payload.ContextEventRef != detail.ContextEventRef {
 			return fmt.Errorf("invalid planning suspension context")
 		}
-	} else {
+	default:
 		return fmt.Errorf("invalid model suspension type")
 	}
 	return nil
@@ -392,4 +422,32 @@ func modelRetryKey(manifest Event) [4]string {
 		}
 	}
 	return [4]string{manifest.OrganizationID, manifest.CorrelationID, manifest.EventType, input}
+}
+
+func modelResultRetryKey(event Event) ([4]string, bool) {
+	switch event.EventType {
+	case "PLAN_CREATED":
+		return [4]string{event.OrganizationID, event.CorrelationID, "PLANNING_CONTEXT_MANIFESTED", ""}, true
+	case "INTENT_DRAFTED":
+		var payload IntentDraftedPayload
+		if decodeExactPayload(event.Payload, &payload) == nil {
+			return [4]string{event.OrganizationID, event.CorrelationID, "INTENT_NORMALIZATION_CONTEXT_MANIFESTED", payload.SourceMessageID}, true
+		}
+	}
+	return [4]string{}, false
+}
+
+// validLegacyModelResult preserves unmanifested local results, but prevents a
+// manifested input from hiding its execution identity through the legacy path.
+func validLegacyModelResult(event Event, stream []Event) bool {
+	key, result := modelResultRetryKey(event)
+	if !result {
+		return false
+	}
+	for _, manifest := range stream {
+		if manifest.Sequence < event.Sequence && (manifest.EventType == "PLANNING_CONTEXT_MANIFESTED" || manifest.EventType == "INTENT_NORMALIZATION_CONTEXT_MANIFESTED") && modelRetryKey(manifest) == key {
+			return false
+		}
+	}
+	return true
 }

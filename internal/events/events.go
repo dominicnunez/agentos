@@ -4642,7 +4642,7 @@ func sameStrings(left, right []string) bool {
 // exactly one earlier normalization manifest for the same input and tenant.
 func validIntentDraftExecution(stream []Event, draft Event, payload IntentDraftedPayload) bool {
 	if draft.SourceExecutionID == "" {
-		return true
+		return validLegacyModelResult(draft, stream)
 	}
 	matches := 0
 	for _, event := range stream {

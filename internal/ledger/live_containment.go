@@ -684,14 +684,14 @@ func (l *SQLite) CheckExecutionContainment(ctx context.Context, organization, ta
 	return l.withFreezeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		draft := events.TrustedDraft{OrganizationID: organization, TaskID: taskID, CorrelationID: correlation, SourceExecutionID: executionID}
 		var notSent bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events n JOIN events m ON m.organization_id=n.organization_id AND m.task_id=n.task_id AND m.correlation_id=n.correlation_id AND m.source_execution_id=n.source_execution_id WHERE n.event_type='INFERENCE_NOT_SENT' AND m.event_type='PLANNING_CONTEXT_MANIFESTED' AND n.organization_id=? AND n.task_id=? AND n.correlation_id=? AND n.source_execution_id=? AND n.sequence>m.sequence)`, organization, taskID, correlation, executionID).Scan(&notSent); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events n JOIN events m ON m.organization_id=n.organization_id AND m.task_id=n.task_id AND m.correlation_id=n.correlation_id AND m.source_execution_id=n.source_execution_id WHERE n.event_type='INFERENCE_NOT_SENT' AND m.event_type IN ('PLANNING_CONTEXT_MANIFESTED','INTENT_NORMALIZATION_CONTEXT_MANIFESTED') AND n.organization_id=? AND n.task_id=? AND n.correlation_id=? AND n.source_execution_id=? AND n.sequence>m.sequence)`, organization, taskID, correlation, executionID).Scan(&notSent); err != nil {
 			return err
 		}
 		var hasModelStop bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE organization_id=? AND correlation_id=? AND source_execution_id=? AND event_type='MODEL_STOP_REQUESTED')`, organization, correlation, executionID).Scan(&hasModelStop); err != nil {
 			return err
 		}
-		if hasModelStop {
+		if hasModelStop || notSent {
 			modelStream, modelFreezes, err := modelStopHistory(ctx, tx, events.Event{OrganizationID: organization, TaskID: taskID, CorrelationID: correlation, SourceExecutionID: executionID})
 			if err != nil {
 				return err
@@ -699,7 +699,7 @@ func (l *SQLite) CheckExecutionContainment(ctx context.Context, organization, ta
 			if err := events.ValidateModelStops(modelStream, modelFreezes); err != nil {
 				return err
 			}
-			notSent = notSent || events.ModelNotStartedExecutions(modelStream, organization, correlation)[executionID] != 0
+			notSent = events.ModelUndispatchedExecutions(modelStream, organization, correlation)[executionID] != 0
 		}
 		if notSent {
 			draft.SourceExecutionID = ""

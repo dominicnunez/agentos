@@ -205,6 +205,25 @@ func modelStopFreezes(ctx context.Context, tx *sql.Tx, organization string) ([]e
 // Hot admission is an exact invocation query, not a history replay. Typed
 // mutations and startup replay validate evidence before granting any closure.
 func validateModelNotStopped(ctx context.Context, queryer rowsQueryer, draft events.TrustedDraft) error {
+	if draft.SourceExecutionID == "" && (draft.EventType == "PLAN_CREATED" || draft.EventType == "INTENT_DRAFTED") {
+		kind, input := "PLANNING_CONTEXT_MANIFESTED", ""
+		if draft.EventType == "INTENT_DRAFTED" {
+			var payload events.IntentDraftedPayload
+			if err := decodeExactJSON(draft.Payload, &payload); err != nil {
+				return err
+			}
+			kind, input = "INTENT_NORMALIZATION_CONTEXT_MANIFESTED", payload.SourceMessageID
+		}
+		rows, err := queryer.QueryContext(ctx, `SELECT 1 FROM events WHERE organization_id=? AND correlation_id=? AND event_type=? AND (?='PLANNING_CONTEXT_MANIFESTED' OR json_extract(payload,'$.source_message_id')=?) LIMIT 1`, draft.OrganizationID, draft.CorrelationID, kind, kind, input)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = rows.Close() }()
+		if rows.Next() {
+			return fmt.Errorf("model result omits its manifested execution")
+		}
+		return rows.Err()
+	}
 	if draft.OrganizationID == "" || draft.CorrelationID == "" || draft.SourceExecutionID == "" {
 		return nil
 	}

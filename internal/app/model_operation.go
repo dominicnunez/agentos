@@ -16,7 +16,7 @@ import (
 // actual call and its late accounting until WaitForStops can join them.
 type ModelOperation struct {
 	service    *Service
-	ctx        context.Context
+	ctx        context.Context //nolint:containedctx // Owns one operation through admission and late-return bookkeeping.
 	cancel     context.CancelCauseFunc
 	mu         sync.Mutex
 	manifest   string

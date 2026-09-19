@@ -1,6 +1,8 @@
 package ledger
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,13 +36,122 @@ func TestStopNamespaceRejectsRecordWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	for _, eventType := range []string{"EXECUTION_STOP_REQUESTED", "EXECUTION_STOP_UNCERTAIN", "EXECUTION_STOP_CONFIRMED", "MODEL_STOP_REQUESTED", "MODEL_STOP_UNCERTAIN", "MODEL_STOP_CONFIRMED"} {
+	for _, eventType := range []string{"EXECUTION_STOP_REQUESTED", "EXECUTION_STOP_UNCERTAIN", "EXECUTION_STOP_CONFIRMED", "MODEL_STOP_REQUESTED", "MODEL_STOP_UNCERTAIN", "MODEL_STOP_CONFIRMED", "INFERENCE_NOT_SENT"} {
 		if err := store.AppendRecord(t.Context(), "org-1", eventType, "runtime", "task-1", nil, nil, "authorization_trace", eventType, 1, struct{}{}); err == nil {
 			t.Fatalf("generic record writer admitted %s", eventType)
 		}
 	}
 	if count := stopAdmissionEventCount(t, store); count != 0 {
 		t.Fatalf("reserved writer published %d events", count)
+	}
+}
+
+func TestModelStopRejectsResultWithMissingExecution(t *testing.T) {
+	for _, normalization := range []bool{false, true} {
+		t.Run(fmt.Sprint(normalization), func(t *testing.T) {
+			store, err := Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			manifest := modelStopManifest(t, store, normalization, "model-call")
+			appendHistoricalInferenceFreeze(t, store, "org-1", 1, true)
+			request, _, err := store.RequestModelStop(t.Context(), manifest.EventID, "security_hold")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.RecordModelStop(t.Context(), request.EventID, &events.ModelStopReturn{LocalState: "RETURNED", ReturnedAt: time.Now().UTC()}); err != nil {
+				t.Fatal(err)
+			}
+			appendInferenceFreeze(t, store, "org-1", 2, false)
+			result := modelStopDraft(manifest)
+			result.SourceExecutionID = ""
+			result.EventType = "PLAN_CREATED"
+			plan := core.Plan{ID: "plan-model-stop", IntentID: "intent-model-stop", IntentFingerprint: "fingerprint", Version: 1, CreatedAt: time.Now().UTC()}
+			plan.Fingerprint, _ = core.FingerprintPlan(plan)
+			result.Payload = plan
+			if normalization {
+				draft := core.IntentDraft{ID: "intent-model-stop", OrganizationID: "org-1", Version: 1, Objective: "bounded work", CreatedAt: time.Now().UTC()}
+				draft.Fingerprint, _ = core.FingerprintIntentDraft(draft)
+				result.EventType = "INTENT_DRAFTED"
+				result.Payload = events.IntentDraftedPayload{SourceMessageID: "message-1", Draft: draft}
+			}
+			if _, err := store.Append(t.Context(), result); err == nil {
+				t.Fatal("missing execution bypassed committed stop after release")
+			}
+			if normalization {
+				payload := result.Payload.(events.IntentDraftedPayload)
+				payload.SourceMessageID = "new-literal-input"
+				result.Payload = payload
+				if _, err := store.Append(t.Context(), result); err != nil {
+					t.Fatalf("unrelated literal normalization was blocked: %v", err)
+				}
+			} else {
+				// Import the omitted identity through the internal append seam to
+				// exercise the bounded strategic reader independently of admission.
+				if err := store.withFreezeTx(t.Context(), func(ctx context.Context, tx *sql.Tx) error {
+					if _, err := appendEvent(ctx, tx, result); err != nil {
+						return err
+					}
+					_, err := boundedStrategicExecutionEvents(ctx, tx, "org-1", "model-stop", core.Work{GoalID: "goal"}, events.ExecutionStartDetail{StrategicEventRefs: []string{"mission", "goal"}, StrategicContextRefs: make([]core.VersionedRef, 2)})
+					if err == nil || !strings.Contains(err.Error(), "manifested execution") {
+						t.Fatalf("bounded strategic reader bypassed missing identity: %v", err)
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestModelRetryOrdinaryClosureAgreement(t *testing.T) {
+	for _, normalization := range []bool{false, true} {
+		for _, success := range []bool{false, true} {
+			t.Run(fmt.Sprintf("normalization=%t/success=%t", normalization, success), func(t *testing.T) {
+				store, err := Open(":memory:")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = store.Close() })
+				manifest := modelStopManifest(t, store, normalization, "first")
+				closure := modelStopDraft(manifest)
+				closure.EventType, closure.Payload = "PLANNING_FAILED", map[string]string{"code": "FAILED", "reason": "ordinary failure", "evidence_event_ref": manifest.EventID}
+				if normalization {
+					closure.EventType, closure.Payload = "INTENT_NORMALIZATION_FAILED", struct{}{}
+				}
+				if success {
+					closure.EventType = "PLAN_CREATED"
+					plan := core.Plan{ID: "plan-model-stop", IntentID: "intent-model-stop", IntentFingerprint: "fingerprint", Version: 1, CreatedAt: time.Now().UTC()}
+					plan.Fingerprint, _ = core.FingerprintPlan(plan)
+					closure.Payload = plan
+					if normalization {
+						draft := core.IntentDraft{ID: "intent-model-stop", OrganizationID: "org-1", Version: 1, CreatedAt: time.Now().UTC()}
+						draft.Fingerprint, _ = core.FingerprintIntentDraft(draft)
+						closure.EventType, closure.Payload = "INTENT_DRAFTED", events.IntentDraftedPayload{SourceMessageID: "message-1", Draft: draft}
+					}
+				}
+				if _, err := store.Append(t.Context(), closure); err != nil {
+					t.Fatal(err)
+				}
+				prior, err := store.Events(t.Context(), "model-stop")
+				if err != nil {
+					t.Fatal(err)
+				}
+				next := modelStopDraft(manifest)
+				next.EventType, next.Payload, next.SourceExecutionID = manifest.EventType, manifest.Payload, "second"
+				want := normalization && !success
+				if _, err := store.Append(t.Context(), next); (err == nil) != want {
+					t.Fatalf("live retry allowed=%t want=%t err=%v", err == nil, want, err)
+				}
+				candidate := manifest
+				candidate.EventID, candidate.SourceExecutionID, candidate.Sequence = "candidate", "second", prior[len(prior)-1].Sequence+1
+				if err := events.ValidateModelStops(append(prior, candidate), nil); (err == nil) != want {
+					t.Fatalf("replay retry allowed=%t want=%t err=%v", err == nil, want, err)
+				}
+			})
+		}
 	}
 }
 
@@ -170,6 +281,7 @@ func TestModelStopHistoryCost(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer func() { _ = rows.Close() }()
 			var plan string
 			for rows.Next() {
 				var a, b, c int
@@ -179,7 +291,9 @@ func TestModelStopHistoryCost(t *testing.T) {
 				}
 				plan += detail
 			}
-			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
 			if !strings.Contains(plan, "events_execution_idx") {
 				t.Fatalf("unbounded lookup plan=%s", plan)
 			}

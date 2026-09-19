@@ -190,6 +190,9 @@ type preparedProjection struct {
 // services own their validation. Every organizational projection namespace is
 // reserved for the typed, event-coupled admission paths below.
 func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, actorID, taskID string, authorizationRefs, artifactRefs []string, kind, id string, version int, value any) error {
+	if eventType == "INFERENCE_NOT_SENT" {
+		return fmt.Errorf("not-sent evidence requires typed inference admission")
+	}
 	if events.RequiresModelStopAdmission(eventType) {
 		return fmt.Errorf("model stop events require typed model stop admission")
 	}
@@ -1589,6 +1592,15 @@ func boundedStrategicExecutionEvents(ctx context.Context, tx *sql.Tx, organizati
 FROM events WHERE organization_id=? AND correlation_id=? AND event_type='PLAN_CREATED' ORDER BY sequence LIMIT 2`, organizationID, correlationID))
 	if err != nil || len(plans) != 1 {
 		return nil, fmt.Errorf("read exact execution strategic Plan")
+	}
+	// This bounded reader omits planning history. Check the legacy shortcut
+	// against its exact run before ResolvePlan consumes the filtered stream.
+	if plans[0].SourceExecutionID == "" {
+		legacy := modelStopDraft(plans[0])
+		legacy.EventType = "PLAN_CREATED"
+		if err := validateModelNotStopped(ctx, tx, legacy); err != nil {
+			return nil, err
+		}
 	}
 	goalBody, found, err := latestRecordBody(ctx, tx, "goal", string(work.GoalID))
 	if err != nil || !found {
