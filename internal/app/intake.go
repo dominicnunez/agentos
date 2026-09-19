@@ -292,14 +292,15 @@ func (s *Service) RecordIntentNormalizationContext(ctx context.Context, organiza
 		}
 		return stream, nil
 	}
-	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
+	event, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
 		OrganizationID: organizationID, EventType: "INTENT_NORMALIZATION_CONTEXT_MANIFESTED",
 		SourceActorID: "runtime", SourceExecutionID: in.ExecutionID, TaskID: "task-" + correlationID,
 		CorrelationID: correlationID, Payload: payload,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, fmt.Errorf("persist intent normalization context: %w", err)
 	}
-	return s.gateway.Events(ctx, correlationID)
+	return append(stream, event), nil
 }
 
 func (s *Service) RecordIntentNormalizationUsage(ctx context.Context, organizationID, requestID, executionID string, usage events.InferenceUsageRecordedPayload) ([]events.Event, error) {
@@ -343,14 +344,15 @@ func (s *Service) RecordIntentNormalizationUsage(ctx context.Context, organizati
 	if !manifested {
 		return nil, fmt.Errorf("intent normalization context must be manifested before usage")
 	}
-	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
+	event, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
 		OrganizationID: organizationID, EventType: "INFERENCE_USAGE_RECORDED",
 		SourceActorID: "runtime", SourceExecutionID: executionID, TaskID: "task-" + correlationID,
 		CorrelationID: correlationID, Payload: usage,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, fmt.Errorf("persist intent normalization usage: %w", err)
 	}
-	return s.gateway.Events(ctx, correlationID)
+	return append(stream, event), nil
 }
 
 func (s *Service) RecordIntentDraft(ctx context.Context, organizationID, requestID, sourceMessageID, executionID string, draft core.IntentDraft, reply string) ([]events.Event, error) {
@@ -384,13 +386,14 @@ func (s *Service) RecordIntentDraft(ctx context.Context, organizationID, request
 		}
 	}
 	payload := events.IntentDraftedPayload{SourceMessageID: sourceMessageID, Draft: draft, Reply: reply}
-	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
+	event, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
 		OrganizationID: organizationID, EventType: "INTENT_DRAFTED", SourceActorID: "runtime", SourceExecutionID: executionID,
 		TaskID: "task-" + correlationID, CorrelationID: correlationID, Payload: payload,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, fmt.Errorf("persist intent draft: %w", err)
 	}
-	return s.gateway.Events(ctx, correlationID)
+	return append(stream, event), nil
 }
 
 func (s *Service) ConfirmIntent(ctx context.Context, in IntentConfirmation) (Result, error) {

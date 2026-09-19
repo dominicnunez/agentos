@@ -714,6 +714,31 @@ evidence and cannot authorize ordinary output or completion. Generic writers
 cannot mint these stop records or reopen a suspended Task. Replay checks the
 same identity, ordering, and suspension requirements.
 
+Adaptive planning and model-based intent normalization use `MODEL_STOP_REQUESTED`,
+`MODEL_STOP_UNCERTAIN`, and `MODEL_STOP_CONFIRMED`, bound to the exact context
+manifest rather than a fabricated running Task. Their lifecycle includes route
+preparation, invocation, and durable plan/draft or ordinary-failure admission.
+Cancellation causes distinguish security holds, unavailable containment, runtime
+shutdown, caller cancellation, and deadlines. The writer derives an intervening
+hold from authoritative history; later release does not erase it.
+
+A bounded acknowledgement wait releases the caller while the runtime retains the
+blocked call and attempts to join its late accounting during shutdown. Confirmation
+records `RETURNED` with the actual return time and optional usage/provider stop
+facts, or `NOT_STARTED` when dispatch was prevented. The latter has no return
+time or provider evidence and contradicts any inference invocation/accounting.
+It is distinct from the inference guard's `INFERENCE_NOT_SENT` proof. Returned
+usage is atomically recorded or reused with the exact confirmation. An ordinary
+result or failure committed before the stop remains authoritative.
+
+Fresh planning and normalization attempts may use validated non-dispatch proof;
+a confirmed non-security normalization stop may also permit a fresh operator
+request. Each new attempt needs independent current authority, route, and budget
+admission. Missing acknowledgement or storage uncertainty does not permit retry,
+and a security-held invoked attempt stays latched absent guard not-sent proof.
+Typed writers and replay enforce the same identity, ordering, and retry rules;
+local return never asserts that remote computation ended.
+
 Protected-effect admission checks the Task's latest admitted suspension before
 consuming approval or recording a new attempt, including legacy suspensions.
 Already attempted effects retain their separate reconciliation path.
@@ -734,13 +759,15 @@ request contexts receive shutdown cancellation so active normalization can stop
 cooperatively; accounting still uses its bounded bookkeeping context. Task result
 admission remains cancellable until `COMPLETION_VERIFIED` commits. Completing
 that already-verified Task projection remains permitted after cancellation.
-Shutdown then closes providers and boundedly drains stop evidence before closing
-the ledger. Joining a returned planning call does not establish a durable planning
-stop acknowledgement or prove remote termination.
+Shutdown then closes providers and attempts a bounded drain before closing the
+ledger. A successful drain joins the owned calls and late writes; a timeout is
+reported and leaves durable uncertainty and conservative accounting, without a
+guarantee that later returns can be recorded after shutdown. Joining local calls
+and stop writes does not prove remote termination.
 A persistent storage outage or noncooperative remote service remains a limit.
 
-Full suspended-task reconciliation/resumption, planning and normalization stop
-acknowledgement, and complete coordination/output/effect and cancellation-timeline coverage remain
+Full suspended-task reconciliation/resumption and complete coordination/output/effect
+and cancellation-timeline coverage remain
 unfinished under [issue #178](https://github.com/dominicnunez/agentos/issues/178).
 
 For example, after reading the current head, the owner sends this JSON with

@@ -25,7 +25,7 @@ const (
 	// not identify or publish an Agent OS release.
 	OldestSupportedStorageVersion = 1
 	// CurrentStorageVersion is the only layout accepted after runtime startup.
-	CurrentStorageVersion = 11
+	CurrentStorageVersion = 12
 	// AuthorityAdmissionBindingStorageVersion is the first storage contract in
 	// which every capability and freeze record names its exact admitting event.
 	AuthorityAdmissionBindingStorageVersion = 7
@@ -100,6 +100,9 @@ const storageSchemaV10SQL = `ALTER TABLE inference_policies ADD COLUMN connectio
 ALTER TABLE inference_reservations ADD COLUMN connection_id TEXT NOT NULL DEFAULT '';
 DROP INDEX inference_policies_active_idx;
 CREATE UNIQUE INDEX inference_policies_active_idx ON inference_policies(organization_id,connection_id) WHERE active=1;`
+
+const storageSchemaV12SQL = `CREATE INDEX IF NOT EXISTS events_execution_idx
+ON events(organization_id,correlation_id,source_execution_id,event_type,sequence);`
 
 const storageSchemaV1SQL = `CREATE TABLE events (
 sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, organization_id TEXT NOT NULL,
@@ -336,6 +339,11 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 			return err
 		}
 		return advanceProjectionStorageContract(ctx, tx, from, to, "freeze-history-freshness")
+	case from == 11 && to == 12:
+		if _, err := tx.ExecContext(ctx, storageSchemaV12SQL); err != nil {
+			return err
+		}
+		return advanceProjectionStorageContract(ctx, tx, from, to, "model-stop-admission-index")
 	default:
 		return fmt.Errorf("no reviewed storage migration exists")
 	}
@@ -677,6 +685,15 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 			if count != 1 {
 				return StorageContract{}, fmt.Errorf("storage schema version %d lacks exact index %s", version, index)
 			}
+		}
+	}
+	if version >= 12 {
+		var count int
+		if err := query.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name='events_execution_idx' AND tbl_name='events'`).Scan(&count); err != nil {
+			return StorageContract{}, err
+		}
+		if count != 1 {
+			return StorageContract{}, fmt.Errorf("storage schema version %d lacks execution index", version)
 		}
 	}
 	if version >= 11 {

@@ -101,6 +101,9 @@ func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx, pendin
 	if err := validateInferenceRouteRejections(stream); err != nil {
 		return err
 	}
+	if err := events.ValidateModelStops(stream, freezes); err != nil {
+		return err
+	}
 	eventsByID := make(map[string]events.Event, len(stream))
 	reservedEvents := make(map[string]events.Event)
 	reconciledEvents := make(map[string][]events.Event)

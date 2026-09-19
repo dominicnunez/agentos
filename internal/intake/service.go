@@ -661,7 +661,7 @@ func (s *Service) handleIntentConversation(ctx context.Context, principal Princi
 	return s.normalizeRecordedIntentMessage(ctx, principal, message, stream)
 }
 
-func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal Principal, message Message, stream []events.Event) (View, error) {
+func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal Principal, message Message, stream []events.Event) (view View, resultErr error) {
 	turns, err := intakeTurns(stream)
 	if err != nil {
 		return View{}, fmt.Errorf("%w: load intake conversation", ErrUnavailable)
@@ -677,6 +677,18 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 	attempt := intentNormalizationAttempt(stream, message.MessageID) + 1
 	executionID := fmt.Sprintf("intent-normalization-%s-%s-a%d", stream[0].CorrelationID, message.MessageID, attempt)
 	descriptor, usesModel := normalizer.Descriptor()
+	var operation *app.ModelOperation
+	if usesModel {
+		ctx, operation, err = s.app.BeginModelOperation(ctx, principal.OrganizationID)
+		if err != nil {
+			return View{}, fmt.Errorf("%w: begin normalization: %w", ErrUnavailable, err)
+		}
+		defer func() {
+			if stopErr := operation.Finish(); stopErr != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("%w: preserve normalization stop: %w", ErrUnavailable, stopErr))
+			}
+		}()
+	}
 	var routing *modelinput.RouteRequirements
 	var routingDecision *modelinput.RouteDecision
 	if usesModel {
@@ -706,6 +718,16 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 		if err != nil {
 			return View{}, fmt.Errorf("%w: manifest intent normalization context", ErrUnavailable)
 		}
+		contextRef := ""
+		for _, event := range stream {
+			if event.EventType == "INTENT_NORMALIZATION_CONTEXT_MANIFESTED" && event.SourceExecutionID == executionID {
+				contextRef = event.EventID
+			}
+		}
+		if contextRef == "" {
+			return View{}, fmt.Errorf("%w: missing normalization manifest", ErrUnavailable)
+		}
+		operation.BindContext(contextRef)
 	}
 	normalizationCtx := ctx
 	if usesModel {
@@ -721,17 +743,28 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 			return View{}, fmt.Errorf("%w: bind intent normalization inference scope", ErrUnavailable)
 		}
 	}
-	normalized, err := normalizer.Normalize(normalizationCtx, turns)
-	// A disconnected caller must not prevent runtime accounting or an ordinary
-	// failure boundary. Keep context values and a bounded bookkeeping lifetime;
-	// the ledger still rejects closure across an intervening security hold.
+	var normalized Normalization
+	if usesModel {
+		normalized, err = app.CallModel(operation, normalizationCtx, func(callCtx context.Context) (Normalization, *events.InferenceUsageRecordedPayload, error) {
+			result, callErr := normalizer.Normalize(callCtx, turns)
+			usage := result.Usage
+			if usage != nil && (!usage.Valid() || usage.ConnectionID != descriptor.ConnectionID || usage.Provider != descriptor.Provider || usage.Model != descriptor.Model) {
+				return Normalization{}, nil, errors.Join(callErr, fmt.Errorf("normalizer returned usage outside its declared model boundary"))
+			}
+			return result, usage, callErr
+		})
+	} else {
+		normalized, err = normalizer.Normalize(normalizationCtx, turns)
+	}
+	// Accounting survives caller cancellation. An ordinary failure decision uses
+	// the live context; interrupted calls retain their separate stop evidence.
 	bookkeepingCtx, finishBookkeeping := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer finishBookkeeping()
 	// Only a proven ordinary rejection closes the attempt. Storage uncertainty
 	// and containment interruptions must retain the unresolved manifest.
 	reject := func(cause error) (View, error) {
-		if usesModel {
-			if finishErr := s.app.RecordIntentNormalizationFailure(bookkeepingCtx, principal.OrganizationID, message.ConversationID, executionID); finishErr != nil {
+		if usesModel && context.Cause(ctx) == nil {
+			if finishErr := s.app.RecordIntentNormalizationFailure(ctx, principal.OrganizationID, message.ConversationID, executionID); finishErr != nil {
 				return View{}, fmt.Errorf("%w: persist failed normalization boundary", ErrUnavailable)
 			}
 		}
@@ -748,8 +781,8 @@ func (s *Service) normalizeRecordedIntentMessage(ctx context.Context, principal 
 			if suspendErr := s.app.RecordIntentNormalizationSuspension(bookkeepingCtx, principal.OrganizationID, message.ConversationID, executionID); suspendErr != nil {
 				return View{}, fmt.Errorf("%w: persist normalization suspension", ErrUnavailable)
 			}
-		} else if usesModel && !errors.Is(err, core.ErrOrganizationFrozen) {
-			if finishErr := s.app.RecordIntentNormalizationFailure(bookkeepingCtx, principal.OrganizationID, message.ConversationID, executionID); finishErr != nil {
+		} else if usesModel && context.Cause(ctx) == nil {
+			if finishErr := s.app.RecordIntentNormalizationFailure(ctx, principal.OrganizationID, message.ConversationID, executionID); finishErr != nil {
 				return View{}, fmt.Errorf("%w: persist failed normalization boundary", ErrUnavailable)
 			}
 		}

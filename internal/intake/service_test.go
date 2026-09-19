@@ -858,8 +858,8 @@ func testIntentNormalizationRetry(t *testing.T, cancelled bool) {
 	if _, err := service.Handle(ctx, principal, message); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("first normalization err=%v", err)
 	}
-	// A fresh service and request context must recognize the durable ordinary
-	// failure even when its original caller disconnected during the model call.
+	// A fresh service and request context recognizes an ordinary failure or
+	// confirmed benign cancellation, without reusing the stopped invocation.
 	service = NewWithNormalizer(app.New(events.NewGateway(store)), normalizer)
 	view, err := service.Handle(t.Context(), principal, message)
 	if err != nil || view.State != StateAwaitingConfirmation || model.calls != 2 {
@@ -869,8 +869,12 @@ func testIntentNormalizationRetry(t *testing.T, cancelled bool) {
 	if countEvents(stream, "INTAKE_MESSAGE_RECORDED") != 1 || countEvents(stream, "INTENT_NORMALIZATION_CONTEXT_MANIFESTED") != 2 || countEvents(stream, "INFERENCE_USAGE_RECORDED") != 1 || countEvents(stream, "INTENT_DRAFTED") != 1 {
 		t.Fatalf("interrupted retry did not preserve distinct attempts: %+v", stream)
 	}
-	if countEvents(stream, "INTENT_NORMALIZATION_FAILED") != 1 {
-		t.Fatal("ordinary cancellation retry lacks its durable failure boundary")
+	wantFailure, wantStop := 1, 0
+	if cancelled {
+		wantFailure, wantStop = 0, 1
+	}
+	if countEvents(stream, "INTENT_NORMALIZATION_FAILED") != wantFailure || countEvents(stream, "MODEL_STOP_CONFIRMED") != wantStop {
+		t.Fatal("fresh retry lacks its durable failure or benign stop boundary")
 	}
 }
 
@@ -2084,8 +2088,12 @@ func TestPostNormalizationRejectionPermitsCorrectedRetry(t *testing.T) {
 				}
 				return
 			}
-			if countEvents(stream, "INTENT_NORMALIZATION_FAILED") != 1 || containsEvent(stream, "INTENT_DRAFTED") {
-				t.Fatal("ordinary rejection lacks an exclusive finish")
+			wantFailure, wantStop := 1, 0
+			if name == "cancelled-invalid-output" {
+				wantFailure, wantStop = 0, 1
+			}
+			if countEvents(stream, "INTENT_NORMALIZATION_FAILED") != wantFailure || countEvents(stream, "MODEL_STOP_CONFIRMED") != wantStop || containsEvent(stream, "INTENT_DRAFTED") {
+				t.Fatal("rejection lacks an exclusive failure or benign stop boundary")
 			}
 			service = NewWithNormalizer(app.New(gateway), normalizer)
 			view, err := service.Handle(t.Context(), principal, message)

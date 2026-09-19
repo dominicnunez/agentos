@@ -446,6 +446,9 @@ func validateContainedOutcome(ctx context.Context, tx *sql.Tx, draft events.Trus
 // validateExecutionPublication protects each subsequent publication in its
 // writer transaction, including holds committed after outcome admission.
 func validateExecutionPublication(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft) error {
+	if err := validateModelNotStopped(ctx, tx, draft); err != nil {
+		return err
+	}
 	if err := validateExecutionNotStopped(ctx, tx, draft); err != nil {
 		return err
 	}
@@ -649,12 +652,24 @@ func bindPlanningFailureContainment(ctx context.Context, tx *sql.Tx, draft *even
 }
 
 func validatePlanningRetry(ctx context.Context, tx *sql.Tx, draft events.TrustedDraft) error {
-	var unresolved bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events m WHERE m.organization_id=? AND m.correlation_id=? AND m.event_type='PLANNING_CONTEXT_MANIFESTED' AND (m.source_execution_id=? OR NOT EXISTS(SELECT 1 FROM events n WHERE n.event_type='INFERENCE_NOT_SENT' AND n.organization_id=m.organization_id AND n.task_id=m.task_id AND n.correlation_id=m.correlation_id AND n.source_execution_id=m.source_execution_id AND n.sequence>m.sequence)))`, draft.OrganizationID, draft.CorrelationID, draft.SourceExecutionID).Scan(&unresolved); err != nil {
+	prior, freezes, err := modelStopRunHistory(ctx, tx, draft.OrganizationID, draft.CorrelationID)
+	if err != nil {
 		return err
 	}
-	if unresolved {
-		return core.ErrContainmentUnavailable
+	if err := events.ValidateModelStops(prior, freezes); err != nil {
+		return err
+	}
+	proofs := events.PlanningUndispatchedExecutions(prior, draft.OrganizationID, draft.CorrelationID)
+	for _, manifest := range prior {
+		if manifest.EventType != "PLANNING_CONTEXT_MANIFESTED" {
+			continue
+		}
+		if manifest.SourceExecutionID == draft.SourceExecutionID {
+			return core.ErrContainmentUnavailable
+		}
+		if proofs[manifest.SourceExecutionID] <= manifest.Sequence {
+			return core.ErrContainmentUnavailable
+		}
 	}
 	return nil
 }
@@ -671,6 +686,20 @@ func (l *SQLite) CheckExecutionContainment(ctx context.Context, organization, ta
 		var notSent bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events n JOIN events m ON m.organization_id=n.organization_id AND m.task_id=n.task_id AND m.correlation_id=n.correlation_id AND m.source_execution_id=n.source_execution_id WHERE n.event_type='INFERENCE_NOT_SENT' AND m.event_type='PLANNING_CONTEXT_MANIFESTED' AND n.organization_id=? AND n.task_id=? AND n.correlation_id=? AND n.source_execution_id=? AND n.sequence>m.sequence)`, organization, taskID, correlation, executionID).Scan(&notSent); err != nil {
 			return err
+		}
+		var hasModelStop bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE organization_id=? AND correlation_id=? AND source_execution_id=? AND event_type='MODEL_STOP_REQUESTED')`, organization, correlation, executionID).Scan(&hasModelStop); err != nil {
+			return err
+		}
+		if hasModelStop {
+			modelStream, modelFreezes, err := modelStopHistory(ctx, tx, events.Event{OrganizationID: organization, TaskID: taskID, CorrelationID: correlation, SourceExecutionID: executionID})
+			if err != nil {
+				return err
+			}
+			if err := events.ValidateModelStops(modelStream, modelFreezes); err != nil {
+				return err
+			}
+			notSent = notSent || events.ModelNotStartedExecutions(modelStream, organization, correlation)[executionID] != 0
 		}
 		if notSent {
 			draft.SourceExecutionID = ""
@@ -722,11 +751,19 @@ func validateNormalizationRetry(ctx context.Context, tx *sql.Tx, draft events.Tr
 	if err := decodeExactJSON(draft.Payload, &next); err != nil {
 		return err
 	}
-	prior, err := collectEvents(tx.QueryContext(ctx, `SELECT event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND event_type='INTENT_NORMALIZATION_CONTEXT_MANIFESTED' ORDER BY sequence`, draft.OrganizationID, draft.TaskID, draft.CorrelationID))
+	prior, freezes, err := modelStopRunHistory(ctx, tx, draft.OrganizationID, draft.CorrelationID)
 	if err != nil {
 		return err
 	}
+	if err := events.ValidateModelStops(prior, freezes); err != nil {
+		return err
+	}
+	proofs := events.ModelUndispatchedExecutions(prior, draft.OrganizationID, draft.CorrelationID)
+	finishes := modelStopRetryFinishes(prior)
 	for _, event := range prior {
+		if event.EventType != "INTENT_NORMALIZATION_CONTEXT_MANIFESTED" || event.TaskID != draft.TaskID {
+			continue
+		}
 		var recorded events.IntentNormalizationContextPayload
 		if err := decodeExactJSONBytes(event.Payload, &recorded); err != nil {
 			return err
@@ -734,18 +771,15 @@ func validateNormalizationRetry(ctx context.Context, tx *sql.Tx, draft events.Tr
 		if recorded.SourceMessageID != next.SourceMessageID {
 			continue
 		}
+		if event.SourceExecutionID == draft.SourceExecutionID {
+			return core.ErrContainmentUnavailable
+		}
+		if proofs[event.SourceExecutionID] > event.Sequence {
+			continue
+		}
 		check := draft
 		check.EventType = "INTENT_DRAFTED"
 		check.SourceExecutionID = event.SourceExecutionID
-		var notSent bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type='INFERENCE_NOT_SENT' AND sequence>?)`, draft.OrganizationID, draft.TaskID, draft.CorrelationID, event.SourceExecutionID, event.Sequence).Scan(&notSent); err != nil {
-			return err
-		}
-		if notSent {
-			// The guard closed this invocation without dispatch. A fresh
-			// attempt must still pass its own current containment admission.
-			continue
-		}
 		var suspended bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type='INTENT_NORMALIZATION_SUSPENDED' AND sequence>?)`, draft.OrganizationID, draft.TaskID, draft.CorrelationID, event.SourceExecutionID, event.Sequence).Scan(&suspended); err != nil {
 			return err
@@ -756,6 +790,9 @@ func validateNormalizationRetry(ctx context.Context, tx *sql.Tx, draft events.Tr
 		var finish int64
 		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MIN(sequence),0) FROM events WHERE organization_id=? AND task_id=? AND correlation_id=? AND source_execution_id=? AND event_type='INTENT_NORMALIZATION_FAILED' AND sequence>?`, draft.OrganizationID, draft.TaskID, draft.CorrelationID, event.SourceExecutionID, event.Sequence).Scan(&finish); err != nil {
 			return err
+		}
+		if finish == 0 {
+			finish = finishes[event.SourceExecutionID]
 		}
 		hold, err := executionIntervalHoldThrough(ctx, tx, check, finish)
 		if err != nil {

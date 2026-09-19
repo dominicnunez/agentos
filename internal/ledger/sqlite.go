@@ -190,6 +190,12 @@ type preparedProjection struct {
 // services own their validation. Every organizational projection namespace is
 // reserved for the typed, event-coupled admission paths below.
 func (l *SQLite) AppendRecord(ctx context.Context, organizationID, eventType, actorID, taskID string, authorizationRefs, artifactRefs []string, kind, id string, version int, value any) error {
+	if events.RequiresModelStopAdmission(eventType) {
+		return fmt.Errorf("model stop events require typed model stop admission")
+	}
+	if events.RequiresExecutionStopAdmission(eventType) {
+		return fmt.Errorf("execution stop events require typed execution stop admission")
+	}
 	if kind == "organization_freeze" {
 		return fmt.Errorf("organization freeze requires the typed owner control")
 	}
@@ -1759,6 +1765,12 @@ func latestDispatchRosterRevision[T any](ctx context.Context, tx *sql.Tx, kind s
 }
 
 func prepareProjection(draft events.ProjectionDraft, allowWorkCompletion, allowGoalAchievement bool) (preparedProjection, error) {
+	if events.RequiresModelStopAdmission(draft.Event.EventType) {
+		return preparedProjection{}, fmt.Errorf("model stop events require typed model stop admission")
+	}
+	if events.RequiresExecutionStopAdmission(draft.Event.EventType) {
+		return preparedProjection{}, fmt.Errorf("execution stop events require typed execution stop admission")
+	}
 	if draft.Event.EventType == "" || draft.ProjectionKind == "" || draft.RecordID == "" || draft.Version < 1 {
 		return preparedProjection{}, fmt.Errorf("event type, projection kind, record id, and positive version are required")
 	}
@@ -4310,6 +4322,9 @@ func collectRecordBodies(rows *sql.Rows, err error) ([][]byte, error) {
 }
 
 func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Event, error) {
+	if events.RequiresModelStopAdmission(d.EventType) {
+		return events.Event{}, fmt.Errorf("model stop events require typed model stop admission")
+	}
 	if events.RequiresExecutionStopAdmission(d.EventType) {
 		return events.Event{}, fmt.Errorf("execution stop events require typed execution stop admission")
 	}
@@ -4370,6 +4385,10 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 			if err := bindPlanningFailureContainment(ctx, tx, &d); err != nil {
 				return err
 			}
+		case "INTENT_NORMALIZATION_SUSPENDED", "PLANNING_CONTAINMENT_SUSPENDED":
+			if err := validateModelSuspension(ctx, tx, d); err != nil {
+				return err
+			}
 		case "INTENT_NORMALIZATION_CONTEXT_MANIFESTED":
 			if err := validateNormalizationRetry(ctx, tx, d); err != nil {
 				return err
@@ -4378,6 +4397,9 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 				return err
 			}
 		case "TOOL_OUTCOME_RECORDED", "INFERENCE_USAGE_RECORDED", "EXECUTION_FINISHED":
+			if err := validateModelNotStopped(ctx, tx, d); err != nil {
+				return err
+			}
 			// Stop-bound audit/accounting is admitted atomically by
 			// RecordExecutionStop. Generic publication remains available only
 			// while the exact execution has no durable stop request.

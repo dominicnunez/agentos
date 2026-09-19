@@ -469,6 +469,9 @@ func verifyProjectionAdmissions(ctx context.Context, db *sql.DB) error {
 	if err := events.ValidateExecutionStops(stream, freezeAdmissions); err != nil {
 		return err
 	}
+	if err := events.ValidateModelStops(stream, freezeAdmissions); err != nil {
+		return err
+	}
 	if err := events.ValidateSecurityHoldOutcomes(stream, freezeAdmissions); err != nil {
 		return err
 	}
