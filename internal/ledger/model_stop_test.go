@@ -80,7 +80,10 @@ func TestModelStopRejectsResultWithMissingExecution(t *testing.T) {
 				t.Fatal("missing execution bypassed committed stop after release")
 			}
 			if normalization {
-				payload := result.Payload.(events.IntentDraftedPayload)
+				payload, ok := result.Payload.(events.IntentDraftedPayload)
+				if !ok {
+					t.Fatal("normalization fixture lacks its draft payload")
+				}
 				payload.SourceMessageID = "new-literal-input"
 				result.Payload = payload
 				if _, err := store.Append(t.Context(), result); err != nil {
