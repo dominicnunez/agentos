@@ -4155,6 +4155,9 @@ func (g *Gateway) PublishAgentDraft(ctx context.Context, organizationID, actorID
 	return g.ledger.Append(ctx, trusted)
 }
 func (g *Gateway) PublishTrusted(ctx context.Context, draft TrustedDraft) (Event, error) {
+	if RequiresModelStopAdmission(draft.EventType) {
+		return Event{}, fmt.Errorf("model stop events require typed model stop admission")
+	}
 	if RequiresExecutionStopAdmission(draft.EventType) {
 		return Event{}, fmt.Errorf("execution stop events require typed execution stop admission")
 	}
@@ -4639,7 +4642,7 @@ func sameStrings(left, right []string) bool {
 // exactly one earlier normalization manifest for the same input and tenant.
 func validIntentDraftExecution(stream []Event, draft Event, payload IntentDraftedPayload) bool {
 	if draft.SourceExecutionID == "" {
-		return true
+		return validLegacyModelResult(draft, stream)
 	}
 	matches := 0
 	for _, event := range stream {

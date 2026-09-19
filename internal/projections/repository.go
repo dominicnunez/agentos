@@ -499,6 +499,9 @@ func (r *Repository) Rebuild(ctx context.Context) (Snapshot, error) {
 
 func projectionKnowledgeAuthorityAdmissions(ctx context.Context, gateway *events.Gateway, stream []events.Event) ([]events.CapabilityLeaseAdmission, []events.OrganizationFreezeAdmission, error) {
 	for _, event := range stream {
+		if events.RequiresModelStopAdmission(event.EventType) {
+			return gateway.KnowledgeAuthorityAdmissions(ctx)
+		}
 		if event.EventType == "TOOL_OUTCOME_RECORDED" {
 			var outcome core.ToolOutcome
 			if json.Unmarshal(event.Payload, &outcome) == nil && outcome.ErrorClass == "security_hold" {
@@ -513,6 +516,9 @@ func projectionKnowledgeAuthorityAdmissions(ctx context.Context, gateway *events
 }
 
 func validateProjectionEventAdmissions(stream []events.Event, inboxObservations map[string]events.InboxObservationBinding, leaseAdmissions []events.CapabilityLeaseAdmission, freezeAdmissions []events.OrganizationFreezeAdmission) error {
+	if err := events.ValidateModelStops(stream, freezeAdmissions); err != nil {
+		return err
+	}
 	if err := events.ValidateExecutionStops(stream, freezeAdmissions); err != nil {
 		return err
 	}

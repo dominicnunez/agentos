@@ -195,6 +195,13 @@ func (l *SQLite) RecordInferenceNotSent(ctx context.Context, request inference.I
 		return fmt.Errorf("not-sent request fingerprint is required")
 	}
 	return l.withTx(ctx, func(tx *sql.Tx) error {
+		var noCall bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE organization_id=? AND correlation_id=? AND source_execution_id=? AND event_type='MODEL_STOP_CONFIRMED' AND json_extract(payload,'$.local_state')='NOT_STARTED')`, request.Scope.OrganizationID, request.Scope.CorrelationID, request.Scope.ExecutionID).Scan(&noCall); err != nil {
+			return err
+		}
+		if noCall {
+			return fmt.Errorf("guard invocation contradicts a model callback which never started")
+		}
 		var uncertain bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM inference_reservations WHERE organization_id=? AND execution_id=? AND state<>?)`, request.Scope.OrganizationID, request.Scope.ExecutionID, inferenceStateNotSent).Scan(&uncertain); err != nil {
 			return err
@@ -227,6 +234,9 @@ func (l *SQLite) ReserveInference(ctx context.Context, request inference.Inferen
 	var reserved inference.Reservation
 	err := l.withFreezeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		var closed bool
+		if err := validateModelNotStopped(ctx, tx, events.TrustedDraft{OrganizationID: request.Scope.OrganizationID, CorrelationID: request.Scope.CorrelationID, SourceExecutionID: request.Scope.ExecutionID}); err != nil {
+			return err
+		}
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE organization_id=? AND source_execution_id=? AND event_type='INFERENCE_NOT_SENT')`, request.Scope.OrganizationID, request.Scope.ExecutionID).Scan(&closed); err != nil {
 			return err
 		}

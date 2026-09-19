@@ -32,8 +32,11 @@ type normalizationShutdownContextKey struct{}
 
 type shutdownNormalizationAdapter struct {
 	started, cancelled chan struct{}
+	release            chan struct{}
 	once               sync.Once
+	releaseOnce        sync.Once
 	preservedBaseValue bool
+	stopCause          error
 }
 
 func (*shutdownNormalizationAdapter) Name() string { return "shutdown-normalization/test-model" }
@@ -54,8 +57,14 @@ func (m *shutdownNormalizationAdapter) waitForShutdown(ctx context.Context) (exe
 	m.once.Do(func() { close(m.started) })
 	m.preservedBaseValue = ctx.Value(normalizationShutdownContextKey{}) == "base-context-value"
 	<-ctx.Done()
+	m.stopCause = context.Cause(ctx)
 	close(m.cancelled)
+	<-m.release
 	return execution.ModelResponse{}, context.Cause(ctx)
+}
+
+func (m *shutdownNormalizationAdapter) finish() {
+	m.releaseOnce.Do(func() { close(m.release) })
 }
 
 func TestShutdownCancelsActiveHTTPNormalizationBeforeDrain(t *testing.T) {
@@ -77,7 +86,7 @@ func TestShutdownCancelsActiveHTTPNormalizationBeforeDrain(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			adapter := &shutdownNormalizationAdapter{started: make(chan struct{}), cancelled: make(chan struct{})}
+			adapter := &shutdownNormalizationAdapter{started: make(chan struct{}), cancelled: make(chan struct{}), release: make(chan struct{})}
 			guarded, err := inference.NewGuardedAdapter(store, adapter)
 			if err != nil {
 				t.Fatal(err)
@@ -161,6 +170,7 @@ func TestShutdownCancelsActiveHTTPNormalizationBeforeDrain(t *testing.T) {
 				}{status: response.StatusCode}
 			}()
 			t.Cleanup(func() {
+				adapter.finish()
 				cancel()
 				_ = userServer.Close()
 				_ = siblingServer.Close()
@@ -174,6 +184,11 @@ func TestShutdownCancelsActiveHTTPNormalizationBeforeDrain(t *testing.T) {
 				case <-requestDone:
 				case <-time.After(2 * time.Second):
 					t.Error("request cleanup did not finish")
+				}
+				cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancelCleanup()
+				if err := runtime.WaitForStops(cleanupCtx); err != nil {
+					t.Error(err)
 				}
 			})
 			select {
@@ -194,13 +209,39 @@ func TestShutdownCancelsActiveHTTPNormalizationBeforeDrain(t *testing.T) {
 			if !adapter.preservedBaseValue {
 				t.Fatal("shutdown context discarded the server base context")
 			}
+			if !errors.Is(adapter.stopCause, core.ErrExecutionStopped) {
+				t.Fatalf("runtime shutdown lost its cause: %v", adapter.stopCause)
+			}
 			select {
 			case result := <-requestDone:
 				if result.err != nil || result.status != http.StatusServiceUnavailable {
 					t.Fatalf("normalization response status=%d err=%v", result.status, result.err)
 				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("cancelled normalization request did not drain")
+			case <-time.After(2 * time.Second):
+				t.Fatal("cancelled normalization request waited for the blocked provider")
+			}
+			stopping, err := eventGateway.Events(t.Context(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			stopCounts := map[string]int{}
+			for _, event := range stopping {
+				stopCounts[event.EventType]++
+			}
+			if stopCounts["MODEL_STOP_REQUESTED"] != 1 || stopCounts["MODEL_STOP_UNCERTAIN"] != 1 || stopCounts["MODEL_STOP_CONFIRMED"] != 0 {
+				t.Fatalf("normalization stop evidence before provider return=%v", stopCounts)
+			}
+			waitingCtx, cancelWait := context.WithTimeout(t.Context(), 50*time.Millisecond)
+			err = runtime.WaitForStops(waitingCtx)
+			cancelWait()
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("normalization falsely drained an unreturned provider: %v", err)
+			}
+			adapter.finish()
+			stopCtx, cancelStop := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancelStop()
+			if err := runtime.WaitForStops(stopCtx); err != nil {
+				t.Fatal(err)
 			}
 			select {
 			case err := <-serveDone:
@@ -221,7 +262,7 @@ func TestShutdownCancelsActiveHTTPNormalizationBeforeDrain(t *testing.T) {
 			for _, event := range stream {
 				counts[event.EventType]++
 			}
-			if counts["INFERENCE_RESERVED"] != 1 || counts["INFERENCE_RECONCILED"] != 1 || counts["INTENT_NORMALIZATION_FAILED"] != 1 || counts["INTENT_DRAFTED"] != 0 {
+			if counts["INFERENCE_RESERVED"] != 1 || counts["INFERENCE_RECONCILED"] != 1 || counts["INTENT_NORMALIZATION_FAILED"] != 0 || counts["INTENT_DRAFTED"] != 0 || counts["MODEL_STOP_CONFIRMED"] != 1 {
 				t.Fatalf("shutdown normalization accounting=%v", counts)
 			}
 		})

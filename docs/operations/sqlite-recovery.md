@@ -90,7 +90,7 @@ Event Contract validator and tenant, revision, sequence, and dispatch rules.
 ## Storage and Event Contract versions
 
 SQLite storage versions are independent of the Agent OS binary version. The
-current runtime writes storage schema v11 and accepts v1 as the oldest supported
+current runtime writes storage schema v12 and accepts v1 as the oldest supported
 upgrade source. Schema v1 is frozen in
 `internal/ledger/testdata/storage-v1.sql`. Schema v2 adds metadata that binds
 the storage version, Agent OS application ID, current Event Contract schema,
@@ -105,6 +105,11 @@ cross-tenant, or malformed. Storage v8 adds the quarantine boundary without
 reusing the already deployed v7 contract. Storage v9 adds the reviewed tenant-scoped index
 used to select current knowledge for an Agent execution without scanning other
 Organizations' knowledge records.
+
+Storage v12 adds an index scoped to correlation, organization, and execution for
+model stop admission. Migration preserves existing event bytes and stop evidence;
+the reviewed layout fingerprint covers the index. Stop validation remains a
+separate live-admission and replay requirement, not an implication of the index.
 
 Storage v11 adds organization-scoped freeze observation tokens and reviewed
 triggers covering freeze records and their admission events. Migration seeds

@@ -27,6 +27,7 @@ func TestPlanningRetryRequiresExactNonDispatchProof(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = store.Close() })
 			request := testInferenceRequest("planning-attempt-1")
+			request.Scope.TaskID = "task-" + request.Scope.CorrelationID
 			scope := request.Scope
 			draft := events.TrustedDraft{OrganizationID: scope.OrganizationID, EventType: "PLANNING_CONTEXT_MANIFESTED", SourceActorID: "runtime", SourceExecutionID: scope.ExecutionID, TaskID: scope.TaskID, CorrelationID: scope.CorrelationID, Payload: map[string]string{}}
 			if _, err := store.Append(t.Context(), draft); err != nil {

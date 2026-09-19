@@ -8,18 +8,36 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 )
 
-// PlanningNotSentExecutions indexes guard-owned closure evidence for one run.
-func PlanningNotSentExecutions(stream []Event, organization, correlation string) map[string]int64 {
+// PlanningUndispatchedExecutions indexes guard-owned not-sent evidence and
+// typed runtime proof that the planning callback never started. Neither proof
+// claims remote cancellation of an already-dispatched invocation.
+func PlanningUndispatchedExecutions(stream []Event, organization, correlation string) map[string]int64 {
+	all := ModelUndispatchedExecutions(stream, organization, correlation)
 	proofs := map[string]int64{}
 	for _, event := range stream {
-		if event.EventType != "INFERENCE_NOT_SENT" || event.SourceActorID != "runtime" || event.OrganizationID != organization || event.CorrelationID != correlation || event.TaskID != "task-"+correlation {
+		if event.EventType == "PLANNING_CONTEXT_MANIFESTED" && event.OrganizationID == organization && event.CorrelationID == correlation && all[event.SourceExecutionID] > event.Sequence {
+			proofs[event.SourceExecutionID] = all[event.SourceExecutionID]
+		}
+	}
+	return proofs
+}
+
+// ModelUndispatchedExecutions retains the two distinct no-dispatch proofs for
+// auxiliary retry readers whose complete event history has already validated.
+func ModelUndispatchedExecutions(stream []Event, organization, correlation string) map[string]int64 {
+	proofs := map[string]int64{}
+	for execution, sequence := range ModelNotStartedExecutions(stream, organization, correlation) {
+		proofs[execution] = sequence
+	}
+	for _, event := range stream {
+		if event.EventType != "INFERENCE_NOT_SENT" || !validModelStopEnvelope(event) || event.OrganizationID != organization || event.CorrelationID != correlation {
 			continue
 		}
 		var payload struct {
 			RequestID    string `json:"request_id"`
 			PromptSHA256 string `json:"prompt_sha256"`
 		}
-		if decodeExactPayload(event.Payload, &payload) != nil || payload.RequestID != event.SourceExecutionID || len(payload.PromptSHA256) != 64 {
+		if decodeExactPayload(event.Payload, &payload) != nil || payload.RequestID != event.SourceExecutionID || !validSHA256(payload.PromptSHA256) {
 			continue
 		}
 		proofs[event.SourceExecutionID] = event.Sequence
@@ -31,9 +49,12 @@ func PlanningNotSentExecutions(stream []Event, organization, correlation string)
 // complete no-dispatch chain for plans produced by a later planning attempt.
 func ValidatePlanExecution(planEvent Event, stream []Event) error {
 	if planEvent.SourceExecutionID == "" {
+		if !validLegacyModelResult(planEvent, stream) {
+			return fmt.Errorf("model plan omits its manifested execution")
+		}
 		return nil
 	}
-	proofs := PlanningNotSentExecutions(stream, planEvent.OrganizationID, planEvent.CorrelationID)
+	proofs := PlanningUndispatchedExecutions(stream, planEvent.OrganizationID, planEvent.CorrelationID)
 	if planEvent.SourceExecutionID == "planning-plan-"+planEvent.CorrelationID+"-attempt-1" {
 		if proofs[planEvent.SourceExecutionID] != 0 {
 			return fmt.Errorf("closed planning invocation cannot publish a plan")

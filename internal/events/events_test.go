@@ -25,7 +25,7 @@ func TestRetriedPlanRequiresExactNonDispatchChain(t *testing.T) {
 				}
 				return body
 			}
-			first := Event{EventID: "first", Sequence: 1, OrganizationID: "org", CorrelationID: "run", TaskID: "task-run", SourceActorID: "runtime", EventType: "PLANNING_CONTEXT_MANIFESTED", SourceExecutionID: "planning-plan-run-attempt-1", Payload: encode(PlanningContextPayload{PlanID: "plan-run", IntentID: "intent", IntentFingerprint: "fingerprint"})}
+			first := Event{EventID: "first", Sequence: 1, SchemaVersion: SchemaVersion, OrganizationID: "org", CorrelationID: "run", TaskID: "task-run", SourceActorID: "runtime", EventType: "PLANNING_CONTEXT_MANIFESTED", SourceExecutionID: "planning-plan-run-attempt-1", Payload: encode(PlanningContextPayload{PlanID: "plan-run", IntentID: "intent", IntentFingerprint: "fingerprint"})}
 			proof := first
 			proof.EventID, proof.EventType, proof.Sequence = "proof", "INFERENCE_NOT_SENT", 2
 			proof.Payload = encode(map[string]string{"request_id": first.SourceExecutionID, "prompt_sha256": strings.Repeat("a", 64)})

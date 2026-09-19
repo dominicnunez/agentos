@@ -503,14 +503,14 @@ func cancelOnShutdown(handler http.Handler, shutdown context.Context) http.Handl
 		handler = http.DefaultServeMux
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCtx, cancel := context.WithCancel(r.Context())
-		stop := context.AfterFunc(shutdown, cancel)
+		requestCtx, cancel := context.WithCancelCause(r.Context())
+		stop := context.AfterFunc(shutdown, func() { cancel(core.ErrExecutionStopped) })
 		if shutdown.Err() != nil {
-			cancel()
+			cancel(core.ErrExecutionStopped)
 		}
 		defer func() {
 			stop()
-			cancel()
+			cancel(nil)
 		}()
 		handler.ServeHTTP(w, r.WithContext(requestCtx))
 	})
