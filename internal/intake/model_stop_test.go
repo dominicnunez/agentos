@@ -10,7 +10,6 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/ledger"
-	"github.com/dominicnunez/agentos/internal/projections"
 )
 
 type stopNormalizationLedger struct {
@@ -117,7 +116,7 @@ func TestNormalizationStopAdmission(t *testing.T) {
 					t.Fatalf("local stop proof=%+v", detail)
 				}
 			}
-			if _, err := projections.New(events.NewGateway(store)).Rebuild(t.Context()); err != nil {
+			if _, _, err := app.New(events.NewGateway(store)).OrganizationState(t.Context(), core.ID(principal.OrganizationID)); err != nil {
 				t.Fatal(err)
 			}
 		})

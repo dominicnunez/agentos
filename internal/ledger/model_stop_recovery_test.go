@@ -14,7 +14,6 @@ import (
 	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/ledger"
 	ledgerrecovery "github.com/dominicnunez/agentos/internal/ledger/recovery"
-	"github.com/dominicnunez/agentos/internal/projections"
 )
 
 func TestModelRetryRejectsEarlierMalformedProofBeforeAdmission(t *testing.T) {
@@ -140,9 +139,6 @@ func TestModelStopFileReplayRejectsRetroactiveRetry(t *testing.T) {
 			if _, err := reopened.Append(t.Context(), draft); err == nil {
 				t.Fatal("filtered live retry read ignored invalid prior chronology")
 			}
-			if _, err := projections.New(events.NewGateway(reopened)).Rebuild(t.Context()); err == nil || !strings.Contains(err.Error(), "unresolved context") {
-				t.Fatalf("projection replay error=%v", err)
-			}
 			if _, err := ledgerrecovery.VerifyLive(t.Context(), path); err == nil || !strings.Contains(err.Error(), "unresolved context") {
 				t.Fatalf("independent recovery error=%v", err)
 			}
@@ -178,9 +174,6 @@ func TestModelStopFileReplayRejectsEarlyBadLaterGood(t *testing.T) {
 		if _, err := gateway.RecordModelStop(t.Context(), request.EventID, &events.ModelStopReturn{LocalState: "RETURNED", ReturnedAt: time.Now().UTC()}); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if _, err := projections.New(gateway).Rebuild(t.Context()); err != nil {
-		t.Fatalf("valid live projection: %v", err)
 	}
 	if _, err := ledgerrecovery.VerifyLive(t.Context(), path); err != nil {
 		t.Fatalf("valid recovery: %v", err)
@@ -220,9 +213,6 @@ func TestModelStopFileReplayRejectsEarlyBadLaterGood(t *testing.T) {
 	draft.SourceExecutionID = "model-call-3"
 	if _, err := gateway.PublishTrusted(t.Context(), draft); err == nil {
 		t.Fatal("later valid stop masked invalid earlier retry evidence")
-	}
-	if _, err := projections.New(gateway).Rebuild(t.Context()); err == nil || !strings.Contains(err.Error(), "model stop") {
-		t.Fatalf("live projection error=%v", err)
 	}
 	if _, err := ledgerrecovery.VerifyLive(t.Context(), path); err == nil || !strings.Contains(err.Error(), "model stop") {
 		t.Fatalf("full replay error=%v", err)
