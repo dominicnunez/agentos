@@ -442,6 +442,16 @@ func serveAll(ctx context.Context, bindings []serverBinding, stopWork func()) er
 			return fmt.Errorf("runtime context, server, and listener are required")
 		}
 	}
+	requestLifetime, cancelRequests := context.WithCancel(ctx)
+	defer cancelRequests()
+	wrappedServers := make(map[*http.Server]struct{}, len(bindings))
+	for _, binding := range bindings {
+		if _, found := wrappedServers[binding.server]; found {
+			continue
+		}
+		wrappedServers[binding.server] = struct{}{}
+		binding.server.Handler = cancelOnShutdown(binding.server.Handler, requestLifetime)
+	}
 	results := make(chan error, len(bindings))
 	for _, binding := range bindings {
 		binding := binding
@@ -463,6 +473,7 @@ func serveAll(ctx context.Context, bindings []serverBinding, stopWork func()) er
 		}
 	case <-ctx.Done():
 	}
+	cancelRequests()
 	// Stop dispatch and active supervisors before waiting for their HTTP
 	// requests. A listener failure must contain sibling listeners' work too.
 	if stopWork != nil {
@@ -485,6 +496,24 @@ func serveAll(ctx context.Context, bindings []serverBinding, stopWork func()) er
 		completed++
 	}
 	return result
+}
+
+func cancelOnShutdown(handler http.Handler, shutdown context.Context) http.Handler {
+	if handler == nil {
+		handler = http.DefaultServeMux
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCtx, cancel := context.WithCancel(r.Context())
+		stop := context.AfterFunc(shutdown, cancel)
+		if shutdown.Err() != nil {
+			cancel()
+		}
+		defer func() {
+			stop()
+			cancel()
+		}()
+		handler.ServeHTTP(w, r.WithContext(requestCtx))
+	})
 }
 
 func closeListeners(bindings []serverBinding) {
