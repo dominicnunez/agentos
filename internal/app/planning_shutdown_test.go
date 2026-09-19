@@ -96,6 +96,14 @@ func TestHeldPlannerReleasesOtherTenant(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("held model retained the submission permit")
 	}
+	// Check the admission boundary directly. Completing the unrelated Task
+	// also exercises its ordinary ledger work, which is not a stop deadline.
+	select {
+	case service.permit <- struct{}{}:
+		service.release()
+	default:
+		t.Fatal("held model retained the submission permit after returning")
+	}
 	otherDone := make(chan error, 1)
 	go func() {
 		result, err := service.Submit(t.Context(), Submit{RequestID: "other-model", OrganizationID: "org-2", Statement: "echo unaffected", Kind: core.ExecutionDeterministic})
@@ -109,8 +117,8 @@ func TestHeldPlannerReleasesOtherTenant(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("other tenant remained blocked behind stopped model")
+	case <-time.After(10 * time.Second):
+		t.Fatal("unrelated task did not finish after admission was released")
 	}
 	stream, err := store.Events(t.Context(), "")
 	if err != nil {
