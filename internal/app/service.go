@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/assignment"
@@ -28,12 +29,13 @@ import (
 )
 
 const (
-	submissionTimeout       = 25 * time.Second
-	defaultModelTurnTimeout = 25 * time.Second
-	defaultBlueprintVersion = "v1-general-worker"
-	defaultPromptVersion    = "v1"
-	localRuntimeAdapter     = "local"
-	assignmentBlockedCode   = "ASSIGNMENT_INELIGIBLE"
+	submissionTimeout          = 25 * time.Second
+	defaultModelTurnTimeout    = 25 * time.Second
+	planningBookkeepingTimeout = 5 * time.Second
+	defaultBlueprintVersion    = "v1-general-worker"
+	defaultPromptVersion       = "v1"
+	localRuntimeAdapter        = "local"
+	assignmentBlockedCode      = "ASSIGNMENT_INELIGIBLE"
 )
 
 var ErrNoDurableHumanCompletion = errors.New("durable user completion not found")
@@ -99,6 +101,12 @@ func (e *planningAttemptError) Unwrap() error {
 }
 
 type Service struct {
+	stops              sync.WaitGroup
+	activeExecutions   sync.WaitGroup
+	stopMu             sync.Mutex
+	stopErr            error
+	stopping           bool
+	runningExecutions  map[*runningExecution]struct{}
 	permit             chan struct{}
 	gateway            *events.Gateway
 	state              *projections.Repository
@@ -811,7 +819,7 @@ func (s *Service) restoreVerifiedTask(ctx context.Context, state projections.Ver
 }
 
 func containmentInterrupted(err error) bool {
-	return errors.Is(err, core.ErrOrganizationFrozen) || errors.Is(err, core.ErrContainmentUnavailable)
+	return errors.Is(err, core.ErrOrganizationFrozen) || errors.Is(err, core.ErrContainmentUnavailable) || errors.Is(err, core.ErrExecutionStopped)
 }
 
 func (s *Service) failPlanningWork(ctx context.Context, organizationID core.ID, state projections.Versioned[core.Work], code, reason, evidenceRef string) error {
@@ -1674,8 +1682,21 @@ func (s *Service) acquire(ctx context.Context) error {
 	if ctx == nil {
 		return fmt.Errorf("service context is required")
 	}
+	s.stopMu.Lock()
+	stopping := s.stopping
+	s.stopMu.Unlock()
+	if stopping {
+		return core.ErrExecutionStopped
+	}
 	select {
 	case s.permit <- struct{}{}:
+		s.stopMu.Lock()
+		stopping = s.stopping
+		s.stopMu.Unlock()
+		if stopping {
+			s.release()
+			return core.ErrExecutionStopped
+		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -2125,7 +2146,7 @@ func acceptedGoalID(draft core.IntentDraft) (core.ID, error) {
 	return core.AcceptedIntentGoalID(draft)
 }
 
-func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correlationID string, intent core.Intent, work core.Work, draft core.IntentDraft, requestedKind core.ExecutionKind) (core.Plan, error) {
+func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correlationID string, intent core.Intent, work core.Work, draft core.IntentDraft, requestedKind core.ExecutionKind) (resultPlan core.Plan, resultErr error) {
 	stream, err := s.gateway.Events(ctx, correlationID)
 	if err != nil {
 		return core.Plan{}, fmt.Errorf("load durable planning state: %w", err)
@@ -2199,6 +2220,20 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 		}
 		return core.Plan{}, &planningAttemptError{EvidenceEventRef: attemptRef, Err: attemptStateErr}
 	}
+	planningCtx := ctx
+	if usesModel {
+		var finishPlanning func()
+		planningCtx, finishPlanning, err = s.trackExecution(ctx)
+		if err != nil {
+			return core.Plan{}, err
+		}
+		defer finishPlanning()
+		defer func() {
+			if resultErr != nil {
+				resultErr = errors.Join(resultErr, context.Cause(planningCtx))
+			}
+		}()
+	}
 	executionID := core.ID("")
 	planningContextRef := ""
 	var routing *modelinput.RouteRequirements
@@ -2209,9 +2244,9 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 		}
 		if selector, ok := planner.(planning.PlannerSelector); ok {
 			var binding *modelinput.RouteBinding
-			planner, binding, err = selector.SelectPlanner(ctx, string(organizationID))
+			planner, binding, err = selector.SelectPlanner(planningCtx, string(organizationID))
 			if err != nil {
-				err = s.RecordInferenceRouteRejection(ctx, string(organizationID), correlationID, "PLANNING", "", err)
+				err = s.RecordInferenceRouteRejection(planningCtx, string(organizationID), correlationID, "PLANNING", "", err)
 				return core.Plan{}, fmt.Errorf("select planning route: %w", err)
 			}
 			if planner == nil || binding == nil || binding.Validate() != nil || binding.Requirements.OrganizationID != string(organizationID) {
@@ -2226,12 +2261,12 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 			if descriptor.ConnectionID != routingDecision.ConnectionID || descriptor.Provider != routingDecision.Provider || descriptor.Model != routingDecision.Model || descriptor.ExecutionProfileVersion != routingDecision.ExecutionProfileVersion {
 				return core.Plan{}, fmt.Errorf("selected planner identity differs from routing decision")
 			}
-			if err := s.gateway.ValidateInferenceRouteBinding(ctx, *binding); err != nil {
+			if err := s.gateway.ValidateInferenceRouteBinding(planningCtx, *binding); err != nil {
 				return core.Plan{}, fmt.Errorf("validate planning route provenance: %w", err)
 			}
 		}
 		if routing == nil {
-			required, err := s.gateway.InferenceConnectionRequiresRouting(ctx, descriptor.ConnectionID)
+			required, err := s.gateway.InferenceConnectionRequiresRouting(planningCtx, descriptor.ConnectionID)
 			if err != nil {
 				return core.Plan{}, err
 			}
@@ -2253,7 +2288,7 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 			ExecutionProfileVersion: descriptor.ExecutionProfileVersion, InputEventRefs: inputRefs,
 			StrategicContextRefs: strategicContextRefs, Routing: modelinput.CloneRouteRequirements(routing),
 		}
-		contextEvent, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
+		contextEvent, err := s.gateway.PublishTrusted(planningCtx, events.TrustedDraft{
 			OrganizationID: string(organizationID), EventType: "PLANNING_CONTEXT_MANIFESTED", SourceActorID: "runtime",
 			SourceExecutionID: string(executionID), TaskID: "task-" + correlationID, Payload: contextPayload, CorrelationID: correlationID,
 		})
@@ -2267,17 +2302,19 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 			return err
 		}
 		if errors.Is(err, core.ErrContainmentUnavailable) {
-			_, persistErr := s.gateway.PublishTrusted(context.WithoutCancel(ctx), events.TrustedDraft{
+			suspensionCtx, finishSuspension := context.WithTimeout(context.WithoutCancel(planningCtx), planningBookkeepingTimeout)
+			_, persistErr := s.gateway.PublishTrusted(suspensionCtx, events.TrustedDraft{
 				OrganizationID: string(organizationID), EventType: "PLANNING_CONTAINMENT_SUSPENDED", SourceActorID: "runtime",
 				SourceExecutionID: string(executionID), TaskID: "task-" + correlationID, CorrelationID: correlationID,
 				Payload: map[string]string{"context_event_ref": planningContextRef},
 			})
+			finishSuspension()
 			err = errors.Join(err, persistErr)
 		}
 		return &planningAttemptError{EvidenceEventRef: planningContextRef, Err: err}
 	}
 
-	turnCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.modelTurnTimeout)
+	turnCtx, cancel := context.WithTimeout(planningCtx, s.modelTurnTimeout)
 	if usesModel {
 		turnCtx, err = inference.WithScope(turnCtx, inference.Scope{
 			RoutingDecision: modelinput.CloneRouteDecision(routingDecision),
@@ -2292,17 +2329,23 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 		}
 	}
 	result, buildErr := planner.Build(turnCtx, planning.Input{Intent: draft, Strategy: strategy}, requestedKind)
+	turnCause := context.Cause(turnCtx)
 	cancel()
+	bookkeepingCtx, finishBookkeeping := context.WithTimeout(context.WithoutCancel(planningCtx), planningBookkeepingTimeout)
+	defer finishBookkeeping()
 	if result.Usage != nil {
 		if !usesModel || result.Usage.ConnectionID != descriptor.ConnectionID || !result.Usage.Valid() || result.Usage.Provider != descriptor.Provider || result.Usage.Model != descriptor.Model {
 			return core.Plan{}, attemptFailure(errors.Join(buildErr, fmt.Errorf("planner returned usage outside its declared model boundary")))
 		}
-		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
+		if _, err := s.gateway.PublishTrusted(bookkeepingCtx, events.TrustedDraft{
 			OrganizationID: string(organizationID), EventType: "INFERENCE_USAGE_RECORDED", SourceActorID: "runtime",
 			SourceExecutionID: string(executionID), TaskID: "task-" + correlationID, Payload: result.Usage, CorrelationID: correlationID,
 		}); err != nil {
 			return core.Plan{}, attemptFailure(errors.Join(buildErr, fmt.Errorf("persist planning inference usage: %w", err)))
 		}
+	}
+	if usesModel {
+		buildErr = errors.Join(buildErr, turnCause, context.Cause(planningCtx))
 	}
 	if buildErr != nil {
 		return core.Plan{}, attemptFailure(fmt.Errorf("build bounded Task DAG: %w", buildErr))
@@ -2322,7 +2365,7 @@ func (s *Service) ensurePlan(ctx context.Context, organizationID core.ID, correl
 	if err := validateDurablePlan(plan, planID, intent, draft, requestedKind, strategicEventRefs, strategicContextRefs); err != nil {
 		return core.Plan{}, attemptFailure(err)
 	}
-	if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{
+	if _, err := s.gateway.PublishTrusted(planningCtx, events.TrustedDraft{
 		OrganizationID: string(organizationID), EventType: "PLAN_CREATED", SourceActorID: "runtime",
 		SourceExecutionID: string(executionID), TaskID: "task-" + correlationID, Payload: plan, CorrelationID: correlationID,
 	}); err != nil {
@@ -2891,6 +2934,11 @@ func (s *Service) actionableRemediation(ctx context.Context, snapshot projection
 }
 
 func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot, state projections.Versioned[core.Task], remediation bool) (resultRun taskRun, resultErr error) {
+	ctx, releaseTask, err := s.trackExecution(ctx)
+	if err != nil {
+		return taskRun{}, err
+	}
+	defer releaseTask()
 	task := state.Value
 	organizationID, err := taskOrganization(snapshot, task)
 	if err != nil {
@@ -3169,49 +3217,40 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		}
 	}
 	handlerStartedAt := time.Now().UTC()
-	executionResult, executionErr := handler.Execute(executionCtx, executionTask, manifest)
-	cancel()
-	reportedOutcome := executionResult.Outcome
-	executionInterrupted := false
-	interrupt := func(cause error) {
-		executionInterrupted = true
-		executionErr = cause
-		class := "execution_cancelled"
-		if errors.Is(executionErr, core.ErrOrganizationFrozen) {
-			class = "security_hold"
+	stopRun := stoppedExecution{organization: organizationID, taskID: task.ID, executionID: executionID, correlation: state.CorrelationID, startedAt: handlerStartedAt}
+	pending := make(chan handlerResult, 1)
+	go func() {
+		result, err := handler.Execute(executionCtx, executionTask, manifest)
+		pending <- handlerResult{result: result, err: err, finishedAt: time.Now().UTC()}
+	}()
+	var returned handlerResult
+	select {
+	case returned = <-pending:
+		cause := executionStopCause(liveCtx, executionCtx, returned.err)
+		cancel()
+		if cause != nil {
+			return s.stopExecution(ctx, stopRun, cause, nil, &returned)
 		}
-		if errors.Is(executionErr, core.ErrContainmentUnavailable) {
-			class = "containment_unavailable"
-		}
-		evidence := core.ExecutionInterruptionEvidence{
-			LocalExecutionStopped: true, ExternalEffectsStatus: "REQUIRES_RECONCILIATION",
-			ReportedOutcome: reportedOutcome,
-		}
-		var hold core.SecurityHoldCause
-		if errors.As(executionErr, &hold) {
-			evidence.Hold = &hold
-		}
-		executionResult.Outcome = core.ToolOutcome{
-			ToolInvocationID: core.ID("held-" + string(executionID)), ToolID: "runtime-containment",
-			Status: core.OutcomeFailed, PostconditionStatus: core.PostconditionNotChecked,
-			Retryability: core.NotRetryable, ErrorClass: class, ErrorDetail: "execution interrupted before result admission",
-			ObservedEffect: evidence,
-			StartedAt:      handlerStartedAt, FinishedAt: time.Now().UTC(),
-		}
+	case <-executionCtx.Done():
+		cause := executionStopCause(liveCtx, executionCtx, nil)
+		cancel()
+		return s.stopExecution(ctx, stopRun, cause, pending, nil)
 	}
-	if liveCtx.Err() != nil || errors.Is(executionErr, core.ErrContainmentUnavailable) || errors.Is(executionErr, core.ErrOrganizationFrozen) {
-		interrupt(errors.Join(context.Cause(liveCtx), executionErr))
-	}
+	executionResult, executionErr := returned.result, returned.err
+	completionAdmitted := false
+	defer func() {
+		if resultErr == nil || completionAdmitted {
+			return
+		}
+		if cause := executionStopCause(liveCtx, liveCtx, resultErr); cause != nil {
+			resultRun, resultErr = s.stopExecution(ctx, stopRun, cause, nil, &returned)
+		}
+	}()
+	// Handler return does not end the execution. Shutdown cancellation must
+	// still reach each admission transaction until completion is committed.
+	ctx = liveCtx
 	outcome, verifierAvailable := s.verifier.Verify(executionTask, executionResult.Outcome)
 	outcomeEvent, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: outcome, CorrelationID: state.CorrelationID})
-	var admissionHold core.SecurityHoldCause
-	if errors.As(err, &admissionHold) {
-		// Admission can observe a hold before the local cancellation monitor.
-		// Retry once with failed audit evidence, never with successful output.
-		interrupt(admissionHold)
-		outcome, verifierAvailable = s.verifier.Verify(executionTask, executionResult.Outcome)
-		outcomeEvent, err = s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: outcome, CorrelationID: state.CorrelationID})
-	}
 	if err != nil {
 		return taskRun{}, fmt.Errorf("persist outcome for task %s: %w", task.ID, err)
 	}
@@ -3223,43 +3262,6 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 			return taskRun{}, fmt.Errorf("persist inference usage for task %s: %w", task.ID, err)
 		}
 	}
-	if executionInterrupted {
-		// Suspension is a runtime lifecycle transition, not a result, parent
-		// remediation request, or terminal failure of the task's contract.
-		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "EXECUTION_FINISHED", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: map[string]any{"status": outcome.Status}, CorrelationID: state.CorrelationID}); err != nil {
-			return taskRun{}, fmt.Errorf("persist interrupted execution finish: %w", err)
-		}
-		task.Status = core.TaskBlocked
-		detail := map[string]string{"outcome_event_ref": outcomeEvent.EventID, "reason": "execution interrupted; operator reconciliation required before resumption"}
-		if err := s.state.SaveTask(ctx, organizationID, "TASK_EXECUTION_SUSPENDED", "runtime", state.CorrelationID, state.Version+2, task, detail); err != nil {
-			return taskRun{}, fmt.Errorf("suspend interrupted task %s: %w", task.ID, err)
-		}
-		return taskRun{Outcome: outcome, ExecutionError: executionErr}, nil
-	}
-	auditCtx := ctx
-	// Keep the execution generation even while durable bookkeeping ignores
-	// cancellation. Each action writer checks that generation transactionally.
-	ctx = context.WithoutCancel(liveCtx)
-	defer func() {
-		var hold core.SecurityHoldCause
-		if !errors.As(resultErr, &hold) {
-			return
-		}
-		interrupt(hold)
-		interruptedOutcome, _ := s.verifier.Verify(executionTask, executionResult.Outcome)
-		interruptedEvent, err := s.gateway.PublishTrusted(auditCtx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "TOOL_OUTCOME_RECORDED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), Payload: interruptedOutcome, CorrelationID: state.CorrelationID})
-		if err != nil {
-			resultErr = fmt.Errorf("record late execution interruption: %w", err)
-			return
-		}
-		task.Status = core.TaskBlocked
-		detail := map[string]string{"outcome_event_ref": interruptedEvent.EventID, "reason": "execution interrupted during result admission; operator reconciliation required"}
-		if err := s.state.SaveTask(auditCtx, organizationID, "TASK_EXECUTION_SUSPENDED", "runtime", state.CorrelationID, state.Version+2, task, detail); err != nil {
-			resultErr = fmt.Errorf("suspend late-interrupted task: %w", err)
-			return
-		}
-		resultRun, resultErr = taskRun{Outcome: interruptedOutcome, ExecutionError: hold}, nil
-	}()
 	for _, batch := range inboxBatches {
 		if len(batch.Events) == 0 {
 			continue
@@ -3322,6 +3324,10 @@ func (s *Service) executeTask(ctx context.Context, snapshot projections.Snapshot
 		if _, err := s.gateway.PublishTrusted(ctx, events.TrustedDraft{OrganizationID: string(organizationID), EventType: "COMPLETION_VERIFIED", SourceActorID: "runtime", SourceExecutionID: string(executionID), TaskID: string(task.ID), ArtifactRefs: outcome.ArtifactRefs, Payload: detail, CorrelationID: state.CorrelationID}); err != nil {
 			return taskRun{}, fmt.Errorf("persist completion verification for task %s: %w", task.ID, err)
 		}
+		// The durable verification ended this execution. Finishing its task
+		// projection is bookkeeping; later shutdown must not reverse that fact.
+		completionAdmitted = true
+		ctx = context.WithoutCancel(liveCtx)
 		task.Status = core.TaskCompleted
 		if err := s.state.SaveTask(ctx, organizationID, "TASK_VERIFIED_COMPLETE", "runtime", state.CorrelationID, state.Version+2, task, detail); err != nil {
 			return taskRun{}, fmt.Errorf("persist completed task %s: %w", task.ID, err)

@@ -513,6 +513,9 @@ func projectionKnowledgeAuthorityAdmissions(ctx context.Context, gateway *events
 }
 
 func validateProjectionEventAdmissions(stream []events.Event, inboxObservations map[string]events.InboxObservationBinding, leaseAdmissions []events.CapabilityLeaseAdmission, freezeAdmissions []events.OrganizationFreezeAdmission) error {
+	if err := events.ValidateExecutionStops(stream, freezeAdmissions); err != nil {
+		return err
+	}
 	if err := events.ValidateSecurityHoldOutcomes(stream, freezeAdmissions); err != nil {
 		return err
 	}

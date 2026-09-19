@@ -53,11 +53,29 @@ type CodexSubscription struct {
 	close       func() error
 	isolatedDir string
 	runPermit   chan struct{}
+	lifecycleMu sync.RWMutex
+	closed      bool
 	closeOnce   sync.Once
 	closeErr    error
+	restart     codexRuntimeFactory
+	// This adapter-owned lifetime only cancels process recreation on Close;
+	// individual requests still provide their own contexts and deadlines.
+	lifetimeCtx      context.Context //nolint:containedctx // Owned resource lifetime, never a retained caller context.
+	stopLifetime     context.CancelFunc
+	clearCredentials func()
+	runtimeWG        sync.WaitGroup
 }
 
 type codexRun func(context.Context, sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error)
+
+type codexRuntime struct {
+	run         codexRun
+	models      func(context.Context, protocol.ModelListParams) (protocol.ModelListResponse, error)
+	close       func() error
+	isolatedDir string
+}
+
+type codexRuntimeFactory func(context.Context) (codexRuntime, error)
 
 type codexProtocolErrors struct {
 	mu  sync.Mutex
@@ -94,9 +112,34 @@ func NewCodexSubscription(ctx context.Context, config CodexSubscriptionConfig) (
 	if err != nil {
 		return nil, fmt.Errorf("load Codex subscription credentials: %w", err)
 	}
+	var credentialsMu sync.Mutex
+	startRuntime := func(startCtx context.Context) (codexRuntime, error) {
+		return startCodexRuntime(startCtx, config, &credentialsMu, &creds)
+	}
+	runtime, err := startRuntime(ctx)
+	if err != nil {
+		credentialsMu.Lock()
+		creds = auth.Credentials{}
+		credentialsMu.Unlock()
+		return nil, err
+	}
+	lifetimeCtx, stopLifetime := context.WithCancel(context.Background())
+	return &CodexSubscription{
+		model: config.Model, run: runtime.run, models: runtime.models, close: runtime.close,
+		isolatedDir: runtime.isolatedDir, runPermit: make(chan struct{}, 1), restart: startRuntime,
+		lifetimeCtx: lifetimeCtx, stopLifetime: stopLifetime,
+		clearCredentials: func() {
+			credentialsMu.Lock()
+			creds = auth.Credentials{}
+			credentialsMu.Unlock()
+		},
+	}, nil
+}
+
+func startCodexRuntime(ctx context.Context, config CodexSubscriptionConfig, credentialsMu *sync.Mutex, creds *auth.Credentials) (codexRuntime, error) {
 	isolatedDir, err := os.MkdirTemp("", "agentos-codex-")
 	if err != nil {
-		return nil, fmt.Errorf("create isolated Codex runtime directory: %w", err)
+		return codexRuntime{}, fmt.Errorf("create isolated Codex runtime directory: %w", err)
 	}
 	cleanup := func() error { return removeOwnedCodexDirectory(isolatedDir, isolatedDir, "agentos-codex-") }
 
@@ -111,14 +154,10 @@ func NewCodexSubscription(ctx context.Context, config CodexSubscriptionConfig) (
 		},
 	})
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("start isolated Codex app-server: %w", err), cleanup())
+		return codexRuntime{}, errors.Join(fmt.Errorf("start isolated Codex app-server: %w", err), cleanup())
 	}
-	var credentialsMu sync.Mutex
 	closeProcess := func() error {
 		closeErr := process.Close()
-		credentialsMu.Lock()
-		creds = auth.Credentials{}
-		credentialsMu.Unlock()
 		return errors.Join(closeErr, cleanup())
 	}
 
@@ -143,7 +182,7 @@ func NewCodexSubscription(ctx context.Context, config CodexSubscriptionConfig) (
 			if refreshErr != nil {
 				return protocol.ChatgptAuthTokensRefreshResponse{}, fmt.Errorf("persist refreshed Codex credential: %w", refreshErr)
 			}
-			creds = refreshed
+			*creds = refreshed
 			return protocol.ChatgptAuthTokensRefreshResponse{
 				AccessToken:      refreshed.AccessToken,
 				ChatgptAccountID: refreshed.AccountID,
@@ -153,7 +192,7 @@ func NewCodexSubscription(ctx context.Context, config CodexSubscriptionConfig) (
 	})
 
 	if _, err = process.Initialize(ctx); err != nil {
-		return nil, errors.Join(fmt.Errorf("initialize Codex app-server: %w", err), closeProcess())
+		return codexRuntime{}, errors.Join(fmt.Errorf("initialize Codex app-server: %w", err), closeProcess())
 	}
 	credentialsMu.Lock()
 	loginParams := &protocol.ChatgptAuthTokensLoginAccountParams{
@@ -163,16 +202,14 @@ func NewCodexSubscription(ctx context.Context, config CodexSubscriptionConfig) (
 	}
 	credentialsMu.Unlock()
 	if _, err = process.Client.Account.Login(ctx, loginParams); err != nil {
-		return nil, errors.Join(fmt.Errorf("authenticate Codex subscription: %w", err), closeProcess())
+		return codexRuntime{}, errors.Join(fmt.Errorf("authenticate Codex subscription: %w", err), closeProcess())
 	}
 
-	return &CodexSubscription{
-		model:       config.Model,
+	return codexRuntime{
 		run:         sdkStreamRun(process, protocolErrors),
 		models:      process.Client.Model.List,
 		close:       closeProcess,
 		isolatedDir: isolatedDir,
-		runPermit:   make(chan struct{}, 1),
 	}, nil
 }
 
@@ -189,13 +226,30 @@ func (a *CodexSubscription) AvailableModels(ctx context.Context) ([]ModelChoice,
 	if ctx == nil {
 		return nil, fmt.Errorf("context is required")
 	}
-	if a == nil || a.models == nil || a.runPermit == nil {
+	if a == nil || a.runPermit == nil {
 		return nil, fmt.Errorf("codex model discovery is unavailable")
 	}
 	if err := acquireCodexPermit(ctx, a.runPermit); err != nil {
 		return nil, err
 	}
 	defer func() { <-a.runPermit }()
+	a.lifecycleMu.RLock()
+	closed, models := a.closed, a.models
+	a.lifecycleMu.RUnlock()
+	if closed {
+		return nil, fmt.Errorf("codex model discovery is unavailable")
+	}
+	if models == nil {
+		if err := a.ensureCodexRuntime(ctx); err != nil {
+			return nil, fmt.Errorf("codex model discovery is unavailable: %w", err)
+		}
+	}
+	a.lifecycleMu.RLock()
+	closed, models = a.closed, a.models
+	a.lifecycleMu.RUnlock()
+	if closed || models == nil {
+		return nil, fmt.Errorf("codex model discovery is unavailable")
+	}
 	const maximumPages = 20
 	limit := uint32(100)
 	var cursor *string
@@ -203,7 +257,7 @@ func (a *CodexSubscription) AvailableModels(ctx context.Context) ([]ModelChoice,
 	seenModels := make(map[string]struct{})
 	choices := make([]ModelChoice, 0)
 	for page := 0; page < maximumPages; page++ {
-		response, err := a.models(ctx, protocol.ModelListParams{Cursor: cursor, Limit: &limit})
+		response, err := models(ctx, protocol.ModelListParams{Cursor: cursor, Limit: &limit})
 		if err != nil {
 			return nil, fmt.Errorf("list Codex models: %w", err)
 		}
@@ -243,6 +297,9 @@ func (a *CodexSubscription) AvailableModels(ctx context.Context) ([]ModelChoice,
 }
 
 func acquireCodexPermit(ctx context.Context, permit chan struct{}) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	select {
 	case permit <- struct{}{}:
 		return nil
@@ -318,29 +375,33 @@ func (a *CodexSubscription) completeInput(ctx context.Context, prompt string, in
 	if a.runPermit == nil {
 		return ModelResponse{}, RequestNotSent(fmt.Errorf("codex subscription adapter is closed"))
 	}
-	select {
-	case a.runPermit <- struct{}{}:
-		defer func() { <-a.runPermit }()
-	case <-runCtx.Done():
+	if err := acquireCodexPermit(runCtx, a.runPermit); err != nil {
 		return ModelResponse{}, RequestNotSent(fmt.Errorf("wait for confined Codex turn: %w", runCtx.Err()))
 	}
-	if a.run == nil || a.isolatedDir == "" {
+	defer func() { <-a.runPermit }()
+	if err := a.ensureCodexRuntime(runCtx); err != nil {
+		return ModelResponse{}, RequestNotSent(fmt.Errorf("codex subscription adapter is unavailable: %w", err))
+	}
+	a.lifecycleMu.RLock()
+	closed, run, isolatedDir := a.closed, a.run, a.isolatedDir
+	a.lifecycleMu.RUnlock()
+	if closed || run == nil || isolatedDir == "" {
 		return ModelResponse{}, RequestNotSent(fmt.Errorf("codex subscription adapter is closed"))
 	}
 
-	runDir, err := os.MkdirTemp(a.isolatedDir, "run-")
+	runDir, err := os.MkdirTemp(isolatedDir, "run-")
 	if err != nil {
 		return ModelResponse{}, RequestNotSent(fmt.Errorf("create isolated Codex turn directory: %w", err))
 	}
 	defer func() {
-		err = errors.Join(err, removeOwnedCodexDirectory(a.isolatedDir, runDir, "run-"))
+		err = errors.Join(err, removeOwnedCodexDirectory(isolatedDir, runDir, "run-"))
 	}()
 
 	includeDefaults := false
 	model := a.model
 	var approval sdk.AskForApproval = sdk.ApprovalPolicyNever
 	sandbox := sdk.SandboxModeReadOnly
-	result, summary, err := a.run(runCtx, sdk.RunOptions{
+	result, summary, err := run(runCtx, sdk.RunOptions{
 		Prompt:         prompt,
 		Instructions:   instructions,
 		Cwd:            &runDir,
@@ -354,6 +415,9 @@ func (a *CodexSubscription) completeInput(ctx context.Context, prompt string, in
 		}}},
 	})
 	if err != nil {
+		if stop, found := StopOutcome(err); found && stop.LocalProcessStopAttempted {
+			err = errors.Join(err, a.retireCodexRuntime())
+		}
 		return ModelResponse{}, fmt.Errorf("run confined Codex turn: %w", err)
 	}
 	return validatedCodexResponse(a.model, result, summary)
@@ -422,19 +486,127 @@ func codexTokenCount(value int64) (int, error) {
 
 func (a *CodexSubscription) Close() error {
 	a.closeOnce.Do(func() {
-		if a.runPermit == nil {
-			return
+		a.lifecycleMu.Lock()
+		a.closed = true
+		closeProcess := a.close
+		stopLifetime, clearCredentials := a.stopLifetime, a.clearCredentials
+		a.run, a.models, a.close, a.isolatedDir, a.restart = nil, nil, nil, "", nil
+		a.lifecycleMu.Unlock()
+		if stopLifetime != nil {
+			stopLifetime()
 		}
-		a.runPermit <- struct{}{}
-		defer func() { <-a.runPermit }()
-		if a.close != nil {
-			a.closeErr = a.close()
+		if closeProcess != nil {
+			a.closeErr = closeProcess()
 		}
-		a.close = nil
-		a.run = nil
-		a.isolatedDir = ""
+		a.runtimeWG.Wait()
+		if clearCredentials != nil {
+			clearCredentials()
+		}
 	})
 	return a.closeErr
+}
+
+func (a *CodexSubscription) ensureCodexRuntime(ctx context.Context) error {
+	a.lifecycleMu.RLock()
+	closed, ready := a.closed, a.run != nil && a.isolatedDir != ""
+	a.lifecycleMu.RUnlock()
+	if closed {
+		return fmt.Errorf("codex subscription adapter is closed")
+	}
+	if ready {
+		return nil
+	}
+	return a.restartCodexRuntime(ctx)
+}
+
+// retireCodexRuntime permanently detaches and closes a process that received a
+// turn request. It never starts another process on behalf of the uncertain
+// request. Later work may create a fresh isolated runtime under its own context.
+func (a *CodexSubscription) retireCodexRuntime() error {
+	a.lifecycleMu.Lock()
+	if a.closed {
+		a.lifecycleMu.Unlock()
+		return fmt.Errorf("codex subscription adapter is closed")
+	}
+	closeProcess := a.close
+	a.run, a.models, a.close, a.isolatedDir = nil, nil, nil, ""
+	if closeProcess != nil {
+		a.runtimeWG.Add(1)
+	}
+	a.lifecycleMu.Unlock()
+
+	if closeProcess == nil {
+		return nil
+	}
+	defer a.runtimeWG.Done()
+	return closeProcess()
+}
+
+func (a *CodexSubscription) restartCodexRuntime(requestCtx context.Context) error {
+	if requestCtx == nil {
+		return fmt.Errorf("runtime context is required")
+	}
+	if err := requestCtx.Err(); err != nil {
+		return err
+	}
+	a.lifecycleMu.Lock()
+	if a.closed {
+		a.lifecycleMu.Unlock()
+		return fmt.Errorf("codex subscription adapter is closed")
+	}
+	if a.run != nil && a.isolatedDir != "" {
+		a.lifecycleMu.Unlock()
+		return nil
+	}
+	factory, lifetimeCtx := a.restart, a.lifetimeCtx
+	if factory != nil {
+		a.runtimeWG.Add(1)
+	}
+	a.lifecycleMu.Unlock()
+
+	if factory == nil {
+		return fmt.Errorf("codex runtime replacement is unavailable")
+	}
+	defer a.runtimeWG.Done()
+	restartCtx, cancel := codexRuntimeContext(lifetimeCtx, requestCtx)
+	defer cancel()
+	if err := restartCtx.Err(); err != nil {
+		return err
+	}
+	runtime, startErr := factory(restartCtx)
+	if startErr != nil {
+		return fmt.Errorf("start replacement Codex runtime: %w", startErr)
+	}
+	if runtime.run == nil || runtime.close == nil || runtime.isolatedDir == "" {
+		if runtime.close != nil {
+			startErr = runtime.close()
+		}
+		return errors.Join(startErr, fmt.Errorf("replacement Codex runtime is incomplete"))
+	}
+
+	a.lifecycleMu.Lock()
+	if a.closed {
+		a.lifecycleMu.Unlock()
+		return errors.Join(runtime.close(), fmt.Errorf("codex subscription adapter is closed"))
+	}
+	a.run, a.models, a.close, a.isolatedDir = runtime.run, runtime.models, runtime.close, runtime.isolatedDir
+	a.lifecycleMu.Unlock()
+	return nil
+}
+
+func codexRuntimeContext(lifetimeCtx, requestCtx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(requestCtx, codexRunTimeout)
+	if lifetimeCtx == nil {
+		return ctx, cancel
+	}
+	stopLifetime := context.AfterFunc(lifetimeCtx, cancel)
+	if lifetimeCtx.Err() != nil {
+		cancel()
+	}
+	return ctx, func() {
+		stopLifetime()
+		cancel()
+	}
 }
 
 func validateCodexConfig(config CodexSubscriptionConfig) error {

@@ -19,6 +19,7 @@ type identityTransport struct {
 	notices              []protocol.Notification
 	started, interrupted int
 	waitForCancel        bool
+	confirmInterrupt     bool
 	threadResponse       string
 	turnResponse         string
 	requests             map[string]json.RawMessage
@@ -51,6 +52,9 @@ func (f *identityTransport) Send(ctx context.Context, req protocol.Request) (pro
 		}
 	case "turn/interrupt":
 		f.interrupted++
+		if f.confirmInterrupt {
+			f.notify(ctx, identityNotice("turn/completed", `{"threadId":"thread-1","turn":{"id":"turn-1","status":"interrupted","items":[]}}`))
+		}
 		body = `{}`
 	default:
 		return protocol.Response{}, fmt.Errorf("unexpected test method")
@@ -143,6 +147,21 @@ func TestCodexDirectLifecycleInterruptsOnDeadline(t *testing.T) {
 	result, _, err := runIdentityTransport(t, transport)
 	if !errors.Is(err, context.DeadlineExceeded) || result != nil || transport.interrupted != 1 || WasRequestNotSent(err) {
 		t.Fatal("deadline lost cancellation or invocation accounting")
+	}
+	if stop, found := StopOutcome(err); found {
+		t.Fatalf("interrupt acknowledgement was treated as stop confirmation: %+v", stop)
+	}
+}
+
+func TestCodexDirectLifecycleRequiresTerminalStopConfirmation(t *testing.T) {
+	transport := &identityTransport{model: "gpt-test", provider: "openai", waitForCancel: true, confirmInterrupt: true, notices: successfulIdentityNotices()[:1]}
+	result, _, err := runIdentityTransport(t, transport)
+	stop, found := StopOutcome(err)
+	if !errors.Is(err, context.DeadlineExceeded) || result != nil || transport.interrupted != 1 || !found {
+		t.Fatalf("confirmed interruption result=%v interrupted=%d stop=%+v found=%v err=%v", result, transport.interrupted, stop, found, err)
+	}
+	if !stop.LocalTurnStopped || stop.LocalProcessStopAttempted || stop.LocalProcessStopped || stop.RemoteStatus != RemoteStopUncertain {
+		t.Fatalf("confirmed interruption stop=%+v", stop)
 	}
 }
 

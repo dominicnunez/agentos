@@ -9,10 +9,420 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/dominicnunez/codex-sdk-go/appserver"
 	protocol "github.com/dominicnunez/codex-sdk-go/appserver/protocol"
 )
+
+func TestCodexSubscriptionCloseDoesNotWaitForRunningTurn(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	processClosed := make(chan struct{})
+	adapter := &CodexSubscription{
+		model:       "gpt-test",
+		isolatedDir: t.TempDir(),
+		runPermit:   make(chan struct{}, 1),
+		run: func(context.Context, sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error) {
+			close(started)
+			<-release
+			return nil, codexRunSummary{}, context.Canceled
+		},
+		close: func() error {
+			close(processClosed)
+			return nil
+		},
+	}
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		_, _ = adapter.Complete(t.Context(), "bounded prompt")
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not start")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- adapter.Close() }()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		close(release)
+		<-runDone
+		t.Fatal("Close waited for the ordinary turn permit")
+	}
+	select {
+	case <-processClosed:
+	default:
+		t.Fatal("Close returned without invoking owned process shutdown")
+	}
+	close(release)
+	<-runDone
+}
+
+func TestCodexSubscriptionHardStopRetiresRuntimeUntilNextTurn(t *testing.T) {
+	lifetime, stopLifetime := context.WithCancel(context.Background())
+	defer stopLifetime()
+	var oldCalls, oldCloses, restarts, replacementCalls, replacementCloses int
+	oldDir, replacementDir := t.TempDir(), t.TempDir()
+	oldStopErr := errors.New("injected old process kill failure")
+	adapter := &CodexSubscription{
+		model:       "gpt-test",
+		isolatedDir: oldDir,
+		runPermit:   make(chan struct{}, 1),
+		run: func(_ context.Context, options sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error) {
+			oldCalls++
+			if options.Prompt != "first turn" || options.Cwd == nil || filepath.Dir(*options.Cwd) != oldDir {
+				t.Errorf("old runtime request=%q cwd=%v", options.Prompt, options.Cwd)
+			}
+			return nil, codexRunSummary{}, withModelStopOutcome(context.Canceled, ModelStopOutcome{
+				LocalProcessStopAttempted: true,
+				RemoteStatus:              RemoteStopUncertain,
+			})
+		},
+		close: func() error {
+			oldCloses++
+			return oldStopErr
+		},
+		lifetimeCtx:  lifetime,
+		stopLifetime: stopLifetime,
+		restart: func(context.Context) (codexRuntime, error) {
+			restarts++
+			return codexRuntime{
+				run: func(_ context.Context, options sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error) {
+					replacementCalls++
+					if options.Prompt != "second turn" || options.Cwd == nil || filepath.Dir(*options.Cwd) != replacementDir {
+						t.Errorf("replacement runtime request=%q cwd=%v", options.Prompt, options.Cwd)
+					}
+					return successfulCodexRun("replacement answer"), successfulCodexSummary(4, 2), nil
+				},
+				close: func() error {
+					replacementCloses++
+					return nil
+				},
+				isolatedDir: replacementDir,
+			}, nil
+		},
+	}
+	if _, err := adapter.Complete(t.Context(), "first turn"); !errors.Is(err, context.Canceled) || !errors.Is(err, oldStopErr) {
+		t.Fatalf("first turn error=%v", err)
+	} else if stop, found := StopOutcome(err); !found || !stop.LocalProcessStopAttempted || stop.LocalProcessStopped || stop.RemoteStatus != RemoteStopUncertain {
+		t.Fatalf("failed process stop evidence=%+v found=%v", stop, found)
+	}
+	if restarts != 0 {
+		t.Fatalf("stopped request started %d replacement runtimes", restarts)
+	}
+	response, err := adapter.Complete(t.Context(), "second turn")
+	if err != nil || response.Text != "replacement answer" {
+		t.Fatalf("replacement turn response=%+v err=%v", response, err)
+	}
+	if oldCalls != 1 || oldCloses != 1 || restarts != 1 || replacementCalls != 1 {
+		t.Fatalf("old calls=%d closes=%d restarts=%d replacement calls=%d", oldCalls, oldCloses, restarts, replacementCalls)
+	}
+	if err := adapter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if replacementCloses != 1 {
+		t.Fatalf("replacement closes=%d", replacementCloses)
+	}
+}
+
+func TestCodexSubscriptionQueuedTurnUsesReplacementRuntime(t *testing.T) {
+	lifetime, stopLifetime := context.WithCancel(context.Background())
+	defer stopLifetime()
+	started, release := make(chan struct{}), make(chan struct{})
+	var oldCalls, replacementCalls int
+	adapter := &CodexSubscription{
+		model: "gpt-test", isolatedDir: t.TempDir(), runPermit: make(chan struct{}, 1),
+		run: func(_ context.Context, options sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error) {
+			oldCalls++
+			if options.Prompt != "uncertain turn" {
+				t.Errorf("old runtime received queued prompt %q", options.Prompt)
+			}
+			close(started)
+			<-release
+			return nil, codexRunSummary{}, withModelStopOutcome(context.Canceled, ModelStopOutcome{LocalProcessStopAttempted: true, RemoteStatus: RemoteStopUncertain})
+		},
+		close: func() error { return nil }, lifetimeCtx: lifetime, stopLifetime: stopLifetime,
+		restart: func(context.Context) (codexRuntime, error) {
+			return codexRuntime{
+				run: func(_ context.Context, options sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error) {
+					replacementCalls++
+					if options.Prompt != "queued independent turn" {
+						t.Errorf("replacement runtime replayed prompt %q", options.Prompt)
+					}
+					return successfulCodexRun("queued answer"), successfulCodexSummary(2, 1), nil
+				},
+				close: func() error { return nil }, isolatedDir: t.TempDir(),
+			}, nil
+		},
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := adapter.Complete(t.Context(), "uncertain turn")
+		firstDone <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first turn did not start")
+	}
+	secondDone := make(chan struct {
+		response ModelResponse
+		err      error
+	}, 1)
+	go func() {
+		response, err := adapter.Complete(t.Context(), "queued independent turn")
+		secondDone <- struct {
+			response ModelResponse
+			err      error
+		}{response, err}
+	}()
+	select {
+	case result := <-secondDone:
+		t.Fatalf("queued turn bypassed serialization: %+v", result)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := <-firstDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("uncertain turn error=%v", err)
+	}
+	result := <-secondDone
+	if result.err != nil || result.response.Text != "queued answer" {
+		t.Fatalf("queued replacement response=%+v err=%v", result.response, result.err)
+	}
+	if oldCalls != 1 || replacementCalls != 1 {
+		t.Fatalf("old calls=%d replacement calls=%d", oldCalls, replacementCalls)
+	}
+}
+
+func TestCodexSubscriptionRetriesFailedRuntimeRecreationWithoutReplay(t *testing.T) {
+	lifetime, stopLifetime := context.WithCancel(context.Background())
+	defer stopLifetime()
+	restartFailure := errors.New("injected replacement failure")
+	var oldCalls, restarts, replacementCalls int
+	adapter := &CodexSubscription{
+		model: "gpt-test", isolatedDir: t.TempDir(), runPermit: make(chan struct{}, 1),
+		run: func(context.Context, sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error) {
+			oldCalls++
+			return nil, codexRunSummary{}, withModelStopOutcome(context.Canceled, ModelStopOutcome{LocalProcessStopAttempted: true, RemoteStatus: RemoteStopUncertain})
+		},
+		close: func() error { return nil }, lifetimeCtx: lifetime, stopLifetime: stopLifetime,
+		restart: func(context.Context) (codexRuntime, error) {
+			restarts++
+			if restarts == 1 {
+				return codexRuntime{}, restartFailure
+			}
+			return codexRuntime{
+				run: func(_ context.Context, options sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error) {
+					replacementCalls++
+					if options.Prompt != "new request" {
+						t.Errorf("replacement replayed %q", options.Prompt)
+					}
+					return successfulCodexRun("recovered"), successfulCodexSummary(1, 1), nil
+				},
+				close: func() error { return nil }, isolatedDir: t.TempDir(),
+			}, nil
+		},
+	}
+	if _, err := adapter.Complete(t.Context(), "uncertain request"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stopped request error=%v", err)
+	} else if stop, found := StopOutcome(err); !found || !stop.LocalProcessStopAttempted || stop.RemoteStatus != RemoteStopUncertain {
+		t.Fatalf("stopped request lost stop evidence=%+v found=%v", stop, found)
+	}
+	if _, err := adapter.Complete(t.Context(), "new request"); !errors.Is(err, restartFailure) || !WasRequestNotSent(err) {
+		t.Fatalf("failed recreation error=%v", err)
+	}
+	response, err := adapter.Complete(t.Context(), "new request")
+	if err != nil || response.Text != "recovered" {
+		t.Fatalf("runtime retry response=%+v err=%v", response, err)
+	}
+	if oldCalls != 1 || restarts != 2 || replacementCalls != 1 {
+		t.Fatalf("old calls=%d restarts=%d replacement calls=%d", oldCalls, restarts, replacementCalls)
+	}
+}
+
+func TestCodexSubscriptionCloseCancelsRuntimeReplacement(t *testing.T) {
+	lifetime, stopLifetime := context.WithCancel(context.Background())
+	restartStarted := make(chan struct{})
+	credentialsCleared := make(chan struct{})
+	var oldCloses, restarts, replacementCalls int
+	adapter := &CodexSubscription{
+		model: "gpt-test", isolatedDir: t.TempDir(), runPermit: make(chan struct{}, 1),
+		run: func(context.Context, sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error) {
+			return nil, codexRunSummary{}, withModelStopOutcome(context.Canceled, ModelStopOutcome{LocalProcessStopAttempted: true, LocalProcessStopped: true, LocalTurnStopped: true, RemoteStatus: RemoteStopUncertain})
+		},
+		close: func() error { oldCloses++; return nil }, lifetimeCtx: lifetime, stopLifetime: stopLifetime,
+		restart: func(ctx context.Context) (codexRuntime, error) {
+			restarts++
+			close(restartStarted)
+			<-ctx.Done()
+			select {
+			case <-credentialsCleared:
+				t.Error("credentials cleared before replacement callbacks drained")
+			default:
+			}
+			return codexRuntime{}, ctx.Err()
+		},
+		clearCredentials: func() { close(credentialsCleared) },
+	}
+	if _, err := adapter.Complete(t.Context(), "stopping request"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stopped request error=%v", err)
+	}
+	if restarts != 0 {
+		t.Fatalf("stopped request started %d replacement runtimes", restarts)
+	}
+	completeDone := make(chan error, 1)
+	go func() {
+		_, err := adapter.Complete(t.Context(), "independent request")
+		completeDone <- err
+	}()
+	select {
+	case <-restartStarted:
+	case <-time.After(time.Second):
+		t.Fatal("replacement did not start")
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- adapter.Close() }()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not cancel and drain replacement")
+	}
+	select {
+	case <-credentialsCleared:
+	default:
+		t.Fatal("Close returned before clearing credentials")
+	}
+	if err := <-completeDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("independent request error=%v", err)
+	}
+	if _, err := adapter.Complete(t.Context(), "after close"); err == nil || !WasRequestNotSent(err) {
+		t.Fatalf("closed adapter restarted: %v", err)
+	}
+	if oldCloses != 1 || restarts != 1 || replacementCalls != 0 {
+		t.Fatalf("old closes=%d restarts=%d replacement calls=%d", oldCloses, restarts, replacementCalls)
+	}
+}
+
+func TestCodexSubscriptionCloseWaitsForDetachedRuntimeCleanup(t *testing.T) {
+	lifetime, cancelLifetime := context.WithCancel(context.Background())
+	closeStarted := make(chan struct{})
+	releaseClose := make(chan struct{})
+	shutdownStarted := make(chan struct{})
+	credentialsCleared := make(chan struct{})
+	var closes int
+	adapter := &CodexSubscription{
+		model: "gpt-test", isolatedDir: t.TempDir(), runPermit: make(chan struct{}, 1),
+		run: func(context.Context, sdk.RunOptions) (*sdk.RunResult, codexRunSummary, error) {
+			return nil, codexRunSummary{}, withModelStopOutcome(context.Canceled, ModelStopOutcome{LocalProcessStopAttempted: true, RemoteStatus: RemoteStopUncertain})
+		},
+		close: func() error {
+			closes++
+			close(closeStarted)
+			<-releaseClose
+			return nil
+		},
+		lifetimeCtx: lifetime,
+		stopLifetime: func() {
+			cancelLifetime()
+			close(shutdownStarted)
+		},
+		clearCredentials: func() { close(credentialsCleared) },
+	}
+	completeDone := make(chan error, 1)
+	go func() {
+		_, err := adapter.Complete(t.Context(), "stopping request")
+		completeDone <- err
+	}()
+	select {
+	case <-closeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("detached runtime cleanup did not start")
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- adapter.Close() }()
+	select {
+	case <-shutdownStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not begin shutdown")
+	}
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned before detached cleanup: %v", err)
+	case <-credentialsCleared:
+		t.Fatal("credentials cleared before detached cleanup")
+	default:
+	}
+	close(releaseClose)
+	if err := <-completeDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("stopped request error=%v", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-credentialsCleared:
+	default:
+		t.Fatal("Close returned before clearing credentials")
+	}
+	if closes != 1 {
+		t.Fatalf("runtime closes=%d", closes)
+	}
+}
+
+func TestCodexSubscriptionCanceledRecoveryDoesNotStartRuntime(t *testing.T) {
+	lifetime, stopLifetime := context.WithCancel(context.Background())
+	defer stopLifetime()
+	var restarts int
+	adapter := &CodexSubscription{
+		model: "gpt-test", runPermit: make(chan struct{}, 1), lifetimeCtx: lifetime, stopLifetime: stopLifetime,
+		restart: func(context.Context) (codexRuntime, error) {
+			restarts++
+			return codexRuntime{}, errors.New("canceled recovery started")
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := adapter.Complete(ctx, "denied request"); !errors.Is(err, context.Canceled) || !WasRequestNotSent(err) {
+		t.Fatalf("canceled recovery error=%v", err)
+	}
+	if restarts != 0 {
+		t.Fatalf("canceled request started %d runtimes", restarts)
+	}
+}
+
+func TestCodexSubscriptionModelDiscoveryBoundsRuntimeRecreation(t *testing.T) {
+	lifetime, stopLifetime := context.WithCancel(context.Background())
+	defer stopLifetime()
+	restartFailure := errors.New("injected recreation failure")
+	var restarts int
+	adapter := &CodexSubscription{
+		runPermit: make(chan struct{}, 1), lifetimeCtx: lifetime, stopLifetime: stopLifetime,
+		restart: func(ctx context.Context) (codexRuntime, error) {
+			restarts++
+			deadline, found := ctx.Deadline()
+			if !found || time.Until(deadline) <= 0 || time.Until(deadline) > codexRunTimeout {
+				t.Errorf("recreation deadline=%v found=%v", deadline, found)
+			}
+			return codexRuntime{}, restartFailure
+		},
+	}
+	if _, err := adapter.AvailableModels(context.Background()); !errors.Is(err, restartFailure) {
+		t.Fatalf("model discovery error=%v", err)
+	}
+	if restarts != 1 {
+		t.Fatalf("runtime recreations=%d", restarts)
+	}
+}
 
 func TestCodexSubscriptionAppliesFailClosedRunProfile(t *testing.T) {
 	root := t.TempDir()

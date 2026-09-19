@@ -123,12 +123,22 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 	if err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, models.close()) }()
+	var service *app.Service
+	defer func() {
+		if service != nil {
+			service.StopExecutions()
+		}
+		err = errors.Join(err, models.close())
+		if service != nil {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err = errors.Join(err, service.WaitForStops(stopCtx))
+		}
+	}()
 	planner, err := planning.NewModelPlanner(planningModel{adapter: models.planning})
 	if err != nil {
 		return err
 	}
-	var service *app.Service
 	var selectedPlanner planning.Planner = planner
 	if models.registry != nil && config.Routing.PlanningRequirements != nil {
 		route, err := newAuxiliaryRoute(models.registry, config.Routing.Planning, *config.Routing.PlanningRequirements)
@@ -145,6 +155,10 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 	} else {
 		service = app.NewWithModelAndPlanner(events.NewGateway(l), models.task, planner)
 	}
+	// Recovery can dispatch work before any HTTP listener exists. Observe
+	// runtime cancellation now, rather than waiting for serving to return.
+	stopOnCancel := context.AfterFunc(ctx, service.StopExecutions)
+	defer stopOnCancel()
 	if _, err := service.Recover(ctx); err != nil {
 		return fmt.Errorf("recover durable runtime before serving: %w", err)
 	}
@@ -214,7 +228,7 @@ func runServer(ctx context.Context, config bootstrap.Config, source secrets.Sour
 		log.Printf("Agent OS A2A gateway listening on %s", a2aListener.Addr())
 		bindings = append(bindings, serverBinding{server: a2aServer, listener: a2aListener, certFile: tlsCertFile, keyFile: tlsKeyFile})
 	}
-	return serveAll(ctx, bindings)
+	return serveAll(ctx, bindings, service.StopExecutions)
 }
 
 type inferenceAdmissionStore interface {
@@ -404,7 +418,7 @@ func configuredProvider(ctx context.Context, provider bootstrap.Provider, runtim
 }
 
 func serve(ctx context.Context, server *http.Server, listener net.Listener, certFile, keyFile string) error {
-	return serveAll(ctx, []serverBinding{{server: server, listener: listener, certFile: certFile, keyFile: keyFile}})
+	return serveAll(ctx, []serverBinding{{server: server, listener: listener, certFile: certFile, keyFile: keyFile}}, nil)
 }
 
 type serverBinding struct {
@@ -413,7 +427,7 @@ type serverBinding struct {
 	certFile, keyFile string
 }
 
-func serveAll(ctx context.Context, bindings []serverBinding) error {
+func serveAll(ctx context.Context, bindings []serverBinding, stopWork func()) error {
 	if ctx == nil || len(bindings) == 0 {
 		closeListeners(bindings)
 		return fmt.Errorf("runtime context, server, and listener are required")
@@ -427,6 +441,16 @@ func serveAll(ctx context.Context, bindings []serverBinding) error {
 			closeListeners(bindings)
 			return fmt.Errorf("runtime context, server, and listener are required")
 		}
+	}
+	requestLifetime, cancelRequests := context.WithCancel(ctx)
+	defer cancelRequests()
+	wrappedServers := make(map[*http.Server]struct{}, len(bindings))
+	for _, binding := range bindings {
+		if _, found := wrappedServers[binding.server]; found {
+			continue
+		}
+		wrappedServers[binding.server] = struct{}{}
+		binding.server.Handler = cancelOnShutdown(binding.server.Handler, requestLifetime)
 	}
 	results := make(chan error, len(bindings))
 	for _, binding := range bindings {
@@ -449,6 +473,12 @@ func serveAll(ctx context.Context, bindings []serverBinding) error {
 		}
 	case <-ctx.Done():
 	}
+	cancelRequests()
+	// Stop dispatch and active supervisors before waiting for their HTTP
+	// requests. A listener failure must contain sibling listeners' work too.
+	if stopWork != nil {
+		stopWork()
+	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	for _, binding := range bindings {
@@ -466,6 +496,24 @@ func serveAll(ctx context.Context, bindings []serverBinding) error {
 		completed++
 	}
 	return result
+}
+
+func cancelOnShutdown(handler http.Handler, shutdown context.Context) http.Handler {
+	if handler == nil {
+		handler = http.DefaultServeMux
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCtx, cancel := context.WithCancel(r.Context())
+		stop := context.AfterFunc(shutdown, cancel)
+		if shutdown.Err() != nil {
+			cancel()
+		}
+		defer func() {
+			stop()
+			cancel()
+		}()
+		handler.ServeHTTP(w, r.WithContext(requestCtx))
+	})
 }
 
 func closeListeners(bindings []serverBinding) {

@@ -334,6 +334,9 @@ func (l *SQLite) AppendProjections(ctx context.Context, drafts []events.Projecti
 	}
 	prepared := make([]preparedProjection, 0, len(drafts))
 	for _, draft := range drafts {
+		if draft.Event.EventType == "TASK_EXECUTION_SUSPENDED" {
+			return nil, fmt.Errorf("task execution suspension requires typed execution stop admission")
+		}
 		item, err := prepareProjection(draft, false, false)
 		if err != nil {
 			return nil, err
@@ -3516,6 +3519,9 @@ func (l *SQLite) AuthorizeAndAppendEffectAttempt(ctx context.Context, obligation
 	}
 	var trace core.AuthorizationTrace
 	err = l.withFreezeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		if err := validateTaskNotSuspended(ctx, tx, string(obligation.OrganizationID), string(obligation.TaskID)); err != nil {
+			return err
+		}
 		if err := validateEffectTrajectory(ctx, tx, obligation); err != nil {
 			return fmt.Errorf("validate protected effect trajectory: %w", err)
 		}
@@ -4304,6 +4310,9 @@ func collectRecordBodies(rows *sql.Rows, err error) ([][]byte, error) {
 }
 
 func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Event, error) {
+	if events.RequiresExecutionStopAdmission(d.EventType) {
+		return events.Event{}, fmt.Errorf("execution stop events require typed execution stop admission")
+	}
 	if d.EventType == "INFERENCE_NOT_SENT" {
 		return events.Event{}, fmt.Errorf("not-sent evidence requires typed inference admission")
 	}
@@ -4369,8 +4378,12 @@ func (l *SQLite) Append(ctx context.Context, d events.TrustedDraft) (events.Even
 				return err
 			}
 		case "TOOL_OUTCOME_RECORDED", "INFERENCE_USAGE_RECORDED", "EXECUTION_FINISHED":
-			// Runtime audit/accounting may finish after containment. Outcomes
-			// have their separate interruption-evidence validator below.
+			// Stop-bound audit/accounting is admitted atomically by
+			// RecordExecutionStop. Generic publication remains available only
+			// while the exact execution has no durable stop request.
+			if err := validateExecutionNotStopped(ctx, tx, d); err != nil {
+				return err
+			}
 		case "INTENT_DRAFTED", "RESULT_PUBLISHED", "CANDIDATE_COMPLETE", "COMPLETION_VERIFIED", "COMPLETION_REVIEW_REQUESTED":
 			if err := validateExecutionPublication(ctx, tx, d); err != nil {
 				return err
