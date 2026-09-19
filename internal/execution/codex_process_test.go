@@ -14,7 +14,13 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	if mode := os.Getenv("AGENTOS_CODEX_TEST_PROCESS"); mode != "" {
+	mode := os.Getenv("AGENTOS_CODEX_TEST_PROCESS")
+	// The public constructor deliberately strips ambient environment variables.
+	// Its exact app-server arguments select the offline peer in this test binary.
+	if mode == "" && len(os.Args) == 4 && os.Args[1] == "app-server" && os.Args[2] == "--listen" && os.Args[3] == "stdio://" {
+		mode = "recover"
+	}
+	if mode != "" {
 		if err := serveCodexTestProcess(mode); err != nil {
 			os.Exit(1)
 		}
@@ -23,7 +29,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// The test binary acts as a local stdio peer. No provider, credentials or
+// The test binary acts as a local stdio peer. No provider, real credentials or
 // networking are used; production startup, pipe ownership and SDK dispatch run.
 func serveCodexTestProcess(mode string) error {
 	d := json.NewDecoder(os.Stdin)
@@ -50,6 +56,15 @@ func serveCodexTestProcess(mode string) error {
 				}
 			}
 			continue
+		case "account/login/start":
+			var params protocol.ChatgptAuthTokensLoginAccountParams
+			if err := json.Unmarshal(req.Params, &params); err != nil {
+				return err
+			}
+			if mode != "recover" || !initialized || params.AccessToken != "synthetic-token" || params.ChatgptAccountId != "synthetic-account" {
+				return os.ErrInvalid
+			}
+			result = json.RawMessage(`{"type":"chatgptAuthTokens"}`)
 		case "thread/start":
 			if !initialized {
 				return os.ErrInvalid
@@ -69,6 +84,30 @@ func serveCodexTestProcess(mode string) error {
 				return err
 			}
 		case "turn/start":
+			if mode == "recover" {
+				var params struct {
+					Input []struct {
+						Text string `json:"text"`
+					} `json:"input"`
+				}
+				if err := json.Unmarshal(req.Params, &params); err != nil {
+					return err
+				}
+				if len(params.Input) != 1 {
+					return os.ErrInvalid
+				}
+				if params.Input[0].Text == "hang-for-stop" {
+					if err := os.WriteFile("turn-received", []byte("received"), 0o600); err != nil {
+						return err
+					}
+					for {
+						time.Sleep(time.Hour)
+					}
+				}
+				if params.Input[0].Text != "fresh-request" {
+					return os.ErrInvalid
+				}
+			}
 			if mode == "hang" {
 				for {
 					time.Sleep(time.Hour)
