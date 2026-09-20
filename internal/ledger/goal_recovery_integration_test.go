@@ -13,6 +13,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/ledger"
 	ledgerrecovery "github.com/dominicnunez/agentos/internal/ledger/recovery"
+	"github.com/dominicnunez/agentos/internal/replay"
 )
 
 func TestRecoveryRejectsCausallyReorderedGoalEvidence(t *testing.T) {
@@ -111,6 +112,15 @@ func TestRecoveryRejectsCausallyReorderedGoalEvidence(t *testing.T) {
 	}
 	if _, err := app.New(gateway).Recover(ctx); err != nil {
 		t.Fatalf("legitimate Mission retirement after Goal evaluation was rejected: %v", err)
+	}
+	for _, selected := range []string{correlationID, "goal-1"} {
+		snapshot, err := store.VerifiedIncidentEvents(ctx, string(organization.ID), selected, 256)
+		if err != nil {
+			t.Fatalf("incident rejected completed Goal evidence for %s: %v", selected, err)
+		}
+		if _, err := replay.ProjectIncident(snapshot, selected); err != nil {
+			t.Fatalf("incident renderer rejected completed Goal evidence for %s: %v", selected, err)
+		}
 	}
 
 	stream, err := store.Events(ctx, "")
