@@ -8,6 +8,65 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 )
 
+// IncidentEffect carries validated fields needed by the bounded renderer.
+type IncidentEffect struct {
+	EffectID, TaskID, EventRef, Status   string
+	AttemptCount                         int
+	ConfirmationRefs, ReconciliationRefs []string
+}
+
+// IncidentEffects validates the complete selected effect event history without
+// exposing core contracts to renderers. Backing records are checked by readers.
+func IncidentEffects(stream []Event, tasks map[string]int64) ([]IncidentEffect, error) {
+	previous := map[string]core.EffectObligation{}
+	var result []IncidentEffect
+	for _, event := range stream {
+		if event.EventType != "EFFECT_OBLIGATION_TRANSITIONED" {
+			continue
+		}
+		value, err := IncidentEffectValue(event, tasks)
+		if err != nil {
+			return nil, err
+		}
+		id := string(value.ID)
+		prior, found := previous[id]
+		if err := ValidateIncidentEffect(value, prior, !found); err != nil {
+			return nil, err
+		}
+		previous[id] = value
+		result = append(result, IncidentEffect{EffectID: id, TaskID: string(value.TaskID), EventRef: event.EventID, Status: string(value.Status), AttemptCount: value.AttemptCount, ConfirmationRefs: slices.Clone(value.ConfirmationEvidenceRefs), ReconciliationRefs: slices.Clone(value.ReconciliationEvidenceRefs)})
+	}
+	return result, nil
+}
+
+// AdmissionForIncident derives a local boundary from its exact event fields.
+func AdmissionForIncident(event Event) (IncidentAdmission, bool, error) {
+	admission := IncidentAdmission{EventRef: event.EventID, TaskID: event.TaskID, ExecutionID: event.SourceExecutionID}
+	switch event.EventType {
+	case "EXECUTION_STARTED":
+		var err error
+		admission.ExecutionID, err = ContainmentExecutionID(event)
+		if err != nil {
+			return IncidentAdmission{}, false, err
+		}
+		admission.Kind = "EXECUTION_START"
+	case "INFERENCE_RESERVED":
+		admission.Kind = "INFERENCE_RESERVATION"
+	case "EFFECT_OBLIGATION_TRANSITIONED":
+		value, err := core.DecodeEffectObligation(event.Payload)
+		if err != nil {
+			return IncidentAdmission{}, false, err
+		}
+		if value.Status != core.EffectAttempted {
+			return IncidentAdmission{}, false, nil
+		}
+		admission.Kind, admission.ExecutionID = "EFFECT_ATTEMPT", ""
+	default:
+		return IncidentAdmission{}, false, nil
+	}
+	return admission, true, nil
+}
+
 // IncidentEffectValue checks the admitted Task link and exact public event
 // envelope. It does not establish historical permission or remote dispatch.
 func IncidentEffectValue(event Event, tasks map[string]int64) (core.EffectObligation, error) {

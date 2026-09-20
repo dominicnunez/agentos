@@ -205,7 +205,7 @@ func TestIncidentReconciliationHistory(t *testing.T) {
 
 func TestIncidentReservationLinkedEvents(t *testing.T) {
 	for _, eventType := range []string{"INFERENCE_RESERVED", "INFERENCE_RECONCILED"} {
-		for _, scope := range []string{"other-correlation", "other-organization", "other-reservation", "malformed-other-org", "malformed-other-correlation"} {
+		for _, scope := range []string{"other-correlation", "other-organization", "other-reservation", "independent-reservation", "malformed-other-org", "malformed-other-correlation", "malformed-independent-correlation"} {
 			t.Run(eventType+"/"+scope, func(t *testing.T) {
 				path := filepath.Join(t.TempDir(), "linked.db")
 				store, err := Open(path)
@@ -235,13 +235,24 @@ func TestIncidentReservationLinkedEvents(t *testing.T) {
 				if scope == "other-organization" || scope == "malformed-other-org" {
 					draft.OrganizationID, draft.CorrelationID = "other-org", original.CorrelationID
 				}
-				if scope == "other-reservation" {
+				if scope == "other-reservation" || scope == "independent-reservation" {
 					var payload map[string]any
 					if err := json.Unmarshal(original.Payload, &payload); err != nil {
 						t.Fatal(err)
 					}
 					payload["reservation_id"] = "unrelated-reservation"
+					if scope == "independent-reservation" {
+						// A new reservation ID alone does not sever the original
+						// execution identity retained by the copied envelope.
+						payload["request_id"] = "unrelated-request"
+						payload["execution_id"] = "unrelated-call"
+						delete(payload, "execution_manifest_ref")
+						draft.SourceExecutionID, draft.TaskID = "unrelated-call", "unrelated-task"
+					}
 					draft.Payload = payload
+				}
+				if scope == "malformed-independent-correlation" {
+					draft.SourceExecutionID, draft.TaskID = "unrelated-call", "unrelated-task"
 				}
 				if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
 					extra, err := appendEvent(t.Context(), tx, draft)
@@ -267,7 +278,7 @@ func TestIncidentReservationLinkedEvents(t *testing.T) {
 				}
 				t.Cleanup(func() { _ = store.Close() })
 				_, err = store.VerifiedIncidentEvents(t.Context(), "organization-1", "work-1", 256)
-				if scope == "other-correlation" {
+				if scope == "other-correlation" || scope == "other-reservation" || scope == "malformed-other-correlation" {
 					if err == nil {
 						t.Fatal("same reservation acquired another event under a different correlation")
 					}

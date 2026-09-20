@@ -12,6 +12,8 @@ import (
 func IncidentTaskAdmissions(stream []Event) (map[string]int64, error) {
 	works := map[core.ID]core.Work{}
 	workScopes := map[core.ID][2]string{}
+	intents := map[core.ID]core.Intent{}
+	intentScopes := map[core.ID][2]string{}
 	priorTasks := map[string]core.Task{}
 	versions := map[[2]string]int{}
 	tasks := map[string]int64{}
@@ -35,6 +37,15 @@ func IncidentTaskAdmissions(stream []Event) (map[string]int64, error) {
 			return nil, err
 		}
 		projection := payload.Projection
+		if projection.ProjectionKind == "intent" {
+			var intent core.Intent
+			if decodeExactEventJSON(projection.Value, &intent) != nil || string(intent.ID) != projection.RecordID || intents[intent.ID].ID != "" {
+				return nil, fmt.Errorf("incident Intent identity is invalid or repeated")
+			}
+			intents[intent.ID] = intent
+			intentScopes[intent.ID] = [2]string{event.OrganizationID, event.CorrelationID}
+			continue
+		}
 		if projection.ProjectionKind != "work" && projection.ProjectionKind != "task" {
 			continue
 		}
@@ -47,6 +58,10 @@ func IncidentTaskAdmissions(stream []Event) (map[string]int64, error) {
 			var work core.Work
 			if decodeExactEventJSON(projection.Value, &work) != nil || string(work.ID) != projection.RecordID {
 				return nil, fmt.Errorf("incident Work identity is invalid")
+			}
+			intent, found := intents[work.IntentID]
+			if !found || intentScopes[work.IntentID] != [2]string{event.OrganizationID, event.CorrelationID} || string(intent.OrganizationID) != event.OrganizationID || intent.GoalID != work.GoalID || intent.ReplacesWorkID != work.ReplacesWorkID || intent.NormalizedObjective != work.Objective {
+				return nil, fmt.Errorf("incident Work lacks its exact prior Intent")
 			}
 			var prior *core.Work
 			if value, ok := works[work.ID]; ok {
@@ -63,7 +78,7 @@ func IncidentTaskAdmissions(stream []Event) (map[string]int64, error) {
 			continue
 		}
 		var task core.Task
-		if decodeExactEventJSON(projection.Value, &task) != nil || string(task.ID) != projection.RecordID || works[task.WorkID].ID == "" || workScopes[task.WorkID] != [2]string{event.OrganizationID, event.CorrelationID} {
+		if decodeExactEventJSON(projection.Value, &task) != nil || string(task.ID) != projection.RecordID || works[task.WorkID].ID == "" || works[task.WorkID].Status != core.WorkActive || workScopes[task.WorkID] != [2]string{event.OrganizationID, event.CorrelationID} {
 			return nil, fmt.Errorf("incident Task lacks its exact prior Work")
 		}
 		var prior *core.Task

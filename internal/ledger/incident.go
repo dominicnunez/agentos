@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"slices"
 	"sort"
 	"strings"
 
@@ -85,13 +84,7 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 		return events.IncidentSnapshot{}, err
 	}
 	snapshot.RelatedEvents = related
-	if err := validateIncidentStops(ctx, tx, work, freezes, &budget); err != nil {
-		return events.IncidentSnapshot{}, err
-	}
-	if err := events.ValidateSecurityHoldOutcomes(work, freezes); err != nil {
-		return events.IncidentSnapshot{}, err
-	}
-	if err := validateIncidentInference(ctx, tx, work, freezes); err != nil {
+	if err := validateIncidentExecutionEvidence(ctx, tx, work, freezes, &budget); err != nil {
 		return events.IncidentSnapshot{}, err
 	}
 	effects, err := incidentEffects(ctx, tx, &budget, organization, correlation, tasks, work)
@@ -181,9 +174,10 @@ func incidentTasks(ctx context.Context, tx *sql.Tx, stream []events.Event) (map[
 	if err := validateIncidentRecords(ctx, tx, stream); err != nil {
 		return nil, err
 	}
-	works := map[core.ID]core.Work{}
-	tasks := map[string]int64{}
-	priorTasks := map[string]core.Task{}
+	tasks, err := events.IncidentTaskAdmissions(stream)
+	if err != nil {
+		return nil, err
+	}
 	versions := map[string]int{}
 	identities := map[string][2]string{}
 	for _, event := range stream {
@@ -207,37 +201,8 @@ func incidentTasks(ctx context.Context, tx *sql.Tx, stream []events.Event) (map[
 		}
 		versions[key] = projection.Version
 		identities[key] = [2]string{projection.ProjectionKind, projection.RecordID}
-		if projection.ProjectionKind == "work" {
-			var work core.Work
-			if decodeExactJSONBytes(projection.Value, &work) != nil || string(work.ID) != projection.RecordID {
-				return nil, fmt.Errorf("incident Work identity is invalid")
-			}
-			var prior *core.Work
-			if value, ok := works[work.ID]; ok {
-				prior = &value
-			}
-			if err := events.ValidateWorkProjectionTransition(event.EventType, projection.Version, prior, work); err != nil {
-				return nil, err
-			}
-			works[work.ID] = work
-			continue
-		}
-		var task core.Task
-		if decodeExactJSONBytes(projection.Value, &task) != nil || string(task.ID) != projection.RecordID || works[task.WorkID].ID == "" {
-			return nil, fmt.Errorf("incident Task lacks its exact Work")
-		}
-		var prior *core.Task
-		if value, ok := priorTasks[projection.RecordID]; ok {
-			prior = &value
-		}
-		if err := events.ValidateTaskProjectionTransition(event.EventType, projection.Version, prior, task); err != nil {
-			return nil, err
-		}
-		priorTasks[projection.RecordID] = task
-		if projection.Version == 1 {
-			tasks[projection.RecordID] = event.Sequence
-		}
 	}
+
 	if len(identities) == 0 {
 		return tasks, nil
 	}
@@ -359,18 +324,12 @@ func incidentEffects(ctx context.Context, tx *sql.Tx, budget *incidentBudget, or
 func validateIncidentEffects(ctx context.Context, tx *sql.Tx, organization string, tasks map[string]int64, ids []string, stream []events.Event) error {
 	histories := map[string][]events.Event{}
 	for _, event := range stream {
-		value, err := core.DecodeEffectObligation(event.Payload)
-		if err != nil || string(value.OrganizationID) != organization || string(value.TaskID) != event.TaskID || (tasks[event.TaskID] == 0 || event.Sequence <= tasks[event.TaskID]) || event.OrganizationID != organization || event.SchemaVersion != events.SchemaVersion || event.SourceActorID != "" || event.SourceExecutionID != "" || event.CorrelationID != "" || event.RecipientID != "" || event.RecipientScope != "" {
-			return fmt.Errorf("incident effect crosses its Task identity")
+		value, err := events.IncidentEffectValue(event, tasks)
+		if err != nil {
+			return err
 		}
-		refs := slices.Clone(value.ConfirmationEvidenceRefs)
-		for _, ref := range value.ReconciliationEvidenceRefs {
-			if !slices.Contains(refs, ref) {
-				refs = append(refs, ref)
-			}
-		}
-		if !slices.Equal(event.AuthorizationRefs, value.AuthorizationRefs) || !slices.Equal(event.ArtifactRefs, refs) {
-			return fmt.Errorf("incident effect envelope differs from its evidence")
+		if event.OrganizationID != organization {
+			return fmt.Errorf("incident effect crosses its organization")
 		}
 		histories[string(value.ID)] = append(histories[string(value.ID)], event)
 	}
@@ -415,7 +374,7 @@ func validateIncidentEffects(ctx context.Context, tx *sql.Tx, organization strin
 		if err != nil || json.Unmarshal(event.Payload, &recorded) != nil || !reflect.DeepEqual(recorded, value) || version != index+1 || string(value.ID) != id || admission != "" && admission != event.EventID {
 			return fmt.Errorf("incident effect record differs from its ordered event")
 		}
-		if err := validateIncidentEffect(value, previous[id], index == 0); err != nil {
+		if err := events.ValidateIncidentEffect(value, previous[id], index == 0); err != nil {
 			return err
 		}
 		previous[id] = value
@@ -428,78 +387,6 @@ func validateIncidentEffects(ctx context.Context, tx *sql.Tx, organization strin
 		if indices[id] == 0 || indices[id] != len(histories[id]) {
 			return fmt.Errorf("incident effect history has unmatched events")
 		}
-	}
-	return nil
-}
-
-// Effects have no shared replay validator or sealed record admission. This
-// read-only check proves ordered identity/state consistency, not permission to
-// dispatch or independent confirmation by an external destination.
-func validateIncidentEffect(value, previous core.EffectObligation, first bool) error {
-	if value.ID == "" || value.OrganizationID == "" || value.TaskID == "" || value.ActorID == "" || value.Action == "" || value.Resource == "" || value.Scope == "" || value.IdempotencyKey == "" || value.EffectFingerprint == "" || len(value.AuthorizationRefs) == 0 || len(value.AuthorizationRefs) > core.MaximumEffectAuthorizationRefs {
-		return fmt.Errorf("incident effect identity is incomplete")
-	}
-	if err := core.ValidateExecutionAuthorityEffect(value); err != nil {
-		return err
-	}
-	for _, refs := range [][]string{value.AuthorizationRefs, value.ConfirmationEvidenceRefs, value.ReconciliationEvidenceRefs} {
-		seen := make(map[string]bool, len(refs))
-		for _, ref := range refs {
-			if ref == "" || seen[ref] {
-				return fmt.Errorf("incident effect has empty or repeated evidence")
-			}
-			seen[ref] = true
-		}
-	}
-	if (len(value.ReconciliationEvidenceRefs) > 0) != (value.ReconciledAt != nil) {
-		return fmt.Errorf("incident effect reconciliation evidence is incomplete")
-	}
-	if value.Status == core.EffectPending || value.Status == core.EffectAttempted || value.Status == core.EffectCancelled {
-		if len(value.ConfirmationEvidenceRefs) != 0 || len(value.ReconciliationEvidenceRefs) != 0 || value.ReconciledAt != nil {
-			return fmt.Errorf("incident unfinished effect carries terminal evidence")
-		}
-	}
-	if value.Status == core.EffectFailed && (len(value.ConfirmationEvidenceRefs) != 0 || value.ReconciledAt == nil) {
-		return fmt.Errorf("incident failed effect lacks reconciliation or claims confirmation")
-	}
-	if value.ActorKind != "" {
-		fingerprint, err := core.FingerprintEffect(value)
-		if err != nil || fingerprint != value.EffectFingerprint || !core.ValidPrincipalKind(value.ActorKind) {
-			return fmt.Errorf("incident effect fingerprint is invalid")
-		}
-	}
-	if !first {
-		before, err := core.FingerprintEffect(previous)
-		after, nextErr := core.FingerprintEffect(value)
-		if err != nil || nextErr != nil || before != after {
-			return fmt.Errorf("incident effect changes immutable intent")
-		}
-	}
-	switch value.Status {
-	case core.EffectPending:
-		if !first || value.AttemptCount != 0 || value.LastAttemptAt != nil {
-			return fmt.Errorf("incident effect pending history is invalid")
-		}
-	case core.EffectAttempted:
-		if value.AttemptCount != previous.AttemptCount+1 || !first && previous.Status != core.EffectPending {
-			return fmt.Errorf("incident effect attempt history is invalid")
-		}
-	case core.EffectConfirmed, core.EffectFailed:
-		if first || previous.Status != core.EffectAttempted || value.AttemptCount != previous.AttemptCount || !reflect.DeepEqual(value.LastAttemptAt, previous.LastAttemptAt) {
-			return fmt.Errorf("incident effect terminal history lacks its attempt")
-		}
-		if value.Status == core.EffectConfirmed && len(value.ConfirmationEvidenceRefs) == 0 {
-			return fmt.Errorf("incident effect confirmation lacks evidence")
-		}
-		if value.ReconciledAt != nil && len(value.ReconciliationEvidenceRefs) == 0 {
-			return fmt.Errorf("incident effect reconciliation lacks evidence")
-		}
-	case core.EffectCancelled:
-		if first || previous.Status != core.EffectPending || value.AttemptCount != 0 {
-			return fmt.Errorf("incident cancelled effect was not pending")
-		}
-	default:
-		return fmt.Errorf("incident effect status is invalid")
 	}
 	return nil
 }

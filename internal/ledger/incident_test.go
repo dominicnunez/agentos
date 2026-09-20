@@ -311,7 +311,7 @@ func TestIncidentInferenceRequiresExactAccounting(t *testing.T) {
 }
 
 func TestIncidentRejectsOrphanInferenceRows(t *testing.T) {
-	for _, scope := range []string{"selected", "other-organization", "other-correlation"} {
+	for _, scope := range []string{"selected", "other-organization", "other-correlation", "independent-correlation"} {
 		t.Run(scope, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "inference.db")
 			store, err := Open(path)
@@ -352,6 +352,8 @@ func TestIncidentRejectsOrphanInferenceRows(t *testing.T) {
 				_, err = store.db.ExecContext(t.Context(), `UPDATE inference_reservations SET organization_id='other-org' WHERE reservation_id=?`, first.ID)
 			case "other-correlation":
 				_, err = store.db.ExecContext(t.Context(), `UPDATE inference_reservations SET correlation_id='other-run' WHERE reservation_id=?`, first.ID)
+			case "independent-correlation":
+				_, err = store.db.ExecContext(t.Context(), `UPDATE inference_reservations SET correlation_id='other-run',execution_id='other-call',task_id='other-task',request_id='other-request' WHERE reservation_id=?`, first.ID)
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -369,7 +371,7 @@ func TestIncidentRejectsOrphanInferenceRows(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = store.Close() })
 			snapshot, err := store.VerifiedIncidentEvents(t.Context(), "org-1", "model-stop", 256)
-			if scope == "selected" {
+			if scope == "selected" || scope == "other-correlation" {
 				if err == nil {
 					t.Fatal("later valid admission hid selected orphan accounting")
 				}

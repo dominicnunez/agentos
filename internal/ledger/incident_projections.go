@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/dominicnunez/agentos/internal/events"
@@ -22,6 +23,8 @@ func validateIncidentRecords(ctx context.Context, tx *sql.Tx, stream []events.Ev
 	}
 	args := []any{}
 	wanted := map[string]bool{}
+	intentIDs := map[string]bool{}
+	workIDs := map[string]bool{}
 	for _, event := range stream {
 		payload, present, err := events.AdmittedProjection(event)
 		if err != nil {
@@ -39,6 +42,12 @@ func validateIncidentRecords(ctx context.Context, tx *sql.Tx, stream []events.Ev
 		if err := events.ValidateProjectionEventBoundary(event, payload); err != nil {
 			return err
 		}
+		if payload.Projection.ProjectionKind == "intent" {
+			intentIDs[payload.Projection.RecordID] = true
+		}
+		if payload.Projection.ProjectionKind == "work" {
+			workIDs[payload.Projection.RecordID] = true
+		}
 		args = append(args, event.EventID)
 		wanted[event.EventID] = true
 	}
@@ -50,6 +59,38 @@ func validateIncidentRecords(ctx context.Context, tx *sql.Tx, stream []events.Ev
 	organization, correlation := stream[0].OrganizationID, stream[0].CorrelationID
 	args = append(args, correlation, organization, organization)
 	where := `WHERE (` + selected + `) OR (r.kind IN (` + incidentProjectionKindsSQL + `) AND CASE WHEN json_valid(r.body) THEN json_extract(r.body,'$.correlation_id') END=? AND (e.organization_id=? OR (e.event_id IS NULL AND ` + incidentProjectionOwnedOrganization + `=?)))`
+	if len(intentIDs) != 0 {
+		ids := make([]string, 0, len(intentIDs))
+		for id := range intentIDs {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+		where += ` OR (r.kind='work' AND (e.organization_id=? OR e.event_id IS NULL) AND (CASE WHEN json_valid(r.body) THEN json_extract(r.body,'$.value.intent_id') END IN (` + marks + `) OR CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.projection.value.intent_id') END IN (` + marks + `)))`
+		args = append(args, organization)
+		for _, id := range ids {
+			args = append(args, id)
+		}
+		for _, id := range ids {
+			args = append(args, id)
+		}
+	}
+	if len(workIDs) != 0 {
+		ids := make([]string, 0, len(workIDs))
+		for id := range workIDs {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+		where += ` OR (r.kind='task' AND (e.organization_id=? OR e.event_id IS NULL) AND (CASE WHEN json_valid(r.body) THEN json_extract(r.body,'$.value.work_id') END IN (` + marks + `) OR CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.projection.value.work_id') END IN (` + marks + `)))`
+		args = append(args, organization)
+		for _, id := range ids {
+			args = append(args, id)
+		}
+		for _, id := range ids {
+			args = append(args, id)
+		}
+	}
 	var count int
 	var recordBytes, eventBytes int64
 	preflight := `SELECT COUNT(*),COALESCE(SUM(record_bytes),0),COALESCE(SUM(event_bytes),0) FROM (SELECT ` + incidentProjectionRecordBytes + ` AS record_bytes,` + incidentProjectionEventBytes + ` AS event_bytes FROM records AS r LEFT JOIN events AS e ON e.event_id=r.admission_event_id ` + where + ` LIMIT 257)`

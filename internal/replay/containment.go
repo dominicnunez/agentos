@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 )
 
@@ -164,23 +163,11 @@ func collectAdmissions(view *Containment, admissions []events.IncidentAdmission,
 		if !found {
 			continue
 		}
-		valid := admission.Kind == "EXECUTION_START" && event.EventType == "EXECUTION_STARTED" || admission.Kind == "INFERENCE_RESERVATION" && event.EventType == "INFERENCE_RESERVED" || admission.Kind == "EFFECT_ATTEMPT" && event.EventType == "EFFECT_OBLIGATION_TRANSITIONED"
-		execution := event.SourceExecutionID
-		if admission.Kind == "EXECUTION_START" {
-			var err error
-			execution, err = events.ContainmentExecutionID(event)
-			if err != nil {
-				return err
-			}
+		derived, valid, err := events.AdmissionForIncident(event)
+		if err != nil {
+			return err
 		}
-		if admission.Kind == "EFFECT_ATTEMPT" {
-			effect, err := core.DecodeEffectObligation(event.Payload)
-			if err != nil || effect.Status != core.EffectAttempted {
-				return fmt.Errorf("incident effect admission is not an attempt")
-			}
-			execution = ""
-		}
-		if !valid || admission.TaskID != event.TaskID || !validOptionalField(admission.ExecutionID) || admission.ExecutionID != execution {
+		if !valid || admission != derived || !validOptionalField(admission.ExecutionID) {
 			return fmt.Errorf("incident admission crosses its recorded boundary")
 		}
 		latest[admission.Kind] = Admission{EventRef: event.EventID, Kind: admission.Kind, TaskID: admission.TaskID, ExecutionID: admission.ExecutionID}
@@ -260,31 +247,22 @@ func collectStops(view *Containment, stream []events.Event) error {
 }
 
 func collectEffects(view *Containment, stream []events.Event, tasks map[string]int64) error {
+	effects, err := events.IncidentEffects(stream, tasks)
+	if err != nil {
+		return err
+	}
 	indices := map[string]int{}
-	previous := map[string]core.EffectObligation{}
-	for _, event := range stream {
-		if event.EventType != "EFFECT_OBLIGATION_TRANSITIONED" {
-			continue
-		}
-		effect, err := events.IncidentEffectValue(event, tasks)
-		if err != nil {
-			return err
-		}
-		id := string(effect.ID)
-		index, found := indices[id]
-		if err := events.ValidateIncidentEffect(effect, previous[id], !found); err != nil {
-			return err
-		}
-		previous[id] = effect
-		if !validRequiredField(id) || !validReferences(effect.ConfirmationEvidenceRefs) || !validReferences(effect.ReconciliationEvidenceRefs) {
+	for _, effect := range effects {
+		if !validRequiredField(effect.EffectID) || !validReferences(effect.ConfirmationRefs) || !validReferences(effect.ReconciliationRefs) {
 			return fmt.Errorf("incident effect evidence has invalid public bounds")
 		}
+		index, found := indices[effect.EffectID]
 		if !found {
 			index = len(view.Effects)
-			indices[id] = index
-			view.Effects = append(view.Effects, EffectHistory{EffectID: id, TaskID: string(effect.TaskID), LinkScope: "TASK", States: []EffectState{}})
+			indices[effect.EffectID] = index
+			view.Effects = append(view.Effects, EffectHistory{EffectID: effect.EffectID, TaskID: effect.TaskID, LinkScope: "TASK", States: []EffectState{}})
 		}
-		view.Effects[index].States = append(view.Effects[index].States, EffectState{EventRef: event.EventID, Status: string(effect.Status), AttemptCount: effect.AttemptCount, ConfirmationRefs: cloneStrings(effect.ConfirmationEvidenceRefs), ReconciliationRefs: cloneStrings(effect.ReconciliationEvidenceRefs)})
+		view.Effects[index].States = append(view.Effects[index].States, EffectState{EventRef: effect.EventRef, Status: effect.Status, AttemptCount: effect.AttemptCount, ConfirmationRefs: cloneStrings(effect.ConfirmationRefs), ReconciliationRefs: cloneStrings(effect.ReconciliationRefs)})
 	}
 	return nil
 }

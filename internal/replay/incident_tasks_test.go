@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 )
 
@@ -29,15 +28,16 @@ func admittedEffectFixture(t *testing.T) events.IncidentSnapshot {
 		}
 		return event
 	}
-	work := seal("work", "work-id", "WORK_CREATED", "", 1, core.Work{ID: "work-id", IntentID: "intent", Objective: "objective", Status: core.WorkActive, CreatedAt: now})
-	task := seal("task", "task-id", "TASK_CREATED", "task-id", 2, core.Task{ID: "task-id", WorkID: "work-id", Description: "task", TaskContractVersion: "1", ExecutionKind: core.ExecutionHuman, ModelInferencePolicy: core.InferenceForbidden, Status: core.TaskPending})
-	value := core.EffectObligation{ID: "effect-id", OrganizationID: "org", TaskID: "task-id", ActorID: "owner", Action: "send", Resource: "destination", Scope: "org", IdempotencyKey: "key", EffectFingerprint: "legacy", AuthorizationRefs: []string{"lease"}, Status: core.EffectAttempted, AttemptCount: 1}
+	intent := seal("intent", "intent", "INTENT_CREATED", "", 1, map[string]any{"id": "intent", "organization_id": "org", "normalized_objective": "objective", "created_at": now})
+	work := seal("work", "work-id", "WORK_CREATED", "", 2, map[string]any{"id": "work-id", "intent_id": "intent", "objective": "objective", "status": "ACTIVE", "created_at": now})
+	task := seal("task", "task-id", "TASK_CREATED", "task-id", 3, map[string]any{"id": "task-id", "work_id": "work-id", "description": "task", "task_contract_version": "1", "execution_kind": "HUMAN", "model_inference_policy": "DISALLOWED", "status": "PENDING"})
+	value := map[string]any{"effect_obligation_id": "effect-id", "organization_id": "org", "task_id": "task-id", "actor_id": "owner", "action": "send", "resource": "destination", "scope": "org", "idempotency_key": "key", "effect_fingerprint": "legacy", "authorization_refs": []string{"lease"}, "status": "ATTEMPTED", "attempt_count": 1}
 	body, err := json.Marshal(value)
 	if err != nil {
 		t.Fatal(err)
 	}
-	effect := events.Event{EventID: "effect", Sequence: 3, OrganizationID: "org", TaskID: "task-id", EventType: "EFFECT_OBLIGATION_TRANSITIONED", AuthorizationRefs: value.AuthorizationRefs, Payload: body, CreatedAt: now, SchemaVersion: events.SchemaVersion}
-	return events.IncidentSnapshot{Work: events.VerifiedEventSnapshot{OrganizationID: "org", CorrelationID: "work", Algorithm: "SHA-256", LedgerEvents: 3, LedgerSequence: 3, LedgerEventID: "effect", LedgerSHA256: strings.Repeat("a", 64), Events: []events.Event{work, task}}, RelatedEvents: []events.Event{effect}}
+	effect := events.Event{EventID: "effect", Sequence: 4, OrganizationID: "org", TaskID: "task-id", EventType: "EFFECT_OBLIGATION_TRANSITIONED", AuthorizationRefs: []string{"lease"}, Payload: body, CreatedAt: now, SchemaVersion: events.SchemaVersion}
+	return events.IncidentSnapshot{Work: events.VerifiedEventSnapshot{OrganizationID: "org", CorrelationID: "work", Algorithm: "SHA-256", LedgerEvents: 4, LedgerSequence: 4, LedgerEventID: "effect", LedgerSHA256: strings.Repeat("a", 64), Events: []events.Event{intent, work, task}}, RelatedEvents: []events.Event{effect}}
 }
 
 func TestProjectIncidentValidatesEffectAdmission(t *testing.T) {
@@ -46,26 +46,26 @@ func TestProjectIncidentValidatesEffectAdmission(t *testing.T) {
 			snapshot := admittedEffectFixture(t)
 			switch variant {
 			case "pending-labelled-attempt":
-				var value core.EffectObligation
+				var value map[string]any
 				if err := json.Unmarshal(snapshot.RelatedEvents[0].Payload, &value); err != nil {
 					t.Fatal(err)
 				}
-				value.Status, value.AttemptCount = core.EffectPending, 0
+				value["status"], value["attempt_count"] = "PENDING", 0
 				snapshot.RelatedEvents[0].Payload, _ = json.Marshal(value)
 				snapshot.Admissions = []events.IncidentAdmission{{EventRef: "effect", Kind: "EFFECT_ATTEMPT", TaskID: "task-id"}}
 			case "invalid-state":
-				var value core.EffectObligation
+				var value map[string]any
 				if err := json.Unmarshal(snapshot.RelatedEvents[0].Payload, &value); err != nil {
 					t.Fatal(err)
 				}
-				value.Status = core.EffectConfirmed
-				value.ConfirmationEvidenceRefs = []string{"receipt"}
+				value["status"] = "CONFIRMED"
+				value["confirmation_evidence_refs"] = []string{"receipt"}
 				snapshot.RelatedEvents[0].Payload, _ = json.Marshal(value)
-				snapshot.RelatedEvents[0].ArtifactRefs = value.ConfirmationEvidenceRefs
+				snapshot.RelatedEvents[0].ArtifactRefs = []string{"receipt"}
 			case "effect-in-work-without-task":
 				effect := snapshot.RelatedEvents[0]
 				effect.CorrelationID = "work"
-				snapshot.Work.Events = []events.Event{snapshot.Work.Events[0], effect}
+				snapshot.Work.Events = []events.Event{snapshot.Work.Events[0], snapshot.Work.Events[1], effect}
 				snapshot.RelatedEvents = nil
 			}
 			report, err := ProjectIncident(snapshot, "conversation")
