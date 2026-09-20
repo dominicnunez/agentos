@@ -177,12 +177,12 @@ func incidentEvents(ctx context.Context, tx *sql.Tx, budget *incidentBudget, whe
 	return stream, nil
 }
 
-func incidentTasks(ctx context.Context, tx *sql.Tx, stream []events.Event) (map[string]bool, error) {
+func incidentTasks(ctx context.Context, tx *sql.Tx, stream []events.Event) (map[string]int64, error) {
 	if err := validateIncidentRecords(ctx, tx, stream); err != nil {
 		return nil, err
 	}
 	works := map[core.ID]core.Work{}
-	tasks := map[string]bool{}
+	tasks := map[string]int64{}
 	priorTasks := map[string]core.Task{}
 	versions := map[string]int{}
 	identities := map[string][2]string{}
@@ -234,21 +234,51 @@ func incidentTasks(ctx context.Context, tx *sql.Tx, stream []events.Event) (map[
 			return nil, err
 		}
 		priorTasks[projection.RecordID] = task
-		tasks[projection.RecordID] = true
+		if projection.Version == 1 {
+			tasks[projection.RecordID] = event.Sequence
+		}
 	}
-	for key, identity := range identities {
+	if len(identities) == 0 {
+		return tasks, nil
+	}
+	args := make([]any, 0, 2*len(identities))
+	keys := make([]string, 0, len(identities))
+	for key := range identities {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		identity := identities[key]
+		args = append(args, identity[0], identity[1])
+	}
+	marks := strings.TrimSuffix(strings.Repeat("(?,?),", len(keys)), ",")
+	rows, err := tx.QueryContext(ctx, `SELECT kind,record_id,COUNT(*) FROM (SELECT kind,record_id FROM records WHERE (kind,record_id) IN (`+marks+`) LIMIT 257) GROUP BY kind,record_id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	seen := 0
+	for rows.Next() {
+		var kind, id string
 		var count int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM records WHERE kind=? AND record_id=? LIMIT 257)`, identity[0], identity[1]).Scan(&count); err != nil {
+		if err := rows.Scan(&kind, &id, &count); err != nil {
 			return nil, err
 		}
-		if count != versions[key] {
+		if count != versions[kind+":"+id] {
 			return nil, fmt.Errorf("incident projection record/event history is incomplete")
 		}
+		seen++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if seen != len(identities) {
+		return nil, fmt.Errorf("incident projection record history is missing")
 	}
 	return tasks, nil
 }
 
-func incidentEffects(ctx context.Context, tx *sql.Tx, budget *incidentBudget, organization, correlation string, tasks map[string]bool, work []events.Event) ([]events.Event, error) {
+func incidentEffects(ctx context.Context, tx *sql.Tx, budget *incidentBudget, organization, correlation string, tasks map[string]int64, work []events.Event) ([]events.Event, error) {
 	if len(tasks) == 0 {
 		for _, event := range work {
 			if event.EventType == "EFFECT_OBLIGATION_TRANSITIONED" {
@@ -326,11 +356,11 @@ func incidentEffects(ctx context.Context, tx *sql.Tx, budget *incidentBudget, or
 	return selected, nil
 }
 
-func validateIncidentEffects(ctx context.Context, tx *sql.Tx, organization string, tasks map[string]bool, ids []string, stream []events.Event) error {
+func validateIncidentEffects(ctx context.Context, tx *sql.Tx, organization string, tasks map[string]int64, ids []string, stream []events.Event) error {
 	histories := map[string][]events.Event{}
 	for _, event := range stream {
 		value, err := core.DecodeEffectObligation(event.Payload)
-		if err != nil || string(value.OrganizationID) != organization || string(value.TaskID) != event.TaskID || !tasks[event.TaskID] || event.OrganizationID != organization || event.SchemaVersion != events.SchemaVersion || event.SourceActorID != "" || event.SourceExecutionID != "" || event.CorrelationID != "" || event.RecipientID != "" || event.RecipientScope != "" {
+		if err != nil || string(value.OrganizationID) != organization || string(value.TaskID) != event.TaskID || (tasks[event.TaskID] == 0 || event.Sequence <= tasks[event.TaskID]) || event.OrganizationID != organization || event.SchemaVersion != events.SchemaVersion || event.SourceActorID != "" || event.SourceExecutionID != "" || event.CorrelationID != "" || event.RecipientID != "" || event.RecipientScope != "" {
 			return fmt.Errorf("incident effect crosses its Task identity")
 		}
 		refs := slices.Clone(value.ConfirmationEvidenceRefs)
