@@ -12,6 +12,7 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/inference"
 )
 
 func incidentEffectFixture(t *testing.T, store *SQLite) core.EffectObligation {
@@ -212,7 +213,7 @@ func TestIncidentReadSnapshotExcludesConcurrentHold(t *testing.T) {
 }
 
 func TestIncidentInferenceRequiresExactAccounting(t *testing.T) {
-	for _, mutation := range []string{"none", "reservation", "policy", "orphan", "later-duplicate", "released-stale"} {
+	for _, mutation := range []string{"none", "reservation", "policy", "orphan", "later-duplicate", "released-stale", "oversized-row", "oversized-row-unicode", "oversized-row-nul"} {
 		t.Run(mutation, func(t *testing.T) {
 			store, err := Open(":memory:")
 			if err != nil {
@@ -259,6 +260,15 @@ func TestIncidentInferenceRequiresExactAccounting(t *testing.T) {
 				})
 			case "reservation":
 				_, err = store.db.ExecContext(t.Context(), `UPDATE inference_reservations SET prompt_sha256=?`, strings.Repeat("b", 64))
+			case "oversized-row", "oversized-row-unicode", "oversized-row-nul":
+				value := strings.Repeat("x", 2<<20)
+				switch mutation {
+				case "oversized-row-unicode":
+					value = strings.Repeat("界", 700000)
+				case "oversized-row-nul":
+					value = "\x00" + value
+				}
+				_, err = store.db.ExecContext(t.Context(), `UPDATE inference_reservations SET request_id=?`, value)
 			case "policy":
 				_, err = store.db.ExecContext(t.Context(), `UPDATE inference_policies SET body='{}'`)
 			case "orphan":
@@ -280,6 +290,9 @@ func TestIncidentInferenceRequiresExactAccounting(t *testing.T) {
 				t.Fatal(err)
 			}
 			snapshot, err := store.VerifiedIncidentEvents(t.Context(), "org-1", "model-stop", 256)
+			if strings.HasPrefix(mutation, "oversized-row") && (err == nil || !strings.Contains(err.Error(), "accounting exceeds byte limit")) {
+				t.Fatalf("oversized accounting was not rejected before reading its fields: %v", err)
+			}
 			if mutation != "none" {
 				t.Logf("rejected %s: %v", mutation, err)
 				if err == nil {
@@ -293,6 +306,158 @@ func TestIncidentInferenceRequiresExactAccounting(t *testing.T) {
 			if len(snapshot.Admissions) != 1 || snapshot.Admissions[0].Kind != "INFERENCE_RESERVATION" {
 				t.Fatalf("inference admissions=%+v", snapshot.Admissions)
 			}
+		})
+	}
+}
+
+func TestIncidentRejectsOrphanInferenceRows(t *testing.T) {
+	for _, scope := range []string{"selected", "other-organization", "other-correlation"} {
+		t.Run(scope, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "inference.db")
+			store, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			modelStopManifest(t, store, false, "first")
+			policy := testInferencePolicy(time.Now().UTC())
+			policy.OrganizationID, policy.Provider, policy.Model, policy.ExecutionProfileVersion = "org-1", "provider", "model", "v1"
+			policy.MaxConcurrentRequests = 2
+			policy.MaxTokensPerWindow = 1000
+			if err := store.ActivateInferencePolicy(t.Context(), policy); err != nil {
+				t.Fatal(err)
+			}
+			request := testInferenceRequest("first")
+			request.Scope.OrganizationID, request.Scope.CorrelationID, request.Scope.TaskID, request.Scope.IntentID = "org-1", "model-stop", "task-model-stop", "intent-model-stop"
+			request.Descriptor.Provider, request.Descriptor.Model, request.Descriptor.ExecutionProfileVersion = "provider", "model", "v1"
+			first, err := store.ReserveInference(t.Context(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Retain a real accounting row but remove its admission contract from
+			// an otherwise integrity-valid history. A later valid reservation must
+			// not hide the earlier orphan.
+			if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
+				if _, err := tx.ExecContext(t.Context(), `UPDATE events SET event_type='AUDIT_NOTE',payload=CAST('{}' AS BLOB) WHERE event_type='INFERENCE_RESERVED'`); err != nil {
+					return err
+				}
+				if _, err := tx.ExecContext(t.Context(), `DELETE FROM event_integrity`); err != nil {
+					return err
+				}
+				return rebuildEventIntegrity(t.Context(), tx)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			switch scope {
+			case "other-organization":
+				_, err = store.db.ExecContext(t.Context(), `UPDATE inference_reservations SET organization_id='other-org' WHERE reservation_id=?`, first.ID)
+			case "other-correlation":
+				_, err = store.db.ExecContext(t.Context(), `UPDATE inference_reservations SET correlation_id='other-run' WHERE reservation_id=?`, first.ID)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Scope.RequestID, request.Scope.ExecutionID = "later", "later"
+			if _, err := store.ReserveInference(t.Context(), request); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store, err = Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			snapshot, err := store.VerifiedIncidentEvents(t.Context(), "org-1", "model-stop", 256)
+			if scope == "selected" {
+				if err == nil {
+					t.Fatal("later valid admission hid selected orphan accounting")
+				}
+				return
+			}
+			if err != nil || len(snapshot.Admissions) != 1 {
+				t.Fatalf("unrelated orphan affected selected incident: admissions=%d err=%v", len(snapshot.Admissions), err)
+			}
+		})
+	}
+}
+
+func TestIncidentInferenceSupportBudget(t *testing.T) {
+	for _, distinct := range []bool{false, true} {
+		t.Run(fmt.Sprint(distinct), func(t *testing.T) {
+			store, err := Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			policy := testInferencePolicy(time.Now().UTC())
+			policy.MaxConcurrentRequests, policy.MaxTokensPerWindow = 2, 1000
+			if err := store.ActivateInferencePolicy(t.Context(), policy); err != nil {
+				t.Fatal(err)
+			}
+			first, err := store.ReserveInference(t.Context(), testInferenceRequest("first"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if distinct {
+				if _, err := store.ReconcileInference(t.Context(), first, nil, inference.ReconciliationUncertain); err != nil {
+					t.Fatal(err)
+				}
+				policy.AuthorizedBy = "other-owner"
+				policy.AuthorizedAt = policy.AuthorizedAt.Add(time.Second)
+				if err := store.ActivateInferencePolicy(t.Context(), policy); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := store.ReserveInference(t.Context(), testInferenceRequest("later")); err != nil {
+				t.Fatal(err)
+			}
+			// JSON whitespace preserves the exact decoded policy and its
+			// fingerprint while exercising the stored support-byte boundary.
+			if _, err := store.db.ExecContext(t.Context(), `UPDATE inference_policies SET body=CAST(body || ? AS BLOB)`, strings.Repeat(" ", 1100000)); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := store.VerifiedIncidentEvents(t.Context(), "organization-1", "work-1", 256)
+			if distinct {
+				if err == nil {
+					t.Fatal("distinct policy support exceeded aggregate byte bound")
+				}
+				return
+			}
+			if err != nil || len(snapshot.Admissions) != 2 {
+				t.Fatalf("shared policy support charged repeatedly: admissions=%d err=%v", len(snapshot.Admissions), err)
+			}
+		})
+	}
+}
+
+func TestIncidentInferenceGrowth(t *testing.T) {
+	for _, count := range []int{1, 100} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			store, err := Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			policy := testInferencePolicy(time.Now().UTC())
+			policy.MaxConcurrentRequests, policy.MaxTokensPerWindow = count, 100000
+			policy.Pricing.MaxCostNanoUSDPerWindow = 100000000
+			if err := store.ActivateInferencePolicy(t.Context(), policy); err != nil {
+				t.Fatal(err)
+			}
+			for i := range count {
+				if _, err := store.ReserveInference(t.Context(), testInferenceRequest(fmt.Sprint(i))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			start := time.Now()
+			for range 5 {
+				snapshot, err := store.VerifiedIncidentEvents(t.Context(), "organization-1", "work-1", 256)
+				if err != nil || len(snapshot.Admissions) != count {
+					t.Fatalf("inference snapshot admissions=%d err=%v", len(snapshot.Admissions), err)
+				}
+			}
+			t.Logf("%d reservations; five complete incident snapshots=%s", count, time.Since(start))
 		})
 	}
 }

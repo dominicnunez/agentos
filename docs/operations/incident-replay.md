@@ -49,6 +49,8 @@ than 256 events, an event with more
 than 1,024 authorization or artifact references, an exposed envelope value
 larger than 4 KiB, or a JSON report larger than 2 MiB fails closed rather than
 returning an incomplete reconstruction.
+Supporting records are also bounded before loading; oversized or inconsistent
+supporting evidence fails the request even when the selected event count fits.
 
 Predecessor links express recorded ordering within the combined selected
 evidence, using durable ledger order rather than wall-clock timestamps.

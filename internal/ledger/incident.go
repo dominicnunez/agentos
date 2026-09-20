@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -14,7 +15,7 @@ import (
 )
 
 const incidentEventColumns = `event_id,sequence,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version`
-const incidentEventBytes = `length(event_id)+length(organization_id)+length(event_type)+length(source_actor_id)+length(source_execution_id)+length(recipient_scope)+length(recipient_id)+length(task_id)+length(authorization_refs)+length(artifact_refs)+length(payload)+length(correlation_id)+length(created_at)+length(schema_version)`
+const incidentEventBytes = `length(CAST(event_id AS BLOB))+length(CAST(organization_id AS BLOB))+length(CAST(event_type AS BLOB))+length(CAST(source_actor_id AS BLOB))+length(CAST(source_execution_id AS BLOB))+length(CAST(recipient_scope AS BLOB))+length(CAST(recipient_id AS BLOB))+length(CAST(task_id AS BLOB))+length(CAST(authorization_refs AS BLOB))+length(CAST(artifact_refs AS BLOB))+length(CAST(payload AS BLOB))+length(CAST(correlation_id AS BLOB))+length(CAST(created_at AS BLOB))+length(CAST(schema_version AS BLOB))`
 
 type incidentBudget struct {
 	events int
@@ -64,7 +65,7 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 	// resolver allocates its evidence. Orphans count toward the same bound.
 	var freezeCount int
 	var freezeBytes int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(COALESCE(length(body),0)+COALESCE(`+incidentEventBytes+`,0)),0) FROM (`+freezeHistorySQL+` LIMIT ?)`, organization, organization, organization, organization, limit+1).Scan(&freezeCount, &freezeBytes); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(COALESCE(length(CAST(body AS BLOB)),0)+COALESCE(`+incidentEventBytes+`,0)),0) FROM (`+freezeHistorySQL+` LIMIT ?)`, organization, organization, organization, organization, limit+1).Scan(&freezeCount, &freezeBytes); err != nil {
 		return events.IncidentSnapshot{}, err
 	}
 	if freezeCount > limit || freezeBytes > 2<<20 {
@@ -203,7 +204,7 @@ func incidentTasks(ctx context.Context, tx *sql.Tx, stream []events.Event) (map[
 		var body []byte
 		var eventID, fingerprint string
 		var size int64
-		if err := tx.QueryRowContext(ctx, `SELECT length(body) FROM records WHERE kind=? AND record_id=? AND version=?`, projection.ProjectionKind, projection.RecordID, projection.Version).Scan(&size); err != nil || size > 2<<20 {
+		if err := tx.QueryRowContext(ctx, `SELECT length(CAST(body AS BLOB)) FROM records WHERE kind=? AND record_id=? AND version=?`, projection.ProjectionKind, projection.RecordID, projection.Version).Scan(&size); err != nil || size > 2<<20 {
 			return nil, fmt.Errorf("incident projection record is missing or exceeds byte limit")
 		}
 		if err := tx.QueryRowContext(ctx, `SELECT body,admission_event_id,admission_fingerprint FROM records WHERE kind=? AND record_id=? AND version=?`, projection.ProjectionKind, projection.RecordID, projection.Version).Scan(&body, &eventID, &fingerprint); err != nil {
@@ -281,7 +282,7 @@ func incidentEffects(ctx context.Context, tx *sql.Tx, budget *incidentBudget, or
 	idArgs := append(append(append([]any(nil), args...), args...), args...)
 	var count int
 	var size int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(id)),0) FROM (`+idQuery+` LIMIT 257)`, idArgs...).Scan(&count, &size); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(CAST(id AS BLOB))),0) FROM (`+idQuery+` LIMIT 257)`, idArgs...).Scan(&count, &size); err != nil {
 		return nil, err
 	}
 	if count > 256 || size > budget.bytes {
@@ -317,7 +318,7 @@ func incidentEffects(ctx context.Context, tx *sql.Tx, budget *incidentBudget, or
 	for _, id := range effectIDs {
 		effectArgs = append(effectArgs, id)
 	}
-	selected, err := incidentEvents(ctx, tx, budget, `event_type='EFFECT_OBLIGATION_TRANSITIONED' AND json_extract(payload,'$.effect_obligation_id') IN (`+effectMarks+`) AND NOT (organization_id=? AND correlation_id=?)`, append(effectArgs, organization, correlation)...)
+	selected, err := incidentEvents(ctx, tx, budget, `event_type='EFFECT_OBLIGATION_TRANSITIONED' AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.effect_obligation_id') END IN (`+effectMarks+`) AND NOT (organization_id=? AND correlation_id=?)`, append(effectArgs, organization, correlation)...)
 	if err != nil {
 		return nil, err
 	}
@@ -338,15 +339,24 @@ func validateIncidentEffects(ctx context.Context, tx *sql.Tx, organization strin
 	histories := map[string][]events.Event{}
 	for _, event := range stream {
 		value, err := core.DecodeEffectObligation(event.Payload)
-		if err != nil || string(value.OrganizationID) != organization || string(value.TaskID) != event.TaskID || !tasks[event.TaskID] || event.OrganizationID != organization || event.SchemaVersion != events.SchemaVersion || event.SourceExecutionID != "" || event.RecipientID != "" || event.RecipientScope != "" {
+		if err != nil || string(value.OrganizationID) != organization || string(value.TaskID) != event.TaskID || !tasks[event.TaskID] || event.OrganizationID != organization || event.SchemaVersion != events.SchemaVersion || event.SourceActorID != "" || event.SourceExecutionID != "" || event.CorrelationID != "" || event.RecipientID != "" || event.RecipientScope != "" {
 			return fmt.Errorf("incident effect crosses its Task identity")
+		}
+		refs := slices.Clone(value.ConfirmationEvidenceRefs)
+		for _, ref := range value.ReconciliationEvidenceRefs {
+			if !slices.Contains(refs, ref) {
+				refs = append(refs, ref)
+			}
+		}
+		if !slices.Equal(event.AuthorizationRefs, value.AuthorizationRefs) || !slices.Equal(event.ArtifactRefs, refs) {
+			return fmt.Errorf("incident effect envelope differs from its evidence")
 		}
 		histories[string(value.ID)] = append(histories[string(value.ID)], event)
 	}
 	for _, id := range ids {
 		var count int
 		var size int64
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(body)),0) FROM (SELECT body FROM records WHERE kind='effect' AND record_id=? ORDER BY version LIMIT 257)`, id).Scan(&count, &size); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(CAST(body AS BLOB))),0) FROM (SELECT body FROM records WHERE kind='effect' AND record_id=? ORDER BY version LIMIT 257)`, id).Scan(&count, &size); err != nil {
 			return err
 		}
 		if count != len(histories[id]) || count == 0 || count > 256 || size > 2<<20 {
@@ -401,6 +411,26 @@ func validateIncidentEffect(value, previous core.EffectObligation, first bool) e
 	}
 	if err := core.ValidateExecutionAuthorityEffect(value); err != nil {
 		return err
+	}
+	for _, refs := range [][]string{value.AuthorizationRefs, value.ConfirmationEvidenceRefs, value.ReconciliationEvidenceRefs} {
+		seen := make(map[string]bool, len(refs))
+		for _, ref := range refs {
+			if ref == "" || seen[ref] {
+				return fmt.Errorf("incident effect has empty or repeated evidence")
+			}
+			seen[ref] = true
+		}
+	}
+	if (len(value.ReconciliationEvidenceRefs) > 0) != (value.ReconciledAt != nil) {
+		return fmt.Errorf("incident effect reconciliation evidence is incomplete")
+	}
+	if value.Status == core.EffectPending || value.Status == core.EffectAttempted || value.Status == core.EffectCancelled {
+		if len(value.ConfirmationEvidenceRefs) != 0 || len(value.ReconciliationEvidenceRefs) != 0 || value.ReconciledAt != nil {
+			return fmt.Errorf("incident unfinished effect carries terminal evidence")
+		}
+	}
+	if value.Status == core.EffectFailed && (len(value.ConfirmationEvidenceRefs) != 0 || value.ReconciledAt == nil) {
+		return fmt.Errorf("incident failed effect lacks reconciliation or claims confirmation")
 	}
 	if value.ActorKind != "" {
 		fingerprint, err := core.FingerprintEffect(value)

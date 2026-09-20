@@ -12,6 +12,22 @@ import (
 	"github.com/dominicnunez/agentos/internal/modelinput"
 )
 
+type incidentPolicy struct {
+	value    inference.Policy
+	sequence int64
+}
+
+type incidentPolicySupport struct {
+	policies       map[[2]string]incidentPolicy
+	remainingBytes int64
+}
+
+const incidentReservationBytes = `length(CAST(reservation_id AS BLOB))+length(CAST(request_id AS BLOB))+length(CAST(organization_id AS BLOB))+
+length(CAST(purpose AS BLOB))+length(CAST(intent_id AS BLOB))+length(CAST(task_id AS BLOB))+length(CAST(execution_id AS BLOB))+
+length(CAST(correlation_id AS BLOB))+length(CAST(prompt_sha256 AS BLOB))+length(CAST(provider AS BLOB))+length(CAST(model AS BLOB))+
+length(CAST(execution_profile_version AS BLOB))+length(CAST(policy_fingerprint AS BLOB))+length(CAST(state AS BLOB))+
+length(CAST(window_started_at AS BLOB))+length(CAST(window_expires_at AS BLOB))+length(CAST(connection_id AS BLOB))+length(CAST(created_at AS BLOB))`
+
 // This validates the selected durable admission and its exact accounting,
 // policy and execution bindings. It does not replay global budget competition,
 // knowledge selection or all historical capability decisions.
@@ -19,6 +35,7 @@ func validateIncidentInference(ctx context.Context, tx *sql.Tx, stream []events.
 	manifests := map[string][]events.Event{}
 	starts := map[string]events.Event{}
 	seen := map[string]bool{}
+	support := incidentPolicySupport{policies: map[[2]string]incidentPolicy{}, remainingBytes: 2 << 20}
 	for _, event := range stream {
 		switch event.EventType {
 		case "PLANNING_CONTEXT_MANIFESTED", "INTENT_NORMALIZATION_CONTEXT_MANIFESTED", "EXECUTION_CONTEXT_MANIFESTED":
@@ -44,7 +61,7 @@ func validateIncidentInference(ctx context.Context, tx *sql.Tx, stream []events.
 			if frozen {
 				return fmt.Errorf("incident inference reservation occurred during hold")
 			}
-			if err := incidentReservation(ctx, tx, event, payload); err != nil {
+			if err := incidentReservation(ctx, tx, event, payload, &support); err != nil {
 				return err
 			}
 			matching := manifests[event.SourceExecutionID]
@@ -94,51 +111,86 @@ func validateIncidentInference(ctx context.Context, tx *sql.Tx, stream []events.
 			}
 		}
 	}
+	// Each unique selected event already proved its exact row and scope above.
+	// A bounded reverse count detects any additional accounting row without
+	// materializing unrelated reservations or their caller-controlled strings.
+	if len(stream) != 0 {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM inference_reservations WHERE organization_id=? AND correlation_id=? LIMIT ?)`, stream[0].OrganizationID, stream[0].CorrelationID, len(seen)+1).Scan(&count); err != nil {
+			return err
+		}
+		if count != len(seen) {
+			return fmt.Errorf("incident inference accounting lacks its exact admission history")
+		}
+	}
 	return nil
 }
 
-func incidentReservation(ctx context.Context, tx *sql.Tx, event events.Event, payload events.InferenceReservedPayload) error {
+func incidentReservation(ctx context.Context, tx *sql.Tx, event events.Event, payload events.InferenceReservedPayload, support *incidentPolicySupport) error {
+	var size int64
+	if err := tx.QueryRowContext(ctx, `SELECT `+incidentReservationBytes+` FROM inference_reservations WHERE reservation_id=?`, payload.ReservationID).Scan(&size); err != nil {
+		return fmt.Errorf("incident reservation lacks accounting: %w", err)
+	}
+	if size > support.remainingBytes {
+		return fmt.Errorf("incident inference accounting exceeds byte limit")
+	}
+	support.remainingBytes -= size
 	var row inferenceValidationRow
 	if err := tx.QueryRowContext(ctx, `SELECT reservation_id,request_id,organization_id,purpose,intent_id,task_id,execution_id,correlation_id,prompt_sha256,provider,model,execution_profile_version,policy_fingerprint,state,reserved_input_tokens,reserved_output_tokens,reserved_cost_nano_usd,charged_input_tokens,charged_output_tokens,charged_cost_nano_usd,window_started_at,window_expires_at,connection_id,created_at FROM inference_reservations WHERE reservation_id=?`, payload.ReservationID).Scan(&row.reservationID, &row.requestID, &row.organizationID, &row.purpose, &row.intentID, &row.taskID, &row.executionID, &row.correlationID, &row.promptSHA256, &row.provider, &row.model, &row.profile, &row.policyFingerprint, &row.state, &row.reservedInput, &row.reservedOutput, &row.reservedCost, &row.chargedInput, &row.chargedOutput, &row.chargedCost, &row.windowStart, &row.windowEnd, &row.connectionID, &row.createdAt); err != nil {
 		return fmt.Errorf("incident reservation lacks accounting: %w", err)
 	}
-	var size int
-	if err := tx.QueryRowContext(ctx, `SELECT length(body) FROM inference_policies WHERE organization_id=? AND policy_fingerprint=?`, event.OrganizationID, payload.PolicyFingerprint).Scan(&size); err != nil {
+	policy, err := support.load(ctx, tx, event, payload.PolicyFingerprint)
+	if err != nil {
 		return err
 	}
-	if size > 2<<20 {
-		return fmt.Errorf("incident inference policy exceeds byte limit")
+	if row.validate(policy) != nil {
+		return fmt.Errorf("incident reservation differs from its policy")
+	}
+	return validateInferenceReservationEvent(event, row, policy)
+}
+
+// Supporting policies are immutable within this read transaction. Decode each
+// unique policy and activation once, charge their stored bytes once, and still
+// validate every reservation and its chronology against that exact evidence.
+func (s *incidentPolicySupport) load(ctx context.Context, tx *sql.Tx, event events.Event, fingerprint string) (inference.Policy, error) {
+	key := [2]string{event.OrganizationID, fingerprint}
+	if cached, ok := s.policies[key]; ok {
+		if cached.sequence >= event.Sequence {
+			return inference.Policy{}, fmt.Errorf("incident policy activation does not precede reservation")
+		}
+		return cached.value, nil
+	}
+	var policyBytes int64
+	var activationBytes sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT length(CAST(body AS BLOB))+length(CAST(activation_event_id AS BLOB))+length(CAST(connection_id AS BLOB)),(SELECT `+incidentEventBytes+` FROM events WHERE event_id=p.activation_event_id) FROM inference_policies p WHERE organization_id=? AND policy_fingerprint=?`, event.OrganizationID, fingerprint).Scan(&policyBytes, &activationBytes); err != nil {
+		return inference.Policy{}, err
+	}
+	if !activationBytes.Valid || policyBytes > s.remainingBytes || activationBytes.Int64 > s.remainingBytes-policyBytes {
+		return inference.Policy{}, fmt.Errorf("incident inference supporting evidence exceeds byte limit or lacks activation")
 	}
 	var body []byte
 	var activationID, connection string
-	if err := tx.QueryRowContext(ctx, `SELECT body,activation_event_id,connection_id FROM inference_policies WHERE organization_id=? AND policy_fingerprint=?`, event.OrganizationID, payload.PolicyFingerprint).Scan(&body, &activationID, &connection); err != nil {
-		return err
+	if err := tx.QueryRowContext(ctx, `SELECT body,activation_event_id,connection_id FROM inference_policies WHERE organization_id=? AND policy_fingerprint=?`, event.OrganizationID, fingerprint).Scan(&body, &activationID, &connection); err != nil {
+		return inference.Policy{}, err
 	}
 	var policy inference.Policy
 	if decodeExactJSONBytes(body, &policy) != nil || policy.Validate() != nil || policy.OrganizationID != event.OrganizationID || policy.ConnectionID != connection {
-		return fmt.Errorf("incident inference policy is invalid")
+		return inference.Policy{}, fmt.Errorf("incident inference policy is invalid")
 	}
-	fingerprint, err := policy.Fingerprint()
-	if err != nil || fingerprint != payload.PolicyFingerprint || row.validate(policy) != nil {
-		return fmt.Errorf("incident reservation differs from its policy")
-	}
-	if err := validateInferenceReservationEvent(event, row, policy); err != nil {
-		return err
-	}
-	if err := tx.QueryRowContext(ctx, `SELECT `+incidentEventBytes+` FROM events WHERE event_id=?`, activationID).Scan(&size); err != nil {
-		return err
-	}
-	if size > 2<<20 {
-		return fmt.Errorf("incident policy activation exceeds byte limit")
+	actual, err := policy.Fingerprint()
+	if err != nil || actual != fingerprint {
+		return inference.Policy{}, fmt.Errorf("incident inference policy fingerprint is invalid")
 	}
 	activation, found, err := eventByID(ctx, tx, activationID)
 	if err != nil {
-		return err
+		return inference.Policy{}, err
 	}
 	var activated events.InferencePolicyActivatedPayload
 	expected := events.InferencePolicyActivatedPayload{ConnectionID: policy.ConnectionID, PolicyFingerprint: fingerprint, Provider: policy.Provider, Model: policy.Model, ExecutionProfileVersion: policy.ExecutionProfileVersion, AccessMode: string(policy.Mode), AuthorizedBy: policy.AuthorizedBy, AuthorizedAt: policy.AuthorizedAt, AuthorizationExpiresAt: policy.AuthorizationExpiresAt}
 	if !found || activation.EventType != "INFERENCE_POLICY_ACTIVATED" || activation.OrganizationID != event.OrganizationID || activation.SourceActorID != policy.AuthorizedBy || activation.SourceExecutionID != "" || activation.TaskID != "" || activation.RecipientID != "" || activation.RecipientScope != "" || len(activation.AuthorizationRefs) != 0 || len(activation.ArtifactRefs) != 0 || activation.SchemaVersion != events.SchemaVersion || activation.Sequence >= event.Sequence || activation.CorrelationID != "inference-policy-"+fingerprint[:16] || decodeExactJSONBytes(activation.Payload, &activated) != nil || !reflect.DeepEqual(activated, expected) {
-		return fmt.Errorf("incident policy lacks its exact prior activation")
+		return inference.Policy{}, fmt.Errorf("incident policy lacks its exact prior activation")
 	}
-	return nil
+	s.remainingBytes -= policyBytes + activationBytes.Int64
+	s.policies[key] = incidentPolicy{value: policy, sequence: activation.Sequence}
+	return policy, nil
 }
