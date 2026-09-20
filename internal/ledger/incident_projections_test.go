@@ -118,3 +118,73 @@ func TestIncidentRequiresExactSelectedRecords(t *testing.T) {
 		})
 	}
 }
+
+func TestIncidentRequiresSelectedProjectionAdmissions(t *testing.T) {
+	for _, mutation := range []string{"missing-admission", "missing-event", "moved-event", "moved-event-missing-fingerprint", "all-events-moved"} {
+		t.Run(mutation, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "incident.db")
+			store, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			stopTestExecution(t, store)
+			if mutation == "missing-event" {
+				now := time.Now().UTC()
+				intent := core.Intent{ID: "orphan-intent", OrganizationID: "org-1", OriginalInstruction: "orphan", NormalizedObjective: "orphan", CreatedAt: now}
+				if _, err := store.AppendProjection(t.Context(), events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "stop-work"}, ProjectionKind: "intent", RecordID: string(intent.ID), Version: 1, Value: intent}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mutation == "all-events-moved" {
+				if _, err := store.Append(t.Context(), events.TrustedDraft{OrganizationID: "org-1", CorrelationID: "stop-work", EventType: "AUDIT_NOTE", Payload: map[string]string{"reason": "retain selected stream"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := store.VerifiedIncidentEvents(t.Context(), "org-1", "stop-work", 256); err != nil {
+				t.Fatalf("valid incident was rejected: %v", err)
+			}
+			if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
+				statement := `UPDATE events SET payload=CAST('{}' AS BLOB) WHERE event_type='INTENT_CREATED'`
+				switch mutation {
+				case "missing-event":
+					statement = `DELETE FROM events WHERE event_id=(SELECT admission_event_id FROM records WHERE kind='intent' AND record_id='orphan-intent')`
+				case "moved-event", "moved-event-missing-fingerprint":
+					statement = `UPDATE events SET correlation_id='other-run' WHERE event_type='INTENT_CREATED'`
+				case "all-events-moved":
+					statement = `UPDATE events SET correlation_id='other-run' WHERE correlation_id='stop-work' AND event_type IN ('INTENT_CREATED','WORK_CREATED','TASK_CREATED','EXECUTION_STARTED')`
+				}
+				if _, err := tx.ExecContext(t.Context(), statement); err != nil {
+					return err
+				}
+				if mutation == "moved-event-missing-fingerprint" {
+					if _, err := tx.ExecContext(t.Context(), `UPDATE records SET admission_fingerprint='' WHERE kind='intent'`); err != nil {
+						return err
+					}
+				}
+				if _, err := tx.ExecContext(t.Context(), `DELETE FROM event_integrity`); err != nil {
+					return err
+				}
+				return rebuildEventIntegrity(t.Context(), tx)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.VerifiedIncidentEvents(t.Context(), "org-1", "stop-work", 256); err == nil {
+				t.Fatalf("accepted selected projection with %s", mutation)
+			}
+		})
+	}
+}
+
+func TestIncidentProjectionRecordTenantIsolation(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	stopTestExecution(t, store)
+	appendTaskProjectionParents(t, t.Context(), store, "org-2", "stop-work", "other-work")
+	if _, err := store.VerifiedIncidentEvents(t.Context(), "org-1", "stop-work", 256); err != nil {
+		t.Fatalf("other tenant's projection records affected incident: %v", err)
+	}
+}
