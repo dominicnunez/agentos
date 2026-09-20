@@ -85,10 +85,7 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 		return events.IncidentSnapshot{}, err
 	}
 	snapshot.RelatedEvents = related
-	if err := events.ValidateExecutionStops(work, freezes); err != nil {
-		return events.IncidentSnapshot{}, err
-	}
-	if err := events.ValidateModelStops(work, freezes); err != nil {
+	if err := validateIncidentStops(ctx, tx, work, freezes, &budget); err != nil {
 		return events.IncidentSnapshot{}, err
 	}
 	if err := events.ValidateSecurityHoldOutcomes(work, freezes); err != nil {
@@ -181,6 +178,9 @@ func incidentEvents(ctx context.Context, tx *sql.Tx, budget *incidentBudget, whe
 }
 
 func incidentTasks(ctx context.Context, tx *sql.Tx, stream []events.Event) (map[string]bool, error) {
+	if err := validateIncidentRecords(ctx, tx, stream); err != nil {
+		return nil, err
+	}
 	works := map[core.ID]core.Work{}
 	tasks := map[string]bool{}
 	priorTasks := map[string]core.Task{}
@@ -201,19 +201,6 @@ func incidentTasks(ctx context.Context, tx *sql.Tx, stream []events.Event) (map[
 		if projection.ProjectionKind != "work" && projection.ProjectionKind != "task" {
 			continue
 		}
-		var body []byte
-		var eventID, fingerprint string
-		var size int64
-		if err := tx.QueryRowContext(ctx, `SELECT length(CAST(body AS BLOB)) FROM records WHERE kind=? AND record_id=? AND version=?`, projection.ProjectionKind, projection.RecordID, projection.Version).Scan(&size); err != nil || size > 2<<20 {
-			return nil, fmt.Errorf("incident projection record is missing or exceeds byte limit")
-		}
-		if err := tx.QueryRowContext(ctx, `SELECT body,admission_event_id,admission_fingerprint FROM records WHERE kind=? AND record_id=? AND version=?`, projection.ProjectionKind, projection.RecordID, projection.Version).Scan(&body, &eventID, &fingerprint); err != nil {
-			return nil, fmt.Errorf("incident projection lacks exact record: %w", err)
-		}
-		var record events.ProjectionRecord
-		if decodeExactJSONBytes(body, &record) != nil || !reflect.DeepEqual(record, projection) || eventID != event.EventID || fingerprint != payload.Admission.Fingerprint {
-			return nil, fmt.Errorf("incident projection record differs from admitted event")
-		}
 		key := projection.ProjectionKind + ":" + projection.RecordID
 		if projection.Version != versions[key]+1 {
 			return nil, fmt.Errorf("incident projection history is incomplete")
@@ -225,8 +212,12 @@ func incidentTasks(ctx context.Context, tx *sql.Tx, stream []events.Event) (map[
 			if decodeExactJSONBytes(projection.Value, &work) != nil || string(work.ID) != projection.RecordID {
 				return nil, fmt.Errorf("incident Work identity is invalid")
 			}
-			if prior, ok := works[work.ID]; ok && !core.ValidWorkRevision(prior, work) {
-				return nil, fmt.Errorf("incident Work revision is invalid")
+			var prior *core.Work
+			if value, ok := works[work.ID]; ok {
+				prior = &value
+			}
+			if err := events.ValidateWorkProjectionTransition(event.EventType, projection.Version, prior, work); err != nil {
+				return nil, err
 			}
 			works[work.ID] = work
 			continue
