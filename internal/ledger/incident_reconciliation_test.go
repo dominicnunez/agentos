@@ -202,3 +202,79 @@ func TestIncidentReconciliationHistory(t *testing.T) {
 		})
 	}
 }
+
+func TestIncidentReservationLinkedEvents(t *testing.T) {
+	for _, eventType := range []string{"INFERENCE_RESERVED", "INFERENCE_RECONCILED"} {
+		for _, scope := range []string{"other-correlation", "other-organization", "other-reservation", "malformed-other-org", "malformed-other-correlation"} {
+			t.Run(eventType+"/"+scope, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "linked.db")
+				store, err := Open(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.ActivateInferencePolicy(t.Context(), testInferencePolicy(time.Now().UTC())); err != nil {
+					t.Fatal(err)
+				}
+				reservation, err := store.ReserveInference(t.Context(), testInferenceRequest("ordinary"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				usage := testInferenceUsage()
+				if _, err := store.ReconcileInference(t.Context(), reservation, &usage, inference.ReconciliationCompleted); err != nil {
+					t.Fatal(err)
+				}
+				stream, err := store.Events(t.Context(), "work-1")
+				if err != nil || len(stream) != 2 {
+					t.Fatalf("read exact accounting pair: count=%d err=%v", len(stream), err)
+				}
+				original := stream[0]
+				if eventType == "INFERENCE_RECONCILED" {
+					original = stream[1]
+				}
+				draft := events.TrustedDraft{OrganizationID: original.OrganizationID, SourceActorID: original.SourceActorID, SourceExecutionID: original.SourceExecutionID, TaskID: original.TaskID, CorrelationID: "other-run", EventType: eventType, Payload: original.Payload}
+				if scope == "other-organization" || scope == "malformed-other-org" {
+					draft.OrganizationID, draft.CorrelationID = "other-org", original.CorrelationID
+				}
+				if scope == "other-reservation" {
+					var payload map[string]any
+					if err := json.Unmarshal(original.Payload, &payload); err != nil {
+						t.Fatal(err)
+					}
+					payload["reservation_id"] = "unrelated-reservation"
+					draft.Payload = payload
+				}
+				if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
+					extra, err := appendEvent(t.Context(), tx, draft)
+					if err != nil || !strings.HasPrefix(scope, "malformed-") {
+						return err
+					}
+					if _, err := tx.ExecContext(t.Context(), `UPDATE events SET payload=CAST('{' AS BLOB) WHERE event_id=?`, extra.EventID); err != nil {
+						return err
+					}
+					if _, err := tx.ExecContext(t.Context(), `DELETE FROM event_integrity`); err != nil {
+						return err
+					}
+					return rebuildEventIntegrity(t.Context(), tx)
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+				store, err = Open(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = store.Close() })
+				_, err = store.VerifiedIncidentEvents(t.Context(), "organization-1", "work-1", 256)
+				if scope == "other-correlation" {
+					if err == nil {
+						t.Fatal("same reservation acquired another event under a different correlation")
+					}
+				} else if err != nil {
+					t.Fatalf("unrelated evidence affected selected reservation: %v", err)
+				}
+			})
+		}
+	}
+}

@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"reflect"
+	"sort"
+	"strings"
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
@@ -149,6 +151,42 @@ func validateIncidentInference(ctx context.Context, tx *sql.Tx, stream []events.
 		if count != len(seen) {
 			return fmt.Errorf("incident inference accounting lacks its exact admission history")
 		}
+		if err := validateIncidentInferenceLinks(ctx, tx, stream[0].OrganizationID, accounting); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Exact selected events already prove each expected row and terminal state.
+// Count all same-organization events linked to those reservation identities so
+// an extra event cannot escape validation by claiming another correlation.
+func validateIncidentInferenceLinks(ctx context.Context, tx *sql.Tx, organization string, accounting map[string]*incidentAccounting) error {
+	if len(accounting) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(accounting))
+	expected := len(accounting)
+	for id, entry := range accounting {
+		ids = append(ids, id)
+		if entry.reconciled {
+			expected++
+		}
+	}
+	sort.Strings(ids)
+	args := make([]any, 0, len(ids)+2)
+	args = append(args, organization)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	args = append(args, expected+1)
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM events WHERE organization_id=? AND event_type IN ('INFERENCE_RESERVED','INFERENCE_RECONCILED') AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.reservation_id') END IN (`+marks+`) LIMIT ?)`, args...).Scan(&count); err != nil {
+		return err
+	}
+	if count != expected {
+		return fmt.Errorf("incident inference reservation has extra or missing linked events")
 	}
 	return nil
 }
