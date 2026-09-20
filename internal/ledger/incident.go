@@ -353,50 +353,59 @@ func validateIncidentEffects(ctx context.Context, tx *sql.Tx, organization strin
 		}
 		histories[string(value.ID)] = append(histories[string(value.ID)], event)
 	}
+	if len(ids) == 0 || len(ids) > 256 {
+		return fmt.Errorf("incident effect identities exceed bounded history")
+	}
+	args := make([]any, 0, len(ids))
 	for _, id := range ids {
-		var count int
-		var size int64
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(CAST(body AS BLOB))),0) FROM (SELECT body FROM records WHERE kind='effect' AND record_id=? ORDER BY version LIMIT 257)`, id).Scan(&count, &size); err != nil {
+		args = append(args, id)
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	query := `SELECT record_id,version,body,admission_event_id FROM records WHERE kind='effect' AND record_id IN (` + marks + `) ORDER BY record_id,version LIMIT 257`
+	var count int
+	var size int64
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(CAST(record_id AS BLOB))+length(CAST(body AS BLOB))+length(CAST(admission_event_id AS BLOB))),0) FROM (`+query+`)`, args...).Scan(&count, &size); err != nil {
+		return err
+	}
+	if count != len(stream) || count == 0 || count > 256 || size > 2<<20 {
+		return fmt.Errorf("incident effect record/event history is incomplete or exceeds limit")
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	indices := map[string]int{}
+	previous := map[string]core.EffectObligation{}
+	for rows.Next() {
+		var id, admission string
+		var version int
+		var body []byte
+		if err := rows.Scan(&id, &version, &body, &admission); err != nil {
 			return err
 		}
-		if count != len(histories[id]) || count == 0 || count > 256 || size > 2<<20 {
-			return fmt.Errorf("incident effect record/event history is incomplete or exceeds limit")
+		index := indices[id]
+		if index >= len(histories[id]) {
+			return fmt.Errorf("incident effect record has no matching event")
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT version,body,admission_event_id FROM records WHERE kind='effect' AND record_id=? ORDER BY version`, id)
-		if err != nil {
+		value, err := core.DecodeEffectObligation(body)
+		event := histories[id][index]
+		var recorded core.EffectObligation
+		if err != nil || json.Unmarshal(event.Payload, &recorded) != nil || !reflect.DeepEqual(recorded, value) || version != index+1 || string(value.ID) != id || admission != "" && admission != event.EventID {
+			return fmt.Errorf("incident effect record differs from its ordered event")
+		}
+		if err := validateIncidentEffect(value, previous[id], index == 0); err != nil {
 			return err
 		}
-		defer func() { _ = rows.Close() }()
-		var previous core.EffectObligation
-		index := 0
-		for rows.Next() {
-			var version int
-			var body []byte
-			var admission string
-			if err := rows.Scan(&version, &body, &admission); err != nil {
-				_ = rows.Close()
-				return err
-			}
-			value, err := core.DecodeEffectObligation(body)
-			event := histories[id][index]
-			var recorded core.EffectObligation
-			if err != nil || json.Unmarshal(event.Payload, &recorded) != nil || !reflect.DeepEqual(recorded, value) || version != index+1 || string(value.ID) != id || admission != "" && admission != event.EventID {
-				_ = rows.Close()
-				return fmt.Errorf("incident effect record differs from its ordered event")
-			}
-			if err := validateIncidentEffect(value, previous, index == 0); err != nil {
-				_ = rows.Close()
-				return err
-			}
-			previous = value
-			index++
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		if err := rows.Close(); err != nil {
-			return err
+		previous[id] = value
+		indices[id] = index + 1
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if indices[id] == 0 || indices[id] != len(histories[id]) {
+			return fmt.Errorf("incident effect history has unmatched events")
 		}
 	}
 	return nil

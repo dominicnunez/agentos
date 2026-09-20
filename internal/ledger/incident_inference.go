@@ -22,6 +22,12 @@ type incidentPolicySupport struct {
 	remainingBytes int64
 }
 
+type incidentAccounting struct {
+	row        inferenceValidationRow
+	sequence   int64
+	reconciled bool
+}
+
 const incidentReservationBytes = `length(CAST(reservation_id AS BLOB))+length(CAST(request_id AS BLOB))+length(CAST(organization_id AS BLOB))+
 length(CAST(purpose AS BLOB))+length(CAST(intent_id AS BLOB))+length(CAST(task_id AS BLOB))+length(CAST(execution_id AS BLOB))+
 length(CAST(correlation_id AS BLOB))+length(CAST(prompt_sha256 AS BLOB))+length(CAST(provider AS BLOB))+length(CAST(model AS BLOB))+
@@ -35,6 +41,7 @@ func validateIncidentInference(ctx context.Context, tx *sql.Tx, stream []events.
 	manifests := map[string][]events.Event{}
 	starts := map[string]events.Event{}
 	seen := map[string]bool{}
+	accounting := map[string]*incidentAccounting{}
 	support := incidentPolicySupport{policies: map[[2]string]incidentPolicy{}, remainingBytes: 2 << 20}
 	for _, event := range stream {
 		switch event.EventType {
@@ -61,9 +68,11 @@ func validateIncidentInference(ctx context.Context, tx *sql.Tx, stream []events.
 			if frozen {
 				return fmt.Errorf("incident inference reservation occurred during hold")
 			}
-			if err := incidentReservation(ctx, tx, event, payload, &support); err != nil {
+			row, err := incidentReservation(ctx, tx, event, payload, &support)
+			if err != nil {
 				return err
 			}
+			accounting[payload.ReservationID] = &incidentAccounting{row: row, sequence: event.Sequence}
 			matching := manifests[event.SourceExecutionID]
 			for _, manifest := range matching {
 				for _, freeze := range freezes {
@@ -109,6 +118,24 @@ func validateIncidentInference(ctx context.Context, tx *sql.Tx, stream []events.
 			if manifest.ContextBuilderVersion == "v5" && (payload.ExecutionManifestRef != manifestEvent.EventID || manifest.ExecutionInputSHA256 != payload.PromptSHA256 || manifest.ConnectionID != payload.ConnectionID || manifest.Provider != payload.Provider || manifest.Model != payload.Model || manifest.ExecutionProfileVersion != payload.ExecutionProfileVersion || !modelinput.SameRouteRequirements(manifest.Routing, payload.Routing) || !modelinput.SameRouteDecision(manifest.RoutingDecision, payload.RoutingDecision)) {
 				return fmt.Errorf("incident inference differs from its execution manifest")
 			}
+		case "INFERENCE_RECONCILED":
+			var payload events.InferenceReconciledPayload
+			if decodeExactJSONBytes(event.Payload, &payload) != nil {
+				return fmt.Errorf("incident inference reconciliation is malformed")
+			}
+			entry, found := accounting[payload.ReservationID]
+			if !found || entry.reconciled || entry.row.state == inferenceStateReserved || event.Sequence <= entry.sequence {
+				return fmt.Errorf("incident inference reconciliation lacks its exact terminal accounting")
+			}
+			if err := validateInferenceReconciliationEvent(event, entry.row); err != nil {
+				return err
+			}
+			entry.reconciled = true
+		}
+	}
+	for _, entry := range accounting {
+		if entry.row.state != inferenceStateReserved && !entry.reconciled {
+			return fmt.Errorf("incident inference accounting lacks its exact terminal reconciliation")
 		}
 	}
 	// Each unique selected event already proved its exact row and scope above.
@@ -126,27 +153,30 @@ func validateIncidentInference(ctx context.Context, tx *sql.Tx, stream []events.
 	return nil
 }
 
-func incidentReservation(ctx context.Context, tx *sql.Tx, event events.Event, payload events.InferenceReservedPayload, support *incidentPolicySupport) error {
+func incidentReservation(ctx context.Context, tx *sql.Tx, event events.Event, payload events.InferenceReservedPayload, support *incidentPolicySupport) (inferenceValidationRow, error) {
 	var size int64
 	if err := tx.QueryRowContext(ctx, `SELECT `+incidentReservationBytes+` FROM inference_reservations WHERE reservation_id=?`, payload.ReservationID).Scan(&size); err != nil {
-		return fmt.Errorf("incident reservation lacks accounting: %w", err)
+		return inferenceValidationRow{}, fmt.Errorf("incident reservation lacks accounting: %w", err)
 	}
 	if size > support.remainingBytes {
-		return fmt.Errorf("incident inference accounting exceeds byte limit")
+		return inferenceValidationRow{}, fmt.Errorf("incident inference accounting exceeds byte limit")
 	}
 	support.remainingBytes -= size
 	var row inferenceValidationRow
 	if err := tx.QueryRowContext(ctx, `SELECT reservation_id,request_id,organization_id,purpose,intent_id,task_id,execution_id,correlation_id,prompt_sha256,provider,model,execution_profile_version,policy_fingerprint,state,reserved_input_tokens,reserved_output_tokens,reserved_cost_nano_usd,charged_input_tokens,charged_output_tokens,charged_cost_nano_usd,window_started_at,window_expires_at,connection_id,created_at FROM inference_reservations WHERE reservation_id=?`, payload.ReservationID).Scan(&row.reservationID, &row.requestID, &row.organizationID, &row.purpose, &row.intentID, &row.taskID, &row.executionID, &row.correlationID, &row.promptSHA256, &row.provider, &row.model, &row.profile, &row.policyFingerprint, &row.state, &row.reservedInput, &row.reservedOutput, &row.reservedCost, &row.chargedInput, &row.chargedOutput, &row.chargedCost, &row.windowStart, &row.windowEnd, &row.connectionID, &row.createdAt); err != nil {
-		return fmt.Errorf("incident reservation lacks accounting: %w", err)
+		return inferenceValidationRow{}, fmt.Errorf("incident reservation lacks accounting: %w", err)
 	}
 	policy, err := support.load(ctx, tx, event, payload.PolicyFingerprint)
 	if err != nil {
-		return err
+		return inferenceValidationRow{}, err
 	}
 	if row.validate(policy) != nil {
-		return fmt.Errorf("incident reservation differs from its policy")
+		return inferenceValidationRow{}, fmt.Errorf("incident reservation differs from its policy")
 	}
-	return validateInferenceReservationEvent(event, row, policy)
+	if err := validateInferenceReservationEvent(event, row, policy); err != nil {
+		return inferenceValidationRow{}, err
+	}
+	return row, nil
 }
 
 // Supporting policies are immutable within this read transaction. Decode each
