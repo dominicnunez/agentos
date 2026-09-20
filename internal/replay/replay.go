@@ -51,20 +51,25 @@ type Link struct {
 }
 
 type Report struct {
-	SchemaVersion  int       `json:"schema_version"`
-	OrganizationID string    `json:"organization_id"`
-	ConversationID string    `json:"conversation_id"`
-	CorrelationID  string    `json:"-"`
-	Integrity      Integrity `json:"integrity"`
-	EventCount     int       `json:"event_count"`
-	Entries        []Entry   `json:"entries"`
-	Links          []Link    `json:"links"`
+	SchemaVersion  int          `json:"schema_version"`
+	OrganizationID string       `json:"organization_id"`
+	ConversationID string       `json:"conversation_id"`
+	CorrelationID  string       `json:"-"`
+	Integrity      Integrity    `json:"integrity"`
+	EventCount     int          `json:"event_count"`
+	Entries        []Entry      `json:"entries"`
+	Links          []Link       `json:"links"`
+	Containment    *Containment `json:"containment,omitempty"`
 }
 
 // Project returns the same report for the same verified snapshot. Links state
 // only explicit order within the selected stream, Task, or execution; they are
 // not a judgment about root cause.
 func Project(snapshot events.VerifiedEventSnapshot, conversationID string) (Report, error) {
+	return project(snapshot, conversationID, nil)
+}
+
+func project(snapshot events.VerifiedEventSnapshot, conversationID string, related map[string]bool) (Report, error) {
 	if !validRequiredField(snapshot.OrganizationID) || !validRequiredField(snapshot.CorrelationID) || !validRequiredField(conversationID) {
 		return Report{}, fmt.Errorf("incident replay requires organization and correlation identity")
 	}
@@ -94,7 +99,7 @@ func Project(snapshot events.VerifiedEventSnapshot, conversationID string) (Repo
 	metadataBytes := len(snapshot.OrganizationID) + len(conversationID)
 	var previous events.Event
 	for index, event := range snapshot.Events {
-		if err := validateEvent(snapshot, previous, event, seen); err != nil {
+		if err := validateEvent(snapshot, previous, event, seen, related); err != nil {
 			return Report{}, err
 		}
 		metadataBytes += eventMetadataBytes(event)
@@ -148,7 +153,7 @@ func Project(snapshot events.VerifiedEventSnapshot, conversationID string) (Repo
 	return report, nil
 }
 
-func validateEvent(snapshot events.VerifiedEventSnapshot, previous, event events.Event, seen map[string]struct{}) error {
+func validateEvent(snapshot events.VerifiedEventSnapshot, previous, event events.Event, seen map[string]struct{}, related map[string]bool) error {
 	if event.EventID == "" || event.Sequence < 1 || event.EventType == "" || event.CreatedAt.IsZero() || event.SchemaVersion != events.SchemaVersion {
 		return fmt.Errorf("incident replay event has an incomplete envelope")
 	}
@@ -158,7 +163,7 @@ func validateEvent(snapshot events.VerifiedEventSnapshot, previous, event events
 		!validReferences(event.AuthorizationRefs) || !validReferences(event.ArtifactRefs) {
 		return fmt.Errorf("incident replay event envelope exceeds its public bounds")
 	}
-	if event.OrganizationID != snapshot.OrganizationID || event.CorrelationID != snapshot.CorrelationID {
+	if event.OrganizationID != snapshot.OrganizationID || event.CorrelationID != snapshot.CorrelationID && !related[event.EventID] {
 		return fmt.Errorf("incident replay crosses its organization or correlation boundary")
 	}
 	if previous.Sequence != 0 && event.Sequence <= previous.Sequence {
