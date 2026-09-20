@@ -48,6 +48,15 @@ COALESCE(length(CAST(e.correlation_id AS BLOB)),0)+COALESCE(length(CAST(e.create
 // policy and execution bindings. It does not replay global budget competition,
 // knowledge selection or all historical capability decisions.
 func validateIncidentInference(ctx context.Context, tx *sql.Tx, stream []events.Event, freezes []events.OrganizationFreezeAdmission) error {
+	correlations := []string{}
+	if len(stream) != 0 {
+		correlations = append(correlations, stream[0].CorrelationID)
+	}
+	budget := incidentBudget{events: 3 * 256, bytes: 2 << 20}
+	return validateIncidentInferenceBudget(ctx, tx, stream, freezes, correlations, &budget)
+}
+
+func validateIncidentInferenceBudget(ctx context.Context, tx *sql.Tx, stream []events.Event, freezes []events.OrganizationFreezeAdmission, correlations []string, budget *incidentBudget) error {
 	reserved, reservationIDs, policyFingerprints, err := incidentInferenceRequirements(stream)
 	if err != nil {
 		return err
@@ -56,7 +65,7 @@ func validateIncidentInference(ctx context.Context, tx *sql.Tx, stream []events.
 	if len(stream) != 0 {
 		organization = stream[0].OrganizationID
 	}
-	support, err := loadIncidentInferenceSupport(ctx, tx, organization, reservationIDs, policyFingerprints)
+	support, err := loadIncidentInferenceSupport(ctx, tx, organization, reservationIDs, policyFingerprints, budget)
 	if err != nil {
 		return err
 	}
@@ -167,17 +176,30 @@ func validateIncidentInference(ctx context.Context, tx *sql.Tx, stream []events.
 	// Each unique selected event already proved its exact row and scope above.
 	// A bounded reverse count detects any additional accounting row without
 	// materializing unrelated reservations or their caller-controlled strings.
-	if len(stream) != 0 {
+	if len(correlations) != 0 {
+		args := []any{organization}
+		selected := map[string]bool{}
+		for _, correlation := range correlations {
+			args = append(args, correlation)
+			selected[correlation] = true
+		}
+		expected := 0
+		for _, event := range stream {
+			if event.EventType == "INFERENCE_RESERVED" && selected[event.CorrelationID] {
+				expected++
+			}
+		}
+		args = append(args, expected+1)
 		var count int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM inference_reservations WHERE organization_id=? AND correlation_id=? LIMIT ?)`, stream[0].OrganizationID, stream[0].CorrelationID, len(reservationIDs)+1).Scan(&count); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM inference_reservations WHERE organization_id=? AND correlation_id IN (`+incidentMarks(len(correlations))+`) LIMIT ?)`, args...).Scan(&count); err != nil {
 			return err
 		}
-		if count != len(reservationIDs) {
+		if count != expected {
 			return fmt.Errorf("incident inference accounting lacks its exact admission history")
 		}
-		if err := validateIncidentInferenceLinks(ctx, tx, stream[0].OrganizationID, accounting); err != nil {
-			return err
-		}
+	}
+	if err := validateIncidentInferenceLinks(ctx, tx, organization, accounting); err != nil {
+		return err
 	}
 	return nil
 }
@@ -244,7 +266,7 @@ func incidentInferenceRequirements(stream []events.Event) (map[string]events.Inf
 	return reserved, reservationIDs, policyFingerprints, nil
 }
 
-func loadIncidentInferenceSupport(ctx context.Context, tx *sql.Tx, organization string, reservationIDs, policyFingerprints []string) (incidentInferenceSupport, error) {
+func loadIncidentInferenceSupport(ctx context.Context, tx *sql.Tx, organization string, reservationIDs, policyFingerprints []string, budget *incidentBudget) (incidentInferenceSupport, error) {
 	support := incidentInferenceSupport{
 		reservations: make(map[string]inferenceValidationRow, len(reservationIDs)),
 		policies:     make(map[[2]string]incidentPolicy, len(policyFingerprints)),
@@ -260,13 +282,13 @@ func loadIncidentInferenceSupport(ctx context.Context, tx *sql.Tx, organization 
 	}
 	var reservationCount int
 	var reservationBytes int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM (SELECT `+incidentReservationBytes+` AS bytes FROM inference_reservations WHERE organization_id=? AND reservation_id IN (`+reservationMarks+`) ORDER BY reservation_id LIMIT 257)`, reservationArgs...).Scan(&reservationCount, &reservationBytes); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM (SELECT `+incidentReservationBytes+` AS bytes FROM inference_reservations WHERE organization_id=? AND reservation_id IN (`+reservationMarks+`) ORDER BY reservation_id LIMIT ?)`, append(reservationArgs, budget.events+1)...).Scan(&reservationCount, &reservationBytes); err != nil {
 		return support, err
 	}
 	if reservationCount != len(reservationIDs) {
 		return support, fmt.Errorf("incident reservation lacks accounting")
 	}
-	if reservationBytes > 2<<20 {
+	if reservationCount > budget.events || reservationBytes > budget.bytes {
 		return support, fmt.Errorf("incident inference accounting exceeds byte limit")
 	}
 
@@ -278,12 +300,15 @@ func loadIncidentInferenceSupport(ctx context.Context, tx *sql.Tx, organization 
 	}
 	var policyCount, activationCount int
 	var policyBytes, activationBytes int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(policy_bytes),0),COALESCE(SUM(activation_bytes),0),COALESCE(SUM(has_activation),0) FROM (SELECT `+incidentInferencePolicyBytes+` AS policy_bytes,`+incidentInferenceActivationBytes+` AS activation_bytes,CASE WHEN e.event_id IS NULL THEN 0 ELSE 1 END AS has_activation FROM inference_policies p LEFT JOIN events e ON e.event_id=p.activation_event_id AND e.organization_id=p.organization_id WHERE p.organization_id=? AND p.policy_fingerprint IN (`+policyMarks+`) ORDER BY p.policy_fingerprint LIMIT 257)`, policyArgs...).Scan(&policyCount, &policyBytes, &activationBytes, &activationCount); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(policy_bytes),0),COALESCE(SUM(activation_bytes),0),COALESCE(SUM(has_activation),0) FROM (SELECT `+incidentInferencePolicyBytes+` AS policy_bytes,`+incidentInferenceActivationBytes+` AS activation_bytes,CASE WHEN e.event_id IS NULL THEN 0 ELSE 1 END AS has_activation FROM inference_policies p LEFT JOIN events e ON e.event_id=p.activation_event_id AND e.organization_id=p.organization_id WHERE p.organization_id=? AND p.policy_fingerprint IN (`+policyMarks+`) ORDER BY p.policy_fingerprint LIMIT ?)`, append(policyArgs, budget.events+1)...).Scan(&policyCount, &policyBytes, &activationBytes, &activationCount); err != nil {
 		return support, err
 	}
-	if policyCount != len(policyFingerprints) || activationCount != policyCount || policyBytes > (2<<20)-reservationBytes || activationBytes > (2<<20)-reservationBytes-policyBytes {
+	if policyCount != len(policyFingerprints) || activationCount != policyCount || reservationCount+policyCount+activationCount > budget.events || policyBytes > budget.bytes-reservationBytes || activationBytes > budget.bytes-reservationBytes-policyBytes {
 		return support, fmt.Errorf("incident inference supporting evidence exceeds byte limit or lacks activation")
 	}
+
+	budget.events -= reservationCount + policyCount + activationCount
+	budget.bytes -= reservationBytes + policyBytes + activationBytes
 
 	rows, err := tx.QueryContext(ctx, `SELECT reservation_id,request_id,organization_id,purpose,intent_id,task_id,execution_id,correlation_id,prompt_sha256,provider,model,execution_profile_version,policy_fingerprint,state,reserved_input_tokens,reserved_output_tokens,reserved_cost_nano_usd,charged_input_tokens,charged_output_tokens,charged_cost_nano_usd,window_started_at,window_expires_at,connection_id,created_at FROM inference_reservations WHERE organization_id=? AND reservation_id IN (`+reservationMarks+`) ORDER BY reservation_id`, reservationArgs...)
 	if err != nil {

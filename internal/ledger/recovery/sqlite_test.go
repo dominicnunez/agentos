@@ -22,6 +22,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	"github.com/dominicnunez/agentos/internal/replay"
 	_ "modernc.org/sqlite"
 )
 
@@ -381,6 +382,32 @@ func TestVerifyReplaysEventAdmittedKnowledge(t *testing.T) {
 	}
 	if _, err := Verify(ctx, path); err != nil {
 		t.Fatalf("verify event-admitted knowledge: %v", err)
+	}
+	store, err = ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	snapshot, err := store.VerifiedIncidentEvents(ctx, "org-1", "knowledge-knowledge-1", 256)
+	if err != nil {
+		t.Fatalf("incident rejected independently validated Knowledge: %v", err)
+	}
+	if _, err := replay.ProjectIncident(snapshot, "knowledge-knowledge-1"); err != nil {
+		t.Fatalf("incident renderer rejected independently validated Knowledge: %v", err)
+	}
+	if len(snapshot.Work.Events) != 2 || len(snapshot.DependencyEvents) == 0 {
+		t.Fatal("Knowledge validation support did not stay outside the selected timeline")
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	if _, err := raw.ExecContext(ctx, `DELETE FROM records WHERE kind='task' AND record_id='task-knowledge-validation'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.VerifiedIncidentEvents(ctx, "org-1", "knowledge-knowledge-1", 256); err == nil {
+		t.Fatal("incident accepted Knowledge whose validation Task lost its durable backing")
 	}
 }
 

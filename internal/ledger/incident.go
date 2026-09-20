@@ -86,7 +86,7 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 	if err := validateIncidentExecutionEvidence(ctx, tx, work, freezes, &budget); err != nil {
 		return events.IncidentSnapshot{}, err
 	}
-	if err := loadIncidentDependencies(ctx, tx, &snapshot); err != nil {
+	if err := loadIncidentDependencies(ctx, tx, &snapshot, freezes); err != nil {
 		return events.IncidentSnapshot{}, err
 	}
 	tasks, err := events.ValidateIncidentHistory(snapshot)

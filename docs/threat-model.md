@@ -168,6 +168,8 @@ The chain is not a signature or external checkpoint. Removing a valid suffix wit
 
 Governance inspection, incident replay, and evidence export are authenticated local-owner surfaces with organization scoping, bounded payloads, and restricted projections. They do not expose a general raw-ledger query interface. Incident replay combines one Work history with validated organization hold/release and Task-bound effect records in one verified read snapshot. Its containment summary identifies local admission boundaries and preserves uncertain stops alongside later local completion and usage. Coordination/output actions remain unclassified; Task-linked effects do not imply an execution-specific causal link. Replay reports evidence relationships, not proven root cause, remote termination, or complete historical authorization, and does not re-execute work. Export checksums detect byte changes but do not establish signed origin, control effectiveness, or certification.
 
+Incident validation privately follows projection dependencies and checks retained lifecycle admissions and completion evidence with shared recovery validators. Exact record backing and aggregate loading bounds constrain that supporting evidence; it does not enter the public report. A history can exceed those bounds even when the selected timeline is small. Complete-chain verification still scans retained ledger history per request.
+
 Sustained valid submissions, artifacts, histories, and expensive verification can still consume disk or processing capacity. Operational capacity monitoring and filesystem quotas remain necessary.
 
 ## Setup and supply chain

@@ -17,6 +17,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/replay"
 )
 
 type changingAuthorityJSON struct {
@@ -3773,6 +3774,15 @@ func TestReviewedReplacementRequiresOnePriorFailedWork(t *testing.T) {
 		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "replacement"}, ProjectionKind: "work", RecordID: string(replacement.ID), Version: 1, Value: replacement},
 	}); err != nil {
 		t.Fatalf("atomic replacement projections failed: %v", err)
+	}
+	for _, selected := range []string{"old", "replacement"} {
+		snapshot, err := store.VerifiedIncidentEvents(ctx, "org-1", selected, 256)
+		if err != nil {
+			t.Fatalf("incident rejected reviewed replacement history for %s: %v", selected, err)
+		}
+		if _, err := replay.ProjectIncident(snapshot, selected); err != nil {
+			t.Fatalf("incident renderer rejected reviewed replacement history for %s: %v", selected, err)
+		}
 	}
 
 	duplicateDraft := appendReviewedReplacementIntent(t, ctx, store, "org-1", "replacement-2", "intent-replacement-2", predecessor.ID, "echo second replacement", now)

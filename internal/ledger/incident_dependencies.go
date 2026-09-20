@@ -32,7 +32,7 @@ type incidentDependencies struct {
 	tooManyKeys        bool
 }
 
-func loadIncidentDependencies(ctx context.Context, tx *sql.Tx, snapshot *events.IncidentSnapshot) error {
+func loadIncidentDependencies(ctx context.Context, tx *sql.Tx, snapshot *events.IncidentSnapshot, freezes []events.OrganizationFreezeAdmission) error {
 	d := incidentDependencies{organization: snapshot.Work.OrganizationID,
 		budget: incidentBudget{events: events.MaximumIncidentEvidence, bytes: events.MaximumIncidentEvidenceBytes},
 		stream: map[string]events.Event{}, public: map[string]bool{}, keys: map[incidentKey]bool{}, refs: map[string]bool{},
@@ -90,7 +90,23 @@ func loadIncidentDependencies(ctx context.Context, tx *sql.Tx, snapshot *events.
 	sort.Slice(snapshot.DependencyEvents, func(i, j int) bool {
 		return snapshot.DependencyEvents[i].Sequence < snapshot.DependencyEvents[j].Sequence
 	})
-	return d.loadSupportingRows(ctx, tx, snapshot)
+	if err := d.loadSupportingRows(ctx, tx, snapshot); err != nil {
+		return err
+	}
+	stream := make([]events.Event, 0, len(d.stream))
+	for _, event := range d.stream {
+		stream = append(stream, event)
+	}
+	sort.Slice(stream, func(i, j int) bool { return stream[i].Sequence < stream[j].Sequence })
+	correlations := make([]string, 0, len(d.correlations))
+	for correlation := range d.correlations {
+		correlations = append(correlations, correlation)
+	}
+	sort.Strings(correlations)
+	if err := validateIncidentInferenceBudget(ctx, tx, stream, freezes, correlations, &d.budget); err != nil {
+		return err
+	}
+	return validateIncidentExecutionRows(ctx, tx, stream)
 }
 
 func (d *incidentDependencies) add(event events.Event) error {
@@ -179,7 +195,7 @@ func incidentOwnedContract(kind string) bool {
 	case "INTENT_CONFIRMED", "INTAKE_MESSAGE_RECORDED", "HUMAN_INPUT_RECEIVED", "A2A_INPUT_RECEIVED",
 		"WORK_COMPLETION_EVALUATED", "GOAL_PROGRESS_EVALUATED", "EVIDENCE_PUBLISHED", "COMPLETION_REVIEW_REQUESTED", "COMPLETION_REVIEW_DECIDED", "INBOX_EVENTS_OBSERVED",
 		"CAPABILITY_GRANTED", "CAPABILITY_REVOKED", "CAPABILITY_CHECKED", "FREEZE_SET",
-		"HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED", "A2A_KNOWLEDGE_JUDGMENT_RECEIVED", "KNOWLEDGE_JUDGMENT_PUBLISHED":
+		"HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED", "A2A_KNOWLEDGE_JUDGMENT_RECEIVED", "KNOWLEDGE_JUDGMENT_PUBLISHED", "KNOWLEDGE_VALIDATION_RECORDED":
 		return true
 	}
 	return false
@@ -414,7 +430,7 @@ func (d *incidentDependencies) frontier() (string, []any) {
 			condition = `((json_extract(payload,'$.projection.projection_kind')='task' AND json_extract(payload,'$.projection.value.work_id')=?) OR json_extract(payload,'$.replaces_work_id')=? OR json_extract(payload,'$.projection.value.replaces_work_id')=?)`
 			args = append(args, key.id, key.id, key.id)
 		case "intent":
-			condition = `(json_extract(payload,'$.projection.value.intent_id')=? OR json_extract(payload,'$.intent_id')=?)`
+			condition = `((json_extract(payload,'$.projection.projection_kind')='work' AND json_extract(payload,'$.projection.value.intent_id')=?) OR (event_type='INTENT_CONFIRMED' AND json_extract(payload,'$.intent_id')=?))`
 			args = append(args, key.id, key.id)
 		case "goal":
 			condition = `(json_extract(payload,'$.projection.value.goal_id')=? OR json_extract(payload,'$.goal_id')=?)`

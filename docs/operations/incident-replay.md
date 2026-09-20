@@ -51,6 +51,14 @@ larger than 4 KiB, or a JSON report larger than 2 MiB fails closed rather than
 returning an incomplete reconstruction.
 Supporting records are also bounded before loading; oversized or inconsistent
 supporting evidence fails the request even when the selected event count fits.
+The reader privately loads the retained projection histories and referenced
+evidence needed to validate the selection, including reviewed Intent, roster,
+execution, completion, and Knowledge dependencies. It uses the shared historical
+admission and completion validators. These dependencies are not added to the
+public timeline. Their aggregate loading budget is 4,096 supporting items and
+32 MiB, including supporting records; a valid but larger dependency history
+also fails the request. The complete integrity-chain check
+still reads the ledger on each request, so cost grows with retained history.
 
 Predecessor links express recorded ordering within the combined selected
 evidence, using durable ledger order rather than wall-clock timestamps.
