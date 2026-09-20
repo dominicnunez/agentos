@@ -36,18 +36,19 @@ func TestIncidentTaskGraph(t *testing.T) {
 			}
 			test.change(tasks)
 			stream := []Event{
-				incidentProjectionEvent(t, 1, "INTENT_CREATED", "intent", string(intent.ID), 1, "", intent),
-				incidentProjectionEvent(t, 2, "WORK_CREATED", "work", string(work.ID), 1, "", work),
-				incidentProjectionEvent(t, 3, "WORK_CREATED", "work", string(other.ID), 1, "", other),
-				incidentProjectionEvent(t, 4, "TASK_CREATED", "task", string(tasks[0].ID), 1, string(tasks[0].ID), tasks[0]),
-				incidentProjectionEvent(t, 5, "TASK_CREATED", "task", string(tasks[1].ID), 1, string(tasks[1].ID), tasks[1]),
+				incidentProjectionEvent(t, 1, "ORGANIZATION_CREATED", "organization", "org-1", 1, "", core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "1", CreatedAt: now}),
+				incidentProjectionEvent(t, 2, "INTENT_CREATED", "intent", string(intent.ID), 1, "", intent),
+				incidentProjectionEvent(t, 3, "WORK_CREATED", "work", string(work.ID), 1, "", work),
+				incidentProjectionEvent(t, 4, "WORK_CREATED", "work", string(other.ID), 1, "", other),
+				incidentProjectionEvent(t, 5, "TASK_CREATED", "task", string(tasks[0].ID), 1, string(tasks[0].ID), tasks[0]),
+				incidentProjectionEvent(t, 6, "TASK_CREATED", "task", string(tasks[1].ID), 1, string(tasks[1].ID), tasks[1]),
 			}
 			admitted, err := IncidentTaskAdmissions(stream)
 			if test.invalid {
 				if err == nil {
 					t.Fatal("accepted invalid final Task graph")
 				}
-			} else if err != nil || admitted["task-1"] != 4 || admitted["task-2"] != 5 {
+			} else if err != nil || admitted["task-1"] != 5 || admitted["task-2"] != 6 {
 				t.Fatalf("valid graph admissions = %v, error = %v", admitted, err)
 			}
 		})

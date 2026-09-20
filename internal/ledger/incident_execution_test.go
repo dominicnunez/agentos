@@ -170,7 +170,7 @@ func TestIncidentHiddenLegacyHoldOutcome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := stopTestExecution(t, store)
+	task := incidentTestExecution(t, store)
 	hold := appendHistoricalInferenceFreeze(t, store, "org-1", 1, true)
 	var sequence int64
 	if err := store.db.QueryRowContext(t.Context(), `SELECT sequence FROM events WHERE event_id=?`, hold.EventRef).Scan(&sequence); err != nil {

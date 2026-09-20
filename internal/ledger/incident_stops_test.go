@@ -22,7 +22,7 @@ func incidentStopRequest(t *testing.T, store *SQLite, family string) events.Even
 		}
 		return request
 	}
-	task := stopTestExecution(t, store)
+	task := incidentTestExecution(t, store)
 	request, err := store.RequestExecutionStop(t.Context(), "org-1", string(task.ID), "stop-work", fmt.Sprintf("execution-%s-v2", task.ID), "execution_cancelled")
 	if err != nil {
 		t.Fatal(err)
@@ -247,7 +247,7 @@ func TestIncidentStopWithoutRequest(t *testing.T) {
 			var contextEvent events.Event
 			eventType := "MODEL_STOP_UNCERTAIN"
 			if family == "task" {
-				task := stopTestExecution(t, store)
+				task := incidentTestExecution(t, store)
 				contextEvent = events.Event{OrganizationID: "org-1", TaskID: string(task.ID), SourceExecutionID: fmt.Sprintf("execution-%s-v2", task.ID), CorrelationID: "stop-work"}
 				eventType = "EXECUTION_STOP_UNCERTAIN"
 			} else {

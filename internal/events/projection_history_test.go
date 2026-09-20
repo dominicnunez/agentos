@@ -57,6 +57,14 @@ func TestProjectionHistoryRejectsInvalidPredecessors(t *testing.T) {
 	}
 }
 
+func TestProjectionHistoryChecksAbandonment(t *testing.T) {
+	stream := historyTestEvents(t, core.WorkActive, "")
+	stream = append(stream, Event{EventID: "abandon", Sequence: 5, OrganizationID: "org-1", CorrelationID: "incident", EventType: "INTAKE_ABANDONED", SourceActorID: "runtime", SchemaVersion: SchemaVersion, CreatedAt: time.Now().UTC(), Payload: []byte(`{}`)})
+	if _, err := ValidateProjectionHistory(stream, nil, nil, nil); err == nil {
+		t.Fatal("accepted malformed standalone intake abandonment")
+	}
+}
+
 func historyTestEvents(t *testing.T, status core.WorkStatus, assignee core.ID) []Event {
 	t.Helper()
 	now := time.Now().UTC()

@@ -89,7 +89,7 @@ func TestIncidentRequiresExactSelectedRecords(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			stopTestExecution(t, store)
+			incidentTestExecution(t, store)
 			if _, err := store.VerifiedIncidentEvents(t.Context(), "org-1", "stop-work", 256); err != nil {
 				t.Fatal(err)
 			}
@@ -129,7 +129,7 @@ func TestIncidentRequiresSelectedProjectionAdmissions(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = store.Close() })
-			stopTestExecution(t, store)
+			incidentTestExecution(t, store)
 			if mutation == "missing-event" {
 				now := time.Now().UTC()
 				intent := core.Intent{ID: "orphan-intent", OrganizationID: "org-1", OriginalInstruction: "orphan", NormalizedObjective: "orphan", CreatedAt: now}
@@ -403,7 +403,7 @@ func TestIncidentProjectionRecordTenantIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	stopTestExecution(t, store)
+	incidentTestExecution(t, store)
 	appendTaskProjectionParents(t, t.Context(), store, "org-2", "stop-work", "other-work")
 	foreign := core.Task{ID: "foreign-task", WorkID: "other-work", Description: "foreign claim", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
 	if _, err := store.AppendProjection(t.Context(), events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-2", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: string(foreign.ID), CorrelationID: "stop-work"}, ProjectionKind: "task", RecordID: string(foreign.ID), Version: 1, Value: foreign}); err != nil {

@@ -17,10 +17,11 @@ func TestIncidentTaskAdmissionsRequiresActiveWork(t *testing.T) {
 	failed.Status = core.WorkFailed
 	task := core.Task{ID: "task-1", WorkID: active.ID, Description: "bounded task", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
 	stream := []Event{
-		incidentProjectionEvent(t, 1, "INTENT_CREATED", "intent", string(intent.ID), 1, "", intent),
-		incidentProjectionEvent(t, 2, "WORK_CREATED", "work", string(active.ID), 1, "", active),
-		incidentProjectionEvent(t, 3, "WORK_FAILED", "work", string(failed.ID), 2, "", failed),
-		incidentProjectionEvent(t, 4, "TASK_CREATED", "task", string(task.ID), 1, string(task.ID), task),
+		incidentProjectionEvent(t, 1, "ORGANIZATION_CREATED", "organization", "org-1", 1, "", core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "1", CreatedAt: now}),
+		incidentProjectionEvent(t, 2, "INTENT_CREATED", "intent", string(intent.ID), 1, "", intent),
+		incidentProjectionEvent(t, 3, "WORK_CREATED", "work", string(active.ID), 1, "", active),
+		incidentProjectionEvent(t, 4, "WORK_FAILED", "work", string(failed.ID), 2, "", failed),
+		incidentProjectionEvent(t, 5, "TASK_CREATED", "task", string(task.ID), 1, string(task.ID), task),
 	}
 	if _, err := IncidentTaskAdmissions(stream); err == nil {
 		t.Fatal("accepted Task admission after its Work became terminal")

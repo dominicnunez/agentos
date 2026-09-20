@@ -51,6 +51,11 @@ func ValidateProjectionHistory(stream []Event, inboxObservations map[string]Inbo
 		Knowledge: map[core.ID]core.DurableState[core.KnowledgeRecord]{},
 	}
 	confirmations := make(map[string][]Event)
+	for _, event := range ordered {
+		if event.EventType == "INTENT_CONFIRMED" {
+			confirmations[event.CorrelationID] = append(confirmations[event.CorrelationID], event)
+		}
+	}
 	replacementConfirmations := make(map[core.ID]string)
 	teamRecords := make(map[string][][]byte)
 	blueprintRevisions := make(map[core.ID]map[string]core.AgentBlueprint)
@@ -76,12 +81,16 @@ func ValidateProjectionHistory(stream []Event, inboxObservations map[string]Inbo
 			return core.DurableGraph{}, fmt.Errorf("event %s: %w", event.EventID, err)
 		}
 		if !present {
+			if event.EventType == "INTAKE_ABANDONED" {
+				if err := ValidateIndexedIntakeAbandonment(reviewEvidence.At(event), event); err != nil {
+					return core.DurableGraph{}, fmt.Errorf("event %s: %w", event.EventID, err)
+				}
+			}
 			if event.EventType == "INTENT_CONFIRMED" {
 				var confirmation IntentConfirmedPayload
 				if boundaryjson.Unmarshal(event.Payload, &confirmation) != nil {
 					return core.DurableGraph{}, fmt.Errorf("event %s contains an invalid intent confirmation", event.EventID)
 				}
-				confirmations[event.CorrelationID] = append(confirmations[event.CorrelationID], event)
 				if confirmation.GoalID == "" {
 					if err := ValidateIndexedReviewedIntentAdmission(reviewEvidence.At(event), event); err != nil {
 						return core.DurableGraph{}, fmt.Errorf("event %s: %w", event.EventID, err)
@@ -273,7 +282,7 @@ func validateProjectionWorkAtAdmission(work core.Work, event Event, record Proje
 	if intent.Value.ReplacesWorkID != work.ReplacesWorkID {
 		return fmt.Errorf("work does not match its accepted Intent replacement lineage")
 	}
-	if intentRequiresConfirmation(intent.Value) {
+	if IntentRequiresConfirmation(intent.Value) {
 		matching := confirmations[record.CorrelationID]
 		if len(matching) != 1 || matching[0].Sequence >= event.Sequence {
 			return fmt.Errorf("external Work requires one prior reviewed intent confirmation")
@@ -320,7 +329,7 @@ func validateProjectionReplacementConfirmation(event Event, confirmation IntentC
 	return nil
 }
 
-func intentRequiresConfirmation(intent core.Intent) bool {
+func IntentRequiresConfirmation(intent core.Intent) bool {
 	return intent.GoalID != "" || intent.ReplacesWorkID != "" || intent.SourceChannel == "HUMAN_DIRECT" || intent.SourceChannel == "A2A" || intent.SourcePrincipalKind == core.PrincipalHuman || intent.SourcePrincipalKind == core.PrincipalExternalAgent
 }
 

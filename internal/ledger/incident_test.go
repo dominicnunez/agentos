@@ -17,7 +17,7 @@ import (
 
 func incidentEffectFixture(t *testing.T, store *SQLite) core.EffectObligation {
 	t.Helper()
-	task := stopTestExecution(t, store)
+	task := incidentTestExecution(t, store)
 	lease := core.CapabilityLease{ID: "incident-lease", ActorID: task.AssigneeID, ActorKind: core.PrincipalAgent, OriginTaskID: task.ID, Action: "send", Resource: "destination", Scope: "org-1"}
 	if err := store.AppendRecord(t.Context(), "org-1", "CAPABILITY_GRANTED", "owner", string(task.ID), nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
 		t.Fatal(err)

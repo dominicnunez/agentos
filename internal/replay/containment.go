@@ -83,7 +83,7 @@ func ProjectIncident(snapshot events.IncidentSnapshot, conversationID string) (R
 	combined := snapshot.Work
 	combined.Events = append([]events.Event(nil), snapshot.Work.Events...)
 	related := make(map[string]bool, len(snapshot.RelatedEvents))
-	tasks, err := events.IncidentTaskAdmissions(snapshot.Work.Events)
+	tasks, err := events.ValidateIncidentHistory(snapshot)
 	if err != nil {
 		return Report{}, err
 	}

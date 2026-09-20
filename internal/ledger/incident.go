@@ -56,8 +56,7 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 	if len(work) == 0 {
 		return snapshot, nil
 	}
-	tasks, err := incidentTasks(ctx, tx, work)
-	if err != nil {
+	if err := validateIncidentRecords(ctx, tx, work); err != nil {
 		return events.IncidentSnapshot{}, err
 	}
 	// Bound the joined record/event rows before the existing complete-chain
@@ -85,6 +84,13 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 	}
 	snapshot.RelatedEvents = related
 	if err := validateIncidentExecutionEvidence(ctx, tx, work, freezes, &budget); err != nil {
+		return events.IncidentSnapshot{}, err
+	}
+	if err := loadIncidentDependencies(ctx, tx, &snapshot); err != nil {
+		return events.IncidentSnapshot{}, err
+	}
+	tasks, err := events.ValidateIncidentHistory(snapshot)
+	if err != nil {
 		return events.IncidentSnapshot{}, err
 	}
 	effects, err := incidentEffects(ctx, tx, &budget, organization, correlation, tasks, work)
@@ -122,79 +128,6 @@ func incidentEvents(ctx context.Context, tx *sql.Tx, budget *incidentBudget, whe
 	budget.events -= count
 	budget.bytes -= size
 	return stream, nil
-}
-
-func incidentTasks(ctx context.Context, tx *sql.Tx, stream []events.Event) (map[string]int64, error) {
-	if err := validateIncidentRecords(ctx, tx, stream); err != nil {
-		return nil, err
-	}
-	tasks, err := events.IncidentTaskAdmissions(stream)
-	if err != nil {
-		return nil, err
-	}
-	versions := map[string]int{}
-	identities := map[string][2]string{}
-	for _, event := range stream {
-		payload, present, err := events.AdmittedProjection(event)
-		if err != nil {
-			return nil, err
-		}
-		if !present {
-			continue
-		}
-		if err := events.ValidateProjectionEventBoundary(event, payload); err != nil {
-			return nil, err
-		}
-		projection := payload.Projection
-		if projection.ProjectionKind != "work" && projection.ProjectionKind != "task" {
-			continue
-		}
-		key := projection.ProjectionKind + ":" + projection.RecordID
-		if projection.Version != versions[key]+1 {
-			return nil, fmt.Errorf("incident projection history is incomplete")
-		}
-		versions[key] = projection.Version
-		identities[key] = [2]string{projection.ProjectionKind, projection.RecordID}
-	}
-
-	if len(identities) == 0 {
-		return tasks, nil
-	}
-	args := make([]any, 0, 2*len(identities))
-	keys := make([]string, 0, len(identities))
-	for key := range identities {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		identity := identities[key]
-		args = append(args, identity[0], identity[1])
-	}
-	marks := strings.TrimSuffix(strings.Repeat("(?,?),", len(keys)), ",")
-	rows, err := tx.QueryContext(ctx, `SELECT kind,record_id,COUNT(*) FROM (SELECT kind,record_id FROM records WHERE (kind,record_id) IN (`+marks+`) LIMIT 257) GROUP BY kind,record_id`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	seen := 0
-	for rows.Next() {
-		var kind, id string
-		var count int
-		if err := rows.Scan(&kind, &id, &count); err != nil {
-			return nil, err
-		}
-		if count != versions[kind+":"+id] {
-			return nil, fmt.Errorf("incident projection record/event history is incomplete")
-		}
-		seen++
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if seen != len(identities) {
-		return nil, fmt.Errorf("incident projection record history is missing")
-	}
-	return tasks, nil
 }
 
 func incidentEffects(ctx context.Context, tx *sql.Tx, budget *incidentBudget, organization, correlation string, tasks map[string]int64, work []events.Event) ([]events.Event, error) {

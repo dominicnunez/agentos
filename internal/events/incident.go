@@ -9,10 +9,13 @@ import (
 // RelatedEvents carry the organization's freeze chain and exact task-bound
 // effect histories; their presence grants no authority or execution linkage.
 type IncidentSnapshot struct {
-	Work          VerifiedEventSnapshot `json:"-"`
-	RelatedEvents []Event               `json:"-"`
-	FreezeRecords []AuthorityRecord     `json:"-"`
-	Admissions    []IncidentAdmission   `json:"-"`
+	Work              VerifiedEventSnapshot              `json:"-"`
+	RelatedEvents     []Event                            `json:"-"`
+	FreezeRecords     []AuthorityRecord                  `json:"-"`
+	Admissions        []IncidentAdmission                `json:"-"`
+	DependencyEvents  []Event                            `json:"-"`
+	AuthorityRecords  []AuthorityRecord                  `json:"-"`
+	InboxObservations map[string]InboxObservationBinding `json:"-"`
 }
 
 // IncidentAdmission identifies a validated durable boundary, never an observed

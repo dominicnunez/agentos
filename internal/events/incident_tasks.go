@@ -1,117 +1,12 @@
 package events
 
-import (
-	"fmt"
-
-	"github.com/dominicnunez/agentos/internal/core"
-)
-
-// IncidentTaskAdmissions derives Task identities and their first admission
-// sequence from sealed Work/Task history and validates their final dependency graph.
-// Ordinary Task mentions grant no link.
-// Exact backing records and snapshot integrity remain the reader's responsibility.
+// IncidentTaskAdmissions validates a self-contained Work history. Readers with
+// private dependencies use ValidateIncidentHistory instead.
 func IncidentTaskAdmissions(stream []Event) (map[string]int64, error) {
-	works := map[core.ID]core.Work{}
-	workScopes := map[core.ID][2]string{}
-	intents := map[core.ID]core.Intent{}
-	intentScopes := map[core.ID][2]string{}
-	priorTasks := map[core.ID]core.Task{}
-	versions := map[[2]string]int{}
-	tasks := map[string]int64{}
-	var lastSequence int64
-	for _, event := range stream {
-		if event.Sequence <= lastSequence {
-			return nil, fmt.Errorf("incident history is unordered")
-		}
-		lastSequence = event.Sequence
-		payload, present, err := AdmittedProjection(event)
-		if err != nil {
-			return nil, err
-		}
-		if !present {
-			if RequiresProjectionAdmission(event.EventType, event.SourceActorID) {
-				return nil, fmt.Errorf("incident lifecycle lacks projection admission")
-			}
-			continue
-		}
-		if err := ValidateProjectionEventBoundary(event, payload); err != nil {
-			return nil, err
-		}
-		projection := payload.Projection
-		if projection.ProjectionKind == "intent" {
-			var intent core.Intent
-			if decodeExactEventJSON(projection.Value, &intent) != nil || string(intent.ID) != projection.RecordID || intents[intent.ID].ID != "" {
-				return nil, fmt.Errorf("incident Intent identity is invalid or repeated")
-			}
-			intents[intent.ID] = intent
-			intentScopes[intent.ID] = [2]string{event.OrganizationID, event.CorrelationID}
-			continue
-		}
-		if projection.ProjectionKind != "work" && projection.ProjectionKind != "task" {
-			continue
-		}
-		key := [2]string{projection.ProjectionKind, projection.RecordID}
-		if projection.Version != versions[key]+1 {
-			return nil, fmt.Errorf("incident projection history is incomplete")
-		}
-		versions[key] = projection.Version
-		if projection.ProjectionKind == "work" {
-			var work core.Work
-			if decodeExactEventJSON(projection.Value, &work) != nil || string(work.ID) != projection.RecordID {
-				return nil, fmt.Errorf("incident Work identity is invalid")
-			}
-			intent, found := intents[work.IntentID]
-			if !found || intentScopes[work.IntentID] != [2]string{event.OrganizationID, event.CorrelationID} || string(intent.OrganizationID) != event.OrganizationID || intent.GoalID != work.GoalID || intent.ReplacesWorkID != work.ReplacesWorkID || intent.NormalizedObjective != work.Objective {
-				return nil, fmt.Errorf("incident Work lacks its exact prior Intent")
-			}
-			var prior *core.Work
-			if value, ok := works[work.ID]; ok {
-				prior = &value
-				if workScopes[work.ID] != [2]string{event.OrganizationID, event.CorrelationID} {
-					return nil, fmt.Errorf("incident Work changes scope")
-				}
-			}
-			if err := ValidateWorkProjectionTransition(event.EventType, projection.Version, prior, work); err != nil {
-				return nil, err
-			}
-			works[work.ID] = work
-			workScopes[work.ID] = [2]string{event.OrganizationID, event.CorrelationID}
-			continue
-		}
-		var task core.Task
-		if decodeExactEventJSON(projection.Value, &task) != nil || string(task.ID) != projection.RecordID || works[task.WorkID].ID == "" || works[task.WorkID].Status != core.WorkActive || workScopes[task.WorkID] != [2]string{event.OrganizationID, event.CorrelationID} {
-			return nil, fmt.Errorf("incident Task lacks its exact prior Work")
-		}
-		var prior *core.Task
-		if value, ok := priorTasks[task.ID]; ok {
-			prior = &value
-		}
-		if err := ValidateTaskProjectionTransition(event.EventType, projection.Version, prior, task); err != nil {
-			return nil, err
-		}
-		priorTasks[task.ID] = task
-		if projection.Version == 1 {
-			tasks[projection.RecordID] = event.Sequence
-		}
+	snapshot := IncidentSnapshot{Work: VerifiedEventSnapshot{Events: stream}}
+	if len(stream) != 0 {
+		snapshot.Work.OrganizationID = stream[0].OrganizationID
+		snapshot.Work.CorrelationID = stream[0].CorrelationID
 	}
-	// A batch may admit dependencies after their dependants. Validate the final
-	// graph, as durable recovery does; parents are accountability links only.
-	// Each Task already matches its Work's immutable organization/correlation.
-	if err := core.ValidateTaskDAG(priorTasks); err != nil {
-		return nil, err
-	}
-	for id, task := range priorTasks {
-		if task.ParentID != "" {
-			parent, found := priorTasks[task.ParentID]
-			if !found || parent.WorkID != task.WorkID {
-				return nil, fmt.Errorf("incident Task %s references invalid parent %s", id, task.ParentID)
-			}
-		}
-		for _, dependencyID := range task.DependsOn {
-			if priorTasks[dependencyID].WorkID != task.WorkID {
-				return nil, fmt.Errorf("incident Task %s references cross-Work dependency %s", id, dependencyID)
-			}
-		}
-	}
-	return tasks, nil
+	return ValidateIncidentHistory(snapshot)
 }
