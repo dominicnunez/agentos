@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 )
 
@@ -83,14 +84,12 @@ func ProjectIncident(snapshot events.IncidentSnapshot, conversationID string) (R
 	combined := snapshot.Work
 	combined.Events = append([]events.Event(nil), snapshot.Work.Events...)
 	related := make(map[string]bool, len(snapshot.RelatedEvents))
-	tasks := map[string]bool{}
-	for _, event := range snapshot.Work.Events {
-		if event.TaskID != "" {
-			tasks[event.TaskID] = true
-		}
+	tasks, err := events.IncidentTaskAdmissions(snapshot.Work.Events)
+	if err != nil {
+		return Report{}, err
 	}
 	for _, event := range snapshot.RelatedEvents {
-		if event.EventType != "FREEZE_SET" && (event.EventType != "EFFECT_OBLIGATION_TRANSITIONED" || !tasks[event.TaskID]) {
+		if event.EventType != "FREEZE_SET" && (event.EventType != "EFFECT_OBLIGATION_TRANSITIONED" || (tasks[event.TaskID] == 0 || event.Sequence <= tasks[event.TaskID])) {
 			return Report{}, fmt.Errorf("incident has unrelated evidence")
 		}
 		related[event.EventID] = true
@@ -129,7 +128,7 @@ func ProjectIncident(snapshot events.IncidentSnapshot, conversationID string) (R
 	if err := collectStops(view, combined.Events); err != nil {
 		return Report{}, err
 	}
-	if err := collectEffects(view, combined.Events); err != nil {
+	if err := collectEffects(view, combined.Events, tasks); err != nil {
 		return Report{}, err
 	}
 	report.Containment = view
@@ -166,7 +165,22 @@ func collectAdmissions(view *Containment, admissions []events.IncidentAdmission,
 			continue
 		}
 		valid := admission.Kind == "EXECUTION_START" && event.EventType == "EXECUTION_STARTED" || admission.Kind == "INFERENCE_RESERVATION" && event.EventType == "INFERENCE_RESERVED" || admission.Kind == "EFFECT_ATTEMPT" && event.EventType == "EFFECT_OBLIGATION_TRANSITIONED"
-		if !valid || admission.TaskID != event.TaskID || !validOptionalField(admission.ExecutionID) {
+		execution := event.SourceExecutionID
+		if admission.Kind == "EXECUTION_START" {
+			var err error
+			execution, err = events.ContainmentExecutionID(event)
+			if err != nil {
+				return err
+			}
+		}
+		if admission.Kind == "EFFECT_ATTEMPT" {
+			effect, err := core.DecodeEffectObligation(event.Payload)
+			if err != nil || effect.Status != core.EffectAttempted {
+				return fmt.Errorf("incident effect admission is not an attempt")
+			}
+			execution = ""
+		}
+		if !valid || admission.TaskID != event.TaskID || !validOptionalField(admission.ExecutionID) || admission.ExecutionID != execution {
 			return fmt.Errorf("incident admission crosses its recorded boundary")
 		}
 		latest[admission.Kind] = Admission{EventRef: event.EventID, Kind: admission.Kind, TaskID: admission.TaskID, ExecutionID: admission.ExecutionID}
@@ -245,33 +259,32 @@ func collectStops(view *Containment, stream []events.Event) error {
 	return nil
 }
 
-func collectEffects(view *Containment, stream []events.Event) error {
+func collectEffects(view *Containment, stream []events.Event, tasks map[string]int64) error {
 	indices := map[string]int{}
+	previous := map[string]core.EffectObligation{}
 	for _, event := range stream {
 		if event.EventType != "EFFECT_OBLIGATION_TRANSITIONED" {
 			continue
 		}
-		var effect struct {
-			ID                 string   `json:"effect_obligation_id"`
-			TaskID             string   `json:"task_id"`
-			Status             string   `json:"status"`
-			AttemptCount       int      `json:"attempt_count"`
-			ConfirmationRefs   []string `json:"confirmation_evidence_refs"`
-			ReconciliationRefs []string `json:"reconciliation_evidence_refs"`
-		}
-		if err := json.Unmarshal(event.Payload, &effect); err != nil {
+		effect, err := events.IncidentEffectValue(event, tasks)
+		if err != nil {
 			return err
 		}
-		if !validRequiredField(effect.ID) || effect.TaskID != event.TaskID || !validReferences(effect.ConfirmationRefs) || !validReferences(effect.ReconciliationRefs) {
+		id := string(effect.ID)
+		index, found := indices[id]
+		if err := events.ValidateIncidentEffect(effect, previous[id], !found); err != nil {
+			return err
+		}
+		previous[id] = effect
+		if !validRequiredField(id) || !validReferences(effect.ConfirmationEvidenceRefs) || !validReferences(effect.ReconciliationEvidenceRefs) {
 			return fmt.Errorf("incident effect evidence has invalid public bounds")
 		}
-		index, found := indices[effect.ID]
 		if !found {
 			index = len(view.Effects)
-			indices[effect.ID] = index
-			view.Effects = append(view.Effects, EffectHistory{EffectID: effect.ID, TaskID: effect.TaskID, LinkScope: "TASK", States: []EffectState{}})
+			indices[id] = index
+			view.Effects = append(view.Effects, EffectHistory{EffectID: id, TaskID: string(effect.TaskID), LinkScope: "TASK", States: []EffectState{}})
 		}
-		view.Effects[index].States = append(view.Effects[index].States, EffectState{EventRef: event.EventID, Status: effect.Status, AttemptCount: effect.AttemptCount, ConfirmationRefs: cloneStrings(effect.ConfirmationRefs), ReconciliationRefs: cloneStrings(effect.ReconciliationRefs)})
+		view.Effects[index].States = append(view.Effects[index].States, EffectState{EventRef: event.EventID, Status: string(effect.Status), AttemptCount: effect.AttemptCount, ConfirmationRefs: cloneStrings(effect.ConfirmationEvidenceRefs), ReconciliationRefs: cloneStrings(effect.ReconciliationEvidenceRefs)})
 	}
 	return nil
 }

@@ -80,6 +80,7 @@ func TestProjectIncidentRejectsBrokenEvidence(t *testing.T) {
 		"wrong admission class":       func(s *events.IncidentSnapshot) { s.Admissions[0].Kind = "EFFECT_ATTEMPT" },
 		"duplicate admission":         func(s *events.IncidentSnapshot) { s.Admissions = append(s.Admissions, s.Admissions[0]) },
 		"wrong admission task":        func(s *events.IncidentSnapshot) { s.Admissions[0].TaskID = "other-task" },
+		"wrong admission execution":   func(s *events.IncidentSnapshot) { s.Admissions[0].ExecutionID = "invented" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			snapshot := incidentFixture(t)
@@ -88,5 +89,19 @@ func TestProjectIncidentRejectsBrokenEvidence(t *testing.T) {
 				t.Fatal("accepted inconsistent incident evidence")
 			}
 		})
+	}
+}
+
+func TestProjectIncidentRejectsTaskMentionAsAdmission(t *testing.T) {
+	snapshot := incidentFixture(t)
+	snapshot.RelatedEvents = append(snapshot.RelatedEvents, events.Event{
+		EventID: "effect", Sequence: 5, OrganizationID: "org", TaskID: "task-work",
+		EventType: "EFFECT_OBLIGATION_TRANSITIONED", CreatedAt: snapshot.Work.Events[0].CreatedAt,
+		SchemaVersion: events.SchemaVersion,
+		Payload:       []byte(`{"effect_obligation_id":"effect-1","task_id":"task-work","status":"ATTEMPTED","attempt_count":1}`),
+	})
+	snapshot.Work.LedgerEvents++
+	if _, err := ProjectIncident(snapshot, "public-conversation"); err == nil {
+		t.Fatal("ordinary event TaskID was accepted as a Task admission")
 	}
 }
