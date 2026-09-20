@@ -112,6 +112,9 @@ func ProjectIncident(snapshot events.IncidentSnapshot, conversationID string) (R
 	if err := events.ValidateSecurityHoldOutcomes(combined.Events, freezes); err != nil {
 		return Report{}, err
 	}
+	if _, err := events.IncidentAdmissions(combined.Events, nil, freezes); err != nil {
+		return Report{}, err
+	}
 	view := &Containment{Holds: []HoldBoundary{}, Stops: []StopEvidence{}, Effects: []EffectHistory{}, AdmissionScope: "CONTAINMENT_BOUNDARIES", UnclassifiedActions: []string{"COORDINATION", "OUTPUT"}}
 	for _, freeze := range freezes {
 		hold := HoldBoundary{EventRef: freeze.EventRef, Frozen: freeze.Frozen, Control: "LEGACY", LastAdmissions: []Admission{}}
@@ -160,14 +163,17 @@ func collectAdmissions(view *Containment, admissions []events.IncidentAdmission,
 			}
 		}
 		admission, found := byRef[event.EventID]
-		if !found {
-			continue
-		}
 		derived, valid, err := events.AdmissionForIncident(event)
 		if err != nil {
 			return err
 		}
-		if !valid || admission != derived || !validOptionalField(admission.ExecutionID) {
+		if found != valid {
+			return fmt.Errorf("incident admission set differs from its durable events")
+		}
+		if !valid {
+			continue
+		}
+		if admission != derived || !validOptionalField(admission.ExecutionID) {
 			return fmt.Errorf("incident admission crosses its recorded boundary")
 		}
 		latest[admission.Kind] = Admission{EventRef: event.EventID, Kind: admission.Kind, TaskID: admission.TaskID, ExecutionID: admission.ExecutionID}

@@ -37,7 +37,7 @@ func admittedEffectFixture(t *testing.T) events.IncidentSnapshot {
 		t.Fatal(err)
 	}
 	effect := events.Event{EventID: "effect", Sequence: 4, OrganizationID: "org", TaskID: "task-id", EventType: "EFFECT_OBLIGATION_TRANSITIONED", AuthorizationRefs: []string{"lease"}, Payload: body, CreatedAt: now, SchemaVersion: events.SchemaVersion}
-	return events.IncidentSnapshot{Work: events.VerifiedEventSnapshot{OrganizationID: "org", CorrelationID: "work", Algorithm: "SHA-256", LedgerEvents: 4, LedgerSequence: 4, LedgerEventID: "effect", LedgerSHA256: strings.Repeat("a", 64), Events: []events.Event{intent, work, task}}, RelatedEvents: []events.Event{effect}}
+	return events.IncidentSnapshot{Work: events.VerifiedEventSnapshot{OrganizationID: "org", CorrelationID: "work", Algorithm: "SHA-256", LedgerEvents: 4, LedgerSequence: 4, LedgerEventID: "effect", LedgerSHA256: strings.Repeat("a", 64), Events: []events.Event{intent, work, task}}, RelatedEvents: []events.Event{effect}, Admissions: []events.IncidentAdmission{{EventRef: "effect", Kind: "EFFECT_ATTEMPT", TaskID: "task-id"}}}
 }
 
 func TestProjectIncidentValidatesEffectAdmission(t *testing.T) {

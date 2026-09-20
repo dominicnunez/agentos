@@ -7,14 +7,15 @@ import (
 )
 
 // IncidentTaskAdmissions derives Task identities and their first admission
-// sequence from sealed Work/Task history. Ordinary Task mentions grant no link.
+// sequence from sealed Work/Task history and validates their final dependency graph.
+// Ordinary Task mentions grant no link.
 // Exact backing records and snapshot integrity remain the reader's responsibility.
 func IncidentTaskAdmissions(stream []Event) (map[string]int64, error) {
 	works := map[core.ID]core.Work{}
 	workScopes := map[core.ID][2]string{}
 	intents := map[core.ID]core.Intent{}
 	intentScopes := map[core.ID][2]string{}
-	priorTasks := map[string]core.Task{}
+	priorTasks := map[core.ID]core.Task{}
 	versions := map[[2]string]int{}
 	tasks := map[string]int64{}
 	var lastSequence int64
@@ -82,15 +83,34 @@ func IncidentTaskAdmissions(stream []Event) (map[string]int64, error) {
 			return nil, fmt.Errorf("incident Task lacks its exact prior Work")
 		}
 		var prior *core.Task
-		if value, ok := priorTasks[projection.RecordID]; ok {
+		if value, ok := priorTasks[task.ID]; ok {
 			prior = &value
 		}
 		if err := ValidateTaskProjectionTransition(event.EventType, projection.Version, prior, task); err != nil {
 			return nil, err
 		}
-		priorTasks[projection.RecordID] = task
+		priorTasks[task.ID] = task
 		if projection.Version == 1 {
 			tasks[projection.RecordID] = event.Sequence
+		}
+	}
+	// A batch may admit dependencies after their dependants. Validate the final
+	// graph, as durable recovery does; parents are accountability links only.
+	// Each Task already matches its Work's immutable organization/correlation.
+	if err := core.ValidateTaskDAG(priorTasks); err != nil {
+		return nil, err
+	}
+	for id, task := range priorTasks {
+		if task.ParentID != "" {
+			parent, found := priorTasks[task.ParentID]
+			if !found || parent.WorkID != task.WorkID {
+				return nil, fmt.Errorf("incident Task %s references invalid parent %s", id, task.ParentID)
+			}
+		}
+		for _, dependencyID := range task.DependsOn {
+			if priorTasks[dependencyID].WorkID != task.WorkID {
+				return nil, fmt.Errorf("incident Task %s references cross-Work dependency %s", id, dependencyID)
+			}
 		}
 	}
 	return tasks, nil

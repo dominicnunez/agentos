@@ -13,7 +13,11 @@ import (
 func incidentFixture(t *testing.T) events.IncidentSnapshot {
 	t.Helper()
 	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
-	reserve := events.Event{EventID: "reserve", Sequence: 1, OrganizationID: "org", CorrelationID: "work", TaskID: "task-work", SourceActorID: "runtime", SourceExecutionID: "call", EventType: "INFERENCE_RESERVED", CreatedAt: now.Add(time.Hour), SchemaVersion: events.SchemaVersion, Payload: []byte(`{"private":"never disclose"}`)}
+	reserveBody, err := json.Marshal(events.InferenceReservedPayload{ReservationID: "reservation", RequestID: "call", Purpose: "PLANNING", IntentID: "private never disclose", PolicyFingerprint: strings.Repeat("a", 64), PromptSHA256: strings.Repeat("b", 64), Provider: "provider", Model: "model", ExecutionProfileVersion: "profile", ReservedInputTokens: 100, ReservedOutputTokens: 20, WindowStartedAt: now, WindowExpiresAt: now.Add(time.Hour), AdmittedAt: now.Format(time.RFC3339Nano)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserve := events.Event{EventID: "reserve", Sequence: 1, OrganizationID: "org", CorrelationID: "work", TaskID: "task-work", SourceActorID: "runtime", SourceExecutionID: "call", EventType: "INFERENCE_RESERVED", CreatedAt: now.Add(time.Hour), SchemaVersion: events.SchemaVersion, Payload: reserveBody}
 	usage := reserve
 	usage.EventID, usage.EventType, usage.Sequence = "usage", "INFERENCE_USAGE_RECORDED", 4
 	snapshot := events.IncidentSnapshot{Work: events.VerifiedEventSnapshot{OrganizationID: "org", CorrelationID: "work", Algorithm: "SHA-256", LedgerEvents: 4, LedgerSequence: 40, LedgerEventID: "private-global-head", LedgerSHA256: strings.Repeat("a", 64), Events: []events.Event{reserve, usage}}, Admissions: []events.IncidentAdmission{{EventRef: "reserve", Kind: "INFERENCE_RESERVATION", TaskID: "task-work", ExecutionID: "call"}}}

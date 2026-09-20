@@ -101,53 +101,7 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 }
 
 func incidentAdmissions(work, related []events.Event, freezes []events.OrganizationFreezeAdmission) ([]events.IncidentAdmission, error) {
-	stream := append(append([]events.Event(nil), work...), related...)
-	sort.Slice(stream, func(i, j int) bool { return stream[i].Sequence < stream[j].Sequence })
-	suspended := map[string]bool{}
-	stopped := map[string]bool{}
-	var admissions []events.IncidentAdmission
-	for _, event := range stream {
-		if event.EventType == "TASK_EXECUTION_SUSPENDED" {
-			suspended[event.TaskID] = true
-		}
-		if event.EventType == "EXECUTION_STOP_REQUESTED" || event.EventType == "MODEL_STOP_REQUESTED" {
-			stopped[event.SourceExecutionID] = true
-		}
-		kind, execution := "", event.SourceExecutionID
-		switch event.EventType {
-		case "EXECUTION_STARTED":
-			var err error
-			execution, err = events.ContainmentExecutionID(event)
-			if err != nil {
-				return nil, err
-			}
-			kind = "EXECUTION_START"
-		case "INFERENCE_RESERVED":
-			kind = "INFERENCE_RESERVATION"
-		case "EFFECT_OBLIGATION_TRANSITIONED":
-			value, err := core.DecodeEffectObligation(event.Payload)
-			if err != nil {
-				return nil, err
-			}
-			if value.Status == core.EffectAttempted {
-				kind = "EFFECT_ATTEMPT"
-			}
-		}
-		if kind == "" {
-			continue
-		}
-		frozen := false
-		for _, freeze := range freezes {
-			if freeze.Sequence < event.Sequence {
-				frozen = freeze.Frozen
-			}
-		}
-		if frozen || stopped[execution] || suspended[event.TaskID] {
-			return nil, fmt.Errorf("incident admission follows containment boundary")
-		}
-		admissions = append(admissions, events.IncidentAdmission{EventRef: event.EventID, Kind: kind, TaskID: event.TaskID, ExecutionID: execution})
-	}
-	return admissions, nil
+	return events.IncidentAdmissions(work, related, freezes)
 }
 
 func incidentEvents(ctx context.Context, tx *sql.Tx, budget *incidentBudget, where string, args ...any) ([]events.Event, error) {

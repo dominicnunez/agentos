@@ -51,6 +51,9 @@ func AdmissionForIncident(event Event) (IncidentAdmission, bool, error) {
 		}
 		admission.Kind = "EXECUTION_START"
 	case "INFERENCE_RESERVED":
+		if _, err := DecodeInferenceReservation(event); err != nil {
+			return IncidentAdmission{}, false, err
+		}
 		admission.Kind = "INFERENCE_RESERVATION"
 	case "EFFECT_OBLIGATION_TRANSITIONED":
 		value, err := core.DecodeEffectObligation(event.Payload)
