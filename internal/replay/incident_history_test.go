@@ -65,7 +65,7 @@ func TestProjectIncidentChecksOtherProjectionHistory(t *testing.T) {
 				if invalid && version == 2 {
 					label, status, statement = "MISSION_RETIRED", "RETIRED", "direction 1"
 				}
-				event := events.Event{EventID: fmt.Sprintf("mission-%d", version), Sequence: int64(5 + version), OrganizationID: "org", CorrelationID: "work", SourceActorID: "runtime", EventType: label, CreatedAt: snapshot.Work.Events[0].CreatedAt, SchemaVersion: events.SchemaVersion}
+				event := events.Event{EventID: fmt.Sprintf("mission-%d", version), Sequence: int64(6 + version), OrganizationID: "org", CorrelationID: "work", SourceActorID: "runtime", EventType: label, CreatedAt: snapshot.Work.Events[0].CreatedAt, SchemaVersion: events.SchemaVersion}
 				value, err := json.Marshal(map[string]any{"id": "mission", "organization_id": "org", "statement": statement, "status": status, "created_at": event.CreatedAt})
 				if err != nil {
 					t.Fatal(err)
@@ -80,7 +80,7 @@ func TestProjectIncidentChecksOtherProjectionHistory(t *testing.T) {
 				}
 				snapshot.Work.Events = append(snapshot.Work.Events, event)
 			}
-			snapshot.Work.LedgerEvents, snapshot.Work.LedgerSequence = 8, 8
+			snapshot.Work.LedgerEvents, snapshot.Work.LedgerSequence = 9, 9
 			_, err := ProjectIncident(snapshot, "conversation")
 			if invalid && err == nil {
 				t.Fatal("accepted Mission revival after an earlier terminal revision")
@@ -98,7 +98,7 @@ func TestProjectIncidentKeepsDependenciesPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Entries) != 4 {
+	if len(report.Entries) != 5 {
 		t.Fatalf("supporting Organization appeared as a displayed action: %+v", report.Entries)
 	}
 	body, err := json.Marshal(report)

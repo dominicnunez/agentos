@@ -37,34 +37,43 @@ func admittedEffectFixture(t *testing.T) events.IncidentSnapshot {
 	if err != nil {
 		t.Fatal(err)
 	}
-	effect := events.Event{EventID: "effect", Sequence: 5, OrganizationID: "org", TaskID: "task-id", EventType: "EFFECT_OBLIGATION_TRANSITIONED", AuthorizationRefs: []string{"lease"}, Payload: body, CreatedAt: now, SchemaVersion: events.SchemaVersion}
-	return events.IncidentSnapshot{Work: events.VerifiedEventSnapshot{OrganizationID: "org", CorrelationID: "work", Algorithm: "SHA-256", LedgerEvents: 5, LedgerSequence: 5, LedgerEventID: "effect", LedgerSHA256: strings.Repeat("a", 64), Events: []events.Event{intent, work, task}}, RelatedEvents: []events.Event{effect}, DependencyEvents: []events.Event{organization}, Admissions: []events.IncidentAdmission{{EventRef: "effect", Kind: "EFFECT_ATTEMPT", TaskID: "task-id"}}}
+	effect := events.Event{EventID: "effect", Sequence: 6, OrganizationID: "org", TaskID: "task-id", EventType: "EFFECT_OBLIGATION_TRANSITIONED", AuthorizationRefs: []string{"lease"}, Payload: body, CreatedAt: now, SchemaVersion: events.SchemaVersion}
+	pending := effect
+	pending.EventID, pending.Sequence = "pending", 5
+	value["status"], value["attempt_count"] = "PENDING", 0
+	pending.Payload, err = json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events.IncidentSnapshot{Work: events.VerifiedEventSnapshot{OrganizationID: "org", CorrelationID: "work", Algorithm: "SHA-256", LedgerEvents: 6, LedgerSequence: 6, LedgerEventID: "effect", LedgerSHA256: strings.Repeat("a", 64), Events: []events.Event{intent, work, task}}, RelatedEvents: []events.Event{pending, effect}, DependencyEvents: []events.Event{organization}, Admissions: []events.IncidentAdmission{{EventRef: "effect", Kind: "EFFECT_ATTEMPT", TaskID: "task-id"}}}
 }
 
 func TestProjectIncidentValidatesEffectAdmission(t *testing.T) {
-	for _, variant := range []string{"valid", "invalid-state", "effect-in-work-without-task", "pending-labelled-attempt"} {
+	for _, variant := range []string{"valid", "missing-pending", "invalid-state", "effect-in-work-without-task", "pending-labelled-attempt"} {
 		t.Run(variant, func(t *testing.T) {
 			snapshot := admittedEffectFixture(t)
 			switch variant {
+			case "missing-pending":
+				snapshot.RelatedEvents = snapshot.RelatedEvents[1:]
 			case "pending-labelled-attempt":
 				var value map[string]any
-				if err := json.Unmarshal(snapshot.RelatedEvents[0].Payload, &value); err != nil {
+				if err := json.Unmarshal(snapshot.RelatedEvents[1].Payload, &value); err != nil {
 					t.Fatal(err)
 				}
 				value["status"], value["attempt_count"] = "PENDING", 0
-				snapshot.RelatedEvents[0].Payload, _ = json.Marshal(value)
+				snapshot.RelatedEvents[1].Payload, _ = json.Marshal(value)
 				snapshot.Admissions = []events.IncidentAdmission{{EventRef: "effect", Kind: "EFFECT_ATTEMPT", TaskID: "task-id"}}
 			case "invalid-state":
 				var value map[string]any
-				if err := json.Unmarshal(snapshot.RelatedEvents[0].Payload, &value); err != nil {
+				if err := json.Unmarshal(snapshot.RelatedEvents[1].Payload, &value); err != nil {
 					t.Fatal(err)
 				}
 				value["status"] = "CONFIRMED"
 				value["confirmation_evidence_refs"] = []string{"receipt"}
-				snapshot.RelatedEvents[0].Payload, _ = json.Marshal(value)
-				snapshot.RelatedEvents[0].ArtifactRefs = []string{"receipt"}
+				snapshot.RelatedEvents[1].Payload, _ = json.Marshal(value)
+				snapshot.RelatedEvents[1].ArtifactRefs = []string{"receipt"}
 			case "effect-in-work-without-task":
-				effect := snapshot.RelatedEvents[0]
+				effect := snapshot.RelatedEvents[1]
 				effect.CorrelationID = "work"
 				snapshot.Work.Events = []events.Event{snapshot.Work.Events[0], snapshot.Work.Events[1], effect}
 				snapshot.RelatedEvents = nil

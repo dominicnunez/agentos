@@ -87,6 +87,9 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
    survives, retry and restart behave correctly, and other tenants are unaffected.
    Test doubles must implement the interfaces production calls. Where feasible,
    verify regressions fail for the intended defect against the prior behavior.
+   Derive valid history fixtures from the owning writer's state transitions.
+   Before treating cross-tenant evidence as unrelated, verify whether the linked
+   identifier is globally unique or tenant-scoped in storage and recovery.
    When validation depends on earlier events, test an invalid earlier event
    followed by plausible later events, and compare live reads with full replay.
    For cancellation changes, exercise the real transport/runtime shutdown path

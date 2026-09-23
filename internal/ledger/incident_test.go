@@ -22,7 +22,7 @@ func incidentEffectFixture(t *testing.T, store *SQLite) core.EffectObligation {
 	if err := store.AppendRecord(t.Context(), "org-1", "CAPABILITY_GRANTED", "owner", string(task.ID), nil, nil, "capability_lease", string(lease.ID), 1, lease); err != nil {
 		t.Fatal(err)
 	}
-	return appendApprovedEffectAttempt(t, store, task, lease, "incident-effect", "incident-approval")
+	return appendIncidentEffectAttempt(t, store, task, lease, "incident-effect", "incident-approval")
 }
 
 func TestIncidentTaskEffectHistory(t *testing.T) {
@@ -37,7 +37,7 @@ func TestIncidentTaskEffectHistory(t *testing.T) {
 			confirmed := attempt
 			confirmed.Status = core.EffectConfirmed
 			confirmed.ConfirmationEvidenceRefs = []string{"receipt"}
-			if err := store.AppendRecord(t.Context(), "org-1", "EFFECT_OBLIGATION_TRANSITIONED", "", string(attempt.TaskID), attempt.AuthorizationRefs, confirmed.ConfirmationEvidenceRefs, "effect", string(attempt.ID), 2, confirmed); err != nil {
+			if err := store.AppendRecord(t.Context(), "org-1", "EFFECT_OBLIGATION_TRANSITIONED", "", string(attempt.TaskID), attempt.AuthorizationRefs, confirmed.ConfirmationEvidenceRefs, "effect", string(attempt.ID), 3, confirmed); err != nil {
 				t.Fatal(err)
 			}
 			if mutation == "orphan-event" {
@@ -75,7 +75,7 @@ func TestIncidentTaskEffectHistory(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "orphan-record":
-				if _, err := store.db.ExecContext(t.Context(), `INSERT INTO records SELECT kind,record_id,3,body,admission_event_id,admission_fingerprint,created_at FROM records WHERE kind='effect' AND version=2`); err != nil {
+				if _, err := store.db.ExecContext(t.Context(), `INSERT INTO records SELECT kind,record_id,4,body,admission_event_id,admission_fingerprint,created_at FROM records WHERE kind='effect' AND version=2`); err != nil {
 					t.Fatal(err)
 				}
 			case "cross-tenant":
@@ -104,7 +104,7 @@ func TestIncidentTaskEffectHistory(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(snapshot.RelatedEvents) != 2 {
+			if len(snapshot.RelatedEvents) != 3 {
 				t.Fatalf("effect history=%d", len(snapshot.RelatedEvents))
 			}
 			var attempts int

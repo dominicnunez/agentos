@@ -26,7 +26,7 @@ func TestIncidentEffectRequiresEarlierTask(t *testing.T) {
 				confirmed := attempt
 				confirmed.Status = core.EffectConfirmed
 				confirmed.ConfirmationEvidenceRefs = []string{"receipt"}
-				if err := store.AppendRecord(t.Context(), "org-1", "EFFECT_OBLIGATION_TRANSITIONED", "", string(attempt.TaskID), attempt.AuthorizationRefs, confirmed.ConfirmationEvidenceRefs, "effect", string(attempt.ID), 2, confirmed); err != nil {
+				if err := store.AppendRecord(t.Context(), "org-1", "EFFECT_OBLIGATION_TRANSITIONED", "", string(attempt.TaskID), attempt.AuthorizationRefs, confirmed.ConfirmationEvidenceRefs, "effect", string(attempt.ID), 3, confirmed); err != nil {
 					t.Fatal(err)
 				}
 			}

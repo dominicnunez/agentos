@@ -15,7 +15,7 @@ func seedIncidentEffects(t *testing.T, store *SQLite, count int) {
 	task := core.Task{ID: first.TaskID, AssigneeID: first.ActorID}
 	lease := core.CapabilityLease{ID: "incident-lease", ActorID: first.ActorID, ActorKind: first.ActorKind, OriginTaskID: first.TaskID, Action: first.Action, Resource: first.Resource, Scope: first.Scope}
 	for i := 1; i < count; i++ {
-		appendApprovedEffectAttempt(t, store, task, lease, fmt.Sprintf("effect-%03d", i), fmt.Sprintf("approval-%03d", i))
+		appendIncidentEffectAttempt(t, store, task, lease, fmt.Sprintf("effect-%03d", i), fmt.Sprintf("approval-%03d", i))
 	}
 }
 
@@ -46,7 +46,7 @@ func TestIncidentEffectGroupsStayExact(t *testing.T) {
 	if _, err := store.db.ExecContext(t.Context(), `DELETE FROM records WHERE kind='effect' AND record_id='incident-effect'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.ExecContext(t.Context(), `INSERT INTO records SELECT kind,record_id,version+1,body,admission_event_id,admission_fingerprint,created_at FROM records WHERE kind='effect' AND record_id='effect-001'`); err != nil {
+	if _, err := store.db.ExecContext(t.Context(), `INSERT INTO records SELECT kind,record_id,version+2,body,admission_event_id,admission_fingerprint,created_at FROM records WHERE kind='effect' AND record_id='effect-001'`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.VerifiedIncidentEvents(t.Context(), "org-1", "stop-work", 256); err == nil {
@@ -55,7 +55,7 @@ func TestIncidentEffectGroupsStayExact(t *testing.T) {
 }
 
 func TestIncidentDistinctEffectGrowth(t *testing.T) {
-	for _, count := range []int{1, 180} {
+	for _, count := range []int{1, 120} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			store, err := Open(":memory:")
 			if err != nil {
@@ -69,8 +69,8 @@ func TestIncidentDistinctEffectGrowth(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(snapshot.RelatedEvents) != count {
-					t.Fatalf("effect histories=%d want=%d", len(snapshot.RelatedEvents), count)
+				if len(snapshot.RelatedEvents) != count*2 {
+					t.Fatalf("effect histories=%d want=%d", len(snapshot.RelatedEvents), count*2)
 				}
 			}
 			t.Logf("five complete reads with %d distinct effects: %s", count, time.Since(start))

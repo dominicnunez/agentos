@@ -138,7 +138,7 @@ func ValidateIncidentEffect(value, previous core.EffectObligation, first bool) e
 			return fmt.Errorf("incident effect pending history is invalid")
 		}
 	case core.EffectAttempted:
-		if value.AttemptCount != previous.AttemptCount+1 || !first && previous.Status != core.EffectPending {
+		if first || previous.Status != core.EffectPending || value.AttemptCount != previous.AttemptCount+1 {
 			return fmt.Errorf("incident effect attempt history is invalid")
 		}
 	case core.EffectConfirmed, core.EffectFailed:
