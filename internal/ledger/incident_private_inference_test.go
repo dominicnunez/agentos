@@ -18,29 +18,7 @@ func TestIncidentPrivateInferenceBacking(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			now := time.Now().UTC()
-			for _, draft := range []events.ProjectionDraft{
-				{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: "org-1", Version: 1, Value: core.Organization{ID: "org-1", Name: "Org", PolicyVersion: "v1", CreatedAt: now}},
-				{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "mission"}, ProjectionKind: "mission", RecordID: "mission-1", Version: 1, Value: core.Mission{ID: "mission-1", OrganizationID: "org-1", Statement: "test", Status: core.MissionActive, CreatedAt: now}},
-				{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_CREATED", SourceActorID: "runtime", CorrelationID: "goal"}, ProjectionKind: "goal", RecordID: "goal-1", Version: 1, Value: core.Goal{ID: "goal-1", OrganizationID: "org-1", MissionID: "mission-1", Objective: "test", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "test", Origin: "RUNTIME_DEFAULT"}}, Status: core.GoalActive, CreatedAt: now}},
-			} {
-				if _, err := store.AppendProjection(t.Context(), draft); err != nil {
-					t.Fatal(err)
-				}
-			}
-			reviewed := appendReviewedGoalIntent(t, t.Context(), store, "org-1", "model-stop", "intent-model-stop", "goal-1", "test", core.ExecutionDeterministic, now)
-			confirmation := events.IntentConfirmedPayload{IntentID: "intent-model-stop", GoalID: "goal-1", Version: 1, Fingerprint: reviewed.Fingerprint, ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirm"}
-			if _, err := store.AppendIntentConfirmation(t.Context(), events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-model-stop", Payload: confirmation, CorrelationID: "model-stop"}, "goal-1", ""); err != nil {
-				t.Fatal(err)
-			}
-			for _, draft := range []events.ProjectionDraft{
-				{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "model-stop"}, ProjectionKind: "intent", RecordID: "intent-model-stop", Version: 1, Value: core.Intent{ID: "intent-model-stop", OrganizationID: "org-1", GoalID: "goal-1", OriginalInstruction: "test under goal-1", NormalizedObjective: "test", AcceptedFingerprint: reviewed.Fingerprint, ExternalRequestID: "private-request", SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: "source-model-stop", CreatedAt: now}},
-				{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "model-stop"}, ProjectionKind: "work", RecordID: "work-1", Version: 1, Value: core.Work{ID: "work-1", IntentID: "intent-model-stop", GoalID: "goal-1", Objective: "test", Status: core.WorkActive, CreatedAt: now}},
-			} {
-				if _, err := store.AppendProjection(t.Context(), draft); err != nil {
-					t.Fatal(err)
-				}
-			}
+			appendPrivateInferenceGoal(t, store)
 
 			modelStopManifest(t, store, true, "private-call")
 			policy := testInferencePolicy(time.Now().UTC())
@@ -95,4 +73,32 @@ func TestIncidentPrivateInferenceBacking(t *testing.T) {
 			}
 		})
 	}
+}
+
+func appendPrivateInferenceGoal(t *testing.T, store *SQLite) {
+	t.Helper()
+	now := time.Now().UTC()
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: "org-1", Version: 1, Value: core.Organization{ID: "org-1", Name: "Org", PolicyVersion: "v1", CreatedAt: now}},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "MISSION_CREATED", SourceActorID: "runtime", CorrelationID: "mission"}, ProjectionKind: "mission", RecordID: "mission-1", Version: 1, Value: core.Mission{ID: "mission-1", OrganizationID: "org-1", Statement: "test", Status: core.MissionActive, CreatedAt: now}},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "GOAL_CREATED", SourceActorID: "runtime", CorrelationID: "goal"}, ProjectionKind: "goal", RecordID: "goal-1", Version: 1, Value: core.Goal{ID: "goal-1", OrganizationID: "org-1", MissionID: "mission-1", Objective: "test", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "test", Origin: "RUNTIME_DEFAULT"}}, Status: core.GoalActive, CreatedAt: now}},
+	} {
+		if _, err := store.AppendProjection(t.Context(), draft); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reviewed := appendReviewedGoalIntent(t, t.Context(), store, "org-1", "model-stop", "intent-model-stop", "goal-1", "test", core.ExecutionDeterministic, now)
+	confirmation := events.IntentConfirmedPayload{IntentID: "intent-model-stop", GoalID: "goal-1", Version: 1, Fingerprint: reviewed.Fingerprint, ConfirmingActorID: "user-1", ConfirmingActorKind: string(core.PrincipalHuman), SourceChannel: "HUMAN_DIRECT", MessageID: "confirm"}
+	if _, err := store.AppendIntentConfirmation(t.Context(), events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CONFIRMED", SourceActorID: "user-1", TaskID: "task-model-stop", Payload: confirmation, CorrelationID: "model-stop"}, "goal-1", ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, draft := range []events.ProjectionDraft{
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "INTENT_CREATED", SourceActorID: "runtime", CorrelationID: "model-stop"}, ProjectionKind: "intent", RecordID: "intent-model-stop", Version: 1, Value: core.Intent{ID: "intent-model-stop", OrganizationID: "org-1", GoalID: "goal-1", OriginalInstruction: "test under goal-1", NormalizedObjective: "test", AcceptedFingerprint: reviewed.Fingerprint, ExternalRequestID: "private-request", SourcePrincipalID: "user-1", SourcePrincipalKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", SourceMessageID: "source-model-stop", CreatedAt: now}},
+		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "model-stop"}, ProjectionKind: "work", RecordID: "work-1", Version: 1, Value: core.Work{ID: "work-1", IntentID: "intent-model-stop", GoalID: "goal-1", Objective: "test", Status: core.WorkActive, CreatedAt: now}},
+	} {
+		if _, err := store.AppendProjection(t.Context(), draft); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 }

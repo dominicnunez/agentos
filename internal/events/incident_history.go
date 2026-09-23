@@ -1,6 +1,7 @@
 package events
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 )
@@ -50,6 +51,9 @@ func ValidateIncidentHistory(snapshot IncidentSnapshot) (map[string]int64, error
 	if err := ValidateProjectionCompletions(graph, stream, snapshot.InboxObservations); err != nil {
 		return nil, err
 	}
+	if err := validateIncidentInbox(snapshot, stream); err != nil {
+		return nil, err
+	}
 	tasks := make(map[string]int64)
 	for _, event := range snapshot.Work.Events {
 		payload, present, err := AdmittedProjection(event)
@@ -61,6 +65,49 @@ func ValidateIncidentHistory(snapshot IncidentSnapshot) (map[string]int64, error
 		}
 	}
 	return tasks, nil
+}
+
+func validateIncidentInbox(snapshot IncidentSnapshot, stream []Event) error {
+	var observations []Event
+	for _, event := range stream {
+		if event.EventType == "INBOX_EVENTS_OBSERVED" {
+			observations = append(observations, event)
+		}
+	}
+	if len(observations) != len(snapshot.InboxObservations) {
+		return fmt.Errorf("incident inbox backing does not match its observations")
+	}
+	if len(observations) == 0 {
+		return nil
+	}
+	indexed := make(map[string]Event, len(stream))
+	var teams [][]byte
+	for _, event := range stream {
+		indexed[event.EventID] = event
+		payload, present, err := AdmittedProjection(event)
+		if err != nil {
+			return err
+		}
+		if present && payload.Projection.ProjectionKind == "team" {
+			body, err := json.Marshal(payload.Projection)
+			if err != nil {
+				return err
+			}
+			teams = append(teams, body)
+		}
+	}
+	revisions, err := ResolveTeamRevisionBindings(snapshot.Work.OrganizationID, teams, stream)
+	if err != nil {
+		return err
+	}
+	binding := WorkCompletionBinding{OrganizationID: snapshot.Work.OrganizationID, TeamRevisions: revisions, InboxObservations: snapshot.InboxObservations}
+	observed := make(map[string]struct{})
+	for _, event := range observations {
+		if err := validateInboxObservation(binding, event, indexed, observed); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func boundIncidentEvidence(snapshot IncidentSnapshot) error {

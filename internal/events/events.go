@@ -2003,27 +2003,8 @@ func executionInbox(binding WorkCompletionBinding, task core.Task, startEvent Ev
 		if _, ok := routes[recipientKey(event.RecipientScope, event.RecipientID)]; !ok {
 			continue
 		}
-		var payload InboxEventsObservedPayload
-		if event.SourceActorID == "" || event.SourceExecutionID == "" || json.Unmarshal(event.Payload, &payload) != nil || len(payload.EventIDs) == 0 || payload.ExecutionStartEventRef == "" {
-			return nil, nil, fmt.Errorf("execution inbox observation is invalid")
-		}
-		admitted, ok := binding.InboxObservations[event.EventID]
-		if !ok || admitted.ExecutionStartEventRef != payload.ExecutionStartEventRef || !slices.Equal(admitted.EventIDs, payload.EventIDs) {
-			return nil, nil, fmt.Errorf("execution inbox observation lacks atomic admission")
-		}
-		observationStart, err := inboxObservationExecution(binding, event, payload.ExecutionStartEventRef, indexed)
-		if err != nil {
+		if err := validateInboxObservation(binding, event, indexed, observed); err != nil {
 			return nil, nil, err
-		}
-		for _, eventID := range payload.EventIDs {
-			addressed, exists := indexed[eventID]
-			if !exists || addressed.Sequence >= observationStart.Sequence || addressed.OrganizationID != binding.OrganizationID || addressed.RecipientScope != event.RecipientScope || addressed.RecipientID != event.RecipientID || addressed.EventType == "INBOX_EVENTS_OBSERVED" {
-				return nil, nil, fmt.Errorf("execution inbox observation reference is invalid")
-			}
-			if _, duplicate := observed[eventID]; duplicate {
-				return nil, nil, fmt.Errorf("execution inbox event was observed more than once")
-			}
-			observed[eventID] = struct{}{}
 		}
 	}
 	available := make([]Event, 0)
@@ -2050,6 +2031,32 @@ func executionInbox(binding WorkCompletionBinding, task core.Task, startEvent Ev
 		})
 	}
 	return refs, inbox, nil
+}
+
+func validateInboxObservation(binding WorkCompletionBinding, event Event, indexed map[string]Event, observed map[string]struct{}) error {
+	var payload InboxEventsObservedPayload
+	if event.SourceActorID == "" || event.SourceExecutionID == "" || json.Unmarshal(event.Payload, &payload) != nil || len(payload.EventIDs) == 0 || payload.ExecutionStartEventRef == "" {
+		return fmt.Errorf("execution inbox observation is invalid")
+	}
+	admitted, ok := binding.InboxObservations[event.EventID]
+	if !ok || admitted.ExecutionStartEventRef != payload.ExecutionStartEventRef || !slices.Equal(admitted.EventIDs, payload.EventIDs) {
+		return fmt.Errorf("execution inbox observation lacks atomic admission")
+	}
+	observationStart, err := inboxObservationExecution(binding, event, payload.ExecutionStartEventRef, indexed)
+	if err != nil {
+		return err
+	}
+	for _, eventID := range payload.EventIDs {
+		addressed, exists := indexed[eventID]
+		if !exists || addressed.Sequence >= observationStart.Sequence || addressed.OrganizationID != binding.OrganizationID || addressed.RecipientScope != event.RecipientScope || addressed.RecipientID != event.RecipientID || addressed.EventType == "INBOX_EVENTS_OBSERVED" {
+			return fmt.Errorf("execution inbox observation reference is invalid")
+		}
+		if _, duplicate := observed[eventID]; duplicate {
+			return fmt.Errorf("execution inbox event was observed more than once")
+		}
+		observed[eventID] = struct{}{}
+	}
+	return nil
 }
 
 func inboxObservationExecution(binding WorkCompletionBinding, observation Event, startEventRef string, indexed map[string]Event) (Event, error) {

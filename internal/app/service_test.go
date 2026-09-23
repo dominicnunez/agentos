@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/modelinput"
 	"github.com/dominicnunez/agentos/internal/planning"
 	"github.com/dominicnunez/agentos/internal/projections"
+	"github.com/dominicnunez/agentos/internal/replay"
 	"github.com/dominicnunez/agentos/internal/telemetry"
 )
 
@@ -4250,6 +4252,61 @@ func TestLateralMessagesAtActionBoundary(t *testing.T) {
 	}
 	if _, err := service.Recover(ctx); err != nil {
 		t.Fatalf("historical completion failed after valid Team membership revision: %v", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	l, err = ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incident, err := l.VerifiedIncidentEvents(ctx, "org-1", "request-1", 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(incident.InboxObservations) != len(routes) {
+		t.Fatalf("incident lost inbox bindings: got %d want %d", len(incident.InboxObservations), len(routes))
+	}
+	if _, err := replay.ProjectIncident(incident, "request-1"); err != nil {
+		t.Fatal(err)
+	}
+	for eventID, binding := range incident.InboxObservations {
+		for _, mutation := range []string{"missing", "wrong-start", "missing-message"} {
+			broken := binding
+			switch mutation {
+			case "missing":
+				delete(incident.InboxObservations, eventID)
+			case "wrong-start":
+				broken.ExecutionStartEventRef = "missing-start"
+				incident.InboxObservations[eventID] = broken
+			case "missing-message":
+				broken.EventIDs = nil
+				incident.InboxObservations[eventID] = broken
+			}
+			if _, err := replay.ProjectIncident(incident, "request-1"); err == nil {
+				t.Fatalf("incident renderer accepted %s inbox backing", mutation)
+			}
+			incident.InboxObservations[eventID] = binding
+		}
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.ExecContext(ctx, `DELETE FROM inbox WHERE recipient_scope=? AND recipient_id=?`, events.RecipientTeam, string(team.ID))
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err = ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.VerifiedIncidentEvents(ctx, "org-1", "request-1", 256); err == nil {
+		t.Fatal("incident accepted missing Team inbox backing after reopen")
 	}
 }
 
