@@ -9,6 +9,31 @@ import (
 	"github.com/dominicnunez/agentos/internal/events"
 )
 
+func TestProjectIncidentRejectsHiddenWorkEvent(t *testing.T) {
+	for _, destination := range []string{"dependency", "related"} {
+		t.Run(destination, func(t *testing.T) {
+			snapshot := incidentFixture(t)
+			if _, err := ProjectIncident(snapshot, "conversation"); err != nil {
+				t.Fatalf("valid baseline: %v", err)
+			}
+			event := snapshot.Work.Events[len(snapshot.Work.Events)-1]
+			snapshot.Work.Events = snapshot.Work.Events[:len(snapshot.Work.Events)-1]
+			if destination == "dependency" {
+				snapshot.DependencyEvents = append(snapshot.DependencyEvents, event)
+			} else {
+				snapshot.RelatedEvents = append(snapshot.RelatedEvents, event)
+			}
+			report, err := ProjectIncident(snapshot, "conversation")
+			if err == nil {
+				t.Fatal("accepted selected Work event hidden in private evidence")
+			}
+			if !reflect.DeepEqual(report, Report{}) {
+				t.Fatal("incomplete Work timeline returned a partial report")
+			}
+		})
+	}
+}
+
 func TestProjectIncidentBoundsAdmissions(t *testing.T) {
 	for _, name := range []string{"items", "bytes"} {
 		t.Run(name, func(t *testing.T) {

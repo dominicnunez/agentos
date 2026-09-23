@@ -59,7 +59,8 @@ execution's durable scope and cutoff, independently of the manifest's claimed
 references. Linked intake and private Task histories retain their conflicting
 terminal events even when their correlation differs. These dependencies are not
 added to the public timeline. Their aggregate loading budget is 4,096 supporting
-items and 32 MiB, including supporting records and admission annotations; a valid
+items and 32 MiB, including supporting records, admission annotations, and nested
+authorization, artifact, and inbox references across public and private evidence; a valid
 but larger dependency history also fails the request. The complete integrity-chain check
 still reads the ledger on each request, so cost grows with retained history.
 

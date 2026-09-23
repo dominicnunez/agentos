@@ -14,11 +14,14 @@ func admittedEffectFixture(t *testing.T) events.IncidentSnapshot {
 	now := time.Now().UTC()
 	seal := func(kind, id, label, taskID string, sequence int64, value any) events.Event {
 		event := events.Event{EventID: id, Sequence: sequence, OrganizationID: "org", CorrelationID: "work", SourceActorID: "runtime", TaskID: taskID, EventType: label, CreatedAt: now, SchemaVersion: events.SchemaVersion}
+		if kind == "organization" {
+			event.CorrelationID = "setup"
+		}
 		body, err := json.Marshal(value)
 		if err != nil {
 			t.Fatal(err)
 		}
-		payload, err := events.SealProjectionEvent(event, events.ProjectionRecord{ProjectionKind: kind, RecordID: id, Version: 1, CorrelationID: "work", Value: body}, nil)
+		payload, err := events.SealProjectionEvent(event, events.ProjectionRecord{ProjectionKind: kind, RecordID: id, Version: 1, CorrelationID: event.CorrelationID, Value: body}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

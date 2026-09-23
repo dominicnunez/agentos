@@ -38,6 +38,13 @@ func ValidateIncidentHistory(snapshot IncidentSnapshot) (map[string]int64, error
 			return nil, fmt.Errorf("incident Work history crosses its correlation")
 		}
 	}
+	for _, private := range [][]Event{snapshot.DependencyEvents, snapshot.RelatedEvents} {
+		for _, event := range private {
+			if event.CorrelationID == snapshot.Work.CorrelationID {
+				return nil, fmt.Errorf("incident selected correlation event is outside Work history")
+			}
+		}
+	}
 	sort.Slice(stream, func(i, j int) bool { return stream[i].Sequence < stream[j].Sequence })
 	authority := append(append([]AuthorityRecord(nil), snapshot.FreezeRecords...), snapshot.AuthorityRecords...)
 	leases, freezes, err := ResolveAuthorityAdmissions(stream, authority)
@@ -128,9 +135,10 @@ func ValidateIncidentBounds(snapshot IncidentSnapshot) error {
 		for _, event := range stream {
 			remaining -= len(event.Payload) + len(event.EventID) + len(event.OrganizationID) + len(event.CorrelationID) + len(event.EventType) + len(event.SourceActorID) + len(event.SourceExecutionID) + len(event.RecipientID) + len(event.RecipientScope) + len(event.TaskID)
 			for _, refs := range [][]string{event.AuthorizationRefs, event.ArtifactRefs} {
-				if len(refs) > MaximumIncidentEvidence {
+				if len(refs) > MaximumIncidentEvidence-count {
 					return fmt.Errorf("incident evidence has too many references")
 				}
+				count += len(refs)
 				for _, ref := range refs {
 					remaining -= len(ref)
 				}
@@ -149,9 +157,10 @@ func ValidateIncidentBounds(snapshot IncidentSnapshot) error {
 		}
 	}
 	for key, binding := range snapshot.InboxObservations {
-		if len(binding.EventIDs) > MaximumIncidentEvidence {
+		if len(binding.EventIDs) > MaximumIncidentEvidence-count {
 			return fmt.Errorf("incident inbox evidence has too many references")
 		}
+		count += len(binding.EventIDs)
 		remaining -= len(key) + len(binding.ExecutionStartEventRef)
 		for _, eventID := range binding.EventIDs {
 			remaining -= len(eventID)
