@@ -6,7 +6,6 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
-	"github.com/dominicnunez/agentos/internal/replay"
 )
 
 func TestIncidentReverseSelectionIgnoresNotes(t *testing.T) {
@@ -64,7 +63,7 @@ func TestIncidentReverseSelectionIgnoresNotes(t *testing.T) {
 					t.Fatal("ordinary note entered the dependency set through a contract field name")
 				}
 			}
-			if _, err := replay.ProjectIncident(snapshot, correlation); err != nil {
+			if _, err := events.ValidateIncidentHistory(snapshot); err != nil {
 				t.Fatal(err)
 			}
 		})

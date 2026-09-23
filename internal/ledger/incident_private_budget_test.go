@@ -9,7 +9,6 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/inference"
-	"github.com/dominicnunez/agentos/internal/replay"
 )
 
 func TestIncidentPrivateInferenceBudget(t *testing.T) {
@@ -126,7 +125,7 @@ func TestIncidentPrivateInferenceBudget(t *testing.T) {
 			if count != sample.reservations || len(snapshot.Work.Events) != 1 {
 				t.Fatalf("public=%d private reservations=%d", len(snapshot.Work.Events), count)
 			}
-			if _, err := replay.ProjectIncident(snapshot, "goal"); err != nil {
+			if _, err := events.ValidateIncidentHistory(snapshot); err != nil {
 				t.Fatal(err)
 			}
 		})

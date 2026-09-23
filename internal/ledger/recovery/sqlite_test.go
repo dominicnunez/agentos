@@ -22,7 +22,6 @@ import (
 	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/inference"
 	"github.com/dominicnunez/agentos/internal/ledger"
-	"github.com/dominicnunez/agentos/internal/replay"
 	_ "modernc.org/sqlite"
 )
 
@@ -392,8 +391,8 @@ func TestVerifyReplaysEventAdmittedKnowledge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("incident rejected independently validated Knowledge: %v", err)
 	}
-	if _, err := replay.ProjectIncident(snapshot, "knowledge-knowledge-1"); err != nil {
-		t.Fatalf("incident renderer rejected independently validated Knowledge: %v", err)
+	if _, err := events.ValidateIncidentHistory(snapshot); err != nil {
+		t.Fatalf("shared incident validator rejected independently validated Knowledge: %v", err)
 	}
 	if len(snapshot.Work.Events) != 2 || len(snapshot.DependencyEvents) == 0 {
 		t.Fatal("Knowledge validation support did not stay outside the selected timeline")
@@ -496,7 +495,7 @@ func TestVerifyRejectsKnowledgeWhenValidatorLeaseRecordIsMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("incident rejected human Knowledge validation: %v", err)
 	}
-	if _, err := replay.ProjectIncident(snapshot, "knowledge-knowledge-human"); err != nil {
+	if _, err := events.ValidateIncidentHistory(snapshot); err != nil {
 		t.Fatal(err)
 	}
 	db, err := sql.Open("sqlite", path)

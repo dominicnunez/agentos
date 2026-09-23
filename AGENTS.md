@@ -66,6 +66,9 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
    the owners and phases from request admission through preparation, model calls,
    and durable result admission. Identify the authoritative completion boundary;
    a handler return does not necessarily end the operation.
+   Place cross-module tests in an allowed integration layer and keep direct
+   storage mutations in the owning module. Check test architecture boundaries
+   before expanding fixtures across modules.
 2. Maintain a compact local evidence matrix for relevant identity, missing or
    invalid metadata, cancellation, authority failure, timing between writes,
    and crash boundaries. Distinguish proven, contradicted, missing, and

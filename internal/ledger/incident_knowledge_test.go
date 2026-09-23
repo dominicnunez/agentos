@@ -7,7 +7,6 @@ import (
 
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
-	"github.com/dominicnunez/agentos/internal/replay"
 )
 
 func TestIncidentAgentKnowledgeCreator(t *testing.T) {
@@ -47,7 +46,7 @@ func TestIncidentAgentKnowledgeCreator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("incident omitted Agent creator evidence: %v", err)
 	}
-	if _, err := replay.ProjectIncident(snapshot, "knowledge-agent-knowledge"); err != nil {
+	if _, err := events.ValidateIncidentHistory(snapshot); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -60,6 +60,7 @@ func ValidateProjectionHistory(stream []Event, inboxObservations map[string]Inbo
 	teamRecords := make(map[string][][]byte)
 	blueprintRevisions := make(map[core.ID]map[string]core.AgentBlueprint)
 	profileRevisions := make(map[core.ID]map[string]core.ExecutionProfile)
+	executionStarts := make(map[string]Event)
 	for _, event := range ordered {
 		if event.EventID == "" || event.Sequence < 1 || event.CreatedAt.IsZero() {
 			return core.DurableGraph{}, fmt.Errorf("event stream contains an incomplete envelope")
@@ -81,6 +82,13 @@ func ValidateProjectionHistory(stream []Event, inboxObservations map[string]Inbo
 			return core.DurableGraph{}, fmt.Errorf("event %s: %w", event.EventID, err)
 		}
 		if !present {
+			if event.EventType == "EVIDENCE_PUBLISHED" {
+				task := graph.Tasks[core.ID(event.TaskID)]
+				start := executionStarts[fmt.Sprintf("execution-%s-v%d", task.Value.ID, task.Version)]
+				if err := validateAgentEvidenceBinding(event, task.Value, task.Version, start); err != nil {
+					return core.DurableGraph{}, fmt.Errorf("event %s: %w", event.EventID, err)
+				}
+			}
 			if event.EventType == "INTAKE_ABANDONED" {
 				if err := ValidateIndexedIntakeAbandonment(reviewEvidence.At(event), event); err != nil {
 					return core.DurableGraph{}, fmt.Errorf("event %s: %w", event.EventID, err)
@@ -223,6 +231,11 @@ func ValidateProjectionHistory(stream []Event, inboxObservations map[string]Inbo
 			}
 			if err == nil {
 				err = core.AdmitDurableRevision(graph.Tasks, value.ID, record.Version, record.CorrelationID, value, true, core.ValidTaskRevision)
+			}
+			if err == nil && event.EventType == "EXECUTION_STARTED" {
+				// The full dispatch was validated above. Evidence checks reuse
+				// that exact revision without rescanning configuration history.
+				executionStarts[fmt.Sprintf("execution-%s-v%d", value.ID, record.Version)] = event
 			}
 		case "lab_experiment":
 			err = admitLifecycleProjection(event, record, "Lab experiment", experiments, graph.Experiments, func(value core.Experiment) core.ID { return value.ID }, ValidateExperimentProjectionTransition, func(value core.Experiment) error {

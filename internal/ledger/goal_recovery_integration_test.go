@@ -13,7 +13,6 @@ import (
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/ledger"
 	ledgerrecovery "github.com/dominicnunez/agentos/internal/ledger/recovery"
-	"github.com/dominicnunez/agentos/internal/replay"
 )
 
 func TestRecoveryRejectsCausallyReorderedGoalEvidence(t *testing.T) {
@@ -118,8 +117,8 @@ func TestRecoveryRejectsCausallyReorderedGoalEvidence(t *testing.T) {
 		if err != nil {
 			t.Fatalf("incident rejected completed Goal evidence for %s: %v", selected, err)
 		}
-		if _, err := replay.ProjectIncident(snapshot, selected); err != nil {
-			t.Fatalf("incident renderer rejected completed Goal evidence for %s: %v", selected, err)
+		if _, err := events.ValidateIncidentHistory(snapshot); err != nil {
+			t.Fatalf("shared incident validator rejected completed Goal evidence for %s: %v", selected, err)
 		}
 	}
 

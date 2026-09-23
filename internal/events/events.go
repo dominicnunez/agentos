@@ -124,6 +124,17 @@ func (payload EvidencePublishedPayload) ValidFor(envelopeRefs []string) bool {
 // to one admitted running Agent Task revision and its exact execution start.
 // The evidence remains an untrusted claim and grants no authority or completion.
 func ValidateAgentEvidencePublished(event Event, task core.Task, taskVersion int, start Event, stream []Event) error {
+	if err := validateAgentEvidenceBinding(event, task, taskVersion, start); err != nil {
+		return err
+	}
+	if err := ValidateAgentDispatchStart(start, task, taskVersion, stream); err != nil {
+		return fmt.Errorf("published Agent evidence lacks exact dispatch admission: %w", err)
+	}
+	return nil
+}
+
+// Callers may use this after independently validating the exact start admission.
+func validateAgentEvidenceBinding(event Event, task core.Task, taskVersion int, start Event) error {
 	var payload EvidencePublishedPayload
 	if event.EventID == "" || event.Sequence <= start.Sequence || event.CreatedAt.IsZero() || event.SchemaVersion != SchemaVersion ||
 		event.EventType != "EVIDENCE_PUBLISHED" || event.OrganizationID == "" || event.SourceActorID == "" ||
@@ -137,9 +148,6 @@ func ValidateAgentEvidencePublished(event Event, task core.Task, taskVersion int
 		event.SourceExecutionID != fmt.Sprintf("execution-%s-v%d", task.ID, taskVersion) ||
 		event.OrganizationID != start.OrganizationID || event.TaskID != start.TaskID || event.CorrelationID != start.CorrelationID {
 		return fmt.Errorf("published Agent evidence is not bound to its running Task execution")
-	}
-	if err := ValidateAgentDispatchStart(start, task, taskVersion, stream); err != nil {
-		return fmt.Errorf("published Agent evidence lacks exact dispatch admission: %w", err)
 	}
 	return nil
 }

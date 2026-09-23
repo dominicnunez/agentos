@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -4289,24 +4288,83 @@ func TestLateralMessagesAtActionBoundary(t *testing.T) {
 			incident.InboxObservations[eventID] = binding
 		}
 	}
-	if err := l.Close(); err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite", path)
+}
+
+func TestIncidentLabReproduction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lab.db")
+	store, err := ledger.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.ExecContext(ctx, `DELETE FROM inbox WHERE recipient_scope=? AND recipient_id=?`, events.RecipientTeam, string(team.ID))
-	_ = db.Close()
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	runtime := New(gateway)
+	spec := lab.DefaultSpec()
+	spec.Budget.MaxExecutions = 2
+	spec.Budget.MaxUsageUnits = 1000
+	spec.Budget.MaxChildren = 1
+	experiment, err := runtime.SubmitExperiment(t.Context(), Submit{RequestID: "experiment", OrganizationID: "org-1", Statement: "echo candidate", Kind: core.ExecutionDeterministic}, spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	l, err = ledger.Open(path)
+	reproduction, err := runtime.Submit(t.Context(), Submit{RequestID: "reproduction", OrganizationID: "org-1", Statement: "echo independent", Kind: core.ExecutionDeterministic})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := l.VerifiedIncidentEvents(ctx, "org-1", "request-1", 256); err == nil {
-		t.Fatal("incident accepted missing Team inbox backing after reopen")
+	var reproductionRef string
+	for _, event := range reproduction.Events {
+		if event.EventType == "WORK_COMPLETED" {
+			reproductionRef = event.EventID
+		}
+	}
+	if reproductionRef == "" {
+		t.Fatal("reproduction did not complete")
+	}
+	_, err = lab.New(gateway).Nominate(t.Context(), lab.Nomination{OrganizationID: "org-1", ExperimentID: experiment.Experiment.ID, TargetKind: core.PromotionTargetKnowledge, TargetRef: "candidate-1", Summary: "independently reproduced", ReproductionEvidenceRefs: []string{reproductionRef}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	correlation := experiment.Events[0].CorrelationID
+	snapshot, err := store.VerifiedIncidentEvents(t.Context(), "org-1", correlation, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(snapshot.DependencyEvents, func(event events.Event) bool { return event.EventID == reproductionRef }) {
+		t.Fatal("independent reproduction absent from private evidence")
+	}
+	if _, err := replay.ProjectIncident(snapshot, correlation); err != nil {
+		t.Fatal(err)
+	}
+	for _, missing := range []string{"lab_experiment", "work"} {
+		t.Run("missing-"+missing, func(t *testing.T) {
+			broken := snapshot
+			filter := func(stream []events.Event) []events.Event {
+				filtered := make([]events.Event, 0, len(stream))
+				for _, event := range stream {
+					payload, present, err := events.AdmittedProjection(event)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if present && payload.Projection.ProjectionKind == missing && (missing == "lab_experiment" || payload.Projection.RecordID == string(reproduction.Work.ID)) {
+						continue
+					}
+					filtered = append(filtered, event)
+				}
+				return filtered
+			}
+			broken.Work.Events = filter(snapshot.Work.Events)
+			broken.DependencyEvents = filter(snapshot.DependencyEvents)
+			if _, err := replay.ProjectIncident(broken, correlation); err == nil {
+				t.Fatal("incident renderer accepted missing Lab history")
+			}
+		})
 	}
 }
 

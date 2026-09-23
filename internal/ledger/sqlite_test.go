@@ -17,7 +17,6 @@ import (
 	"github.com/dominicnunez/agentos/internal/authority"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
-	"github.com/dominicnunez/agentos/internal/replay"
 )
 
 type changingAuthorityJSON struct {
@@ -3780,8 +3779,8 @@ func TestReviewedReplacementRequiresOnePriorFailedWork(t *testing.T) {
 		if err != nil {
 			t.Fatalf("incident rejected reviewed replacement history for %s: %v", selected, err)
 		}
-		if _, err := replay.ProjectIncident(snapshot, selected); err != nil {
-			t.Fatalf("incident renderer rejected reviewed replacement history for %s: %v", selected, err)
+		if _, err := events.ValidateIncidentHistory(snapshot); err != nil {
+			t.Fatalf("shared incident validator rejected reviewed replacement history for %s: %v", selected, err)
 		}
 	}
 
