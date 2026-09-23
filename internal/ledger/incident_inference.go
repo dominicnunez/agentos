@@ -22,12 +22,14 @@ type incidentPolicy struct {
 type incidentInferenceSupport struct {
 	reservations map[string]inferenceValidationRow
 	policies     map[[2]string]incidentPolicy
+	histories    map[string][]inferencePolicyRevision
 }
 
 type incidentAccounting struct {
-	row        inferenceValidationRow
-	sequence   int64
-	reconciled bool
+	row            inferenceValidationRow
+	sequence       int64
+	reconciled     bool
+	reconciliation events.Event
 }
 
 const incidentReservationBytes = `length(CAST(reservation_id AS BLOB))+length(CAST(request_id AS BLOB))+length(CAST(organization_id AS BLOB))+
@@ -37,12 +39,6 @@ length(CAST(execution_profile_version AS BLOB))+length(CAST(policy_fingerprint A
 length(CAST(window_started_at AS BLOB))+length(CAST(window_expires_at AS BLOB))+length(CAST(connection_id AS BLOB))+length(CAST(created_at AS BLOB))`
 
 const incidentInferencePolicyBytes = `length(CAST(p.body AS BLOB))+length(CAST(p.activation_event_id AS BLOB))+length(CAST(p.connection_id AS BLOB))`
-
-const incidentInferenceActivationBytes = `COALESCE(length(CAST(e.event_id AS BLOB)),0)+COALESCE(length(CAST(e.organization_id AS BLOB)),0)+
-COALESCE(length(CAST(e.event_type AS BLOB)),0)+COALESCE(length(CAST(e.source_actor_id AS BLOB)),0)+COALESCE(length(CAST(e.source_execution_id AS BLOB)),0)+
-COALESCE(length(CAST(e.recipient_scope AS BLOB)),0)+COALESCE(length(CAST(e.recipient_id AS BLOB)),0)+COALESCE(length(CAST(e.task_id AS BLOB)),0)+
-COALESCE(length(CAST(e.authorization_refs AS BLOB)),0)+COALESCE(length(CAST(e.artifact_refs AS BLOB)),0)+COALESCE(length(CAST(e.payload AS BLOB)),0)+
-COALESCE(length(CAST(e.correlation_id AS BLOB)),0)+COALESCE(length(CAST(e.created_at AS BLOB)),0)+COALESCE(length(CAST(e.schema_version AS BLOB)),0)`
 
 // This validates the selected durable admission and its exact accounting,
 // policy and execution bindings. It does not replay global budget competition,
@@ -166,11 +162,22 @@ func validateIncidentInferenceBudget(ctx context.Context, tx *sql.Tx, stream []e
 				return err
 			}
 			entry.reconciled = true
+			entry.reconciliation = event
 		}
 	}
 	for _, entry := range accounting {
 		if entry.row.state != inferenceStateReserved && !entry.reconciled {
 			return fmt.Errorf("incident inference accounting lacks its exact terminal reconciliation")
+		}
+		policy := support.policies[[2]string{entry.row.organizationID, entry.row.policyFingerprint}]
+		if policy.value.Version == inference.ConnectionPolicyVersion {
+			var reconciliations []events.Event
+			if entry.reconciled {
+				reconciliations = []events.Event{entry.reconciliation}
+			}
+			if err := validateConnectionPolicyLifetime(support.histories[entry.row.connectionID], entry.row.policyFingerprint, entry.sequence, reconciliations); err != nil {
+				return err
+			}
 		}
 	}
 	// Each unique selected event already proved its exact row and scope above.
@@ -292,23 +299,8 @@ func loadIncidentInferenceSupport(ctx context.Context, tx *sql.Tx, organization 
 		return support, fmt.Errorf("incident inference accounting exceeds byte limit")
 	}
 
-	policyMarks := strings.TrimSuffix(strings.Repeat("?,", len(policyFingerprints)), ",")
-	policyArgs := make([]any, 0, len(policyFingerprints)+1)
-	policyArgs = append(policyArgs, organization)
-	for _, fingerprint := range policyFingerprints {
-		policyArgs = append(policyArgs, fingerprint)
-	}
-	var policyCount, activationCount int
-	var policyBytes, activationBytes int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(policy_bytes),0),COALESCE(SUM(activation_bytes),0),COALESCE(SUM(has_activation),0) FROM (SELECT `+incidentInferencePolicyBytes+` AS policy_bytes,`+incidentInferenceActivationBytes+` AS activation_bytes,CASE WHEN e.event_id IS NULL THEN 0 ELSE 1 END AS has_activation FROM inference_policies p LEFT JOIN events e ON e.event_id=p.activation_event_id AND e.organization_id=p.organization_id WHERE p.organization_id=? AND p.policy_fingerprint IN (`+policyMarks+`) ORDER BY p.policy_fingerprint LIMIT ?)`, append(policyArgs, budget.events+1)...).Scan(&policyCount, &policyBytes, &activationBytes, &activationCount); err != nil {
-		return support, err
-	}
-	if policyCount != len(policyFingerprints) || activationCount != policyCount || reservationCount+policyCount+activationCount > budget.events || policyBytes > budget.bytes-reservationBytes || activationBytes > budget.bytes-reservationBytes-policyBytes {
-		return support, fmt.Errorf("incident inference supporting evidence exceeds byte limit or lacks activation")
-	}
-
-	budget.events -= reservationCount + policyCount + activationCount
-	budget.bytes -= reservationBytes + policyBytes + activationBytes
+	budget.events -= reservationCount
+	budget.bytes -= reservationBytes
 
 	rows, err := tx.QueryContext(ctx, `SELECT reservation_id,request_id,organization_id,purpose,intent_id,task_id,execution_id,correlation_id,prompt_sha256,provider,model,execution_profile_version,policy_fingerprint,state,reserved_input_tokens,reserved_output_tokens,reserved_cost_nano_usd,charged_input_tokens,charged_output_tokens,charged_cost_nano_usd,window_started_at,window_expires_at,connection_id,created_at FROM inference_reservations WHERE organization_id=? AND reservation_id IN (`+reservationMarks+`) ORDER BY reservation_id`, reservationArgs...)
 	if err != nil {
@@ -338,65 +330,8 @@ func loadIncidentInferenceSupport(ctx context.Context, tx *sql.Tx, organization 
 		return support, fmt.Errorf("incident reservation lacks accounting")
 	}
 
-	type storedPolicy struct {
-		fingerprint, activationID, connection string
-		body                                  []byte
-	}
-	stored := make([]storedPolicy, 0, len(policyFingerprints))
-	policyRows, err := tx.QueryContext(ctx, `SELECT policy_fingerprint,body,activation_event_id,connection_id FROM inference_policies WHERE organization_id=? AND policy_fingerprint IN (`+policyMarks+`) ORDER BY policy_fingerprint`, policyArgs...)
-	if err != nil {
+	if err := loadIncidentPolicyHistory(ctx, tx, organization, policyFingerprints, budget, &support); err != nil {
 		return support, err
-	}
-	defer func() { _ = policyRows.Close() }()
-	activationSet := make(map[string]bool, len(policyFingerprints))
-	for policyRows.Next() {
-		var policy storedPolicy
-		if err := policyRows.Scan(&policy.fingerprint, &policy.body, &policy.activationID, &policy.connection); err != nil {
-			_ = policyRows.Close()
-			return support, err
-		}
-		stored = append(stored, policy)
-		activationSet[policy.activationID] = true
-	}
-	if err := policyRows.Err(); err != nil {
-		_ = policyRows.Close()
-		return support, err
-	}
-	if err := policyRows.Close(); err != nil {
-		return support, err
-	}
-	if len(stored) != len(policyFingerprints) {
-		return support, fmt.Errorf("incident inference policy is missing")
-	}
-
-	activationIDs := make([]string, 0, len(activationSet))
-	for id := range activationSet {
-		activationIDs = append(activationIDs, id)
-	}
-	sort.Strings(activationIDs)
-	activationMarks := strings.TrimSuffix(strings.Repeat("?,", len(activationIDs)), ",")
-	activationArgs := make([]any, 0, len(activationIDs)+1)
-	activationArgs = append(activationArgs, organization)
-	for _, id := range activationIDs {
-		activationArgs = append(activationArgs, id)
-	}
-	activations, err := collectEvents(tx.QueryContext(ctx, `SELECT `+incidentEventColumns+` FROM events WHERE organization_id=? AND event_id IN (`+activationMarks+`) ORDER BY event_id`, activationArgs...))
-	if err != nil {
-		return support, err
-	}
-	activationByID := make(map[string]events.Event, len(activations))
-	for _, activation := range activations {
-		activationByID[activation.EventID] = activation
-	}
-	if len(activationByID) != len(activationIDs) {
-		return support, fmt.Errorf("incident inference supporting evidence lacks activation")
-	}
-	for _, storedPolicy := range stored {
-		policy, err := validateIncidentInferencePolicy(organization, storedPolicy.fingerprint, storedPolicy.connection, storedPolicy.body, activationByID[storedPolicy.activationID])
-		if err != nil {
-			return support, err
-		}
-		support.policies[[2]string{organization, storedPolicy.fingerprint}] = incidentPolicy{value: policy, sequence: activationByID[storedPolicy.activationID].Sequence}
 	}
 	return support, nil
 }
