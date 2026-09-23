@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -18,8 +19,8 @@ func TestIncidentPrivateInferenceBudget(t *testing.T) {
 		wantError             string
 	}{
 		{"dense", 300, 0, ""},
-		{"aggregate-count", 1000, 0, "incident inference accounting exceeds byte limit"},
-		{"aggregate-bytes", 800, 1, "incident inference accounting exceeds byte limit"},
+		{"aggregate-count", 8, 0, "incident inference supporting evidence exceeds byte limit or lacks activation"},
+		{"aggregate-bytes", 64, 1, "incident inference accounting exceeds byte limit"},
 	} {
 		t.Run(sample.name, func(t *testing.T) {
 			store, err := Open(filepath.Join(t.TempDir(), "budget.db"))
@@ -50,10 +51,27 @@ func TestIncidentPrivateInferenceBudget(t *testing.T) {
 				}
 			}
 			if sample.name == "aggregate-count" {
-				for range 2080 {
-					if _, err := store.Append(t.Context(), events.TrustedDraft{OrganizationID: "org-1", CorrelationID: "model-stop", EventType: "AUDIT_NOTE", Payload: map[string]string{"text": "retained evidence"}}); err != nil {
-						t.Fatal(err)
+				var retained, records int
+				if err := store.db.QueryRowContext(t.Context(), `SELECT (SELECT COUNT(*) FROM events)+(SELECT COUNT(*) FROM inference_reservations),(SELECT COUNT(*) FROM records)`).Scan(&retained, &records); err != nil {
+					t.Fatal(err)
+				}
+				// Ordinary padding exercises the same aggregate item limit without
+				// repeating inference admission for items unrelated to this boundary.
+				// Keep event/accounting totals below the limit until record support
+				// is included. The owning writer retains exact event-chain backing.
+				padding := events.MaximumIncidentEvidence - retained - 2*records + 1
+				if padding <= 0 {
+					t.Fatal("fixture already exhausted item budget")
+				}
+				if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
+					for range padding {
+						if _, err := appendEvent(t.Context(), tx, events.TrustedDraft{OrganizationID: "org-1", CorrelationID: "model-stop", EventType: "AUDIT_NOTE", Payload: map[string]string{"text": "retained evidence"}}); err != nil {
+							return err
+						}
 					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
 				}
 			}
 			if sample.padding != 0 {
