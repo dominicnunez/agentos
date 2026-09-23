@@ -393,15 +393,28 @@ func (d *incidentDependencies) frontier() (string, []any) {
 	})
 	if len(identities) > 0 {
 		var pairs []string
+		var leaseIDs []string
 		for _, key := range identities {
 			pairs = append(pairs, "(?,?)")
 			args = append(args, key.kind, key.id)
+			if key.kind == "capability_lease" {
+				leaseIDs = append(leaseIDs, key.id)
+			}
 		}
 		marks := strings.Join(pairs, ",")
 		parts = append(parts, `(CASE WHEN json_valid(payload) THEN json_extract(payload,'$.projection.projection_kind') END,CASE WHEN json_valid(payload) THEN json_extract(payload,'$.projection.record_id') END) IN (`+marks+`)`)
 		parts = append(parts, `event_id IN (SELECT admission_event_id FROM records WHERE (kind,record_id) IN (`+marks+`))`)
 		for _, key := range identities {
 			args = append(args, key.kind, key.id)
+		}
+		// Lease events carry their identity directly, not in a projection.
+		// Select the full lifecycle even when its backing record was removed.
+		// Do not hide a tenant mismatch; add rejects foreign selected evidence.
+		if len(leaseIDs) > 0 {
+			parts = append(parts, `(event_type IN ('CAPABILITY_GRANTED','CAPABILITY_REVOKED') AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.id') END IN (`+incidentMarks(len(leaseIDs))+`))`)
+			for _, id := range leaseIDs {
+				args = append(args, id)
+			}
 		}
 	}
 	addSet := func(set map[string]bool, column string) {
