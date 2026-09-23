@@ -97,6 +97,8 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
    public operation at representative small and large sizes before review.
    Scale both admitted operations and supporting history; one operation amid
    many unrelated events cannot expose repeated validation across many starts.
+   For dependency readers, vary chain depth, branching, and unrelated history
+   separately; a short public timeline can require a deep supporting graph.
    Account for nested calls, repeated polls and concurrent callers; one scan per
    transaction can still mean one scan per poll. Measure relevant allocations,
    query counts or latency, including cold and warm paths when caching is used.

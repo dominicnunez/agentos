@@ -5,8 +5,6 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"sync/atomic"
-
-	"modernc.org/sqlite"
 )
 
 // Observe every statement of the public operation, including its preflights.
@@ -33,7 +31,7 @@ func (c *incidentCountConn) BeginTx(ctx context.Context, opts driver.TxOptions) 
 type incidentCountConnector struct {
 	path  string
 	count *atomic.Int64
-	inner sqlite.Driver
+	inner driver.Driver
 }
 
 func (c *incidentCountConnector) Connect(context.Context) (driver.Conn, error) {
@@ -44,4 +42,4 @@ func (c *incidentCountConnector) Connect(context.Context) (driver.Conn, error) {
 	return &incidentCountConn{Conn: conn, count: c.count}, nil
 }
 
-func (c *incidentCountConnector) Driver() driver.Driver { return &c.inner }
+func (c *incidentCountConnector) Driver() driver.Driver { return c.inner }

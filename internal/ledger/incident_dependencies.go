@@ -29,6 +29,7 @@ type incidentDependencies struct {
 	recordCorrelations map[string]bool
 	backed             map[string]bool
 	authority          []events.AuthorityRecord
+	selectedRecords    map[int64]bool
 	tooManyKeys        bool
 }
 
@@ -64,6 +65,9 @@ func loadIncidentDependencies(ctx context.Context, tx *sql.Tx, snapshot *events.
 			if err := d.add(event); err != nil {
 				return err
 			}
+		}
+		if err := d.expandReferences(ctx, tx, loaded); err != nil {
+			return err
 		}
 		if err := d.loadRecords(ctx, tx); err != nil {
 			return err
@@ -124,6 +128,10 @@ func (d *incidentDependencies) add(event events.Event) error {
 	if !present && !incidentOwnedContract(event.EventType) {
 		return nil
 	}
+	return d.discoverEvent(event, projection, present)
+}
+
+func (d *incidentDependencies) discoverEvent(event events.Event, projection events.ProjectionEventPayload, present bool) error {
 	switch event.EventType {
 	case "PLAN_CREATED", "INTENT_CONFIRMED", "INTAKE_RECEIVED", "INTENT_DRAFTED":
 		d.correlation(event.CorrelationID)

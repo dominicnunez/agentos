@@ -290,7 +290,7 @@ func TestIncidentPolicyHistoryQueries(t *testing.T) {
 				t.Fatal(err)
 			}
 			var count atomic.Int64
-			store.db = sql.OpenDB(&incidentCountConnector{path: path, count: &count})
+			store.db = sql.OpenDB(&incidentCountConnector{path: path, count: &count, inner: store.db.Driver()})
 			store.db.SetMaxOpenConns(1)
 			for read := range 2 {
 				count.Store(0)
