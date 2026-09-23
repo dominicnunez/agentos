@@ -3774,6 +3774,15 @@ func TestReviewedReplacementRequiresOnePriorFailedWork(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("atomic replacement projections failed: %v", err)
 	}
+	for _, selected := range []string{"old", "replacement"} {
+		snapshot, err := store.VerifiedIncidentEvents(ctx, "org-1", selected, 256)
+		if err != nil {
+			t.Fatalf("incident rejected reviewed replacement history for %s: %v", selected, err)
+		}
+		if _, err := events.ValidateIncidentHistory(snapshot); err != nil {
+			t.Fatalf("shared incident validator rejected reviewed replacement history for %s: %v", selected, err)
+		}
+	}
 
 	duplicateDraft := appendReviewedReplacementIntent(t, ctx, store, "org-1", "replacement-2", "intent-replacement-2", predecessor.ID, "echo second replacement", now)
 	if _, err := store.AppendIntentConfirmation(ctx, events.TrustedDraft{

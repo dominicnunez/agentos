@@ -21,14 +21,14 @@ func (s *Service) IncidentReplay(ctx context.Context, organizationID core.ID, co
 	if !found {
 		return replay.Report{}, false, nil
 	}
-	snapshot, err := s.gateway.VerifiedReplayEvents(ctx, string(organizationID), correlationID, replay.MaximumEvents)
+	snapshot, err := s.gateway.VerifiedIncidentEvents(ctx, string(organizationID), correlationID, replay.MaximumEvents)
 	if err != nil {
 		return replay.Report{}, false, err
 	}
-	if len(snapshot.Events) == 0 {
+	if len(snapshot.Work.Events) == 0 {
 		return replay.Report{}, false, nil
 	}
-	report, err := replay.Project(snapshot, conversationID)
+	report, err := replay.ProjectIncident(snapshot, conversationID)
 	if err != nil {
 		return replay.Report{}, false, fmt.Errorf("project incident replay: %w", err)
 	}

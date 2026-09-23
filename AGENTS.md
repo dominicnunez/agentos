@@ -66,6 +66,9 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
    the owners and phases from request admission through preparation, model calls,
    and durable result admission. Identify the authoritative completion boundary;
    a handler return does not necessarily end the operation.
+   Place cross-module tests in an allowed integration layer and keep direct
+   storage mutations in the owning module. Check test architecture boundaries
+   before expanding fixtures across modules.
 2. Maintain a compact local evidence matrix for relevant identity, missing or
    invalid metadata, cancellation, authority failure, timing between writes,
    and crash boundaries. Distinguish proven, contradicted, missing, and
@@ -75,11 +78,22 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
    direct composition as well as the production setup.
 4. Implement a complete, cohesive invariant across its callers. Prefer an
    existing shared boundary that owns the rule over multiple partial fixes.
+   For filtered readers, check selection completeness in both directions before
+   relying on shared validators. Reconstruct candidate sets from durable scope
+   and time boundaries, independently of claimed references. Compare required
+   inputs and invariants with full recovery, including private dependencies and
+   omitted candidates. Compare every stored metadata field with the owning
+   writer and recovery rules; include forbidden fields in validation and byte
+   preflight rather than dropping them from the selected columns. Document
+   deliberate scope exclusions rather than assuming parity.
 5. Exercise realistic failure paths through actual entry points and durable
    state. Verify forbidden calls and writes do not occur, necessary evidence
    survives, retry and restart behave correctly, and other tenants are unaffected.
    Test doubles must implement the interfaces production calls. Where feasible,
    verify regressions fail for the intended defect against the prior behavior.
+   Derive valid history fixtures from the owning writer's state transitions.
+   Before treating cross-tenant evidence as unrelated, verify whether the linked
+   identifier is globally unique or tenant-scoped in storage and recovery.
    When validation depends on earlier events, test an invalid earlier event
    followed by plausible later events, and compare live reads with full replay.
    For cancellation changes, exercise the real transport/runtime shutdown path
@@ -88,6 +102,10 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
    that recovery must preserve; one authority generation is not every stop signal.
 6. For changes whose cost grows with history or candidate counts, check a complete
    public operation at representative small and large sizes before review.
+   Scale both admitted operations and supporting history; one operation amid
+   many unrelated events cannot expose repeated validation across many starts.
+   For dependency readers, vary chain depth, branching, and unrelated history
+   separately; a short public timeline can require a deep supporting graph.
    Account for nested calls, repeated polls and concurrent callers; one scan per
    transaction can still mean one scan per poll. Measure relevant allocations,
    query counts or latency, including cold and warm paths when caching is used.

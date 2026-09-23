@@ -387,8 +387,8 @@ func (r inferenceValidationRow) validate(policy inference.Policy) error {
 }
 
 func validateInferenceReservationEvent(event events.Event, row inferenceValidationRow, policy inference.Policy) error {
-	var payload events.InferenceReservedPayload
-	if decodeExactJSONBytes(event.Payload, &payload) != nil {
+	payload, decodeErr := events.DecodeInferenceReservation(event)
+	if decodeErr != nil {
 		return fmt.Errorf("inference reservation event is invalid")
 	}
 	start, _ := time.Parse(time.RFC3339Nano, row.windowStart)

@@ -314,7 +314,7 @@ func TestVerifyReplaysEventAdmittedKnowledge(t *testing.T) {
 		t.Fatal(err)
 	}
 	validationAt := time.Now().UTC()
-	intent := core.Intent{ID: "intent-knowledge-validation", OrganizationID: "org-1", OriginalInstruction: "echo validated", NormalizedObjective: "echo validated", CreatedAt: validationAt}
+	intent := core.Intent{ID: "intent-knowledge-validation", OrganizationID: "org-1", OriginalInstruction: "echo validated", NormalizedObjective: "echo validated", AcceptedFingerprint: "internal-recovery", CreatedAt: validationAt}
 	work := core.Work{ID: "work-knowledge-validation", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: validationAt}
 	task := core.Task{ID: "task-knowledge-validation", WorkID: work.ID, Description: "echo validated", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, RuntimeHandlerRef: "builtin.echo", TaskContractVersion: "1", Status: core.TaskPending}
 	for _, draft := range []events.ProjectionDraft{
@@ -327,6 +327,7 @@ func TestVerifyReplaysEventAdmittedKnowledge(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	appendRecoveryPlan(t, store, "work-knowledge-validation", intent, task)
 	running := task
 	running.Status = core.TaskRunning
 	if _, _, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
@@ -380,6 +381,32 @@ func TestVerifyReplaysEventAdmittedKnowledge(t *testing.T) {
 	}
 	if _, err := Verify(ctx, path); err != nil {
 		t.Fatalf("verify event-admitted knowledge: %v", err)
+	}
+	store, err = ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	snapshot, err := store.VerifiedIncidentEvents(ctx, "org-1", "knowledge-knowledge-1", 256)
+	if err != nil {
+		t.Fatalf("incident rejected independently validated Knowledge: %v", err)
+	}
+	if _, err := events.ValidateIncidentHistory(snapshot); err != nil {
+		t.Fatalf("shared incident validator rejected independently validated Knowledge: %v", err)
+	}
+	if len(snapshot.Work.Events) != 2 || len(snapshot.DependencyEvents) == 0 {
+		t.Fatal("Knowledge validation support did not stay outside the selected timeline")
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	if _, err := raw.ExecContext(ctx, `DELETE FROM records WHERE kind='task' AND record_id='task-knowledge-validation'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.VerifiedIncidentEvents(ctx, "org-1", "knowledge-knowledge-1", 256); err == nil {
+		t.Fatal("incident accepted Knowledge whose validation Task lost its durable backing")
 	}
 }
 
@@ -459,6 +486,18 @@ func TestVerifyRejectsKnowledgeWhenValidatorLeaseRecordIsMissing(t *testing.T) {
 	if _, err := Verify(ctx, path); err != nil {
 		t.Fatalf("verify complete validator lease: %v", err)
 	}
+	store, err = ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	snapshot, err := store.VerifiedIncidentEvents(ctx, "org-1", "knowledge-knowledge-human", 256)
+	if err != nil {
+		t.Fatalf("incident rejected human Knowledge validation: %v", err)
+	}
+	if _, err := events.ValidateIncidentHistory(snapshot); err != nil {
+		t.Fatal(err)
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -469,6 +508,9 @@ func TestVerifyRejectsKnowledgeWhenValidatorLeaseRecordIsMissing(t *testing.T) {
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := store.VerifiedIncidentEvents(ctx, "org-1", "knowledge-knowledge-human", 256); err == nil {
+		t.Fatal("incident accepted missing validator lease record")
 	}
 	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "authority admission event") {
 		t.Fatalf("missing validator lease record was certified: %v", err)
@@ -1258,7 +1300,7 @@ func TestRecoveryRejectsWorkBeforeIntentAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	swapRecoveryProjectionSequences(t, ctx, path, intentEvent, workEvent)
-	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "work requires its durable Intent") {
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "work requires its exact prior Intent") {
 		t.Fatalf("Work-before-Intent recovery error=%v", err)
 	}
 }
@@ -1352,7 +1394,7 @@ func TestRecoveryRejectsGoalBoundWorkWithoutConfirmation(t *testing.T) {
 		want   string
 		tamper func(*testing.T, string)
 	}{
-		{name: "missing confirmation", want: "one prior intent confirmation", tamper: func(t *testing.T, path string) {
+		{name: "missing confirmation", want: "one prior reviewed intent confirmation", tamper: func(t *testing.T, path string) {
 			deleteRecoveryEvent(t, ctx, path, `event_id=?`, confirmationEvent.EventID)
 		}},
 		{name: "missing intake evidence", want: "current durable reviewed draft", tamper: func(t *testing.T, path string) {
@@ -1361,7 +1403,7 @@ func TestRecoveryRejectsGoalBoundWorkWithoutConfirmation(t *testing.T) {
 		{name: "missing reviewed draft", want: "current durable reviewed draft", tamper: func(t *testing.T, path string) {
 			deleteRecoveryEvent(t, ctx, path, `correlation_id=? AND event_type='INTENT_DRAFTED'`, correlationID)
 		}},
-		{name: "goal admitted after confirmation", want: "active Goal at admission", tamper: func(t *testing.T, path string) {
+		{name: "goal admitted after confirmation", want: "lacks its active Goal", tamper: func(t *testing.T, path string) {
 			swapRecoveryProjectionAndOrdinarySequences(t, ctx, path, goalEvent, confirmationEvent)
 		}},
 	} {
@@ -1469,13 +1511,13 @@ func TestRecoveryRechecksReplacementFailureAtConfirmationSequence(t *testing.T) 
 		t.Fatalf("valid replacement failed recovery verification: %v", err)
 	}
 	swapRecoveryProjectionAndOrdinarySequences(t, ctx, path, failureEvent, confirmationEvent)
-	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "prior failed Work with the same Goal binding at admission") {
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "prior failed Work with the same Goal binding") {
 		t.Fatalf("recovery accepted replacement before predecessor failure: %v", err)
 	}
 }
 
 func TestRecoveryRequiresConfirmationForRuntimeReplacement(t *testing.T) {
-	if !intentRequiresConfirmation(core.Intent{ReplacesWorkID: "work-old", SourcePrincipalID: "runtime", SourcePrincipalKind: core.PrincipalRuntime, SourceChannel: "INTERNAL"}) {
+	if !events.IntentRequiresConfirmation(core.Intent{ReplacesWorkID: "work-old", SourcePrincipalID: "runtime", SourcePrincipalKind: core.PrincipalRuntime, SourceChannel: "INTERNAL"}) {
 		t.Fatal("recovery treated runtime replacement lineage as unreviewed internal Work")
 	}
 }
@@ -1598,17 +1640,7 @@ SELECT 'duplicate-abandonment',organization_id,event_type,source_actor_id,source
 			}
 		}},
 		{name: "after confirmation", want: "confirmed intent cannot be abandoned", tamper: func(t *testing.T, db *sql.DB) {
-			var sequence int64
-			if err := db.QueryRowContext(ctx, `SELECT sequence FROM events WHERE event_type='INTAKE_ABANDONED'`).Scan(&sequence); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := db.ExecContext(ctx, `UPDATE events SET sequence=? WHERE event_type='INTAKE_ABANDONED'`, sequence+2); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := db.ExecContext(ctx, `INSERT INTO events(sequence,event_id,organization_id,event_type,source_actor_id,source_execution_id,recipient_scope,recipient_id,task_id,authorization_refs,artifact_refs,payload,correlation_id,created_at,schema_version)
-SELECT ?,'prior-confirmation',organization_id,'INTENT_CONFIRMED',source_actor_id,'','','',task_id,'[]','[]','{}',correlation_id,created_at,schema_version FROM events WHERE event_type='INTAKE_ABANDONED'`, sequence+1); err != nil {
-				t.Fatal(err)
-			}
+			insertPriorRecoveryConfirmation(t, db)
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1719,7 +1751,7 @@ func TestRecoveryRejectsTaskBeforeAssigneeAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	swapRecoveryProjectionSequences(t, ctx, path, agentEvent, taskEvent)
-	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "invalid Task assignment") {
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "invalid assignee agent") {
 		t.Fatalf("Task-before-assignee recovery error=%v", err)
 	}
 }
@@ -1733,8 +1765,9 @@ func TestRecoveryRejectsMislabeledTaskLifecycle(t *testing.T) {
 	}
 	_, _ = appendRecoveryProjectionChain(t, ctx, store)
 	task := core.Task{ID: "task-1", WorkID: "work-1", Description: "recovery task", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskRunning}
+	appendRecoveryPlan(t, store, "work-1", core.Intent{ID: "intent-1", AcceptedFingerprint: "internal-recovery"}, task)
 	started, err := store.AppendProjection(ctx, events.ProjectionDraft{
-		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1"},
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1", Payload: events.ExecutionStartDetail{InboxCutoffSequence: 0}},
 		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
 	})
 	if err != nil {
@@ -1789,8 +1822,9 @@ func TestRecoveryRejectsCompletedTaskWithoutEvidenceChain(t *testing.T) {
 	}
 	_, _ = appendRecoveryProjectionChain(t, ctx, store)
 	task := core.Task{ID: "task-1", WorkID: "work-1", Description: "recovery task", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskRunning}
+	appendRecoveryPlan(t, store, "work-1", core.Intent{ID: "intent-1", AcceptedFingerprint: "internal-recovery"}, task)
 	if _, err := store.AppendProjection(ctx, events.ProjectionDraft{
-		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1"},
+		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1", Payload: events.ExecutionStartDetail{InboxCutoffSequence: 0}},
 		ProjectionKind: "task", RecordID: string(task.ID), Version: 2, Value: task,
 	}); err != nil {
 		_ = store.Close()
@@ -1844,7 +1878,7 @@ func TestRecoveryRejectsCompletedTaskWithoutEvidenceChain(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "completed Task task-1 lacks exact durable evidence") {
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "task completion lacks its exact verification decision") {
 		t.Fatalf("recovery accepted a status-only Task completion: %v", err)
 	}
 }
@@ -2562,7 +2596,7 @@ func TestRecoveryRejectsInvalidHistoricalTeamRoster(t *testing.T) {
 		t.Fatal(err)
 	}
 	resealRecoveryProjection(t, ctx, store, path, created, payload)
-	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "invalid Team roster") {
+	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "team references invalid member Agent") {
 		t.Fatalf("historically invalid Team roster recovery error=%v", err)
 	}
 }
@@ -2731,7 +2765,7 @@ func TestRecoveryRejectsSupersededAgentDispatchBinding(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
-	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, NormalizedObjective: "objective", CreatedAt: now}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, NormalizedObjective: "objective", AcceptedFingerprint: "internal-recovery", CreatedAt: now}
 	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
 	blueprint := core.AgentBlueprint{ID: "blueprint-1", OrganizationID: organization.ID, Version: "v1", Role: "worker", OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE", CreatedAt: now}
 	profile := core.ExecutionProfile{ID: "profile-1", OrganizationID: organization.ID, Version: "v1", ModelProvider: "provider", Model: "model", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE", CreatedAt: now}
@@ -2769,6 +2803,7 @@ func TestRecoveryRejectsSupersededAgentDispatchBinding(t *testing.T) {
 		_ = store.Close()
 		t.Fatal(err)
 	}
+	appendRecoveryPlan(t, store, "work-1", intent, task)
 	task.Status = core.TaskRunning
 	started, _, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1"},
@@ -2974,7 +3009,7 @@ func appendRecoveryProjectionState(t *testing.T, ctx context.Context, store *led
 	t.Helper()
 	now := time.Now().UTC()
 	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
-	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, NormalizedObjective: "objective", CreatedAt: now}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, NormalizedObjective: "objective", AcceptedFingerprint: "internal-recovery", CreatedAt: now}
 	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
 	task := core.Task{ID: "task-1", WorkID: work.ID, Description: "recovery task", ExecutionKind: core.ExecutionDeterministic, ModelInferencePolicy: core.InferenceForbidden, TaskContractVersion: "1", Status: core.TaskPending}
 	drafts := []events.ProjectionDraft{

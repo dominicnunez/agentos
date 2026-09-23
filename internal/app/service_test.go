@@ -21,6 +21,7 @@ import (
 	"github.com/dominicnunez/agentos/internal/modelinput"
 	"github.com/dominicnunez/agentos/internal/planning"
 	"github.com/dominicnunez/agentos/internal/projections"
+	"github.com/dominicnunez/agentos/internal/replay"
 	"github.com/dominicnunez/agentos/internal/telemetry"
 )
 
@@ -4250,6 +4251,120 @@ func TestLateralMessagesAtActionBoundary(t *testing.T) {
 	}
 	if _, err := service.Recover(ctx); err != nil {
 		t.Fatalf("historical completion failed after valid Team membership revision: %v", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	l, err = ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incident, err := l.VerifiedIncidentEvents(ctx, "org-1", "request-1", 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(incident.InboxObservations) != len(routes) {
+		t.Fatalf("incident lost inbox bindings: got %d want %d", len(incident.InboxObservations), len(routes))
+	}
+	if _, err := replay.ProjectIncident(incident, "request-1"); err != nil {
+		t.Fatal(err)
+	}
+	for eventID, binding := range incident.InboxObservations {
+		for _, mutation := range []string{"missing", "wrong-start", "missing-message"} {
+			broken := binding
+			switch mutation {
+			case "missing":
+				delete(incident.InboxObservations, eventID)
+			case "wrong-start":
+				broken.ExecutionStartEventRef = "missing-start"
+				incident.InboxObservations[eventID] = broken
+			case "missing-message":
+				broken.EventIDs = nil
+				incident.InboxObservations[eventID] = broken
+			}
+			if _, err := replay.ProjectIncident(incident, "request-1"); err == nil {
+				t.Fatalf("incident renderer accepted %s inbox backing", mutation)
+			}
+			incident.InboxObservations[eventID] = binding
+		}
+	}
+}
+
+func TestIncidentLabReproduction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lab.db")
+	store, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gateway := events.NewGateway(store)
+	runtime := New(gateway)
+	spec := lab.DefaultSpec()
+	spec.Budget.MaxExecutions = 2
+	spec.Budget.MaxUsageUnits = 1000
+	spec.Budget.MaxChildren = 1
+	experiment, err := runtime.SubmitExperiment(t.Context(), Submit{RequestID: "experiment", OrganizationID: "org-1", Statement: "echo candidate", Kind: core.ExecutionDeterministic}, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reproduction, err := runtime.Submit(t.Context(), Submit{RequestID: "reproduction", OrganizationID: "org-1", Statement: "echo independent", Kind: core.ExecutionDeterministic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reproductionRef string
+	for _, event := range reproduction.Events {
+		if event.EventType == "WORK_COMPLETED" {
+			reproductionRef = event.EventID
+		}
+	}
+	if reproductionRef == "" {
+		t.Fatal("reproduction did not complete")
+	}
+	_, err = lab.New(gateway).Nominate(t.Context(), lab.Nomination{OrganizationID: "org-1", ExperimentID: experiment.Experiment.ID, TargetKind: core.PromotionTargetKnowledge, TargetRef: "candidate-1", Summary: "independently reproduced", ReproductionEvidenceRefs: []string{reproductionRef}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	correlation := experiment.Events[0].CorrelationID
+	snapshot, err := store.VerifiedIncidentEvents(t.Context(), "org-1", correlation, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(snapshot.DependencyEvents, func(event events.Event) bool { return event.EventID == reproductionRef }) {
+		t.Fatal("independent reproduction absent from private evidence")
+	}
+	if _, err := replay.ProjectIncident(snapshot, correlation); err != nil {
+		t.Fatal(err)
+	}
+	for _, missing := range []string{"lab_experiment", "work"} {
+		t.Run("missing-"+missing, func(t *testing.T) {
+			broken := snapshot
+			filter := func(stream []events.Event) []events.Event {
+				filtered := make([]events.Event, 0, len(stream))
+				for _, event := range stream {
+					payload, present, err := events.AdmittedProjection(event)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if present && payload.Projection.ProjectionKind == missing && (missing == "lab_experiment" || payload.Projection.RecordID == string(reproduction.Work.ID)) {
+						continue
+					}
+					filtered = append(filtered, event)
+				}
+				return filtered
+			}
+			broken.Work.Events = filter(snapshot.Work.Events)
+			broken.DependencyEvents = filter(snapshot.DependencyEvents)
+			if _, err := replay.ProjectIncident(broken, correlation); err == nil {
+				t.Fatal("incident renderer accepted missing Lab history")
+			}
+		})
 	}
 }
 

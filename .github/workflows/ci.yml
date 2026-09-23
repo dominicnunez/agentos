@@ -133,7 +133,9 @@ jobs:
 
       - name: Race-tested unit tests
         if: steps.scope.outputs.code != 'false'
-        run: go test -race -timeout=20m ./...
+        run: |
+          python3 -m unittest scripts/test_race_tests.py
+          python3 scripts/race_tests.py
 
       - name: Bounded operator-boundary fuzzing
         if: steps.scope.outputs.code != 'false'

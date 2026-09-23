@@ -30,13 +30,13 @@ type freezeHistory struct {
 }
 
 const freezeHistorySQL = `SELECT r.kind,r.record_id,r.version,r.body,r.admission_event_id,
-e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version
+e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version,r.admission_fingerprint
 FROM events e
 LEFT JOIN records r ON r.admission_event_id<>'' AND r.admission_event_id=e.event_id AND r.kind='organization_freeze' AND r.record_id=?
 WHERE e.event_type='FREEZE_SET' AND e.organization_id=?
 UNION ALL
 SELECT r.kind,r.record_id,r.version,r.body,r.admission_event_id,
-e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version
+e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version,r.admission_fingerprint
 FROM records r
 LEFT JOIN events e ON e.event_id=r.admission_event_id
 WHERE r.kind='organization_freeze' AND r.record_id=?
@@ -134,7 +134,7 @@ func resolveFreezeRows(ctx context.Context, organization string, records []event
 }
 
 func scanFreezeHistoryRow(row rowScanner) (events.AuthorityRecord, events.Event, bool, bool, error) {
-	var recordKind, recordID, admissionEventID sql.NullString
+	var recordKind, recordID, admissionEventID, fingerprint sql.NullString
 	var recordVersion sql.NullInt64
 	var recordBody []byte
 	var eventID, eventOrganization, eventType, actorID, executionID sql.NullString
@@ -144,13 +144,16 @@ func scanFreezeHistoryRow(row rowScanner) (events.AuthorityRecord, events.Event,
 	if err := row.Scan(&recordKind, &recordID, &recordVersion, &recordBody, &admissionEventID,
 		&eventID, &eventSequence, &eventOrganization, &eventType, &actorID, &executionID,
 		&recipientScope, &recipientID, &taskID, &authorizationRefs, &artifactRefs,
-		&payload, &correlationID, &createdAt, &schemaVersion); err != nil {
+		&payload, &correlationID, &createdAt, &schemaVersion, &fingerprint); err != nil {
 		return events.AuthorityRecord{}, events.Event{}, false, false, err
 	}
 	var record events.AuthorityRecord
 	if recordKind.Valid {
-		if !recordID.Valid || !recordVersion.Valid || !admissionEventID.Valid {
+		if !recordID.Valid || !recordVersion.Valid || !admissionEventID.Valid || !fingerprint.Valid {
 			return record, events.Event{}, false, false, fmt.Errorf("freeze record row is incomplete")
+		}
+		if fingerprint.String != "" {
+			return record, events.Event{}, false, false, fmt.Errorf("freeze record carries projection fingerprint")
 		}
 		record = events.AuthorityRecord{Kind: recordKind.String, RecordID: recordID.String, Version: int(recordVersion.Int64), Body: append([]byte(nil), recordBody...), AdmissionEventID: admissionEventID.String}
 	}

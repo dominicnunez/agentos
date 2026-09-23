@@ -45,7 +45,17 @@ and security review.
 
 ## Race-test duration
 
-The race suite has a twenty-minute timeout per Go package. Large SQLite history
-tests incur substantial overhead under the race detector, and hosted runners
-vary in speed. Run `go test -race -timeout=20m ./...` to match CI. Assertion
-failures, data races, and expiry of this timeout fail the check.
+Run `python3 scripts/race_tests.py` to match CI. Packages other than ledger run
+normally with the race detector and a twenty-minute package timeout. Ledger's
+large SQLite history suite runs in four sequential groups with that same timeout
+per group. The runner discovers tests, examples, and fuzz seed targets from one
+compiled race binary, sorts them, and distributes them round-robin. Every test
+keeps all its subtests, and each group's completed or skipped names must match
+its discovery list. Failures, race reports, and timeouts fail the check.
+
+Grouping bounds cumulative package duration; it does not speed up individual
+operations. A complete ungrouped normal ledger run also checks shared-process
+state interactions. It cannot replace race detection across group boundaries:
+tests needing concurrent interaction must share a top-level test. The ungrouped
+race command remains `go test -race -count=1 -timeout=20m ./...` when the runner
+can complete the entire ledger package within that budget.

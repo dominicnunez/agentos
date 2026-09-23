@@ -25,7 +25,7 @@ const (
 	// not identify or publish an Agent OS release.
 	OldestSupportedStorageVersion = 1
 	// CurrentStorageVersion is the only layout accepted after runtime startup.
-	CurrentStorageVersion = 12
+	CurrentStorageVersion = 13
 	// AuthorityAdmissionBindingStorageVersion is the first storage contract in
 	// which every capability and freeze record names its exact admitting event.
 	AuthorityAdmissionBindingStorageVersion = 7
@@ -103,6 +103,15 @@ CREATE UNIQUE INDEX inference_policies_active_idx ON inference_policies(organiza
 
 const storageSchemaV12SQL = `CREATE INDEX IF NOT EXISTS events_execution_idx
 ON events(organization_id,correlation_id,source_execution_id,event_type,sequence);`
+
+const storageSchemaV13SQL = `CREATE INDEX IF NOT EXISTS records_replaced_work_idx
+ON records(kind, CASE WHEN json_valid(body) THEN json_extract(body,'$.value.replaces_work_id') END, version);
+CREATE INDEX IF NOT EXISTS events_incident_execution_idx
+ON events(organization_id,source_execution_id,sequence);
+CREATE INDEX IF NOT EXISTS events_message_idx
+ON events(organization_id, CASE WHEN json_valid(payload) THEN json_extract(payload,'$.message_id') END, event_type, sequence);
+CREATE INDEX IF NOT EXISTS events_source_message_idx
+ON events(organization_id, CASE WHEN json_valid(payload) THEN json_extract(payload,'$.source_message_id') END, event_type, sequence);`
 
 const storageSchemaV1SQL = `CREATE TABLE events (
 sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, organization_id TEXT NOT NULL,
@@ -344,6 +353,11 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 			return err
 		}
 		return advanceProjectionStorageContract(ctx, tx, from, to, "model-stop-admission-index")
+	case from == 12 && to == 13:
+		if _, err := tx.ExecContext(ctx, storageSchemaV13SQL); err != nil {
+			return err
+		}
+		return advanceProjectionStorageContract(ctx, tx, from, to, "incident-history-indexes")
 	default:
 		return fmt.Errorf("no reviewed storage migration exists")
 	}
@@ -694,6 +708,17 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 		}
 		if count != 1 {
 			return StorageContract{}, fmt.Errorf("storage schema version %d lacks execution index", version)
+		}
+	}
+	if version >= 13 {
+		for index, table := range map[string]string{"records_replaced_work_idx": "records", "events_incident_execution_idx": "events", "events_message_idx": "events", "events_source_message_idx": "events"} {
+			var count int
+			if err := query.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name=? AND tbl_name=?`, index, table).Scan(&count); err != nil {
+				return StorageContract{}, err
+			}
+			if count != 1 {
+				return StorageContract{}, fmt.Errorf("storage schema version %d lacks incident index %s", version, index)
+			}
 		}
 	}
 	if version >= 11 {
