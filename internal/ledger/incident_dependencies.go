@@ -185,10 +185,19 @@ func (d *incidentDependencies) add(event events.Event) error {
 	return nil
 }
 
+func incidentExecutionContract(kind string) bool {
+	for _, token := range strings.Split(incidentExecutionTypes, ",") {
+		if strings.Trim(strings.TrimSpace(token), "'") == kind {
+			return true
+		}
+	}
+	return false
+}
+
 // Ordinary notes and result text cannot introduce graph edges merely by
 // spelling an identity field name; only owned semantic contracts expand scope.
 func incidentOwnedContract(kind string) bool {
-	if strings.Contains(","+strings.ReplaceAll(strings.ReplaceAll(incidentExecutionTypes, "'", ""), "\n", "")+",", ","+kind+",") {
+	if incidentExecutionContract(kind) {
 		return true
 	}
 	switch kind {
@@ -214,7 +223,7 @@ func (d *incidentDependencies) key(kind, id string) {
 		d.keys[key] = false
 	}
 	switch kind {
-	case "work", "intent", "goal", "knowledge":
+	case "work", "intent", "goal", "knowledge", "lab_experiment":
 		if _, ok := d.reverse[key]; !ok {
 			d.reverse[key] = false
 		}
@@ -427,7 +436,7 @@ func (d *incidentDependencies) frontier() (string, []any) {
 		var condition string
 		switch key.kind {
 		case "work":
-			condition = `((json_extract(payload,'$.projection.projection_kind')='task' AND json_extract(payload,'$.projection.value.work_id')=?) OR (event_type='INTENT_CONFIRMED' AND json_extract(payload,'$.replaces_work_id')=?) OR (json_extract(payload,'$.projection.projection_kind') IN ('work','intent') AND json_extract(payload,'$.projection.value.replaces_work_id')=?))`
+			condition = `((json_extract(payload,'$.projection.projection_kind') IN ('task','lab_experiment') AND json_extract(payload,'$.projection.value.work_id')=?) OR (event_type='INTENT_CONFIRMED' AND json_extract(payload,'$.replaces_work_id')=?) OR (json_extract(payload,'$.projection.projection_kind') IN ('work','intent') AND json_extract(payload,'$.projection.value.replaces_work_id')=?))`
 			args = append(args, key.id, key.id, key.id)
 		case "intent":
 			condition = `((json_extract(payload,'$.projection.projection_kind')='work' AND json_extract(payload,'$.projection.value.intent_id')=?) OR (event_type='INTENT_CONFIRMED' AND json_extract(payload,'$.intent_id')=?))`
@@ -437,6 +446,9 @@ func (d *incidentDependencies) frontier() (string, []any) {
 			args = append(args, key.id, key.id)
 		case "knowledge":
 			condition = `(event_type IN ('KNOWLEDGE_PROPOSED','KNOWLEDGE_VALIDATION_RECORDED','KNOWLEDGE_JUDGMENT_PUBLISHED','HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED','A2A_KNOWLEDGE_JUDGMENT_RECEIVED') AND json_extract(payload,'$.knowledge_id')=?)`
+			args = append(args, key.id)
+		case "lab_experiment":
+			condition = `(json_extract(payload,'$.projection.projection_kind')='lab_promotion_candidate' AND json_extract(payload,'$.projection.value.experiment_id')=?)`
 			args = append(args, key.id)
 		}
 		if condition != "" {
@@ -501,10 +513,13 @@ func (d *incidentDependencies) loadRecords(ctx context.Context, tx *sql.Tx) erro
 		var predicate string
 		switch key.kind {
 		case "work":
-			predicate = `(r.kind='task' AND json_extract(r.body,'$.value.work_id')=?) OR (r.kind IN ('work','intent') AND json_extract(r.body,'$.value.replaces_work_id')=?)`
+			predicate = `(r.kind IN ('task','lab_experiment') AND json_extract(r.body,'$.value.work_id')=?) OR (r.kind IN ('work','intent') AND json_extract(r.body,'$.value.replaces_work_id')=?)`
 			args = append(args, key.id, key.id)
 		case "intent":
 			predicate = `r.kind='work' AND json_extract(r.body,'$.value.intent_id')=?`
+			args = append(args, key.id)
+		case "lab_experiment":
+			predicate = `r.kind='lab_promotion_candidate' AND json_extract(r.body,'$.value.experiment_id')=?`
 			args = append(args, key.id)
 		case "goal":
 			predicate = `r.kind IN ('work','intent') AND json_extract(r.body,'$.value.goal_id')=?`
