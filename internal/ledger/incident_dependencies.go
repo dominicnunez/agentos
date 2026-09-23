@@ -278,7 +278,7 @@ func (d *incidentDependencies) key(kind, id string) {
 		d.keys[key] = false
 	}
 	switch kind {
-	case "work", "task", "intent", "goal", "knowledge", "lab_experiment":
+	case "work", "task", "intent", "goal", "mission", "knowledge", "lab_experiment":
 		if _, ok := d.reverse[key]; !ok {
 			d.reverse[key] = false
 		}
@@ -518,6 +518,9 @@ func (d *incidentDependencies) frontier() (string, []any) {
 		d.reverse[key] = true
 		var condition string
 		switch key.kind {
+		case "mission":
+			condition = `(json_extract(payload,'$.projection.projection_kind')='goal' AND json_extract(payload,'$.projection.value.mission_id')=?)`
+			args = append(args, key.id)
 		case "work":
 			condition = `((json_extract(payload,'$.projection.projection_kind') IN ('task','lab_experiment') AND json_extract(payload,'$.projection.value.work_id')=?) OR (event_type='INTENT_CONFIRMED' AND json_extract(payload,'$.replaces_work_id')=?) OR (json_extract(payload,'$.projection.projection_kind') IN ('work','intent') AND json_extract(payload,'$.projection.value.replaces_work_id')=?))`
 			args = append(args, key.id, key.id, key.id)
@@ -597,6 +600,9 @@ func (d *incidentDependencies) loadRecords(ctx context.Context, tx *sql.Tx) erro
 	for _, key := range keys {
 		var predicate string
 		switch key.kind {
+		case "mission":
+			predicate = `r.kind='goal' AND json_extract(r.body,'$.value.mission_id')=?`
+			args = append(args, key.id)
 		case "work":
 			predicate = `(r.kind IN ('task','lab_experiment') AND json_extract(r.body,'$.value.work_id')=?) OR (r.kind IN ('work','intent') AND json_extract(r.body,'$.value.replaces_work_id')=?)`
 			args = append(args, key.id, key.id)
