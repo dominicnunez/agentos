@@ -28,11 +28,11 @@ func (d *incidentDependencies) loadAuthorities(ctx context.Context, tx *sql.Tx) 
 	for _, id := range ids {
 		args = append(args, id)
 	}
-	query := `SELECT kind,record_id,version,body,admission_event_id FROM records WHERE kind='capability_lease' AND record_id IN (` + incidentMarks(len(ids)) + `) ORDER BY record_id,version LIMIT ?`
+	query := `SELECT kind,record_id,version,body,admission_event_id,admission_fingerprint FROM records WHERE kind='capability_lease' AND record_id IN (` + incidentMarks(len(ids)) + `) ORDER BY record_id,version LIMIT ?`
 	args = append(args, d.budget.events+1)
 	var count int
 	var size int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(CAST(body AS BLOB))+length(CAST(record_id AS BLOB))+length(CAST(admission_event_id AS BLOB))),0) FROM (`+query+`)`, args...).Scan(&count, &size); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(CAST(body AS BLOB))+length(CAST(record_id AS BLOB))+length(CAST(admission_event_id AS BLOB))+length(CAST(admission_fingerprint AS BLOB))),0) FROM (`+query+`)`, args...).Scan(&count, &size); err != nil {
 		return err
 	}
 	if count > d.budget.events || size > d.budget.bytes {
@@ -45,8 +45,12 @@ func (d *incidentDependencies) loadAuthorities(ctx context.Context, tx *sql.Tx) 
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var record events.AuthorityRecord
-		if err := rows.Scan(&record.Kind, &record.RecordID, &record.Version, &record.Body, &record.AdmissionEventID); err != nil {
+		var fingerprint string
+		if err := rows.Scan(&record.Kind, &record.RecordID, &record.Version, &record.Body, &record.AdmissionEventID, &fingerprint); err != nil {
 			return err
+		}
+		if fingerprint != "" {
+			return fmt.Errorf("incident authority record carries projection fingerprint")
 		}
 		d.authority = append(d.authority, record)
 		d.ref(record.AdmissionEventID)

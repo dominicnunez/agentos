@@ -82,8 +82,10 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
    relying on shared validators. Reconstruct candidate sets from durable scope
    and time boundaries, independently of claimed references. Compare required
    inputs and invariants with full recovery, including private dependencies and
-   omitted candidates. Document deliberate scope exclusions rather than assuming
-   parity.
+   omitted candidates. Compare every stored metadata field with the owning
+   writer and recovery rules; include forbidden fields in validation and byte
+   preflight rather than dropping them from the selected columns. Document
+   deliberate scope exclusions rather than assuming parity.
 5. Exercise realistic failure paths through actual entry points and durable
    state. Verify forbidden calls and writes do not occur, necessary evidence
    survives, retry and restart behave correctly, and other tenants are unaffected.

@@ -62,7 +62,7 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 	// resolver allocates its evidence. Orphans count toward the same bound.
 	var freezeCount int
 	var freezeBytes int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(COALESCE(length(CAST(body AS BLOB)),0)+COALESCE(`+incidentEventBytes+`,0)),0) FROM (`+freezeHistorySQL+` LIMIT ?)`, organization, organization, organization, organization, limit+1).Scan(&freezeCount, &freezeBytes); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(COALESCE(length(CAST(body AS BLOB)),0)+COALESCE(length(CAST(record_id AS BLOB)),0)+COALESCE(length(CAST(admission_event_id AS BLOB)),0)+COALESCE(length(CAST(admission_fingerprint AS BLOB)),0)+COALESCE(`+incidentEventBytes+`,0)),0) FROM (`+freezeHistorySQL+` LIMIT ?)`, organization, organization, organization, organization, limit+1).Scan(&freezeCount, &freezeBytes); err != nil {
 		return events.IncidentSnapshot{}, err
 	}
 	if freezeCount > limit || freezeBytes > 2<<20 {
@@ -230,10 +230,10 @@ func validateIncidentEffects(ctx context.Context, tx *sql.Tx, organization strin
 		args = append(args, id)
 	}
 	marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-	query := `SELECT record_id,version,body,admission_event_id FROM records WHERE kind='effect' AND record_id IN (` + marks + `) ORDER BY record_id,version LIMIT 257`
+	query := `SELECT record_id,version,body,admission_event_id,admission_fingerprint FROM records WHERE kind='effect' AND record_id IN (` + marks + `) ORDER BY record_id,version LIMIT 257`
 	var count int
 	var size int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(CAST(record_id AS BLOB))+length(CAST(body AS BLOB))+length(CAST(admission_event_id AS BLOB))),0) FROM (`+query+`)`, args...).Scan(&count, &size); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(CAST(record_id AS BLOB))+length(CAST(body AS BLOB))+length(CAST(admission_event_id AS BLOB))+length(CAST(admission_fingerprint AS BLOB))),0) FROM (`+query+`)`, args...).Scan(&count, &size); err != nil {
 		return err
 	}
 	if count != len(stream) || count == 0 || count > 256 || size > 2<<20 {
@@ -247,10 +247,10 @@ func validateIncidentEffects(ctx context.Context, tx *sql.Tx, organization strin
 	indices := map[string]int{}
 	previous := map[string]core.EffectObligation{}
 	for rows.Next() {
-		var id, admission string
+		var id, admission, fingerprint string
 		var version int
 		var body []byte
-		if err := rows.Scan(&id, &version, &body, &admission); err != nil {
+		if err := rows.Scan(&id, &version, &body, &admission, &fingerprint); err != nil {
 			return err
 		}
 		index := indices[id]
@@ -259,7 +259,7 @@ func validateIncidentEffects(ctx context.Context, tx *sql.Tx, organization strin
 		}
 		value, err := core.DecodeEffectObligation(body)
 		event := histories[id][index]
-		if err != nil || !bytes.Equal(body, event.Payload) || version != index+1 || string(value.ID) != id || admission != "" && admission != event.EventID {
+		if err != nil || !bytes.Equal(body, event.Payload) || version != index+1 || string(value.ID) != id || admission != "" || fingerprint != "" {
 			return fmt.Errorf("incident effect record differs from its ordered event")
 		}
 		if err := events.ValidateIncidentEffect(value, previous[id], index == 0); err != nil {

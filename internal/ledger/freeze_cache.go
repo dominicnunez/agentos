@@ -254,13 +254,13 @@ func (l *SQLite) prepareFreeze(ctx context.Context, organization string) (*freez
 }
 
 const freezeTailSQL = `SELECT r.kind,r.record_id,r.version,r.body,r.admission_event_id,
-e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version
+e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version,r.admission_fingerprint
 FROM events e
 LEFT JOIN records r ON r.admission_event_id<>'' AND r.admission_event_id=e.event_id AND r.kind='organization_freeze' AND r.record_id=?
 WHERE e.event_type='FREEZE_SET' AND e.organization_id=? AND e.sequence>?
 UNION ALL
 SELECT r.kind,r.record_id,r.version,r.body,r.admission_event_id,
-e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version
+e.event_id,e.sequence,e.organization_id,e.event_type,e.source_actor_id,e.source_execution_id,e.recipient_scope,e.recipient_id,e.task_id,e.authorization_refs,e.artifact_refs,e.payload,e.correlation_id,e.created_at,e.schema_version,r.admission_fingerprint
 FROM records r
 LEFT JOIN events e ON e.event_id=r.admission_event_id
 WHERE r.kind='organization_freeze' AND r.record_id=? AND r.version>?
