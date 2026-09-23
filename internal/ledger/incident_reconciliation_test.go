@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -205,7 +206,7 @@ func TestIncidentReconciliationHistory(t *testing.T) {
 
 func TestIncidentReservationLinkedEvents(t *testing.T) {
 	for _, eventType := range []string{"INFERENCE_RESERVED", "INFERENCE_RECONCILED"} {
-		for _, scope := range []string{"other-correlation", "other-organization", "other-reservation", "independent-reservation", "malformed-other-org", "malformed-other-correlation", "malformed-independent-correlation"} {
+		for _, scope := range []string{"other-correlation", "other-organization", "foreign-independent-reservation", "other-reservation", "independent-reservation", "malformed-other-org", "malformed-other-correlation", "malformed-independent-correlation"} {
 			t.Run(eventType+"/"+scope, func(t *testing.T) {
 				path := filepath.Join(t.TempDir(), "linked.db")
 				store, err := Open(path)
@@ -235,19 +236,22 @@ func TestIncidentReservationLinkedEvents(t *testing.T) {
 				if scope == "other-organization" || scope == "malformed-other-org" {
 					draft.OrganizationID, draft.CorrelationID = "other-org", original.CorrelationID
 				}
-				if scope == "other-reservation" || scope == "independent-reservation" {
+				if scope == "other-reservation" || scope == "independent-reservation" || scope == "foreign-independent-reservation" {
 					var payload map[string]any
 					if err := json.Unmarshal(original.Payload, &payload); err != nil {
 						t.Fatal(err)
 					}
 					payload["reservation_id"] = "unrelated-reservation"
-					if scope == "independent-reservation" {
+					if scope == "independent-reservation" || scope == "foreign-independent-reservation" {
 						// A new reservation ID alone does not sever the original
 						// execution identity retained by the copied envelope.
 						payload["request_id"] = "unrelated-request"
 						payload["execution_id"] = "unrelated-call"
 						delete(payload, "execution_manifest_ref")
 						draft.SourceExecutionID, draft.TaskID = "unrelated-call", "unrelated-task"
+					}
+					if scope == "foreign-independent-reservation" {
+						draft.OrganizationID = "other-org"
 					}
 					draft.Payload = payload
 				}
@@ -277,10 +281,13 @@ func TestIncidentReservationLinkedEvents(t *testing.T) {
 					t.Fatal(err)
 				}
 				t.Cleanup(func() { _ = store.Close() })
-				_, err = store.VerifiedIncidentEvents(t.Context(), "organization-1", "work-1", 256)
-				if scope == "other-correlation" || scope == "other-reservation" || scope == "malformed-other-correlation" {
+				snapshot, err := store.VerifiedIncidentEvents(t.Context(), "organization-1", "work-1", 256)
+				if scope == "other-correlation" || scope == "other-organization" || scope == "other-reservation" || scope == "malformed-other-correlation" {
 					if err == nil {
-						t.Fatal("same reservation acquired another event under a different correlation")
+						t.Fatal("selected reservation acquired conflicting linked history")
+					}
+					if !reflect.DeepEqual(snapshot, events.IncidentSnapshot{}) {
+						t.Fatal("invalid linked history returned a partial snapshot")
 					}
 				} else if err != nil {
 					t.Fatalf("unrelated evidence affected selected reservation: %v", err)

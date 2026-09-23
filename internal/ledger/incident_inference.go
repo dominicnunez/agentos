@@ -205,16 +205,16 @@ func validateIncidentInferenceBudget(ctx context.Context, tx *sql.Tx, stream []e
 			return fmt.Errorf("incident inference accounting lacks its exact admission history")
 		}
 	}
-	if err := validateIncidentInferenceLinks(ctx, tx, organization, accounting); err != nil {
+	if err := validateIncidentInferenceLinks(ctx, tx, accounting); err != nil {
 		return err
 	}
 	return nil
 }
 
 // Exact selected events already prove each expected row and terminal state.
-// Count all same-organization events linked to those reservation identities so
-// an extra event cannot escape validation by claiming another correlation.
-func validateIncidentInferenceLinks(ctx context.Context, tx *sql.Tx, organization string, accounting map[string]*incidentAccounting) error {
+// Count all events linked to those globally unique reservation identities so
+// an extra event cannot escape validation by claiming another scope.
+func validateIncidentInferenceLinks(ctx context.Context, tx *sql.Tx, accounting map[string]*incidentAccounting) error {
 	if len(accounting) == 0 {
 		return nil
 	}
@@ -227,15 +227,14 @@ func validateIncidentInferenceLinks(ctx context.Context, tx *sql.Tx, organizatio
 		}
 	}
 	sort.Strings(ids)
-	args := make([]any, 0, len(ids)+2)
-	args = append(args, organization)
+	args := make([]any, 0, len(ids)+1)
 	for _, id := range ids {
 		args = append(args, id)
 	}
 	args = append(args, expected+1)
 	marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
 	var count int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM events WHERE organization_id=? AND event_type IN ('INFERENCE_RESERVED','INFERENCE_RECONCILED') AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.reservation_id') END IN (`+marks+`) LIMIT ?)`, args...).Scan(&count); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM events WHERE event_type IN ('INFERENCE_RESERVED','INFERENCE_RECONCILED') AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.reservation_id') END IN (`+marks+`) LIMIT ?)`, args...).Scan(&count); err != nil {
 		return err
 	}
 	if count != expected {
