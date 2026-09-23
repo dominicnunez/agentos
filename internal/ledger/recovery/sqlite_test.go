@@ -487,6 +487,18 @@ func TestVerifyRejectsKnowledgeWhenValidatorLeaseRecordIsMissing(t *testing.T) {
 	if _, err := Verify(ctx, path); err != nil {
 		t.Fatalf("verify complete validator lease: %v", err)
 	}
+	store, err = ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	snapshot, err := store.VerifiedIncidentEvents(ctx, "org-1", "knowledge-knowledge-human", 256)
+	if err != nil {
+		t.Fatalf("incident rejected human Knowledge validation: %v", err)
+	}
+	if _, err := replay.ProjectIncident(snapshot, "knowledge-knowledge-human"); err != nil {
+		t.Fatal(err)
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -497,6 +509,9 @@ func TestVerifyRejectsKnowledgeWhenValidatorLeaseRecordIsMissing(t *testing.T) {
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := store.VerifiedIncidentEvents(ctx, "org-1", "knowledge-knowledge-human", 256); err == nil {
+		t.Fatal("incident accepted missing validator lease record")
 	}
 	if _, err := Verify(ctx, path); err == nil || !strings.Contains(err.Error(), "authority admission event") {
 		t.Fatalf("missing validator lease record was certified: %v", err)

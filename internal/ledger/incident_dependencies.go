@@ -195,7 +195,7 @@ func incidentOwnedContract(kind string) bool {
 	case "INTENT_CONFIRMED", "INTAKE_MESSAGE_RECORDED", "HUMAN_INPUT_RECEIVED", "A2A_INPUT_RECEIVED",
 		"WORK_COMPLETION_EVALUATED", "GOAL_PROGRESS_EVALUATED", "EVIDENCE_PUBLISHED", "COMPLETION_REVIEW_REQUESTED", "COMPLETION_REVIEW_DECIDED", "INBOX_EVENTS_OBSERVED",
 		"CAPABILITY_GRANTED", "CAPABILITY_REVOKED", "CAPABILITY_CHECKED", "FREEZE_SET",
-		"HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED", "A2A_KNOWLEDGE_JUDGMENT_RECEIVED", "KNOWLEDGE_JUDGMENT_PUBLISHED", "KNOWLEDGE_VALIDATION_RECORDED":
+		"HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED", "A2A_KNOWLEDGE_JUDGMENT_RECEIVED", "KNOWLEDGE_JUDGMENT_PUBLISHED", "KNOWLEDGE_VALIDATION_RECORDED", "KNOWLEDGE_PROPOSED":
 		return true
 	}
 	return false
@@ -427,16 +427,16 @@ func (d *incidentDependencies) frontier() (string, []any) {
 		var condition string
 		switch key.kind {
 		case "work":
-			condition = `((json_extract(payload,'$.projection.projection_kind')='task' AND json_extract(payload,'$.projection.value.work_id')=?) OR json_extract(payload,'$.replaces_work_id')=? OR json_extract(payload,'$.projection.value.replaces_work_id')=?)`
+			condition = `((json_extract(payload,'$.projection.projection_kind')='task' AND json_extract(payload,'$.projection.value.work_id')=?) OR (event_type='INTENT_CONFIRMED' AND json_extract(payload,'$.replaces_work_id')=?) OR (json_extract(payload,'$.projection.projection_kind') IN ('work','intent') AND json_extract(payload,'$.projection.value.replaces_work_id')=?))`
 			args = append(args, key.id, key.id, key.id)
 		case "intent":
 			condition = `((json_extract(payload,'$.projection.projection_kind')='work' AND json_extract(payload,'$.projection.value.intent_id')=?) OR (event_type='INTENT_CONFIRMED' AND json_extract(payload,'$.intent_id')=?))`
 			args = append(args, key.id, key.id)
 		case "goal":
-			condition = `(json_extract(payload,'$.projection.value.goal_id')=? OR json_extract(payload,'$.goal_id')=?)`
+			condition = `((json_extract(payload,'$.projection.projection_kind') IN ('work','intent') AND json_extract(payload,'$.projection.value.goal_id')=?) OR (event_type IN ('INTENT_CONFIRMED','WORK_COMPLETION_EVALUATED','GOAL_PROGRESS_EVALUATED') AND json_extract(payload,'$.goal_id')=?))`
 			args = append(args, key.id, key.id)
 		case "knowledge":
-			condition = `json_extract(payload,'$.knowledge_id')=?`
+			condition = `(event_type IN ('KNOWLEDGE_PROPOSED','KNOWLEDGE_VALIDATION_RECORDED','KNOWLEDGE_JUDGMENT_PUBLISHED','HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED','A2A_KNOWLEDGE_JUDGMENT_RECEIVED') AND json_extract(payload,'$.knowledge_id')=?)`
 			args = append(args, key.id)
 		}
 		if condition != "" {
