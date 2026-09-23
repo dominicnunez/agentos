@@ -1,11 +1,10 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
-	"reflect"
 	"sort"
 	"strings"
 
@@ -257,8 +256,7 @@ func validateIncidentEffects(ctx context.Context, tx *sql.Tx, organization strin
 		}
 		value, err := core.DecodeEffectObligation(body)
 		event := histories[id][index]
-		var recorded core.EffectObligation
-		if err != nil || json.Unmarshal(event.Payload, &recorded) != nil || !reflect.DeepEqual(recorded, value) || version != index+1 || string(value.ID) != id || admission != "" && admission != event.EventID {
+		if err != nil || !bytes.Equal(body, event.Payload) || version != index+1 || string(value.ID) != id || admission != "" && admission != event.EventID {
 			return fmt.Errorf("incident effect record differs from its ordered event")
 		}
 		if err := events.ValidateIncidentEffect(value, previous[id], index == 0); err != nil {
