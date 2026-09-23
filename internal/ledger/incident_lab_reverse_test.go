@@ -95,11 +95,12 @@ func MoveIncidentProjectionForTest(t *testing.T, store *SQLite, kind, missing st
 		if _, err = tx.ExecContext(t.Context(), `UPDATE records SET body=?,admission_fingerprint=? WHERE admission_event_id=?`, body, sealed.Admission.Fingerprint, id); err != nil {
 			return err
 		}
-		if missing == "event" {
+		switch missing {
+		case "event":
 			if _, err = tx.ExecContext(t.Context(), `DELETE FROM events WHERE event_id=?`, id); err != nil {
 				return err
 			}
-		} else if missing == "record" {
+		case "record":
 			if _, err = tx.ExecContext(t.Context(), `DELETE FROM records WHERE admission_event_id=?`, id); err != nil {
 				return err
 			}
