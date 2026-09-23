@@ -54,10 +54,13 @@ supporting evidence fails the request even when the selected event count fits.
 The reader privately loads the retained projection histories and referenced
 evidence needed to validate the selection, including reviewed Intent, roster,
 execution, completion, and Knowledge dependencies. It uses the shared historical
-admission and completion validators. These dependencies are not added to the
-public timeline. Their aggregate loading budget is 4,096 supporting items and
-32 MiB, including supporting records; a valid but larger dependency history
-also fails the request. The complete integrity-chain check
+admission and completion validators. Input candidates are selected from the
+execution's durable scope and cutoff, independently of the manifest's claimed
+references. Linked intake and private Task histories retain their conflicting
+terminal events even when their correlation differs. These dependencies are not
+added to the public timeline. Their aggregate loading budget is 4,096 supporting
+items and 32 MiB, including supporting records and admission annotations; a valid
+but larger dependency history also fails the request. The complete integrity-chain check
 still reads the ledger on each request, so cost grows with retained history.
 
 Predecessor links express recorded ordering within the combined selected

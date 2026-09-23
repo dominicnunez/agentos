@@ -30,6 +30,9 @@ type incidentDependencies struct {
 	backed             map[string]bool
 	authority          []events.AuthorityRecord
 	selectedRecords    map[int64]bool
+	inboxStarts        map[string]bool
+	factualStarts      map[string]bool
+	inboxRows          map[string]bool
 	tooManyKeys        bool
 }
 
@@ -51,6 +54,15 @@ func loadIncidentDependencies(ctx context.Context, tx *sql.Tx, snapshot *events.
 		}
 	}
 	for {
+		if err := d.loadExecutionEvidence(ctx, tx); err != nil {
+			return err
+		}
+		if err := d.loadInboxCandidates(ctx, tx); err != nil {
+			return err
+		}
+		if err := d.loadFactualCandidates(ctx, tx); err != nil {
+			return err
+		}
 		where, args := d.frontier()
 		if where == "" {
 			break
@@ -102,6 +114,9 @@ func loadIncidentDependencies(ctx context.Context, tx *sql.Tx, snapshot *events.
 		stream = append(stream, event)
 	}
 	sort.Slice(stream, func(i, j int) bool { return stream[i].Sequence < stream[j].Sequence })
+	if err := validateIncidentManifests(ctx, tx, stream, snapshot.InboxObservations); err != nil {
+		return err
+	}
 	correlations := make([]string, 0, len(d.correlations))
 	for correlation := range d.correlations {
 		correlations = append(correlations, correlation)
@@ -133,8 +148,21 @@ func (d *incidentDependencies) add(event events.Event) error {
 
 func (d *incidentDependencies) discoverEvent(event events.Event, projection events.ProjectionEventPayload, present bool) error {
 	switch event.EventType {
-	case "PLAN_CREATED", "INTENT_CONFIRMED", "INTAKE_RECEIVED", "INTENT_DRAFTED":
+	case "PLAN_CREATED", "INTENT_CONFIRMED", "INTAKE_RECEIVED", "INTAKE_MESSAGE_RECORDED", "INTENT_NORMALIZATION_CONTEXT_MANIFESTED", "INTENT_DRAFTED", "INTAKE_ABANDONED":
 		d.correlation(event.CorrelationID)
+	}
+	// Message identities connect intake lifecycle events even when a retained
+	// event has been moved away from its original correlation.
+	if incidentIntakeContract(event.EventType) {
+		var payload struct {
+			MessageID       string `json:"message_id"`
+			SourceMessageID string `json:"source_message_id"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return err
+		}
+		d.key("intake_message", payload.MessageID)
+		d.key("intake_message", payload.SourceMessageID)
 	}
 	d.key("organization", event.OrganizationID)
 	if event.TaskID != "" {
@@ -167,6 +195,15 @@ func (d *incidentDependencies) discoverEvent(event events.Event, projection even
 		d.key("capability_lease", lease.ID)
 	}
 	if present {
+		if projection.Projection.ProjectionKind == "intent" {
+			var intent struct {
+				SourceMessageID string `json:"source_message_id"`
+			}
+			if err := json.Unmarshal(projection.Projection.Value, &intent); err != nil {
+				return err
+			}
+			d.key("intake_message", intent.SourceMessageID)
+		}
 		d.key(projection.Projection.ProjectionKind, projection.Projection.RecordID)
 		switch projection.Projection.ProjectionKind {
 		case "intent", "work", "task", "lab_experiment", "lab_promotion_candidate":
@@ -193,6 +230,16 @@ func (d *incidentDependencies) discoverEvent(event events.Event, projection even
 	return nil
 }
 
+const incidentIntakeTypes = "'INTAKE_MESSAGE_RECORDED','INTENT_NORMALIZATION_CONTEXT_MANIFESTED','INTENT_DRAFTED','INTAKE_ABANDONED','INTENT_CONFIRMED'"
+
+func incidentIntakeContract(kind string) bool {
+	switch kind {
+	case "INTAKE_MESSAGE_RECORDED", "INTENT_NORMALIZATION_CONTEXT_MANIFESTED", "INTENT_DRAFTED", "INTAKE_ABANDONED", "INTENT_CONFIRMED":
+		return true
+	}
+	return false
+}
+
 func incidentExecutionContract(kind string) bool {
 	for _, token := range strings.Split(incidentExecutionTypes, ",") {
 		if strings.Trim(strings.TrimSpace(token), "'") == kind {
@@ -205,7 +252,7 @@ func incidentExecutionContract(kind string) bool {
 // Ordinary notes and result text cannot introduce graph edges merely by
 // spelling an identity field name; only owned semantic contracts expand scope.
 func incidentOwnedContract(kind string) bool {
-	if incidentExecutionContract(kind) {
+	if incidentExecutionContract(kind) || incidentIntakeContract(kind) {
 		return true
 	}
 	switch kind {
@@ -402,9 +449,13 @@ func (d *incidentDependencies) frontier() (string, []any) {
 	if len(identities) > 0 {
 		var pairs []string
 		var leaseIDs []string
+		var messageIDs []string
 		for _, key := range identities {
 			pairs = append(pairs, "(?,?)")
 			args = append(args, key.kind, key.id)
+			if key.kind == "intake_message" {
+				messageIDs = append(messageIDs, key.id)
+			}
 			if key.kind == "capability_lease" {
 				leaseIDs = append(leaseIDs, key.id)
 			}
@@ -414,6 +465,15 @@ func (d *incidentDependencies) frontier() (string, []any) {
 		parts = append(parts, `event_id IN (SELECT admission_event_id FROM records WHERE (kind,record_id) IN (`+marks+`))`)
 		for _, key := range identities {
 			args = append(args, key.kind, key.id)
+		}
+		if len(messageIDs) > 0 {
+			parts = append(parts, `(organization_id=? AND event_type IN (`+incidentIntakeTypes+`) AND (CASE WHEN json_valid(payload) THEN json_extract(payload,'$.message_id') END IN (`+incidentMarks(len(messageIDs))+`) OR CASE WHEN json_valid(payload) THEN json_extract(payload,'$.source_message_id') END IN (`+incidentMarks(len(messageIDs))+`)))`)
+			args = append(args, d.organization)
+			for range 2 {
+				for _, id := range messageIDs {
+					args = append(args, id)
+				}
+			}
 		}
 		// Lease events carry their identity directly, not in a projection.
 		// Select the full lifecycle even when its backing record was removed.

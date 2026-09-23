@@ -79,9 +79,11 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
 4. Implement a complete, cohesive invariant across its callers. Prefer an
    existing shared boundary that owns the rule over multiple partial fixes.
    For filtered readers, check selection completeness in both directions before
-   relying on shared validators. Compare their required inputs and invariants
-   with full recovery, and test invalid retained history that the filter could
-   hide. Document deliberate scope exclusions rather than assuming parity.
+   relying on shared validators. Reconstruct candidate sets from durable scope
+   and time boundaries, independently of claimed references. Compare required
+   inputs and invariants with full recovery, including private dependencies and
+   omitted candidates. Document deliberate scope exclusions rather than assuming
+   parity.
 5. Exercise realistic failure paths through actual entry points and durable
    state. Verify forbidden calls and writes do not occur, necessary evidence
    survives, retry and restart behave correctly, and other tenants are unaffected.

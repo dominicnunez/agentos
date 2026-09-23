@@ -15,6 +15,24 @@ func incidentExecutionHistory(ctx context.Context, tx *sql.Tx, work []events.Eve
 	if len(work) == 0 {
 		return nil, nil
 	}
+	where, args, err := incidentExecutionSelection(work)
+	if err != nil {
+		return nil, err
+	}
+	where += ` AND correlation_id<>?`
+	args = append(args, work[0].CorrelationID)
+	additional, err := incidentEvents(ctx, tx, budget, where, args...)
+	if err != nil {
+		return nil, err
+	}
+	stream := append(append([]events.Event(nil), work...), additional...)
+	sort.Slice(stream, func(i, j int) bool { return stream[i].Sequence < stream[j].Sequence })
+	return stream, nil
+}
+
+// The same inverse relationships apply when an execution is private supporting
+// evidence rather than part of the displayed Work.
+func incidentExecutionSelection(work []events.Event) (string, []any, error) {
 	refs := make([]string, 0, len(work))
 	executions := map[string]bool{}
 	tasks := map[string]bool{}
@@ -29,7 +47,7 @@ func incidentExecutionHistory(ctx context.Context, tx *sql.Tx, work []events.Eve
 		if event.EventType == "EXECUTION_STARTED" {
 			id, err := events.ContainmentExecutionID(event)
 			if err != nil {
-				return nil, err
+				return "", nil, err
 			}
 			executions[id] = true
 		}
@@ -45,7 +63,7 @@ func incidentExecutionHistory(ctx context.Context, tx *sql.Tx, work []events.Eve
 		taskIDs = append(taskIDs, id)
 	}
 	sort.Strings(taskIDs)
-	args := []any{work[0].OrganizationID, work[0].CorrelationID}
+	args := []any{work[0].OrganizationID}
 	links := ""
 	if len(ids) != 0 {
 		links = `source_execution_id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + `) OR `
@@ -79,7 +97,7 @@ func incidentExecutionHistory(ctx context.Context, tx *sql.Tx, work []events.Eve
 	}
 	_, reservationIDs, _, err := incidentInferenceRequirements(work)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	if len(reservationIDs) != 0 {
 		links += ` OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END) WHERE key='reservation_id' AND value IN (` + strings.TrimSuffix(strings.Repeat("?,", len(reservationIDs)), ",") + `))`
@@ -88,11 +106,5 @@ func incidentExecutionHistory(ctx context.Context, tx *sql.Tx, work []events.Eve
 		}
 	}
 	links += `))`
-	additional, err := incidentEvents(ctx, tx, budget, `organization_id=? AND correlation_id<>? AND (`+links+`)`, args...)
-	if err != nil {
-		return nil, err
-	}
-	stream := append(append([]events.Event(nil), work...), additional...)
-	sort.Slice(stream, func(i, j int) bool { return stream[i].Sequence < stream[j].Sequence })
-	return stream, nil
+	return `organization_id=? AND (` + links + `)`, args, nil
 }

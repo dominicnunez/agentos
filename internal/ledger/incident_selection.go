@@ -117,7 +117,9 @@ func incidentReferenceSQL(seeds int) string {
 	recordTargets := fmt.Sprintf(`SELECT locator FROM (SELECT rowid AS locator FROM records WHERE kind=walk.kind AND record_id=walk.identity LIMIT %[1]d)
  UNION SELECT locator FROM (SELECT r.rowid AS locator FROM records r LEFT JOIN events e ON e.event_id=r.admission_event_id WHERE walk.kind='work' AND r.kind IN ('work','intent') AND CASE WHEN json_valid(r.body) THEN json_extract(r.body,'$.value.replaces_work_id') END=walk.identity AND (e.organization_id=(SELECT organization FROM config) OR e.event_id IS NULL) LIMIT %[1]d) LIMIT %[1]d`, events.MaximumIncidentEvidence+1)
 	eventTargets := fmt.Sprintf(`SELECT locator FROM (SELECT sequence AS locator FROM events WHERE walk.kind='correlation' AND organization_id=(SELECT organization FROM config) AND correlation_id=walk.identity LIMIT %[1]d)
- UNION SELECT locator FROM (SELECT sequence AS locator FROM events WHERE walk.kind='execution' AND organization_id=(SELECT organization FROM config) AND source_execution_id=walk.identity LIMIT %[1]d) LIMIT %[1]d`, events.MaximumIncidentEvidence+1)
+ UNION SELECT locator FROM (SELECT sequence AS locator FROM events WHERE walk.kind='execution' AND organization_id=(SELECT organization FROM config) AND source_execution_id=walk.identity LIMIT %[1]d)
+ UNION SELECT locator FROM (SELECT sequence AS locator FROM events WHERE walk.kind='intake_message' AND organization_id=(SELECT organization FROM config) AND event_type IN (`+incidentIntakeTypes+`) AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.message_id') END=walk.identity LIMIT %[1]d)
+ UNION SELECT locator FROM (SELECT sequence AS locator FROM events WHERE walk.kind='intake_message' AND organization_id=(SELECT organization FROM config) AND event_type IN (`+incidentIntakeTypes+`) AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.source_message_id') END=walk.identity LIMIT %[1]d) LIMIT %[1]d`, events.MaximumIncidentEvidence+1)
 	bounded := func(query string) string {
 		return fmt.Sprintf(`(SELECT CASE WHEN count(*)>%d THEN json_array(NULL) ELSE json_group_array(locator) END FROM (%s))`, events.MaximumIncidentEvidence, query)
 	}
@@ -133,9 +135,9 @@ func incidentReferenceSQL(seeds int) string {
  LEFT JOIN events target ON target.event_id=json_extract(edge.value,'$.id') AND json_extract(edge.value,'$.kind')='event'
  WHERE walk.phase=2 AND (json_extract(edge.value,'$.kind')<>'event' OR target.sequence IS NOT NULL)
  UNION SELECT COALESCE(edge.value,0),CASE WHEN edge.type='null' THEN -1 ELSE 0 END,'@record',''
- FROM walk JOIN json_each(` + bounded(recordTargets) + `) edge WHERE phase=1 AND kind NOT IN ('correlation','execution')
+ FROM walk JOIN json_each(` + bounded(recordTargets) + `) edge WHERE phase=1 AND kind NOT IN ('correlation','execution','intake_message')
  UNION SELECT COALESCE(edge.value,0),CASE WHEN edge.type='null' THEN -1 ELSE 0 END,'',''
- FROM walk JOIN json_each(` + bounded(eventTargets) + `) edge WHERE phase=1 AND kind IN ('correlation','execution')
+ FROM walk JOIN json_each(` + bounded(eventTargets) + `) edge WHERE phase=1 AND kind IN ('correlation','execution','intake_message')
  UNION SELECT e.sequence,0,'','' FROM walk JOIN records r ON r.rowid=walk.sequence JOIN events e ON e.event_id=r.admission_event_id WHERE walk.phase=2 AND walk.kind='@record'
  ORDER BY 2)
  SELECT walk.sequence,walk.phase,walk.kind,walk.identity,e.event_id,e.organization_id,CASE WHEN walk.kind='@record' THEN ` + incidentProjectionRecordBytes + ` ELSE ` + incidentProjectionEventBytes + ` END

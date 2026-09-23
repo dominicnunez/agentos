@@ -107,7 +107,11 @@ ON events(organization_id,correlation_id,source_execution_id,event_type,sequence
 const storageSchemaV13SQL = `CREATE INDEX IF NOT EXISTS records_replaced_work_idx
 ON records(kind, CASE WHEN json_valid(body) THEN json_extract(body,'$.value.replaces_work_id') END, version);
 CREATE INDEX IF NOT EXISTS events_incident_execution_idx
-ON events(organization_id,source_execution_id,sequence);`
+ON events(organization_id,source_execution_id,sequence);
+CREATE INDEX IF NOT EXISTS events_message_idx
+ON events(organization_id, CASE WHEN json_valid(payload) THEN json_extract(payload,'$.message_id') END, event_type, sequence);
+CREATE INDEX IF NOT EXISTS events_source_message_idx
+ON events(organization_id, CASE WHEN json_valid(payload) THEN json_extract(payload,'$.source_message_id') END, event_type, sequence);`
 
 const storageSchemaV1SQL = `CREATE TABLE events (
 sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, organization_id TEXT NOT NULL,
@@ -707,7 +711,7 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 		}
 	}
 	if version >= 13 {
-		for index, table := range map[string]string{"records_replaced_work_idx": "records", "events_incident_execution_idx": "events"} {
+		for index, table := range map[string]string{"records_replaced_work_idx": "records", "events_incident_execution_idx": "events", "events_message_idx": "events", "events_source_message_idx": "events"} {
 			var count int
 			if err := query.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name=? AND tbl_name=?`, index, table).Scan(&count); err != nil {
 				return StorageContract{}, err
