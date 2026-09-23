@@ -2,10 +2,32 @@ package replay
 
 import (
 	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/dominicnunez/agentos/internal/events"
 )
+
+func TestProjectIncidentBoundsAdmissions(t *testing.T) {
+	for _, name := range []string{"items", "bytes"} {
+		t.Run(name, func(t *testing.T) {
+			snapshot := incidentFixture(t)
+			if name == "items" {
+				snapshot.Admissions = make([]events.IncidentAdmission, events.MaximumIncidentEvidence+1)
+			} else {
+				snapshot.Admissions[0].ExecutionID = strings.Repeat("x", events.MaximumIncidentEvidenceBytes+1)
+			}
+			report, err := ProjectIncident(snapshot, "conversation")
+			if err == nil || !strings.Contains(err.Error(), "bound") {
+				t.Fatalf("expected evidence bound before admission projection, got %v", err)
+			}
+			if !reflect.DeepEqual(report, Report{}) {
+				t.Fatal("oversized evidence returned a partial report")
+			}
+		})
+	}
+}
 
 func TestProjectIncidentRequiresEveryAdmission(t *testing.T) {
 	for _, name := range []string{"inference", "effect"} {

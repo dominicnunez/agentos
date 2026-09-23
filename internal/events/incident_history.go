@@ -15,7 +15,7 @@ const (
 // Exact database selection, backing projection records and ledger integrity are
 // the reader's responsibility. Dependencies never become displayed Work events.
 func ValidateIncidentHistory(snapshot IncidentSnapshot) (map[string]int64, error) {
-	if err := boundIncidentEvidence(snapshot); err != nil {
+	if err := ValidateIncidentBounds(snapshot); err != nil {
 		return nil, err
 	}
 	stream := make([]Event, 0, len(snapshot.Work.Events)+len(snapshot.RelatedEvents)+len(snapshot.DependencyEvents))
@@ -110,12 +110,20 @@ func validateIncidentInbox(snapshot IncidentSnapshot, stream []Event) error {
 	return nil
 }
 
-func boundIncidentEvidence(snapshot IncidentSnapshot) error {
-	count := len(snapshot.DependencyEvents) + len(snapshot.AuthorityRecords) + len(snapshot.FreezeRecords) + len(snapshot.InboxObservations)
+// ValidateIncidentBounds checks the complete evidence budget before consumers
+// allocate derived indexes or return an assembled snapshot.
+func ValidateIncidentBounds(snapshot IncidentSnapshot) error {
+	count := len(snapshot.DependencyEvents) + len(snapshot.AuthorityRecords) + len(snapshot.FreezeRecords) + len(snapshot.InboxObservations) + len(snapshot.Admissions)
 	if count > MaximumIncidentEvidence || len(snapshot.Work.Events)+len(snapshot.RelatedEvents) > 256 {
 		return fmt.Errorf("incident supporting evidence exceeds its item bound")
 	}
 	remaining := MaximumIncidentEvidenceBytes
+	for _, admission := range snapshot.Admissions {
+		remaining -= len(admission.EventRef) + len(admission.Kind) + len(admission.TaskID) + len(admission.ExecutionID)
+		if remaining < 0 {
+			return fmt.Errorf("incident admission evidence exceeds its byte bound")
+		}
+	}
 	for _, stream := range [][]Event{snapshot.Work.Events, snapshot.RelatedEvents, snapshot.DependencyEvents} {
 		for _, event := range stream {
 			remaining -= len(event.Payload) + len(event.EventID) + len(event.OrganizationID) + len(event.CorrelationID) + len(event.EventType) + len(event.SourceActorID) + len(event.SourceExecutionID) + len(event.RecipientID) + len(event.RecipientScope) + len(event.TaskID)

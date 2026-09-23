@@ -102,6 +102,9 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 	if err != nil {
 		return events.IncidentSnapshot{}, err
 	}
+	if err := events.ValidateIncidentBounds(snapshot); err != nil {
+		return events.IncidentSnapshot{}, err
+	}
 	return snapshot, nil
 }
 

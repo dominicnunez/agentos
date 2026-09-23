@@ -80,13 +80,13 @@ func ProjectIncident(snapshot events.IncidentSnapshot, conversationID string) (R
 	if _, err := Project(snapshot.Work, conversationID); err != nil {
 		return Report{}, err
 	}
-	combined := snapshot.Work
-	combined.Events = append([]events.Event(nil), snapshot.Work.Events...)
-	related := make(map[string]bool, len(snapshot.RelatedEvents))
 	tasks, err := events.ValidateIncidentHistory(snapshot)
 	if err != nil {
 		return Report{}, err
 	}
+	combined := snapshot.Work
+	combined.Events = append([]events.Event(nil), snapshot.Work.Events...)
+	related := make(map[string]bool, len(snapshot.RelatedEvents))
 	for _, event := range snapshot.RelatedEvents {
 		if event.EventType != "FREEZE_SET" && (event.EventType != "EFFECT_OBLIGATION_TRANSITIONED" || (tasks[event.TaskID] == 0 || event.Sequence <= tasks[event.TaskID])) {
 			return Report{}, fmt.Errorf("incident has unrelated evidence")
