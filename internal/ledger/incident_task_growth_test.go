@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/dominicnunez/agentos/internal/core"
+	"github.com/dominicnunez/agentos/internal/events"
 )
 
 func TestIncidentDistinctTaskGrowth(t *testing.T) {
@@ -16,8 +19,23 @@ func TestIncidentDistinctTaskGrowth(t *testing.T) {
 			t.Cleanup(func() { _ = store.Close() })
 			appendTaskProjectionParents(t, t.Context(), store, "org-1", "many-tasks", "work-1")
 			agent, config := appendTaskAssignmentAgent(t, t.Context(), store, "org-1", "many-tasks", false)
+			// The supported closed-set writer admits the same Task history in one
+			// transaction, without rebuilding the entire graph after each Task.
+			drafts := make([]events.ProjectionDraft, 0, count)
 			for i := range count {
-				appendPendingAgentExecutionTask(t, t.Context(), store, "many-tasks", fmt.Sprintf("task-%d", i), agent, config)
+				id := fmt.Sprintf("task-%d", i)
+				task := core.Task{
+					ID: core.ID(id), WorkID: "work-1", Description: "bounded Agent work", ExecutionKind: core.ExecutionAgent,
+					ModelInferencePolicy: core.InferenceAllowed, AssigneeType: "AGENT", AssigneeID: agent.ID, AgentConfig: &config,
+					TaskContractVersion: "1", Status: core.TaskPending,
+				}
+				drafts = append(drafts, events.ProjectionDraft{
+					Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "TASK_CREATED", SourceActorID: "runtime", TaskID: id, CorrelationID: "many-tasks"},
+					ProjectionKind: "task", RecordID: id, Version: 1, Value: task,
+				})
+			}
+			if _, err := store.AppendProjections(t.Context(), drafts); err != nil {
+				t.Fatal(err)
 			}
 			started := time.Now()
 			for range 5 {
