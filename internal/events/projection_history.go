@@ -32,6 +32,7 @@ func ValidateProjectionHistory(stream []Event, inboxObservations map[string]Inbo
 	ordered := append([]Event(nil), stream...)
 	sort.Slice(ordered, func(left, right int) bool { return ordered[left].Sequence < ordered[right].Sequence })
 	reviewEvidence := IndexReviewedIntentEvidence(ordered)
+	startHistory := newExecutionHistory(ordered)
 	tasks := make(map[core.ID]core.DurableState[core.Task])
 	agents := make(map[core.ID]core.DurableState[core.Agent])
 	missions := make(map[core.ID]core.DurableState[core.Mission])
@@ -224,10 +225,10 @@ func ValidateProjectionHistory(stream []Event, inboxObservations map[string]Inbo
 				err = validateProjectionEventLifecycle(event, record, "Task", tasks, func(value core.Task) core.ID { return value.ID }, true, ValidateTaskProjectionTransition)
 			}
 			if err == nil {
-				err = validateProjectionTaskAtAdmission(value, event, record, graph, ordered)
+				err = validateProjectionTaskAtAdmission(value, event, record, graph, startHistory)
 			}
 			if err == nil && event.EventType == "TASK_VERIFIED_COMPLETE" {
-				err = validateTaskCompletionAtAdmission(value, event, record, graph, ordered, teamRecords[event.OrganizationID], inboxObservations, blueprintRevisions, profileRevisions)
+				err = validateTaskCompletionAtAdmission(value, event, record, graph, ordered, teamRecords[event.OrganizationID], inboxObservations, blueprintRevisions, profileRevisions, startHistory)
 			}
 			if err == nil {
 				err = core.AdmitDurableRevision(graph.Tasks, value.ID, record.Version, record.CorrelationID, value, true, core.ValidTaskRevision)
@@ -346,7 +347,7 @@ func IntentRequiresConfirmation(intent core.Intent) bool {
 	return intent.GoalID != "" || intent.ReplacesWorkID != "" || intent.SourceChannel == "HUMAN_DIRECT" || intent.SourceChannel == "A2A" || intent.SourcePrincipalKind == core.PrincipalHuman || intent.SourcePrincipalKind == core.PrincipalExternalAgent
 }
 
-func validateProjectionTaskAtAdmission(task core.Task, event Event, record ProjectionRecord, graph core.DurableGraph, stream []Event) error {
+func validateProjectionTaskAtAdmission(task core.Task, event Event, record ProjectionRecord, graph core.DurableGraph, startHistory *executionHistory) error {
 	work, found := graph.Works[task.WorkID]
 	if !found || work.CorrelationID != record.CorrelationID || work.Value.ID != task.WorkID || work.Value.Status != core.WorkActive {
 		return fmt.Errorf("task requires its exact active Work on the same correlation boundary")
@@ -359,7 +360,7 @@ func validateProjectionTaskAtAdmission(task core.Task, event Event, record Proje
 		return err
 	}
 	if event.EventType == "EXECUTION_STARTED" {
-		return ValidateTaskExecutionStart(event, task, record.Version, work.Value, intent.Value, stream)
+		return startHistory.validate(event, task, record.Version, work.Value, intent.Value)
 	}
 	return nil
 }
@@ -471,7 +472,7 @@ func priorEventByID(stream []Event, beforeSequence int64, eventID string) (Event
 	return Event{}, false
 }
 
-func validateTaskCompletionAtAdmission(task core.Task, event Event, record ProjectionRecord, graph core.DurableGraph, stream []Event, teamRecords [][]byte, inboxObservations map[string]InboxObservationBinding, blueprintRevisions map[core.ID]map[string]core.AgentBlueprint, profileRevisions map[core.ID]map[string]core.ExecutionProfile) error {
+func validateTaskCompletionAtAdmission(task core.Task, event Event, record ProjectionRecord, graph core.DurableGraph, stream []Event, teamRecords [][]byte, inboxObservations map[string]InboxObservationBinding, blueprintRevisions map[core.ID]map[string]core.AgentBlueprint, profileRevisions map[core.ID]map[string]core.ExecutionProfile, startHistory *executionHistory) error {
 	work, found := graph.Works[task.WorkID]
 	if !found {
 		return fmt.Errorf("completed Task lacks its durable Work")
@@ -517,7 +518,8 @@ func validateTaskCompletionAtAdmission(task core.Task, event Event, record Proje
 		return fmt.Errorf("resolve completed Task Team history: %w", err)
 	}
 	binding := WorkCompletionBinding{
-		OrganizationID: event.OrganizationID, CorrelationID: record.CorrelationID,
+		executionHistory: startHistory,
+		OrganizationID:   event.OrganizationID, CorrelationID: record.CorrelationID,
 		Work: work.Value, WorkVersion: work.Version, Intent: intent.Value, Tasks: tasks,
 		TeamRevisions: teamRevisions, InboxObservations: inboxObservations, AgentBlueprints: blueprints, ExecutionProfiles: profiles,
 	}

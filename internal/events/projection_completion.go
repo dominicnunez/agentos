@@ -263,6 +263,7 @@ func ValidateWorkCompletions(snapshot core.DurableGraph, stream []Event, teamRec
 }
 
 func validateWorkCompletionAdmissionsAtUse(snapshot core.DurableGraph, stream []Event, teamRecords [][]byte, inboxObservations map[string]InboxObservationBinding, useSequences map[core.ID]int64) error {
+	var startHistory *executionHistory
 	for workID, state := range snapshot.Works {
 		if useSequences != nil {
 			if _, selected := useSequences[workID]; !selected {
@@ -327,9 +328,14 @@ func validateWorkCompletionAdmissionsAtUse(snapshot core.DurableGraph, stream []
 			return fmt.Errorf("completed work %s has invalid Team history: %w", workID, err)
 		}
 		binding := WorkCompletionBinding{
-			OrganizationID: string(intent.Value.OrganizationID), CorrelationID: state.CorrelationID,
+			executionHistory: startHistory,
+			OrganizationID:   string(intent.Value.OrganizationID), CorrelationID: state.CorrelationID,
 			Work: state.Value, WorkVersion: state.Version, Intent: intent.Value, Tasks: tasks,
 			TeamRevisions: teamRevisions, InboxObservations: inboxObservations, AgentBlueprints: blueprints, ExecutionProfiles: profiles,
+		}
+		if startHistory == nil {
+			startHistory = newExecutionHistory(stream)
+			binding.executionHistory = startHistory
 		}
 		binding.CompletionSequence = transition.Sequence
 		if useSequences != nil {

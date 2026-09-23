@@ -787,7 +787,8 @@ type ExecutionStartSelection struct {
 type ExecutionStartValidator func(ExecutionStartSelection) (core.ExecutionContextManifest, error)
 
 type WorkCompletionBinding struct {
-	knowledgeReplay *ExecutionKnowledgeReplay
+	knowledgeReplay  *ExecutionKnowledgeReplay
+	executionHistory *executionHistory
 	// CompletionSequence is the final Work transition boundary. Zero is used
 	// while admitting aggregate evidence before that transition exists.
 	CompletionSequence int64
@@ -910,12 +911,29 @@ func ResolvePlan(organizationID, correlationID string, work core.Work, intent co
 }
 
 func resolvePlan(organizationID, correlationID string, work core.Work, intent core.Intent, stream []Event) (core.Plan, Event, error) {
+	return bindResolvedPlan(organizationID, correlationID, work, intent, func() (core.Plan, Event, error) {
+		return resolvePlanEvent(organizationID, correlationID, stream)
+	})
+}
+
+func bindResolvedPlan(organizationID, correlationID string, work core.Work, intent core.Intent, resolve func() (core.Plan, Event, error)) (core.Plan, Event, error) {
 	if organizationID == "" || correlationID == "" || work.ID == "" || work.IntentID == "" || intent.ID == "" || intent.AcceptedFingerprint == "" {
 		return core.Plan{}, Event{}, fmt.Errorf("strategic Plan identity is incomplete")
 	}
 	if intent.ID != work.IntentID || intent.OrganizationID != core.ID(organizationID) {
 		return core.Plan{}, Event{}, fmt.Errorf("strategic Plan Intent does not match durable Work")
 	}
+	plan, event, err := resolve()
+	if err != nil {
+		return core.Plan{}, Event{}, err
+	}
+	if plan.IntentID != work.IntentID || plan.IntentFingerprint != intent.AcceptedFingerprint {
+		return core.Plan{}, Event{}, fmt.Errorf("strategic Plan identity or lifecycle is invalid")
+	}
+	return plan, event, nil
+}
+
+func resolvePlanEvent(organizationID, correlationID string, stream []Event) (core.Plan, Event, error) {
 	var selected Event
 	var plan core.Plan
 	for _, event := range stream {
@@ -937,7 +955,7 @@ func resolvePlan(organizationID, correlationID string, work core.Work, intent co
 	if selected.EventID == "" {
 		return core.Plan{}, Event{}, fmt.Errorf("strategic Plan is unavailable")
 	}
-	if plan.ID != core.ID("plan-"+correlationID) || plan.IntentID != work.IntentID || plan.IntentFingerprint != intent.AcceptedFingerprint || plan.Version != 1 || len(plan.Tasks) == 0 || plan.CreatedAt.IsZero() || offset != 0 {
+	if plan.ID != core.ID("plan-"+correlationID) || plan.Version != 1 || len(plan.Tasks) == 0 || plan.CreatedAt.IsZero() || offset != 0 {
 		return core.Plan{}, Event{}, fmt.Errorf("strategic Plan identity or lifecycle is invalid")
 	}
 	if plan.Fingerprint == "" || plan.Fingerprint != expectedFingerprint {
@@ -2497,9 +2515,14 @@ func validCompletionInputEvent(binding WorkCompletionBinding, taskID core.ID, ev
 }
 
 func validateExecutionStart(binding WorkCompletionBinding, task core.Task, version int, outcomeEvent Event, stream []Event) (Event, bool, error) {
+	history := binding.executionHistory
+	starts := stream
+	if history != nil {
+		starts = history.correlations[binding.CorrelationID]
+	}
 	var found Event
 	remediation := false
-	for _, event := range stream {
+	for _, event := range starts {
 		if event.EventType != "EXECUTION_STARTED" || event.TaskID != string(task.ID) || event.CorrelationID != binding.CorrelationID {
 			continue
 		}
@@ -2511,7 +2534,7 @@ func validateExecutionStart(binding WorkCompletionBinding, task core.Task, versi
 		if found.EventID != "" || event.Sequence >= outcomeEvent.Sequence || event.OrganizationID != binding.OrganizationID || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || payload.Projection.ProjectionKind != "task" || payload.Projection.RecordID != string(task.ID) || payload.Projection.CorrelationID != binding.CorrelationID || json.Unmarshal(payload.Projection.Value, &projected) != nil || projected.Status != core.TaskRunning || !sameTaskDefinition(projected, task) {
 			return Event{}, false, fmt.Errorf("work completion execution-start record is invalid")
 		}
-		if err := ValidateTaskExecutionStart(event, projected, version, binding.Work, binding.Intent, stream); err != nil {
+		if err := validateTaskExecutionStart(event, projected, version, binding.Work, binding.Intent, stream, history); err != nil {
 			return Event{}, false, err
 		}
 		if task.ExecutionKind == core.ExecutionAgent {
@@ -2530,6 +2553,14 @@ func validateExecutionStart(binding WorkCompletionBinding, task core.Task, versi
 // boundary. Strategic references are coordination context only, but every
 // execution kind must bind the exact Plan revisions that admission accepted.
 func ValidateTaskExecutionStart(start Event, task core.Task, taskVersion int, work core.Work, intent core.Intent, stream []Event) error {
+	return validateTaskExecutionStart(start, task, taskVersion, work, intent, stream, nil)
+}
+
+func (history *executionHistory) validate(start Event, task core.Task, taskVersion int, work core.Work, intent core.Intent) error {
+	return validateTaskExecutionStart(start, task, taskVersion, work, intent, history.stream, history)
+}
+
+func validateTaskExecutionStart(start Event, task core.Task, taskVersion int, work core.Work, intent core.Intent, stream []Event, history *executionHistory) error {
 	if start.OrganizationID == "" || start.SourceActorID != "runtime" || start.SourceExecutionID != "" || start.RecipientScope != "" || start.RecipientID != "" || start.TaskID != string(task.ID) || start.CorrelationID == "" || taskVersion < 2 || task.Status != core.TaskRunning || task.WorkID != work.ID || work.IntentID != intent.ID || intent.OrganizationID != core.ID(start.OrganizationID) {
 		return fmt.Errorf("execution start crosses its durable Task boundary")
 	}
@@ -2539,7 +2570,11 @@ func ValidateTaskExecutionStart(start Event, task core.Task, taskVersion int, wo
 	case core.ExecutionAgent:
 		detail, err = executionStartDetail(start)
 		if err == nil {
-			err = ValidateAgentDispatchStart(start, task, taskVersion, stream)
+			dispatch := stream
+			if history != nil {
+				dispatch = history.dispatchStream(start, detail.DispatchBinding)
+			}
+			err = ValidateAgentDispatchStart(start, task, taskVersion, dispatch)
 		}
 	case core.ExecutionDeterministic, core.ExecutionHuman:
 		detail, err = nonAgentExecutionStartDetail(start, task.ExecutionKind)
@@ -2551,20 +2586,30 @@ func ValidateTaskExecutionStart(start Event, task core.Task, taskVersion int, wo
 	if err != nil {
 		return err
 	}
-	plan, planEvent, err := resolvePlan(start.OrganizationID, start.CorrelationID, work, intent, stream)
+	var plan core.Plan
+	var planEvent Event
+	if history == nil {
+		plan, planEvent, err = resolvePlan(start.OrganizationID, start.CorrelationID, work, intent, stream)
+	} else {
+		plan, planEvent, err = history.resolvePlan(start.OrganizationID, start.CorrelationID, work, intent)
+	}
 	if err != nil {
 		return fmt.Errorf("resolve execution-start Plan context: %w", err)
 	}
 	if planEvent.Sequence >= start.Sequence {
 		return fmt.Errorf("execution start predates its durable Plan")
 	}
-	if _, err := resolveStrategicContextByRefs(start.OrganizationID, work, stream, plan.StrategicEventRefs, plan.StrategicContextRefs, planEvent.Sequence); err != nil {
+	strategy := stream
+	if history != nil {
+		strategy = history.strategyStream(start.OrganizationID, work, start.Sequence, plan.StrategicEventRefs)
+	}
+	if _, err := resolveStrategicContextByRefs(start.OrganizationID, work, strategy, plan.StrategicEventRefs, plan.StrategicContextRefs, planEvent.Sequence); err != nil {
 		return fmt.Errorf("resolve execution-start Plan context: %w", err)
 	}
 	if !slices.Equal(plan.StrategicEventRefs, detail.StrategicEventRefs) || !slices.Equal(plan.StrategicContextRefs, detail.StrategicContextRefs) {
 		return fmt.Errorf("execution start does not bind its durable Plan context")
 	}
-	currentStrategy, currentEventRefs, currentContextRefs, err := ResolveStrategicContext(start.OrganizationID, work, stream, start.Sequence)
+	currentStrategy, currentEventRefs, currentContextRefs, err := ResolveStrategicContext(start.OrganizationID, work, strategy, start.Sequence)
 	if err != nil || !slices.Equal(currentEventRefs, detail.StrategicEventRefs) || !slices.Equal(currentContextRefs, detail.StrategicContextRefs) {
 		return fmt.Errorf("execution start crossed a strategic-context revision")
 	}
@@ -2572,7 +2617,13 @@ func ValidateTaskExecutionStart(start Event, task core.Task, taskVersion int, wo
 		return fmt.Errorf("execution start used inactive strategic context")
 	}
 	if task.ExecutionKind == core.ExecutionHuman {
-		inputEvent, found := eventWithID(stream, detail.InputEventRef)
+		var inputEvent Event
+		var found bool
+		if history == nil {
+			inputEvent, found = eventWithID(stream, detail.InputEventRef)
+		} else {
+			inputEvent, found = history.event(detail.InputEventRef)
+		}
 		if !found || inputEvent.Sequence >= start.Sequence || inputEvent.OrganizationID != start.OrganizationID || inputEvent.TaskID != start.TaskID || inputEvent.CorrelationID != start.CorrelationID {
 			return fmt.Errorf("user execution start lacks its exact prior input event")
 		}

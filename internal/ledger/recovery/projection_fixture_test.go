@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func appendRecoveryPlan(t *testing.T, store *ledger.SQLite, correlationID string, intent core.Intent, task core.Task) {
+func appendRecoveryPlan(t testing.TB, store *ledger.SQLite, correlationID string, intent core.Intent, task core.Task) {
 	t.Helper()
 	plan := core.Plan{ID: core.ID("plan-" + correlationID), IntentID: intent.ID, IntentFingerprint: intent.AcceptedFingerprint, Version: 1, Tasks: []core.PlanTask{{Key: "bounded-task", Description: task.Description, ExecutionKind: task.ExecutionKind, ModelInferencePolicy: task.ModelInferencePolicy}}, CreatedAt: time.Now().UTC()}
 	var err error
