@@ -465,7 +465,7 @@ func TestIncidentProjectionRecordTenantIsolation(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.VerifiedIncidentEvents(t.Context(), "org-1", "stop-work", 256); err != nil {
-		t.Fatalf("other tenant's projection records affected incident: %v", err)
+	if _, err := store.VerifiedIncidentEvents(t.Context(), "org-1", "stop-work", 256); err == nil {
+		t.Fatal("foreign Task referring to selected global Work was omitted")
 	}
 }

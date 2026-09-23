@@ -278,7 +278,7 @@ func (d *incidentDependencies) key(kind, id string) {
 		d.keys[key] = false
 	}
 	switch kind {
-	case "work", "intent", "goal", "knowledge", "lab_experiment":
+	case "work", "task", "intent", "goal", "knowledge", "lab_experiment":
 		if _, ok := d.reverse[key]; !ok {
 			d.reverse[key] = false
 		}
@@ -410,7 +410,7 @@ func (d *incidentDependencies) discover(value any, field string) {
 			kind = "intent"
 		case "work_id", "replaces_work_id":
 			kind = "work"
-		case "task_id", "origin_task_id", "parent_id":
+		case "task_id", "origin_task_id", "parent_id", "depends_on":
 			kind = "task"
 		case "experiment_id":
 			kind = "lab_experiment"
@@ -509,6 +509,8 @@ func (d *incidentDependencies) frontier() (string, []any) {
 	addSet(d.refs, "event_id")
 	addSet(d.correlations, "correlation_id")
 	addSet(d.executions, "source_execution_id")
+	// Projection identities are global. Incoming references from another tenant
+	// are invalid evidence about the selected identity, not unrelated history.
 	for key, done := range d.reverse {
 		if done {
 			continue
@@ -522,6 +524,9 @@ func (d *incidentDependencies) frontier() (string, []any) {
 		case "intent":
 			condition = `((json_extract(payload,'$.projection.projection_kind')='work' AND json_extract(payload,'$.projection.value.intent_id')=?) OR (event_type='INTENT_CONFIRMED' AND json_extract(payload,'$.intent_id')=?))`
 			args = append(args, key.id, key.id)
+		case "task":
+			condition = `(json_extract(payload,'$.projection.projection_kind')='task' AND (json_extract(payload,'$.projection.value.parent_id')=? OR EXISTS (SELECT 1 FROM json_each(payload,'$.projection.value.depends_on') WHERE value=?)))`
+			args = append(args, key.id, key.id)
 		case "goal":
 			condition = `((json_extract(payload,'$.projection.projection_kind') IN ('work','intent') AND json_extract(payload,'$.projection.value.goal_id')=?) OR (event_type IN ('INTENT_CONFIRMED','WORK_COMPLETION_EVALUATED','GOAL_PROGRESS_EVALUATED') AND json_extract(payload,'$.goal_id')=?))`
 			args = append(args, key.id, key.id)
@@ -533,8 +538,7 @@ func (d *incidentDependencies) frontier() (string, []any) {
 			args = append(args, key.id)
 		}
 		if condition != "" {
-			parts = append(parts, `(CASE WHEN json_valid(payload) THEN `+condition+` END AND organization_id=?)`)
-			args = append(args, d.organization)
+			parts = append(parts, `(CASE WHEN json_valid(payload) THEN `+condition+` END)`)
 		}
 	}
 	if len(parts) == 0 {
@@ -599,6 +603,9 @@ func (d *incidentDependencies) loadRecords(ctx context.Context, tx *sql.Tx) erro
 		case "intent":
 			predicate = `r.kind='work' AND json_extract(r.body,'$.value.intent_id')=?`
 			args = append(args, key.id)
+		case "task":
+			predicate = `r.kind='task' AND (json_extract(r.body,'$.value.parent_id')=? OR EXISTS (SELECT 1 FROM json_each(r.body,'$.value.depends_on') WHERE value=?))`
+			args = append(args, key.id, key.id)
 		case "lab_experiment":
 			predicate = `r.kind='lab_promotion_candidate' AND json_extract(r.body,'$.value.experiment_id')=?`
 			args = append(args, key.id)
@@ -607,8 +614,7 @@ func (d *incidentDependencies) loadRecords(ctx context.Context, tx *sql.Tx) erro
 			args = append(args, key.id)
 		}
 		if predicate != "" {
-			where += ` OR (CASE WHEN json_valid(r.body) THEN (` + predicate + `) END AND (e.organization_id=? OR e.event_id IS NULL))`
-			args = append(args, d.organization)
+			where += ` OR (CASE WHEN json_valid(r.body) THEN (` + predicate + `) END)`
 		}
 	}
 	var count int
