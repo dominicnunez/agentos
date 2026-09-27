@@ -128,3 +128,31 @@ func TestProjectIncidentRejectsAdmissionDuringHold(t *testing.T) {
 		t.Fatal("accepted reservation admitted during an active hold")
 	}
 }
+
+func TestProjectIncidentReservationIdentity(t *testing.T) {
+	for _, manifest := range []string{"", "manifest"} {
+		t.Run("manifest="+manifest, func(t *testing.T) {
+			snapshot := incidentFixture(t)
+			event := &snapshot.Work.Events[0]
+			var payload events.InferenceReservedPayload
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			payload.Purpose = "TASK_EXECUTION"
+			payload.ExecutionManifestRef = manifest
+			event.Payload, _ = json.Marshal(payload)
+			if _, err := ProjectIncident(snapshot, "conversation"); err != nil {
+				t.Fatalf("matching reservation identity rejected: %v", err)
+			}
+			payload.RequestID = "other-execution"
+			event.Payload, _ = json.Marshal(payload)
+			report, err := ProjectIncident(snapshot, "conversation")
+			if err == nil {
+				t.Fatal("accepted task reservation with conflicting execution identity")
+			}
+			if !reflect.DeepEqual(report, Report{}) {
+				t.Fatal("invalid reservation returned a partial report")
+			}
+		})
+	}
+}

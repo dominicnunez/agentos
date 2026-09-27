@@ -534,6 +534,23 @@ func TestTaskInferenceRecoveryPreservesHistoricalManifestAccounting(t *testing.T
 			if err := store.ValidateInferenceAdmissions(t.Context()); err != nil {
 				t.Fatalf("historical accounting contract changed: %v", err)
 			}
+			legacy.RequestID = "other-execution"
+			body, err = json.Marshal(legacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.ExecContext(t.Context(), `UPDATE events SET payload=? WHERE event_type='INFERENCE_RESERVED'`, body); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.ExecContext(t.Context(), `UPDATE inference_reservations SET request_id=?`, legacy.RequestID); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.ValidateInferenceAdmissions(t.Context()); err == nil {
+				t.Fatal("historical task reservation accepted conflicting execution identity")
+			}
+			if _, err := store.db.ExecContext(t.Context(), `UPDATE inference_reservations SET request_id=?`, reservation.RequestID); err != nil {
+				t.Fatal(err)
+			}
 		})
 	}
 }

@@ -25,7 +25,7 @@ func DecodeInferenceReservation(event Event) (InferenceReservedPayload, error) {
 	default:
 		return p, fmt.Errorf("inference reservation purpose is invalid")
 	}
-	if p.ExecutionManifestRef != "" && p.RequestID != event.SourceExecutionID {
+	if (p.Purpose == "TASK_EXECUTION" || p.ExecutionManifestRef != "") && p.RequestID != event.SourceExecutionID {
 		return p, fmt.Errorf("inference reservation context identity is invalid")
 	}
 	var admitted time.Time
