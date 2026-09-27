@@ -98,7 +98,7 @@ func TestIncidentModelStopGlobalReferences(t *testing.T) {
 			}
 			if _, err := store.VerifiedIncidentEvents(t.Context(), selectedContext.OrganizationID, selectedContext.CorrelationID, 256); err == nil {
 				t.Fatal("incident reader omitted a foreign model-stop event referencing selected global evidence")
-		} else if !strings.Contains(err.Error(), "model stop") && !strings.Contains(err.Error(), "incident execution evidence crosses") && !strings.Contains(err.Error(), "incident dependency crosses organization") {
+			} else if !strings.Contains(err.Error(), "model stop") && !strings.Contains(err.Error(), "incident execution evidence crosses") && !strings.Contains(err.Error(), "incident dependency crosses organization") {
 				t.Fatalf("incident rejected fixture for an unrelated reason: %v", err)
 			}
 		})
