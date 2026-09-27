@@ -64,6 +64,9 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 	if err := validateIncidentRecords(ctx, tx, work); err != nil {
 		return events.IncidentSnapshot{}, err
 	}
+	if err := validateIncidentFreezeScope(ctx, tx, organization); err != nil {
+		return events.IncidentSnapshot{}, err
+	}
 	// Bound the joined record/event rows before the existing complete-chain
 	// resolver allocates its evidence. Orphans count toward the same bound.
 	var freezeCount int
@@ -112,6 +115,30 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 		return events.IncidentSnapshot{}, err
 	}
 	return snapshot, nil
+}
+
+// Freeze payloads and record bodies claim an organization independently of
+// their envelope or storage key. Check those claims before the scoped history
+// reader: a foreign envelope plus a missing record must not hide a hold.
+// Enumerating keys also retains conflicting duplicate organization claims.
+func validateIncidentFreezeScope(ctx context.Context, tx *sql.Tx, organization string) error {
+	var conflict bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1 FROM events e WHERE e.event_type='FREEZE_SET' AND e.organization_id<>?1
+AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(e.payload) THEN e.payload ELSE '{}' END)
+ WHERE key='organization_id' AND type='text' AND value=?1)
+UNION ALL
+SELECT 1 FROM records r WHERE r.kind='organization_freeze' AND r.record_id<>?1
+AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(r.body) THEN r.body ELSE '{}' END)
+ WHERE key='organization_id' AND type='text' AND value=?1)
+)`, organization).Scan(&conflict)
+	if err != nil {
+		return err
+	}
+	if conflict {
+		return fmt.Errorf("incident freeze identity crosses its claimed organization")
+	}
+	return nil
 }
 
 func incidentAdmissions(work, related []events.Event, freezes []events.OrganizationFreezeAdmission) ([]events.IncidentAdmission, error) {
