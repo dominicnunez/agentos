@@ -83,7 +83,8 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
    existing shared boundary that owns the rule over multiple partial fixes.
    For filtered readers, check selection completeness in both directions before
    relying on shared validators. Derive each event kind's candidate predicate
-   from its owning validator before applying tenant, identity, or time filters;
+   from its owning validator and its caller's applicability conditions before
+   applying tenant, identity, or time filters;
    a shared subsystem does not imply a shared identity scope. Reconstruct
    candidate sets from durable scope and time boundaries, independently of
    claimed references. Compare required

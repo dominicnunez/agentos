@@ -17,6 +17,8 @@ type incidentLinkRule struct {
 	array                  bool
 	element                string
 	discriminator, equals  string
+	detail                 bool
+	eventTypes             string
 }
 
 var incidentLinkRules = []incidentLinkRule{
@@ -41,36 +43,56 @@ var incidentLinkRules = []incidentLinkRule{
 	{target: "execution_profile", sources: "task", field: "agent_config.profile_id"},
 }
 
+// Event references are global identities, including references to ordinary
+// evidence notes. Their owning validators check identity, tenant, and time.
+var incidentEvidenceLinkRules = []incidentLinkRule{
+	{target: "event", sources: "knowledge", field: "provenance_event_refs", array: true},
+	{target: "event", sources: "knowledge", field: "occurrence_event_refs", array: true},
+	{target: "event", sources: "knowledge", field: "validation_refs", array: true},
+	{target: "event", sources: "lab_experiment", field: "result_event_refs", array: true},
+	{target: "event", sources: "lab_promotion_candidate", field: "experiment_result_event_refs", array: true},
+	{target: "event", sources: "lab_promotion_candidate", field: "reproduction_evidence_refs", array: true},
+}
+
 // Pure functions keep trigger programs small: expanding every relationship into
 // each maintenance and guard trigger makes even ordinary event inserts expensive
 // to compile. Neither function reads a connection or retains source state.
 func init() {
-	sqlite.MustRegisterDeterministicScalarFunction("agentos_incident_links_v1", 3, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
-		links := []incidentSelector{}
-		seen := map[incidentKey]bool{}
-		visitIncidentLinks(args, "", func(kind, id string) bool {
-			key := incidentKey{kind, id}
-			if !seen[key] {
-				seen[key] = true
-				links = append(links, incidentSelector{kind, id})
-			}
-			return false
+	// Keep v1 immutable so migration can verify the exact v13 index contents
+	// before adding relationships introduced by v2.
+	for _, version := range []string{"v1", "v2"} {
+		rules := incidentLinkRules
+		if version == "v2" {
+			rules = append(append([]incidentLinkRule(nil), rules...), incidentEvidenceLinkRules...)
+			rules = append(rules, incidentDetailLinkRules...)
+		}
+		sqlite.MustRegisterDeterministicScalarFunction("agentos_incident_links_"+version, 3, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+			links := []incidentSelector{}
+			seen := map[incidentKey]bool{}
+			visitIncidentLinks(args, "", rules, func(kind, id string) bool {
+				key := incidentKey{kind, id}
+				if !seen[key] {
+					seen[key] = true
+					links = append(links, incidentSelector{kind, id})
+				}
+				return false
+			})
+			encoded, err := json.Marshal(links)
+			return string(encoded), err
 		})
-		encoded, err := json.Marshal(links)
-		return string(encoded), err
-	})
-	sqlite.MustRegisterDeterministicScalarFunction("agentos_incident_link_match_v1", 5, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
-		kind, kindOK := args[3].(string)
-		id, idOK := args[4].(string)
-		if !kindOK || !idOK || kind == "" || id == "" {
+		sqlite.MustRegisterDeterministicScalarFunction("agentos_incident_link_match_"+version, 5, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+			kind, kindOK := args[3].(string)
+			id, idOK := args[4].(string)
+			if !kindOK || !idOK || kind == "" || id == "" {
+				return int64(0), nil
+			}
+			found := visitIncidentLinks(args[:3], kind, rules, func(candidateKind, candidateID string) bool { return candidateKind == kind && candidateID == id })
+			if found {
+				return int64(1), nil
+			}
 			return int64(0), nil
-		}
-		found := visitIncidentLinks(args[:3], kind, func(candidateKind, candidateID string) bool { return candidateKind == kind && candidateID == id })
-		if found {
-			return int64(1), nil
-		}
-		return int64(0), nil
-	})
+		})
+	}
 }
 
 func incidentLinkArguments(record bool, source string) string {
@@ -80,7 +102,7 @@ func incidentLinkArguments(record bool, source string) string {
 	if record {
 		return "1," + source + "kind," + source + "body"
 	}
-	return "0,NULL," + source + "payload"
+	return "0," + source + "event_type," + source + "payload"
 }
 
 // incidentLinkSelect returns distinct links for one source row. Event projection
@@ -90,19 +112,19 @@ func incidentLinkSelect(record bool, source string) string {
 }
 
 func incidentLinkJSON(record bool, source string) string {
-	return "agentos_incident_links_v1(" + incidentLinkArguments(record, source) + ")"
+	return "agentos_incident_links_v2(" + incidentLinkArguments(record, source) + ")"
 }
 
 // All arguments are internal SQL expressions, not caller supplied identifiers.
 func incidentLinkMatch(record bool, source, targetKind, targetID string) string {
-	return "agentos_incident_link_match_v1(" + incidentLinkArguments(record, source) + "," + targetKind + "," + targetID + ")"
+	return "agentos_incident_link_match_v2(" + incidentLinkArguments(record, source) + "," + targetKind + "," + targetID + ")"
 }
 
 // Invalid documents and fields derive no links, so maintenance cannot reject a
 // malformed raw source write. Exact admission validation still rejects selected
 // malformed evidence. A source-sized parse is required; there is no cross-read
 // cache or truncation that could hide a derivable incoming reference.
-func visitIncidentLinks(args []driver.Value, target string, visit func(string, string) bool) bool {
+func visitIncidentLinks(args []driver.Value, target string, rules []incidentLinkRule, visit func(string, string) bool) bool {
 	var body []byte
 	switch value := args[2].(type) {
 	case string:
@@ -120,7 +142,11 @@ func visitIncidentLinks(args []driver.Value, target string, visit func(string, s
 		return false
 	}
 	kind, _ := args[1].(string)
+	var detail map[string]json.RawMessage
+	eventType := ""
 	if args[0] == int64(0) {
+		eventType = kind
+		detail = incidentLinkObject(projection["detail"])
 		projection = incidentLinkObject(projection["projection"])
 		kind = incidentLinkString(projection["projection_kind"])
 		id := incidentLinkString(projection["record_id"])
@@ -129,18 +155,25 @@ func visitIncidentLinks(args []driver.Value, target string, visit func(string, s
 		}
 	}
 	values := incidentLinkObject(projection["value"])
-	for _, rule := range incidentLinkRules {
+	for _, rule := range rules {
 		if target != "" && rule.target != target {
 			continue
 		}
 		if !strings.Contains(","+rule.sources+",", ","+kind+",") {
 			continue
 		}
+		if rule.eventTypes != "" && !strings.Contains(","+rule.eventTypes+",", ","+eventType+",") {
+			continue
+		}
 		if rule.discriminator != "" && incidentLinkString(values[rule.discriminator]) != rule.equals {
 			continue
 		}
 		fields := strings.Split(rule.field, ".")
-		value := values[fields[0]]
+		fieldsRoot := values
+		if rule.detail {
+			fieldsRoot = detail
+		}
+		value := fieldsRoot[fields[0]]
 		for _, field := range fields[1:] {
 			value = incidentLinkObject(value)[field]
 		}

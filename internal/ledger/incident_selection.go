@@ -18,6 +18,10 @@ type incidentSelector struct {
 	ID   string `json:"id"`
 }
 
+// These admissions invoke the full Plan candidate validator. A pending Work or
+// planning attempt alone does not make another tenant's correlation relevant.
+const incidentPlanUseTypes = `'EXECUTION_STARTED','WORK_COMPLETED'`
+
 func init() {
 	// The function has no connection, request, or cache state. It only discovers
 	// selectors in one already budgeted document using the reader's grammar.
@@ -114,10 +118,10 @@ func incidentReferenceSQL(seeds int) string {
 	// including cycles, without retaining full documents in the recursive queue.
 	// Each lookup branch is capped before UNION builds its distinct temp set.
 	envelope := `json_object('organization_id',e.organization_id,'correlation_id',e.correlation_id,'source_execution_id',e.source_execution_id,'task_id',e.task_id,'recipient_scope',e.recipient_scope,'recipient_id',e.recipient_id,'authorization_refs',json(CAST(e.authorization_refs AS TEXT)))`
-	recordTargets := fmt.Sprintf(`SELECT locator FROM (SELECT rowid AS locator FROM records WHERE kind=walk.kind AND record_id=walk.identity LIMIT %[1]d)
+	recordTargets := fmt.Sprintf(`SELECT locator FROM (SELECT rowid AS locator FROM records WHERE walk.kind<>'event' AND kind=walk.kind AND record_id=walk.identity LIMIT %[1]d)
  UNION SELECT locator FROM (SELECT r.rowid AS locator FROM incident_record_links link JOIN records r ON r.kind=link.record_kind AND r.record_id=link.record_id AND r.version=link.record_version WHERE link.target_kind=walk.kind AND link.target_id=walk.identity LIMIT %[1]d) LIMIT %[1]d`, events.MaximumIncidentEvidence+1)
 	eventTargets := fmt.Sprintf(`SELECT locator FROM (SELECT sequence AS locator FROM events WHERE walk.kind='correlation' AND organization_id=(SELECT organization FROM config) AND correlation_id=walk.identity LIMIT %[1]d)
- UNION SELECT locator FROM (SELECT sequence AS locator FROM events WHERE walk.kind='correlation' AND event_type='PLAN_CREATED' AND correlation_id=walk.identity LIMIT %[1]d)
+ UNION SELECT locator FROM (SELECT sequence AS locator FROM events WHERE walk.kind='correlation' AND event_type='PLAN_CREATED' AND correlation_id=walk.identity AND EXISTS (SELECT 1 FROM events plan_use WHERE plan_use.organization_id=(SELECT organization FROM config) AND plan_use.correlation_id=walk.identity AND plan_use.event_type IN (`+incidentPlanUseTypes+`)) LIMIT %[1]d)
  UNION SELECT locator FROM (SELECT sequence AS locator FROM events WHERE walk.kind='execution' AND organization_id=(SELECT organization FROM config) AND source_execution_id=walk.identity LIMIT %[1]d)
  UNION SELECT locator FROM (SELECT sequence AS locator FROM events WHERE walk.kind='intake_message' AND organization_id=(SELECT organization FROM config) AND event_type IN (`+incidentIntakeTypes+`) AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.message_id') END=walk.identity LIMIT %[1]d)
  UNION SELECT locator FROM (SELECT sequence AS locator FROM events WHERE walk.kind='intake_message' AND organization_id=(SELECT organization FROM config) AND event_type IN (`+incidentIntakeTypes+`) AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.source_message_id') END=walk.identity LIMIT %[1]d)
@@ -128,6 +132,7 @@ func incidentReferenceSQL(seeds int) string {
 	return `WITH RECURSIVE config(organization) AS (VALUES (?)), walk(sequence,phase,kind,identity) AS (
  SELECT sequence,0,'','' FROM events WHERE event_id IN (` + incidentMarks(seeds) + `)
  UNION SELECT sequence,2,kind,'' FROM walk WHERE phase=0
+ UNION SELECT 0,1,'event',e.event_id FROM walk JOIN events e ON e.sequence=walk.sequence WHERE walk.phase=2 AND walk.kind=''
  UNION SELECT CASE WHEN json_extract(edge.value,'$.kind')='event' THEN target.sequence ELSE 0 END,
  CASE WHEN json_extract(edge.value,'$.kind')='event' THEN 0 ELSE 1 END,
  CASE WHEN json_extract(edge.value,'$.kind')='event' THEN '' ELSE json_extract(edge.value,'$.kind') END,
@@ -163,9 +168,13 @@ func (d *incidentDependencies) expandReferences(ctx context.Context, tx *sql.Tx,
 	var sequences []any
 	var size int64
 	physical := 0
-	selectors := map[string]map[string]bool{"key": {}, "correlation": {}, "execution": {}}
+	selectors := map[string]map[string]bool{"key": {}, "event": {}, "correlation": {}, "execution": {}}
 	for key := range d.keys {
-		selectors["key"][key.kind+"\x00"+key.id] = true
+		if key.kind == "event" {
+			selectors["event"][key.id] = true
+		} else {
+			selectors["key"][key.kind+"\x00"+key.id] = true
+		}
 	}
 	for id := range d.correlations {
 		selectors["correlation"][id] = true
@@ -191,11 +200,15 @@ func (d *incidentDependencies) expandReferences(ctx context.Context, tx *sql.Tx,
 		}
 		if phase == 1 {
 			category, key := "key", kind+"\x00"+identity
-			if kind == "correlation" || kind == "execution" {
+			if kind == "event" || kind == "correlation" || kind == "execution" {
 				category, key = kind, identity
 			}
 			selectors[category][key] = true
-			if len(selectors[category]) > events.MaximumIncidentEvidence {
+			limit := events.MaximumIncidentEvidence
+			if category == "event" {
+				limit = incidentMaximumEventIdentities
+			}
+			if len(selectors[category]) > limit {
 				_ = rows.Close()
 				return fmt.Errorf("incident identity frontier exceeds support limit")
 			}

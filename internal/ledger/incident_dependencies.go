@@ -15,12 +15,17 @@ import (
 // Reverse keys select complete sibling sets needed by temporal graph validation.
 type incidentKey struct{ kind, id string }
 
+// Public events have a separate 256-item allowance from private evidence.
+// Their incoming-reference identities must not consume projection key capacity.
+const incidentMaximumEventIdentities = events.MaximumIncidentEvidence + 256
+
 type incidentDependencies struct {
 	organization       string
 	budget             incidentBudget
 	stream             map[string]events.Event
 	public             map[string]bool
 	keys               map[incidentKey]bool
+	eventKeys          int
 	refs               map[string]bool
 	correlations       map[string]bool
 	executions         map[string]bool
@@ -136,6 +141,9 @@ func (d *incidentDependencies) add(event events.Event) error {
 		return nil
 	}
 	d.stream[event.EventID] = event
+	// Incoming evidence references can name any selected event, including an opaque
+	// observation whose own payload must not introduce outgoing graph edges.
+	d.key("event", event.EventID)
 	projection, present, err := events.AdmittedProjection(event)
 	if err != nil {
 		return err
@@ -271,11 +279,18 @@ func (d *incidentDependencies) key(kind, id string) {
 	}
 	key := incidentKey{kind, id}
 	if _, ok := d.keys[key]; !ok {
-		if len(d.keys) >= events.MaximumIncidentEvidence {
+		count, limit := len(d.keys)-d.eventKeys, events.MaximumIncidentEvidence
+		if kind == "event" {
+			count, limit = d.eventKeys, incidentMaximumEventIdentities
+		}
+		if count >= limit {
 			d.tooManyKeys = true
 			return
 		}
 		d.keys[key] = false
+		if kind == "event" {
+			d.eventKeys++
+		}
 	}
 	if _, ok := d.reverse[key]; !ok {
 		d.reverse[key] = false
@@ -463,7 +478,7 @@ func (d *incidentDependencies) frontier() (string, []any) {
 		}
 		marks := strings.Join(pairs, ",")
 		parts = append(parts, `sequence IN (SELECT event_sequence FROM incident_event_links WHERE (target_kind,target_id) IN (`+marks+`))`)
-		parts = append(parts, `event_id IN (SELECT admission_event_id FROM records WHERE (kind,record_id) IN (`+marks+`))`)
+		parts = append(parts, `event_id IN (SELECT admission_event_id FROM records WHERE kind<>'event' AND (kind,record_id) IN (`+marks+`))`)
 		for _, key := range identities {
 			args = append(args, key.kind, key.id)
 		}
@@ -510,9 +525,10 @@ func (d *incidentDependencies) frontier() (string, []any) {
 			if column != "event_id" {
 				scope := `organization_id=?`
 				if column == "correlation_id" {
-					// The Plan owner selects by correlation before validating its
-					// tenant, Task envelope, and payload. Preserve that candidate set.
-					scope = `(organization_id=? OR event_type='PLAN_CREATED')`
+					// Incident validation consumes Plans for execution starts and
+					// completed Work. Other histories retain tenant scope here.
+					scope = `(organization_id=? OR (event_type='PLAN_CREATED' AND EXISTS (SELECT 1 FROM events plan_use WHERE plan_use.organization_id=? AND plan_use.correlation_id=events.correlation_id AND plan_use.event_type IN (` + incidentPlanUseTypes + `))))`
+					args = append(args, d.organization)
 				}
 				part = `(` + scope + ` AND ` + part + `)`
 				args = append(args, d.organization)
@@ -528,35 +544,37 @@ func (d *incidentDependencies) frontier() (string, []any) {
 	addSet(d.executions, "source_execution_id")
 	// Projection identities are global. Incoming references from another tenant
 	// are invalid evidence about the selected identity, not unrelated history.
+	reverseIDs := make(map[string][]string)
 	for key, done := range d.reverse {
 		if done {
 			continue
 		}
 		d.reverse[key] = true
-		var condition string
-		var eventCondition string
 		switch key.kind {
+		case "work", "intent", "goal", "knowledge":
+			reverseIDs[key.kind] = append(reverseIDs[key.kind], key.id)
+		}
+	}
+	for _, kind := range []string{"work", "intent", "goal", "knowledge"} {
+		ids := reverseIDs[kind]
+		if len(ids) == 0 {
+			continue
+		}
+		sort.Strings(ids)
+		var eventCondition, field string
+		switch kind {
 		case "work":
-			eventCondition = `(event_type='INTENT_CONFIRMED' AND json_extract(payload,'$.replaces_work_id')=?)`
-			args = append(args, key.id)
+			eventCondition, field = `event_type='INTENT_CONFIRMED'`, "replaces_work_id"
 		case "intent":
-			eventCondition = `(event_type='INTENT_CONFIRMED' AND json_extract(payload,'$.intent_id')=?)`
-			args = append(args, key.id)
+			eventCondition, field = `event_type='INTENT_CONFIRMED'`, "intent_id"
 		case "goal":
-			eventCondition = `(event_type IN ('INTENT_CONFIRMED','WORK_COMPLETION_EVALUATED','GOAL_PROGRESS_EVALUATED') AND json_extract(payload,'$.goal_id')=?)`
-			args = append(args, key.id)
+			eventCondition, field = `event_type IN ('INTENT_CONFIRMED','WORK_COMPLETION_EVALUATED','GOAL_PROGRESS_EVALUATED')`, "goal_id"
 		case "knowledge":
-			eventCondition = `(event_type IN ('KNOWLEDGE_PROPOSED','KNOWLEDGE_VALIDATION_RECORDED','KNOWLEDGE_JUDGMENT_PUBLISHED','HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED','A2A_KNOWLEDGE_JUDGMENT_RECEIVED') AND json_extract(payload,'$.knowledge_id')=?)`
-			args = append(args, key.id)
+			eventCondition, field = `event_type IN ('KNOWLEDGE_PROPOSED','KNOWLEDGE_VALIDATION_RECORDED','KNOWLEDGE_JUDGMENT_PUBLISHED','HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED','A2A_KNOWLEDGE_JUDGMENT_RECEIVED')`, "knowledge_id"
 		}
-		if eventCondition != "" {
-			if condition != "" {
-				condition += " OR "
-			}
-			condition += eventCondition
-		}
-		if condition != "" {
-			parts = append(parts, `(CASE WHEN json_valid(payload) THEN `+condition+` END)`)
+		parts = append(parts, `(CASE WHEN json_valid(payload) THEN (`+eventCondition+` AND json_extract(payload,'$.`+field+`') IN (`+incidentMarks(len(ids))+`)) END)`)
+		for _, id := range ids {
+			args = append(args, id)
 		}
 	}
 	if len(parts) == 0 {
@@ -603,7 +621,7 @@ func (d *incidentDependencies) loadRecords(ctx context.Context, tx *sql.Tx) erro
 	}
 	where := `WHERE 0`
 	if len(pairs) > 0 {
-		where += ` OR (r.kind,r.record_id) IN (` + strings.Join(pairs, ",") + `)`
+		where += ` OR (r.kind<>'event' AND (r.kind,r.record_id) IN (` + strings.Join(pairs, ",") + `))`
 		where += ` OR (r.kind,r.record_id,r.version) IN (SELECT record_kind,record_id,record_version FROM incident_record_links WHERE (target_kind,target_id) IN (` + strings.Join(pairs, ",") + `))`
 		for _, key := range keys {
 			args = append(args, key.kind, key.id)

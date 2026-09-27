@@ -118,7 +118,7 @@ func TestIncidentLinkSelectInvalidJSON(t *testing.T) {
 func incidentTestLinks(t *testing.T, store *SQLite, record bool, kind, body string) (*sql.Rows, error) {
 	t.Helper()
 	for _, statement := range []string{
-		`CREATE TEMP TABLE IF NOT EXISTS test_link_source(kind TEXT,body TEXT,payload TEXT,record INTEGER)`,
+		`CREATE TEMP TABLE IF NOT EXISTS test_link_source(kind TEXT,body TEXT,payload TEXT,record INTEGER,event_type TEXT DEFAULT '')`,
 		`CREATE TEMP TABLE IF NOT EXISTS test_links(target_kind TEXT,target_id TEXT)`,
 		`CREATE TEMP TRIGGER IF NOT EXISTS test_record_links AFTER INSERT ON test_link_source WHEN NEW.record=1 BEGIN INSERT INTO test_links ` + incidentLinkSelect(true, "NEW") + `; END`,
 		`CREATE TEMP TRIGGER IF NOT EXISTS test_event_links AFTER INSERT ON test_link_source WHEN NEW.record=0 BEGIN INSERT INTO test_links ` + incidentLinkSelect(false, "NEW") + `; END`,
@@ -128,7 +128,7 @@ func incidentTestLinks(t *testing.T, store *SQLite, record bool, kind, body stri
 			t.Fatal(err)
 		}
 	}
-	if _, err := store.db.ExecContext(t.Context(), `INSERT INTO test_link_source VALUES (?,?,?,?)`, kind, body, body, record); err != nil {
+	if _, err := store.db.ExecContext(t.Context(), `INSERT INTO test_link_source(kind,body,payload,record) VALUES (?,?,?,?)`, kind, body, body, record); err != nil {
 		t.Fatal(err)
 	}
 	return store.db.QueryContext(t.Context(), `SELECT target_kind,target_id FROM test_links`)
@@ -144,7 +144,7 @@ func assertIncidentLinkMatch(t *testing.T, store *SQLite, record bool, kind, bod
 	for _, candidate := range candidates {
 		parts := strings.SplitN(candidate, ":", 2)
 		var matches bool
-		query := `WITH source(kind,body,payload) AS (VALUES (?,?,?)), target(kind,id) AS (VALUES (?,?)) SELECT ` + incidentLinkMatch(record, "source", "target.kind", "target.id") + ` FROM source,target`
+		query := `WITH source(kind,body,payload,event_type) AS (VALUES (?,?,?,'')), target(kind,id) AS (VALUES (?,?)) SELECT ` + incidentLinkMatch(record, "source", "target.kind", "target.id") + ` FROM source,target`
 		if err := store.db.QueryRowContext(t.Context(), query, kind, body, body, parts[0], parts[1]).Scan(&matches); err != nil {
 			t.Fatal(err)
 		}

@@ -93,11 +93,27 @@ func incidentCanonicalLink(record bool, link string) string {
 // are stable composite record identities or explicit event primary keys; an
 // implicit records rowid must never become durable index identity.
 func createIncidentLinkSchema(ctx context.Context, tx *sql.Tx) error {
+	return createIncidentLinks(ctx, tx, 1)
+}
+
+func incidentLinkGrammar(statement string, version int) string {
+	if version == 1 {
+		statement = strings.ReplaceAll(statement, "_v2(", "_v1(")
+		// v13 event extractors received NULL as their unused kind argument.
+		// Preserve their exact SQL, not just equivalent extraction behavior.
+		for _, source := range []string{"NEW.", "e.", ""} {
+			statement = strings.ReplaceAll(statement, "0,"+source+"event_type,"+source+"payload", "0,NULL,"+source+"payload")
+		}
+	}
+	return statement
+}
+
+func createIncidentLinks(ctx context.Context, tx *sql.Tx, version int) error {
 	for _, object := range incidentLinkObjects {
 		if object.kind == "trigger" {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, object.sql); err != nil {
+		if _, err := tx.ExecContext(ctx, incidentLinkGrammar(object.sql, version)); err != nil {
 			return fmt.Errorf("create incident link schema: %w", err)
 		}
 	}
@@ -110,7 +126,7 @@ func createIncidentLinkSchema(ctx context.Context, tx *sql.Tx) error {
 		// The correlated extractor expands one source at a time, rather than
 		// materializing the complete historical graph in the migration process.
 		statement := "INSERT INTO " + table + " SELECT json_extract(link.value,'$.kind'),json_extract(link.value,'$.id')," + identity + " FROM " + source + " " + alias + " JOIN json_each(" + incidentLinkJSON(record, alias) + ") link"
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
+		if _, err := tx.ExecContext(ctx, incidentLinkGrammar(statement, version)); err != nil {
 			return fmt.Errorf("backfill incident links: %w", err)
 		}
 	}
@@ -118,7 +134,7 @@ func createIncidentLinkSchema(ctx context.Context, tx *sql.Tx) error {
 		if object.kind != "trigger" {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, object.sql); err != nil {
+		if _, err := tx.ExecContext(ctx, incidentLinkGrammar(object.sql, version)); err != nil {
 			return fmt.Errorf("guard incident link schema: %w", err)
 		}
 	}
@@ -126,10 +142,15 @@ func createIncidentLinkSchema(ctx context.Context, tx *sql.Tx) error {
 }
 
 func validateIncidentLinkSchema(ctx context.Context, query storageQueryer) error {
+	return validateIncidentLinkGrammar(ctx, query, 2)
+}
+
+func validateIncidentLinkGrammar(ctx context.Context, query storageQueryer, version int) error {
 	want := make(map[string]incidentSchemaObject, len(incidentLinkChecks))
 	args := make([]any, 0, len(incidentLinkChecks))
 	maximumSQL := 0
 	for _, object := range incidentLinkChecks {
+		object.sql = incidentLinkGrammar(object.sql, version)
 		want[object.name] = object
 		args = append(args, object.name)
 		maximumSQL = max(maximumSQL, len(object.sql))
@@ -178,6 +199,10 @@ OR (type='trigger' AND tbl_name IN ('events','records','incident_event_links','i
 // The reader receives only aggregate counts. Extraction retains one source's
 // document and distinct links at a time, never a complete historical graph.
 func validateIncidentLinkContents(ctx context.Context, query storageQueryer) error {
+	return validateIncidentLinkVersion(ctx, query, 2)
+}
+
+func validateIncidentLinkVersion(ctx context.Context, query storageQueryer, version int) error {
 	var parts []string
 	for _, record := range []bool{false, true} {
 		table, source, alias := "incident_event_links", "events", "e"
@@ -189,7 +214,7 @@ func validateIncidentLinkContents(ctx context.Context, query storageQueryer) err
 		canonical := "json_each(" + incidentLinkJSON(record, alias) + ") wanted"
 		parts = append(parts, "SELECT '"+table+"',COUNT(*),COUNT(retained_link.target_id),(SELECT COUNT(*) FROM "+table+") FROM "+source+" "+alias+" JOIN "+canonical+" LEFT JOIN "+table+" retained_link ON retained_link.target_kind=json_extract(wanted.value,'$.kind') AND retained_link.target_id=json_extract(wanted.value,'$.id') AND "+identity)
 	}
-	rows, err := query.QueryContext(ctx, strings.Join(parts, " UNION ALL "))
+	rows, err := query.QueryContext(ctx, incidentLinkGrammar(strings.Join(parts, " UNION ALL "), version))
 	if err != nil {
 		return fmt.Errorf("verify incident link contents: %w", err)
 	}
