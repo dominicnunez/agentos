@@ -9,7 +9,7 @@ import (
 	"modernc.org/sqlite"
 )
 
-// incidentLinkRule is one typed reference carried by a projection. The same
+// incidentLinkRule is one typed reference carried by an owned contract. The same
 // registry drives extraction and guards for the durable incoming-link index.
 // Ownership and arbitrary note fields deliberately do not define references.
 type incidentLinkRule struct {
@@ -18,7 +18,9 @@ type incidentLinkRule struct {
 	element                string
 	discriminator, equals  string
 	detail                 bool
+	payload                bool
 	eventTypes             string
+	requires               string
 }
 
 var incidentLinkRules = []incidentLinkRule{
@@ -65,6 +67,9 @@ func init() {
 		if version == "v2" {
 			rules = append(append([]incidentLinkRule(nil), rules...), incidentEvidenceLinkRules...)
 			rules = append(rules, incidentDetailLinkRules...)
+			rules = append(rules, incidentStopLinkRules...)
+			rules = append(rules, incidentContextLinkRules...)
+			rules = append(rules, incidentRouteLinkRules...)
 		}
 		sqlite.MustRegisterDeterministicScalarFunction("agentos_incident_links_"+version, 3, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
 			links := []incidentSelector{}
@@ -141,6 +146,7 @@ func visitIncidentLinks(args []driver.Value, target string, rules []incidentLink
 	if projection == nil {
 		return false
 	}
+	root := projection
 	kind, _ := args[1].(string)
 	var detail map[string]json.RawMessage
 	eventType := ""
@@ -159,19 +165,27 @@ func visitIncidentLinks(args []driver.Value, target string, rules []incidentLink
 		if target != "" && rule.target != target {
 			continue
 		}
-		if !strings.Contains(","+rule.sources+",", ","+kind+",") {
+		if !rule.payload && !strings.Contains(","+rule.sources+",", ","+kind+",") {
 			continue
 		}
 		if rule.eventTypes != "" && !strings.Contains(","+rule.eventTypes+",", ","+eventType+",") {
-			continue
-		}
-		if rule.discriminator != "" && incidentLinkString(values[rule.discriminator]) != rule.equals {
 			continue
 		}
 		fields := strings.Split(rule.field, ".")
 		fieldsRoot := values
 		if rule.detail {
 			fieldsRoot = detail
+		}
+		if rule.payload {
+			fieldsRoot = root
+		}
+		if rule.discriminator != "" && incidentLinkString(fieldsRoot[rule.discriminator]) != rule.equals {
+			continue
+		}
+		if rule.requires != "" {
+			if _, present := fieldsRoot[rule.requires]; !present {
+				continue
+			}
 		}
 		value := fieldsRoot[fields[0]]
 		for _, field := range fields[1:] {

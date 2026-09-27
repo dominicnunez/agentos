@@ -89,3 +89,31 @@ func ValidateInferenceRouteRejectionOrigin(d TrustedDraft, origin Event) error {
 	}
 	return nil
 }
+
+// ValidateInferenceRouteRejections checks diagnostic attribution against earlier
+// origins in sequence-ordered history. Both replay and filtered readers use it.
+func ValidateInferenceRouteRejections(stream []Event) error {
+	origins := make(map[string]Event)
+	for _, event := range stream {
+		switch event.EventType {
+		case "WORK_CREATED", "PLAN_CREATED", "INTAKE_MESSAGE_RECORDED":
+			origins[event.EventID] = event
+		case "INFERENCE_ROUTE_REJECTED":
+			var payload InferenceRouteRejectedPayload
+			if err := decodeExactEventJSON(event.Payload, &payload); err != nil {
+				return fmt.Errorf("invalid routing rejection history")
+			}
+			draft := TrustedDraft{OrganizationID: event.OrganizationID, EventType: event.EventType, SourceActorID: event.SourceActorID,
+				SourceExecutionID: event.SourceExecutionID, RecipientScope: event.RecipientScope, RecipientID: event.RecipientID, TaskID: event.TaskID,
+				AuthorizationRefs: event.AuthorizationRefs, ArtifactRefs: event.ArtifactRefs, CorrelationID: event.CorrelationID, Payload: event.Payload}
+			origin, found := origins[payload.OriginEventRef]
+			if !found || origin.Sequence >= event.Sequence || event.SchemaVersion != SchemaVersion {
+				return fmt.Errorf("invalid routing rejection origin history")
+			}
+			if err := ValidateInferenceRouteRejectionOrigin(draft, origin); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}

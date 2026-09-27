@@ -46,6 +46,9 @@ func ValidateIncidentHistory(snapshot IncidentSnapshot) (map[string]int64, error
 		}
 	}
 	sort.Slice(stream, func(i, j int) bool { return stream[i].Sequence < stream[j].Sequence })
+	if err := ValidateInferenceRouteRejections(stream); err != nil {
+		return nil, err
+	}
 	authority := append(append([]AuthorityRecord(nil), snapshot.FreezeRecords...), snapshot.AuthorityRecords...)
 	leases, freezes, err := ResolveAuthorityAdmissions(stream, authority)
 	if err != nil {

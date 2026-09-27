@@ -168,7 +168,7 @@ func TestIncidentDetailLinkMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	incidentTestExecution(t, store)
+	request := incidentStopRequest(t, store, "task")
 	before, err := store.Events(t.Context(), "")
 	if err != nil {
 		t.Fatal(err)
@@ -246,6 +246,13 @@ func TestIncidentDetailLinkMigration(t *testing.T) {
 		if count != 1 {
 			t.Fatalf("missing migrated Agent dispatch event link %s: %d", ref, count)
 		}
+	}
+	var stopLinks int
+	if err := store.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM incident_event_links WHERE target_kind='event' AND target_id=? AND event_id=?`, started.EventID, request.EventID).Scan(&stopLinks); err != nil {
+		t.Fatal(err)
+	}
+	if stopLinks != 1 {
+		t.Fatalf("missing migrated stop request reference: %d", stopLinks)
 	}
 	if _, err := store.VerifiedIncidentEvents(t.Context(), "org-1", started.CorrelationID, 256); err != nil {
 		t.Fatalf("migrated Agent execution incident: %v", err)

@@ -124,11 +124,10 @@ func TestIncidentStopLinkedHistory(t *testing.T) {
 				}
 				t.Cleanup(func() { _ = store.Close() })
 				request := incidentStopRequest(t, store, family)
-				// Real Task identities are global; auxiliary model task IDs are
-				// organization-scoped. A foreign envelope retaining the real Task
-				// is conflicting evidence, not an unrelated tenant's history.
+				// Real Task and event-reference identities are global; auxiliary
+				// model Task/execution strings alone remain organization-scoped.
 				valid := variant == "pending" || variant == "uncertain" || variant == "confirmed" || variant == "uncertain-confirmed" || variant == "malformed-unrelated" ||
-					(family != "task" && (variant == "cross-tenant" || variant == "malformed-foreign"))
+					(family != "task" && variant == "malformed-foreign")
 				var earlier events.Event
 				if variant == "uncertain" || variant == "uncertain-confirmed" || variant == "duplicate-uncertain" || variant == "early-invalid-late-confirmed" {
 					earlier = incidentStopUncertain(t, store, family, request)

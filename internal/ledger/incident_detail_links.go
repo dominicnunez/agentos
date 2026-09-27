@@ -16,4 +16,7 @@ var incidentDetailLinkRules = []incidentLinkRule{
 	{target: "event", sources: "task", detail: true, eventTypes: "EXECUTION_STARTED", field: "dispatch_binding.agent_event_ref"},
 	{target: "event", sources: "task", detail: true, eventTypes: "EXECUTION_STARTED", field: "dispatch_binding.blueprint_event_ref"},
 	{target: "event", sources: "task", detail: true, eventTypes: "EXECUTION_STARTED", field: "dispatch_binding.execution_profile_event_ref"},
+	{target: "event", sources: "task", detail: true, eventTypes: "TASK_EXECUTION_SUSPENDED", field: "stop_request_ref"},
+	// The legacy suspension contract does not consume execution_start_ref.
+	{target: "event", sources: "task", detail: true, eventTypes: "TASK_EXECUTION_SUSPENDED", field: "execution_start_ref", requires: "stop_request_ref"},
 }
