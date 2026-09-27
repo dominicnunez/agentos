@@ -85,7 +85,12 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
    relying on shared validators. Derive each event kind's candidate predicate
    from its owning validator and its caller's applicability conditions before
    applying tenant, identity, or time filters;
-   a shared subsystem does not imply a shared identity scope. Reconstruct
+   a shared subsystem does not imply a shared identity scope. Build
+   an inventory of reference-bearing fields from owned payload types, including
+   nested arrays, and map each to incoming selection or a justified exclusion.
+   Tenant-scoped lookup does not prove that a foreign claim against a global
+   event ID is unrelated. Exercise that claim before excluding it, while keeping
+   valid shared authority references from expanding unrelated history. Reconstruct
    candidate sets from durable scope and time boundaries, independently of
    claimed references. Compare required
    inputs and invariants with full recovery, including private dependencies and

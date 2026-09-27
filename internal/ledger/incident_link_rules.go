@@ -16,6 +16,8 @@ type incidentLinkRule struct {
 	target, sources, field string
 	array                  bool
 	element                string
+	elementArray           bool
+	prefix                 string
 	discriminator, equals  string
 	detail                 bool
 	payload                bool
@@ -70,6 +72,10 @@ func init() {
 			rules = append(rules, incidentStopLinkRules...)
 			rules = append(rules, incidentContextLinkRules...)
 			rules = append(rules, incidentRouteLinkRules...)
+			rules = append(rules, incidentAggregateLinkRules...)
+			rules = append(rules, incidentReviewLinkRules...)
+			rules = append(rules, incidentKnowledgeLinkRules...)
+			rules = append(rules, incidentInboxLinkRules...)
 		}
 		sqlite.MustRegisterDeterministicScalarFunction("agentos_incident_links_"+version, 3, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
 			links := []incidentSelector{}
@@ -192,30 +198,57 @@ func visitIncidentLinks(args []driver.Value, target string, rules []incidentLink
 			value = incidentLinkObject(value)[field]
 		}
 		if !rule.array {
-			if id := incidentLinkString(value); id != "" && visit(rule.target, id) {
+			if id := incidentLinkID(value, rule.prefix); id != "" && visit(rule.target, id) {
 				return true
 			}
 			continue
 		}
-		decoder := json.NewDecoder(bytes.NewReader(value))
-		opening, err := decoder.Token()
-		if err != nil || opening != json.Delim('[') {
-			continue
-		}
-		for decoder.More() {
-			var item json.RawMessage
-			if decoder.Decode(&item) != nil {
-				break
-			}
-			if rule.element != "" {
-				item = incidentLinkObject(item)[rule.element]
-			}
-			if id := incidentLinkString(item); id != "" && visit(rule.target, id) {
-				return true
-			}
+		if visitIncidentLinkArray(value, rule, visit) {
+			return true
 		}
 	}
 	return false
+}
+
+// Only contract-named array elements are traversed. Nested arrays are used by
+// Goal criteria; arbitrary objects and note fields never introduce links.
+func visitIncidentLinkArray(value json.RawMessage, rule incidentLinkRule, visit func(string, string) bool) bool {
+	decoder := json.NewDecoder(bytes.NewReader(value))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('[') {
+		return false
+	}
+	for decoder.More() {
+		var item json.RawMessage
+		if decoder.Decode(&item) != nil {
+			break
+		}
+		if rule.element != "" {
+			item = incidentLinkObject(item)[rule.element]
+		}
+		if rule.elementArray {
+			if visitIncidentLinkArray(item, incidentLinkRule{target: rule.target, prefix: rule.prefix}, visit) {
+				return true
+			}
+			continue
+		}
+		if id := incidentLinkID(item, rule.prefix); id != "" && visit(rule.target, id) {
+			return true
+		}
+	}
+	return false
+}
+
+func incidentLinkID(raw []byte, prefix string) string {
+	id := incidentLinkString(raw)
+	if prefix == "" {
+		return id
+	}
+	id, found := strings.CutPrefix(id, prefix)
+	if !found {
+		return ""
+	}
+	return id
 }
 
 // SQLite json_extract uses the first occurrence of a duplicate object member.

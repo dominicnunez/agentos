@@ -13,5 +13,6 @@ var incidentStopLinkRules = []incidentLinkRule{
 	{target: "event", payload: true, eventTypes: "MODEL_STOP_REQUESTED", field: "context_event_ref"},
 	{target: "event", payload: true, eventTypes: "MODEL_STOP_UNCERTAIN,MODEL_STOP_CONFIRMED", field: "stop_request_ref"},
 	{target: "event", payload: true, eventTypes: "MODEL_STOP_UNCERTAIN,MODEL_STOP_CONFIRMED", field: "usage_event_ref"},
+	{target: "event", payload: true, eventTypes: "PLANNING_FAILED", field: "evidence_event_ref"},
 	{target: "event", payload: true, eventTypes: "TOOL_OUTCOME_RECORDED", field: "observed_effect.stop_request_ref", discriminator: "tool_id", equals: "runtime-containment"},
 }

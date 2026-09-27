@@ -97,7 +97,8 @@ func incidentExecutionSelection(work []events.Event) (string, []any, error) {
 	links += `(event_type IN (` + incidentExecutionTypes + `) AND (`
 	// Enumerate duplicate reference keys too. Nested references are restricted
 	// to contract-owned interruption and projection details, not arbitrary
-	// tool output fields. Authority hold references are deliberately excluded.
+	// tool output fields. Same-organization hold references do not connect every
+	// execution sharing a freeze; foreign hold claims are selected below.
 	links += `EXISTS (WITH nodes AS MATERIALIZED (SELECT id,parent,key,value FROM json_tree(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END)) SELECT 1 FROM nodes AS leaf LEFT JOIN nodes AS container ON container.id=leaf.parent AND container.parent=0 WHERE ((leaf.parent=0 AND leaf.key IN ('context_event_ref','execution_start_ref','execution_manifest_ref','stop_request_ref','usage_event_ref','outcome_event_ref','finish_event_ref','evidence_event_ref')) OR (container.key='observed_effect' AND leaf.key='stop_request_ref') OR (container.key='detail' AND leaf.key IN ('stop_request_ref','execution_start_ref'))) AND leaf.value IN (` + strings.TrimSuffix(strings.Repeat("?,", len(refs)), ",") + `))`
 	for _, ref := range refs {
 		args = append(args, ref)
@@ -119,5 +120,13 @@ func incidentExecutionSelection(work []events.Event) (string, []any, error) {
 		}
 	}
 	links += `))`
-	return `organization_id=? AND (` + links + `)`, args, nil
+	args = append(args, work[0].OrganizationID)
+	for _, ref := range refs {
+		args = append(args, ref)
+	}
+	args = append(args, work[0].OrganizationID)
+	for _, ref := range refs {
+		args = append(args, ref)
+	}
+	return `(organization_id=? AND (` + links + `) OR (` + incidentForeignHoldClaim(len(refs)) + `) OR (` + incidentForeignPlanningSuspension(len(refs)) + `))`, args, nil
 }
