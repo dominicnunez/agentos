@@ -116,7 +116,17 @@ retained record or event bytes. These indexes support bounded incident dependenc
 selection without scanning unrelated records for each dependency. Each incident
 read checks the exact link table, index, and trigger definitions in its read
 snapshot; the mutable stored layout fingerprint alone is insufficient. Exact
-admission and lifecycle validation remain separate requirements.
+link contents are also compared with references derived from every retained
+event and record source in that snapshot. This detects missing or forged links
+even if maintenance guards were removed and later restored. It requires a full
+source scan and indexed link checks per incident read, in addition to ledger
+integrity verification; only aggregate results are returned to the reader, and
+reference extraction retains one source at a time. Admission and lifecycle
+validation remain separate requirements.
+
+Changing the stored reference rules requires a migration and backfill. Updating
+only the runtime extractor can leave historical index rows inconsistent with the
+new rules, which incident reads will reject.
 
 Storage v12 adds an index scoped to correlation, organization, and execution for
 model stop admission. Migration preserves existing event bytes and stop evidence;

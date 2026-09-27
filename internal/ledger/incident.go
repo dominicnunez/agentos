@@ -49,6 +49,9 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 	if err != nil {
 		return events.IncidentSnapshot{}, fmt.Errorf("verify incident ledger: %w", err)
 	}
+	if err := validateIncidentLinkContents(ctx, tx); err != nil {
+		return events.IncidentSnapshot{}, err
+	}
 	budget := incidentBudget{events: limit, bytes: 2 << 20}
 	work, err := incidentEvents(ctx, tx, &budget, `organization_id=? AND correlation_id=?`, organization, correlation)
 	if err != nil {
@@ -150,13 +153,14 @@ func incidentEffects(ctx context.Context, tx *sql.Tx, budget *incidentBudget, or
 	}
 	sort.Strings(ids)
 	marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-	args := []any{organization}
+	args := make([]any, 0, len(ids))
 	for _, id := range ids {
 		args = append(args, id)
 	}
-	// Discover by both durable records and event envelopes. Neither side may
-	// conceal an orphan or later cross-tenant revision of a selected effect.
-	idQuery := `SELECT record_id AS id FROM records WHERE kind='effect' AND json_valid(body) AND json_extract(body,'$.organization_id')=? AND json_extract(body,'$.task_id') IN (` + marks + `) UNION SELECT json_extract(payload,'$.effect_obligation_id') AS id FROM events WHERE event_type='EFFECT_OBLIGATION_TRANSITIONED' AND organization_id=? AND task_id IN (` + marks + `) UNION SELECT json_extract(payload,'$.effect_obligation_id') AS id FROM events WHERE event_type='EFFECT_OBLIGATION_TRANSITIONED' AND json_valid(payload) AND json_extract(payload,'$.organization_id')=? AND json_extract(payload,'$.task_id') IN (` + marks + `)`
+	// Task identities are global. Discover claims from records, event envelopes,
+	// and payloads before validating organization identity, even when every
+	// revision claims a foreign organization or Work correlation.
+	idQuery := `SELECT record_id AS id FROM records WHERE kind='effect' AND json_valid(body) AND json_extract(body,'$.task_id') IN (` + marks + `) UNION SELECT json_extract(payload,'$.effect_obligation_id') AS id FROM events WHERE event_type='EFFECT_OBLIGATION_TRANSITIONED' AND task_id IN (` + marks + `) UNION SELECT json_extract(payload,'$.effect_obligation_id') AS id FROM events WHERE event_type='EFFECT_OBLIGATION_TRANSITIONED' AND json_valid(payload) AND json_extract(payload,'$.task_id') IN (` + marks + `)`
 	idArgs := append(append(append([]any(nil), args...), args...), args...)
 	var count int
 	var size int64

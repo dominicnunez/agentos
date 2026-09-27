@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/dominicnunez/agentos/internal/events"
 )
 
 func TestIncidentLinkSelectFamilies(t *testing.T) {
@@ -29,6 +31,8 @@ func TestIncidentLinkSelectFamilies(t *testing.T) {
 		{"notes", "note", `{"goal_id":"g","work_id":"w","parent_id":"p","scope":"AGENT","scope_id":"a"}`, nil},
 		{"wrong types", "task", `{"work_id":7,"parent_id":{},"depends_on":"opaque","assignee_type":"AGENT","assignee_id":false,"agent_config":[]}`, nil},
 		{"wrong array", "knowledge", `{"derived_knowledge_refs":{"id":"k"}}`, nil},
+		{"duplicate field", "task", `{"work_id":"w","work_id":"other"}`, []string{"work:w"}},
+		{"duplicate member", "knowledge", `{"derived_knowledge_refs":[{"id":"k","id":"other"}]}`, []string{"knowledge:k"}},
 	}
 	store, err := Open(":memory:")
 	if err != nil {
@@ -146,6 +150,23 @@ func assertIncidentLinkMatch(t *testing.T, store *SQLite, record bool, kind, bod
 		}
 		if matches != expected[candidate] {
 			t.Fatalf("match %q=%v, want %v", candidate, matches, expected[candidate])
+		}
+	}
+}
+
+// Ordinary notes have no typed links, but SQLite must still compile their source
+// triggers. This benchmark covers that regression through the owning writer.
+func BenchmarkIncidentOrdinaryAppend(b *testing.B) {
+	store, err := Open(":memory:")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	draft := events.TrustedDraft{OrganizationID: "org", EventType: "AUDIT_NOTE", CorrelationID: "notes", Payload: map[string]string{"note": "unrelated"}}
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := store.Append(b.Context(), draft); err != nil {
+			b.Fatal(err)
 		}
 	}
 }

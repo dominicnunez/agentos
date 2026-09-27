@@ -472,7 +472,7 @@ func (d *incidentDependencies) frontier() (string, []any) {
 			args = append(args, key.kind, key.id)
 		}
 		if len(taskIDs) > 0 {
-			parts = append(parts, `(event_type IN (`+incidentTaskLifecycleTypes+`) AND task_id IN (`+incidentMarks(len(taskIDs))+`))`)
+			parts = append(parts, `(event_type IN (`+incidentTaskHistoryTypes+`) AND task_id IN (`+incidentMarks(len(taskIDs))+`))`)
 			for _, id := range taskIDs {
 				args = append(args, id)
 			}

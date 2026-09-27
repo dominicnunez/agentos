@@ -196,7 +196,8 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
   Do not request a redundant general review for a push already under review.
 - Once a review is requested or running, wait for its reply before continuing
   implementation or pushing further changes. Do not request additional reviews
-  while waiting for the current review. Read-only review/CI status checks are OK.
+  while waiting for the current review. Wait quietly rather than monitoring CI;
+  check CI when needed for merge readiness or diagnosing a known failure.
 - Track review start/completion times, review type, and change size in a local
   project file outside the repository. Estimate the first status check from
   comparable observations and adjust as evidence changes; avoid frequent fixed

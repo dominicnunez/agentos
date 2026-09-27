@@ -13,6 +13,14 @@ import (
 // record is missing. Use the owning writer's complete lifecycle label family.
 var incidentTaskLifecycleTypes = "'" + strings.Join(events.ProjectionLifecycleEventTypes("task"), "','") + "'"
 
+// These envelopes refer to materialized, globally keyed Tasks. Planning and
+// normalization also use logical task IDs, scoped by organization; they remain
+// in the organization-scoped execution selector rather than this global one.
+var incidentTaskHistoryTypes = incidentTaskLifecycleTypes + `,'EXECUTION_CONTEXT_MANIFESTED','EXECUTION_FINISHED',
+'EXECUTION_STOP_REQUESTED','EXECUTION_STOP_UNCERTAIN','EXECUTION_STOP_CONFIRMED',
+'TOOL_OUTCOME_RECORDED','EVIDENCE_PUBLISHED','INBOX_EVENTS_OBSERVED',
+'COMPLETION_REVIEW_REQUESTED','COMPLETION_REVIEW_DECIDED'`
+
 // Discover the execution families consumed by the shared inference, stop, and
 // legacy hold validators. Correlation is a selector, never the only identity.
 func incidentExecutionHistory(ctx context.Context, tx *sql.Tx, work []events.Event, budget *incidentBudget) ([]events.Event, error) {
@@ -80,7 +88,7 @@ func incidentExecutionSelection(work []events.Event) (string, []any, error) {
 	// no label allowlist. Task-only evidence and payload links use the owned
 	// families so independent effect records keep their separate reader.
 	if len(taskIDs) != 0 {
-		links += `(event_type IN (` + incidentExecutionTypes + `,` + incidentTaskLifecycleTypes + `) AND task_id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(taskIDs)), ",") + `)) OR `
+		links += `(event_type IN (` + incidentExecutionTypes + `,` + incidentTaskHistoryTypes + `) AND task_id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(taskIDs)), ",") + `)) OR `
 		for _, id := range taskIDs {
 			args = append(args, id)
 		}

@@ -107,9 +107,9 @@ func createIncidentLinkSchema(ctx context.Context, tx *sql.Tx) error {
 		if record {
 			table, source, alias, identity = "incident_record_links", "records", "r", "r.kind,r.record_id,r.version,r.admission_event_id"
 		}
-		// The correlated aggregate expands one source at a time, rather than
+		// The correlated extractor expands one source at a time, rather than
 		// materializing the complete historical graph in the migration process.
-		statement := "INSERT INTO " + table + " SELECT json_extract(link.value,'$.kind'),json_extract(link.value,'$.id')," + identity + " FROM " + source + " " + alias + " JOIN json_each((SELECT json_group_array(json_object('kind',target_kind,'id',target_id)) FROM (" + incidentLinkSelect(record, alias) + "))) link"
+		statement := "INSERT INTO " + table + " SELECT json_extract(link.value,'$.kind'),json_extract(link.value,'$.id')," + identity + " FROM " + source + " " + alias + " JOIN json_each(" + incidentLinkJSON(record, alias) + ") link"
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("backfill incident links: %w", err)
 		}
@@ -167,6 +167,48 @@ OR (type='trigger' AND tbl_name IN ('events','records','incident_event_links','i
 	}
 	if len(want) != 0 {
 		return fmt.Errorf("incident link schema is incomplete")
+	}
+	return rows.Close()
+}
+
+// Guard definitions cannot prove that the index was maintained continuously.
+// Verify its contents against both authoritative source tables in this read's
+// snapshot, including histories unrelated to the selected incident. This adds
+// one complete source scan and indexed link probes, not one query per source.
+// The reader receives only aggregate counts. Extraction retains one source's
+// document and distinct links at a time, never a complete historical graph.
+func validateIncidentLinkContents(ctx context.Context, query storageQueryer) error {
+	var parts []string
+	for _, record := range []bool{false, true} {
+		table, source, alias := "incident_event_links", "events", "e"
+		identity := "retained_link.event_sequence=e.sequence AND retained_link.event_id=e.event_id"
+		if record {
+			table, source, alias = "incident_record_links", "records", "r"
+			identity = "retained_link.record_kind=r.kind AND retained_link.record_id=r.record_id AND retained_link.record_version=r.version AND retained_link.admission_event_id=r.admission_event_id"
+		}
+		canonical := "json_each(" + incidentLinkJSON(record, alias) + ") wanted"
+		parts = append(parts, "SELECT '"+table+"',COUNT(*),COUNT(retained_link.target_id),(SELECT COUNT(*) FROM "+table+") FROM "+source+" "+alias+" JOIN "+canonical+" LEFT JOIN "+table+" retained_link ON retained_link.target_kind=json_extract(wanted.value,'$.kind') AND retained_link.target_id=json_extract(wanted.value,'$.id') AND "+identity)
+	}
+	rows, err := query.QueryContext(ctx, strings.Join(parts, " UNION ALL "))
+	if err != nil {
+		return fmt.Errorf("verify incident link contents: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var table string
+		var expected, matched, retained int64
+		if err := rows.Scan(&table, &expected, &matched, &retained); err != nil {
+			return fmt.Errorf("verify incident link contents: %w", err)
+		}
+		// Every canonical reference must have its exact unique index row. Equal
+		// cardinality then excludes extras, including a forged row replacing a
+		// missing row without changing the total count.
+		if expected != matched || expected != retained {
+			return fmt.Errorf("incident link contents do not match authoritative sources: %s", table)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("verify incident link contents: %w", err)
 	}
 	return rows.Close()
 }

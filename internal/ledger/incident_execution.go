@@ -17,7 +17,7 @@ const incidentExecutionTypes = `'EXECUTION_STARTED','EXECUTION_CONTEXT_MANIFESTE
 'PLANNING_CONTEXT_MANIFESTED','INTENT_NORMALIZATION_CONTEXT_MANIFESTED',
 'MODEL_STOP_REQUESTED','MODEL_STOP_UNCERTAIN','MODEL_STOP_CONFIRMED',
 'EXECUTION_STOP_REQUESTED','EXECUTION_STOP_UNCERTAIN','EXECUTION_STOP_CONFIRMED',
-'TOOL_OUTCOME_RECORDED','INFERENCE_USAGE_RECORDED','INFERENCE_RESERVED','INFERENCE_RECONCILED','INFERENCE_NOT_SENT',
+'TOOL_OUTCOME_RECORDED','EVIDENCE_PUBLISHED','INFERENCE_USAGE_RECORDED','INFERENCE_RESERVED','INFERENCE_RECONCILED','INFERENCE_NOT_SENT',
 'PLAN_CREATED','PLANNING_FAILED','INTENT_DRAFTED','INTENT_NORMALIZATION_FAILED','PLANNING_CONTAINMENT_SUSPENDED','INTENT_NORMALIZATION_SUSPENDED'`
 
 func validateIncidentExecutionEvidence(ctx context.Context, tx *sql.Tx, work []events.Event, freezes []events.OrganizationFreezeAdmission, budget *incidentBudget) error {
@@ -55,6 +55,9 @@ func validateIncidentExecutionEvidence(ctx context.Context, tx *sql.Tx, work []e
 // reservation event and its row, or removed the event altogether. This query
 // returns one scalar and is not repeated per execution or reservation.
 func validateIncidentExecutionRows(ctx context.Context, tx *sql.Tx, work []events.Event) error {
+	if err := validateIncidentInferenceScope(ctx, tx, work); err != nil {
+		return err
+	}
 	executions := map[string]bool{}
 	tasks := map[string]bool{}
 	expected := 0

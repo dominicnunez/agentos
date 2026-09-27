@@ -114,7 +114,7 @@ func TestIncidentStopCrossCorrelation(t *testing.T) {
 }
 
 func TestIncidentStopLinkedHistory(t *testing.T) {
-	variants := []string{"pending", "uncertain", "confirmed", "uncertain-confirmed", "duplicate-uncertain", "duplicate-confirmed", "early-invalid-late-confirmed", "cross-task", "cross-execution", "cross-all-envelope", "cross-tenant", "wrong-request", "cross-request", "duplicate-key-link", "malformed-linked", "malformed-unrelated"}
+	variants := []string{"pending", "uncertain", "confirmed", "uncertain-confirmed", "duplicate-uncertain", "duplicate-confirmed", "early-invalid-late-confirmed", "cross-task", "cross-execution", "cross-all-envelope", "cross-tenant", "wrong-request", "cross-request", "duplicate-key-link", "malformed-linked", "malformed-foreign", "malformed-unrelated"}
 	for _, family := range []string{"planning", "normalization", "task"} {
 		for _, variant := range variants {
 			t.Run(family+"/"+variant, func(t *testing.T) {
@@ -124,7 +124,11 @@ func TestIncidentStopLinkedHistory(t *testing.T) {
 				}
 				t.Cleanup(func() { _ = store.Close() })
 				request := incidentStopRequest(t, store, family)
-				valid := variant == "pending" || variant == "uncertain" || variant == "confirmed" || variant == "uncertain-confirmed" || variant == "cross-tenant" || variant == "malformed-unrelated"
+				// Real Task identities are global; auxiliary model task IDs are
+				// organization-scoped. A foreign envelope retaining the real Task
+				// is conflicting evidence, not an unrelated tenant's history.
+				valid := variant == "pending" || variant == "uncertain" || variant == "confirmed" || variant == "uncertain-confirmed" || variant == "malformed-unrelated" ||
+					(family != "task" && (variant == "cross-tenant" || variant == "malformed-foreign"))
 				var earlier events.Event
 				if variant == "uncertain" || variant == "uncertain-confirmed" || variant == "duplicate-uncertain" || variant == "early-invalid-late-confirmed" {
 					earlier = incidentStopUncertain(t, store, family, request)
@@ -133,7 +137,7 @@ func TestIncidentStopLinkedHistory(t *testing.T) {
 				if variant == "confirmed" || variant == "uncertain-confirmed" || variant == "duplicate-confirmed" || variant == "early-invalid-late-confirmed" {
 					confirmed = incidentStopConfirmed(t, store, family, request)
 				}
-				if !valid || variant == "cross-tenant" || variant == "malformed-unrelated" {
+				if !valid || variant == "cross-tenant" || strings.HasPrefix(variant, "malformed-") {
 					draft := modelStopDraft(request)
 					draft.CorrelationID = "other-run"
 					draft.EventType = "MODEL_STOP_UNCERTAIN"
@@ -150,8 +154,10 @@ func TestIncidentStopLinkedHistory(t *testing.T) {
 						draft.SourceExecutionID = "other-execution"
 					case "cross-all-envelope":
 						draft.TaskID, draft.SourceExecutionID = "other-task", "other-execution"
-					case "cross-tenant", "malformed-unrelated":
+					case "cross-tenant", "malformed-foreign":
 						draft.OrganizationID = "other-org"
+					case "malformed-unrelated":
+						draft.OrganizationID, draft.TaskID, draft.SourceExecutionID = "other-org", "other-task", "other-execution"
 					case "wrong-request":
 						draft.Payload = map[string]string{"stop_request_ref": "missing-request"}
 					case "cross-request":

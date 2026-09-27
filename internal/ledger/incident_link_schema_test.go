@@ -314,3 +314,74 @@ INSERT INTO records(kind,record_id,version,body,created_at) VALUES('task','malfo
 		t.Fatalf("migrated index is unguarded: %v", err)
 	}
 }
+
+func TestIncidentReadChecksLinkContents(t *testing.T) {
+	for _, record := range []bool{false, true} {
+		for _, mutation := range []string{"missing", "extra", "altered", "source identity"} {
+			t.Run(fmt.Sprintf("record=%t/%s", record, mutation), func(t *testing.T) {
+				store, err := Open(":memory:")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = store.Close() })
+				appendDerivedIncidentChain(t, store, 2)
+				if _, err := store.VerifiedIncidentEvents(t.Context(), "org-1", "knowledge-derived-0", 256); err != nil {
+					t.Fatalf("valid incident: %v", err)
+				}
+				table := "incident_event_links"
+				where := `target_kind='knowledge' AND target_id='derived-0' AND event_sequence IN (SELECT sequence FROM events WHERE json_extract(payload,'$.projection.record_id')='derived-1')`
+				columns := `target_kind,'invented-target',event_sequence,event_id`
+				identity := `event_id='absent-index-source'`
+				if record {
+					table = "incident_record_links"
+					where = `target_kind='knowledge' AND target_id='derived-0' AND record_kind='knowledge' AND record_id='derived-1'`
+					columns = `target_kind,'invented-target',record_kind,record_id,record_version,admission_event_id`
+					identity = `admission_event_id='absent-index-source'`
+				}
+				var guards []incidentSchemaObject
+				for _, object := range incidentLinkObjects {
+					if object.kind == "trigger" && object.table == table {
+						guards = append(guards, object)
+						if _, err := store.db.ExecContext(t.Context(), "DROP TRIGGER "+object.name); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				statement := "DELETE FROM " + table + " WHERE " + where
+				switch mutation {
+				case "extra":
+					statement = "INSERT INTO " + table + " SELECT " + columns + " FROM " + table + " WHERE " + where
+				case "altered":
+					statement = "UPDATE " + table + " SET target_id='invented-target' WHERE " + where
+				case "source identity":
+					statement = "UPDATE " + table + " SET " + identity + " WHERE " + where
+				}
+				result, err := store.db.ExecContext(t.Context(), statement)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if changed, err := result.RowsAffected(); err != nil || changed == 0 {
+					t.Fatalf("no incoming links changed: %d, %v", changed, err)
+				}
+				for _, guard := range guards {
+					if _, err := store.db.ExecContext(t.Context(), guard.sql); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := validateIncidentLinkSchema(t.Context(), store.db); err != nil {
+					t.Fatalf("exact guard restoration: %v", err)
+				}
+				if _, err := ValidateEventIntegrity(t.Context(), store.db); err != nil {
+					t.Fatalf("authoritative events changed: %v", err)
+				}
+				snapshot, err := store.VerifiedIncidentEvents(t.Context(), "org-1", "knowledge-derived-0", 256)
+				if err == nil || !strings.Contains(err.Error(), "incident link contents") {
+					t.Fatalf("inconsistent derived index was trusted: %v", err)
+				}
+				if !reflect.DeepEqual(snapshot, events.IncidentSnapshot{}) {
+					t.Fatal("index inconsistency returned partial incident evidence")
+				}
+			})
+		}
+	}
+}

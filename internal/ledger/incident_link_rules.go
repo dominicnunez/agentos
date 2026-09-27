@@ -1,9 +1,16 @@
 package ledger
 
-import "strings"
+import (
+	"bytes"
+	"database/sql/driver"
+	"encoding/json"
+	"strings"
+
+	"modernc.org/sqlite"
+)
 
 // incidentLinkRule is one typed reference carried by a projection. The same
-// registry drives frontier predicates and the durable incoming-link index.
+// registry drives extraction and guards for the durable incoming-link index.
 // Ownership and arbitrary note fields deliberately do not define references.
 type incidentLinkRule struct {
 	target, sources, field string
@@ -34,76 +41,169 @@ var incidentLinkRules = []incidentLinkRule{
 	{target: "execution_profile", sources: "task", field: "agent_config.profile_id"},
 }
 
-// Invalid raw JSON must not make maintenance triggers reject the source write.
-// Semantic validation still owns rejection when that source is selected.
-func incidentLinkSource(record bool, source string) (body, prefix, kind string) {
+// Pure functions keep trigger programs small: expanding every relationship into
+// each maintenance and guard trigger makes even ordinary event inserts expensive
+// to compile. Neither function reads a connection or retains source state.
+func init() {
+	sqlite.MustRegisterDeterministicScalarFunction("agentos_incident_links_v1", 3, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+		links := []incidentSelector{}
+		seen := map[incidentKey]bool{}
+		visitIncidentLinks(args, "", func(kind, id string) bool {
+			key := incidentKey{kind, id}
+			if !seen[key] {
+				seen[key] = true
+				links = append(links, incidentSelector{kind, id})
+			}
+			return false
+		})
+		encoded, err := json.Marshal(links)
+		return string(encoded), err
+	})
+	sqlite.MustRegisterDeterministicScalarFunction("agentos_incident_link_match_v1", 5, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+		kind, kindOK := args[3].(string)
+		id, idOK := args[4].(string)
+		if !kindOK || !idOK || kind == "" || id == "" {
+			return int64(0), nil
+		}
+		found := visitIncidentLinks(args[:3], kind, func(candidateKind, candidateID string) bool { return candidateKind == kind && candidateID == id })
+		if found {
+			return int64(1), nil
+		}
+		return int64(0), nil
+	})
+}
+
+func incidentLinkArguments(record bool, source string) string {
 	if source != "" {
 		source += "."
 	}
-	body, prefix = source+"payload", "$.projection."
 	if record {
-		body, prefix = source+"body", "$."
+		return "1," + source + "kind," + source + "body"
 	}
-	body = "(CASE WHEN json_valid(" + body + ") THEN " + body + " ELSE '{}' END)"
-	kind = "json_extract(" + body + ",'" + prefix + "projection_kind')"
-	if record {
-		kind = source + "kind"
-	}
-	return
+	return "0,NULL," + source + "payload"
 }
 
-func (rule incidentLinkRule) selection(record bool, source string) string {
-	body, prefix, kind := incidentLinkSource(record, source)
-	path := "'" + prefix + "value." + rule.field + "'"
-	id := "json_extract(" + body + "," + path + ")"
-	valid := "json_type(" + body + "," + path + ")='text'"
-	from := ""
-	if rule.array {
-		// json_each accepts scalar values too; only declared arrays are references.
-		from = " FROM json_each(CASE WHEN json_type(" + body + "," + path + ")='array' THEN json_extract(" + body + "," + path + ") ELSE '[]' END) AS link"
-		id, valid = "link.value", "link.type='text'"
-		if rule.element != "" {
-			element := "(CASE WHEN link.type='object' THEN link.value ELSE '{}' END)"
-			id = "json_extract(" + element + ",'$." + rule.element + "')"
-			valid = "json_type(" + element + ",'$." + rule.element + "')='text'"
+// incidentLinkSelect returns distinct links for one source row. Event projection
+// identity remains a link even when its materialized record is missing.
+func incidentLinkSelect(record bool, source string) string {
+	return "SELECT json_extract(value,'$.kind') AS target_kind,json_extract(value,'$.id') AS target_id FROM json_each(" + incidentLinkJSON(record, source) + ")"
+}
+
+func incidentLinkJSON(record bool, source string) string {
+	return "agentos_incident_links_v1(" + incidentLinkArguments(record, source) + ")"
+}
+
+// All arguments are internal SQL expressions, not caller supplied identifiers.
+func incidentLinkMatch(record bool, source, targetKind, targetID string) string {
+	return "agentos_incident_link_match_v1(" + incidentLinkArguments(record, source) + "," + targetKind + "," + targetID + ")"
+}
+
+// Invalid documents and fields derive no links, so maintenance cannot reject a
+// malformed raw source write. Exact admission validation still rejects selected
+// malformed evidence. A source-sized parse is required; there is no cross-read
+// cache or truncation that could hide a derivable incoming reference.
+func visitIncidentLinks(args []driver.Value, target string, visit func(string, string) bool) bool {
+	var body []byte
+	switch value := args[2].(type) {
+	case string:
+		body = []byte(value)
+	case []byte:
+		body = value
+	default:
+		return false
+	}
+	if !json.Valid(body) {
+		return false
+	}
+	projection := incidentLinkObject(body)
+	if projection == nil {
+		return false
+	}
+	kind, _ := args[1].(string)
+	if args[0] == int64(0) {
+		projection = incidentLinkObject(projection["projection"])
+		kind = incidentLinkString(projection["projection_kind"])
+		id := incidentLinkString(projection["record_id"])
+		if kind != "" && id != "" && (target == "" || target == kind) && visit(kind, id) {
+			return true
 		}
 	}
-	condition := kind + " IN ('" + strings.ReplaceAll(rule.sources, ",", "','") + "') AND " + valid + " AND " + id + "<>''"
-	if rule.discriminator != "" {
-		condition += " AND json_extract(" + body + ",'" + prefix + "value." + rule.discriminator + "')='" + rule.equals + "'"
-	}
-	return "SELECT '" + rule.target + "' AS target_kind, " + id + " AS target_id" + from + " WHERE " + condition
-}
-
-// incidentLinkSelect returns links for one source row (NEW/OLD in triggers or
-// a caller's row alias). Event identity is itself a link so incoming projections
-// remain discoverable when their materialized record is absent.
-func incidentLinkSelect(record bool, source string) string {
-	parts := make([]string, 0, len(incidentLinkRules)+1)
+	values := incidentLinkObject(projection["value"])
 	for _, rule := range incidentLinkRules {
-		parts = append(parts, rule.selection(record, source))
+		if target != "" && rule.target != target {
+			continue
+		}
+		if !strings.Contains(","+rule.sources+",", ","+kind+",") {
+			continue
+		}
+		if rule.discriminator != "" && incidentLinkString(values[rule.discriminator]) != rule.equals {
+			continue
+		}
+		fields := strings.Split(rule.field, ".")
+		value := values[fields[0]]
+		for _, field := range fields[1:] {
+			value = incidentLinkObject(value)[field]
+		}
+		if !rule.array {
+			if id := incidentLinkString(value); id != "" && visit(rule.target, id) {
+				return true
+			}
+			continue
+		}
+		decoder := json.NewDecoder(bytes.NewReader(value))
+		opening, err := decoder.Token()
+		if err != nil || opening != json.Delim('[') {
+			continue
+		}
+		for decoder.More() {
+			var item json.RawMessage
+			if decoder.Decode(&item) != nil {
+				break
+			}
+			if rule.element != "" {
+				item = incidentLinkObject(item)[rule.element]
+			}
+			if id := incidentLinkString(item); id != "" && visit(rule.target, id) {
+				return true
+			}
+		}
 	}
-	if !record {
-		parts = append(parts, incidentEventIdentitySelect(source))
-	}
-	return "SELECT DISTINCT target_kind,target_id FROM (" + strings.Join(parts, " UNION ALL ") + ")"
+	return false
 }
 
-func incidentEventIdentitySelect(source string) string {
-	body, prefix, kind := incidentLinkSource(false, source)
-	id := "json_extract(" + body + ",'" + prefix + "record_id')"
-	return "SELECT " + kind + " AS target_kind, " + id + " AS target_id WHERE json_type(" + body + ",'" + prefix + "projection_kind')='text' AND " + kind + "<>'' AND json_type(" + body + ",'" + prefix + "record_id')='text' AND " + id + "<>''"
+// SQLite json_extract uses the first occurrence of a duplicate object member.
+// Preserve that discovery behavior; selected duplicates fail exact validation.
+func incidentLinkObject(raw []byte) map[string]json.RawMessage {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return nil
+	}
+	fields := map[string]json.RawMessage{}
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return nil
+		}
+		var value json.RawMessage
+		if decoder.Decode(&value) != nil {
+			return nil
+		}
+		name, ok := key.(string)
+		if !ok {
+			return nil
+		}
+		if _, seen := fields[name]; !seen {
+			fields[name] = value
+		}
+	}
+	return fields
 }
 
-// incidentLinkMatch verifies a single claimed link without materializing the
-// complete distinct outgoing set. All arguments are internal SQL expressions.
-func incidentLinkMatch(record bool, source, targetKind, targetID string) string {
-	parts := make([]string, 0, len(incidentLinkRules)+1)
-	for _, rule := range incidentLinkRules {
-		parts = append(parts, "("+targetKind+"='"+rule.target+"' AND EXISTS (SELECT 1 FROM ("+rule.selection(record, source)+") candidate WHERE candidate.target_id="+targetID+"))")
+func incidentLinkString(raw []byte) string {
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		return ""
 	}
-	if !record {
-		parts = append(parts, "EXISTS (SELECT 1 FROM ("+incidentEventIdentitySelect(source)+") candidate WHERE candidate.target_kind="+targetKind+" AND candidate.target_id="+targetID+")")
-	}
-	return "(" + strings.Join(parts, " OR ") + ")"
+	return value
 }
