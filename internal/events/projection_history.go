@@ -1,7 +1,6 @@
 package events
 
 import (
-	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
@@ -33,6 +32,7 @@ func ValidateProjectionHistory(stream []Event, inboxObservations map[string]Inbo
 	sort.Slice(ordered, func(left, right int) bool { return ordered[left].Sequence < ordered[right].Sequence })
 	reviewEvidence := IndexReviewedIntentEvidence(ordered)
 	startHistory := newExecutionHistory(ordered)
+	completionEvidence := NewCompletionEvidenceValidator(ordered)
 	tasks := make(map[core.ID]core.DurableState[core.Task])
 	agents := make(map[core.ID]core.DurableState[core.Agent])
 	missions := make(map[core.ID]core.DurableState[core.Mission])
@@ -58,7 +58,8 @@ func ValidateProjectionHistory(stream []Event, inboxObservations map[string]Inbo
 		}
 	}
 	replacementConfirmations := make(map[core.ID]string)
-	teamRecords := make(map[string][][]byte)
+	teamRevisions := make(map[string]map[core.ID][]TeamRevisionBinding)
+	tasksByWork := make(map[core.ID]map[core.ID]core.DurableState[core.Task])
 	blueprintRevisions := make(map[core.ID]map[string]core.AgentBlueprint)
 	profileRevisions := make(map[core.ID]map[string]core.ExecutionProfile)
 	executionStarts := make(map[string]Event)
@@ -196,12 +197,12 @@ func ValidateProjectionHistory(stream []Event, inboxObservations map[string]Inbo
 				err = core.AdmitDurableRevision(graph.Teams, value.ID, record.Version, record.CorrelationID, value, false, core.ValidTeamRevision)
 			}
 			if err == nil {
-				body, marshalErr := json.Marshal(record)
-				if marshalErr != nil {
-					err = marshalErr
-				} else {
-					teamRecords[event.OrganizationID] = append(teamRecords[event.OrganizationID], body)
+				if teamRevisions[event.OrganizationID] == nil {
+					teamRevisions[event.OrganizationID] = make(map[core.ID][]TeamRevisionBinding)
 				}
+				// The exact event, revision order, and roster were admitted above.
+				// Retain only this validated prefix for later completion checks.
+				teamRevisions[event.OrganizationID][value.ID] = append(teamRevisions[event.OrganizationID][value.ID], TeamRevisionBinding{Team: value, Version: record.Version, EffectiveSequence: event.Sequence})
 			}
 		case "intent":
 			var value core.Intent
@@ -228,10 +229,16 @@ func ValidateProjectionHistory(stream []Event, inboxObservations map[string]Inbo
 				err = validateProjectionTaskAtAdmission(value, event, record, graph, startHistory)
 			}
 			if err == nil && event.EventType == "TASK_VERIFIED_COMPLETE" {
-				err = validateTaskCompletionAtAdmission(value, event, record, graph, ordered, teamRecords[event.OrganizationID], inboxObservations, blueprintRevisions, profileRevisions, startHistory)
+				err = validateTaskCompletionAtAdmission(value, event, record, graph, tasksByWork[value.WorkID], completionEvidence, teamRevisions[event.OrganizationID], inboxObservations, blueprintRevisions, profileRevisions, startHistory)
 			}
 			if err == nil {
 				err = core.AdmitDurableRevision(graph.Tasks, value.ID, record.Version, record.CorrelationID, value, true, core.ValidTaskRevision)
+			}
+			if err == nil {
+				if tasksByWork[value.WorkID] == nil {
+					tasksByWork[value.WorkID] = make(map[core.ID]core.DurableState[core.Task])
+				}
+				tasksByWork[value.WorkID][value.ID] = graph.Tasks[value.ID]
 			}
 			if err == nil && event.EventType == "EXECUTION_STARTED" {
 				// The full dispatch was validated above. Evidence checks reuse
@@ -472,7 +479,7 @@ func priorEventByID(stream []Event, beforeSequence int64, eventID string) (Event
 	return Event{}, false
 }
 
-func validateTaskCompletionAtAdmission(task core.Task, event Event, record ProjectionRecord, graph core.DurableGraph, stream []Event, teamRecords [][]byte, inboxObservations map[string]InboxObservationBinding, blueprintRevisions map[core.ID]map[string]core.AgentBlueprint, profileRevisions map[core.ID]map[string]core.ExecutionProfile, startHistory *executionHistory) error {
+func validateTaskCompletionAtAdmission(task core.Task, event Event, record ProjectionRecord, graph core.DurableGraph, workTasks map[core.ID]core.DurableState[core.Task], evidence *CompletionEvidenceValidator, teamRevisions map[core.ID][]TeamRevisionBinding, inboxObservations map[string]InboxObservationBinding, blueprintRevisions map[core.ID]map[string]core.AgentBlueprint, profileRevisions map[core.ID]map[string]core.ExecutionProfile, startHistory *executionHistory) error {
 	work, found := graph.Works[task.WorkID]
 	if !found {
 		return fmt.Errorf("completed Task lacks its durable Work")
@@ -502,7 +509,7 @@ func validateTaskCompletionAtAdmission(task core.Task, event Event, record Proje
 		profiles[config.ProfileID] = profile
 		return nil
 	}
-	for taskID, state := range graph.Tasks {
+	for taskID, state := range workTasks {
 		if taskID == task.ID {
 			continue
 		}
@@ -513,17 +520,13 @@ func validateTaskCompletionAtAdmission(task core.Task, event Event, record Proje
 	if err := addTask(task, record.Version, record.CorrelationID); err != nil {
 		return err
 	}
-	teamRevisions, err := ResolveTeamRevisionBindings(event.OrganizationID, teamRecords, stream)
-	if err != nil {
-		return fmt.Errorf("resolve completed Task Team history: %w", err)
-	}
 	binding := WorkCompletionBinding{
 		executionHistory: startHistory,
 		OrganizationID:   event.OrganizationID, CorrelationID: record.CorrelationID,
 		Work: work.Value, WorkVersion: work.Version, Intent: intent.Value, Tasks: tasks,
 		TeamRevisions: teamRevisions, InboxObservations: inboxObservations, AgentBlueprints: blueprints, ExecutionProfiles: profiles,
 	}
-	_, err = ValidateTaskCompletionEvidenceChain(binding, WorkCompletionTaskBinding{Task: task, Version: record.Version, CorrelationID: record.CorrelationID}, event, stream)
+	_, err := evidence.ValidateTask(binding, WorkCompletionTaskBinding{Task: task, Version: record.Version, CorrelationID: record.CorrelationID}, event)
 	return err
 }
 

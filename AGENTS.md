@@ -69,10 +69,13 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
    Place cross-module tests in an allowed integration layer and keep direct
    storage mutations in the owning module. Check test architecture boundaries
    before expanding fixtures across modules.
-2. Maintain a compact local evidence matrix for relevant identity, missing or
-   invalid metadata, cancellation, authority failure, timing between writes,
-   and crash boundaries. Distinguish proven, contradicted, missing, and
-   inapplicable coverage; a passing package suite is not exhaustive evidence.
+2. For cross-boundary behavior changes, maintain a compact contract evidence
+   matrix: invariant, owning writer/validator and callers, independent failure
+   cases, exact evidence and revision, and decision. Derive cases from those
+   owners rather than from the patch. Distinguish proven, contradicted, missing,
+   and inapplicable with a reason. Include relevant identity, missing/forbidden
+   metadata, authority failure, cancellation, write timing and crash boundaries.
+   A passing package suite or clean audit is not exhaustive evidence.
 3. Enforce invariants at their authoritative boundary before dispatch or durable
    publication. Validate relationships in both directions and cover supported
    direct composition as well as the production setup.
@@ -112,10 +115,19 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
    Preserve snapshot, invalidation, rollback and tenant-isolation guarantees.
    Distinguish necessary full replay from repeated runtime work. Investigate CI
    timeouts before changing their budget; a longer timeout is not a performance fix.
-7. Before each review push, audit the whole changed invariant and diff, address
-   confirmed related gaps, and run the required checks. A review finding triggers
-   a class-wide audit of sibling callers and failure modes before the next push.
-   Record concrete evidence; external review is an independent gate.
+7. Before a ready review push, audit the whole changed invariant and diff against
+   the evidence matrix. For high-risk cross-boundary changes, use an independent
+   reviewer to inspect the raw contract, sources and tests for missing coverage.
+   Required missing or contradicted evidence holds the push; continue diagnosis
+   and logical local commits without asking for routine approval. An exclusion
+   needs a contract or scope reason, not absence from the diff. Run applicable
+   checks and address confirmed related gaps. For performance changes, compare
+   the same complete workload before/after and diagnose regressions before
+   calling the change an improvement. Map each external finding to the missed
+   boundary or evidence row, audit sibling paths, and track repeat defect classes.
+   Apply the verification-before-completion skill when available; these gate
+   requirements remain binding without it. Documentation-only and low-impact
+   mechanical changes do not require this matrix or independent coverage audit.
 8. Keep PRs cohesive and bounded without omitting necessary callers merely to
    reduce diff size. Track independent confirmed defects under the issue policy
    below and resolve them before proceeding to later goal parts.

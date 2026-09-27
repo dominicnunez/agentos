@@ -422,14 +422,14 @@ func TestCompletionReplayPreservesVersionOneExecutionContext(t *testing.T) {
 		AgentBlueprints:   map[core.ID]core.AgentBlueprint{blueprint.ID: blueprint},
 		ExecutionProfiles: map[core.ID]core.ExecutionProfile{profile.ID: profile},
 	}
-	if _, err := completionExecutionModel(binding, task, string(manifest.ExecutionID), start, outcomeEvent, stream); err != nil {
+	if _, err := completionModelParity(t, binding, task, string(manifest.ExecutionID), start, outcomeEvent, stream); err != nil {
 		t.Fatalf("persisted version 1 execution manifest was rejected: %v", err)
 	}
 
 	manifest.KnowledgeRefs = []core.VersionedRef{{ID: "knowledge-1", Version: "2", MaterializationState: core.MaterializedFull}}
 	manifestEvent.Payload, _ = json.Marshal(manifest)
 	stream[len(stream)-2] = manifestEvent
-	if _, err := completionExecutionModel(binding, task, string(manifest.ExecutionID), start, outcomeEvent, stream); err == nil {
+	if _, err := completionModelParity(t, binding, task, string(manifest.ExecutionID), start, outcomeEvent, stream); err == nil {
 		t.Fatal("version 1 execution manifest accepted post-version-1 knowledge references")
 	}
 
@@ -443,13 +443,13 @@ func TestCompletionReplayPreservesVersionOneExecutionContext(t *testing.T) {
 	manifest.ExecutionInputSHA256 = core.FingerprintExecutionInput(versionTwoInput)
 	manifestEvent.Payload, _ = json.Marshal(manifest)
 	stream[len(stream)-2] = manifestEvent
-	if _, err := completionExecutionModel(binding, task, string(manifest.ExecutionID), start, outcomeEvent, stream); err != nil {
+	if _, err := completionModelParity(t, binding, task, string(manifest.ExecutionID), start, outcomeEvent, stream); err != nil {
 		t.Fatalf("persisted version 2 execution manifest was rejected: %v", err)
 	}
 	manifest.CoordinationRefs = []core.VersionedRef{{ID: "task-peer", Version: "1", MaterializationState: core.MaterializedFull}}
 	manifestEvent.Payload, _ = json.Marshal(manifest)
 	stream[len(stream)-2] = manifestEvent
-	if _, err := completionExecutionModel(binding, task, string(manifest.ExecutionID), start, outcomeEvent, stream); err == nil {
+	if _, err := completionModelParity(t, binding, task, string(manifest.ExecutionID), start, outcomeEvent, stream); err == nil {
 		t.Fatal("version 2 execution manifest accepted version 3 coordination references")
 	}
 	for _, version := range []string{"v4", "v5"} {
@@ -475,7 +475,7 @@ func TestCompletionReplayPreservesVersionOneExecutionContext(t *testing.T) {
 			currentOutcome := outcomeEvent
 			currentOutcome.Sequence = 7
 			currentStream := append(append([]Event(nil), knowledgeHistory...), planEvent, start, currentManifestEvent, currentOutcome)
-			if _, err := completionExecutionModel(binding, task, string(currentManifest.ExecutionID), start, currentOutcome, currentStream); err != nil {
+			if _, err := completionModelParity(t, binding, task, string(currentManifest.ExecutionID), start, currentOutcome, currentStream); err != nil {
 				t.Fatalf("valid %s Knowledge context rejected: %v", version, err)
 			}
 			if version == "v5" {
@@ -493,7 +493,7 @@ func TestCompletionReplayPreservesVersionOneExecutionContext(t *testing.T) {
 					t.Run(name, func(t *testing.T) {
 						changed := append([]Event(nil), currentStream...)
 						alter(&changed[len(changed)-2])
-						if _, err := completionExecutionModel(binding, task, string(currentManifest.ExecutionID), start, currentOutcome, changed); err == nil {
+						if _, err := completionModelParity(t, binding, task, string(currentManifest.ExecutionID), start, currentOutcome, changed); err == nil {
 							t.Fatal("v5 manifest envelope substitution accepted without inference reservation")
 						}
 					})
@@ -505,7 +505,7 @@ func TestCompletionReplayPreservesVersionOneExecutionContext(t *testing.T) {
 			stale.SupersedesVersion = integerRef(2)
 			invalidation := executionKnowledgeProjection(t, 6, "KNOWLEDGE_STALE", stale)
 			currentStream = append(currentStream[:len(currentStream)-1], invalidation, currentOutcome)
-			_, err = completionExecutionModel(binding, task, string(currentManifest.ExecutionID), start, currentOutcome, currentStream)
+			_, err = completionModelParity(t, binding, task, string(currentManifest.ExecutionID), start, currentOutcome, currentStream)
 			if version == "v5" && err == nil {
 				t.Fatal("v5 completion accepted Knowledge invalidated before its outcome")
 			}
@@ -514,10 +514,10 @@ func TestCompletionReplayPreservesVersionOneExecutionContext(t *testing.T) {
 			}
 			futureInvalidation := executionKnowledgeProjection(t, 8, "KNOWLEDGE_STALE", stale)
 			currentStream = append(currentStream[:len(currentStream)-2], currentOutcome, futureInvalidation)
-			if _, err := completionExecutionModel(binding, task, string(currentManifest.ExecutionID), start, currentOutcome, currentStream); err != nil {
+			if _, err := completionModelParity(t, binding, task, string(currentManifest.ExecutionID), start, currentOutcome, currentStream); err != nil {
 				t.Fatalf("later invalidation retroactively changed the %s outcome boundary: %v", version, err)
 			}
-			model, err := completionExecutionModel(binding, task, string(currentManifest.ExecutionID), start, currentOutcome, currentStream)
+			model, err := completionModelParity(t, binding, task, string(currentManifest.ExecutionID), start, currentOutcome, currentStream)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -583,13 +583,13 @@ func TestCompletionReplayBindsVersionThreePeerCoordinationAtStart(t *testing.T) 
 	outcomeEvent := Event{EventID: "outcome-event", Sequence: 7, OrganizationID: "org-1", TaskID: string(task.ID), CorrelationID: "run-1"}
 	stream := []Event{planEvent, ownCreated, peerCreated, start, manifestEvent, postStartPeerRevision, outcomeEvent}
 	binding := WorkCompletionBinding{OrganizationID: "org-1", CorrelationID: "run-1", Work: work, Intent: intent, AgentBlueprints: map[core.ID]core.AgentBlueprint{blueprint.ID: blueprint}, ExecutionProfiles: map[core.ID]core.ExecutionProfile{profile.ID: profile}}
-	if _, err := completionExecutionModel(binding, task, string(manifest.ExecutionID), start, outcomeEvent, stream); err != nil {
+	if _, err := completionModelParity(t, binding, task, string(manifest.ExecutionID), start, outcomeEvent, stream); err != nil {
 		t.Fatalf("version 3 peer coordination was not replayed at the start boundary: %v", err)
 	}
 	manifest.CoordinationRefs[0].Version = "2"
 	manifestEvent.Payload, _ = json.Marshal(manifest)
 	stream[4] = manifestEvent
-	if _, err := completionExecutionModel(binding, task, string(manifest.ExecutionID), start, outcomeEvent, stream); err == nil {
+	if _, err := completionModelParity(t, binding, task, string(manifest.ExecutionID), start, outcomeEvent, stream); err == nil {
 		t.Fatal("substituted version 3 peer coordination reference was accepted")
 	}
 }
