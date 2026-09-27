@@ -31,7 +31,7 @@ func TestIncidentReferencePlan(t *testing.T) {
 		}
 		t.Log(detail)
 		plan = append(plan, detail)
-		for _, table := range []string{"events", "records", "e", "r", "target"} {
+		for _, table := range []string{"events", "records", "e", "r", "target", "link", "incident_event_links", "incident_record_links"} {
 			if detail == "SCAN "+table || strings.HasPrefix(detail, "SCAN "+table+" ") {
 				t.Fatalf("unindexed history scan: %s", detail)
 			}
@@ -40,7 +40,7 @@ func TestIncidentReferencePlan(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"CO-ROUTINE walk", "records_replaced_work_idx", "events_incident_execution_idx", "events_message_idx", "events_source_message_idx", "sqlite_autoindex_records_1"} {
+	for _, want := range []string{"CO-ROUTINE walk", "SEARCH link USING PRIMARY KEY (target_kind=? AND target_id=?)", "SEARCH incident_event_links USING PRIMARY KEY (target_kind=? AND target_id=?)", "events_incident_execution_idx", "events_message_idx", "events_source_message_idx", "sqlite_autoindex_records_1"} {
 		if !strings.Contains(strings.Join(plan, "\n"), want) {
 			t.Fatalf("missing indexed closure operation %s", want)
 		}

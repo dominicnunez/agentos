@@ -747,6 +747,16 @@ func testStorageSchemaFingerprint(ctx context.Context, db *sql.DB) (string, erro
 
 func removeConnectionColumnsForLegacyFixture(t *testing.T, db *sql.DB) {
 	t.Helper()
+	for _, table := range []string{"incident_event_links", "incident_record_links"} {
+		for _, suffix := range []string{"insert_guard", "delete_guard", "update_guard", "source_insert", "source_update", "source_delete"} {
+			if _, err := db.ExecContext(t.Context(), "DROP TRIGGER IF EXISTS "+table+"_"+suffix); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS "+table); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := db.ExecContext(t.Context(), `DROP TRIGGER IF EXISTS freeze_events_delete_change;
 DROP TRIGGER IF EXISTS freeze_events_insert_change;
 DROP TRIGGER IF EXISTS freeze_events_insert_conflict;

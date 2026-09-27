@@ -20,6 +20,14 @@ func TestIncidentDerivedQueryGrowth(t *testing.T) {
 	checkIncidentLineageGrowth(t, "derived")
 }
 
+func TestIncidentIncomingQueryGrowth(t *testing.T) {
+	checkIncidentLineageGrowth(t, "incoming")
+}
+
+func TestIncidentIncomingWidthGrowth(t *testing.T) {
+	checkIncidentLineageGrowth(t, "branching")
+}
+
 func checkIncidentLineageGrowth(t *testing.T, kind string) {
 	t.Helper()
 	var small int64
@@ -32,8 +40,11 @@ func checkIncidentLineageGrowth(t *testing.T, kind string) {
 			}
 			t.Cleanup(func() { _ = store.Close() })
 			var correlation string
-			if kind == "derived" {
-				correlation = appendDerivedIncidentChain(t, store, depth)
+			if kind == "derived" || kind == "incoming" || kind == "branching" {
+				correlation = appendDerivedIncidentGraph(t, store, depth, kind == "branching")
+				if kind != "derived" {
+					correlation = "knowledge-derived-0"
+				}
 			} else {
 				correlation = appendIncidentLineage(t, store, depth)
 			}
@@ -81,6 +92,11 @@ func checkIncidentLineageGrowth(t *testing.T, kind string) {
 // evidence from accidentally selecting every ancestor in one frontier.
 func appendDerivedIncidentChain(t testing.TB, store *SQLite, depth int) string {
 	t.Helper()
+	return appendDerivedIncidentGraph(t, store, depth, false)
+}
+
+func appendDerivedIncidentGraph(t testing.TB, store *SQLite, depth int, branching bool) string {
+	t.Helper()
 	ctx := t.Context()
 	_, err := store.AppendProjection(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"},
@@ -92,6 +108,9 @@ func appendDerivedIncidentChain(t testing.TB, store *SQLite, depth int) string {
 	}
 	var prior, correlation string
 	for n := range depth {
+		if branching && n > 0 {
+			prior = "derived-0"
+		}
 		id := fmt.Sprintf("derived-%d", n)
 		artifact := "artifact-" + id
 		evidence, err := store.Append(ctx, events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: id, ArtifactRefs: []string{artifact}, Payload: map[string]string{"summary": "A recorded observation."}})

@@ -58,6 +58,8 @@ Developer fixtures and fake adapters are not production network paths. V1 does n
 
 Strong hostile-tenant isolation, host-administrator resistance, encrypted general ledger/artifact storage, external audit anchoring, comprehensive incident response, and prevention of covert timing channels are outside the present implementation claim.
 
+Incident dependency selection uses typed incoming-link indexes maintained from event payloads and record bodies independently. SQLite guards prevent ordinary writes from inventing links or removing required links, and each incident read checks the exact maintenance and guard definitions in the same snapshot. These controls do not establish origin against a privileged actor who removes the guards, rewrites retained state and its derived indexes, and restores the expected schema. Admission and lifecycle validation still apply to selected evidence.
+
 # 3. Attack surface, mitigations and attacker stories
 
 ## Local gateway and dashboard

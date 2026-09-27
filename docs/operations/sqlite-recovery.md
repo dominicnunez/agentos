@@ -106,12 +106,17 @@ reusing the already deployed v7 contract. Storage v9 adds the reviewed tenant-sc
 used to select current knowledge for an Agent execution without scanning other
 Organizations' knowledge records.
 
-Storage v13 adds indexes for Work replacement predecessors and complete
-organization-scoped execution histories. These support bounded incident
-dependency selection without scanning unrelated records for each dependency.
-Migration preserves retained record and event bytes; the reviewed layout
-fingerprint covers both indexes. Exact admission and lifecycle validation
-remain separate requirements.
+Storage v13 adds indexes for Work replacement predecessors, complete
+organization-scoped execution histories, and typed incoming projection links.
+The incoming links are derived independently from event payloads and record
+bodies and maintained by guarded SQLite triggers. Record links use stable
+record identities rather than implicit row identifiers, preserving them across
+database compaction. Migration backfills the links atomically without changing
+retained record or event bytes. These indexes support bounded incident dependency
+selection without scanning unrelated records for each dependency. Each incident
+read checks the exact link table, index, and trigger definitions in its read
+snapshot; the mutable stored layout fingerprint alone is insufficient. Exact
+admission and lifecycle validation remain separate requirements.
 
 Storage v12 adds an index scoped to correlation, organization, and execution for
 model stop admission. Migration preserves existing event bytes and stop evidence;

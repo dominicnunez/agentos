@@ -13,7 +13,7 @@ import (
 )
 
 func TestIncidentPrivateTaskSuspension(t *testing.T) {
-	for _, mutation := range []string{"selected-task", "other-task", "other-organization"} {
+	for _, mutation := range []string{"selected-task", "other-task", "other-organization", "other-organization-other-task"} {
 		t.Run(mutation, func(t *testing.T) { checkPrivateTaskSuspension(t, mutation) })
 	}
 }
@@ -56,10 +56,10 @@ func checkPrivateTaskSuspension(t *testing.T, mutation string) {
 	}
 	if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
 		organization, task := "org-1", "stop-task"
-		if mutation == "other-task" {
+		if mutation == "other-task" || mutation == "other-organization-other-task" {
 			task = "unrelated-task"
 		}
-		if mutation == "other-organization" {
+		if mutation == "other-organization" || mutation == "other-organization-other-task" {
 			organization = "unrelated-org"
 		}
 		if _, err := tx.ExecContext(t.Context(), `UPDATE events SET event_type='TASK_EXECUTION_SUSPENDED',organization_id=?,task_id=? WHERE event_id=?`, organization, task, prior.EventID); err != nil {
@@ -91,7 +91,9 @@ func checkPrivateTaskSuspension(t *testing.T, mutation string) {
 		t.Fatalf("unrelated legacy suspension: %v", stopErr)
 	}
 	snapshot, err := store.VerifiedIncidentEvents(t.Context(), "org-1", "knowledge-private-task", 256)
-	if mutation != "selected-task" {
+	// Task projection identities are global. Changing only the organization
+	// still names the selected Task, so the incident must reject that evidence.
+	if mutation == "other-task" || mutation == "other-organization-other-task" {
 		if err != nil {
 			t.Fatalf("unrelated suspension poisoned incident: %v", err)
 		}

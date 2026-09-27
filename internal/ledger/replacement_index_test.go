@@ -31,6 +31,7 @@ func TestIncidentIndexQueryPlans(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer func() { _ = db.Close() }()
+				removeIncidentLinkSchemaForTest(t, db)
 				if _, err := db.ExecContext(t.Context(), `DROP INDEX IF EXISTS records_replaced_work_idx; DROP INDEX IF EXISTS events_incident_execution_idx; DROP INDEX IF EXISTS events_message_idx; DROP INDEX IF EXISTS events_source_message_idx;
 INSERT INTO events(event_id,organization_id,event_type,authorization_refs,artifact_refs,payload,created_at,schema_version) VALUES('malformed-intake','org-1','INTAKE_MESSAGE_RECORDED','[]','[]','{','2026-09-22T00:00:00Z',:schema);
 INSERT INTO records(kind,record_id,version,body,created_at) VALUES('retained','malformed',1,:body,'2026-09-22T00:00:00Z');`, sql.Named("schema", events.SchemaVersion), sql.Named("body", []byte(`{`))); err != nil {

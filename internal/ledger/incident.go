@@ -42,6 +42,9 @@ func (l *SQLite) VerifiedIncidentEvents(ctx context.Context, organization, corre
 }
 
 func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation string, limit int) (events.IncidentSnapshot, error) {
+	if err := validateIncidentLinkSchema(ctx, tx); err != nil {
+		return events.IncidentSnapshot{}, err
+	}
 	head, err := ValidateEventIntegrity(ctx, tx)
 	if err != nil {
 		return events.IncidentSnapshot{}, fmt.Errorf("verify incident ledger: %w", err)

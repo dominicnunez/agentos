@@ -447,6 +447,7 @@ func (d *incidentDependencies) frontier() (string, []any) {
 		var pairs []string
 		var leaseIDs []string
 		var messageIDs []string
+		var taskIDs []string
 		for _, key := range identities {
 			pairs = append(pairs, "(?,?)")
 			args = append(args, key.kind, key.id)
@@ -456,12 +457,25 @@ func (d *incidentDependencies) frontier() (string, []any) {
 			if key.kind == "capability_lease" {
 				leaseIDs = append(leaseIDs, key.id)
 			}
+			if key.kind == "task" {
+				taskIDs = append(taskIDs, key.id)
+			}
 		}
 		marks := strings.Join(pairs, ",")
-		parts = append(parts, `(CASE WHEN json_valid(payload) THEN json_extract(payload,'$.projection.projection_kind') END,CASE WHEN json_valid(payload) THEN json_extract(payload,'$.projection.record_id') END) IN (`+marks+`)`)
+		parts = append(parts, `sequence IN (SELECT event_sequence FROM incident_event_links WHERE (target_kind,target_id) IN (`+marks+`))`)
 		parts = append(parts, `event_id IN (SELECT admission_event_id FROM records WHERE (kind,record_id) IN (`+marks+`))`)
 		for _, key := range identities {
 			args = append(args, key.kind, key.id)
+		}
+		parts = append(parts, `event_id IN (SELECT r.admission_event_id FROM incident_record_links link JOIN records r ON r.kind=link.record_kind AND r.record_id=link.record_id AND r.version=link.record_version WHERE (link.target_kind,link.target_id) IN (`+marks+`))`)
+		for _, key := range identities {
+			args = append(args, key.kind, key.id)
+		}
+		if len(taskIDs) > 0 {
+			parts = append(parts, `(event_type IN (`+incidentTaskLifecycleTypes+`) AND task_id IN (`+incidentMarks(len(taskIDs))+`))`)
+			for _, id := range taskIDs {
+				args = append(args, id)
+			}
 		}
 		if len(messageIDs) > 0 {
 			parts = append(parts, `(organization_id=? AND event_type IN (`+incidentIntakeTypes+`) AND (CASE WHEN json_valid(payload) THEN json_extract(payload,'$.message_id') END IN (`+incidentMarks(len(messageIDs))+`) OR CASE WHEN json_valid(payload) THEN json_extract(payload,'$.source_message_id') END IN (`+incidentMarks(len(messageIDs))+`)))`)
@@ -513,8 +527,7 @@ func (d *incidentDependencies) frontier() (string, []any) {
 			continue
 		}
 		d.reverse[key] = true
-		condition, projectionArgs := incidentReverseProjection(key, false)
-		args = append(args, projectionArgs...)
+		var condition string
 		var eventCondition string
 		switch key.kind {
 		case "work":
@@ -585,6 +598,10 @@ func (d *incidentDependencies) loadRecords(ctx context.Context, tx *sql.Tx) erro
 	where := `WHERE 0`
 	if len(pairs) > 0 {
 		where += ` OR (r.kind,r.record_id) IN (` + strings.Join(pairs, ",") + `)`
+		where += ` OR (r.kind,r.record_id,r.version) IN (SELECT record_kind,record_id,record_version FROM incident_record_links WHERE (target_kind,target_id) IN (` + strings.Join(pairs, ",") + `))`
+		for _, key := range keys {
+			args = append(args, key.kind, key.id)
+		}
 	}
 	if len(correlations) > 0 {
 		where += ` OR (r.kind IN (` + incidentProjectionKindsSQL + `) AND CASE WHEN json_valid(r.body) THEN json_extract(r.body,'$.correlation_id') END IN (` + incidentMarks(len(correlations)) + `) AND (e.organization_id=? OR (e.event_id IS NULL AND ` + incidentProjectionOwnedOrganization + `=?)))`
@@ -592,13 +609,6 @@ func (d *incidentDependencies) loadRecords(ctx context.Context, tx *sql.Tx) erro
 			args = append(args, id)
 		}
 		args = append(args, d.organization, d.organization)
-	}
-	for _, key := range keys {
-		predicate, projectionArgs := incidentReverseProjection(key, true)
-		args = append(args, projectionArgs...)
-		if predicate != "" {
-			where += ` OR (CASE WHEN json_valid(r.body) THEN (` + predicate + `) END)`
-		}
 	}
 	var count int
 	var size int64

@@ -371,6 +371,7 @@ func TestModelStopIndexMigrationPreservesEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	removeIncidentLinkSchemaForTest(t, store.db)
 	if _, err := store.db.ExecContext(t.Context(), `DROP INDEX events_execution_idx; PRAGMA user_version=11`); err != nil {
 		t.Fatal(err)
 	}

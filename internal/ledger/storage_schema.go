@@ -357,6 +357,9 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 		if _, err := tx.ExecContext(ctx, storageSchemaV13SQL); err != nil {
 			return err
 		}
+		if err := createIncidentLinkSchema(ctx, tx); err != nil {
+			return err
+		}
 		return advanceProjectionStorageContract(ctx, tx, from, to, "incident-history-indexes")
 	default:
 		return fmt.Errorf("no reviewed storage migration exists")
@@ -649,6 +652,11 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 			expected[table] = columns
 		}
 	}
+	if version >= 13 {
+		for table, columns := range storageColumnsV13 {
+			expected[table] = columns
+		}
+	}
 	tables, err := userStorageTables(ctx, query)
 	if err != nil {
 		return StorageContract{}, err
@@ -711,6 +719,9 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 		}
 	}
 	if version >= 13 {
+		if err := validateIncidentLinkSchema(ctx, query); err != nil {
+			return StorageContract{}, err
+		}
 		for index, table := range map[string]string{"records_replaced_work_idx": "records", "events_incident_execution_idx": "events", "events_message_idx": "events", "events_source_message_idx": "events"} {
 			var count int
 			if err := query.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name=? AND tbl_name=?`, index, table).Scan(&count); err != nil {

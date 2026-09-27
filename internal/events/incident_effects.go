@@ -138,11 +138,11 @@ func ValidateIncidentEffect(value, previous core.EffectObligation, first bool) e
 			return fmt.Errorf("incident effect pending history is invalid")
 		}
 	case core.EffectAttempted:
-		if first || previous.Status != core.EffectPending || value.AttemptCount != previous.AttemptCount+1 {
+		if first || previous.Status != core.EffectPending || value.AttemptCount != previous.AttemptCount+1 || value.LastAttemptAt == nil || value.LastAttemptAt.IsZero() {
 			return fmt.Errorf("incident effect attempt history is invalid")
 		}
 	case core.EffectConfirmed, core.EffectFailed:
-		if first || previous.Status != core.EffectAttempted || value.AttemptCount != previous.AttemptCount || !reflect.DeepEqual(value.LastAttemptAt, previous.LastAttemptAt) {
+		if first || previous.Status != core.EffectAttempted || value.AttemptCount != previous.AttemptCount || value.LastAttemptAt == nil || value.LastAttemptAt.IsZero() || !reflect.DeepEqual(value.LastAttemptAt, previous.LastAttemptAt) {
 			return fmt.Errorf("incident effect terminal history lacks its attempt")
 		}
 		if value.Status == core.EffectConfirmed && len(value.ConfirmationEvidenceRefs) == 0 {
@@ -152,7 +152,7 @@ func ValidateIncidentEffect(value, previous core.EffectObligation, first bool) e
 			return fmt.Errorf("incident effect reconciliation lacks evidence")
 		}
 	case core.EffectCancelled:
-		if first || previous.Status != core.EffectPending || value.AttemptCount != 0 {
+		if first || previous.Status != core.EffectPending || value.AttemptCount != 0 || value.LastAttemptAt != nil {
 			return fmt.Errorf("incident cancelled effect was not pending")
 		}
 	default:

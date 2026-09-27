@@ -9,6 +9,10 @@ import (
 	"github.com/dominicnunez/agentos/internal/events"
 )
 
+// Task envelopes retain their identity when projection data or its backing
+// record is missing. Use the owning writer's complete lifecycle label family.
+var incidentTaskLifecycleTypes = "'" + strings.Join(events.ProjectionLifecycleEventTypes("task"), "','") + "'"
+
 // Discover the execution families consumed by the shared inference, stop, and
 // legacy hold validators. Correlation is a selector, never the only identity.
 func incidentExecutionHistory(ctx context.Context, tx *sql.Tx, work []events.Event, budget *incidentBudget) ([]events.Event, error) {
@@ -75,13 +79,13 @@ func incidentExecutionSelection(work []events.Event) (string, []any, error) {
 	// including labels added later. Exact execution envelopes therefore have
 	// no label allowlist. Task-only evidence and payload links use the owned
 	// families so independent effect records keep their separate reader.
-	links += `(event_type IN (` + incidentExecutionTypes + `) AND (`
 	if len(taskIDs) != 0 {
-		links += `task_id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(taskIDs)), ",") + `) OR `
+		links += `(event_type IN (` + incidentExecutionTypes + `,` + incidentTaskLifecycleTypes + `) AND task_id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(taskIDs)), ",") + `)) OR `
 		for _, id := range taskIDs {
 			args = append(args, id)
 		}
 	}
+	links += `(event_type IN (` + incidentExecutionTypes + `) AND (`
 	// Enumerate duplicate reference keys too. Nested references are restricted
 	// to contract-owned interruption and projection details, not arbitrary
 	// tool output fields. Authority hold references are deliberately excluded.

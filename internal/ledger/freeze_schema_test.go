@@ -34,6 +34,7 @@ func sameFreezeChange(left, right freezeChange) bool {
 
 func removeFreezeChangesForLegacyFixture(t *testing.T, db *sql.DB) {
 	t.Helper()
+	removeIncidentLinkSchemaForTest(t, db)
 	if _, err := db.ExecContext(t.Context(), `DROP TRIGGER freeze_events_delete_change;
 DROP TRIGGER freeze_events_insert_change;
 DROP TRIGGER freeze_events_insert_conflict;
@@ -431,7 +432,7 @@ func TestFreezeChangeTriggerDriftIsRejected(t *testing.T) {
 CREATE TRIGGER freeze_events_delete_change BEFORE DELETE ON events BEGIN SELECT 1; END;`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ValidateStorageContract(t.Context(), store.db); err == nil || !strings.Contains(err.Error(), "schema fingerprint does not match") {
+	if _, err := ValidateStorageContract(t.Context(), store.db); err == nil || !strings.Contains(err.Error(), "incident link schema definition does not match freeze_events_delete_change") {
 		t.Fatalf("changed freeze trigger was not rejected: %v", err)
 	}
 }

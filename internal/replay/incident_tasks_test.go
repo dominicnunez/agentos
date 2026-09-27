@@ -36,6 +36,7 @@ func admittedEffectFixture(t *testing.T) events.IncidentSnapshot {
 	work := seal("work", "work-id", "WORK_CREATED", "", 3, map[string]any{"id": "work-id", "intent_id": "intent", "objective": "objective", "status": "ACTIVE", "created_at": now})
 	task := seal("task", "task-id", "TASK_CREATED", "task-id", 4, map[string]any{"id": "task-id", "work_id": "work-id", "description": "task", "task_contract_version": "1", "execution_kind": "HUMAN", "model_inference_policy": "DISALLOWED", "status": "PENDING"})
 	value := map[string]any{"effect_obligation_id": "effect-id", "organization_id": "org", "task_id": "task-id", "actor_id": "owner", "action": "send", "resource": "destination", "scope": "org", "idempotency_key": "key", "effect_fingerprint": "legacy", "authorization_refs": []string{"lease"}, "status": "ATTEMPTED", "attempt_count": 1}
+	value["last_attempt_at"] = now
 	body, err := json.Marshal(value)
 	if err != nil {
 		t.Fatal(err)
@@ -44,6 +45,7 @@ func admittedEffectFixture(t *testing.T) events.IncidentSnapshot {
 	pending := effect
 	pending.EventID, pending.Sequence = "pending", 5
 	value["status"], value["attempt_count"] = "PENDING", 0
+	delete(value, "last_attempt_at")
 	pending.Payload, err = json.Marshal(value)
 	if err != nil {
 		t.Fatal(err)
@@ -52,12 +54,22 @@ func admittedEffectFixture(t *testing.T) events.IncidentSnapshot {
 }
 
 func TestProjectIncidentValidatesEffectAdmission(t *testing.T) {
-	for _, variant := range []string{"valid", "missing-pending", "invalid-state", "effect-in-work-without-task", "pending-labelled-attempt"} {
+	for _, variant := range []string{"valid", "missing-pending", "missing-attempt-time", "zero-attempt-time", "invalid-state", "effect-in-work-without-task", "pending-labelled-attempt"} {
 		t.Run(variant, func(t *testing.T) {
 			snapshot := admittedEffectFixture(t)
 			switch variant {
 			case "missing-pending":
 				snapshot.RelatedEvents = snapshot.RelatedEvents[1:]
+			case "missing-attempt-time", "zero-attempt-time":
+				var value map[string]any
+				if err := json.Unmarshal(snapshot.RelatedEvents[1].Payload, &value); err != nil {
+					t.Fatal(err)
+				}
+				delete(value, "last_attempt_at")
+				if variant == "zero-attempt-time" {
+					value["last_attempt_at"] = time.Time{}
+				}
+				snapshot.RelatedEvents[1].Payload, _ = json.Marshal(value)
 			case "pending-labelled-attempt":
 				var value map[string]any
 				if err := json.Unmarshal(snapshot.RelatedEvents[1].Payload, &value); err != nil {
