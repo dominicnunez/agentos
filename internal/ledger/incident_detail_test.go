@@ -58,8 +58,11 @@ func ChangeIncidentDetailForTest(t *testing.T, store *SQLite, id, field string, 
 	t.Helper()
 	if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
 		event, found, err := eventByID(t.Context(), tx, id)
-		if err != nil || !found {
-			return fmt.Errorf("read transition: %v", err)
+		if err != nil {
+			return fmt.Errorf("read transition: %w", err)
+		}
+		if !found {
+			return fmt.Errorf("transition event is missing")
 		}
 		payload, _, err := events.AdmittedProjection(event)
 		if err != nil {

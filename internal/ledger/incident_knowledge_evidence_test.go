@@ -207,8 +207,11 @@ func changeKnowledgeEvidence(t *testing.T, store *SQLite, id, field, target, sid
 	t.Helper()
 	if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
 		event, found, err := eventByID(t.Context(), tx, id)
-		if err != nil || !found {
-			return fmt.Errorf("read Knowledge event: %v", err)
+		if err != nil {
+			return fmt.Errorf("read Knowledge event: %w", err)
+		}
+		if !found {
+			return fmt.Errorf("Knowledge event is missing")
 		}
 		payload, _, err := events.AdmittedProjection(event)
 		if err != nil {

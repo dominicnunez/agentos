@@ -107,9 +107,10 @@ func TestIncidentIncomingLabEvidence(t *testing.T) {
 					}
 				} else {
 					want := "completed Lab experiment result is not its exact Work completion"
-					if field == "experiment_result_event_refs" {
+					switch field {
+					case "experiment_result_event_refs":
 						want = "lab promotion candidate lacks its exact completed experiment"
-					} else if field == "reproduction_evidence_refs" {
+					case "reproduction_evidence_refs":
 						want = "lab promotion candidate lacks independent same-organization reproduction evidence"
 					}
 					if fullErr == nil || !strings.Contains(fullErr.Error(), want) {

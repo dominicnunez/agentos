@@ -14,8 +14,11 @@ func ChangeLabEvidenceForTest(t *testing.T, store *SQLite, id, field, target, si
 	t.Helper()
 	if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
 		event, found, err := eventByID(t.Context(), tx, id)
-		if err != nil || !found {
-			return fmt.Errorf("read Lab event: %v", err)
+		if err != nil {
+			return fmt.Errorf("read Lab event: %w", err)
+		}
+		if !found {
+			return fmt.Errorf("Lab event is missing")
 		}
 		payload, _, err := events.AdmittedProjection(event)
 		if err != nil {

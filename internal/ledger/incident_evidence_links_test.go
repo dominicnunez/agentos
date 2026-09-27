@@ -23,6 +23,7 @@ func TestIncidentEvidenceLinkGrammar(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer func() { _ = rows.Close() }()
 			var got []string
 			for rows.Next() {
 				var kind, id string
