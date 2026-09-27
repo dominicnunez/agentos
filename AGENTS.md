@@ -82,8 +82,11 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
 4. Implement a complete, cohesive invariant across its callers. Prefer an
    existing shared boundary that owns the rule over multiple partial fixes.
    For filtered readers, check selection completeness in both directions before
-   relying on shared validators. Reconstruct candidate sets from durable scope
-   and time boundaries, independently of claimed references. Compare required
+   relying on shared validators. Derive each event kind's candidate predicate
+   from its owning validator before applying tenant, identity, or time filters;
+   a shared subsystem does not imply a shared identity scope. Reconstruct
+   candidate sets from durable scope and time boundaries, independently of
+   claimed references. Compare required
    inputs and invariants with full recovery, including private dependencies and
    omitted candidates. Compare every stored metadata field with the owning
    writer and recovery rules; include forbidden fields in validation and byte

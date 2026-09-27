@@ -508,7 +508,13 @@ func (d *incidentDependencies) frontier() (string, []any) {
 		if len(ids) > 0 {
 			part := column + ` IN (` + incidentMarks(len(ids)) + `)`
 			if column != "event_id" {
-				part = `(organization_id=? AND ` + part + `)`
+				scope := `organization_id=?`
+				if column == "correlation_id" {
+					// The Plan owner selects by correlation before validating its
+					// tenant, Task envelope, and payload. Preserve that candidate set.
+					scope = `(organization_id=? OR event_type='PLAN_CREATED')`
+				}
+				part = `(` + scope + ` AND ` + part + `)`
 				args = append(args, d.organization)
 			}
 			parts = append(parts, part)

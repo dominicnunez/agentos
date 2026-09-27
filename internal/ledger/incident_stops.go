@@ -14,8 +14,9 @@ import (
 var incidentTaskLifecycleTypes = "'" + strings.Join(events.ProjectionLifecycleEventTypes("task"), "','") + "'"
 
 // These envelopes refer to materialized, globally keyed Tasks. Planning and
-// normalization also use logical task IDs, scoped by organization; they remain
-// in the organization-scoped execution selector rather than this global one.
+// normalization also use logical task IDs, scoped by organization. Their Task
+// strings alone do not enter this global selector. Plan candidates are instead
+// selected globally by correlation, matching the owning Plan validator.
 var incidentTaskHistoryTypes = incidentTaskLifecycleTypes + `,'EXECUTION_CONTEXT_MANIFESTED','EXECUTION_FINISHED',
 'EXECUTION_STOP_REQUESTED','EXECUTION_STOP_UNCERTAIN','EXECUTION_STOP_CONFIRMED',
 'TOOL_OUTCOME_RECORDED','EVIDENCE_PUBLISHED','INBOX_EVENTS_OBSERVED',

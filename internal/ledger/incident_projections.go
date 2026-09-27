@@ -59,30 +59,21 @@ func validateIncidentRecords(ctx context.Context, tx *sql.Tx, stream []events.Ev
 	organization, correlation := stream[0].OrganizationID, stream[0].CorrelationID
 	args = append(args, correlation, organization, organization)
 	where := `WHERE (` + selected + `) OR (r.kind IN (` + incidentProjectionKindsSQL + `) AND CASE WHEN json_valid(r.body) THEN json_extract(r.body,'$.correlation_id') END=? AND (e.organization_id=? OR (e.event_id IS NULL AND ` + incidentProjectionOwnedOrganization + `=?)))`
-	if len(intentIDs) != 0 {
-		ids := make([]string, 0, len(intentIDs))
-		for id := range intentIDs {
+	for _, link := range []struct {
+		kind, field string
+		ids         map[string]bool
+	}{{"work", "intent_id", intentIDs}, {"task", "work_id", workIDs}} {
+		if len(link.ids) == 0 {
+			continue
+		}
+		ids := make([]string, 0, len(link.ids))
+		for id := range link.ids {
 			ids = append(ids, id)
 		}
 		sort.Strings(ids)
 		marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-		where += ` OR (r.kind='work' AND (e.organization_id=? OR e.event_id IS NULL) AND (CASE WHEN json_valid(r.body) THEN json_extract(r.body,'$.value.intent_id') END IN (` + marks + `) OR CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.projection.value.intent_id') END IN (` + marks + `)))`
-		args = append(args, organization)
-		for _, id := range ids {
-			args = append(args, id)
-		}
-		for _, id := range ids {
-			args = append(args, id)
-		}
-	}
-	if len(workIDs) != 0 {
-		ids := make([]string, 0, len(workIDs))
-		for id := range workIDs {
-			ids = append(ids, id)
-		}
-		sort.Strings(ids)
-		marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-		where += ` OR (r.kind='task' AND (e.organization_id=? OR e.event_id IS NULL) AND (CASE WHEN json_valid(r.body) THEN json_extract(r.body,'$.value.work_id') END IN (` + marks + `) OR CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.projection.value.work_id') END IN (` + marks + `)))`
+		// SQL identifiers come only from the two fixed relationship definitions.
+		where += fmt.Sprintf(` OR (r.kind='%s' AND (e.organization_id=? OR e.event_id IS NULL) AND (CASE WHEN json_valid(r.body) THEN json_extract(r.body,'$.value.%s') END IN (%s) OR CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.projection.value.%s') END IN (%s)))`, link.kind, link.field, marks, link.field, marks)
 		args = append(args, organization)
 		for _, id := range ids {
 			args = append(args, id)
