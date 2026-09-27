@@ -54,7 +54,13 @@ supporting evidence fails the request even when the selected event count fits.
 The reader privately loads the retained projection histories and referenced
 evidence needed to validate the selection, including reviewed Intent, roster,
 execution, completion, and Knowledge dependencies. It uses the shared historical
-admission and completion validators. Input candidates are selected from the
+admission and completion validators. Typed incoming projection links are checked
+from both events and records, including Mission Goals, roster assignments and
+configuration, and Knowledge derivation, scope, and Agent creators. A conflicting
+tenant reference to a selected global identity fails the request. Organization
+ownership alone does not select every projection in that organization, and
+ordinary notes do not add dependencies by naming an identity field.
+Input candidates are selected from the
 execution's durable scope and cutoff, independently of the manifest's claimed
 references. Linked intake and private Task histories retain their conflicting
 terminal events even when their correlation differs. These dependencies are not

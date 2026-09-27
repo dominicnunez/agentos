@@ -277,11 +277,8 @@ func (d *incidentDependencies) key(kind, id string) {
 		}
 		d.keys[key] = false
 	}
-	switch kind {
-	case "work", "task", "intent", "goal", "mission", "knowledge", "lab_experiment":
-		if _, ok := d.reverse[key]; !ok {
-			d.reverse[key] = false
-		}
+	if _, ok := d.reverse[key]; !ok {
+		d.reverse[key] = false
 	}
 }
 func (d *incidentDependencies) correlation(id string) {
@@ -516,29 +513,28 @@ func (d *incidentDependencies) frontier() (string, []any) {
 			continue
 		}
 		d.reverse[key] = true
-		var condition string
+		condition, projectionArgs := incidentReverseProjection(key, false)
+		args = append(args, projectionArgs...)
+		var eventCondition string
 		switch key.kind {
-		case "mission":
-			condition = `(json_extract(payload,'$.projection.projection_kind')='goal' AND json_extract(payload,'$.projection.value.mission_id')=?)`
-			args = append(args, key.id)
 		case "work":
-			condition = `((json_extract(payload,'$.projection.projection_kind') IN ('task','lab_experiment') AND json_extract(payload,'$.projection.value.work_id')=?) OR (event_type='INTENT_CONFIRMED' AND json_extract(payload,'$.replaces_work_id')=?) OR (json_extract(payload,'$.projection.projection_kind') IN ('work','intent') AND json_extract(payload,'$.projection.value.replaces_work_id')=?))`
-			args = append(args, key.id, key.id, key.id)
+			eventCondition = `(event_type='INTENT_CONFIRMED' AND json_extract(payload,'$.replaces_work_id')=?)`
+			args = append(args, key.id)
 		case "intent":
-			condition = `((json_extract(payload,'$.projection.projection_kind')='work' AND json_extract(payload,'$.projection.value.intent_id')=?) OR (event_type='INTENT_CONFIRMED' AND json_extract(payload,'$.intent_id')=?))`
-			args = append(args, key.id, key.id)
-		case "task":
-			condition = `(json_extract(payload,'$.projection.projection_kind')='task' AND (json_extract(payload,'$.projection.value.parent_id')=? OR EXISTS (SELECT 1 FROM json_each(payload,'$.projection.value.depends_on') WHERE value=?)))`
-			args = append(args, key.id, key.id)
+			eventCondition = `(event_type='INTENT_CONFIRMED' AND json_extract(payload,'$.intent_id')=?)`
+			args = append(args, key.id)
 		case "goal":
-			condition = `((json_extract(payload,'$.projection.projection_kind') IN ('work','intent') AND json_extract(payload,'$.projection.value.goal_id')=?) OR (event_type IN ('INTENT_CONFIRMED','WORK_COMPLETION_EVALUATED','GOAL_PROGRESS_EVALUATED') AND json_extract(payload,'$.goal_id')=?))`
-			args = append(args, key.id, key.id)
+			eventCondition = `(event_type IN ('INTENT_CONFIRMED','WORK_COMPLETION_EVALUATED','GOAL_PROGRESS_EVALUATED') AND json_extract(payload,'$.goal_id')=?)`
+			args = append(args, key.id)
 		case "knowledge":
-			condition = `(event_type IN ('KNOWLEDGE_PROPOSED','KNOWLEDGE_VALIDATION_RECORDED','KNOWLEDGE_JUDGMENT_PUBLISHED','HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED','A2A_KNOWLEDGE_JUDGMENT_RECEIVED') AND json_extract(payload,'$.knowledge_id')=?)`
+			eventCondition = `(event_type IN ('KNOWLEDGE_PROPOSED','KNOWLEDGE_VALIDATION_RECORDED','KNOWLEDGE_JUDGMENT_PUBLISHED','HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED','A2A_KNOWLEDGE_JUDGMENT_RECEIVED') AND json_extract(payload,'$.knowledge_id')=?)`
 			args = append(args, key.id)
-		case "lab_experiment":
-			condition = `(json_extract(payload,'$.projection.projection_kind')='lab_promotion_candidate' AND json_extract(payload,'$.projection.value.experiment_id')=?)`
-			args = append(args, key.id)
+		}
+		if eventCondition != "" {
+			if condition != "" {
+				condition += " OR "
+			}
+			condition += eventCondition
 		}
 		if condition != "" {
 			parts = append(parts, `(CASE WHEN json_valid(payload) THEN `+condition+` END)`)
@@ -598,27 +594,8 @@ func (d *incidentDependencies) loadRecords(ctx context.Context, tx *sql.Tx) erro
 		args = append(args, d.organization, d.organization)
 	}
 	for _, key := range keys {
-		var predicate string
-		switch key.kind {
-		case "mission":
-			predicate = `r.kind='goal' AND json_extract(r.body,'$.value.mission_id')=?`
-			args = append(args, key.id)
-		case "work":
-			predicate = `(r.kind IN ('task','lab_experiment') AND json_extract(r.body,'$.value.work_id')=?) OR (r.kind IN ('work','intent') AND json_extract(r.body,'$.value.replaces_work_id')=?)`
-			args = append(args, key.id, key.id)
-		case "intent":
-			predicate = `r.kind='work' AND json_extract(r.body,'$.value.intent_id')=?`
-			args = append(args, key.id)
-		case "task":
-			predicate = `r.kind='task' AND (json_extract(r.body,'$.value.parent_id')=? OR EXISTS (SELECT 1 FROM json_each(r.body,'$.value.depends_on') WHERE value=?))`
-			args = append(args, key.id, key.id)
-		case "lab_experiment":
-			predicate = `r.kind='lab_promotion_candidate' AND json_extract(r.body,'$.value.experiment_id')=?`
-			args = append(args, key.id)
-		case "goal":
-			predicate = `r.kind IN ('work','intent') AND json_extract(r.body,'$.value.goal_id')=?`
-			args = append(args, key.id)
-		}
+		predicate, projectionArgs := incidentReverseProjection(key, true)
+		args = append(args, projectionArgs...)
 		if predicate != "" {
 			where += ` OR (CASE WHEN json_valid(r.body) THEN (` + predicate + `) END)`
 		}
