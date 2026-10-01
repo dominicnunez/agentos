@@ -187,7 +187,8 @@ func incidentEffects(ctx context.Context, tx *sql.Tx, budget *incidentBudget, or
 	// Task identities are global. Discover claims from records, event envelopes,
 	// and payloads before validating organization identity, even when every
 	// revision claims a foreign organization or Work correlation.
-	idQuery := `SELECT record_id AS id FROM records WHERE kind='effect' AND json_valid(body) AND json_extract(body,'$.task_id') IN (` + marks + `) UNION SELECT json_extract(payload,'$.effect_obligation_id') AS id FROM events WHERE event_type='EFFECT_OBLIGATION_TRANSITIONED' AND task_id IN (` + marks + `) UNION SELECT json_extract(payload,'$.effect_obligation_id') AS id FROM events WHERE event_type='EFFECT_OBLIGATION_TRANSITIONED' AND json_valid(payload) AND json_extract(payload,'$.task_id') IN (` + marks + `)`
+	eventIDs := `SELECT claim.value AS id FROM events JOIN json_each(` + incidentClaimJSON("payload", "$.effect_obligation_id") + `) claim WHERE event_type='EFFECT_OBLIGATION_TRANSITIONED' AND claim.type='text' AND `
+	idQuery := `SELECT record_id AS id FROM records WHERE kind='effect' AND ` + incidentScalarClaim("body", "$.task_id", ` IN (`+marks+`)`) + ` UNION ` + eventIDs + `task_id IN (` + marks + `) UNION ` + eventIDs + incidentScalarClaim("payload", "$.task_id", ` IN (`+marks+`)`)
 	idArgs := append(append(append([]any(nil), args...), args...), args...)
 	var count int
 	var size int64
@@ -227,7 +228,7 @@ func incidentEffects(ctx context.Context, tx *sql.Tx, budget *incidentBudget, or
 	for _, id := range effectIDs {
 		effectArgs = append(effectArgs, id)
 	}
-	selected, err := incidentEvents(ctx, tx, budget, `event_type='EFFECT_OBLIGATION_TRANSITIONED' AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.effect_obligation_id') END IN (`+effectMarks+`) AND NOT (organization_id=? AND correlation_id=?)`, append(effectArgs, organization, correlation)...)
+	selected, err := incidentEvents(ctx, tx, budget, `event_type='EFFECT_OBLIGATION_TRANSITIONED' AND `+incidentScalarClaim("payload", "$.effect_obligation_id", ` IN (`+effectMarks+`)`)+` AND NOT (organization_id=? AND correlation_id=?)`, append(effectArgs, organization, correlation)...)
 	if err != nil {
 		return nil, err
 	}

@@ -31,7 +31,7 @@ func loadIncidentPolicyHistory(ctx context.Context, tx *sql.Tx, organization str
 	}
 	where := `p.organization_id=? AND (p.policy_fingerprint IN (` + incidentMarks(len(fingerprints)) + `)`
 	if len(ids) != 0 {
-		where += ` OR p.connection_id IN (` + incidentMarks(len(ids)) + `) OR CASE WHEN json_valid(p.body) THEN json_extract(p.body,'$.connection_id') END IN (` + incidentMarks(len(ids)) + `)`
+		where += ` OR p.connection_id IN (` + incidentMarks(len(ids)) + `) OR ` + incidentScalarClaim("p.body", "$.connection_id", ` IN (`+incidentMarks(len(ids))+`)`)
 		for range 2 {
 			for _, id := range ids {
 				args = append(args, id)
@@ -77,7 +77,7 @@ func loadIncidentPolicyHistory(ctx context.Context, tx *sql.Tx, organization str
 	activationWhere := `organization_id=? AND (event_id IN (SELECT p.activation_event_id FROM inference_policies p WHERE ` + where + `)`
 	activationArgs = append(activationArgs, args...)
 	if len(ids) != 0 {
-		activationWhere += ` OR (event_type='INFERENCE_POLICY_ACTIVATED' AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.connection_id') END IN (` + incidentMarks(len(ids)) + `))`
+		activationWhere += ` OR (event_type='INFERENCE_POLICY_ACTIVATED' AND ` + incidentScalarClaim("payload", "$.connection_id", ` IN (`+incidentMarks(len(ids))+`)`) + `)`
 		for _, id := range ids {
 			activationArgs = append(activationArgs, id)
 		}

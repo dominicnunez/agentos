@@ -58,6 +58,13 @@ var incidentEvidenceLinkRules = []incidentLinkRule{
 	{target: "event", sources: "lab_promotion_candidate", field: "reproduction_evidence_refs", array: true},
 }
 
+// Intake identities are tenant scoped by their readers. Index every owned
+// occurrence so recursive lookup does not scan the tenant's intake history.
+var incidentIntakeLinkRules = []incidentLinkRule{
+	{target: "intake_message", field: "message_id", payload: true, eventTypes: "INTAKE_MESSAGE_RECORDED,INTENT_NORMALIZATION_CONTEXT_MANIFESTED,INTENT_DRAFTED,INTAKE_ABANDONED,INTENT_CONFIRMED"},
+	{target: "intake_message", field: "source_message_id", payload: true, eventTypes: "INTAKE_MESSAGE_RECORDED,INTENT_NORMALIZATION_CONTEXT_MANIFESTED,INTENT_DRAFTED,INTAKE_ABANDONED,INTENT_CONFIRMED"},
+}
+
 // Pure functions keep trigger programs small: expanding every relationship into
 // each maintenance and guard trigger makes even ordinary event inserts expensive
 // to compile. Neither function reads a connection or retains source state.
@@ -68,6 +75,7 @@ func init() {
 		rules := incidentLinkRules
 		if version == "v2" {
 			rules = append(append([]incidentLinkRule(nil), rules...), incidentEvidenceLinkRules...)
+			rules = append(rules, incidentIntakeLinkRules...)
 			rules = append(rules, incidentDetailLinkRules...)
 			rules = append(rules, incidentStopLinkRules...)
 			rules = append(rules, incidentContextLinkRules...)
@@ -79,10 +87,14 @@ func init() {
 			rules = append(rules, incidentAggregateIdentityRules...)
 			rules = append(rules, incidentReviewIdentityRules...)
 		}
+		visitor := visitIncidentLinks
+		if version == "v2" {
+			visitor = visitAllIncidentLinks
+		}
 		sqlite.MustRegisterDeterministicScalarFunction("agentos_incident_links_"+version, 3, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
 			links := []incidentSelector{}
 			seen := map[incidentKey]bool{}
-			visitIncidentLinks(args, "", rules, func(kind, id string) bool {
+			visitor(args, "", rules, func(kind, id string) bool {
 				key := incidentKey{kind, id}
 				if !seen[key] {
 					seen[key] = true
@@ -99,7 +111,7 @@ func init() {
 			if !kindOK || !idOK || kind == "" || id == "" {
 				return int64(0), nil
 			}
-			found := visitIncidentLinks(args[:3], kind, rules, func(candidateKind, candidateID string) bool { return candidateKind == kind && candidateID == id })
+			found := visitor(args[:3], kind, rules, func(candidateKind, candidateID string) bool { return candidateKind == kind && candidateID == id })
 			if found {
 				return int64(1), nil
 			}
@@ -254,7 +266,8 @@ func incidentLinkID(raw []byte, prefix string) string {
 }
 
 // SQLite json_extract uses the first occurrence of a duplicate object member.
-// Preserve that discovery behavior; selected duplicates fail exact validation.
+// Preserve that immutable v1 behavior for historical migration verification.
+// Current extraction uses incidentLinkMembers to retain all occurrences.
 func incidentLinkObject(raw []byte) map[string]json.RawMessage {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	opening, err := decoder.Token()

@@ -40,7 +40,7 @@ func TestIncidentReferencePlan(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"CO-ROUTINE walk", "SEARCH link USING PRIMARY KEY (target_kind=? AND target_id=?)", "SEARCH incident_event_links USING PRIMARY KEY (target_kind=? AND target_id=?)", "events_incident_execution_idx", "events_message_idx", "events_source_message_idx", "sqlite_autoindex_records_1"} {
+	for _, want := range []string{"CO-ROUTINE walk", "SEARCH intake_link USING PRIMARY KEY (target_kind=? AND target_id=?)", "SEARCH link USING PRIMARY KEY (target_kind=? AND target_id=?)", "events_incident_execution_idx", "sqlite_autoindex_records_1"} {
 		if !strings.Contains(strings.Join(plan, "\n"), want) {
 			t.Fatalf("missing indexed closure operation %s", want)
 		}

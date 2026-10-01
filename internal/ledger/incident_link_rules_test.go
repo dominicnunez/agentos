@@ -31,8 +31,8 @@ func TestIncidentLinkSelectFamilies(t *testing.T) {
 		{"notes", "note", `{"goal_id":"g","work_id":"w","parent_id":"p","scope":"AGENT","scope_id":"a"}`, nil},
 		{"wrong types", "task", `{"work_id":7,"parent_id":{},"depends_on":"opaque","assignee_type":"AGENT","assignee_id":false,"agent_config":[]}`, nil},
 		{"wrong array", "knowledge", `{"derived_knowledge_refs":{"id":"k"}}`, nil},
-		{"duplicate field", "task", `{"work_id":"w","work_id":"other"}`, []string{"work:w"}},
-		{"duplicate member", "knowledge", `{"derived_knowledge_refs":[{"id":"k","id":"other"}]}`, []string{"knowledge:k"}},
+		{"duplicate field", "task", `{"work_id":"w","work_id":"other"}`, []string{"work:w", "work:other"}},
+		{"duplicate member", "knowledge", `{"derived_knowledge_refs":[{"id":"k","id":"other"}]}`, []string{"knowledge:k", "knowledge:other"}},
 	}
 	store, err := Open(":memory:")
 	if err != nil {
@@ -63,7 +63,7 @@ func TestIncidentLinkSelectFamilies(t *testing.T) {
 					t.Fatal(err)
 				}
 				want := append([]string(nil), tc.want...)
-				if !record {
+				if !record && events.ProjectionKindRequiresAdmission(tc.kind) {
 					want = append(want, tc.kind+":self")
 				}
 				sort.Strings(want)

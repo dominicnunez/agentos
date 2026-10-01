@@ -106,13 +106,16 @@ func (d *incidentDependencies) loadFactualCandidates(ctx context.Context, tx *sq
 func incidentFactualQuery(kind string) string {
 	// Each branch is bounded before UNION retains candidate identities. Full
 	// documents are loaded only after the normal metadata budget preflight.
+	// Enumerate typed claims at each owned path before exact validation: a
+	// first duplicate member must not hide a later relevant claim or identity.
 	branch := func(records bool) string {
 		from := "events e"
 		doc := "e.payload"
 		root := "$.projection"
-		id := "json_extract(e.payload,'$.projection.record_id')"
+		id := "identity.value"
+		from += ` JOIN json_each(` + incidentClaimJSON("e.payload", "$.projection.record_id") + `) identity ON identity.type='text'`
 		prior := "e.sequence<json_extract(b.value,'$.start')"
-		newer := `NOT EXISTS (SELECT 1 FROM events n WHERE n.organization_id=e.organization_id AND n.sequence>e.sequence AND n.sequence<json_extract(b.value,'$.start') AND CASE WHEN json_valid(n.payload) THEN json_extract(n.payload,'$.projection.projection_kind') END='` + kind + `' AND json_extract(n.payload,'$.projection.record_id')=` + id + `)`
+		newer := `NOT EXISTS (SELECT 1 FROM events n WHERE n.organization_id=e.organization_id AND n.sequence>e.sequence AND n.sequence<json_extract(b.value,'$.start') AND ` + incidentScalarClaim("n.payload", "$.projection.projection_kind", `='`+kind+`'`) + ` AND ` + incidentScalarClaim("n.payload", "$.projection.record_id", `=`+id) + `)`
 		if records {
 			from = "records r LEFT JOIN events e ON e.event_id=r.admission_event_id"
 			doc = "r.body"
@@ -121,14 +124,16 @@ func incidentFactualQuery(kind string) string {
 			prior = "(e.sequence IS NULL OR e.sequence<json_extract(b.value,'$.start'))"
 			newer = `NOT EXISTS (SELECT 1 FROM records n JOIN events ne ON ne.event_id=n.admission_event_id WHERE n.kind=r.kind AND n.record_id=r.record_id AND n.version>r.version AND ne.sequence<json_extract(b.value,'$.start'))`
 		}
-		value := func(field string) string { return "json_extract(" + doc + ",'" + root + ".value." + field + "')" }
-		typed := "json_extract(" + doc + ",'" + root + ".projection_kind')='" + kind + "'"
+		value := func(field, comparison string) string {
+			return incidentScalarClaim(doc, root+".value."+field, comparison)
+		}
+		typed := incidentScalarClaim(doc, root+".projection_kind", `='`+kind+`'`)
 		if records {
 			typed = "r.kind='" + kind + "'"
 		}
-		match := `EXISTS (SELECT 1 FROM json_each(` + value("member_agent_ids") + `) member WHERE member.value=json_extract(b.value,'$.agent'))`
+		match := incidentArrayClaim(doc, root+".value.member_agent_ids", `=json_extract(b.value,'$.agent')`)
 		if kind == "knowledge" {
-			match = value("status") + `='ACTIVE' AND ` + value("context_use") + `='FACTUAL_REFERENCE' AND ((` + value("scope") + `='ORGANIZATION' AND ` + value("scope_id") + `=(SELECT organization FROM config)) OR (` + value("scope") + `='AGENT' AND ` + value("scope_id") + `=json_extract(b.value,'$.agent')) OR (` + value("scope") + `='TEAM' AND ` + value("scope_id") + ` IN (SELECT value FROM json_each(json_extract(b.value,'$.teams')))))`
+			match = value("status", `='ACTIVE'`) + ` AND ` + value("context_use", `='FACTUAL_REFERENCE'`) + ` AND ((` + value("scope", `='ORGANIZATION'`) + ` AND ` + value("scope_id", `=(SELECT organization FROM config)`) + `) OR (` + value("scope", `='AGENT'`) + ` AND ` + value("scope_id", `=json_extract(b.value,'$.agent')`) + `) OR (` + value("scope", `='TEAM'`) + ` AND ` + value("scope_id", ` IN (SELECT value FROM json_each(json_extract(b.value,'$.teams')))`) + `))`
 		}
 		// Retain former member Team histories too, but only current membership
 		// expands the factual scope at this start. Invalid removals then fail
@@ -137,7 +142,7 @@ func incidentFactualQuery(kind string) string {
 		if kind == "team" {
 			current = "CASE WHEN " + newer + " THEN 1 ELSE 0 END"
 		}
-		return `SELECT start,id,ref,current FROM (SELECT json_extract(b.value,'$.start') AS start,` + id + ` AS id,COALESCE(e.event_id,'') AS ref,` + current + ` AS current FROM ` + from + ` JOIN json_each((SELECT boundaries FROM config)) b WHERE ` + prior + ` AND CASE WHEN json_valid(` + doc + `) THEN ` + typed + ` AND ` + value("organization_id") + `=(SELECT organization FROM config) AND ` + match + ` END LIMIT ` + fmt.Sprint(events.MaximumIncidentEvidence+1) + `)`
+		return `SELECT start,id,ref,current FROM (SELECT json_extract(b.value,'$.start') AS start,` + id + ` AS id,COALESCE(e.event_id,'') AS ref,` + current + ` AS current FROM ` + from + ` JOIN json_each((SELECT boundaries FROM config)) b WHERE ` + prior + ` AND ` + typed + ` AND ` + value("organization_id", `=(SELECT organization FROM config)`) + ` AND ` + match + ` LIMIT ` + fmt.Sprint(events.MaximumIncidentEvidence+1) + `)`
 	}
 	return `WITH config(organization,boundaries) AS (VALUES (?,?)) ` + branch(false) + ` UNION ` + branch(true) + ` LIMIT ?`
 }

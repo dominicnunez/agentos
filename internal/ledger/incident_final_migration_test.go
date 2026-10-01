@@ -39,6 +39,7 @@ func TestIncidentFinalLinkMigration(t *testing.T) {
 				{"GOAL_PROGRESS_EVALUATED", `{"mission_id":"aggregate-mission","work_evidence_refs":["goal-evidence"],"criteria":[{"work_evidence_refs":["criterion-evidence"]}]}`, [][2]string{{"mission", "aggregate-mission"}, {"event", "goal-evidence"}, {"event", "criterion-evidence"}}},
 				{"COMPLETION_REVIEW_REQUESTED", `{"task_id":"request-task","evidence_refs":["request-evidence"]}`, [][2]string{{"task", "request-task"}, {"event", "request-evidence"}}},
 				{"COMPLETION_REVIEW_DECIDED", `{"task_id":"decision-task","evidence_refs":["decision-evidence"]}`, [][2]string{{"task", "decision-task"}, {"event", "decision-evidence"}}},
+				{"INTAKE_ABANDONED", `{"message_id":"migration-first","message\u005fid":"migration-second","source_message_id":"migration-third","source_message\u005fid":"migration-fourth"}`, [][2]string{{"intake_message", "migration-first"}, {"intake_message", "migration-second"}, {"intake_message", "migration-third"}, {"intake_message", "migration-fourth"}}},
 			}
 			ids := make([]string, len(fixtures))
 			for i, fixture := range fixtures {

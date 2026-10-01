@@ -461,14 +461,10 @@ func (d *incidentDependencies) frontier() (string, []any) {
 	if len(identities) > 0 {
 		var pairs []string
 		var leaseIDs []string
-		var messageIDs []string
 		var taskIDs []string
 		for _, key := range identities {
 			pairs = append(pairs, "(?,?)")
 			args = append(args, key.kind, key.id)
-			if key.kind == "intake_message" {
-				messageIDs = append(messageIDs, key.id)
-			}
 			if key.kind == "capability_lease" {
 				leaseIDs = append(leaseIDs, key.id)
 			}
@@ -477,7 +473,8 @@ func (d *incidentDependencies) frontier() (string, []any) {
 			}
 		}
 		marks := strings.Join(pairs, ",")
-		parts = append(parts, `sequence IN (SELECT event_sequence FROM incident_event_links WHERE (target_kind,target_id) IN (`+marks+`))`)
+		parts = append(parts, `sequence IN (SELECT link.event_sequence FROM incident_event_links link JOIN events intake ON intake.sequence=link.event_sequence WHERE (link.target_kind,link.target_id) IN (`+marks+`) AND (link.target_kind<>'intake_message' OR intake.organization_id=?))`)
+		args = append(args, d.organization)
 		parts = append(parts, `event_id IN (SELECT admission_event_id FROM records WHERE kind<>'event' AND (kind,record_id) IN (`+marks+`))`)
 		for _, key := range identities {
 			args = append(args, key.kind, key.id)
@@ -492,20 +489,11 @@ func (d *incidentDependencies) frontier() (string, []any) {
 				args = append(args, id)
 			}
 		}
-		if len(messageIDs) > 0 {
-			parts = append(parts, `(organization_id=? AND event_type IN (`+incidentIntakeTypes+`) AND (CASE WHEN json_valid(payload) THEN json_extract(payload,'$.message_id') END IN (`+incidentMarks(len(messageIDs))+`) OR CASE WHEN json_valid(payload) THEN json_extract(payload,'$.source_message_id') END IN (`+incidentMarks(len(messageIDs))+`)))`)
-			args = append(args, d.organization)
-			for range 2 {
-				for _, id := range messageIDs {
-					args = append(args, id)
-				}
-			}
-		}
 		// Lease events carry their identity directly, not in a projection.
 		// Select the full lifecycle even when its backing record was removed.
 		// Do not hide a tenant mismatch; add rejects foreign selected evidence.
 		if len(leaseIDs) > 0 {
-			parts = append(parts, `(event_type IN ('CAPABILITY_GRANTED','CAPABILITY_REVOKED') AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.id') END IN (`+incidentMarks(len(leaseIDs))+`))`)
+			parts = append(parts, `(event_type IN ('CAPABILITY_GRANTED','CAPABILITY_REVOKED') AND `+incidentScalarClaim("payload", "$.id", ` IN (`+incidentMarks(len(leaseIDs))+`)`)+`)`)
 			for _, id := range leaseIDs {
 				args = append(args, id)
 			}
