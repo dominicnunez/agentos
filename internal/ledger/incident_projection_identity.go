@@ -38,21 +38,24 @@ func validateIncidentProjectionIDs(ctx context.Context, tx *sql.Tx, keys map[inc
 	if err != nil {
 		return err
 	}
-	query := `WITH selected AS MATERIALIZED (SELECT json_extract(value,'$.kind') AS kind,json_extract(value,'$.id') AS identity FROM json_each(?1))
-		SELECT EXISTS(SELECT 1 FROM events e WHERE CASE WHEN ` + projectionIdentityEventContainerBytes("e.payload") + ` THEN
-		` + projectionSelectedSourceBytes("e.payload") + ` AND ` + projectionIdentityClaims("event") + ` ELSE 0 END)
-		OR EXISTS(SELECT 1 FROM records r LEFT JOIN events e ON e.event_id=r.admission_event_id
-		WHERE (r.kind IN (` + incidentProjectionKindsSQL + `,'capability_lease') OR r.admission_event_id<>'' OR r.admission_fingerprint<>'')
-		AND ` + projectionSelectedSourceBytes("r.body") + `
-		AND ` + projectionIdentityClaims("record") + `)`
 	var conflict bool
-	if err := tx.QueryRowContext(ctx, query, body).Scan(&conflict); err != nil {
+	if err := tx.QueryRowContext(ctx, projectionIdentitySQL(), body).Scan(&conflict); err != nil {
 		return err
 	}
 	if conflict {
 		return fmt.Errorf("incident retained source claims a conflicting selected identity")
 	}
 	return nil
+}
+
+func projectionIdentitySQL() string {
+	return `WITH selected AS MATERIALIZED (SELECT json_extract(value,'$.kind') AS kind,json_extract(value,'$.id') AS identity FROM json_each(?1))
+		SELECT EXISTS(SELECT 1 FROM events e WHERE CASE WHEN ` + projectionIdentityEventContainerBytes("e.payload") + ` THEN
+		CASE WHEN ` + projectionSelectedSourceBytes("e.payload") + ` THEN ` + projectionIdentityClaims("event") + ` ELSE 0 END ELSE 0 END)
+		OR EXISTS(SELECT 1 FROM records r LEFT JOIN events e ON e.event_id=r.admission_event_id
+		WHERE (r.kind IN (` + incidentProjectionKindsSQL + `,'capability_lease') OR r.admission_event_id<>'' OR r.admission_fingerprint<>'')
+		AND ` + projectionSelectedSourceBytes("r.body") + `
+		AND ` + projectionIdentityClaims("record") + `)`
 }
 
 func projectionSelectedSourceBytes(body string) string {

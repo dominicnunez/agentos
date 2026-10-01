@@ -16,19 +16,22 @@ import (
 // retained source JSON in SQLite without allocating those payloads in Go.
 func validateIncidentProjectionScope(ctx context.Context, tx *sql.Tx, organization string) error {
 	var conflict bool
-	query := `SELECT EXISTS(SELECT 1 FROM events e WHERE CASE WHEN ` + projectionEventContainerBytes("e.payload") + ` THEN
-		(e.organization_id=?1 OR ` + projectionSourceIdentityBytes("e.payload", "?1") + `) AND ` + projectionScopeClaims("event") + ` ELSE 0 END)
-		OR EXISTS(SELECT 1 FROM records r LEFT JOIN events e ON e.event_id=r.admission_event_id
-		WHERE (r.kind IN (` + incidentProjectionKindsSQL + `) OR r.admission_event_id<>'' OR r.admission_fingerprint<>'')
-		AND (e.organization_id=?1 OR r.record_id=?1 OR ` + projectionSourceIdentityBytes("r.body", "?1") + `)
-		AND ` + projectionScopeClaims("record") + `)`
-	if err := tx.QueryRowContext(ctx, query, organization).Scan(&conflict); err != nil {
+	if err := tx.QueryRowContext(ctx, projectionScopeSQL(), organization).Scan(&conflict); err != nil {
 		return err
 	}
 	if conflict {
 		return fmt.Errorf("incident projection organization claim conflicts with its retained source")
 	}
 	return nil
+}
+
+func projectionScopeSQL() string {
+	return `SELECT EXISTS(SELECT 1 FROM events e WHERE CASE WHEN ` + projectionEventContainerBytes("e.payload") + ` THEN
+		CASE WHEN (e.organization_id=?1 OR ` + projectionSourceIdentityBytes("e.payload", "?1") + `) THEN ` + projectionScopeClaims("event") + ` ELSE 0 END ELSE 0 END)
+		OR EXISTS(SELECT 1 FROM records r LEFT JOIN events e ON e.event_id=r.admission_event_id
+		WHERE (r.kind IN (` + incidentProjectionKindsSQL + `) OR r.admission_event_id<>'' OR r.admission_fingerprint<>'')
+		AND (e.organization_id=?1 OR r.record_id=?1 OR ` + projectionSourceIdentityBytes("r.body", "?1") + `)
+		AND ` + projectionScopeClaims("record") + `)`
 }
 
 // A decoded selected string occurs literally in an unescaped JSON source, or

@@ -14,6 +14,47 @@ import (
 	"github.com/dominicnunez/agentos/internal/events"
 )
 
+// SQLite evaluates both operands of AND when it produces a Boolean value.
+// Inside the container CASE, that would traverse an unrelated typed source's
+// owner tree even when identity membership is false. An error-producing JSON
+// expression provides an evaluation sentinel without a wall-clock threshold.
+func TestProjectionCandidateMembershipLazyEvaluation(t *testing.T) {
+	store := projectionScopeFixture(t)
+	var eventID string
+	if err := store.db.QueryRowContext(t.Context(), `SELECT admission_event_id FROM records WHERE kind='team'`).Scan(&eventID); err != nil {
+		t.Fatal(err)
+	}
+	for _, sample := range []struct {
+		name, prefix, container, membership, query, owner string
+		selected                                          string
+	}{
+		{"scope", "", projectionEventContainerBytes("e.payload"), `(e.organization_id=?1 OR ` + projectionSourceIdentityBytes("e.payload", "?1") + `)`, projectionScopeSQL(), projectionScopeClaims("event"), "org-1"},
+		{"identity", `WITH selected AS MATERIALIZED (SELECT json_extract(value,'$.id') AS identity FROM json_each(?1)) `, projectionIdentityEventContainerBytes("e.payload"), projectionSelectedSourceBytes("e.payload"), projectionIdentitySQL(), projectionIdentityClaims("event"), `[{"kind":"mission","id":"selected-mission"},{"kind":"event","id":"selected-event"}]`},
+	} {
+		t.Run(sample.name, func(t *testing.T) {
+			var container, member bool
+			if err := store.db.QueryRowContext(t.Context(), sample.prefix+`SELECT `+sample.container+`,`+sample.membership+` FROM events e WHERE e.event_id=?2`, sample.selected, eventID).Scan(&container, &member); err != nil {
+				t.Fatal(err)
+			}
+			if !container || member {
+				t.Fatalf("actual foreign writer source does not discriminate container from membership: container=%v member=%v", container, member)
+			}
+			// Keep the complete production query/control flow. Replace only its
+			// expensive event predicate, and select the actual foreign source in
+			// a derived table; all record predicates remain unchanged.
+			if strings.Count(sample.query, sample.owner) != 1 {
+				t.Fatal("production query does not have exactly one event-owner predicate")
+			}
+			query := strings.Replace(sample.query, sample.owner, `json_extract('{','$.owner')`, 1)
+			query = strings.Replace(query, "FROM events e", "FROM (SELECT * FROM events WHERE event_id=?2) e", 1)
+			var conflict bool
+			if err := store.db.QueryRowContext(t.Context(), query, sample.selected, eventID).Scan(&conflict); err != nil || conflict {
+				t.Fatalf("production false membership did not skip the expensive-branch sentinel: conflict=%v err=%v", conflict, err)
+			}
+		})
+	}
+}
+
 // The oracle deliberately has no byte gate: retained scalar ownership is the
 // contract, and candidate rejection must preserve its result for the same raw
 // source, metadata and selected keys. Valid ordinary foreign sources must also
