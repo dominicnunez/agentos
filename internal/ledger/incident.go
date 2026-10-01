@@ -161,6 +161,11 @@ func incidentEvents(ctx context.Context, tx *sql.Tx, budget *incidentBudget, whe
 	if count > budget.events || size > budget.bytes {
 		return nil, fmt.Errorf("incident evidence exceeds event or byte limit")
 	}
+	// The same transaction has already proved this selection empty. Avoid
+	// preparing and executing its potentially large predicate a second time.
+	if count == 0 {
+		return nil, nil
+	}
 	stream, err := collectEvents(tx.QueryContext(ctx, query, args...))
 	if err != nil {
 		return nil, err

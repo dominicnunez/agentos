@@ -112,7 +112,11 @@ func projectionClaimNodes(source string) string {
 	// The event label is one independent owner channel. A closed relation
 	// avoids rebuilding one correlated UNION branch for every family and row.
 	owners += ` UNION SELECT p.id,l.kind FROM projection_nodes p JOIN lifecycle l ON l.label=e.event_type`
-	return `nodes AS MATERIALIZED (SELECT id,parent,key,type,value FROM json_tree(CASE WHEN json_valid(` + body + `) THEN ` + body + ` ELSE '{}' END)),
+	// Keep every key in the consumers' owned ancestor chains and preserve the
+	// original occurrence IDs. Other tree rows and nontext values are unused by
+	// these scalar guards; filtering materialization does not promote descendants
+	// of an omitted unrelated object into root or direct-child claims.
+	return `nodes AS MATERIALIZED (SELECT id,parent,key,type,CASE WHEN type='text' THEN value ELSE NULL END AS value FROM json_tree(CASE WHEN json_valid(` + body + `) THEN ` + body + ` ELSE '{}' END) WHERE parent IS NULL OR key IN ('projection','admission','id','projection_kind','record_id','value','knowledge_id','organization_id','routing','event_ref')),
 		projection_nodes AS (` + projectionNodes + `),
 		lifecycle(label,kind) AS (VALUES ` + strings.Join(lifecycle, ",") + `),
 		owners AS (` + owners + `)`
