@@ -12,9 +12,10 @@ import (
 )
 
 type incidentFactBoundary struct {
-	Start int64    `json:"start"`
-	Agent string   `json:"agent"`
-	Teams []string `json:"teams"`
+	Start  int64    `json:"start"`
+	Agent  string   `json:"agent"`
+	Teams  []string `json:"teams"`
+	Legacy bool     `json:"legacy"`
 }
 
 // Discover candidate inputs independently of the context manifest. Both sides
@@ -27,12 +28,15 @@ func (d *incidentDependencies) loadFactualCandidates(ctx context.Context, tx *sq
 	if d.factualStarts == nil {
 		d.factualStarts = map[string]bool{}
 	}
+	legacy, err := d.legacyCompletionContexts()
+	if err != nil {
+		return err
+	}
 	var boundaries []incidentFactBoundary
 	for _, event := range d.stream {
-		if event.EventType != "EXECUTION_STARTED" || d.factualStarts[event.EventID] {
+		if event.EventType != "EXECUTION_STARTED" {
 			continue
 		}
-		d.factualStarts[event.EventID] = true
 		projection, present, err := events.AdmittedProjection(event)
 		if err != nil {
 			return err
@@ -45,7 +49,20 @@ func (d *incidentDependencies) loadFactualCandidates(ctx context.Context, tx *sq
 			return err
 		}
 		if task.ExecutionKind == core.ExecutionAgent {
-			boundaries = append(boundaries, incidentFactBoundary{Start: event.Sequence, Agent: string(task.AssigneeID)})
+			execution, err := events.ContainmentExecutionID(event)
+			if err != nil {
+				return err
+			}
+			historical := legacy[[3]string{event.CorrelationID, string(task.ID), execution}]
+			key := event.EventID
+			if historical {
+				key += "/legacy"
+			}
+			if d.factualStarts[key] {
+				continue
+			}
+			d.factualStarts[key] = true
+			boundaries = append(boundaries, incidentFactBoundary{Start: event.Sequence, Agent: string(task.AssigneeID), Legacy: historical})
 		}
 	}
 	if len(boundaries) == 0 {
@@ -133,7 +150,7 @@ func incidentFactualQuery(kind string) string {
 		}
 		match := incidentArrayClaim(doc, root+".value.member_agent_ids", `=json_extract(b.value,'$.agent')`)
 		if kind == "knowledge" {
-			match = value("status", `='ACTIVE'`) + ` AND ` + value("context_use", `='FACTUAL_REFERENCE'`) + ` AND ((` + value("scope", `='ORGANIZATION'`) + ` AND ` + value("scope_id", `=(SELECT organization FROM config)`) + `) OR (` + value("scope", `='AGENT'`) + ` AND ` + value("scope_id", `=json_extract(b.value,'$.agent')`) + `) OR (` + value("scope", `='TEAM'`) + ` AND ` + value("scope_id", ` IN (SELECT value FROM json_each(json_extract(b.value,'$.teams')))`) + `))`
+			match = value("status", `='ACTIVE'`) + ` AND ` + `(json_extract(b.value,'$.legacy') OR ` + value("context_use", `='FACTUAL_REFERENCE'`) + `)` + ` AND ((` + value("scope", `='ORGANIZATION'`) + ` AND ` + value("scope_id", `=(SELECT organization FROM config)`) + `) OR (` + value("scope", `='AGENT'`) + ` AND ` + value("scope_id", `=json_extract(b.value,'$.agent')`) + `) OR (` + value("scope", `='TEAM'`) + ` AND ` + value("scope_id", ` IN (SELECT value FROM json_each(json_extract(b.value,'$.teams')))`) + `))`
 		}
 		// Retain former member Team histories too, but only current membership
 		// expands the factual scope at this start. Invalid removals then fail

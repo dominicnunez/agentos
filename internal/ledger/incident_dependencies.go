@@ -37,6 +37,7 @@ type incidentDependencies struct {
 	selectedRecords    map[int64]bool
 	inboxStarts        map[string]bool
 	factualStarts      map[string]bool
+	completionEnds     map[string]bool
 	inboxRows          map[string]bool
 	tooManyKeys        bool
 }
@@ -66,6 +67,9 @@ func loadIncidentDependencies(ctx context.Context, tx *sql.Tx, snapshot *events.
 			return err
 		}
 		if err := d.loadFactualCandidates(ctx, tx); err != nil {
+			return err
+		}
+		if err := d.loadCompletionCandidates(ctx, tx); err != nil {
 			return err
 		}
 		where, args := d.frontier()
