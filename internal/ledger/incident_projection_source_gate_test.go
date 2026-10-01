@@ -85,6 +85,11 @@ func TestProjectionSourceGateDifferential(t *testing.T) {
 		SELECT EXISTS(SELECT 1 FROM events e WHERE ` + projectionIdentityClaims("event") + `)
 		OR EXISTS(SELECT 1 FROM records r LEFT JOIN events e ON e.event_id=r.admission_event_id WHERE
 		(r.kind IN (` + incidentProjectionKindsSQL + `,'capability_lease') OR r.admission_event_id<>'' OR r.admission_fingerprint<>'') AND ` + projectionIdentityClaims("record") + `)`
+	// Retain unfiltered source applicability but freeze the prior complete
+	// occurrence/owner relation; production node changes must not change both
+	// sides of the differential comparison.
+	scopeOracle = projectionPriorValueSQL(t, scopeOracle)
+	identityOracle = projectionPriorValueSQL(t, identityOracle)
 	scopeConflicts, identityConflicts := 0, 0
 	var channelDecisions [2][2][2]int // channel, guard, accept/conflict
 	check := func(name string, payload, body []byte, kind, recordID, envelope, label, backing string, expected ...bool) {
