@@ -329,6 +329,7 @@ func TestProjectionScopeOrphanApplicability(t *testing.T) {
 }
 
 func TestIncidentProjectionDistinctOrganizationClaims(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, claim := range []string{"organization-value", "organization-record-id", "organization-key", "task-routing"} {
 		for _, source := range []string{"both", "event-only", "record-only"} {
 			if claim == "organization-key" && source != "record-only" {

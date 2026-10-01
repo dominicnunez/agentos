@@ -827,6 +827,7 @@ func TestAuditIncidentKnowledgeMalformedTemporalCandidate(t *testing.T) {
 }
 
 func TestAuditIncidentLegacyKnowledgeMalformedTemporalCandidate(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, version := range []string{"v1", "v2", "v3", "v4", "bare-v4"} {
 		for _, selected := range []bool{false, true} {
 			scope := "foreign-control"
@@ -1135,6 +1136,7 @@ func TestAuditIncidentKnowledgeTerminalUseCandidate(t *testing.T) {
 }
 
 func TestAuditIncidentKnowledgeAggregateUseCandidates(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, phase := range []string{"work-evidence", "work-terminal", "goal-use", "after-goal-evaluation", "after-goal"} {
 		t.Run(phase, func(t *testing.T) {
 			store, err := Open(":memory:")

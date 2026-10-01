@@ -9,6 +9,7 @@ import (
 )
 
 func TestIncidentNumericRecordPreflight(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, kind := range []string{"task", "organization_freeze", "capability_lease", "effect"} {
 		t.Run(kind, func(t *testing.T) {
 			store, err := Open(":memory:")

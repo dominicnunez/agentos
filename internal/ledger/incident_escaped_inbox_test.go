@@ -16,6 +16,7 @@ import (
 // Escaped member names have the same decoded meaning and preserve the admitted
 // Team. They must not erase another correlation's eligible inbox input.
 func TestIncidentEscapedTeamInbox(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, field := range []string{"member_agent_ids", "projection", "value", "record_id"} {
 		for _, mode := range []string{"omitted", "other-recipient", "after-cutoff"} {
 			t.Run(field+"/"+mode, func(t *testing.T) {

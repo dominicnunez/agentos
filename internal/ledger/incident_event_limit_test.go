@@ -16,6 +16,7 @@ import (
 // Distinct execution and Task envelopes make these bounded histories exceed
 // SQLite's 32766-parameter ceiling if selector membership expands per ID.
 func TestIncidentPublicEvidenceLimit(t *testing.T) {
+	parallelIncidentTest(t)
 	store, err := Open(":memory:")
 	if err != nil {
 		t.Fatal(err)

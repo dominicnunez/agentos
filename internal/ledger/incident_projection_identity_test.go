@@ -183,6 +183,7 @@ func assertIdentityConflict(t *testing.T, store *SQLite, key incidentKey, want b
 }
 
 func TestProjectionIdentityOccurrenceClaims(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, source := range []string{"event", "record"} {
 		for _, sample := range []struct{ name, body string }{
 			{"duplicate-own-id", `{"projection_kind":"team","record_id":"other-id","value":{"id":"other-id","id":"selected-id"}}`},

@@ -12,6 +12,7 @@ import (
 )
 
 func TestIncidentEvidenceTaskSelection(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, scope := range []string{"public", "private", "foreign", "unrelated"} {
 		for _, execution := range []string{"", "different-execution"} {
 			t.Run(scope+"/"+execution, func(t *testing.T) {
