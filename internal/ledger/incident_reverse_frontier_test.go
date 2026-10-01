@@ -36,9 +36,12 @@ func TestIncidentReverseFrontierWide(t *testing.T) {
 		}{
 			{"org-1", "INTENT_CONFIRMED", map[string]string{"replaces_work_id": "work-0000"}, true, false},
 			{"org-1", "INTENT_CONFIRMED", map[string]string{"intent_id": "intent-0000"}, true, false},
-			{"org-1", "GOAL_PROGRESS_EVALUATED", map[string]string{"goal_id": "goal-0000"}, true, false},
-			{"org-1", "KNOWLEDGE_VALIDATION_RECORDED", map[string]string{"knowledge_id": "knowledge-0000"}, true, false},
-			{"org-2", "GOAL_PROGRESS_EVALUATED", map[string]string{"goal_id": "goal-0000"}, true, false},
+			{"org-1", "INTENT_CONFIRMED", map[string]string{"goal_id": "goal-0000"}, true, false},
+			{"org-1", "KNOWLEDGE_VALIDATION_RECORDED", map[string]string{"knowledge_id": "knowledge-0000"}, false, false},
+			{"org-2", "INTENT_CONFIRMED", map[string]string{"goal_id": "goal-0000"}, true, false},
+			// Raw aggregate statements have no incoming authority until consumed.
+			{"org-1", "GOAL_PROGRESS_EVALUATED", map[string]string{"goal_id": "goal-0000"}, false, false},
+			{"org-2", "GOAL_PROGRESS_EVALUATED", map[string]string{"goal_id": "goal-0000"}, false, false},
 			{"org-1", "AUDIT_NOTE", map[string]string{"goal_id": "goal-0000", "knowledge_id": "knowledge-0000"}, false, false},
 			{"org-1", "INTENT_CONFIRMED", map[string]string{"goal_id": "goal-0000"}, false, true},
 		} {

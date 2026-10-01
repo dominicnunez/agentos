@@ -123,7 +123,7 @@ func incidentReferenceSQL(seeds int) string {
 	eventTargets := fmt.Sprintf(`SELECT locator FROM (SELECT sequence AS locator FROM events WHERE walk.kind='correlation' AND organization_id=(SELECT organization FROM config) AND correlation_id=walk.identity LIMIT %[1]d)
  UNION SELECT locator FROM (SELECT sequence AS locator FROM events WHERE walk.kind='correlation' AND event_type='PLAN_CREATED' AND correlation_id=walk.identity AND EXISTS (SELECT 1 FROM events plan_use WHERE plan_use.organization_id=(SELECT organization FROM config) AND plan_use.correlation_id=walk.identity AND plan_use.event_type IN (`+incidentPlanUseTypes+`)) LIMIT %[1]d)
  UNION SELECT locator FROM (SELECT sequence AS locator FROM events WHERE walk.kind='execution' AND organization_id=(SELECT organization FROM config) AND source_execution_id=walk.identity LIMIT %[1]d)
- UNION SELECT locator FROM (SELECT intake_link.event_sequence AS locator FROM incident_event_links intake_link JOIN events e ON e.sequence=intake_link.event_sequence WHERE intake_link.target_kind=walk.kind AND intake_link.target_id=walk.identity AND (walk.kind<>'intake_message' OR e.organization_id=(SELECT organization FROM config)) LIMIT %[1]d) LIMIT %[1]d`, events.MaximumIncidentEvidence+1)
+ UNION SELECT locator FROM (SELECT intake_link.event_sequence AS locator FROM incident_event_links intake_link JOIN events e ON e.sequence=intake_link.event_sequence WHERE intake_link.target_kind=walk.kind AND intake_link.target_id=walk.identity AND (walk.kind<>'intake_message' OR e.organization_id=(SELECT organization FROM config)) AND `+incidentRawClaimApplicable("e")+` LIMIT %[1]d) LIMIT %[1]d`, events.MaximumIncidentEvidence+1)
 	bounded := func(query string) string {
 		return fmt.Sprintf(`(SELECT CASE WHEN count(*)>%d THEN json_array(NULL) ELSE json_group_array(locator) END FROM (%s))`, events.MaximumIncidentEvidence, query)
 	}
@@ -136,7 +136,7 @@ func incidentReferenceSQL(seeds int) string {
  CASE WHEN json_extract(edge.value,'$.kind')='event' THEN '' ELSE json_extract(edge.value,'$.kind') END,
  CASE WHEN json_extract(edge.value,'$.kind')='event' THEN '' ELSE json_extract(edge.value,'$.id') END
  FROM walk JOIN events e ON e.sequence=walk.sequence AND walk.kind=''
- JOIN json_each(agentos_incident_edges_v1(e.event_type,e.payload,` + envelope + `)) edge
+ JOIN json_each(CASE WHEN ` + incidentRawClaimApplicable("e") + ` THEN agentos_incident_edges_v1(e.event_type,e.payload,` + envelope + `) ELSE '[]' END) edge
  LEFT JOIN events target ON target.event_id=json_extract(edge.value,'$.id') AND json_extract(edge.value,'$.kind')='event'
  WHERE walk.phase=2 AND (json_extract(edge.value,'$.kind')<>'event' OR target.sequence IS NOT NULL)
  UNION SELECT COALESCE(edge.value,0),CASE WHEN edge.type='null' THEN -1 ELSE 0 END,'@record',''

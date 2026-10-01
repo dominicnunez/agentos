@@ -34,9 +34,9 @@ func validateIncidentExecutionEvidence(ctx context.Context, tx *sql.Tx, work []e
 	if err := events.ValidateSecurityHoldOutcomes(stream, freezes); err != nil {
 		return err
 	}
-	if err := validateIncidentInference(ctx, tx, stream, freezes); err != nil {
-		return err
-	}
+	// Complete inference accounting and connection-policy history are validated
+	// after dependency closure with its aggregate support budget. This prepass
+	// retains execution/stop checks without loading the same support twice.
 	if len(work) == 0 {
 		return nil
 	}

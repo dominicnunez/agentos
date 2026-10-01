@@ -29,19 +29,39 @@ func incidentKnowledgeClaims(membership string) string {
 }
 
 func incidentKnowledgeConsumer(field string, predicate func(string, string) string, activation bool) string {
+	return incidentKnowledgeConsumerFor("events", field, predicate, activation)
+}
+
+func incidentKnowledgeConsumerFor(source, field string, predicate func(string, string) string, activation bool) string {
 	eventCondition, recordCondition := "", ""
 	if activation {
 		eventCondition = ` AND consumer.event_type='KNOWLEDGE_ACTIVATED'`
 		recordCondition = ` AND ` + incidentScalarClaim("consumer.body", "$.value.status", `='ACTIVE'`)
 	}
 	return `EXISTS (SELECT 1 FROM incident_event_links link JOIN events consumer ON consumer.sequence=link.event_sequence AND consumer.event_id=link.event_id
-WHERE link.target_kind='event' AND link.target_id=events.event_id AND
+WHERE link.target_kind='event' AND link.target_id=` + source + `.event_id AND
 ` + incidentScalarClaim("consumer.payload", "$.projection.projection_kind", `='knowledge'`) + ` AND ` + predicate("consumer.payload", "$.projection.value") + eventCondition + ` AND
-` + incidentArrayClaim("consumer.payload", "$.projection.value."+field, `=events.event_id`) + `) OR
+` + incidentArrayClaim("consumer.payload", "$.projection.value."+field, `=`+source+`.event_id`) + `) OR
 EXISTS (SELECT 1 FROM incident_record_links link JOIN records consumer ON consumer.kind=link.record_kind AND consumer.record_id=link.record_id AND consumer.version=link.record_version
-WHERE link.target_kind='event' AND link.target_id=events.event_id AND consumer.kind='knowledge' AND
+WHERE link.target_kind='event' AND link.target_id=` + source + `.event_id AND consumer.kind='knowledge' AND
 ` + predicate("consumer.body", "$.value") + recordCondition + ` AND
-` + incidentArrayClaim("consumer.body", "$.value."+field, `=events.event_id`) + `)`
+` + incidentArrayClaim("consumer.body", "$.value."+field, `=`+source+`.event_id`) + `)`
+}
+
+func incidentKnowledgeIncoming(source string) string {
+	proposal := incidentKnowledgeConsumerFor(source, "provenance_event_refs", func(body, path string) string {
+		return incidentScalarClaim(body, path+".created_by_kind", `='AGENT'`)
+	}, false)
+	validation := incidentKnowledgeConsumerFor(source, "validation_refs", func(body, path string) string {
+		return incidentScalarClaim(body, path+".validation_method", `='`+string(core.KnowledgeValidationDeterministic)+`'`)
+	}, true)
+	judgment := incidentKnowledgeConsumerFor(source, "validation_refs", func(body, path string) string {
+		return `(` + incidentScalarClaim(body, path+".validation_method", ` IN ('`+string(core.KnowledgeValidationHuman)+`','`+string(core.KnowledgeValidationIndependentAgent)+`')`) + ` OR ` + incidentScalarClaim(body, path+".validated_by_kind", ` IN ('HUMAN','AGENT','EXTERNAL_AGENT')`) + `)`
+	}, true)
+	return `(` + source + `.event_type NOT IN ('KNOWLEDGE_PROPOSED','KNOWLEDGE_VALIDATION_RECORDED','KNOWLEDGE_JUDGMENT_PUBLISHED','HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED','A2A_KNOWLEDGE_JUDGMENT_RECEIVED') OR ` + incidentScalarClaim(source+".payload", "$.projection.projection_kind", `='knowledge'`) + ` OR
+(` + source + `.event_type='KNOWLEDGE_PROPOSED' AND (` + proposal + `)) OR
+(` + source + `.event_type='KNOWLEDGE_VALIDATION_RECORDED' AND (` + validation + `)) OR
+(` + source + `.event_type IN ('KNOWLEDGE_JUDGMENT_PUBLISHED','HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED','A2A_KNOWLEDGE_JUDGMENT_RECEIVED') AND (` + judgment + `)))`
 }
 
 // json_tree decodes member keys while fullkey retains their source spelling.

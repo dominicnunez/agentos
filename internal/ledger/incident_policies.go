@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/inference"
@@ -41,7 +42,7 @@ func loadIncidentPolicyHistory(ctx context.Context, tx *sql.Tx, organization str
 	where += `)`
 	var count int
 	var size int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM (SELECT `+incidentInferencePolicyBytes+`+length(CAST(p.policy_fingerprint AS BLOB)) AS bytes FROM inference_policies p WHERE `+where+` LIMIT ?)`, append(args, budget.events+1)...).Scan(&count, &size); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM (SELECT `+incidentInferencePolicyBytes+` AS bytes FROM inference_policies p WHERE `+where+` LIMIT ?)`, append(args, budget.events+1)...).Scan(&count, &size); err != nil {
 		return err
 	}
 	if count > budget.events || size > budget.bytes {
@@ -50,20 +51,24 @@ func loadIncidentPolicyHistory(ctx context.Context, tx *sql.Tx, organization str
 	budget.events -= count
 	budget.bytes -= size
 	type storedPolicy struct {
-		fingerprint, activation, connection string
-		body                                []byte
-		active                              int
+		fingerprint, activation, connection, activatedAt string
+		body                                             []byte
+		active                                           int
 	}
 	stored := make([]storedPolicy, 0, count)
-	rows, err := tx.QueryContext(ctx, `SELECT p.policy_fingerprint,p.body,p.activation_event_id,p.connection_id,p.active FROM inference_policies p WHERE `+where+` ORDER BY p.policy_fingerprint`, args...)
+	rows, err := tx.QueryContext(ctx, `SELECT p.policy_fingerprint,p.body,p.activation_event_id,p.connection_id,p.active,p.activated_at FROM inference_policies p WHERE `+where+` ORDER BY p.policy_fingerprint`, args...)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var policy storedPolicy
-		if err := rows.Scan(&policy.fingerprint, &policy.body, &policy.activation, &policy.connection, &policy.active); err != nil {
+		if err := rows.Scan(&policy.fingerprint, &policy.body, &policy.activation, &policy.connection, &policy.active, &policy.activatedAt); err != nil {
 			return err
+		}
+		activated, err := time.Parse(time.RFC3339Nano, policy.activatedAt)
+		if err != nil || activated.IsZero() || policy.active != 0 && policy.active != 1 {
+			return fmt.Errorf("incident inference policy stored metadata is invalid")
 		}
 		stored = append(stored, policy)
 	}
@@ -110,9 +115,6 @@ func loadIncidentPolicyHistory(ctx context.Context, tx *sql.Tx, organization str
 		support.policies[[2]string{organization, record.fingerprint}] = incidentPolicy{value: policy, sequence: activation.Sequence}
 		if policy.Version != inference.ConnectionPolicyVersion {
 			continue
-		}
-		if record.active != 0 && record.active != 1 {
-			return fmt.Errorf("incident inference policy active state is invalid")
 		}
 		support.histories[record.connection] = append(support.histories[record.connection], inferencePolicyRevision{fingerprint: record.fingerprint, sequence: activation.Sequence, authorizedAt: policy.AuthorizedAt})
 		if record.active == 1 {

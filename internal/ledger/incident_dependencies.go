@@ -38,6 +38,7 @@ type incidentDependencies struct {
 	inboxStarts        map[string]bool
 	factualStarts      map[string]bool
 	completionEnds     map[string]bool
+	aggregateClaims    map[string]bool
 	inboxRows          map[string]bool
 	tooManyKeys        bool
 }
@@ -72,6 +73,9 @@ func loadIncidentDependencies(ctx context.Context, tx *sql.Tx, snapshot *events.
 		if err := d.loadCompletionCandidates(ctx, tx); err != nil {
 			return err
 		}
+		if err := d.loadAggregateClaims(ctx, tx); err != nil {
+			return err
+		}
 		where, args := d.frontier()
 		if where == "" {
 			break
@@ -96,6 +100,9 @@ func loadIncidentDependencies(ctx context.Context, tx *sql.Tx, snapshot *events.
 		if err := d.loadAuthorities(ctx, tx); err != nil {
 			return err
 		}
+	}
+	if err := validateIncidentProjectionIDs(ctx, tx, d.keys); err != nil {
+		return err
 	}
 	for _, event := range d.stream {
 		_, present, err := events.AdmittedProjection(event)
@@ -134,6 +141,9 @@ func loadIncidentDependencies(ctx context.Context, tx *sql.Tx, snapshot *events.
 	if err := validateIncidentInferenceBudget(ctx, tx, stream, freezes, correlations, &d.budget); err != nil {
 		return err
 	}
+	if err := validateIncidentNegativeEvents(ctx, tx, stream, &d.budget); err != nil {
+		return err
+	}
 	return validateIncidentExecutionRows(ctx, tx, stream)
 }
 
@@ -151,6 +161,9 @@ func (d *incidentDependencies) add(event events.Event) error {
 	projection, present, err := events.AdmittedProjection(event)
 	if err != nil {
 		return err
+	}
+	if !present && incidentDeferredClaim(event.EventType) {
+		return nil
 	}
 	if !present && !incidentOwnedContract(event.EventType) {
 		return nil
@@ -477,7 +490,7 @@ func (d *incidentDependencies) frontier() (string, []any) {
 			}
 		}
 		marks := strings.Join(pairs, ",")
-		parts = append(parts, `sequence IN (SELECT link.event_sequence FROM incident_event_links link JOIN events intake ON intake.sequence=link.event_sequence WHERE (link.target_kind,link.target_id) IN (`+marks+`) AND (link.target_kind<>'intake_message' OR intake.organization_id=?))`)
+		parts = append(parts, `sequence IN (SELECT link.event_sequence FROM incident_event_links link JOIN events intake ON intake.sequence=link.event_sequence WHERE (link.target_kind,link.target_id) IN (`+marks+`) AND (link.target_kind<>'intake_message' OR intake.organization_id=?) AND `+incidentRawClaimApplicable("intake")+`)`)
 		args = append(args, d.organization)
 		parts = append(parts, `event_id IN (SELECT admission_event_id FROM records WHERE kind<>'event' AND (kind,record_id) IN (`+marks+`))`)
 		for _, key := range identities {
@@ -564,7 +577,8 @@ func (d *incidentDependencies) frontier() (string, []any) {
 		case "knowledge":
 			eventCondition, field = `event_type IN ('KNOWLEDGE_PROPOSED','KNOWLEDGE_VALIDATION_RECORDED','KNOWLEDGE_JUDGMENT_PUBLISHED','HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED','A2A_KNOWLEDGE_JUDGMENT_RECEIVED')`, "knowledge_id"
 		}
-		parts = append(parts, `(CASE WHEN json_valid(payload) THEN (`+eventCondition+` AND json_extract(payload,'$.`+field+`') IN (`+incidentMarks(len(ids))+`)) END)`)
+		claim := incidentScalarClaim("payload", "$."+field, ` IN (`+incidentMarks(len(ids))+`)`)
+		parts = append(parts, `(CASE WHEN json_valid(payload) THEN (`+eventCondition+` AND `+claim+` AND `+incidentRawClaimApplicable("events")+`) END)`)
 		for _, id := range ids {
 			args = append(args, id)
 		}

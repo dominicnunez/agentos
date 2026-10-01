@@ -18,6 +18,8 @@ const incidentEventBytes = `length(CAST(event_id AS BLOB))+length(CAST(organizat
 type incidentBudget struct {
 	events int
 	bytes  int64
+	// Successful exact event checks may be reused inside this read transaction.
+	checkedEvents map[string]bool
 }
 
 // VerifiedIncidentEvents does not promote its verified snapshot to a writer.
@@ -52,6 +54,12 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 	if err := validateIncidentLinkContents(ctx, tx); err != nil {
 		return events.IncidentSnapshot{}, err
 	}
+	if err := validateIncidentFreezeScope(ctx, tx, organization); err != nil {
+		return events.IncidentSnapshot{}, err
+	}
+	if err := validateIncidentProjectionScope(ctx, tx, organization); err != nil {
+		return events.IncidentSnapshot{}, err
+	}
 	budget := incidentBudget{events: limit, bytes: 2 << 20}
 	work, err := incidentEvents(ctx, tx, &budget, `organization_id=? AND correlation_id=?`, organization, correlation)
 	if err != nil {
@@ -64,14 +72,11 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 	if err := validateIncidentRecords(ctx, tx, work); err != nil {
 		return events.IncidentSnapshot{}, err
 	}
-	if err := validateIncidentFreezeScope(ctx, tx, organization); err != nil {
-		return events.IncidentSnapshot{}, err
-	}
 	// Bound the joined record/event rows before the existing complete-chain
 	// resolver allocates its evidence. Orphans count toward the same bound.
 	var freezeCount int
 	var freezeBytes int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(COALESCE(length(CAST(body AS BLOB)),0)+COALESCE(length(CAST(record_id AS BLOB)),0)+COALESCE(length(CAST(admission_event_id AS BLOB)),0)+COALESCE(length(CAST(admission_fingerprint AS BLOB)),0)+COALESCE(`+incidentEventBytes+`,0)),0) FROM (`+freezeHistorySQL+` LIMIT ?)`, organization, organization, organization, organization, limit+1).Scan(&freezeCount, &freezeBytes); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(COALESCE(length(CAST(body AS BLOB)),0)+COALESCE(length(CAST(kind AS BLOB)),0)+COALESCE(length(CAST(version AS BLOB)),0)+COALESCE(length(CAST(record_id AS BLOB)),0)+COALESCE(length(CAST(admission_event_id AS BLOB)),0)+COALESCE(length(CAST(admission_fingerprint AS BLOB)),0)+COALESCE(`+incidentEventBytes+`,0)),0) FROM (`+freezeHistorySQL+` LIMIT ?)`, organization, organization, organization, organization, limit+1).Scan(&freezeCount, &freezeBytes); err != nil {
 		return events.IncidentSnapshot{}, err
 	}
 	if freezeCount > limit || freezeBytes > 2<<20 {
@@ -159,6 +164,17 @@ func incidentEvents(ctx context.Context, tx *sql.Tx, budget *incidentBudget, whe
 	stream, err := collectEvents(tx.QueryContext(ctx, query, args...))
 	if err != nil {
 		return nil, err
+	}
+	for _, event := range stream {
+		if _, _, err := events.AdmittedProjection(event); err != nil {
+			return nil, err
+		}
+	}
+	if budget.checkedEvents == nil {
+		budget.checkedEvents = map[string]bool{}
+	}
+	for _, event := range stream {
+		budget.checkedEvents[event.EventID] = true
 	}
 	budget.events -= count
 	budget.bytes -= size
@@ -268,7 +284,7 @@ func validateIncidentEffects(ctx context.Context, tx *sql.Tx, organization strin
 	query := `SELECT record_id,version,body,admission_event_id,admission_fingerprint FROM records WHERE kind='effect' AND record_id IN (` + marks + `) ORDER BY record_id,version LIMIT 257`
 	var count int
 	var size int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(CAST(record_id AS BLOB))+length(CAST(body AS BLOB))+length(CAST(admission_event_id AS BLOB))+length(CAST(admission_fingerprint AS BLOB))),0) FROM (`+query+`)`, args...).Scan(&count, &size); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(CAST(record_id AS BLOB))+length(CAST(version AS BLOB))+length(CAST(body AS BLOB))+length(CAST(admission_event_id AS BLOB))+length(CAST(admission_fingerprint AS BLOB))),0) FROM (`+query+`)`, args...).Scan(&count, &size); err != nil {
 		return err
 	}
 	if count != len(stream) || count == 0 || count > 256 || size > 2<<20 {

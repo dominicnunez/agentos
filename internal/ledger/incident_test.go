@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -261,10 +262,10 @@ func TestIncidentInferenceRequiresExactAccounting(t *testing.T) {
 			case "reservation":
 				_, err = store.db.ExecContext(t.Context(), `UPDATE inference_reservations SET prompt_sha256=?`, strings.Repeat("b", 64))
 			case "oversized-row", "oversized-row-unicode", "oversized-row-nul":
-				value := strings.Repeat("x", 2<<20)
+				value := strings.Repeat("x", events.MaximumIncidentEvidenceBytes)
 				switch mutation {
 				case "oversized-row-unicode":
-					value = strings.Repeat("界", 700000)
+					value = strings.Repeat("界", events.MaximumIncidentEvidenceBytes/3+1)
 				case "oversized-row-nul":
 					value = "\x00" + value
 				}
@@ -386,53 +387,78 @@ func TestIncidentRejectsOrphanInferenceRows(t *testing.T) {
 
 func TestIncidentInferenceSupportBudget(t *testing.T) {
 	for _, distinct := range []bool{false, true} {
-		t.Run(fmt.Sprint(distinct), func(t *testing.T) {
-			store, err := Open(":memory:")
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = store.Close() })
-			policy := testInferencePolicy(time.Now().UTC())
-			policy.MaxConcurrentRequests, policy.MaxTokensPerWindow = 2, 1000
-			if err := store.ActivateInferencePolicy(t.Context(), policy); err != nil {
-				t.Fatal(err)
-			}
-			first, err := store.ReserveInference(t.Context(), testInferenceRequest("first"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if distinct {
-				if _, err := store.ReconcileInference(t.Context(), first, nil, inference.ReconciliationUncertain); err != nil {
+		for _, padding := range []int{1100000, 12 << 20} {
+			t.Run(fmt.Sprintf("%t/%d", distinct, padding), func(t *testing.T) {
+				store, err := Open(":memory:")
+				if err != nil {
 					t.Fatal(err)
 				}
-				policy.AuthorizedBy = "other-owner"
-				policy.AuthorizedAt = policy.AuthorizedAt.Add(time.Second)
+				t.Cleanup(func() { _ = store.Close() })
+				policy := testInferencePolicy(time.Now().UTC())
+				policy.MaxConcurrentRequests, policy.MaxTokensPerWindow = 2, 1000
+				policy.Pricing.MaxCostNanoUSDPerWindow = 2000000
 				if err := store.ActivateInferencePolicy(t.Context(), policy); err != nil {
 					t.Fatal(err)
 				}
-			}
-			if _, err := store.ReserveInference(t.Context(), testInferenceRequest("later")); err != nil {
-				t.Fatal(err)
-			}
-			// JSON whitespace preserves the exact decoded policy and its
-			// fingerprint while exercising the stored support-byte boundary.
-			if _, err := store.db.ExecContext(t.Context(), `UPDATE inference_policies SET body=CAST(body || ? AS BLOB)`, strings.Repeat(" ", 1100000)); err != nil {
-				t.Fatal(err)
-			}
-			snapshot, err := store.VerifiedIncidentEvents(t.Context(), "organization-1", "work-1", 256)
-			if distinct {
-				if err == nil {
-					t.Fatal("distinct policy support exceeded aggregate byte bound")
+				first, err := store.ReserveInference(t.Context(), testInferenceRequest("first"))
+				if err != nil {
+					t.Fatal(err)
 				}
-				return
-			}
-			if err != nil || len(snapshot.Admissions) != 2 {
-				t.Fatalf("shared policy support charged repeatedly: admissions=%d err=%v", len(snapshot.Admissions), err)
-			}
-		})
+				if distinct {
+					if _, err := store.ReconcileInference(t.Context(), first, nil, inference.ReconciliationUncertain); err != nil {
+						t.Fatal(err)
+					}
+					policy.AuthorizedBy = "other-owner"
+					policy.AuthorizedAt = policy.AuthorizedAt.Add(time.Second)
+					if err := store.ActivateInferencePolicy(t.Context(), policy); err != nil {
+						t.Fatal(err)
+					}
+				}
+				later, err := store.ReserveInference(t.Context(), testInferenceRequest("later"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantAdmissions := 2
+				if distinct && padding == 12<<20 {
+					if _, err := store.ReconcileInference(t.Context(), later, nil, inference.ReconciliationUncertain); err != nil {
+						t.Fatal(err)
+					}
+					policy.AuthorizedBy = "third-owner"
+					policy.AuthorizedAt = policy.AuthorizedAt.Add(time.Second)
+					if err := store.ActivateInferencePolicy(t.Context(), policy); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := store.ReserveInference(t.Context(), testInferenceRequest("third")); err != nil {
+						t.Fatal(err)
+					}
+					wantAdmissions = 3
+				}
+				// Whitespace preserves the decoded policy and fingerprint, while charging
+				// its actual retained bytes against the complete private support budget.
+				if _, err := store.db.ExecContext(t.Context(), `UPDATE inference_policies SET body=CAST(body || ? AS BLOB)`, strings.Repeat(" ", padding)); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.ValidateInferenceAdmissions(t.Context()); err != nil {
+					t.Fatalf("full owner rejected semantically unchanged policy support: %v", err)
+				}
+				snapshot, err := store.VerifiedIncidentEvents(t.Context(), "organization-1", "work-1", 256)
+				overBudget := distinct && wantAdmissions*padding > events.MaximumIncidentEvidenceBytes
+				if overBudget {
+					if err == nil {
+						t.Fatal("distinct policy support exceeded32MiB aggregate bound")
+					}
+					if !reflect.DeepEqual(snapshot, events.IncidentSnapshot{}) {
+						t.Fatal("over-budget support returned partial snapshot")
+					}
+					return
+				}
+				if err != nil || len(snapshot.Admissions) != wantAdmissions {
+					t.Fatalf("within aggregate budget, shared policy charged once: admissions=%d err=%v", len(snapshot.Admissions), err)
+				}
+			})
+		}
 	}
 }
-
 func TestIncidentInferenceGrowth(t *testing.T) {
 	for _, count := range []int{1, 100} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {

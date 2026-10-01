@@ -36,22 +36,15 @@ const incidentReservationBytes = `length(CAST(reservation_id AS BLOB))+length(CA
 length(CAST(purpose AS BLOB))+length(CAST(intent_id AS BLOB))+length(CAST(task_id AS BLOB))+length(CAST(execution_id AS BLOB))+
 length(CAST(correlation_id AS BLOB))+length(CAST(prompt_sha256 AS BLOB))+length(CAST(provider AS BLOB))+length(CAST(model AS BLOB))+
 length(CAST(execution_profile_version AS BLOB))+length(CAST(policy_fingerprint AS BLOB))+length(CAST(state AS BLOB))+
-length(CAST(window_started_at AS BLOB))+length(CAST(window_expires_at AS BLOB))+length(CAST(connection_id AS BLOB))+length(CAST(created_at AS BLOB))`
+length(CAST(window_started_at AS BLOB))+length(CAST(window_expires_at AS BLOB))+length(CAST(connection_id AS BLOB))+length(CAST(created_at AS BLOB))+
+length(CAST(reserved_input_tokens AS BLOB))+length(CAST(reserved_output_tokens AS BLOB))+length(CAST(reserved_cost_nano_usd AS BLOB))+
+length(CAST(charged_input_tokens AS BLOB))+length(CAST(charged_output_tokens AS BLOB))+length(CAST(charged_cost_nano_usd AS BLOB))`
 
-const incidentInferencePolicyBytes = `length(CAST(p.body AS BLOB))+length(CAST(p.activation_event_id AS BLOB))+length(CAST(p.connection_id AS BLOB))`
+const incidentInferencePolicyBytes = `length(CAST(p.body AS BLOB))+length(CAST(p.organization_id AS BLOB))+length(CAST(p.policy_fingerprint AS BLOB))+length(CAST(p.activation_event_id AS BLOB))+length(CAST(p.activated_at AS BLOB))+length(CAST(p.active AS BLOB))+length(CAST(p.connection_id AS BLOB))`
 
 // This validates the selected durable admission and its exact accounting,
 // policy and execution bindings. It does not replay global budget competition,
 // knowledge selection or all historical capability decisions.
-func validateIncidentInference(ctx context.Context, tx *sql.Tx, stream []events.Event, freezes []events.OrganizationFreezeAdmission) error {
-	correlations := []string{}
-	if len(stream) != 0 {
-		correlations = append(correlations, stream[0].CorrelationID)
-	}
-	budget := incidentBudget{events: 3 * 256, bytes: 2 << 20}
-	return validateIncidentInferenceBudget(ctx, tx, stream, freezes, correlations, &budget)
-}
-
 func validateIncidentInferenceBudget(ctx context.Context, tx *sql.Tx, stream []events.Event, freezes []events.OrganizationFreezeAdmission, correlations []string, budget *incidentBudget) error {
 	reserved, reservationIDs, policyFingerprints, err := incidentInferenceRequirements(stream)
 	if err != nil {
@@ -234,7 +227,7 @@ func validateIncidentInferenceLinks(ctx context.Context, tx *sql.Tx, accounting 
 	args = append(args, expected+1)
 	marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
 	var count int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM events WHERE event_type IN ('INFERENCE_RESERVED','INFERENCE_RECONCILED') AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.reservation_id') END IN (`+marks+`) LIMIT ?)`, args...).Scan(&count); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1 FROM events WHERE event_type IN ('INFERENCE_RESERVED','INFERENCE_RECONCILED') AND `+incidentScalarClaim("payload", "$.reservation_id", ` IN (`+marks+`)`)+` LIMIT ?)`, args...).Scan(&count); err != nil {
 		return err
 	}
 	if count != expected {

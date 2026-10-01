@@ -32,7 +32,7 @@ func (d *incidentDependencies) loadAuthorities(ctx context.Context, tx *sql.Tx) 
 	args = append(args, d.budget.events+1)
 	var count int
 	var size int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(CAST(body AS BLOB))+length(CAST(record_id AS BLOB))+length(CAST(admission_event_id AS BLOB))+length(CAST(admission_fingerprint AS BLOB))),0) FROM (`+query+`)`, args...).Scan(&count, &size); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(CAST(body AS BLOB))+length(CAST(kind AS BLOB))+length(CAST(version AS BLOB))+length(CAST(record_id AS BLOB))+length(CAST(admission_event_id AS BLOB))+length(CAST(admission_fingerprint AS BLOB))),0) FROM (`+query+`)`, args...).Scan(&count, &size); err != nil {
 		return err
 	}
 	if count > d.budget.events || size > d.budget.bytes {
