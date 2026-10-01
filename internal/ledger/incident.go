@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -155,20 +156,45 @@ func incidentEvents(ctx context.Context, tx *sql.Tx, budget *incidentBudget, whe
 	args = append(args, budget.events+1)
 	var count int
 	var size int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(`+incidentEventBytes+`),0) FROM (`+query+`)`, args...).Scan(&count, &size); err != nil {
+	var identities string
+	var invalid bool
+	// Capture only integer primary keys while bounding the original selection.
+	// Even a damaged sequence column cannot copy an unbounded value into this
+	// compact list or normalize it through a numeric cast.
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(`+incidentEventBytes+`),0),json_group_array(CASE WHEN typeof(sequence)='integer' THEN sequence END),COALESCE(MAX(typeof(sequence)<>'integer'),0) FROM (`+query+`)`, args...).Scan(&count, &size, &identities, &invalid); err != nil {
 		return nil, err
 	}
 	if count > budget.events || size > budget.bytes {
 		return nil, fmt.Errorf("incident evidence exceeds event or byte limit")
+	}
+	if invalid {
+		return nil, fmt.Errorf("incident evidence has invalid sequence identity")
 	}
 	// The same transaction has already proved this selection empty. Avoid
 	// preparing and executing its potentially large predicate a second time.
 	if count == 0 {
 		return nil, nil
 	}
-	stream, err := collectEvents(tx.QueryContext(ctx, query, args...))
+	var sequences []int64
+	if err := json.Unmarshal([]byte(identities), &sequences); err != nil {
+		return nil, fmt.Errorf("incident sequence identities: %w", err)
+	}
+	if len(sequences) != count {
+		return nil, fmt.Errorf("incident sequence identity count mismatch")
+	}
+	selected := make([]any, 0, len(sequences)+1)
+	for _, sequence := range sequences {
+		selected = append(selected, sequence)
+	}
+	selected = append(selected, count+1)
+	// The same read transaction preserves these exact rows and their byte
+	// preflight. Fetch by primary key instead of repeating the large predicate.
+	stream, err := collectEvents(tx.QueryContext(ctx, `SELECT `+incidentEventColumns+` FROM events WHERE sequence IN (`+incidentMarks(count)+`) ORDER BY sequence LIMIT ?`, selected...))
 	if err != nil {
 		return nil, err
+	}
+	if len(stream) != count {
+		return nil, fmt.Errorf("incident selected event count mismatch")
 	}
 	for _, event := range stream {
 		if _, _, err := events.AdmittedProjection(event); err != nil {
