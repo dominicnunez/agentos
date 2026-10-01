@@ -168,7 +168,11 @@ func changeIncidentHoldRef(t *testing.T, store *SQLite, event events.Event, fiel
 	parts := strings.Split(field, ".")
 	object := payload
 	for _, part := range parts[:len(parts)-1] {
-		object = object[part].(map[string]any)
+		child, ok := object[part].(map[string]any)
+		if !ok {
+			t.Fatalf("hold reference component %s is not an object", part)
+		}
+		object = child
 	}
 	object[parts[len(parts)-1]] = target
 	body, err := json.Marshal(payload)

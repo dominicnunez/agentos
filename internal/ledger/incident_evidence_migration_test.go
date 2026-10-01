@@ -202,11 +202,13 @@ func TestIncidentDetailLinkMigration(t *testing.T) {
 			if _, err := tx.ExecContext(t.Context(), "DROP TRIGGER "+object.name); err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(t.Context(), incidentLinkGrammar(object.sql, 1)); err != nil {
-				return err
-			}
 		}
-		if _, err := tx.ExecContext(t.Context(), `DELETE FROM incident_event_links WHERE target_kind='event'; DELETE FROM incident_record_links WHERE target_kind='event'`); err != nil {
+		// v14 also adds record-identity links. Rebuild the complete immutable
+		// v13 grammar instead of leaving newer non-event relationships behind.
+		if _, err := tx.ExecContext(t.Context(), `DROP TABLE incident_event_links; DROP TABLE incident_record_links`); err != nil {
+			return err
+		}
+		if err := createIncidentLinks(t.Context(), tx, 1); err != nil {
 			return err
 		}
 		if err := validateIncidentLinkGrammar(t.Context(), tx, 1); err != nil {

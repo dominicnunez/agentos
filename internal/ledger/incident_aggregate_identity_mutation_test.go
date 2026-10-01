@@ -16,8 +16,11 @@ func ChangeAggregateIdentityForTest(t *testing.T, store *SQLite, id, field, targ
 	t.Helper()
 	if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
 		event, found, err := eventByID(t.Context(), tx, id)
-		if err != nil || !found {
-			return fmt.Errorf("read aggregate identity evidence: %v", err)
+		if err != nil {
+			return fmt.Errorf("read aggregate identity evidence: %w", err)
+		}
+		if !found {
+			return fmt.Errorf("aggregate identity evidence %s not found", id)
 		}
 		var value any
 		var fingerprint, transitionKind string
@@ -71,8 +74,11 @@ func ChangeAggregateIdentityForTest(t *testing.T, store *SQLite, id, field, targ
 			return err
 		}
 		transition, found, err := eventByID(t.Context(), tx, transitionID)
-		if err != nil || !found {
-			return fmt.Errorf("read aggregate transition: %v", err)
+		if err != nil {
+			return fmt.Errorf("read aggregate transition: %w", err)
+		}
+		if !found {
+			return fmt.Errorf("aggregate transition %s not found", transitionID)
 		}
 		projection, _, err := events.AdmittedProjection(transition)
 		if err != nil {
