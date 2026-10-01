@@ -65,9 +65,9 @@ WHEN ` + source + `.event_type='KNOWLEDGE_VALIDATION_RECORDED' THEN (` + validat
 ELSE (` + judgment + `) END)`
 }
 
-// json_tree decodes member keys while fullkey retains their source spelling.
-// Match each owned object ancestor by key and parent, including duplicate and
-// escaped aliases. Arrays contribute only their immediate string elements.
+// Traverse each owned object member by its decoded key, retaining duplicate
+// and escaped aliases at every ancestor. Arrays contribute only their
+// immediate string elements.
 // Paths and comparisons are internal SQL; identities remain bound arguments.
 func incidentScalarClaim(source, path, comparison string) string {
 	return `EXISTS (` + incidentClaimQuery(source, path, false, comparison) + `)`
@@ -77,36 +77,29 @@ func incidentArrayClaim(source, path, comparison string) string {
 	return `EXISTS (` + incidentClaimQuery(source, path, true, comparison) + `)`
 }
 
-// A correlated JSON array lets identity readers enumerate one source-sized
-// tree once, rather than reparsing the document for every matching leaf.
+// A correlated JSON array lets identity readers enumerate each source once,
+// retaining every matching scalar occurrence before downstream joins.
 func incidentClaimJSON(source, path string) string {
 	return `(SELECT json_group_array(value) FROM (` + incidentClaimQuery(source, path, false, "") + `))`
 }
 
 func incidentClaimQuery(source, path string, array bool, comparison string) string {
 	fields := strings.Split(strings.TrimPrefix(path, "$."), ".")
-	tree := `json_tree(CASE WHEN json_valid(` + source + `) THEN ` + source + ` ELSE '{}' END)`
-	nodes := `WITH claims AS MATERIALIZED (SELECT id,parent,key,type,value FROM ` + tree + `) `
-	from, leaf, value, typed := `claims claim`, "claim", "claim.value", `claim.type='text'`
+	from := `json_each(CASE WHEN json_valid(` + source + `) THEN ` + source + ` ELSE '{}' END)`
+	for index := 0; index < len(fields)-1; index++ {
+		parent := fmt.Sprintf("parent%d", index)
+		from += ` ` + parent + ` JOIN json_each(CASE WHEN ` + parent + `.key='` + fields[index] + `' AND ` + parent + `.type='object' THEN ` + parent + `.value ELSE '{}' END)`
+	}
+	from += ` claim`
+	value, typed := "claim.value", `claim.type='text'`
 	if array {
-		from = `claims ref JOIN claims claim ON claim.id=ref.parent`
+		from += ` JOIN json_each(CASE WHEN claim.key='` + fields[len(fields)-1] + `' AND claim.type='array' THEN claim.value ELSE '[]' END) ref`
 		value = "ref.value"
 		typed = `ref.type='text' AND claim.type='array'`
 	}
-	if !array && len(fields) == 1 {
-		// Root scalar members need no ancestor self-join or materialized copy.
-		nodes, from = "", tree+` claim`
-	}
 	predicate := typed + ` AND claim.key='` + fields[len(fields)-1] + `'`
-	for index := len(fields) - 2; index >= 0; index-- {
-		parent := fmt.Sprintf("parent%d", index)
-		from += ` JOIN claims ` + parent + ` ON ` + parent + `.id=` + leaf + `.parent`
-		predicate += ` AND ` + parent + `.type='object' AND ` + parent + `.key='` + fields[index] + `'`
-		leaf = parent
-	}
-	predicate += ` AND ` + leaf + `.parent=0`
 	if comparison != "" {
 		predicate += ` AND ` + value + comparison
 	}
-	return nodes + `SELECT ` + value + ` AS value FROM ` + from + ` WHERE ` + predicate
+	return `SELECT ` + value + ` AS value FROM ` + from + ` WHERE ` + predicate
 }
