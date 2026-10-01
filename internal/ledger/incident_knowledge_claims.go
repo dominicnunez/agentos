@@ -58,10 +58,11 @@ func incidentKnowledgeIncoming(source string) string {
 	judgment := incidentKnowledgeConsumerFor(source, "validation_refs", func(body, path string) string {
 		return `(` + incidentScalarClaim(body, path+".validation_method", ` IN ('`+string(core.KnowledgeValidationHuman)+`','`+string(core.KnowledgeValidationIndependentAgent)+`')`) + ` OR ` + incidentScalarClaim(body, path+".validated_by_kind", ` IN ('HUMAN','AGENT','EXTERNAL_AGENT')`) + `)`
 	}, true)
-	return `(` + source + `.event_type NOT IN ('KNOWLEDGE_PROPOSED','KNOWLEDGE_VALIDATION_RECORDED','KNOWLEDGE_JUDGMENT_PUBLISHED','HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED','A2A_KNOWLEDGE_JUDGMENT_RECEIVED') OR ` + incidentScalarClaim(source+".payload", "$.projection.projection_kind", `='knowledge'`) + ` OR
-(` + source + `.event_type='KNOWLEDGE_PROPOSED' AND (` + proposal + `)) OR
-(` + source + `.event_type='KNOWLEDGE_VALIDATION_RECORDED' AND (` + validation + `)) OR
-(` + source + `.event_type IN ('KNOWLEDGE_JUDGMENT_PUBLISHED','HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED','A2A_KNOWLEDGE_JUDGMENT_RECEIVED') AND (` + judgment + `)))`
+	return `(CASE WHEN ` + source + `.event_type NOT IN ('KNOWLEDGE_PROPOSED','KNOWLEDGE_VALIDATION_RECORDED','KNOWLEDGE_JUDGMENT_PUBLISHED','HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED','A2A_KNOWLEDGE_JUDGMENT_RECEIVED') THEN 1
+WHEN ` + incidentScalarClaim(source+".payload", "$.projection.projection_kind", `='knowledge'`) + ` THEN 1
+WHEN ` + source + `.event_type='KNOWLEDGE_PROPOSED' THEN (` + proposal + `)
+WHEN ` + source + `.event_type='KNOWLEDGE_VALIDATION_RECORDED' THEN (` + validation + `)
+ELSE (` + judgment + `) END)`
 }
 
 // json_tree decodes member keys while fullkey retains their source spelling.

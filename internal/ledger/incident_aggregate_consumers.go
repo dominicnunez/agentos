@@ -31,7 +31,10 @@ CASE WHEN length(CAST(consumer.payload AS BLOB))>` + fmt.Sprint(events.MaximumIn
 }
 
 func incidentRawClaimApplicable(source string) string {
-	return `(` + incidentAggregateIncoming(source) + ` AND ` + incidentKnowledgeIncoming(source) + `)`
+	// CASE evaluates only the selected family. Boolean AND/OR expression
+	// evaluation otherwise needlessly inspects unrelated source documents.
+	return `(CASE WHEN ` + source + `.event_type IN ('WORK_COMPLETION_EVALUATED','GOAL_PROGRESS_EVALUATED') THEN ` + incidentAggregateIncoming(source) + `
+WHEN ` + source + `.event_type IN ('KNOWLEDGE_PROPOSED','KNOWLEDGE_VALIDATION_RECORDED','KNOWLEDGE_JUDGMENT_PUBLISHED','HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED','A2A_KNOWLEDGE_JUDGMENT_RECEIVED') THEN ` + incidentKnowledgeIncoming(source) + ` ELSE 1 END)`
 }
 
 func incidentDeferredClaim(kind string) bool {
