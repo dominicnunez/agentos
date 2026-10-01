@@ -401,7 +401,11 @@ func TestIncidentProjectionDistinctOrganizationClaims(t *testing.T) {
 					case "organization-record-id":
 						record.RecordID = "org-1"
 					case "task-routing":
-						value["routing"].(map[string]any)["organization_id"] = "org-1"
+						routing, ok := value["routing"].(map[string]any)
+						if !ok {
+							return fmt.Errorf("Task fixture has no routing object")
+						}
+						routing["organization_id"] = "org-1"
 					}
 					var err error
 					record.Value, err = json.Marshal(value)

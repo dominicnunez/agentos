@@ -60,7 +60,7 @@ func TestProjectionSourceGateDifferential(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer tx.Rollback()
+		defer func() { _ = tx.Rollback() }()
 		var scope, identity bool
 		if err := tx.QueryRowContext(t.Context(), scopeOracle, "org-1").Scan(&scope); err != nil {
 			t.Fatalf("%s unfiltered scope: %v", name, err)
@@ -162,17 +162,15 @@ func TestProjectionSourceGateDifferential(t *testing.T) {
 					raw = []byte(strings.ReplaceAll(string(raw), `"projection_kind":`, `"projection_kind":"work","projection_kind":`))
 				}
 				payload, body := []byte(`{"note":"ordinary"}`), []byte(`{"note":"ordinary"}`)
-				physical, key, envelope, label, backing := "team", "team-2", "org-2", "TEAM_CREATED", eventID
+				physical, key, envelope, label, backing := kind, "team-2", "org-2", "TEAM_CREATED", eventID
 				labels := events.ProjectionLifecycleEventTypes(kind)
 				if len(labels) != 0 {
 					label = labels[0]
 				}
 				if channel == "event" {
 					payload = append(append([]byte(`{"projection":`), raw...), []byte(`,"admission":{"event_ref":"ordinary-event"}}`)...)
-					physical = kind
 				} else {
 					body = raw
-					physical = kind
 					if variant >= 10 {
 						backing = "missing-source"
 					}

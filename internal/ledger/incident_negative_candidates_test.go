@@ -91,7 +91,7 @@ func TestIncidentNegativeCheckedCandidateBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	loaded, err := incidentEvents(t.Context(), tx, &budget, `event_id=?`, event.EventID)
 	if err != nil {
 		t.Fatal(err)

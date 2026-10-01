@@ -14,7 +14,7 @@ func TestIncidentUnusedKnowledgeStatements(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer store.Close()
+				defer func() { _ = store.Close() }()
 				appendTaskProjectionParents(t, t.Context(), store, "org-1", "setup", "work-1")
 				appendFactualInferenceKnowledge(t, store, "fact", "Verified fact", "A bounded observation.")
 				baseline, err := store.VerifiedIncidentEvents(t.Context(), "org-1", "knowledge-fact", 256)

@@ -38,10 +38,13 @@ func TestIncidentNegativeDiscoveryProperty(t *testing.T) {
 			return err
 		}
 		if ownerErr != nil && !candidate {
-			return fmt.Errorf("exact owner rejects an excluded source %q: %v", body, ownerErr)
+			return fmt.Errorf("exact owner rejects an excluded source %q: %w", body, ownerErr)
 		}
 		if exclude && (ownerErr != nil || candidate) {
-			return fmt.Errorf("valid ordinary source was not excluded %q: owner=%v candidate=%v", body, ownerErr, candidate)
+			if ownerErr != nil {
+				return fmt.Errorf("valid ordinary source was not excluded %q: %w", body, ownerErr)
+			}
+			return fmt.Errorf("valid ordinary source was not excluded %q: candidate=%v", body, candidate)
 		}
 		return nil
 	}

@@ -21,7 +21,7 @@ func TestAuditIncidentDisplacedRecordOwnedIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 			appendTestMission(t, t.Context(), store, "org-audit", "mission-audit", time.Now().UTC())
 			if _, err := store.VerifiedIncidentEvents(t.Context(), "org-audit", "mission-audit", 256); err != nil {
 				t.Fatalf("valid history: %v", err)
@@ -85,7 +85,7 @@ func TestAuditIncidentDispatchMalformedTemporalCandidate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 			var candidate events.Event
 			addCandidate := func() {
 				var err error
@@ -187,7 +187,7 @@ func TestAuditIncidentIndependentAdmissionEventIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	now := time.Now().UTC()
 	appendTestMission(t, t.Context(), store, "org-audit", "mission-audit", now)
 	mission := core.Mission{ID: "unrelated-mission", OrganizationID: "org-audit", Statement: "independent direction", Status: core.MissionActive, CreatedAt: now}
@@ -234,7 +234,7 @@ func TestAuditIncidentStoredPolicyMetadata(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer store.Close()
+				defer func() { _ = store.Close() }()
 				now := time.Now().UTC()
 				policy := testInferencePolicy(now)
 				policy.Version = version
@@ -306,7 +306,7 @@ func TestAuditIncidentUnusedJudgmentKnowledgeIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	appendTaskProjectionParents(t, t.Context(), store, "org-1", "setup", "work-1")
 	appendFactualInferenceKnowledge(t, store, "fact", "Verified fact", "A bounded observation.")
 	baseline, err := store.VerifiedIncidentEvents(t.Context(), "org-1", "knowledge-fact", 256)
@@ -340,7 +340,7 @@ func TestAuditIncidentIndependentLeaseRecordIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 			appendTaskProjectionParents(t, t.Context(), store, "org-1", "setup", "work-1")
 			appendFactualInferenceKnowledge(t, store, "fact", "Verified fact", "A bounded observation.")
 			if _, err := store.VerifiedIncidentEvents(t.Context(), "org-1", "knowledge-fact", 256); err != nil {
@@ -376,6 +376,7 @@ func TestAuditIncidentIndependentLeaseRecordIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer func() { _ = rows.Close() }()
 			var records []events.AuthorityRecord
 			for rows.Next() {
 				var record events.AuthorityRecord
@@ -387,7 +388,9 @@ func TestAuditIncidentIndependentLeaseRecordIdentity(t *testing.T) {
 			if err := rows.Err(); err != nil {
 				t.Fatal(err)
 			}
-			rows.Close()
+			if err := rows.Close(); err != nil {
+				t.Fatal(err)
+			}
 			_, _, ownerErr := events.ResolveAuthorityAdmissions(full, records)
 			if ownerErr == nil {
 				t.Fatal("full owner accepted unmatched lease record")
@@ -413,7 +416,7 @@ func TestAuditIncidentIndependentProjectionValueIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 			now := time.Now().UTC()
 			appendTestMission(t, t.Context(), store, "org-audit", "mission-audit", now)
 			mission := core.Mission{ID: "unrelated-mission", OrganizationID: "org-audit", Statement: "independent direction", Status: core.MissionActive, CreatedAt: now}
@@ -511,7 +514,7 @@ func TestAuditIncidentDuplicateForeignReservationIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 			agent, config := appendTaskAssignmentAgent(t, t.Context(), store, "org-1", "selected", true)
 			request := appendBenchmarkTaskInference(t, store, agent, config, "selected")
 			policy := testInferencePolicy(time.Now().UTC())
@@ -584,7 +587,7 @@ func TestAuditIncidentStrategyMalformedTemporalCandidate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 			var candidate events.Event
 			add := func() {
 				candidate, err = store.Append(t.Context(), events.TrustedDraft{OrganizationID: "foreign-org", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "unrelated", Payload: map[string]string{"note": "healthy unrelated input"}})
@@ -680,7 +683,7 @@ func TestAuditIncidentKnowledgeMalformedTemporalCandidate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 			var candidate events.Event
 			add := func() {
 				org := "org-1"
@@ -840,7 +843,7 @@ func TestAuditIncidentLegacyKnowledgeMalformedTemporalCandidate(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer store.Close()
+				defer func() { _ = store.Close() }()
 				org := "foreign-org"
 				if selected {
 					org = "org-1"
@@ -979,7 +982,7 @@ func TestAuditIncidentKnowledgeValidUnusedTemporalSource(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 			agent, config := appendTaskAssignmentAgent(t, t.Context(), store, "org-1", "selected", true)
 			if phase == "low-relevance-active" {
 				appendFactualInferenceKnowledge(t, store, "unrelated-fact", "Revenue", "Sales increased three percent.")
@@ -1030,7 +1033,7 @@ func TestAuditIncidentKnowledgeTerminalUseCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	appendLegacyContextParents(t, store)
 	blueprint, agent, config := appendLegacyContextAgent(t, store)
 	fact := appendFactualInferenceKnowledge(t, store, "selected-fact", "Bounded verification", "The bounded rehearsal restored three records.")
@@ -1138,7 +1141,7 @@ func TestAuditIncidentKnowledgeAggregateUseCandidates(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 			now := time.Now().UTC()
 			mission := core.Mission{ID: "mission-audit", OrganizationID: "org-1", Statement: "bounded direction", Status: core.MissionActive, CreatedAt: now}
 			goal := core.Goal{ID: "goal-audit", OrganizationID: "org-1", MissionID: mission.ID, Objective: "bounded work", Mode: core.GoalTarget, SuccessCriteria: []core.IntentValue{{Value: "The result is independently verified.", Origin: "DEFAULT"}}, Status: core.GoalActive, CreatedAt: now}

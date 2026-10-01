@@ -74,11 +74,11 @@ func (d *incidentDependencies) loadAggregateClaims(ctx context.Context, tx *sql.
 	if err != nil {
 		return err
 	}
+	defer func() { _ = rows.Close() }()
 	var consumed []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
 			return err
 		}
 		consumed = append(consumed, id)

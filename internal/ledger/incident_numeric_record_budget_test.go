@@ -15,7 +15,7 @@ func TestIncidentNumericRecordPreflight(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 			correlation := "stop-work"
 			switch kind {
 			case "task":
