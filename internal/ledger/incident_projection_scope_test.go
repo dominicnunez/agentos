@@ -235,6 +235,7 @@ func assertScopeConflict(t *testing.T, store *SQLite, want bool) {
 }
 
 func TestProjectionScopeOccurrenceClaims(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, source := range []string{"event", "record"} {
 		for _, projection := range []struct{ name, json string }{
 			{"duplicate-leaf", `{"projection_kind":"team","value":{"organization_id":"org-2","organization_id":"org-1"}}`},

@@ -13,6 +13,7 @@ import (
 )
 
 func TestIncidentLineageQueryGrowth(t *testing.T) {
+	parallelIncidentTest(t)
 	checkIncidentLineageGrowth(t, "provenance")
 }
 

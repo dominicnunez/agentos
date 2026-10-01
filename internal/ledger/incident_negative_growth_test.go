@@ -104,6 +104,7 @@ func incidentNegativeGrowthFixture(t testing.TB, count, foreign, knowledge int) 
 }
 
 func TestIncidentNegativeGrowthFixture(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, count := range []int{1, 16} {
 		for _, knowledge := range []int{1, 8} {
 			t.Run(fmt.Sprintf("starts-%d/knowledge-%d", count, knowledge), func(t *testing.T) {

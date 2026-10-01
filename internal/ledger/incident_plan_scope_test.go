@@ -13,6 +13,7 @@ import (
 )
 
 func TestIncidentPlanScope(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, private := range []bool{false, true} {
 		for _, variant := range []string{"foreign-task", "foreign-empty-task", "foreign-other-task", "same-tenant", "unrelated", "opaque-note"} {
 			name := variant

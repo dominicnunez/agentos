@@ -143,6 +143,7 @@ func TestIncidentIndependentProjectionValueID(t *testing.T) {
 }
 
 func TestProjectionIdentityOwnedPaths(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, kind := range []string{"organization", "mission", "goal", "team", "agent_blueprint", "execution_profile", "agent", "intent", "work", "task", "lab_experiment", "lab_promotion_candidate", "knowledge"} {
 		for _, source := range []string{"event", "record"} {
 			t.Run(kind+"/"+source, func(t *testing.T) {
