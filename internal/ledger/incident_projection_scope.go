@@ -16,9 +16,10 @@ import (
 // retained source JSON in SQLite without allocating those payloads in Go.
 func validateIncidentProjectionScope(ctx context.Context, tx *sql.Tx, organization string) error {
 	var conflict bool
-	query := `SELECT EXISTS(SELECT 1 FROM events e WHERE ` + projectionScopeClaims("event") + `)
+	query := `SELECT EXISTS(SELECT 1 FROM events e WHERE (e.organization_id=?1 OR ` + projectionSourceIdentityBytes("e.payload", "?1") + `) AND ` + projectionScopeClaims("event") + `)
 		OR EXISTS(SELECT 1 FROM records r LEFT JOIN events e ON e.event_id=r.admission_event_id
 		WHERE (r.kind IN (` + incidentProjectionKindsSQL + `) OR r.admission_event_id<>'' OR r.admission_fingerprint<>'')
+		AND (e.organization_id=?1 OR r.record_id=?1 OR ` + projectionSourceIdentityBytes("r.body", "?1") + `)
 		AND ` + projectionScopeClaims("record") + `)`
 	if err := tx.QueryRowContext(ctx, query, organization).Scan(&conflict); err != nil {
 		return err
@@ -27,6 +28,14 @@ func validateIncidentProjectionScope(ctx context.Context, tx *sql.Tx, organizati
 		return fmt.Errorf("incident projection organization claim conflicts with its retained source")
 	}
 	return nil
+}
+
+// A decoded selected string occurs literally in an unescaped JSON source, or
+// its source contains an escape. BLOB operations preserve bytes after raw NUL.
+// This only avoids an occurrence tree for definitely unrelated source bytes;
+// the unchanged full scalar owner guard still decides every retained candidate.
+func projectionSourceIdentityBytes(body, identity string) string {
+	return `(instr(CAST(` + body + ` AS BLOB),CAST(` + identity + ` AS BLOB))>0 OR instr(CAST(` + body + ` AS BLOB),X'5C')>0)`
 }
 
 // These kinds are the closed admitted projection family. Work has no direct
@@ -77,19 +86,19 @@ func projectionClaimNodes(source string) string {
 	} else {
 		owners += ` UNION SELECT p.id,r.kind FROM projection_nodes p JOIN records r ON r.admission_event_id=e.event_id AND r.admission_event_id<>'' WHERE r.kind IN (` + incidentProjectionKindsSQL + `)`
 	}
+	lifecycle := []string{}
 	for _, kind := range projectionScopeKinds {
 		labels := events.ProjectionLifecycleEventTypes(kind)
-		if len(labels) == 0 {
-			continue
-		}
-		quoted := make([]string, len(labels))
-		for i, label := range labels {
+		for _, label := range labels {
 			// All identifiers come from the owning closed lifecycle contracts.
-			quoted[i] = "'" + strings.ReplaceAll(label, "'", "''") + "'"
+			lifecycle = append(lifecycle, "('"+strings.ReplaceAll(label, "'", "''")+"','"+kind+"')")
 		}
-		owners += ` UNION SELECT p.id,'` + kind + `' FROM projection_nodes p WHERE e.event_type IN (` + strings.Join(quoted, ",") + `)`
 	}
+	// The event label is one independent owner channel. A closed relation
+	// avoids rebuilding one correlated UNION branch for every family and row.
+	owners += ` UNION SELECT p.id,l.kind FROM projection_nodes p JOIN lifecycle l ON l.label=e.event_type`
 	return `nodes AS MATERIALIZED (SELECT id,parent,key,type,value FROM json_tree(CASE WHEN json_valid(` + body + `) THEN ` + body + ` ELSE '{}' END)),
 		projection_nodes AS (` + projectionNodes + `),
+		lifecycle(label,kind) AS (VALUES ` + strings.Join(lifecycle, ",") + `),
 		owners AS (` + owners + `)`
 }

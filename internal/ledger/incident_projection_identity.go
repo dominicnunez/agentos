@@ -39,9 +39,10 @@ func validateIncidentProjectionIDs(ctx context.Context, tx *sql.Tx, keys map[inc
 		return err
 	}
 	query := `WITH selected AS MATERIALIZED (SELECT json_extract(value,'$.kind') AS kind,json_extract(value,'$.id') AS identity FROM json_each(?1))
-		SELECT EXISTS(SELECT 1 FROM events e WHERE ` + projectionIdentityClaims("event") + `)
+		SELECT EXISTS(SELECT 1 FROM events e WHERE ` + projectionSelectedSourceBytes("e.payload") + ` AND ` + projectionIdentityClaims("event") + `)
 		OR EXISTS(SELECT 1 FROM records r LEFT JOIN events e ON e.event_id=r.admission_event_id
 		WHERE (r.kind IN (` + incidentProjectionKindsSQL + `,'capability_lease') OR r.admission_event_id<>'' OR r.admission_fingerprint<>'')
+		AND ` + projectionSelectedSourceBytes("r.body") + `
 		AND ` + projectionIdentityClaims("record") + `)`
 	var conflict bool
 	if err := tx.QueryRowContext(ctx, query, body).Scan(&conflict); err != nil {
@@ -51,6 +52,10 @@ func validateIncidentProjectionIDs(ctx context.Context, tx *sql.Tx, keys map[inc
 		return fmt.Errorf("incident retained source claims a conflicting selected identity")
 	}
 	return nil
+}
+
+func projectionSelectedSourceBytes(body string) string {
+	return `EXISTS(SELECT 1 FROM selected s WHERE ` + projectionSourceIdentityBytes(body, "s.identity") + `)`
 }
 
 func projectionIdentityClaims(source string) string {
