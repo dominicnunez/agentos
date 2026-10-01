@@ -74,8 +74,10 @@ func init() {
 			rules = append(rules, incidentRouteLinkRules...)
 			rules = append(rules, incidentAggregateLinkRules...)
 			rules = append(rules, incidentReviewLinkRules...)
-			rules = append(rules, incidentKnowledgeLinkRules...)
 			rules = append(rules, incidentInboxLinkRules...)
+			rules = append(rules, incidentManifestRecordLinks...)
+			rules = append(rules, incidentAggregateIdentityRules...)
+			rules = append(rules, incidentReviewIdentityRules...)
 		}
 		sqlite.MustRegisterDeterministicScalarFunction("agentos_incident_links_"+version, 3, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
 			links := []incidentSelector{}

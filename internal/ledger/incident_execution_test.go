@@ -51,7 +51,7 @@ func TestIncidentExecutionEvidenceFamilies(t *testing.T) {
 }
 
 func TestIncidentExecutionReferenceCompleteness(t *testing.T) {
-	links := []string{"context_event_ref", "execution_start_ref", "execution_manifest_ref", "stop_request_ref", "usage_event_ref", "outcome_event_ref", "finish_event_ref", "evidence_event_ref", "observed_effect.stop_request_ref", "detail.stop_request_ref", "detail.execution_start_ref", "execution_id", "request_id", "task_id", "duplicate-key", "other-tenant", "independent"}
+	links := []string{"context_event_ref", "execution_start_ref", "execution_manifest_ref", "stop_request_ref", "usage_event_ref", "outcome_event_ref", "finish_event_ref", "evidence_event_ref", "observed_effect.stop_request_ref", "detail.stop_request_ref", "detail.execution_start_ref", "execution_id", "request_id", "task_id", "duplicate-key", "other-tenant", "independent-foreign", "independent"}
 	for _, link := range links {
 		t.Run(link, func(t *testing.T) {
 			store, err := Open(":memory:")
@@ -70,6 +70,10 @@ func TestIncidentExecutionReferenceCompleteness(t *testing.T) {
 			case "other-tenant":
 				draft.OrganizationID, draft.SourceExecutionID, draft.TaskID = "other-tenant", manifest.SourceExecutionID, manifest.TaskID
 				payload["evidence_event_ref"] = manifest.EventID
+			case "independent-foreign":
+				draft.OrganizationID = "other-tenant"
+				draft.SourceExecutionID, draft.TaskID = "other-call", "other-task"
+				payload["evidence_event_ref"] = "unrelated-manifest"
 			case "independent":
 				draft.SourceExecutionID, draft.TaskID = "other-call", "other-task"
 				payload["evidence_event_ref"] = "unrelated-manifest"
@@ -100,7 +104,7 @@ func TestIncidentExecutionReferenceCompleteness(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, err = store.VerifiedIncidentEvents(t.Context(), manifest.OrganizationID, manifest.CorrelationID, 256)
-			if link == "other-tenant" || link == "independent" {
+			if link == "independent-foreign" || link == "independent" {
 				if err != nil {
 					t.Fatalf("unrelated identity poisoned incident: %v", err)
 				}

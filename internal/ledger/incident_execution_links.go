@@ -3,11 +3,14 @@ package ledger
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sort"
 
 	"github.com/dominicnunez/agentos/internal/events"
 )
+
+const incidentIDMembership = `SELECT value FROM json_each(?)`
 
 func (d *incidentDependencies) loadExecutionEvidence(ctx context.Context, tx *sql.Tx) error {
 	stream := make([]events.Event, 0, len(d.stream))
@@ -25,10 +28,15 @@ func (d *incidentDependencies) loadExecutionEvidence(ctx context.Context, tx *sq
 		return err
 	}
 	sort.Strings(ids)
-	where += ` AND event_id NOT IN (` + incidentMarks(len(ids)) + `)`
-	for _, id := range ids {
-		args = append(args, id)
+	encoded, err := json.Marshal(ids)
+	if err != nil {
+		return err
 	}
+	membership := string(encoded)
+	where = `(` + where + ` OR (` + incidentKnowledgeClaims(incidentIDMembership) + `))`
+	args = append(args, membership, membership, membership)
+	where += ` AND event_id NOT IN (` + incidentIDMembership + `)`
+	args = append(args, membership)
 	loaded, err := incidentEvents(ctx, tx, &d.budget, where, args...)
 	if err != nil {
 		return fmt.Errorf("incident supporting execution evidence: %w", err)

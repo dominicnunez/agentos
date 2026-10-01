@@ -3,6 +3,7 @@ package ledger
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"sort"
 	"strings"
 
@@ -76,57 +77,53 @@ func incidentExecutionSelection(work []events.Event) (string, []any, error) {
 		taskIDs = append(taskIDs, id)
 	}
 	sort.Strings(taskIDs)
+	_, reservationIDs, _, err := incidentInferenceRequirements(work)
+	if err != nil {
+		return "", nil, err
+	}
+	// Array membership uses a bounded number of parameters even when each
+	// supporting event carries a distinct execution and Task envelope.
+	sets := make(map[string]string, 4)
+	for name, values := range map[string][]string{"refs": refs, "executions": ids, "tasks": taskIDs, "reservations": reservationIDs} {
+		encoded, err := json.Marshal(values)
+		if err != nil {
+			return "", nil, err
+		}
+		sets[name] = string(encoded)
+	}
 	args := []any{work[0].OrganizationID}
 	links := ""
 	if len(ids) != 0 {
-		links = `source_execution_id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + `) OR `
-		for _, id := range ids {
-			args = append(args, id)
-		}
+		links = `source_execution_id IN (` + incidentIDMembership + `) OR `
+		args = append(args, sets["executions"])
 	}
 	// The stop validators reject any ordinary event from a stopped execution,
 	// including labels added later. Exact execution envelopes therefore have
 	// no label allowlist. Task-only evidence and payload links use the owned
 	// families so independent effect records keep their separate reader.
 	if len(taskIDs) != 0 {
-		links += `(event_type IN (` + incidentExecutionTypes + `,` + incidentTaskHistoryTypes + `) AND task_id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(taskIDs)), ",") + `)) OR `
-		for _, id := range taskIDs {
-			args = append(args, id)
-		}
+		links += `(event_type IN (` + incidentExecutionTypes + `,` + incidentTaskHistoryTypes + `) AND task_id IN (` + incidentIDMembership + `)) OR `
+		args = append(args, sets["tasks"])
 	}
 	links += `(event_type IN (` + incidentExecutionTypes + `) AND (`
 	// Enumerate duplicate reference keys too. Nested references are restricted
 	// to contract-owned interruption and projection details, not arbitrary
 	// tool output fields. Same-organization hold references do not connect every
 	// execution sharing a freeze; foreign hold claims are selected below.
-	links += `EXISTS (WITH nodes AS MATERIALIZED (SELECT id,parent,key,value FROM json_tree(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END)) SELECT 1 FROM nodes AS leaf LEFT JOIN nodes AS container ON container.id=leaf.parent AND container.parent=0 WHERE ((leaf.parent=0 AND leaf.key IN ('context_event_ref','execution_start_ref','execution_manifest_ref','stop_request_ref','usage_event_ref','outcome_event_ref','finish_event_ref','evidence_event_ref')) OR (container.key='observed_effect' AND leaf.key='stop_request_ref') OR (container.key='detail' AND leaf.key IN ('stop_request_ref','execution_start_ref'))) AND leaf.value IN (` + strings.TrimSuffix(strings.Repeat("?,", len(refs)), ",") + `))`
-	for _, ref := range refs {
-		args = append(args, ref)
-	}
+	links += `EXISTS (WITH nodes AS MATERIALIZED (SELECT id,parent,key,value FROM json_tree(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END)) SELECT 1 FROM nodes AS leaf LEFT JOIN nodes AS container ON container.id=leaf.parent AND container.parent=0 WHERE ((leaf.parent=0 AND leaf.key IN ('context_event_ref','execution_start_ref','execution_manifest_ref','stop_request_ref','usage_event_ref','outcome_event_ref','finish_event_ref','evidence_event_ref')) OR (container.key='observed_effect' AND leaf.key='stop_request_ref') OR (container.key='detail' AND leaf.key IN ('stop_request_ref','execution_start_ref'))) AND leaf.value IN (` + incidentIDMembership + `))`
+	args = append(args, sets["refs"])
 	if len(ids) != 0 {
-		links += ` OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END) WHERE key IN ('execution_id','request_id') AND value IN (` + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + `))`
-		for _, id := range ids {
-			args = append(args, id)
-		}
-	}
-	_, reservationIDs, _, err := incidentInferenceRequirements(work)
-	if err != nil {
-		return "", nil, err
+		links += ` OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END) WHERE key IN ('execution_id','request_id') AND value IN (` + incidentIDMembership + `))`
+		args = append(args, sets["executions"])
 	}
 	if len(reservationIDs) != 0 {
-		links += ` OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END) WHERE key='reservation_id' AND value IN (` + strings.TrimSuffix(strings.Repeat("?,", len(reservationIDs)), ",") + `))`
-		for _, id := range reservationIDs {
-			args = append(args, id)
-		}
+		links += ` OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END) WHERE key='reservation_id' AND value IN (` + incidentIDMembership + `))`
+		args = append(args, sets["reservations"])
 	}
 	links += `))`
 	args = append(args, work[0].OrganizationID)
-	for _, ref := range refs {
-		args = append(args, ref)
-	}
+	args = append(args, sets["refs"])
 	args = append(args, work[0].OrganizationID)
-	for _, ref := range refs {
-		args = append(args, ref)
-	}
-	return `(organization_id=? AND (` + links + `) OR (` + incidentForeignHoldClaim(len(refs)) + `) OR (` + incidentForeignPlanningSuspension(len(refs)) + `))`, args, nil
+	args = append(args, sets["refs"])
+	return `(organization_id=? AND (` + links + `) OR (` + incidentForeignHoldClaim(incidentIDMembership) + `) OR (` + incidentForeignPlanningSuspension(incidentIDMembership) + `))`, args, nil
 }

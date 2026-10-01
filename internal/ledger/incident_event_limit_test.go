@@ -13,6 +13,8 @@ import (
 
 // Public events have their own 256-item bound. Their incoming-link selectors
 // must not consume the separate budget for private supporting evidence.
+// Distinct execution and Task envelopes make these bounded histories exceed
+// SQLite's 32766-parameter ceiling if selector membership expands per ID.
 func TestIncidentPublicEvidenceLimit(t *testing.T) {
 	store, err := Open(":memory:")
 	if err != nil {
@@ -29,7 +31,7 @@ func TestIncidentPublicEvidenceLimit(t *testing.T) {
 			refs = append(refs, previous)
 		}
 		for source := range 250 {
-			evidence, err := store.Append(t.Context(), events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "observations", Payload: map[string]int{"observation": node*250 + source}})
+			evidence, err := store.Append(t.Context(), events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", TaskID: fmt.Sprintf("observation-task-%d", node*250+source), SourceExecutionID: fmt.Sprintf("observation-execution-%d", node*250+source), CorrelationID: "observations", Payload: map[string]int{"observation": node*250 + source}})
 			if err != nil {
 				t.Fatal(err)
 			}

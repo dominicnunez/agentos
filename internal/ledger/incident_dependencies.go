@@ -337,7 +337,7 @@ func (d *incidentDependencies) discover(value any, field string) {
 				d.key("task", id)
 			}
 		}
-		if field == "strategic_context_refs" {
+		if field == "strategic_context_refs" || field == "additional_context_refs" {
 			if id, ok := value["id"].(string); ok {
 				kind, id, found := strings.Cut(id, "/")
 				if found && (kind == "mission" || kind == "goal") {

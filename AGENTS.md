@@ -159,8 +159,8 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
     merely because guidance was added or a review found nothing.
 11. Use current, relevant skills and adapt them when observed failures justify a
     reusable improvement. Delegate only a concrete subtask whose independent
-    coverage or time savings justify its inference cost. Use Astra (`gpt-6-astra`)
-    for planning agents. For other assignments, choose a model and reasoning
+    coverage or time savings justify its inference cost. Use GPT-6.1 Sol
+    (`gpt-6.1-sol`) for all subagent tasks, including planning. Choose a reasoning
     level suited to the difficulty and security risk, balancing speed and cost
     without compromising quality. Name applicable skills in each assignment and
     have the agent read them. Require inspected entry points, evidence, exclusions
