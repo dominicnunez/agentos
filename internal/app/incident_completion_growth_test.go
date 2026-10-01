@@ -1,4 +1,4 @@
-package ledger_test
+package app_test
 
 import (
 	"context"
@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/dominicnunez/agentos/internal/app"
-	"github.com/dominicnunez/agentos/internal/completion"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
+	"github.com/dominicnunez/agentos/internal/execution"
 	"github.com/dominicnunez/agentos/internal/ledger"
 	"github.com/dominicnunez/agentos/internal/planning"
 )
@@ -39,7 +39,7 @@ func TestIncidentCompletionGrowth(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = store.Close() })
-			service := app.NewWithModelAndPlanner(events.NewGateway(store), incidentReviewModel{}, incidentCompletionPlanner{count})
+			service := app.NewWithModelAndPlanner(events.NewGateway(store), execution.ReviewFakeModel{}, incidentCompletionPlanner{count})
 			result, err := service.Submit(t.Context(), app.Submit{RequestID: "completion-growth", OrganizationID: "org-1", Statement: "echo bounded work", Kind: core.ExecutionAgent})
 			if err != nil {
 				t.Fatal(err)
@@ -53,7 +53,7 @@ func TestIncidentCompletionGrowth(t *testing.T) {
 			if err != nil || !found {
 				t.Fatalf("complete actual Agent root: found=%t err=%v", found, err)
 			}
-			if _, err := service.ReviewCompletion(t.Context(), app.CompletionReviewInput{OrganizationID: "org-1", TaskID: string(review.Request.TaskID), ReviewID: string(review.Request.ID), Fingerprint: review.Request.Fingerprint, Decision: completion.ReviewApprove, ReviewerID: "reviewer", ReviewerKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", Feedback: "Checked bounded integration"}); err != nil {
+			if _, err := service.ReviewCompletion(t.Context(), app.CompletionReviewInput{OrganizationID: "org-1", TaskID: string(review.Request.TaskID), ReviewID: string(review.Request.ID), Fingerprint: review.Request.Fingerprint, Decision: core.CompletionReviewApprove, ReviewerID: "reviewer", ReviewerKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", Feedback: "Checked bounded integration"}); err != nil {
 				t.Fatal(err)
 			}
 

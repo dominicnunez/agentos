@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/dominicnunez/agentos/internal/app"
-	"github.com/dominicnunez/agentos/internal/completion"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/execution"
@@ -60,7 +59,7 @@ func TestIncidentReviewCandidates(t *testing.T) {
 						if err != nil || !found {
 							t.Fatalf("actual writer review: found=%t err=%v", found, err)
 						}
-						if _, err := service.ReviewCompletion(t.Context(), app.CompletionReviewInput{OrganizationID: organization, TaskID: string(view.Request.TaskID), ReviewID: string(view.Request.ID), Fingerprint: view.Request.Fingerprint, Decision: completion.ReviewApprove, ReviewerID: "reviewer-1", ReviewerKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", Feedback: "Reviewed candidate"}); err != nil {
+						if _, err := service.ReviewCompletion(t.Context(), app.CompletionReviewInput{OrganizationID: organization, TaskID: string(view.Request.TaskID), ReviewID: string(view.Request.ID), Fingerprint: view.Request.Fingerprint, Decision: core.CompletionReviewApprove, ReviewerID: "reviewer-1", ReviewerKind: core.PrincipalHuman, SourceChannel: "HUMAN_DIRECT", Feedback: "Reviewed candidate"}); err != nil {
 							t.Fatal(err)
 						}
 					}
