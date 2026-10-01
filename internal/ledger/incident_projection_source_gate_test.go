@@ -8,7 +8,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 )
 
@@ -196,6 +198,49 @@ func TestProjectionSourceGateDifferential(t *testing.T) {
 	} {
 		check(sample.name, []byte(sample.payload), []byte(sample.body), sample.kind, sample.key, sample.envelope, sample.label, sample.backing, sample.scope, sample.identity)
 	}
+	// Container eligibility is independent of selected-identity bytes. These
+	// ordinary sources contain those bytes and use the selected envelope, so
+	// the former byte gates alone cannot exclude them. Projection, admission,
+	// and each independent lease-owner channel have positive conflict seeds.
+	containerExclusions := 0
+	for _, sample := range []struct {
+		name, payload, kind, envelope, label, backing      string
+		scope, identity, scopeContainer, identityContainer bool
+		selectedBytes                                      bool
+	}{
+		{"ordinary-selected-envelope-and-identities", `{"note":"org-1 selected-mission selected-event selected-lease"}`, "authorization_trace", "org-1", "AUDIT_NOTE", eventID, false, false, false, false, true},
+		{"ordinary-nested-id-selected-envelope", `{"manifest":{"id":"selected-lease"},"note":"org-1"}`, "authorization_trace", "org-1", "AUDIT_NOTE", eventID, false, false, false, false, true},
+		{"unowned-root-id", `{"id":"selected-lease","note":"org-1"}`, "authorization_trace", "org-1", "AUDIT_NOTE", eventID, false, false, false, false, true},
+		{"projection-only", `{"projection":{"projection_kind":"mission","record_id":"foreign","value":{"id":"selected-mission","organization_id":"org-1"}}}`, "authorization_trace", "org-2", "AUDIT_NOTE", eventID, true, true, true, true, true},
+		{"admission-only", `{"admission":{"event_ref":"selected-event"}}`, "authorization_trace", "org-1", "AUDIT_NOTE", eventID, false, true, false, true, true},
+		{"lease-label-only", `{"id":"selected-lease"}`, "authorization_trace", "org-1", "CAPABILITY_GRANTED", eventID, false, true, false, true, true},
+		{"lease-physical-only", `{"id":"selected-lease"}`, "capability_lease", "org-1", "AUDIT_NOTE", eventID, false, true, false, true, true},
+		{"lease-label-missing-counterpart", `{"id":"selected-lease"}`, "authorization_trace", "org-1", "CAPABILITY_REVOKED", "missing-source", false, false, false, true, true},
+		{"escaped-projection", `{"projec\u0074ion":{"projection_kind":"mission","record_id":"foreign","value":{"id":"selected-mission","organization_id":"org-1"}}}`, "authorization_trace", "org-2", "AUDIT_NOTE", eventID, true, true, true, true, true},
+		{"escaped-admission", `{"ad\u006dission":{"event_ref":"selected-event"}}`, "authorization_trace", "org-1", "AUDIT_NOTE", eventID, false, true, true, true, true},
+		{"escaped-lease-label", `{"i\u0064":"selected-lease"}`, "authorization_trace", "org-1", "CAPABILITY_GRANTED", eventID, false, true, true, true, true},
+		{"unknown-noncanonical-containers", `{"Projection":{"value":{"id":"selected-mission","organization_id":"org-1"}},"Admission":{"event_ref":"selected-event"},"ID":"selected-lease"}`, "authorization_trace", "org-1", "AUDIT_NOTE", eventID, false, false, false, false, true},
+		{"nested-projection-overselects", `{"note":{"projection":{"value":{"id":"selected-mission","organization_id":"org-1"}}}}`, "authorization_trace", "org-1", "AUDIT_NOTE", eventID, false, false, true, true, true},
+		{"nested-id-physical-overselects", `{"note":{"id":"selected-lease"}}`, "capability_lease", "org-1", "AUDIT_NOTE", eventID, false, false, false, true, true},
+		{"ordinary-escape-overselects", `{"note":"org-1 selected-mission \u0061"}`, "authorization_trace", "org-1", "AUDIT_NOTE", eventID, false, false, true, true, true},
+	} {
+		check("event/container/"+sample.name, []byte(sample.payload), []byte(`{"note":"safe"}`), sample.kind, "foreign-key", sample.envelope, sample.label, sample.backing, sample.scope, sample.identity)
+		query := `WITH selected AS MATERIALIZED (SELECT json_extract(value,'$.id') AS identity FROM json_each(?1))
+			SELECT ` + projectionEventContainerBytes("e.payload") + `,` + projectionIdentityEventContainerBytes("e.payload") + `,` + projectionSelectedSourceBytes("e.payload") + ` FROM events e WHERE e.event_id=?2`
+		var scopeContainer, identityContainer, selectedBytes bool
+		if err := store.db.QueryRowContext(t.Context(), query, selectedJSON, eventID).Scan(&scopeContainer, &identityContainer, &selectedBytes); err != nil {
+			t.Fatalf("%s container decision: %v", sample.name, err)
+		}
+		if scopeContainer != sample.scopeContainer || identityContainer != sample.identityContainer || selectedBytes != sample.selectedBytes {
+			t.Fatalf("%s container/identity byte decisions=%v/%v/%v want=%v/%v/%v", sample.name, scopeContainer, identityContainer, selectedBytes, sample.scopeContainer, sample.identityContainer, sample.selectedBytes)
+		}
+		if !scopeContainer && !identityContainer && selectedBytes {
+			containerExclusions++
+		}
+	}
+	if containerExclusions < 4 {
+		t.Fatalf("container-specific exclusion corpus is vacuous: %d", containerExclusions)
+	}
 	random := rand.New(rand.NewSource(2174154025621))
 	seeds := [][]byte{
 		[]byte(`{"projection":{"projection_kind":"team","record_id":"foreign","value":{"id":"selected-team","organization_id":"org-1"}}}`),
@@ -281,5 +326,74 @@ func TestIncidentProjectionScopeDamagedOrganizationPhysicalKey(t *testing.T) {
 				t.Fatal("scope conflict returned partial evidence")
 			}
 		})
+	}
+}
+
+// Match TestIncidentPublicEvidenceLimit's successful bound workload exactly:
+// 4,000 source notes, 16 admitted Knowledge nodes, the Organization, and 255
+// additional public notes. Setup/full-owner checks are outside measured polls.
+func BenchmarkIncidentPublicEvidenceBoundSourceGates(b *testing.B) {
+	store, err := Open(":memory:")
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = store.Close() })
+	if _, err := store.AppendProjection(b.Context(), events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "ORGANIZATION_CREATED", SourceActorID: "runtime", CorrelationID: "setup"}, ProjectionKind: "organization", RecordID: "org-1", Version: 1, Value: core.Organization{ID: "org-1", Name: "Evidence", PolicyVersion: "v1", CreatedAt: time.Now().UTC()}}); err != nil {
+		b.Fatal(err)
+	}
+	var previous, correlation string
+	for node := range 16 {
+		refs := make([]string, 0, 251)
+		if previous != "" {
+			refs = append(refs, previous)
+		}
+		for source := range 250 {
+			evidence, err := store.Append(b.Context(), events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", TaskID: fmt.Sprintf("observation-task-%d", node*250+source), SourceExecutionID: fmt.Sprintf("observation-execution-%d", node*250+source), CorrelationID: "observations", Payload: map[string]int{"observation": node*250 + source}})
+			if err != nil {
+				b.Fatal(err)
+			}
+			refs = append(refs, evidence.EventID)
+		}
+		id := fmt.Sprintf("bounded-%d", node)
+		correlation = "knowledge-" + id
+		value := core.KnowledgeRecord{KnowledgeID: core.ID(id), OrganizationID: "org-1", Version: 1, Type: core.KnowledgeLesson, Scope: core.KnowledgeScopeOrganization, ScopeID: "org-1", Status: core.KnowledgeCandidate, Title: "Recorded observations", Content: "Retain the source observations", Basis: core.KnowledgeBasisExternalEvidence, ProvenanceEventRefs: refs, CreatedBy: "runtime", CreatedByKind: core.PrincipalRuntime, CreatedAt: time.Now().UTC(), ValidationMethod: core.KnowledgeValidationUnvalidated}
+		event, err := store.AppendProjection(b.Context(), events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_PROPOSED", SourceActorID: "runtime", CorrelationID: correlation}, ProjectionKind: "knowledge", RecordID: id, Version: 1, Value: value})
+		if err != nil {
+			b.Fatal(err)
+		}
+		previous = event.EventID
+	}
+	for range 255 {
+		if _, err := store.Append(b.Context(), events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: correlation, Payload: map[string]string{"summary": "Public observation"}}); err != nil {
+			b.Fatal(err)
+		}
+	}
+	stream, err := store.Events(b.Context(), "")
+	if err != nil {
+		b.Fatal(err)
+	}
+	if len(stream) != 4272 {
+		b.Fatalf("bound workload source count=%d", len(stream))
+	}
+	if _, err := events.ValidateProjectionHistory(stream, nil, nil, nil); err != nil {
+		b.Fatalf("actual writer full-owner baseline: %v", err)
+	}
+	read := func() {
+		snapshot, err := store.VerifiedIncidentEvents(b.Context(), "org-1", correlation, 256)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(snapshot.Work.Events) != 256 || len(snapshot.DependencyEvents) != 4016 {
+			b.Fatalf("bound workload public/private=%d/%d", len(snapshot.Work.Events), len(snapshot.DependencyEvents))
+		}
+		if err := events.ValidateIncidentBounds(snapshot); err != nil {
+			b.Fatal(err)
+		}
+	}
+	read()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		read()
 	}
 }

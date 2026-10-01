@@ -39,7 +39,8 @@ func validateIncidentProjectionIDs(ctx context.Context, tx *sql.Tx, keys map[inc
 		return err
 	}
 	query := `WITH selected AS MATERIALIZED (SELECT json_extract(value,'$.kind') AS kind,json_extract(value,'$.id') AS identity FROM json_each(?1))
-		SELECT EXISTS(SELECT 1 FROM events e WHERE ` + projectionSelectedSourceBytes("e.payload") + ` AND ` + projectionIdentityClaims("event") + `)
+		SELECT EXISTS(SELECT 1 FROM events e WHERE CASE WHEN ` + projectionIdentityEventContainerBytes("e.payload") + ` THEN
+		` + projectionSelectedSourceBytes("e.payload") + ` AND ` + projectionIdentityClaims("event") + ` ELSE 0 END)
 		OR EXISTS(SELECT 1 FROM records r LEFT JOIN events e ON e.event_id=r.admission_event_id
 		WHERE (r.kind IN (` + incidentProjectionKindsSQL + `,'capability_lease') OR r.admission_event_id<>'' OR r.admission_fingerprint<>'')
 		AND ` + projectionSelectedSourceBytes("r.body") + `
@@ -58,10 +59,22 @@ func projectionSelectedSourceBytes(body string) string {
 	return `EXISTS(SELECT 1 FROM selected s WHERE ` + projectionSourceIdentityBytes(body, "s.identity") + `)`
 }
 
+// Projection and admission identities require their root object containers.
+// A root lease id has separate label/physical-counterpart applicability; keep
+// exactly those owner channels even when no projection/admission survives.
+func projectionIdentityEventContainerBytes(body string) string {
+	return `(CASE WHEN instr(CAST(` + body + ` AS BLOB),X'5C')>0 OR ` + projectionSourceKeyBytes(body, "projection") + ` OR ` + projectionSourceKeyBytes(body, "admission") + ` THEN 1
+		WHEN ` + projectionSourceKeyBytes(body, "id") + ` THEN ` + projectionLeaseEventOwner() + ` ELSE 0 END)`
+}
+
+func projectionLeaseEventOwner() string {
+	return `(e.event_type IN ('CAPABILITY_GRANTED','CAPABILITY_REVOKED') OR EXISTS(SELECT 1 FROM records backing WHERE backing.admission_event_id=e.event_id AND backing.admission_event_id<>'' AND backing.kind='capability_lease'))`
+}
+
 func projectionIdentityClaims(source string) string {
 	physical := `OR (c.kind='organization' AND e.organization_id<>s.identity) OR (c.kind='task' AND e.task_id<>s.identity)
 		OR EXISTS(SELECT 1 FROM records backing WHERE backing.admission_event_id=e.event_id AND backing.admission_event_id<>'' AND (backing.kind<>c.kind OR backing.record_id<>s.identity))`
-	leaseOwner, leaseConflict := `(e.event_type IN ('CAPABILITY_GRANTED','CAPABILITY_REVOKED') OR EXISTS(SELECT 1 FROM records backing WHERE backing.admission_event_id=e.event_id AND backing.admission_event_id<>'' AND backing.kind='capability_lease'))`, `EXISTS(SELECT 1 FROM records backing WHERE backing.admission_event_id=e.event_id AND backing.admission_event_id<>'' AND (backing.kind<>'capability_lease' OR backing.record_id<>s.identity))`
+	leaseOwner, leaseConflict := projectionLeaseEventOwner(), `EXISTS(SELECT 1 FROM records backing WHERE backing.admission_event_id=e.event_id AND backing.admission_event_id<>'' AND (backing.kind<>'capability_lease' OR backing.record_id<>s.identity))`
 	admission := `UNION ALL SELECT 1 FROM nodes a JOIN nodes l ON l.parent=a.id JOIN selected s ON s.kind='event' AND s.identity=l.value
 		WHERE a.parent=0 AND a.key='admission' AND a.type='object' AND l.key='event_ref' AND l.type='text' AND e.event_id<>s.identity`
 	if source == "record" {

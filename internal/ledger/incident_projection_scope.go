@@ -16,7 +16,8 @@ import (
 // retained source JSON in SQLite without allocating those payloads in Go.
 func validateIncidentProjectionScope(ctx context.Context, tx *sql.Tx, organization string) error {
 	var conflict bool
-	query := `SELECT EXISTS(SELECT 1 FROM events e WHERE (e.organization_id=?1 OR ` + projectionSourceIdentityBytes("e.payload", "?1") + `) AND ` + projectionScopeClaims("event") + `)
+	query := `SELECT EXISTS(SELECT 1 FROM events e WHERE CASE WHEN ` + projectionEventContainerBytes("e.payload") + ` THEN
+		(e.organization_id=?1 OR ` + projectionSourceIdentityBytes("e.payload", "?1") + `) AND ` + projectionScopeClaims("event") + ` ELSE 0 END)
 		OR EXISTS(SELECT 1 FROM records r LEFT JOIN events e ON e.event_id=r.admission_event_id
 		WHERE (r.kind IN (` + incidentProjectionKindsSQL + `) OR r.admission_event_id<>'' OR r.admission_fingerprint<>'')
 		AND (e.organization_id=?1 OR r.record_id=?1 OR ` + projectionSourceIdentityBytes("r.body", "?1") + `)
@@ -36,6 +37,17 @@ func validateIncidentProjectionScope(ctx context.Context, tx *sql.Tx, organizati
 // the unchanged full scalar owner guard still decides every retained candidate.
 func projectionSourceIdentityBytes(body, identity string) string {
 	return `(instr(CAST(` + body + ` AS BLOB),CAST(` + identity + ` AS BLOB))>0 OR instr(CAST(` + body + ` AS BLOB),X'5C')>0)`
+}
+
+// Event claims need a root projection object; an envelope or counterpart owner
+// cannot create one. Its exact decoded key is literal quoted source bytes when
+// unescaped. Keep every source escape, including escaped container keys.
+func projectionEventContainerBytes(body string) string {
+	return `(instr(CAST(` + body + ` AS BLOB),X'5C')>0 OR ` + projectionSourceKeyBytes(body, "projection") + `)`
+}
+
+func projectionSourceKeyBytes(body, key string) string {
+	return `instr(CAST(` + body + ` AS BLOB),X'` + fmt.Sprintf("%x", []byte(`"`+key+`"`)) + `')>0`
 }
 
 // These kinds are the closed admitted projection family. Work has no direct
