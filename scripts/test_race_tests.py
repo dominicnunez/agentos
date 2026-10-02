@@ -40,6 +40,35 @@ class RaceTests(unittest.TestCase):
     def test_small_suite_has_no_empty_group(self):
         self.assertEqual(test_groups("TestOnly"), [["TestOnly"]])
 
+    def test_long_differential_keeps_its_own_process(self):
+        differential = "TestProjectionSourceGateDifferential"
+        others = [f"TestFixture{index}" for index in range(40)]
+        groups = test_groups("\n".join([*others, differential]))
+        self.assertEqual(groups[0], [differential])
+        self.assertEqual(len(groups), 9)
+        self.assertCountEqual([name for group in groups for name in group],
+                              [*others, differential])
+        self.assertTrue(all(differential not in group for group in groups[1:]))
+        self.assertTrue(all(len(group) == 5 for group in groups[1:]))
+
+    def test_only_long_differential_has_no_empty_group(self):
+        name = "TestProjectionSourceGateDifferential"
+        self.assertEqual(test_groups(name), [[name]])
+
+    def test_new_roots_remain_covered_with_isolated_differential(self):
+        names = ["TestProjectionSourceGateDifferential", "TestFutureCase",
+                 "ExampleFuture", "FuzzFuture"]
+        groups = test_groups("\n".join(names))
+        self.assertEqual(groups[0], [names[0]])
+        self.assertCountEqual([name for group in groups for name in group], names)
+        self.assertEqual(groups, test_groups("\n".join(reversed(names))))
+
+    def test_eight_ordinary_groups_without_differential(self):
+        names = [f"TestFixture{index}" for index in range(40)]
+        groups = test_groups("\n".join(names))
+        self.assertEqual(len(groups), 8)
+        self.assertCountEqual([name for group in groups for name in group], names)
+
     def test_execution_preserves_limits_and_package_directory(self):
         with patch("scripts.race_tests.subprocess.run") as run:
             names = ["ExampleOutput", "FuzzInput", "TestOne", "TestOneMore"]
@@ -78,6 +107,24 @@ class RaceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Executed tests"):
                 run_ledger(Path("/repo"))
 
+    def test_extra_executed_test_fails(self):
+        with patch("scripts.race_tests.subprocess.run") as run:
+            listing = subprocess.CompletedProcess([], 0, stdout="TestOne\n")
+            extra = subprocess.CompletedProcess([], 0, stdout="\n".join(
+                json.dumps({"Test": name, "Action": "pass"})
+                for name in ("TestOne", "TestUnexpected")), stderr="")
+            run.side_effect = [listing, listing, listing, extra]
+            with self.assertRaisesRegex(ValueError, "Executed tests"):
+                run_ledger(Path("/repo"))
+
+    def test_nonzero_group_result_fails_runner(self):
+        with patch("scripts.race_tests.subprocess.run") as run:
+            listing = subprocess.CompletedProcess([], 0, stdout="TestOne\n")
+            failed = subprocess.CompletedProcess([], 1, stdout="", stderr="race failure")
+            run.side_effect = [listing, listing, listing, failed]
+            with self.assertRaises(subprocess.CalledProcessError):
+                run_ledger(Path("/repo"))
+
     def test_real_go_discovery_and_execution(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -91,6 +138,13 @@ func TestDirectory(t *testing.T) {
     t.Run("child", func(t *testing.T) {
         if _, err := os.ReadFile("marker"); err != nil { t.Fatal(err) }
     })
+}
+func TestProjectionSourceGateDifferential(t *testing.T) {
+    for _, name := range []string{"first", "middle", "last"} {
+        t.Run(name, func(t *testing.T) {
+            if _, err := os.ReadFile("marker"); err != nil { t.Fatal(err) }
+        })
+    }
 }
 func TestSkipped(t *testing.T) { t.Skip("intentional fixture skip") }
 func Example() {

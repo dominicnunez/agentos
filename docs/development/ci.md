@@ -47,9 +47,12 @@ and security review.
 
 Run `python3 scripts/race_tests.py` to match CI. Packages other than ledger run
 normally with the race detector and a twenty-minute package timeout. Ledger's
-large SQLite history suite runs in four sequential groups with that same timeout
+large SQLite history suite runs in sequential groups with that same timeout
 per group. The runner discovers tests, examples, and fuzz seed targets from one
-compiled race binary, sorts them, and distributes them round-robin. Every test
+compiled race binary. The complete source-gate differential test runs alone,
+so its long generated history does not share a deadline with unrelated fixtures.
+The runner sorts every remaining target and distributes them round-robin across
+up to eight nonempty groups. Every test
 keeps all its subtests, and each group's completed or skipped names must match
 its discovery list. Failures, race reports, and timeouts fail the check.
 

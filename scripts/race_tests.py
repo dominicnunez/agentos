@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 
 
-def test_groups(listing, count=4):
+def test_groups(listing, count=8):
     names = []
     for name in listing.splitlines():
         if name.startswith("Benchmark"):
@@ -18,7 +18,15 @@ def test_groups(listing, count=4):
     if not names or len(names) != len(set(names)) or count < 1:
         raise ValueError("Test discovery must be nonempty and unique")
     names.sort()
-    return [names[index::count] for index in range(min(count, len(names)))]
+    groups = []
+    # This complete differential stream is the longest individual root. Keep
+    # its deadline independent of unrelated fixtures without splitting cases.
+    differential = "TestProjectionSourceGateDifferential"
+    if differential in names:
+        groups.append([differential])
+        names.remove(differential)
+    groups.extend(names[index::count] for index in range(min(count, len(names))))
+    return groups
 
 
 def run_ledger(root):
