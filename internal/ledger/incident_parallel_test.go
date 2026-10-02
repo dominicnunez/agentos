@@ -28,7 +28,7 @@ func acquireIncidentTest(t *testing.T, worker bool) {
 	if worker {
 		incidentTestSlots.waitingWorkers++
 	}
-	for incidentTestSlots.active >= 3 || (!worker && incidentTestSlots.waitingWorkers > 0) {
+	for incidentTestSlots.active >= 4 || (!worker && incidentTestSlots.waitingWorkers > 0) {
 		incidentTestSlots.changed.Wait()
 	}
 	if worker {

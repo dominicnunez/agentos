@@ -2917,6 +2917,7 @@ func TestExecutionKnowledgeRejectsUnboundedTeamScopes(t *testing.T) {
 }
 
 func TestExecutionKnowledgeCandidateLimitIsTerminalizable(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, use := range []core.KnowledgeContextUse{"", core.KnowledgeBehavioralPolicy, core.KnowledgeFactualReference} {
 		t.Run("classification="+string(use), func(t *testing.T) { testExecutionKnowledgeCandidateLimit(t, use) })
 	}
@@ -3014,6 +3015,7 @@ VALUES('knowledge','knowledge-1',1,'{}','oversized-event','fingerprint',?)`, cre
 }
 
 func TestGoalProgressWitnessSelectionCrossesFormerEvidenceWindow(t *testing.T) {
+	parallelIncidentTest(t)
 	ctx := context.Background()
 	l, err := Open(":memory:")
 	if err != nil {
