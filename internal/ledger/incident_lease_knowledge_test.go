@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -16,8 +17,10 @@ import (
 
 func TestIncidentIncomingKnowledgeLease(t *testing.T) {
 	parallelIncidentTest(t)
-	for _, mode := range []string{"both", "payload", "envelope", "event-only", "record-only", "event-only-kind", "event-only-method", "event-only-principal", "event-only-missing-gates", "record-only-missing-gates", "event-counterpart", "record-counterpart", "event-only-duplicate-gates", "event-only-duplicate-container", "event-only-duplicate-refs", "record-only-kind", "record-only-status", "same-envelope", "same-envelope-record-only", "duplicate-lease", "before-selected", "after-revoke", "unconsumed", "unrelated", "consequential-only"} {
+	for _, mode := range []string{"both", "payload", "envelope", "event-only", "record-only", "event-only-kind", "event-only-method", "event-only-principal", "event-only-missing-gates", "record-only-missing-gates", "event-counterpart", "record-counterpart", "event-only-duplicate-gates", "event-only-duplicate-container", "event-only-duplicate-refs", "record-only-kind", "record-only-status", "same-envelope", "same-envelope-record-only", "record-only-organization-missing", "record-only-organization-null", "record-only-organization-nontext", "record-only-organization-empty", "record-only-organization-duplicate-null", "record-only-organization-duplicate-nontext", "record-only-organization-duplicate-escaped", "record-only-organization-duplicate-value", "event-only-organization-missing", "event-only-organization-null", "event-only-organization-nontext", "event-only-organization-empty", "event-only-organization-duplicate-null", "event-only-organization-duplicate-nontext", "event-only-organization-duplicate-escaped", "event-only-organization-duplicate-value", "event-only-organization-duplicate-projection", "duplicate-lease", "before-selected", "after-revoke", "unconsumed", "unrelated", "consequential-only"} {
 		t.Run(mode, func(t *testing.T) {
+			recordOnlyOrganization := strings.HasPrefix(mode, "record-only-organization-")
+			eventOnlyOrganization := strings.HasPrefix(mode, "event-only-organization-")
 			path := filepath.Join(t.TempDir(), "knowledge-lease.db")
 			store, err := Open(path)
 			if err != nil {
@@ -89,7 +92,7 @@ func TestIncidentIncomingKnowledgeLease(t *testing.T) {
 					}
 				}
 			}
-			if mode == "same-envelope" || mode == "same-envelope-record-only" {
+			if mode == "same-envelope" || mode == "same-envelope-record-only" || recordOnlyOrganization || eventOnlyOrganization {
 				if _, err := store.db.ExecContext(t.Context(), `UPDATE events SET organization_id='org-1' WHERE event_id=?`, check.EventID); err != nil {
 					t.Fatal(err)
 				}
@@ -119,6 +122,32 @@ func TestIncidentIncomingKnowledgeLease(t *testing.T) {
 				}
 			}
 			if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
+				if recordOnlyOrganization || eventOnlyOrganization {
+					if eventOnlyOrganization {
+						if _, err := tx.ExecContext(t.Context(), `UPDATE events SET organization_id='org-1' WHERE event_id IN (SELECT admission_event_id FROM records WHERE kind='knowledge' AND record_id='foreign-fact' AND version=2)`); err != nil {
+							return err
+						}
+					}
+					// Keep ownership and consuming refs, while making the source's
+					// required Organization unusable without any foreign envelope.
+					query := `SELECT body FROM records WHERE kind='knowledge' AND record_id='foreign-fact' AND version=2`
+					update := `UPDATE records SET body=? WHERE kind='knowledge' AND record_id='foreign-fact' AND version=2`
+					if eventOnlyOrganization {
+						query = `SELECT payload FROM events WHERE event_id IN (SELECT admission_event_id FROM records WHERE kind='knowledge' AND record_id='foreign-fact' AND version=2)`
+						update = `UPDATE events SET payload=? WHERE event_id IN (SELECT admission_event_id FROM records WHERE kind='knowledge' AND record_id='foreign-fact' AND version=2)`
+					}
+					var body []byte
+					if err := tx.QueryRowContext(t.Context(), query).Scan(&body); err != nil {
+						return err
+					}
+					changed, err := rewriteIncidentKnowledgeOrganization(body, eventOnlyOrganization, mode)
+					if err != nil {
+						return err
+					}
+					if _, err := tx.ExecContext(t.Context(), update, changed); err != nil {
+						return err
+					}
+				}
 				if mode == "event-counterpart" || mode == "record-counterpart" {
 					refs, err := json.Marshal([]string{check.EventID})
 					if err != nil {
@@ -134,7 +163,7 @@ func TestIncidentIncomingKnowledgeLease(t *testing.T) {
 						}
 					}
 				}
-				if mode == "event-only" || mode == "event-only-kind" || mode == "event-only-method" || mode == "event-only-principal" || mode == "event-only-duplicate-gates" || mode == "event-only-duplicate-container" || mode == "event-only-duplicate-refs" || mode == "event-only-missing-gates" {
+				if mode == "event-only" || mode == "event-only-kind" || mode == "event-only-method" || mode == "event-only-principal" || mode == "event-only-duplicate-gates" || mode == "event-only-duplicate-container" || mode == "event-only-duplicate-refs" || mode == "event-only-missing-gates" || eventOnlyOrganization {
 					if mode == "event-only-kind" || mode == "event-only-method" || mode == "event-only-principal" {
 						path, value := "$.projection.projection_kind", "unrelated"
 						if mode == "event-only-method" {
@@ -151,7 +180,7 @@ func TestIncidentIncomingKnowledgeLease(t *testing.T) {
 						return err
 					}
 				}
-				if mode == "record-only" || mode == "same-envelope-record-only" || mode == "record-only-kind" || mode == "record-only-status" || mode == "record-only-missing-gates" {
+				if mode == "record-only" || mode == "same-envelope-record-only" || mode == "record-only-kind" || mode == "record-only-status" || mode == "record-only-missing-gates" || recordOnlyOrganization {
 					if mode == "record-only-kind" || mode == "record-only-status" {
 						path, value := "$.projection_kind", "unrelated"
 						if mode == "record-only-status" {
@@ -163,6 +192,11 @@ func TestIncidentIncomingKnowledgeLease(t *testing.T) {
 					}
 					if _, err := tx.ExecContext(t.Context(), `DELETE FROM events WHERE event_id IN (SELECT admission_event_id FROM records WHERE kind='knowledge' AND record_id='foreign-fact' AND version=2)`); err != nil {
 						return err
+					}
+					if recordOnlyOrganization {
+						if _, err := tx.ExecContext(t.Context(), `UPDATE records SET admission_event_id='',admission_fingerprint='' WHERE kind='knowledge' AND record_id='foreign-fact' AND version=2`); err != nil {
+							return err
+						}
 					}
 				}
 				if _, err := tx.ExecContext(t.Context(), `DELETE FROM event_integrity`); err != nil {
@@ -193,12 +227,12 @@ func TestIncidentIncomingKnowledgeLease(t *testing.T) {
 					t.Fatal("retained record owner accepted displaced Knowledge authority")
 				}
 			}
-			if mode == "record-only" || mode == "same-envelope-record-only" || mode == "record-only-kind" || mode == "record-only-status" || mode == "record-only-missing-gates" {
+			if mode == "record-only" || mode == "same-envelope-record-only" || mode == "record-only-kind" || mode == "record-only-status" || mode == "record-only-missing-gates" || recordOnlyOrganization {
 				if _, err := admittedProjectionRecordsBounded(t.Context(), store.db, 2<<20, `WHERE r.kind='knowledge' AND r.record_id='foreign-fact'`); err == nil {
 					t.Fatal("retained record owner accepted orphan or malformed governed Knowledge")
 				}
 			}
-			if mode != "record-only" && mode != "same-envelope-record-only" && mode != "record-only-kind" && mode != "record-only-status" && mode != "record-only-missing-gates" && mode != "record-counterpart" && (fullErr != nil) != invalid {
+			if mode != "record-only" && mode != "same-envelope-record-only" && mode != "record-only-kind" && mode != "record-only-status" && mode != "record-only-missing-gates" && mode != "record-counterpart" && !recordOnlyOrganization && (fullErr != nil) != invalid {
 				t.Fatalf("full recovery applicability: %v", fullErr)
 			}
 			snapshot, err := store.VerifiedIncidentEvents(t.Context(), "org-1", correlation, 256)
@@ -221,6 +255,77 @@ func TestIncidentIncomingKnowledgeLease(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Mutate only an actual writer's owning source. Duplicate ancestors preserve
+// the consuming branch and add a same-organization sibling without its refs.
+func rewriteIncidentKnowledgeOrganization(body []byte, event bool, mode string) ([]byte, error) {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(body, &root); err != nil {
+		return nil, err
+	}
+	projection := root
+	if event {
+		projection = nil
+		if err := json.Unmarshal(root["projection"], &projection); err != nil {
+			return nil, err
+		}
+	}
+	var value map[string]json.RawMessage
+	if err := json.Unmarshal(projection["value"], &value); err != nil {
+		return nil, err
+	}
+	value["organization_id"] = json.RawMessage(`"org-1"`)
+	switch {
+	case strings.HasSuffix(mode, "-missing"), strings.HasSuffix(mode, "-duplicate-value"), strings.HasSuffix(mode, "-duplicate-projection"):
+		delete(value, "organization_id")
+	case strings.HasSuffix(mode, "-null") && !strings.Contains(mode, "-duplicate-"):
+		value["organization_id"] = json.RawMessage(`null`)
+	case strings.HasSuffix(mode, "-nontext") && !strings.Contains(mode, "-duplicate-"):
+		value["organization_id"] = json.RawMessage(`123`)
+	case strings.HasSuffix(mode, "-empty"):
+		value["organization_id"] = json.RawMessage(`""`)
+	}
+	rawValue, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	prepend := func(object []byte, key string, member []byte) []byte {
+		changed := []byte(`{"` + key + `":`)
+		changed = append(changed, member...)
+		changed = append(changed, ',')
+		return append(changed, object[1:]...)
+	}
+	if strings.HasSuffix(mode, "-duplicate-null") || strings.HasSuffix(mode, "-duplicate-nontext") || strings.HasSuffix(mode, "-duplicate-escaped") {
+		key, member := "organization_id", []byte(`null`)
+		if strings.HasSuffix(mode, "-duplicate-nontext") {
+			member = []byte(`123`)
+		}
+		if strings.HasSuffix(mode, "-duplicate-escaped") {
+			key = `organizatio\u006e_id`
+		}
+		rawValue = prepend(rawValue, key, member)
+	}
+	projection["value"] = rawValue
+	rawProjection, err := json.Marshal(projection)
+	if err != nil {
+		return nil, err
+	}
+	if strings.HasSuffix(mode, "-duplicate-value") {
+		rawProjection = prepend(rawProjection, "value", []byte(`{"organization_id":"org-1"}`))
+	}
+	if !event {
+		return rawProjection, nil
+	}
+	root["projection"] = rawProjection
+	rawRoot, err := json.Marshal(root)
+	if err != nil {
+		return nil, err
+	}
+	if strings.HasSuffix(mode, "-duplicate-projection") {
+		rawRoot = prepend(rawRoot, "projection", []byte(`{"projection_kind":"knowledge","value":{"organization_id":"org-1"}}`))
+	}
+	return rawRoot, nil
 }
 
 func TestIncidentSharedKnowledgeLease(t *testing.T) {
@@ -266,6 +371,78 @@ func TestIncidentSharedKnowledgeLease(t *testing.T) {
 			t.Fatal("valid same-organization governed use expanded an independent incident")
 		}
 	}
+	t.Run("escaped-organization", func(t *testing.T) {
+		var activation events.Event
+		for _, event := range stream {
+			if event.EventType == "KNOWLEDGE_ACTIVATED" {
+				activation = event
+			}
+		}
+		payload, present, err := events.AdmittedProjection(activation)
+		if err != nil || !present {
+			t.Fatalf("writer activation: present=%v error=%v", present, err)
+		}
+		escaped := bytes.Replace(payload.Projection.Value, []byte(`"organization_id"`), []byte(`"organizatio\u006e_id"`), 1)
+		if bytes.Equal(payload.Projection.Value, escaped) {
+			t.Fatal("writer source lacks organization field")
+		}
+		payload.Projection.Value = escaped
+		sealed, err := events.SealProjectionEvent(activation, payload.Projection, payload.Detail)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := json.Marshal(sealed.Projection)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
+			if _, err := tx.ExecContext(t.Context(), `UPDATE events SET payload=? WHERE event_id=?`, encoded, activation.EventID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(t.Context(), `UPDATE records SET body=?,admission_fingerprint=? WHERE admission_event_id=?`, body, sealed.Admission.Fingerprint, activation.EventID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(t.Context(), `DELETE FROM event_integrity`); err != nil {
+				return err
+			}
+			return rebuildEventIntegrity(t.Context(), tx)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		stream, err := store.Events(t.Context(), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := events.ValidateProjectionHistory(stream, nil, leases, freezes); err != nil {
+			t.Fatalf("single decoded escaped organization is valid: %v", err)
+		}
+		if _, err := admittedProjectionRecordsBounded(t.Context(), store.db, 2<<20, `WHERE r.kind='knowledge' AND r.record_id='shared-fact'`); err != nil {
+			t.Fatalf("escaped event retains exact record owner: %v", err)
+		}
+		head, err := ValidateEventIntegrity(t.Context(), store.db)
+		if err != nil {
+			t.Fatalf("resealed complete ledger: %v", err)
+		}
+		if head.SHA256 == snapshot.Work.LedgerSHA256 {
+			t.Fatal("changed source bytes did not change complete ledger digest")
+		}
+		expected := snapshot
+		expected.Work.LedgerSHA256 = head.SHA256
+		got, err := store.VerifiedIncidentEvents(t.Context(), "org-1", selected.CorrelationID, 256)
+		if err != nil {
+			t.Fatalf("single escaped organization poisoned shared lease: %v", err)
+		}
+		if got.Work.LedgerSHA256 != head.SHA256 {
+			t.Fatal("incident snapshot lacks independently verified ledger anchor")
+		}
+		if !reflect.DeepEqual(got, expected) {
+			t.Fatal("single escaped organization changed independent incident")
+		}
+	})
 }
 
 func TestIncidentLeaseConsumerLookup(t *testing.T) {

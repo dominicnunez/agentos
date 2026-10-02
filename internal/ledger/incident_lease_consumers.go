@@ -13,8 +13,8 @@ import (
 // Selected lease admissions already pass through add's organization check:
 // loadAuthorities selects each admission event by its global event identity.
 // Their successful exact authority validation therefore binds them to this
-// organization. A foreign governed Knowledge claim against those identities
-// must fail even when its capability check is otherwise absent from the incident.
+// organization. A governed Knowledge claim against those identities needs an
+// unambiguous matching organization even when its check is absent from the incident.
 func validateIncidentLeaseConsumers(ctx context.Context, tx *sql.Tx, organization string, keys map[incidentKey]bool) error {
 	var ids []string
 	for key := range keys {
@@ -35,7 +35,7 @@ func validateIncidentLeaseConsumers(ctx context.Context, tx *sql.Tx, organizatio
 		return err
 	}
 	if conflict {
-		return fmt.Errorf("incident capability lease has a cross-organization Knowledge consumer")
+		return fmt.Errorf("incident capability lease has an invalid Knowledge organization binding")
 	}
 	return nil
 }
@@ -54,8 +54,8 @@ func incidentLeaseConsumerSQL(leases int) string {
 	refs := func(body, path string) string {
 		return `(SELECT json_group_array(value) FROM (` + incidentClaimQuery(body, path+".validation_refs", true, "") + `))`
 	}
-	foreign := func(body, path, envelope string) string {
-		return `(check_event.organization_id<>` + organization + ` OR ` + envelope + `<>` + organization + ` OR ` + incidentScalarClaim(body, path+".organization_id", `<>`+organization) + `)`
+	tenantConflict := func(body, path, envelope string) string {
+		return `(check_event.organization_id<>` + organization + ` OR ` + envelope + `<>` + organization + ` OR NOT ` + incidentLeaseOrgMatch(body, path+".organization_id", organization) + `)`
 	}
 	var labels []string
 	for _, label := range events.ProjectionLifecycleEventTypes("knowledge") {
@@ -79,9 +79,29 @@ SELECT 1 FROM records backing WHERE backing.admission_event_id<>'' AND backing.a
 	return `WITH selected_scope(organization) AS (VALUES (?)), selected_leases(id) AS (VALUES ` + values + `)
 SELECT EXISTS (SELECT 1 FROM events consumer JOIN json_each(` + refs("consumer.payload", "$.projection.value") + `) reference
 CROSS JOIN events check_event ON check_event.event_id=reference.value AND check_event.event_type='CAPABILITY_CHECKED'
-WHERE ` + eventOwner + ` AND ` + foreign("consumer.payload", "$.projection.value", "consumer.organization_id") + ` AND ` + claim + `)
+WHERE ` + eventOwner + ` AND ` + tenantConflict("consumer.payload", "$.projection.value", "consumer.organization_id") + ` AND ` + claim + `)
 OR EXISTS (SELECT 1 FROM records consumer LEFT JOIN events admission ON admission.event_id=consumer.admission_event_id
 JOIN json_each(` + refs("consumer.body", "$.value") + `) reference
 CROSS JOIN events check_event ON check_event.event_id=reference.value AND check_event.event_type='CAPABILITY_CHECKED'
-WHERE ` + recordOwner + ` AND ` + foreign("consumer.body", "$.value", "admission.organization_id") + ` AND ` + claim + `)`
+WHERE ` + recordOwner + ` AND ` + tenantConflict("consumer.body", "$.value", "admission.organization_id") + ` AND ` + claim + `)`
+}
+
+// A shared consumer is unrelated only when its required tenant path is clear.
+// Count every decoded key before checking type: a valid sibling must not mask a
+// missing organization, nontext organization, or duplicate owned container.
+// This checks tenant identity, not the consumer's unrelated historical permissions.
+func incidentLeaseOrgMatch(source, path, organization string) string {
+	fields := strings.Split(strings.TrimPrefix(path, "$."), ".")
+	var match func(string, int) string
+	match = func(object string, index int) string {
+		member := fmt.Sprintf("tenant%d", index)
+		valid := member + `.type='text' AND ` + member + `.value=` + organization
+		if index < len(fields)-1 {
+			child := `CASE WHEN ` + member + `.type='object' THEN ` + member + `.value ELSE '{}' END`
+			valid = member + `.type='object' AND ` + match(child, index+1)
+		}
+		return `(SELECT COUNT(*)=1 AND COALESCE(MAX(CASE WHEN ` + valid + ` THEN 1 ELSE 0 END),0)=1
+FROM json_each(` + object + `) ` + member + ` WHERE ` + member + `.key='` + fields[index] + `')`
+	}
+	return match(`CASE WHEN json_valid(`+source+`) THEN `+source+` ELSE '{}' END`, 0)
 }
