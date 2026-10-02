@@ -5,24 +5,115 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.race_tests import main, run_ledger, test_groups
+from scripts.race_tests import (checked_output, main, race_plan, run_ledger,
+                               selected_groups, test_groups)
 
 
 class RaceTests(unittest.TestCase):
-    def test_only_exact_ledger_package_is_excluded(self):
+    def test_app_groups_keep_every_normal_and_race_case(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "go.mod").write_text("module example.test/race\n\ngo 1.26\n")
+            ledger = root / "internal" / "ledger"
+            ledger.mkdir(parents=True)
+            (ledger / "fixture_test.go").write_text(
+                'package ledger\nimport "testing"\nfunc TestLedger(t *testing.T) {}\n')
+            app = root / "internal" / "app"
+            app.mkdir(parents=True)
+            (app / "race_on_test.go").write_text(
+                '//go:build race\n\npackage app\nconst raceEnabled = true\n')
+            (app / "race_off_test.go").write_text(
+                '//go:build !race\n\npackage app\nconst raceEnabled = false\n')
+            (app / "fixture_test.go").write_text('''package app
+import ("fmt"; "os"; "testing")
+func TestIncidentCompletionGrowth(t *testing.T) {
+    for _, name := range []string{"1", "16"} {
+        t.Run(name, func(t *testing.T) {
+            mode := "normal"
+            if raceEnabled { mode = "race" }
+            if err := os.WriteFile(mode+"-completion-"+name, nil, 0600); err != nil { t.Fatal(err) }
+        })
+    }
+}
+func TestIncidentUnrelatedHistoryGrowth(t *testing.T) {
+    for _, name := range []string{"0", "1000"} {
+        t.Run(name, func(t *testing.T) {
+            results := make(chan int, 4)
+            for i := range 4 { go func() { results <- i }() }
+            seen := map[int]bool{}
+            for range 4 { seen[<-results] = true }
+            if len(seen) != 4 { t.Fatal("lost concurrent callers") }
+            mode := "normal"
+            if raceEnabled { mode = "race" }
+            if err := os.WriteFile(mode+"-history-"+name, nil, 0600); err != nil { t.Fatal(err) }
+        })
+    }
+}
+func TestFutureCase(t *testing.T) {
+    if raceEnabled {
+        if err := os.WriteFile("race-future", nil, 0600); err != nil { t.Fatal(err) }
+    }
+}
+func Example() { fmt.Println("example"); /* Output: example */ }
+''')
+            with patch("scripts.race_tests.__file__", str(root / "scripts" / "race_tests.py")):
+                plan = race_plan(root)
+                self.assertEqual(plan, {"include": [
+                    {"suite": "other", "group": 0},
+                    {"suite": "app", "group": 1},
+                    {"suite": "app", "group": 2},
+                    {"suite": "ledger", "group": 1},
+                ]})
+                main("normal")
+                for job in plan["include"]:
+                    main(job["suite"], job["group"] if job["group"] else None)
+            for name in ("normal-completion-1", "normal-completion-16",
+                         "normal-history-0", "normal-history-1000",
+                         "race-completion-1", "race-completion-16",
+                         "race-history-0", "race-history-1000", "race-future"):
+                self.assertTrue((app / name).is_file(), name)
+
+    def test_single_group_does_not_expand_to_the_full_plan(self):
+        groups = [["TestOne"], ["TestTwo"], ["TestThree"]]
+        self.assertEqual(selected_groups(groups, 2), [(2, ["TestTwo"])])
+        for invalid in (0, -1, 4):
+            with self.subTest(group=invalid), self.assertRaises(ValueError):
+                selected_groups(groups, invalid)
+
+    def test_app_group_rejects_missing_duplicate_and_skipped_required_cases(self):
+        valid = [{"Test": "TestOne", "Action": "pass"},
+                 {"Test": "TestOne/child", "Action": "pass"}]
+        variants = ([], valid + valid, [valid[0]],
+                    [valid[0], {"Test": "TestOne/child", "Action": "skip"}])
+        for events in variants:
+            with self.subTest(events=events), self.assertRaises(ValueError):
+                checked_output(subprocess.CompletedProcess(
+                    [], 0, stdout="\n".join(json.dumps(row) for row in events), stderr=""),
+                    ["TestOne"], required=["TestOne/child"])
+
+    def test_app_group_propagates_process_failure(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            checked_output(subprocess.CompletedProcess([], 1, stdout="", stderr="race failure"),
+                           ["TestOne"])
+
+    def test_only_exact_grouped_packages_are_excluded(self):
         ledger = "example.test/internal/ledger"
+        app = "example.test/internal/app"
         recovery = ledger + "/recovery"
         with patch("scripts.race_tests.subprocess.run") as run, \
-                patch("scripts.race_tests.run_ledger") as grouped:
+                patch("scripts.race_tests.run_ledger") as grouped, \
+                patch("scripts.race_tests.run_app") as app_suite:
             run.side_effect = [
                 subprocess.CompletedProcess([], 0, stdout=json.dumps({"ImportPath": ledger})),
-                subprocess.CompletedProcess([], 0, stdout=ledger + "\n" + recovery + "\n"),
+                subprocess.CompletedProcess([], 0, stdout=json.dumps({"ImportPath": app})),
+                subprocess.CompletedProcess([], 0, stdout=ledger + "\n" + app + "\n" + recovery + "\n"),
                 subprocess.CompletedProcess([], 0),
             ]
             main()
             self.assertEqual(run.call_args.args[0],
                              ["go", "test", "-race", "-count=1", "-timeout=20m", recovery])
             grouped.assert_called_once()
+            app_suite.assert_called_once()
 
     def test_complete_unique_assignment(self):
         names = ["TestOne", "TestOneMore", "ExampleOutput", "FuzzInput", "TestNew"]

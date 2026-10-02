@@ -9,8 +9,40 @@ permissions:
   security-events: write
 
 jobs:
-  verify:
-    name: CI verification (${{ github.event_name }})
+  plan:
+    name: Race discovery (${{ github.event_name }})
+    if: github.event_name != 'push' || github.event.deleted != true
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+      matrix: ${{ steps.groups.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select applicable checks
+        id: scope
+        run: python3 scripts/ci_scope.py
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: steps.scope.outputs.code != 'false'
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Discover complete race groups
+        id: groups
+        env:
+          APPLICABLE_CODE: ${{ steps.scope.outputs.code }}
+        run: |
+          if [ "$APPLICABLE_CODE" = "false" ]; then
+            matrix='{"include":[{"suite":"other","group":0}]}'
+          else
+            matrix=$(python3 scripts/race_tests.py --suite plan)
+          fi
+          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
+
+  checks:
+    name: Code and document verification (${{ github.event_name }})
     if: github.event_name != 'push' || github.event.deleted != true
     runs-on: ubuntu-latest
     steps:
@@ -131,11 +163,12 @@ jobs:
         if: steps.scope.outputs.code != 'false'
         run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4 run
 
-      - name: Race-tested unit tests
+      - name: Complete normal unit tests and race harness checks
         if: steps.scope.outputs.code != 'false'
         run: |
           python3 -m unittest scripts/test_race_tests.py
-          python3 scripts/race_tests.py
+          python3 -m unittest scripts/test_ci_results.py
+          python3 scripts/race_tests.py --suite normal
 
       - name: Bounded operator-boundary fuzzing
         if: steps.scope.outputs.code != 'false'
@@ -175,3 +208,48 @@ jobs:
         with:
           sarif_file: gallow.sarif
           category: gallow
+
+  race:
+    name: Race coverage (${{ github.event_name }}, ${{ matrix.suite }}, ${{ matrix.group }})
+    needs: plan
+    if: needs.plan.outputs.code != 'false'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Execute every discovered target in this group
+        env:
+          RACE_SUITE: ${{ matrix.suite }}
+          RACE_GROUP: ${{ matrix.group }}
+        run: |
+          if [ "$RACE_SUITE" = "other" ]; then
+            python3 scripts/race_tests.py --suite other
+          else
+            python3 scripts/race_tests.py --suite "$RACE_SUITE" --group "$RACE_GROUP"
+          fi
+
+  verify:
+    name: CI verification (${{ github.event_name }})
+    needs: [plan, checks, race]
+    if: always() && (github.event_name != 'push' || github.event.deleted != true)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require every applicable check
+        env:
+          APPLICABLE_CODE: ${{ needs.plan.outputs.code }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          RACE_RESULT: ${{ needs.race.result }}
+        run: python3 scripts/check_ci_results.py

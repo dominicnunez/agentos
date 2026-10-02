@@ -45,20 +45,36 @@ and security review.
 
 ## Race-test duration
 
-Run `python3 scripts/race_tests.py` to match CI. Packages other than ledger run
-normally with the race detector and a twenty-minute package timeout. Ledger's
-large SQLite history suite runs in sequential groups with that same timeout
-per group. The runner discovers tests, examples, and fuzz seed targets from one
-compiled race binary. The complete source-gate differential test runs alone,
-so its long generated history does not share a deadline with unrelated fixtures.
-The runner sorts every remaining target and distributes them round-robin across
-up to eight nonempty groups. Every test
-keeps all its subtests, and each group's completed or skipped names must match
-its discovery list. Failures, race reports, and timeouts fail the check.
+CI runs the complete normal Go suite and all race tests. It discovers the app
+and ledger tests, examples, and fuzz seed targets from compiled race binaries,
+then executes their groups on independent runners in parallel. App uses up to
+two nonempty groups. Ledger keeps the complete source-gate differential test
+alone and distributes every other target round-robin across up to eight nonempty
+groups. All other packages run under the race detector in one additional job.
+Each package or group retains its twenty-minute timeout and uncached test run.
+No tests, subtests, generated cases or history sizes are omitted from race testing.
 
-Grouping bounds cumulative package duration; it does not speed up individual
-operations. A complete ungrouped normal ledger run also checks shared-process
-state interactions. It cannot replace race detection across group boundaries:
-tests needing concurrent interaction must share a top-level test. The ungrouped
-race command remains `go test -race -count=1 -timeout=20m ./...` when the runner
-can complete the entire ledger package within that budget.
+Run `python3 scripts/race_tests.py` locally to execute the same race corpus
+sequentially. It also runs the complete normal app and ledger packages.
+`--suite normal` runs the full normal Go suite; `--suite plan` prints the CI
+matrix discovered from the current source. `--suite app --group N` and
+`--suite ledger --group N` execute exactly one discovered group, and
+`--suite other` race-tests every package outside those two exact packages.
+Groups retain every subtest of their top-level targets; completion must match
+fresh discovery. App additionally requires both completion-growth sizes and
+both unrelated-history sizes to pass in their owning group. Invalid group
+numbers, missing targets, failed processes, race reports and timeouts fail.
+
+The required `CI verification (pull_request)` result depends on discovery,
+normal/code/document checks and the entire race matrix. A failed, cancelled or
+unexpectedly skipped prerequisite cannot yield a successful required result.
+Documentation-only changes still run document checks and skip the race matrix;
+their final result requires successful classification and document checks.
+
+Parallel runners reduce elapsed CI time by sharing independent groups across
+more runners; they do not reduce the test workload or speed up individual reads.
+Runner availability and compilation/cache costs affect the actual duration.
+The complete ungrouped normal suite retains shared-process interaction checks.
+As with the previous sequential race groups, race interactions must be exercised
+within one top-level test; grouping does not provide cross-group race detection.
+All groups run on the same workflow revision with the Go version in `go.mod`.
