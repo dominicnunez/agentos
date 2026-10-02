@@ -15,6 +15,7 @@ import (
 // SQL candidate. Separately generated valid ordinary ASCII objects must be
 // excluded, so an always-true discovery predicate cannot satisfy this test.
 func TestIncidentNegativeDiscoveryProperty(t *testing.T) {
+	parallelIncidentTest(t)
 	store := projectionScopeFixture(t)
 	stream, err := store.Events(t.Context(), "")
 	if err != nil {

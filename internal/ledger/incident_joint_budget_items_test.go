@@ -13,6 +13,7 @@ import (
 
 // Public references and hidden support consume one aggregate allowance.
 func TestIncidentJointSupportItems(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, reservations := range []int{500, 550} {
 		t.Run(fmt.Sprint(reservations), func(t *testing.T) {
 			store, err := Open(filepath.Join(t.TempDir(), "joint-budget.db"))

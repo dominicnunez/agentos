@@ -11,6 +11,7 @@ import (
 )
 
 func TestIncidentExecutionAdmission(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mutation := range []string{"valid", "missing-detail", "wrong-dispatch"} {
 		t.Run(mutation, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "admission.db")

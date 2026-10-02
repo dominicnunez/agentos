@@ -11,6 +11,7 @@ import (
 )
 
 func TestIncidentPrivateInferenceBacking(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mutation := range []string{"valid", "missing-accounting", "invalid-policy"} {
 		t.Run(mutation, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "private-inference.db")

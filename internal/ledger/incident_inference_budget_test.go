@@ -14,6 +14,7 @@ import (
 // A selected connection's complete replacement history is private support. Its
 // policies, activations and accounting share the advertised aggregate bound.
 func TestIncidentInferenceAggregateBudget(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, revisions := range []int{1, 40, 800, events.MaximumIncidentEvidence/2 + 1} {
 		t.Run(fmt.Sprint(revisions), func(t *testing.T) {
 			store, policy, correlation := appendIncidentBudgetHistory(t, revisions)
@@ -90,6 +91,7 @@ func appendIncidentBudgetHistory(t *testing.T, revisions int) (*SQLite, inferenc
 // Later valid replacements must not hide an invalid earlier revision or an
 // orphaned side of the policy/activation pair after the duplicate pass is gone.
 func TestIncidentInferenceAggregateHistoryFailure(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, damage := range []string{"invalid-earlier", "missing-policy", "missing-activation-reference"} {
 		t.Run(damage, func(t *testing.T) {
 			store, policy, correlation := appendIncidentBudgetHistory(t, 800)
@@ -127,6 +129,7 @@ func TestIncidentInferenceAggregateHistoryFailure(t *testing.T) {
 }
 
 func TestIncidentInferenceAggregateBytes(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, padding := range []int{6 << 20, 12 << 20} {
 		t.Run(fmt.Sprint(padding), func(t *testing.T) {
 			store, policy, correlation := appendIncidentBudgetHistory(t, 3)

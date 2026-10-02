@@ -13,6 +13,7 @@ import (
 )
 
 func TestIncidentJointSupportBytes(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, target := range []int{15 << 20, (15 << 20) + (768 << 10)} {
 		t.Run(fmt.Sprint(target), func(t *testing.T) {
 			store, err := Open(filepath.Join(t.TempDir(), "joint-bytes.db"))

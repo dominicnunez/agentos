@@ -508,6 +508,7 @@ func TestAuditIncidentIndependentProjectionValueIdentity(t *testing.T) {
 }
 
 func TestAuditIncidentDuplicateForeignReservationIdentity(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mode := range []string{"unrelated-control", "plain-selected", "duplicate-selected"} {
 		t.Run(mode, func(t *testing.T) {
 			store, err := Open(":memory:")

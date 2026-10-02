@@ -13,6 +13,7 @@ import (
 )
 
 func TestIncidentNegativeSharedActivationBytes(t *testing.T) {
+	parallelIncidentTest(t)
 	store, err := Open(":memory:")
 	if err != nil {
 		t.Fatal(err)

@@ -14,6 +14,7 @@ import (
 )
 
 func TestIncidentIncomingRosterLinks(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, link := range []struct {
 		name, kind, recordID, field, target string
 	}{
@@ -183,6 +184,7 @@ func TestIncidentIncomingRosterLinks(t *testing.T) {
 }
 
 func TestIncidentIncomingRosterGrowth(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, count := range []int{4, 16} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			store, err := Open(":memory:")

@@ -20,6 +20,7 @@ func seedIncidentEffects(t *testing.T, store *SQLite, count int) {
 }
 
 func TestIncidentEffectHistoryBudget(t *testing.T) {
+	parallelIncidentTest(t)
 	store, err := Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -55,6 +56,7 @@ func TestIncidentEffectGroupsStayExact(t *testing.T) {
 }
 
 func TestIncidentDistinctEffectGrowth(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, count := range []int{1, 120} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			store, err := Open(":memory:")

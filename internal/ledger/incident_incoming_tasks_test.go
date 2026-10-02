@@ -14,6 +14,7 @@ import (
 )
 
 func TestIncidentIncomingTaskLinks(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, org := range []string{"org-1", "org-2"} {
 		for _, field := range []string{"unrelated", "work_id", "lab_work", "parent_id", "depends_on"} {
 			for _, side := range []string{"both", "event", "record"} {
@@ -165,6 +166,7 @@ func TestIncidentIncomingTaskLinks(t *testing.T) {
 }
 
 func TestIncidentIncomingTaskGrowth(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, count := range []int{4, 16} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			store, err := Open(":memory:")

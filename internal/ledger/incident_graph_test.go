@@ -11,6 +11,7 @@ import (
 )
 
 func TestIncidentRejectsInvalidTaskGraph(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mutation := range []string{"missing dependency", "missing parent", "cycle"} {
 		t.Run(mutation, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "graph.db")

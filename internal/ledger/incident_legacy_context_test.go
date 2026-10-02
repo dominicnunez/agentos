@@ -13,6 +13,7 @@ import (
 )
 
 func TestIncidentLegacyKnowledgeContext(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, version := range []string{"v1", "v2", "v3", "v4", "v5"} {
 		for _, relevant := range []bool{false, true} {
 			name := version + "/unrelated"
@@ -27,6 +28,7 @@ func TestIncidentLegacyKnowledgeContext(t *testing.T) {
 }
 
 func TestIncidentLegacyKnowledgeBoundaries(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, test := range []struct {
 		name, version, selection string
 		scope                    core.KnowledgeScope

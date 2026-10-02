@@ -387,6 +387,7 @@ func TestIncidentRejectsOrphanInferenceRows(t *testing.T) {
 }
 
 func TestIncidentInferenceSupportBudget(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, distinct := range []bool{false, true} {
 		for _, padding := range []int{1100000, 12 << 20} {
 			t.Run(fmt.Sprintf("%t/%d", distinct, padding), func(t *testing.T) {

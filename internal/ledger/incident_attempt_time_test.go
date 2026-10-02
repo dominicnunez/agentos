@@ -14,6 +14,7 @@ import (
 )
 
 func TestIncidentEffectAttemptTime(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, terminal := range []core.EffectStatus{core.EffectAttempted, core.EffectConfirmed, core.EffectFailed} {
 		for _, mutation := range []string{"none", "missing", "zero", "terminal-changed"} {
 			if terminal == core.EffectAttempted && mutation == "terminal-changed" {

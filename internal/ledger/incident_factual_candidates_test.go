@@ -16,6 +16,7 @@ import (
 )
 
 func TestIncidentOmittedFactualContext(t *testing.T) {
+	parallelIncidentTest(t)
 	path := filepath.Join(t.TempDir(), "factual.db")
 	store, err := Open(path)
 	if err != nil {
@@ -110,6 +111,7 @@ func TestIncidentOmittedFactualContext(t *testing.T) {
 }
 
 func TestIncidentFactualScopeAndTime(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, scope := range []core.KnowledgeScope{core.KnowledgeScopeOrganization, core.KnowledgeScopeAgent, core.KnowledgeScopeTeam} {
 		for _, mode := range []string{"omitted", "unchanged", "late", "stale-before", "stale-after", "removed-before", "removed-after", "invalid-removal"} {
 			if strings.Contains(mode, "remov") && scope != core.KnowledgeScopeTeam {

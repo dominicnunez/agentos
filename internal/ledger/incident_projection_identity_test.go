@@ -231,6 +231,7 @@ func TestProjectionIdentityOccurrenceClaims(t *testing.T) {
 }
 
 func TestProjectionIdentityAdmissionClaims(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mode := range []string{"plain", "duplicate-leaf", "duplicate-container", "escaped-container", "escaped-leaf", "missing-projection", "opaque-nested"} {
 		t.Run(mode, func(t *testing.T) {
 			store := projectionScopeFixture(t)
@@ -268,6 +269,7 @@ func TestProjectionIdentityAdmissionClaims(t *testing.T) {
 }
 
 func TestProjectionIdentityLeaseAndOpaqueClaims(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mode := range []string{"lease", "duplicate-lease", "escaped-lease", "unrelated-lease", "opaque-record"} {
 		t.Run(mode, func(t *testing.T) {
 			store := projectionScopeFixture(t)

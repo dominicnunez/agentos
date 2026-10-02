@@ -11,6 +11,7 @@ import (
 )
 
 func TestIncidentDuplicateIntakeIdentity(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, field := range []string{"message_id", "source_message_id", "escaped-message"} {
 		t.Run(field, func(t *testing.T) {
 			store, err := Open(":memory:")

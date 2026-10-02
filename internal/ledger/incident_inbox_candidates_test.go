@@ -16,6 +16,7 @@ import (
 )
 
 func TestIncidentInboxCandidates(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, scope := range []string{events.RecipientTask, events.RecipientAgent, events.RecipientTeam} {
 		for _, mode := range []string{"omitted", "missing-row", "moved-row", "moved-event", "other-org", "other-recipient", "after-cutoff", "observed", "removed-before-start", "removed-after-start"} {
 			if (mode == "removed-before-start" || mode == "removed-after-start") && scope != events.RecipientTeam {
@@ -225,6 +226,7 @@ func appendInboxTaskInference(t testing.TB, store *SQLite, agent core.Agent, con
 }
 
 func TestIncidentInboxGrowth(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, n := range []int{1, 8} {
 		for _, unrelated := range []int{0, 500} {
 			t.Run(fmt.Sprintf("starts-%d/unrelated-%d", n, unrelated), func(t *testing.T) {

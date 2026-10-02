@@ -108,6 +108,7 @@ func mutateScopeTeam(t *testing.T, store *SQLite, mode string) {
 }
 
 func TestIncidentProjectionOrganizationScope(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mode := range []string{"both", "event-only", "record-only", "missing-record"} {
 		t.Run(mode, func(t *testing.T) {
 			store := projectionScopeFixture(t)
@@ -155,6 +156,7 @@ func TestIncidentProjectionOrganizationScope(t *testing.T) {
 // exercise discovery; the sealed Team regression above exercises an admitted
 // writer history whose organization claim alone becomes contradictory.
 func TestProjectionScopeOwnedClaims(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, owner := range []struct{ kind, event, value string }{
 		{"organization", "ORGANIZATION_CREATED", `{"id":"org-1"}`},
 		{"mission", "MISSION_CREATED", `{"organization_id":"org-1"}`},
@@ -274,6 +276,7 @@ func TestProjectionScopeOccurrenceClaims(t *testing.T) {
 }
 
 func TestProjectionScopeOrphanApplicability(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mode := range []string{"team-orphan", "organization-orphan-value", "organization-orphan-key", "opaque-note", "opaque-record", "work-extra-field"} {
 		t.Run(mode, func(t *testing.T) {
 			store := projectionScopeFixture(t)
@@ -481,6 +484,7 @@ func TestIncidentProjectionDistinctOrganizationClaims(t *testing.T) {
 }
 
 func TestProjectionScopeCounterpartApplicability(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, source := range []string{"event", "record"} {
 		t.Run(source, func(t *testing.T) {
 			store := projectionScopeFixture(t)
@@ -508,6 +512,7 @@ func TestProjectionScopeCounterpartApplicability(t *testing.T) {
 }
 
 func TestIncidentProjectionEmptyCorrelation(t *testing.T) {
+	parallelIncidentTest(t)
 	store := projectionScopeFixture(t)
 	if snapshot, err := store.VerifiedIncidentEvents(t.Context(), "org-1", "absent", 256); err != nil || len(snapshot.Work.Events) != 0 {
 		t.Fatalf("healthy empty incident: %v", err)
@@ -519,6 +524,7 @@ func TestIncidentProjectionEmptyCorrelation(t *testing.T) {
 }
 
 func TestProjectionScopeRootOccurrences(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mode := range []string{"duplicate", "escaped"} {
 		t.Run(mode, func(t *testing.T) {
 			store := projectionScopeFixture(t)

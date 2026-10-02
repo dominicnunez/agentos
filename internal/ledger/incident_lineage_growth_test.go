@@ -18,14 +18,17 @@ func TestIncidentLineageQueryGrowth(t *testing.T) {
 }
 
 func TestIncidentDerivedQueryGrowth(t *testing.T) {
+	parallelIncidentTest(t)
 	checkIncidentLineageGrowth(t, "derived")
 }
 
 func TestIncidentIncomingQueryGrowth(t *testing.T) {
+	parallelIncidentTest(t)
 	checkIncidentLineageGrowth(t, "incoming")
 }
 
 func TestIncidentIncomingWidthGrowth(t *testing.T) {
+	parallelIncidentTest(t)
 	checkIncidentLineageGrowth(t, "branching")
 }
 
