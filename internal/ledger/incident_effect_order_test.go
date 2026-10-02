@@ -10,6 +10,7 @@ import (
 )
 
 func TestIncidentEffectRequiresEarlierTask(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, laterConfirmation := range []bool{false, true} {
 		t.Run(map[bool]string{false: "attempt", true: "later-confirmation"}[laterConfirmation], func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "effects.db")

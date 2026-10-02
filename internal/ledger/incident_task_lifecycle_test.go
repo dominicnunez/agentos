@@ -12,6 +12,7 @@ import (
 )
 
 func TestIncidentTaskLifecycleEnvelope(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, label := range []string{"TASK_CREATED", "TASK_BLOCKED", "TASK_ASSIGNMENT_REVALIDATED", "TASK_EXECUTION_SUSPENDED", "TASK_RECOVERED", "TASK_RESUMED", "EXECUTION_STARTED", "TASK_VERIFIED_COMPLETE", "COMPLETION_REJECTED", "TASK_DEPENDENCY_FAILED", "TASK_REMEDIATION_FAILED", "TASK_WORK_FAILED"} {
 		for _, scope := range []string{"selected", "foreign-selected", "malformed-selected", "unrelated"} {
 			t.Run(label+"/"+scope, func(t *testing.T) {

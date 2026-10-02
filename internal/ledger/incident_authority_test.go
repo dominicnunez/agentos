@@ -11,6 +11,7 @@ import (
 )
 
 func TestIncidentRequiresLeaseHistory(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mutation := range []string{"missing-revocation-record", "missing-grant-record", "missing-revocation-event", "moved-revocation", "foreign-revocation"} {
 		t.Run(mutation, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "authority.db")

@@ -12,6 +12,7 @@ import (
 )
 
 func TestIncidentIncomingInboxRefs(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, field := range []string{"event_ids", "execution_start_event_ref"} {
 		t.Run(field, func(t *testing.T) {
 			store, err := Open(":memory:")

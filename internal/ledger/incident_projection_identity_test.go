@@ -13,6 +13,7 @@ import (
 )
 
 func TestIncidentIndependentProjectionValueID(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, kind := range []string{"team", "knowledge"} {
 		for _, source := range []string{"event", "record", "both"} {
 			t.Run(kind+"/"+source, func(t *testing.T) {

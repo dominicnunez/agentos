@@ -11,6 +11,7 @@ import (
 )
 
 func TestIncidentDuplicateKnowledgeClaims(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, family := range []string{"proposal", "validation"} {
 		for _, mode := range []string{"raw-reference", "consumer-gate", "consumer-reference", "consumer-value", "consumer-projection", "consumer-kind", "consumer-status", "unconsumed"} {
 			if family == "proposal" && mode == "consumer-status" {
@@ -106,6 +107,7 @@ func TestIncidentDuplicateKnowledgeClaims(t *testing.T) {
 }
 
 func TestIncidentDuplicateJudgmentClaims(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, kind := range []string{"HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED", "A2A_KNOWLEDGE_JUDGMENT_RECEIVED", "KNOWLEDGE_JUDGMENT_PUBLISHED"} {
 		for _, mode := range []string{"raw-reference", "consumer-gates", "unconsumed"} {
 			t.Run(kind+"/"+mode, func(t *testing.T) {

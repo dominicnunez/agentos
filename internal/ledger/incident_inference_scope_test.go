@@ -14,6 +14,7 @@ import (
 )
 
 func TestIncidentInferenceForeignScope(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, channel := range []string{"all", "row-task", "event-task", "payload-manifest", "duplicate-payload", "missing-purpose", "auxiliary-purpose", "orphan-row", "orphan-event", "terminal-event"} {
 		t.Run(channel, func(t *testing.T) { testIncidentInferenceScope(t, channel) })
 	}

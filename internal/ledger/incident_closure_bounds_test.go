@@ -44,6 +44,7 @@ func TestIncidentClosureDiamond(t *testing.T) {
 }
 
 func TestIncidentClosureBrokenMiddle(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mutation := range []string{"missing-record", "moved-record", "missing-event", "moved-event"} {
 		t.Run(mutation, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "broken.db")

@@ -159,6 +159,7 @@ func TestModelRetryOrdinaryClosureAgreement(t *testing.T) {
 }
 
 func TestModelStopRetryEvidence(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, normalization := range []bool{false, true} {
 		for _, reason := range []string{"runtime_shutdown", "caller_cancelled", "deadline_exceeded", "containment_unavailable", "security_hold"} {
 			for _, local := range []string{"RETURNED", "NOT_STARTED"} {
@@ -264,6 +265,7 @@ func TestModelStopAtomicAccountingAndCompletedFailure(t *testing.T) {
 }
 
 func TestModelStopHistoryCost(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, size := range []int{1, 1000} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			store, err := Open(":memory:")

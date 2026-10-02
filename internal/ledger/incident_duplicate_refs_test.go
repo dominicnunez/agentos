@@ -17,6 +17,7 @@ import (
 // A later duplicate can claim selected evidence even when both source channels
 // keep an unrelated first value. Selection must reach exact admission checking.
 func TestIncidentDuplicateReferences(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, field := range []string{"provenance_event_refs", "occurrence_event_refs", "value", "projection"} {
 		for _, side := range []string{"both", "event", "record"} {
 			if field == "projection" && side == "record" {

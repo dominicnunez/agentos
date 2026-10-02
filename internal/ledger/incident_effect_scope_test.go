@@ -11,6 +11,7 @@ import (
 )
 
 func TestIncidentEffectForeignScope(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, channel := range []string{"all", "record", "envelope", "payload", "unrelated"} {
 		t.Run(channel, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "effects.db")

@@ -13,6 +13,7 @@ import (
 )
 
 func TestIncidentIncomingDetails(t *testing.T) {
+	ledger.ParallelIncidentTestForTest(t)
 	for _, tc := range []struct {
 		event, targetEvent, field string
 		array                     bool

@@ -14,6 +14,7 @@ import (
 )
 
 func TestIncidentIncomingGoalLinks(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, side := range []string{"unrelated", "event", "record", "both"} {
 		t.Run(side, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "goals.db")
@@ -125,6 +126,7 @@ func TestIncidentIncomingGoalLinks(t *testing.T) {
 }
 
 func TestIncidentIncomingGoalGrowth(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, count := range []int{4, 16} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			store, err := Open(":memory:")

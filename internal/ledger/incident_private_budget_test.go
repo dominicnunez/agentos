@@ -13,6 +13,7 @@ import (
 )
 
 func TestIncidentPrivateInferenceBudget(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, sample := range []struct {
 		name                  string
 		reservations, padding int

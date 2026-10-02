@@ -13,6 +13,7 @@ import (
 )
 
 func TestIncidentAuthorityFingerprint(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, kind := range []string{"capability_lease", "organization_freeze"} {
 		for _, version := range []int{1, 2} {
 			for _, oversized := range []bool{false, true} {

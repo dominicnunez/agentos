@@ -16,6 +16,7 @@ import (
 // A real admitted model lifecycle anchors each retained-history mutation.
 // Every family must be selected before its owning validator can reject it.
 func TestIncidentExecutionEvidenceFamilies(t *testing.T) {
+	parallelIncidentTest(t)
 	families := []string{"EXECUTION_STARTED", "EXECUTION_CONTEXT_MANIFESTED", "EXECUTION_FINISHED", "TASK_EXECUTION_SUSPENDED", "PLANNING_CONTEXT_MANIFESTED", "INTENT_NORMALIZATION_CONTEXT_MANIFESTED", "MODEL_STOP_REQUESTED", "MODEL_STOP_UNCERTAIN", "MODEL_STOP_CONFIRMED", "EXECUTION_STOP_REQUESTED", "EXECUTION_STOP_UNCERTAIN", "EXECUTION_STOP_CONFIRMED", "TOOL_OUTCOME_RECORDED", "INFERENCE_USAGE_RECORDED", "INFERENCE_RESERVED", "INFERENCE_RECONCILED", "INFERENCE_NOT_SENT", "PLAN_CREATED", "PLANNING_FAILED", "INTENT_DRAFTED", "INTENT_NORMALIZATION_FAILED", "PLANNING_CONTAINMENT_SUSPENDED", "INTENT_NORMALIZATION_SUSPENDED", "FUTURE_ORDINARY_ACTIVITY"}
 	for _, family := range families {
 		t.Run(family, func(t *testing.T) {
@@ -51,6 +52,7 @@ func TestIncidentExecutionEvidenceFamilies(t *testing.T) {
 }
 
 func TestIncidentExecutionReferenceCompleteness(t *testing.T) {
+	parallelIncidentTest(t)
 	links := []string{"context_event_ref", "execution_start_ref", "execution_manifest_ref", "stop_request_ref", "usage_event_ref", "outcome_event_ref", "finish_event_ref", "evidence_event_ref", "observed_effect.stop_request_ref", "detail.stop_request_ref", "detail.execution_start_ref", "execution_id", "request_id", "task_id", "duplicate-key", "other-tenant", "independent-foreign", "independent"}
 	for _, link := range links {
 		t.Run(link, func(t *testing.T) {

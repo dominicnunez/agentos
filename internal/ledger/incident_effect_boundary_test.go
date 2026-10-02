@@ -29,6 +29,7 @@ func TestIncidentCountsStoredBytes(t *testing.T) {
 }
 
 func TestIncidentEffectEnvelope(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mutation := range []string{"none", "authorization_refs", "artifact_refs", "source_actor_id", "correlation_id", "empty-receipt", "duplicate-receipt"} {
 		t.Run(mutation, func(t *testing.T) {
 			store, err := Open(":memory:")

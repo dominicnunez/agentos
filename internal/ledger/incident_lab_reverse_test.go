@@ -27,6 +27,7 @@ func TestIncidentOwnedExecutionContracts(t *testing.T) {
 }
 
 func TestIncidentRejectsMovedExperiment(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, missing := range []string{"", "event", "record"} {
 		t.Run("missing-"+missing, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "lab.db")

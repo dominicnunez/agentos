@@ -7,6 +7,7 @@ import (
 )
 
 func TestIncidentUnusedKnowledgeStatements(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, kind := range []string{"KNOWLEDGE_VALIDATION_RECORDED", "KNOWLEDGE_JUDGMENT_PUBLISHED", "HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED", "A2A_KNOWLEDGE_JUDGMENT_RECEIVED"} {
 		for _, mode := range []string{"foreign-identity", "foreign-witness", "public", "unrelated"} {
 			t.Run(kind+"/"+mode, func(t *testing.T) {

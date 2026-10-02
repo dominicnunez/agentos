@@ -13,6 +13,7 @@ import (
 )
 
 func TestIncidentPrivateTaskSuspension(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mutation := range []string{"selected-task", "other-task", "other-organization", "other-organization-other-task"} {
 		t.Run(mutation, func(t *testing.T) { checkPrivateTaskSuspension(t, mutation) })
 	}

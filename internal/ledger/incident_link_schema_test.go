@@ -316,6 +316,7 @@ INSERT INTO records(kind,record_id,version,body,created_at) VALUES('task','malfo
 }
 
 func TestIncidentReadChecksLinkContents(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, record := range []bool{false, true} {
 		for _, mutation := range []string{"missing", "extra", "altered", "source identity"} {
 			t.Run(fmt.Sprintf("record=%t/%s", record, mutation), func(t *testing.T) {

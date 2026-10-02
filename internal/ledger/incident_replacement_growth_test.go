@@ -13,6 +13,7 @@ import (
 )
 
 func TestIncidentReplacementGrowth(t *testing.T) {
+	parallelIncidentTest(t)
 	baseline := map[string]int64{}
 	for _, depth := range []int{8, 32} {
 		t.Run(fmt.Sprint(depth), func(t *testing.T) {

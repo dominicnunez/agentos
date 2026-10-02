@@ -8,6 +8,7 @@ import (
 )
 
 func TestIncidentDependencyRoster(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mutation := range []string{"valid", "untrusted-note", "missing-profile-record", "orphan-profile-revision"} {
 		t.Run(mutation, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "dependencies.db")

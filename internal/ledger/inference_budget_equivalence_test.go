@@ -13,6 +13,7 @@ import (
 )
 
 func TestInferenceIncrementalBudgetMatchesReference(t *testing.T) {
+	parallelIncidentTest(t)
 	for seed := int64(0); seed < 80; seed++ {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) {
 			rng := rand.New(rand.NewSource(seed))

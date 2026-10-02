@@ -91,6 +91,7 @@ func TestIncidentEffectDependencyPromotion(t *testing.T) {
 }
 
 func TestIncidentPublicPrivateByteAllowances(t *testing.T) {
+	parallelIncidentTest(t)
 	store := sharedBudgetStore(t)
 	appendPrivateInferenceGoal(t, store)
 	const privatePayload = (15 << 20) + (600 << 10)
@@ -182,6 +183,7 @@ func incidentOverlapFullOwners(t *testing.T, store *SQLite) {
 }
 
 func TestIncidentPreviouslyPublicBytes(t *testing.T) {
+	parallelIncidentTest(t)
 	store := sharedBudgetStore(t)
 	public, err := store.Append(t.Context(), events.TrustedDraft{OrganizationID: "org-1", EventType: "AUDIT_NOTE", CorrelationID: "public", Payload: map[string]string{"text": strings.Repeat("u", (1<<20)+(512<<10))}})
 	if err != nil {

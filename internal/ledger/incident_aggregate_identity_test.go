@@ -13,6 +13,7 @@ import (
 )
 
 func TestIncidentIncomingAggregateIdentities(t *testing.T) {
+	ledger.ParallelIncidentTestForTest(t)
 	for _, field := range []string{"work_id", "intent_id", "tasks.task_id", "mission_id"} {
 		t.Run(field, func(t *testing.T) {
 			store, err := ledger.Open(filepath.Join(t.TempDir(), "aggregate-identities.db"))

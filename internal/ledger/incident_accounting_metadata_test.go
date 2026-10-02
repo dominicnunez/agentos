@@ -11,6 +11,7 @@ import (
 // SQLite's integer affinity still permits corrupt retained text. Bound every
 // stored accounting column before scanning numeric values into Go.
 func TestIncidentAccountingNumericBytePreflight(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, field := range []string{"reserved_input_tokens", "reserved_output_tokens", "reserved_cost_nano_usd", "charged_input_tokens", "charged_output_tokens", "charged_cost_nano_usd"} {
 		t.Run(field, func(t *testing.T) {
 			store, policy, correlation := appendIncidentBudgetHistory(t, 1)

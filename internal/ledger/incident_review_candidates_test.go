@@ -35,6 +35,7 @@ func (incidentReviewModel) Complete(_ context.Context, prompt string) (execution
 }
 
 func TestIncidentReviewCandidates(t *testing.T) {
+	ledger.ParallelIncidentTestForTest(t)
 	for _, kind := range []string{"COMPLETION_REVIEW_REQUESTED", "COMPLETION_REVIEW_DECIDED"} {
 		for _, mode := range []string{"foreign", "other-correlation", "after-manifest", "deterministic", "unconsumed"} {
 			t.Run(kind+"/"+mode, func(t *testing.T) {

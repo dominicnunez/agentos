@@ -14,6 +14,7 @@ import (
 )
 
 func TestIncidentPrivateReferenceItems(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, count := range []int{500, 550} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			store := sharedBudgetStore(t)
@@ -55,6 +56,7 @@ func TestIncidentPrivateReferenceItems(t *testing.T) {
 }
 
 func TestIncidentTransientReferenceItems(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, count := range []int{500, 550} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			store := sharedBudgetStore(t)
@@ -134,6 +136,7 @@ func TestIncidentTransientReferenceItems(t *testing.T) {
 }
 
 func TestIncidentEffectSharedSupportBytes(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, target := range []int{15 << 20, (15 << 20) + (768 << 10)} {
 		t.Run(fmt.Sprint(target), func(t *testing.T) {
 			store := sharedBudgetStore(t)
@@ -195,6 +198,7 @@ func TestIncidentEffectSharedSupportBytes(t *testing.T) {
 }
 
 func TestIncidentAdmissionSharedItems(t *testing.T) {
+	parallelIncidentTest(t)
 	store := sharedBudgetStore(t)
 	appendPrivateInferenceGoal(t, store)
 	policy := testInferencePolicy(time.Now().UTC())

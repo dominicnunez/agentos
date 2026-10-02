@@ -14,6 +14,7 @@ import (
 )
 
 func TestIncidentGoalDetailOwner(t *testing.T) {
+	ledger.ParallelIncidentTestForTest(t)
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "goal-detail.db")
 	store, err := ledger.Open(path)

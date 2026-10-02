@@ -14,6 +14,7 @@ import (
 )
 
 func TestIncidentCompletionCandidates(t *testing.T) {
+	ledger.ParallelIncidentTestForTest(t)
 	for _, kind := range []string{"COMPLETION_VERIFIED", "RESULT_PUBLISHED", "CANDIDATE_COMPLETE"} {
 		modes := []string{"foreign", "other-task", "other-correlation", "after-window"}
 		if kind == "RESULT_PUBLISHED" || kind == "CANDIDATE_COMPLETE" {
@@ -157,6 +158,7 @@ func TestIncidentCompletionCandidates(t *testing.T) {
 }
 
 func TestIncidentCompletionAnchors(t *testing.T) {
+	ledger.ParallelIncidentTestForTest(t)
 	for _, anchor := range []struct{ kind, candidate, want string }{
 		{"TOOL_OUTCOME_RECORDED", "RESULT_PUBLISHED", "task completion outcome evidence is invalid"},
 		{"COMPLETION_VERIFIED", "RESULT_PUBLISHED", "task completion lacks its exact verification decision"},

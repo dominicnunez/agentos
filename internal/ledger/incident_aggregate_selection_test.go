@@ -11,6 +11,7 @@ import (
 // Selection-level evidence separates exact references from inverse applicability
 // and checks metadata ordering before recursive document expansion.
 func TestIncidentAggregateReferenceBudget(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mode := range []string{"unused-inverse", "direct-foreign", "direct-oversized"} {
 		t.Run(mode, func(t *testing.T) {
 			store, err := Open(":memory:")

@@ -79,6 +79,7 @@ func TestAuditIncidentDisplacedRecordOwnedIdentity(t *testing.T) {
 }
 
 func TestAuditIncidentDispatchMalformedTemporalCandidate(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, phase := range []string{"before-roster", "roster-to-start", "after-start"} {
 		t.Run(phase, func(t *testing.T) {
 			store, err := Open(":memory:")
@@ -227,6 +228,7 @@ func TestAuditIncidentIndependentAdmissionEventIdentity(t *testing.T) {
 }
 
 func TestAuditIncidentStoredPolicyMetadata(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mode := range []string{"healthy", "activation-time", "zero-time", "empty-time", "active-negative", "active-large", "oversized-time", "oversized-active"} {
 		for _, version := range []int{1, inference.ConnectionPolicyVersion} {
 			t.Run(fmt.Sprintf("v%d/%s", version, mode), func(t *testing.T) {
@@ -582,6 +584,7 @@ func TestAuditIncidentDuplicateForeignReservationIdentity(t *testing.T) {
 }
 
 func TestAuditIncidentStrategyMalformedTemporalCandidate(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, phase := range []string{"before-strategy", "before-strategy-casefold", "after-start"} {
 		t.Run(phase, func(t *testing.T) {
 			store, err := Open(":memory:")
@@ -678,6 +681,7 @@ func TestAuditIncidentStrategyMalformedTemporalCandidate(t *testing.T) {
 }
 
 func TestAuditIncidentKnowledgeMalformedTemporalCandidate(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, phase := range []string{"sameorg-before-roster", "sameorg-invalid-target-before-start", "foreign-before-roster", "sameorg-after-start-emptyrefs", "sameorg-after-start-usedrefs", "sameorg-after-reservation"} {
 		t.Run(phase, func(t *testing.T) {
 			store, err := Open(":memory:")

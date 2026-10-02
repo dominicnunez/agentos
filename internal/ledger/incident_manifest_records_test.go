@@ -14,6 +14,7 @@ import (
 )
 
 func TestIncidentManifestRecordRefs(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, scenario := range []string{"knowledge", "task", "mission", "goal", "start-mission", "start-goal", "start-input", "task-identity", "agent"} {
 		t.Run(scenario, func(t *testing.T) {
 			kind, start := strings.CutPrefix(scenario, "start-")

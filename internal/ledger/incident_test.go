@@ -27,6 +27,7 @@ func incidentEffectFixture(t *testing.T, store *SQLite) core.EffectObligation {
 }
 
 func TestIncidentTaskEffectHistory(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mutation := range []string{"none", "earlier-record", "missing-record", "orphan-record", "cross-tenant", "orphan-event", "orphan-task", "orphan-envelope"} {
 		t.Run(mutation, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "effects.db")
@@ -462,6 +463,7 @@ func TestIncidentInferenceSupportBudget(t *testing.T) {
 	}
 }
 func TestIncidentInferenceGrowth(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, count := range []int{1, 100} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			store, err := Open(":memory:")

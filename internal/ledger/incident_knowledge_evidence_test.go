@@ -15,6 +15,7 @@ import (
 )
 
 func TestIncidentIncomingKnowledgeEvidence(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, field := range []string{"provenance_event_refs", "occurrence_event_refs"} {
 		for _, side := range []string{"both", "event", "record", "same-org", "unrelated", "opaque-note"} {
 			t.Run(field+"/"+side, func(t *testing.T) {
@@ -114,6 +115,7 @@ func TestIncidentIncomingKnowledgeEvidence(t *testing.T) {
 }
 
 func TestIncidentIncomingValidationRefs(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, side := range []string{"both", "event", "record", "same-org", "unrelated"} {
 		t.Run(side, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "validation-evidence.db")

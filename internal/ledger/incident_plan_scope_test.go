@@ -125,6 +125,7 @@ SELECT 'extra-plan',(SELECT MAX(sequence)+1 FROM events),?,?,source_actor_id,sou
 }
 
 func TestIncidentUnstartedPlanScope(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, private := range []bool{false, true} {
 		for _, variant := range []string{"foreign-plan-only", "local-and-foreign-plans", "foreign-start", "mixed-correlations"} {
 			if variant == "mixed-correlations" && !private {
@@ -269,6 +270,7 @@ func planScopeParents(t *testing.T, store *SQLite, organizationID, correlationID
 // Structured Human completion can advance a blocked Task without an execution
 // start. Its aggregate Work completion is therefore an independent Plan consumer.
 func TestIncidentCompletedPlanScope(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, private := range []bool{false, true} {
 		for _, foreignCompletion := range []bool{false, true} {
 			name := "local-completion/public"

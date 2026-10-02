@@ -10,6 +10,7 @@ import (
 )
 
 func TestIncidentDistinctTaskGrowth(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, count := range []int{1, 64} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			store, err := Open(":memory:")

@@ -9,6 +9,7 @@ import (
 )
 
 func TestIncidentReadRequiresLinkGuards(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, change := range []string{"missing", "replaced", "extra unique index", "extra source trigger", "temporary source trigger", "temporary link table"} {
 		t.Run(change, func(t *testing.T) {
 			store, err := Open(":memory:")

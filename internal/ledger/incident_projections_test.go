@@ -82,6 +82,7 @@ func TestIncidentRejectsRepeatedTerminalWork(t *testing.T) {
 }
 
 func TestIncidentRequiresExactSelectedRecords(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mutation := range []string{"work-padding", "task-padding", "missing-intent"} {
 		t.Run(mutation, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "incident.db")

@@ -14,6 +14,7 @@ import (
 )
 
 func TestIncidentIncomingSuspensionDetail(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, field := range []string{"stop_request_ref", "execution_start_ref", "request-start", "result-request", "confirmed-outcome_event_ref", "confirmed-usage_event_ref", "confirmed-finish_event_ref", "outcome-request", "ordinary-outcome", "legacy-tool-outcome", "legacy-execution_start_ref", "legacy-outcome_event_ref", "unrelated", "opaque-note"} {
 		t.Run(field, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "suspension.db")

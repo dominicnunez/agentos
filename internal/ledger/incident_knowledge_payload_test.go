@@ -13,6 +13,7 @@ import (
 )
 
 func TestIncidentKnowledgePayloadRefs(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, family := range []string{"agent-proposal", "deterministic-validation"} {
 		for _, mode := range []string{"foreign", "event-only", "record-only", "same-org", "unrelated", "unconsumed"} {
 			t.Run(family+"/"+mode, func(t *testing.T) {

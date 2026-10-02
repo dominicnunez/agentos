@@ -10,6 +10,7 @@ import (
 )
 
 func TestIncidentEffectAdmissionMetadata(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mutation := range []string{"none", "fingerprint", "matching-event", "large-fingerprint"} {
 		t.Run(mutation, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "effects.db")

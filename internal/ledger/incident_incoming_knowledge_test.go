@@ -14,6 +14,7 @@ import (
 )
 
 func TestIncidentIncomingDerivedKnowledge(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, side := range []string{"unrelated", "same-org", "event", "record", "both"} {
 		t.Run(side, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "incoming-knowledge.db")
@@ -170,6 +171,7 @@ func TestIncidentIncomingDerivedKnowledge(t *testing.T) {
 }
 
 func TestIncidentIncomingKnowledgeRoster(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, relation := range []string{"agent-scope", "team-scope", "agent-creator"} {
 		for _, side := range []string{"same-org", "event", "record", "both"} {
 			if side == "same-org" && relation == "agent-creator" {

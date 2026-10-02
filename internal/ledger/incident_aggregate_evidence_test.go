@@ -14,6 +14,7 @@ import (
 )
 
 func TestIncidentAggregateEvidence(t *testing.T) {
+	ledger.ParallelIncidentTestForTest(t)
 	for _, field := range []string{"work_evidence_refs", "criteria.work_evidence_refs", "tasks.verification_event_ref", "tasks.completion_event_ref"} {
 		t.Run(field, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "aggregate.db")

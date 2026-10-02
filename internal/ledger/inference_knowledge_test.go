@@ -658,6 +658,7 @@ func TestTaskInferenceDispatchRosterRejectsSupersededReference(t *testing.T) {
 }
 
 func TestTaskInferenceContextExcludesUnrelatedActivity(t *testing.T) {
+	parallelIncidentTest(t)
 	store, request := setupAdmittedTaskInference(t)
 	history := newInferenceExecutionHistory()
 	stream, err := store.Events(t.Context(), "")

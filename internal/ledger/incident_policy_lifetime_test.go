@@ -90,6 +90,7 @@ func TestIncidentRejectsRetiredPolicy(t *testing.T) {
 }
 
 func TestIncidentConnectionPolicyHistory(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mutation := range []string{"historical", "other-connection", "other-organization", "missing-policy", "missing-activation", "missing-activation-ref", "moved-policy", "moved-policy-and-event", "missing-reconciliation", "late-reconciliation", "retired-active"} {
 		t.Run(mutation, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "history.db")

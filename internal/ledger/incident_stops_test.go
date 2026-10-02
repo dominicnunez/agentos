@@ -114,6 +114,7 @@ func TestIncidentStopCrossCorrelation(t *testing.T) {
 }
 
 func TestIncidentStopLinkedHistory(t *testing.T) {
+	parallelIncidentTest(t)
 	variants := []string{"pending", "uncertain", "confirmed", "uncertain-confirmed", "duplicate-uncertain", "duplicate-confirmed", "early-invalid-late-confirmed", "cross-task", "cross-execution", "cross-all-envelope", "cross-tenant", "wrong-request", "cross-request", "duplicate-key-link", "malformed-linked", "malformed-foreign", "malformed-unrelated"}
 	for _, family := range []string{"planning", "normalization", "task"} {
 		for _, variant := range variants {
@@ -278,6 +279,7 @@ func TestIncidentStopWithoutRequest(t *testing.T) {
 }
 
 func TestIncidentStopGrowth(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, count := range []int{1, 32} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			store, err := Open(":memory:")

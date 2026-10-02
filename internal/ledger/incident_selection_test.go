@@ -142,6 +142,7 @@ func TestIncidentEnvelopeClosure(t *testing.T) {
 }
 
 func TestIncidentReferenceFanout(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, width := range []int{64, 256, 1024} {
 		t.Run(fmt.Sprint(width), func(t *testing.T) {
 			store, err := Open(":memory:")

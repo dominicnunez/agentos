@@ -15,6 +15,7 @@ import (
 )
 
 func TestIncidentUnusedAggregateClaims(t *testing.T) {
+	ledger.ParallelIncidentTestForTest(t)
 	for _, claim := range []string{"work_id", "intent_id", "tasks.task_id", "work.goal_id", "tasks.verification_event_ref", "tasks.completion_event_ref", "mission_id", "goal.goal_id", "work_evidence_refs", "criteria.work_evidence_refs", "unrelated-work", "unrelated-goal", "wrong-work-consumer", "wrong-goal-consumer", "consumed-work-goal", "consumed-goal-goal", "public-work", "public-goal"} {
 		t.Run(claim, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "unused-aggregate.db")

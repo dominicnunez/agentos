@@ -14,6 +14,7 @@ import (
 )
 
 func TestIncidentRejectsMovedPromotion(t *testing.T) {
+	ledger.ParallelIncidentTestForTest(t)
 	for _, missing := range []string{"", "event", "record"} {
 		t.Run("missing-"+missing, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "promotion.db")

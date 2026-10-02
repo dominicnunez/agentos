@@ -60,6 +60,7 @@ func TestIncidentReconciledRowBinding(t *testing.T) {
 }
 
 func TestIncidentReconciliationStates(t *testing.T) {
+	parallelIncidentTest(t)
 	states := []string{inferenceStateReserved, "RECOVERED", string(inference.ReconciliationCompleted), string(inference.ReconciliationNotSent), string(inference.ReconciliationUncertain), string(inference.ReconciliationViolation), string(inference.ReconciliationTerminalFailed), string(inference.ReconciliationTerminalIncomplete), string(inference.ReconciliationTerminalFailedNoUsage), string(inference.ReconciliationTerminalIncompleteNoUsage)}
 	for _, state := range states {
 		t.Run(state, func(t *testing.T) {
@@ -107,6 +108,7 @@ func TestIncidentReconciliationStates(t *testing.T) {
 }
 
 func TestIncidentReconciliationHistory(t *testing.T) {
+	parallelIncidentTest(t)
 	mutations := []string{"missing", "duplicate", "orphan", "before-reservation", "malformed-then-valid", "wrong-actor", "wrong-task", "wrong-execution", "wrong-organization", "wrong-correlation", "active-row", "extra-orphan", "unrelated-orphan"}
 	for _, mutation := range mutations {
 		t.Run(mutation, func(t *testing.T) {
@@ -205,6 +207,7 @@ func TestIncidentReconciliationHistory(t *testing.T) {
 }
 
 func TestIncidentReservationLinkedEvents(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, eventType := range []string{"INFERENCE_RESERVED", "INFERENCE_RECONCILED"} {
 		for _, scope := range []string{"other-correlation", "other-organization", "foreign-independent-reservation", "other-reservation", "independent-reservation", "malformed-other-org", "malformed-other-correlation", "malformed-independent-correlation"} {
 			t.Run(eventType+"/"+scope, func(t *testing.T) {

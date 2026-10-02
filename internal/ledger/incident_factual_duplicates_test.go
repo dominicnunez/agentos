@@ -15,6 +15,7 @@ import (
 )
 
 func TestIncidentDuplicateFactualEligibility(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, field := range []string{"status", "context_use", "scope", "scope_id", "organization_id", "value", "projection", "member_agent_ids"} {
 		t.Run(field, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "factual.db")

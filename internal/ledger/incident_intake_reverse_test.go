@@ -13,6 +13,7 @@ import (
 )
 
 func TestIncidentMovedIntakeAbandonment(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, name := range []string{"unrelated", "foreign-message", "selected-message", "alternate-field"} {
 		selected := name == "selected-message" || name == "alternate-field"
 		t.Run(name, func(t *testing.T) {
@@ -102,6 +103,7 @@ func TestIncidentIntakeMessageSelectors(t *testing.T) {
 }
 
 func TestIncidentIntakeUnrelatedGrowth(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, depth := range []int{8, 32} {
 		t.Run(fmt.Sprint(depth), func(t *testing.T) {
 			store, err := Open(":memory:")
