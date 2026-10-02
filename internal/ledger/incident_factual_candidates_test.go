@@ -293,6 +293,7 @@ func rewriteIncidentFact(t *testing.T, store *SQLite, change func(*core.Knowledg
 }
 
 func TestIncidentFactualGrowth(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, count := range []int{4, 16} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			store, err := Open(":memory:")

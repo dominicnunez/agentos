@@ -15,6 +15,7 @@ import (
 )
 
 func TestIncidentIncomingLabEvidence(t *testing.T) {
+	ledger.ParallelIncidentTestForTest(t)
 	for _, field := range []string{"result_event_refs", "experiment_result_event_refs", "reproduction_evidence_refs"} {
 		for _, side := range []string{"both", "event", "record", "unrelated"} {
 			t.Run(field+"/"+side, func(t *testing.T) {

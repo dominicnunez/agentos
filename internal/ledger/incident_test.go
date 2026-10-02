@@ -214,6 +214,7 @@ func TestIncidentReadSnapshotExcludesConcurrentHold(t *testing.T) {
 }
 
 func TestIncidentInferenceRequiresExactAccounting(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, mutation := range []string{"none", "reservation", "policy", "orphan", "later-duplicate", "released-stale", "oversized-row", "oversized-row-unicode", "oversized-row-nul"} {
 		t.Run(mutation, func(t *testing.T) {
 			store, err := Open(":memory:")

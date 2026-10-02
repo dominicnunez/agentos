@@ -12,6 +12,7 @@ import (
 )
 
 func TestIncidentDetailOwners(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, field := range []string{
 		"submission_event_ref",
 		"judgment_ref",

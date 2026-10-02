@@ -15,6 +15,7 @@ import (
 )
 
 func TestIncidentForeignHoldClaims(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, family := range []string{"task", "planning", "normalization", "outcome", "legacy-outcome", "ordinary-outcome"} {
 		for _, mode := range []string{"foreign", "same-org", "unrelated"} {
 			t.Run(family+"/"+mode, func(t *testing.T) {

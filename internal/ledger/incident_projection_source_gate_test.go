@@ -369,8 +369,7 @@ func TestProjectionSourceGateDifferential(t *testing.T) {
 		for worker := range paths {
 			t.Run(fmt.Sprint(worker), func(t *testing.T) {
 				t.Parallel()
-				incidentTestSlots <- struct{}{}
-				t.Cleanup(func() { <-incidentTestSlots })
+				acquireIncidentTest(t, true)
 				copy, err := Open(paths[worker])
 				if err != nil {
 					t.Fatal(err)
