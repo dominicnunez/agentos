@@ -8,7 +8,10 @@ import subprocess
 import tempfile
 
 
-def test_groups(listing, count=8):
+LEDGER_GROUP_COUNT = 16
+
+
+def test_groups(listing, count=LEDGER_GROUP_COUNT):
     names = []
     for name in listing.splitlines():
         if name.startswith("Benchmark"):
@@ -127,7 +130,7 @@ def run_app(root, group=None):
 def race_plan(root):
     jobs = [{"suite": "other", "group": 0}]
     with tempfile.TemporaryDirectory(prefix="agentos-race-plan-") as temp:
-        for suite, count in (("app", 2), ("ledger", 8)):
+        for suite, count in (("app", 2), ("ledger", LEDGER_GROUP_COUNT)):
             package = root / "internal" / suite
             binary = str(Path(temp) / (suite + ".test"))
             subprocess.run(["go", "test", "-race", "-c", "-o", binary,

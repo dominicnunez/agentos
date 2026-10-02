@@ -134,7 +134,7 @@ func Example() { fmt.Println("example"); /* Output: example */ }
     def test_long_differential_keeps_its_own_process(self):
         differential = "TestProjectionSourceGateDifferential"
         others = [f"TestFixture{index}" for index in range(40)]
-        groups = test_groups("\n".join([*others, differential]))
+        groups = test_groups("\n".join([*others, differential]), count=8)
         self.assertEqual(groups[0], [differential])
         self.assertEqual(len(groups), 9)
         self.assertCountEqual([name for group in groups for name in group],
@@ -154,11 +154,11 @@ func Example() { fmt.Println("example"); /* Output: example */ }
         self.assertCountEqual([name for group in groups for name in group], names)
         self.assertEqual(groups, test_groups("\n".join(reversed(names))))
 
-    def test_eight_ordinary_groups_without_differential(self):
-        names = [f"TestFixture{index}" for index in range(40)]
+    def test_ordinary_groups_bound_root_count(self):
+        names = [f"TestFixture{index}" for index in range(511)]
         groups = test_groups("\n".join(names))
-        self.assertEqual(len(groups), 8)
         self.assertCountEqual([name for group in groups for name in group], names)
+        self.assertTrue(all(0 < len(group) <= 32 for group in groups))
 
     def test_execution_preserves_limits_and_package_directory(self):
         with patch("scripts.race_tests.subprocess.run") as run:

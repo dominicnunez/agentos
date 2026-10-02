@@ -49,7 +49,7 @@ CI runs the complete normal Go suite and all race tests. It discovers the app
 and ledger tests, examples, and fuzz seed targets from compiled race binaries,
 then executes their groups on independent runners in parallel. App uses up to
 two nonempty groups. Ledger keeps the complete source-gate differential test
-alone and distributes every other target round-robin across up to eight nonempty
+alone and distributes every other target round-robin across up to sixteen nonempty
 groups. All other packages run under the race detector in one additional job.
 Each package or group retains its twenty-minute timeout and uncached test run.
 No tests, subtests, generated cases or history sizes are omitted from race testing.
