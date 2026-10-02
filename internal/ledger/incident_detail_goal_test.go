@@ -14,6 +14,15 @@ import (
 )
 
 func TestIncidentGoalDetailOwner(t *testing.T) {
+	testIncidentGoalDetailOwner(t, false)
+}
+
+func TestIncidentMissingGoalAdmission(t *testing.T) {
+	testIncidentGoalDetailOwner(t, true)
+}
+
+func testIncidentGoalDetailOwner(t *testing.T, missingAdmission bool) {
+	t.Helper()
 	ledger.ParallelIncidentTestForTest(t)
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "goal-detail.db")
@@ -146,6 +155,9 @@ func TestIncidentGoalDetailOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	ledger.ChangeIncidentDetailForTest(t, store, incoming.EventID, "evidence_event_ref", selected.EventID)
+	if missingAdmission {
+		ledger.RemoveIncidentAdmissionForTest(t, store, incoming.EventID)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}

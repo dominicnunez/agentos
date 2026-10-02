@@ -161,7 +161,7 @@ func TestIncidentFinalLinkMigration(t *testing.T) {
 				t.Fatal(err)
 			}
 			checkNew(1)
-			if err := validateIncidentLinkGrammar(t.Context(), store.db, 2); err != nil {
+			if err := validateIncidentLinkGrammar(t.Context(), store.db, 3); err != nil {
 				t.Fatal(err)
 			}
 			if err := validateIncidentLinkContents(t.Context(), store.db); err != nil {

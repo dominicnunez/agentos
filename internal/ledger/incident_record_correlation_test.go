@@ -137,7 +137,7 @@ func TestIncidentOrphanRecordCorrelationClaims(t *testing.T) {
 						t.Fatal("orphan shares a selected physical or owned Mission identity")
 					}
 					var linked bool
-					query := `WITH source(kind,body) AS (VALUES ('mission',?)) SELECT ` + incidentLinkMatch(true, "source", "?", "?") + ` FROM source`
+					query := `WITH source(kind,body,admission_event_id,admission_fingerprint) AS (VALUES ('mission',?,'','')) SELECT ` + incidentLinkMatch(true, "source", "?", "?") + ` FROM source`
 					if err := store.db.QueryRowContext(t.Context(), query, body, payload.Projection.ProjectionKind, payload.Projection.RecordID).Scan(&linked); err != nil {
 						t.Fatal(err)
 					}

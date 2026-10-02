@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,7 +27,7 @@ func TestIncidentIncomingRosterLinks(t *testing.T) {
 		{"agent_profile", "agent", "agent-foreign", "execution_profile_id", "profile-selected"},
 		{"task_profile", "task", "task-foreign-agent", "agent_config.profile_id", "profile-selected"},
 	} {
-		for _, side := range []string{"unrelated", "event", "record", "both"} {
+		for _, side := range []string{"unrelated", "event", "record", "both", "missing-kind", "nontext-kind", "wrong-kind", "counterpart-kind"} {
 			t.Run(link.name+"/"+side, func(t *testing.T) {
 				path := filepath.Join(t.TempDir(), "roster.db")
 				store, err := Open(path)
@@ -137,7 +138,7 @@ func TestIncidentIncomingRosterLinks(t *testing.T) {
 								return err
 							}
 						}
-						if side != "event" {
+						if side != "event" && side != "counterpart-kind" {
 							if _, err := tx.ExecContext(t.Context(), `UPDATE records SET body=?,admission_fingerprint=? WHERE admission_event_id=?`, recordBody, sealed.Admission.Fingerprint, eventID); err != nil {
 								return err
 							}
@@ -150,6 +151,13 @@ func TestIncidentIncomingRosterLinks(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				if strings.HasSuffix(side, "-kind") {
+					var eventID string
+					if err := store.db.QueryRowContext(t.Context(), `SELECT admission_event_id FROM records WHERE kind=? AND record_id=?`, link.kind, link.recordID).Scan(&eventID); err != nil {
+						t.Fatal(err)
+					}
+					changeIncidentSourceKind(t, store, eventID, side, side != "counterpart-kind")
+				}
 				if err := store.Close(); err != nil {
 					t.Fatal(err)
 				}
@@ -158,7 +166,7 @@ func TestIncidentIncomingRosterLinks(t *testing.T) {
 					t.Fatal(err)
 				}
 				fullErr := incomingRosterFullValidation(t, store)
-				if side == "event" || side == "both" {
+				if side == "event" || side == "both" || strings.HasSuffix(side, "-kind") {
 					if fullErr == nil {
 						t.Fatal("full recovery accepted invalid event relationship")
 					}

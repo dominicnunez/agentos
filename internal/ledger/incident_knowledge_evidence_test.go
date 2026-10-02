@@ -17,7 +17,7 @@ import (
 func TestIncidentIncomingKnowledgeEvidence(t *testing.T) {
 	parallelIncidentTest(t)
 	for _, field := range []string{"provenance_event_refs", "occurrence_event_refs"} {
-		for _, side := range []string{"both", "event", "record", "same-org", "unrelated", "opaque-note"} {
+		for _, side := range []string{"both", "event", "record", "same-org", "unrelated", "opaque-note", "missing-kind", "nontext-kind", "wrong-kind"} {
 			t.Run(field+"/"+side, func(t *testing.T) {
 				path := filepath.Join(t.TempDir(), "knowledge-evidence.db")
 				store, err := Open(path)
@@ -65,9 +65,17 @@ func TestIncidentIncomingKnowledgeEvidence(t *testing.T) {
 						t.Fatalf("valid baseline: %v", err)
 					}
 				}
-				invalid := side == "both" || side == "event" || side == "record"
+				missingKind := strings.HasSuffix(side, "-kind")
+				invalid := side == "both" || side == "event" || side == "record" || missingKind
 				if invalid {
-					changeKnowledgeEvidence(t, store, incoming.EventID, field, selected.EventID, side)
+					changeSide := side
+					if missingKind {
+						changeSide = "event"
+					}
+					changeKnowledgeEvidence(t, store, incoming.EventID, field, selected.EventID, changeSide)
+					if missingKind {
+						changeIncidentSourceKind(t, store, incoming.EventID, side, true)
+					}
 				}
 				if err := store.Close(); err != nil {
 					t.Fatal(err)
@@ -76,12 +84,15 @@ func TestIncidentIncomingKnowledgeEvidence(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if side == "both" || !invalid {
+				if side == "both" || !invalid || missingKind {
 					stream, err := store.Events(t.Context(), "")
 					if err != nil {
 						t.Fatal(err)
 					}
 					_, fullErr := events.ValidateProjectionHistory(stream, nil, nil, nil)
+					if missingKind && fullErr == nil {
+						t.Fatal("full replay accepted malformed runtime Knowledge source")
+					}
 					if side == "both" && (fullErr == nil || !strings.Contains(fullErr.Error(), "cross-organization evidence")) {
 						t.Fatalf("full replay did not reject evidence ownership: %v", fullErr)
 					}

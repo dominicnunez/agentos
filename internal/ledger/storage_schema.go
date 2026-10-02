@@ -25,7 +25,7 @@ const (
 	// not identify or publish an Agent OS release.
 	OldestSupportedStorageVersion = 1
 	// CurrentStorageVersion is the only layout accepted after runtime startup.
-	CurrentStorageVersion = 14
+	CurrentStorageVersion = 15
 	// AuthorityAdmissionBindingStorageVersion is the first storage contract in
 	// which every capability and freeze record names its exact admitting event.
 	AuthorityAdmissionBindingStorageVersion = 7
@@ -366,6 +366,11 @@ func applyStorageMigration(ctx context.Context, tx *sql.Tx, from, to int) error 
 			return err
 		}
 		return advanceProjectionStorageContract(ctx, tx, from, to, "incident-evidence-indexes")
+	case from == 14 && to == 15:
+		if err := migrateIncidentLifecycleLinks(ctx, tx); err != nil {
+			return err
+		}
+		return advanceProjectionStorageContract(ctx, tx, from, to, "incident-lifecycle-indexes")
 	default:
 		return fmt.Errorf("no reviewed storage migration exists")
 	}
@@ -727,6 +732,9 @@ func validateStorageLayout(ctx context.Context, query storageQueryer, version in
 		grammarVersion := 1
 		if version >= 14 {
 			grammarVersion = 2
+		}
+		if version >= 15 {
+			grammarVersion = 3
 		}
 		if err := validateIncidentLinkGrammar(ctx, query, grammarVersion); err != nil {
 			return StorageContract{}, err

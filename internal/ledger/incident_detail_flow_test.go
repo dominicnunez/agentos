@@ -13,6 +13,19 @@ import (
 )
 
 func TestIncidentIncomingDetails(t *testing.T) {
+	testIncidentIncomingDetails(t, false, false)
+}
+
+func TestIncidentMissingAdmissionDetails(t *testing.T) {
+	testIncidentIncomingDetails(t, true, false)
+}
+
+func TestIncidentMissingAdmissionSameOrg(t *testing.T) {
+	testIncidentIncomingDetails(t, true, true)
+}
+
+func testIncidentIncomingDetails(t *testing.T, missingAdmission, sameOrg bool) {
+	t.Helper()
 	ledger.ParallelIncidentTestForTest(t)
 	for _, tc := range []struct {
 		event, targetEvent, field string
@@ -33,7 +46,7 @@ func TestIncidentIncomingDetails(t *testing.T) {
 			var selected, incoming events.Event
 			for _, id := range []string{"selected", "independent"} {
 				organization := "org-1"
-				if id == "independent" {
+				if id == "independent" && !sameOrg {
 					organization = "org-2"
 				}
 				result, err := runtime.Submit(t.Context(), app.Submit{RequestID: id, OrganizationID: organization, Statement: "echo " + id, Kind: core.ExecutionDeterministic})
@@ -57,7 +70,10 @@ func TestIncidentIncomingDetails(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, event := range baseline.DependencyEvents {
-				if event.EventID == incoming.EventID {
+				// Same-organization histories may already be required by the
+				// Plan owner's candidate validation. That variant checks exact
+				// rejection; foreign fixtures discriminate incoming discovery.
+				if event.EventID == incoming.EventID && !sameOrg {
 					t.Fatal("unrelated admission selected before reference changed")
 				}
 			}
@@ -76,6 +92,9 @@ func TestIncidentIncomingDetails(t *testing.T) {
 				ref = []string{selected.EventID}
 			}
 			ledger.ChangeIncidentDetailForTest(t, store, incoming.EventID, tc.field, ref)
+			if missingAdmission {
+				ledger.RemoveIncidentAdmissionForTest(t, store, incoming.EventID)
+			}
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
 			}

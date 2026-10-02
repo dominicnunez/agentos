@@ -97,6 +97,12 @@ func createIncidentLinkSchema(ctx context.Context, tx *sql.Tx) error {
 }
 
 func incidentLinkGrammar(statement string, version int) string {
+	statement = strings.ReplaceAll(statement, "_v3(", fmt.Sprintf("_v%d(", version))
+	if version < 3 {
+		for _, source := range []string{"NEW.", "r.", ""} {
+			statement = strings.ReplaceAll(statement, incidentRecordLinkFlag(source), "1")
+		}
+	}
 	if version == 1 {
 		statement = strings.ReplaceAll(statement, "_v2(", "_v1(")
 		// v13 event extractors received NULL as their unused kind argument.
@@ -142,7 +148,7 @@ func createIncidentLinks(ctx context.Context, tx *sql.Tx, version int) error {
 }
 
 func validateIncidentLinkSchema(ctx context.Context, query storageQueryer) error {
-	return validateIncidentLinkGrammar(ctx, query, 2)
+	return validateIncidentLinkGrammar(ctx, query, 3)
 }
 
 func validateIncidentLinkGrammar(ctx context.Context, query storageQueryer, version int) error {
@@ -199,7 +205,7 @@ OR (type='trigger' AND tbl_name IN ('events','records','incident_event_links','i
 // The reader receives only aggregate counts. Extraction retains one source's
 // document and distinct links at a time, never a complete historical graph.
 func validateIncidentLinkContents(ctx context.Context, query storageQueryer) error {
-	return validateIncidentLinkVersion(ctx, query, 2)
+	return validateIncidentLinkVersion(ctx, query, 3)
 }
 
 func validateIncidentLinkVersion(ctx context.Context, query storageQueryer, version int) error {

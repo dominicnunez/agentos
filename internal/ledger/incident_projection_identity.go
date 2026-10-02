@@ -55,7 +55,8 @@ func projectionIdentitySQL() string {
 		OR EXISTS(SELECT 1 FROM records r LEFT JOIN events e ON e.event_id=r.admission_event_id
 		WHERE (r.kind IN (` + incidentProjectionKindsSQL + `,'capability_lease') OR r.admission_event_id<>'' OR r.admission_fingerprint<>'')
 		AND ` + projectionSelectedSourceBytes("r.body") + `
-		AND ` + projectionIdentityClaims("record") + `)`
+		AND ` + projectionIdentityClaims("record") + `)
+		OR ` + incidentCounterpartClaims()
 }
 
 func projectionSelectedSourceBytes(body string) string {

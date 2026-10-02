@@ -1,6 +1,7 @@
 package ledger_test
 
 import (
+	"encoding/json"
 	"github.com/dominicnunez/agentos/internal/app"
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
@@ -14,6 +15,15 @@ import (
 )
 
 func TestIncidentAggregateEvidence(t *testing.T) {
+	testIncidentAggregateEvidence(t, false)
+}
+
+func TestIncidentAggregateMissingConsumer(t *testing.T) {
+	testIncidentAggregateEvidence(t, true)
+}
+
+func testIncidentAggregateEvidence(t *testing.T, missingConsumer bool) {
+	t.Helper()
 	ledger.ParallelIncidentTestForTest(t)
 	for _, field := range []string{"work_evidence_refs", "criteria.work_evidence_refs", "tasks.verification_event_ref", "tasks.completion_event_ref"} {
 		t.Run(field, func(t *testing.T) {
@@ -98,14 +108,49 @@ func TestIncidentAggregateEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			graph, err = events.ValidateProjectionHistory(stream, nil, nil, nil)
-			if err != nil {
-				t.Fatalf("mutation must preserve projection admissions: %v", err)
+			if missingConsumer {
+				var terminal string
+				for _, event := range stream {
+					if event.EventType != "WORK_COMPLETED" && event.EventType != "GOAL_ACHIEVED" {
+						continue
+					}
+					payload, present, err := events.AdmittedProjection(event)
+					if err != nil || !present {
+						t.Fatalf("writer terminal admission: %v", err)
+					}
+					var detail struct {
+						EvidenceEventRef string `json:"evidence_event_ref"`
+					}
+					if err := json.Unmarshal(payload.Detail, &detail); err != nil {
+						t.Fatal(err)
+					}
+					if detail.EvidenceEventRef == incoming.EventID {
+						terminal = event.EventID
+					}
+				}
+				if terminal == "" {
+					t.Fatal("aggregate has no actual consuming terminal")
+				}
+				ledger.ChangeIncidentSourceKindForTest(t, store, terminal, "missing-kind")
+				stream, err = store.Events(t.Context(), "")
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
-			if err := events.ValidateProjectionCompletions(graph, stream, nil); err == nil {
-				t.Fatal("full completion owner accepted substituted aggregate evidence")
+			graph, err = events.ValidateProjectionHistory(stream, nil, nil, nil)
+			if missingConsumer {
+				if err == nil {
+					t.Fatal("full history accepted malformed consuming terminal")
+				}
 			} else {
-				t.Logf("owner rejection: %v", err)
+				if err != nil {
+					t.Fatalf("mutation must preserve projection admissions: %v", err)
+				}
+				if err := events.ValidateProjectionCompletions(graph, stream, nil); err == nil {
+					t.Fatal("full completion owner accepted substituted aggregate evidence")
+				} else {
+					t.Logf("owner rejection: %v", err)
+				}
 			}
 			snapshot, err := store.VerifiedIncidentEvents(t.Context(), "org-2", selected.CorrelationID, 256)
 			if err == nil {

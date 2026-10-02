@@ -4,22 +4,17 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-
-	"github.com/dominicnunez/agentos/internal/core"
 )
 
-// Retain the prior boolean expression as an independent equivalence oracle.
-// The consumer/path implementation is unchanged by the dispatch optimization.
+// Retain the prior boolean expression to check dispatch ordering independently.
+// Both forms share current consumption rules; separate public writer fixtures
+// verify ownership and malformed applicability metadata.
 func incidentRawApplicableBeforeDispatch(source string) string {
 	proposal := incidentKnowledgeConsumerFor(source, "provenance_event_refs", func(body, path string) string {
 		return incidentScalarClaim(body, path+".created_by_kind", `='AGENT'`)
 	}, false)
-	validation := incidentKnowledgeConsumerFor(source, "validation_refs", func(body, path string) string {
-		return incidentScalarClaim(body, path+".validation_method", `='`+string(core.KnowledgeValidationDeterministic)+`'`)
-	}, true)
-	judgment := incidentKnowledgeConsumerFor(source, "validation_refs", func(body, path string) string {
-		return `(` + incidentScalarClaim(body, path+".validation_method", ` IN ('`+string(core.KnowledgeValidationHuman)+`','`+string(core.KnowledgeValidationIndependentAgent)+`')`) + ` OR ` + incidentScalarClaim(body, path+".validated_by_kind", ` IN ('HUMAN','AGENT','EXTERNAL_AGENT')`) + `)`
-	}, true)
+	validation := incidentKnowledgeConsumerFor(source, "validation_refs", nil, true)
+	judgment := validation
 	knowledge := `(` + source + `.event_type NOT IN ('KNOWLEDGE_PROPOSED','KNOWLEDGE_VALIDATION_RECORDED','KNOWLEDGE_JUDGMENT_PUBLISHED','HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED','A2A_KNOWLEDGE_JUDGMENT_RECEIVED') OR ` + incidentScalarClaim(source+".payload", "$.projection.projection_kind", `='knowledge'`) + ` OR
 (` + source + `.event_type='KNOWLEDGE_PROPOSED' AND (` + proposal + `)) OR
 (` + source + `.event_type='KNOWLEDGE_VALIDATION_RECORDED' AND (` + validation + `)) OR
@@ -36,7 +31,7 @@ func TestIncidentRawDispatchSkipsOrdinaryPayload(t *testing.T) {
 	// A failing SQL payload expression makes unnecessary document evaluation
 	// observable without timing thresholds or inspecting implementation text.
 	query := func(expression string) string {
-		return `SELECT ` + strings.ReplaceAll(expression, "s.payload", `json('not-json')`) + ` FROM (SELECT 'AUDIT_NOTE' AS event_type,'ordinary' AS event_id) s`
+		return `SELECT ` + strings.ReplaceAll(expression, "s.payload", `json('not-json')`) + ` FROM (SELECT 'AUDIT_NOTE' AS event_type,'ordinary' AS event_id,'runtime' AS source_actor_id) s`
 	}
 	var applicable bool
 	if err := store.db.QueryRowContext(t.Context(), query(incidentRawApplicableBeforeDispatch("s"))).Scan(&applicable); err == nil {
@@ -88,10 +83,16 @@ func TestIncidentRawDispatchEquivalence(t *testing.T) {
 					if !json.Valid([]byte(payload)) && payload != "{" {
 						t.Fatal("invalid differential fixture")
 					}
-					if err := store.db.QueryRowContext(t.Context(), `SELECT `+incidentRawApplicableBeforeDispatch("s")+`,`+incidentRawClaimApplicable("s")+` FROM (SELECT 'unused-foreign' AS event_id,? AS event_type,? AS payload) s`, kind, payload).Scan(&before, &after); err != nil {
+					if err := store.db.QueryRowContext(t.Context(), `SELECT `+incidentRawApplicableBeforeDispatch("s")+`,`+incidentRawClaimApplicable("s")+` FROM (SELECT 'unused-foreign' AS event_id,'agent-foreign' AS source_actor_id,? AS event_type,? AS payload) s`, kind, payload).Scan(&before, &after); err != nil {
 						t.Fatal(err)
 					}
 					if before != after {
+						// Reserved projection fields make even non-runtime proposals
+						// owned admission candidates. Bare unused proposals keep the
+						// historical consumer gate; valid writer rows above remain equal.
+						if kind == "KNOWLEDGE_PROPOSED" && strings.Contains(payload, `"projection"`) && after {
+							continue
+						}
 						t.Fatalf("%s %q changed eligibility: before=%v after=%v", kind, payload, before, after)
 					}
 				}

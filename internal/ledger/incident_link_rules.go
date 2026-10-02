@@ -69,11 +69,11 @@ var incidentIntakeLinkRules = []incidentLinkRule{
 // each maintenance and guard trigger makes even ordinary event inserts expensive
 // to compile. Neither function reads a connection or retains source state.
 func init() {
-	// Keep v1 immutable so migration can verify the exact v13 index contents
-	// before adding relationships introduced by v2.
-	for _, version := range []string{"v1", "v2"} {
+	// Keep v1 and v2 immutable so migrations verify the exact historical
+	// index contents before adding relationships introduced by later grammars.
+	for _, version := range []string{"v1", "v2", "v3"} {
 		rules := incidentLinkRules
-		if version == "v2" {
+		if version != "v1" {
 			rules = append(append([]incidentLinkRule(nil), rules...), incidentEvidenceLinkRules...)
 			rules = append(rules, incidentIntakeLinkRules...)
 			rules = append(rules, incidentDetailLinkRules...)
@@ -90,6 +90,9 @@ func init() {
 		visitor := visitIncidentLinks
 		if version == "v2" {
 			visitor = visitAllIncidentLinks
+		}
+		if version == "v3" {
+			visitor = visitIncidentLifecycleLinks
 		}
 		sqlite.MustRegisterDeterministicScalarFunction("agentos_incident_links_"+version, 3, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
 			links := []incidentSelector{}
@@ -125,9 +128,13 @@ func incidentLinkArguments(record bool, source string) string {
 		source += "."
 	}
 	if record {
-		return "1," + source + "kind," + source + "body"
+		return incidentRecordLinkFlag(source) + "," + source + "kind," + source + "body"
 	}
 	return "0," + source + "event_type," + source + "payload"
+}
+
+func incidentRecordLinkFlag(source string) string {
+	return "CASE WHEN COALESCE(" + source + "admission_event_id,'')<>'' OR COALESCE(" + source + "admission_fingerprint,'')<>'' THEN 2 ELSE 1 END"
 }
 
 // incidentLinkSelect returns distinct links for one source row. Event projection
@@ -137,12 +144,12 @@ func incidentLinkSelect(record bool, source string) string {
 }
 
 func incidentLinkJSON(record bool, source string) string {
-	return "agentos_incident_links_v2(" + incidentLinkArguments(record, source) + ")"
+	return "agentos_incident_links_v3(" + incidentLinkArguments(record, source) + ")"
 }
 
 // All arguments are internal SQL expressions, not caller supplied identifiers.
 func incidentLinkMatch(record bool, source, targetKind, targetID string) string {
-	return "agentos_incident_link_match_v2(" + incidentLinkArguments(record, source) + "," + targetKind + "," + targetID + ")"
+	return "agentos_incident_link_match_v3(" + incidentLinkArguments(record, source) + "," + targetKind + "," + targetID + ")"
 }
 
 // Invalid documents and fields derive no links, so maintenance cannot reject a

@@ -20,8 +20,9 @@ func incidentAggregateIncoming(source string) string {
 	// Check the owning terminal source and detail independently. Oversized
 	// consumers remain candidates without JSON expansion; ordinary metadata
 	// preflight then fails before their payload can be decoded.
-	consumed := `((` + source + `.event_type='WORK_COMPLETION_EVALUATED' AND consumer.event_type='WORK_COMPLETED' AND ` + incidentScalarClaim("consumer.payload", "$.projection.projection_kind", `='work'`) + `) OR
- (` + source + `.event_type='GOAL_PROGRESS_EVALUATED' AND consumer.event_type='GOAL_ACHIEVED' AND ` + incidentScalarClaim("consumer.payload", "$.projection.projection_kind", `='goal'`) + `)) AND ` + incidentScalarClaim("consumer.payload", "$.detail.evidence_event_ref", `=`+source+`.event_id`)
+	// The terminal label owns this consumption even when its projection
+	// discriminator is damaged. Exact admission validation rejects that source.
+	consumed := incidentScalarClaim("consumer.payload", "$.detail.evidence_event_ref", `=`+source+`.event_id`)
 	return `(` + source + `.event_type NOT IN ('WORK_COMPLETION_EVALUATED','GOAL_PROGRESS_EVALUATED') OR EXISTS (
 SELECT 1 FROM incident_event_links aggregate_use JOIN events consumer ON consumer.sequence=aggregate_use.event_sequence AND consumer.event_id=aggregate_use.event_id
 WHERE aggregate_use.target_kind='event' AND aggregate_use.target_id=` + source + `.event_id AND

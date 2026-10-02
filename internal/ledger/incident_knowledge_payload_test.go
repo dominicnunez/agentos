@@ -14,8 +14,12 @@ import (
 
 func TestIncidentKnowledgePayloadRefs(t *testing.T) {
 	parallelIncidentTest(t)
-	for _, family := range []string{"agent-proposal", "deterministic-validation"} {
-		for _, mode := range []string{"foreign", "event-only", "record-only", "same-org", "unrelated", "unconsumed"} {
+	for _, family := range []string{"agent-proposal", "deterministic-validation", "human-judgment"} {
+		for _, mode := range []string{"foreign", "event-only", "record-only", "record-kind", "event-counterpart-kind", "record-counterpart-kind", "event-label", "event-status", "record-status", "event-method", "record-method", "both-method", "candidate-refs", "same-org", "unrelated", "unconsumed"} {
+			if family == "agent-proposal" && (mode == "event-status" || mode == "record-status" || mode == "event-method" || mode == "record-method" || mode == "both-method" || mode == "candidate-refs") {
+				// Agent proposals use creator applicability, not activation status.
+				continue
+			}
 			t.Run(family+"/"+mode, func(t *testing.T) {
 				path := filepath.Join(t.TempDir(), "knowledge.db")
 				store, err := Open(path)
@@ -27,35 +31,134 @@ func TestIncidentKnowledgePayloadRefs(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				var raw events.Event
-				if family == "agent-proposal" {
-					raw = appendIncidentAgentCandidate(t, store, mode != "unconsumed")
-				} else {
-					raw = appendIncidentDeterministicKnowledge(t, store, mode != "unconsumed")
-				}
+				raw := appendIncidentKnowledgeStatement(t, store, family, mode != "unconsumed")
 				stream, err := store.Events(t.Context(), "")
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err := events.ValidateProjectionHistory(stream, nil, nil, nil); err != nil {
+				leases, freezes, err := store.KnowledgeAuthorityAdmissions(t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := events.ValidateProjectionHistory(stream, nil, leases, freezes); err != nil {
 					t.Fatalf("writer full replay: %v", err)
 				}
-				invalid := mode == "foreign" || mode == "event-only" || mode == "record-only"
+				invalid := mode != "same-org" && mode != "unrelated" && mode != "unconsumed"
 				if invalid || mode == "unconsumed" {
 					field, value := "outcome_event_ref", any(selected.EventID)
-					if family == "agent-proposal" {
+					switch family {
+					case "agent-proposal":
 						field, value = "occurrence_event_refs", []string{selected.EventID}
+					case "human-judgment":
+						field = "capability_check_event_id"
 					}
 					changeKnowledgePayloadRef(t, store, raw, field, value)
 				}
-				if mode == "event-only" || mode == "record-only" {
+				if mode == "both-method" || mode == "candidate-refs" {
+					if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
+						var admission string
+						if err := tx.QueryRowContext(t.Context(), `SELECT admission_event_id FROM records WHERE kind='knowledge' ORDER BY version DESC LIMIT 1`).Scan(&admission); err != nil {
+							return err
+						}
+						if _, err := tx.ExecContext(t.Context(), `UPDATE events SET payload=CAST(json_remove(json_set(payload,'$.projection.value.validation_method','UNVALIDATED'),'$.projection.value.validated_by_kind') AS BLOB) WHERE event_id=?`, admission); err != nil {
+							return err
+						}
+						if _, err := tx.ExecContext(t.Context(), `UPDATE records SET body=CAST(json_remove(json_set(body,'$.value.validation_method','UNVALIDATED'),'$.value.validated_by_kind') AS BLOB) WHERE admission_event_id=?`, admission); err != nil {
+							return err
+						}
+						if mode == "candidate-refs" {
+							if _, err := tx.ExecContext(t.Context(), `UPDATE events SET event_type='KNOWLEDGE_PROPOSED',payload=CAST(json_set(payload,'$.projection.value.status','CANDIDATE') AS BLOB) WHERE event_id=?`, admission); err != nil {
+								return err
+							}
+							if _, err := tx.ExecContext(t.Context(), `UPDATE records SET body=CAST(json_set(body,'$.value.status','CANDIDATE') AS BLOB) WHERE admission_event_id=?`, admission); err != nil {
+								return err
+							}
+						}
+						if err := validateIncidentLinkContents(t.Context(), tx); err != nil {
+							return err
+						}
+						if _, err := tx.ExecContext(t.Context(), `DELETE FROM event_integrity`); err != nil {
+							return err
+						}
+						return rebuildEventIntegrity(t.Context(), tx)
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if mode == "event-counterpart-kind" || mode == "record-counterpart-kind" || mode == "event-label" || mode == "event-status" || mode == "record-status" || mode == "event-method" || mode == "record-method" {
+					var admission string
+					if err := store.db.QueryRowContext(t.Context(), `SELECT admission_event_id FROM records WHERE kind='knowledge' ORDER BY version DESC LIMIT 1`).Scan(&admission); err != nil {
+						t.Fatal(err)
+					}
+					switch mode {
+					case "event-method":
+						if _, err := store.db.ExecContext(t.Context(), `UPDATE events SET payload=CAST(json_remove(json_set(payload,'$.projection.value.validation_method','UNVALIDATED'),'$.projection.value.validated_by_kind') AS BLOB) WHERE event_id=?`, admission); err != nil {
+							t.Fatal(err)
+						}
+					case "record-method":
+						if _, err := store.db.ExecContext(t.Context(), `UPDATE records SET body=CAST(json_remove(json_set(body,'$.value.validation_method','UNVALIDATED'),'$.value.validated_by_kind') AS BLOB) WHERE admission_event_id=?`, admission); err != nil {
+							t.Fatal(err)
+						}
+					case "event-label":
+						if _, err := store.db.ExecContext(t.Context(), `UPDATE events SET event_type='AUDIT_NOTE' WHERE event_id=?`, admission); err != nil {
+							t.Fatal(err)
+						}
+					case "event-status":
+						if _, err := store.db.ExecContext(t.Context(), `UPDATE events SET payload=CAST(json_set(payload,'$.projection.value.status','CANDIDATE') AS BLOB) WHERE event_id=?`, admission); err != nil {
+							t.Fatal(err)
+						}
+					case "record-status":
+						if _, err := store.db.ExecContext(t.Context(), `UPDATE records SET body=CAST(json_set(body,'$.value.status','CANDIDATE') AS BLOB) WHERE admission_event_id=?`, admission); err != nil {
+							t.Fatal(err)
+						}
+					case "event-counterpart-kind":
+						changeIncidentSourceKind(t, store, admission, "counterpart-kind", false)
+					case "record-counterpart-kind":
+						ChangeIncidentRecordKindForTest(t, store, admission, true)
+					}
+					field := "provenance_event_refs"
+					if family != "agent-proposal" {
+						field = "validation_refs"
+					}
+					// Only the damaged side still consumes the raw statement.
+					// The counterpart retains independent ownership evidence.
+					if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
+						query, fieldPath := `UPDATE records SET body=CAST(json_set(body,?,json('[]')) AS BLOB) WHERE admission_event_id=?`, "$.value."+field
+						if mode == "record-counterpart-kind" || mode == "record-status" || mode == "record-method" {
+							query, fieldPath = `UPDATE events SET payload=CAST(json_set(payload,?,json('[]')) AS BLOB) WHERE event_id=?`, "$.projection.value."+field
+						}
+						if _, err := tx.ExecContext(t.Context(), query, fieldPath, admission); err != nil {
+							return err
+						}
+						if err := validateIncidentLinkContents(t.Context(), tx); err != nil {
+							return err
+						}
+						if _, err := tx.ExecContext(t.Context(), `DELETE FROM event_integrity`); err != nil {
+							return err
+						}
+						return rebuildEventIntegrity(t.Context(), tx)
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if mode == "event-only" || mode == "record-only" || mode == "record-kind" {
 					if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
 						query := `DELETE FROM records WHERE kind='knowledge'`
-						if mode == "record-only" {
+						if mode == "record-only" || mode == "record-kind" {
 							query = `DELETE FROM events WHERE event_id IN (SELECT admission_event_id FROM records WHERE kind='knowledge' ORDER BY version DESC LIMIT 1)`
 						}
 						if _, err := tx.ExecContext(t.Context(), query); err != nil {
 							return err
+						}
+						if mode == "record-kind" {
+							// Retain the typed body and admission metadata, while losing
+							// the physical kind and the consuming event independently.
+							if _, err := tx.ExecContext(t.Context(), `UPDATE records SET kind='authorization_trace' WHERE kind='knowledge' AND version=(SELECT MAX(version) FROM records WHERE kind='knowledge')`); err != nil {
+								return err
+							}
+							if err := validateIncidentLinkContents(t.Context(), tx); err != nil {
+								return err
+							}
 						}
 						if _, err := tx.ExecContext(t.Context(), `DELETE FROM event_integrity`); err != nil {
 							return err
@@ -76,11 +179,11 @@ func TestIncidentKnowledgePayloadRefs(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				_, fullErr := events.ValidateProjectionHistory(stream, nil, nil, nil)
+				_, fullErr := events.ValidateProjectionHistory(stream, nil, leases, freezes)
 				// Event-only recovery still sees the consuming admission. A record
 				// orphan has no admission to replay and must fail exact backing in
 				// the storage-aware reader instead.
-				if mode != "record-only" && (fullErr != nil) != invalid {
+				if mode != "record-only" && mode != "record-kind" && (fullErr != nil) != invalid {
 					t.Fatalf("full owner applicability: %v", fullErr)
 				}
 				organization, correlation := "org-2", "selected"
@@ -101,6 +204,51 @@ func TestIncidentKnowledgePayloadRefs(t *testing.T) {
 			})
 		}
 	}
+}
+
+func appendIncidentKnowledgeStatement(t *testing.T, store *SQLite, family string, consumed bool) events.Event {
+	t.Helper()
+	switch family {
+	case "agent-proposal":
+		return appendIncidentAgentCandidate(t, store, consumed)
+	case "deterministic-validation":
+		return appendIncidentDeterministicKnowledge(t, store, consumed)
+	case "human-judgment":
+		appendIncidentLeaseKnowledge(t, store, "org-1", "human-validation", true)
+		stream, err := store.Events(t.Context(), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range stream {
+			if event.EventType != "HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED" || event.CorrelationID != "judgment-human-validation" {
+				continue
+			}
+			if !consumed {
+				// Retain the writer's raw judgment, candidate, and authorization,
+				// removing only the complete activation and its exact backing.
+				if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
+					if _, err := tx.ExecContext(t.Context(), `DELETE FROM events WHERE event_id IN (SELECT admission_event_id FROM records WHERE kind='knowledge' AND record_id='human-validation' AND version=2)`); err != nil {
+						return err
+					}
+					if _, err := tx.ExecContext(t.Context(), `DELETE FROM records WHERE kind='knowledge' AND record_id='human-validation' AND version=2`); err != nil {
+						return err
+					}
+					if err := validateIncidentLinkContents(t.Context(), tx); err != nil {
+						return err
+					}
+					if _, err := tx.ExecContext(t.Context(), `DELETE FROM event_integrity`); err != nil {
+						return err
+					}
+					return rebuildEventIntegrity(t.Context(), tx)
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return event
+		}
+	}
+	t.Fatalf("missing writer statement for %s", family)
+	return events.Event{}
 }
 
 func appendIncidentAgentCandidate(t *testing.T, store *SQLite, consumed bool) events.Event {
@@ -207,4 +355,70 @@ func changeKnowledgePayloadRef(t *testing.T, store *SQLite, event events.Event, 
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// Keep direct storage mutation in the owning package; the external test compares
+// the public incident reader with the independent storage-aware recovery reader.
+func IncidentKnowledgeOwnerFixtureForTest(t *testing.T, family string, opaque bool) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "knowledge-owner.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	selected, err := store.Append(t.Context(), events.TrustedDraft{OrganizationID: "org-2", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "selected", Payload: map[string]string{"message": "Selected evidence"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw events.Event
+	if family == "agent-proposal" {
+		raw = appendIncidentAgentCandidate(t, store, true)
+	} else {
+		raw = appendIncidentDeterministicKnowledge(t, store, true)
+	}
+	stream, err := store.Events(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := events.ValidateProjectionHistory(stream, nil, nil, nil); err != nil {
+		t.Fatalf("writer full replay: %v", err)
+	}
+	if _, err := store.VerifiedIncidentEvents(t.Context(), "org-2", "selected", 256); err != nil {
+		t.Fatalf("healthy incident: %v", err)
+	}
+	field, value := "outcome_event_ref", any(selected.EventID)
+	if family == "agent-proposal" {
+		field, value = "occurrence_event_refs", []string{selected.EventID}
+	}
+	changeKnowledgePayloadRef(t, store, raw, field, value)
+	if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
+		var admission string
+		if err := tx.QueryRowContext(t.Context(), `SELECT admission_event_id FROM records WHERE kind='knowledge' ORDER BY version DESC LIMIT 1`).Scan(&admission); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(t.Context(), `DELETE FROM events WHERE event_id=?`, admission); err != nil {
+			return err
+		}
+		query := `UPDATE records SET kind='authorization_trace' WHERE admission_event_id=?`
+		if opaque {
+			query = `UPDATE records SET kind='authorization_trace',admission_event_id='',admission_fingerprint='' WHERE admission_event_id=?`
+		}
+		if _, err := tx.ExecContext(t.Context(), query, admission); err != nil {
+			return err
+		}
+		if err := validateIncidentLinkContents(t.Context(), tx); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(t.Context(), `DELETE FROM event_integrity`); err != nil {
+			return err
+		}
+		return rebuildEventIntegrity(t.Context(), tx)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

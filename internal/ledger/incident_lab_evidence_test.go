@@ -12,12 +12,13 @@ import (
 	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 	"github.com/dominicnunez/agentos/internal/ledger"
+	ledgerrecovery "github.com/dominicnunez/agentos/internal/ledger/recovery"
 )
 
 func TestIncidentIncomingLabEvidence(t *testing.T) {
 	ledger.ParallelIncidentTestForTest(t)
 	for _, field := range []string{"result_event_refs", "experiment_result_event_refs", "reproduction_evidence_refs"} {
-		for _, side := range []string{"both", "event", "record", "unrelated"} {
+		for _, side := range []string{"both", "event", "record", "unrelated", "missing-kind", "nontext-kind", "wrong-kind", "record-kind", "record-counterpart-kind"} {
 			t.Run(field+"/"+side, func(t *testing.T) {
 				path := filepath.Join(t.TempDir(), "lab-evidence.db")
 				store, err := ledger.Open(path)
@@ -95,16 +96,31 @@ func TestIncidentIncomingLabEvidence(t *testing.T) {
 					admission = experimentAdmission
 				}
 				if side != "unrelated" {
-					ledger.ChangeLabEvidenceForTest(t, store, admission, field, selectedRef, side)
+					changeSide := side
+					if strings.HasPrefix(side, "record-") {
+						changeSide = "record"
+					} else if strings.HasSuffix(side, "-kind") {
+						changeSide = "event"
+					}
+					ledger.ChangeLabEvidenceForTest(t, store, admission, field, selectedRef, changeSide)
+					if strings.HasPrefix(side, "record-") {
+						ledger.ChangeIncidentRecordKindForTest(t, store, admission, side == "record-counterpart-kind")
+					} else if strings.HasSuffix(side, "-kind") {
+						ledger.ChangeIncidentSourceKindForTest(t, store, admission, side)
+					}
 				}
 				stream, err := store.Events(t.Context(), "")
 				if err != nil {
 					t.Fatal(err)
 				}
 				_, fullErr := events.ValidateProjectionHistory(stream, nil, nil, nil)
-				if side == "unrelated" || side == "record" {
+				if side == "unrelated" || side == "record" || strings.HasPrefix(side, "record-") {
 					if fullErr != nil {
 						t.Fatalf("valid full projection history: %v", fullErr)
+					}
+				} else if strings.HasSuffix(side, "-kind") {
+					if fullErr == nil {
+						t.Fatal("full projection history accepted malformed Lab source")
 					}
 				} else {
 					want := "completed Lab experiment result is not its exact Work completion"
@@ -116,6 +132,18 @@ func TestIncidentIncomingLabEvidence(t *testing.T) {
 					}
 					if fullErr == nil || !strings.Contains(fullErr.Error(), want) {
 						t.Fatalf("full projection history did not reject %s: %v", field, fullErr)
+					}
+				}
+				if strings.HasPrefix(side, "record-") {
+					if err := store.Close(); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := ledgerrecovery.Verify(t.Context(), path); err == nil || !strings.Contains(err.Error(), "carries projection authority") {
+						t.Fatalf("full recovery did not reject generic record authority: %v", err)
+					}
+					store, err = ledger.Open(path)
+					if err != nil {
+						t.Fatal(err)
 					}
 				}
 				snapshot, err := store.VerifiedIncidentEvents(t.Context(), "org-1", selected.Events[0].CorrelationID, 256)

@@ -206,7 +206,7 @@ func assertTaskScopeUnlinked(t *testing.T, store *SQLite, baseline events.Incide
 	}
 	for key := range keys {
 		var linked bool
-		query := `WITH source(kind,body) AS (VALUES (?,?)) SELECT ` + incidentLinkMatch(true, "source", "?", "?") + ` FROM source`
+		query := `WITH source(kind,body,admission_event_id,admission_fingerprint) AS (VALUES (?,?,'','')) SELECT ` + incidentLinkMatch(true, "source", "?", "?") + ` FROM source`
 		if err := store.db.QueryRowContext(t.Context(), query, kind, body, key.kind, key.id).Scan(&linked); err != nil {
 			t.Fatal(err)
 		}
