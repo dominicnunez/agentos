@@ -97,6 +97,9 @@ func loadIncidentDependencies(ctx context.Context, tx *sql.Tx, snapshot *events.
 			return err
 		}
 	}
+	if err := validateIncidentLeaseConsumers(ctx, tx, d.organization, d.keys); err != nil {
+		return err
+	}
 	if err := validateIncidentProjectionIDs(ctx, tx, d.keys); err != nil {
 		return err
 	}
@@ -630,7 +633,7 @@ func (d *incidentDependencies) loadRecords(ctx context.Context, tx *sql.Tx) erro
 		}
 	}
 	if len(correlations) > 0 {
-		where += ` OR (r.kind IN (` + incidentProjectionKindsSQL + `) AND CASE WHEN json_valid(r.body) THEN json_extract(r.body,'$.correlation_id') END IN (` + incidentMarks(len(correlations)) + `) AND (e.organization_id=? OR (e.event_id IS NULL AND ` + incidentProjectionOwnedOrganization + `=?)))`
+		where += ` OR (r.kind IN (` + incidentProjectionKindsSQL + `) AND ` + incidentRecordCorrelationMatch(incidentMarks(len(correlations))) + ` AND (e.organization_id=? OR (e.event_id IS NULL AND ` + incidentRecordOrgMatch + `)))`
 		for _, id := range correlations {
 			args = append(args, id)
 		}

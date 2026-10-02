@@ -13,7 +13,28 @@ import (
 const incidentProjectionRecordBytes = `length(CAST(r.body AS BLOB))+length(CAST(r.kind AS BLOB))+length(CAST(r.record_id AS BLOB))+length(CAST(r.version AS BLOB))+length(CAST(r.admission_event_id AS BLOB))+length(CAST(r.admission_fingerprint AS BLOB))`
 const incidentProjectionEventBytes = `COALESCE(length(CAST(e.event_id AS BLOB)),0)+COALESCE(length(CAST(e.organization_id AS BLOB)),0)+COALESCE(length(CAST(e.event_type AS BLOB)),0)+COALESCE(length(CAST(e.source_actor_id AS BLOB)),0)+COALESCE(length(CAST(e.source_execution_id AS BLOB)),0)+COALESCE(length(CAST(e.recipient_scope AS BLOB)),0)+COALESCE(length(CAST(e.recipient_id AS BLOB)),0)+COALESCE(length(CAST(e.task_id AS BLOB)),0)+COALESCE(length(CAST(e.authorization_refs AS BLOB)),0)+COALESCE(length(CAST(e.artifact_refs AS BLOB)),0)+COALESCE(length(CAST(e.payload AS BLOB)),0)+COALESCE(length(CAST(e.correlation_id AS BLOB)),0)+COALESCE(length(CAST(e.created_at AS BLOB)),0)+COALESCE(length(CAST(e.schema_version AS BLOB)),0)`
 const incidentProjectionKindsSQL = `'organization','mission','goal','team','agent_blueprint','execution_profile','agent','intent','work','lab_experiment','lab_promotion_candidate','knowledge','task'`
-const incidentProjectionOwnedOrganization = `CASE WHEN json_valid(r.body) THEN CASE WHEN r.kind='organization' THEN json_extract(r.body,'$.value.id') WHEN r.kind NOT IN ('work','task') THEN json_extract(r.body,'$.value.organization_id') END END`
+
+// Retain every owned organization occurrence in an orphan's value containers.
+// Work derives organization through Intent; Task owns routing.organization_id.
+const incidentRecordOrgMatch = `EXISTS (
+ SELECT 1 FROM (
+ SELECT v.value AS organization FROM json_each(CASE WHEN json_valid(r.body) THEN r.body ELSE '{}' END) p
+ JOIN json_each(CASE WHEN p.key='value' AND p.type='object' THEN p.value ELSE '{}' END) v
+ WHERE p.key='value' AND p.type='object' AND v.type='text'
+ AND ((r.kind='organization' AND v.key='id') OR (r.kind NOT IN ('organization','work','task') AND v.key='organization_id'))
+ UNION ALL
+ SELECT o.value AS organization FROM json_each(CASE WHEN json_valid(r.body) THEN r.body ELSE '{}' END) p
+ JOIN json_each(CASE WHEN p.key='value' AND p.type='object' THEN p.value ELSE '{}' END) v
+ JOIN json_each(CASE WHEN v.key='routing' AND v.type='object' THEN v.value ELSE '{}' END) o
+ WHERE r.kind='task' AND p.key='value' AND p.type='object' AND v.key='routing' AND v.type='object'
+ AND o.key='organization_id' AND o.type='text'
+ ) owned WHERE owned.organization=?)`
+
+// Correlation is root metadata. A later duplicate or escaped key is still a
+// candidate claim; only the exact record owner decides whether it is canonical.
+func incidentRecordCorrelationMatch(marks string) string {
+	return `EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(r.body) THEN r.body ELSE '{}' END) c WHERE c.key='correlation_id' AND c.type='text' AND c.value IN (` + marks + `))`
+}
 
 // Validate every selected projection against the shared exact admission reader,
 // including projection kinds not needed to discover this incident's Tasks.
@@ -58,7 +79,7 @@ func validateIncidentRecords(ctx context.Context, tx *sql.Tx, stream []events.Ev
 	}
 	organization, correlation := stream[0].OrganizationID, stream[0].CorrelationID
 	args = append(args, correlation, organization, organization)
-	where := `WHERE (` + selected + `) OR (r.kind IN (` + incidentProjectionKindsSQL + `) AND CASE WHEN json_valid(r.body) THEN json_extract(r.body,'$.correlation_id') END=? AND (e.organization_id=? OR (e.event_id IS NULL AND ` + incidentProjectionOwnedOrganization + `=?)))`
+	where := `WHERE (` + selected + `) OR (r.kind IN (` + incidentProjectionKindsSQL + `) AND ` + incidentRecordCorrelationMatch("?") + ` AND (e.organization_id=? OR (e.event_id IS NULL AND ` + incidentRecordOrgMatch + `)))`
 	for _, link := range []struct {
 		kind, field string
 		ids         map[string]bool
