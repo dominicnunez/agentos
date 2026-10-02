@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -204,6 +205,202 @@ func TestIncidentKnowledgePayloadRefs(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestIncidentKnowledgeCreatorRefs(t *testing.T) {
+	parallelIncidentTest(t)
+	for _, side := range []string{"event", "record"} {
+		for _, mode := range []string{"missing", "null", "nontext", "unknown", "duplicate-kind", "duplicate-value", "escaped-kind", "runtime-value", "runtime-projection", "runtime"} {
+			t.Run(side+"/"+mode, func(t *testing.T) {
+				store, err := Open(filepath.Join(t.TempDir(), "creator.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = store.Close() }()
+				selected, err := store.Append(t.Context(), events.TrustedDraft{OrganizationID: "org-2", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "selected", Payload: map[string]string{"message": "Selected evidence"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				runtimeCreator := strings.HasPrefix(mode, "runtime")
+				raw := appendIncidentAgentCandidate(t, store, !runtimeCreator)
+				if runtimeCreator {
+					appendIncidentRuntimeCandidate(t, store, raw)
+				}
+				stream, err := store.Events(t.Context(), "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := events.ValidateProjectionHistory(stream, nil, nil, nil); err != nil {
+					t.Fatalf("writer full replay: %v", err)
+				}
+				changeKnowledgePayloadRef(t, store, raw, "occurrence_event_refs", []string{selected.EventID})
+				if runtimeCreator && mode != "runtime" {
+					if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
+						var admission string
+						if err := tx.QueryRowContext(t.Context(), `SELECT admission_event_id FROM records WHERE kind='knowledge'`).Scan(&admission); err != nil {
+							return err
+						}
+						table, column, identity := "events", "payload", "event_id"
+						if side == "record" {
+							table, column, identity = "records", "body", "admission_event_id"
+						}
+						var body string
+						if err := tx.QueryRowContext(t.Context(), `SELECT `+column+` FROM `+table+` WHERE `+identity+`=?`, admission).Scan(&body); err != nil {
+							return err
+						}
+						before, after := `"value":`, `"value":{"created_by_kind":"RUNTIME"},"value":`
+						if mode == "runtime-projection" && side == "event" {
+							before, after = `"projection":`, `"projection":{"value":{"created_by_kind":"RUNTIME"}},"projection":`
+						}
+						body = strings.Replace(body, before, after, 1)
+						if _, err := tx.ExecContext(t.Context(), `UPDATE `+table+` SET `+column+`=? WHERE `+identity+`=?`, []byte(body), admission); err != nil {
+							return err
+						}
+						if err := validateIncidentLinkContents(t.Context(), tx); err != nil {
+							return err
+						}
+						if _, err := tx.ExecContext(t.Context(), `DELETE FROM event_integrity`); err != nil {
+							return err
+						}
+						return rebuildEventIntegrity(t.Context(), tx)
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if !runtimeCreator {
+					if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
+						var admission string
+						if err := tx.QueryRowContext(t.Context(), `SELECT admission_event_id FROM records WHERE kind='knowledge'`).Scan(&admission); err != nil {
+							return err
+						}
+						for _, source := range []struct{ table, column, path, identity string }{{"events", "payload", "$.projection.value.created_by_kind", "event_id"}, {"records", "body", "$.value.created_by_kind", "admission_event_id"}} {
+							query := `UPDATE ` + source.table + ` SET ` + source.column + `=CAST(json_remove(` + source.column + `,?) AS BLOB) WHERE ` + source.identity + `=?`
+							args := []any{source.path, admission}
+							if mode != "missing" && mode != "duplicate-value" {
+								query = `UPDATE ` + source.table + ` SET ` + source.column + `=CAST(json_set(` + source.column + `,?,?) AS BLOB) WHERE ` + source.identity + `=?`
+								var kind any
+								switch mode {
+								case "nontext":
+									kind = 7
+								case "unknown":
+									kind = "UNKNOWN"
+								case "duplicate-kind":
+									kind = "HUMAN"
+								case "escaped-kind":
+									kind = "AGENT"
+								}
+								args = []any{source.path, kind, admission}
+							}
+							if _, err := tx.ExecContext(t.Context(), query, args...); err != nil {
+								return err
+							}
+						}
+						query, path := `UPDATE records SET body=CAST(json_set(body,?,json('[]')) AS BLOB) WHERE admission_event_id=?`, "$.value.provenance_event_refs"
+						if side == "record" {
+							query, path = `UPDATE events SET payload=CAST(json_set(payload,?,json('[]')) AS BLOB) WHERE event_id=?`, "$.projection.value.provenance_event_refs"
+						}
+						if _, err := tx.ExecContext(t.Context(), query, path, admission); err != nil {
+							return err
+						}
+						if mode == "duplicate-kind" || mode == "duplicate-value" || mode == "escaped-kind" {
+							for _, source := range []struct{ table, column, identity string }{{"events", "payload", "event_id"}, {"records", "body", "admission_event_id"}} {
+								var body string
+								if err := tx.QueryRowContext(t.Context(), `SELECT `+source.column+` FROM `+source.table+` WHERE `+source.identity+`=?`, admission).Scan(&body); err != nil {
+									return err
+								}
+								switch mode {
+								case "duplicate-kind":
+									body = strings.Replace(body, `"created_by_kind":"HUMAN"`, `"created_by_kind":"RUNTIME","created_by_\u006bind":"HUMAN"`, 1)
+								case "duplicate-value":
+									body = strings.Replace(body, `"value":`, `"value":{"created_by_kind":"RUNTIME"},"value":`, 1)
+								case "escaped-kind":
+									body = strings.Replace(body, `"created_by_kind":`, `"created_by_\u006bind":`, 1)
+								}
+								if _, err := tx.ExecContext(t.Context(), `UPDATE `+source.table+` SET `+source.column+`=? WHERE `+source.identity+`=?`, []byte(body), admission); err != nil {
+									return err
+								}
+							}
+						}
+						if err := validateIncidentLinkContents(t.Context(), tx); err != nil {
+							return err
+						}
+						if _, err := tx.ExecContext(t.Context(), `DELETE FROM event_integrity`); err != nil {
+							return err
+						}
+						return rebuildEventIntegrity(t.Context(), tx)
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				stream, err = store.Events(t.Context(), "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, fullErr := events.ValidateProjectionHistory(stream, nil, nil, nil)
+				invalid := mode != "runtime"
+				if !runtimeCreator || side == "event" || mode == "runtime" {
+					if (fullErr != nil) != invalid {
+						t.Fatalf("full owner applicability: %v", fullErr)
+					}
+				}
+				snapshot, err := store.VerifiedIncidentEvents(t.Context(), "org-2", "selected", 256)
+				if invalid {
+					if err == nil {
+						t.Fatal("malformed creator consumption omitted")
+					}
+					if !reflect.DeepEqual(snapshot, events.IncidentSnapshot{}) {
+						t.Fatal("invalid evidence returned partial snapshot")
+					}
+				} else if err != nil {
+					t.Fatalf("ordinary Runtime provenance: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func appendIncidentRuntimeCandidate(t *testing.T, store *SQLite, raw events.Event) {
+	t.Helper()
+	candidate := core.KnowledgeRecord{KnowledgeID: "runtime-knowledge", OrganizationID: "org-1", Version: 1, Type: core.KnowledgeLesson, Scope: core.KnowledgeScopeOrganization, ScopeID: "org-1", Status: core.KnowledgeCandidate, Title: "Runtime observation", Content: "Ordinary provenance", Basis: core.KnowledgeBasisExternalEvidence, ProvenanceEventRefs: []string{raw.EventID}, CreatedBy: "runtime", CreatedByKind: core.PrincipalRuntime, CreatedAt: time.Now().UTC(), ValidationMethod: core.KnowledgeValidationUnvalidated}
+	if _, err := store.AppendProjection(t.Context(), events.ProjectionDraft{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "KNOWLEDGE_PROPOSED", SourceActorID: "runtime", CorrelationID: "knowledge-runtime-knowledge"}, ProjectionKind: "knowledge", RecordID: "runtime-knowledge", Version: 1, Value: candidate}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func IncidentKnowledgeCreatorFixtureForTest(t *testing.T, duplicate bool) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "creator-owner.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	selected, err := store.Append(t.Context(), events.TrustedDraft{OrganizationID: "org-2", EventType: "AUDIT_NOTE", SourceActorID: "runtime", CorrelationID: "selected", Payload: map[string]string{"message": "Selected evidence"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := appendIncidentAgentCandidate(t, store, false)
+	appendIncidentRuntimeCandidate(t, store, raw)
+	changeKnowledgePayloadRef(t, store, raw, "occurrence_event_refs", []string{selected.EventID})
+	if duplicate {
+		if err := store.withTx(t.Context(), func(tx *sql.Tx) error {
+			var body string
+			if err := tx.QueryRowContext(t.Context(), `SELECT body FROM records WHERE kind='knowledge'`).Scan(&body); err != nil {
+				return err
+			}
+			body = strings.Replace(body, `"value":`, `"value":{"created_by_kind":"RUNTIME"},"value":`, 1)
+			if _, err := tx.ExecContext(t.Context(), `UPDATE records SET body=? WHERE kind='knowledge'`, []byte(body)); err != nil {
+				return err
+			}
+			return validateIncidentLinkContents(t.Context(), tx)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func appendIncidentKnowledgeStatement(t *testing.T, store *SQLite, family string, consumed bool) events.Event {

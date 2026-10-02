@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dominicnunez/agentos/internal/core"
 	"github.com/dominicnunez/agentos/internal/events"
 )
 
@@ -12,12 +11,7 @@ import (
 // admission consumes them. Keep event and record consumers independent so a
 // missing or displaced counterpart cannot hide the remaining claim.
 func incidentKnowledgeClaims(membership string) string {
-	equals := func(field, value string) func(string, string) string {
-		return func(source, path string) string {
-			return incidentScalarClaim(source, path+"."+field, `='`+value+`'`)
-		}
-	}
-	proposals := incidentKnowledgeConsumer("provenance_event_refs", equals("created_by_kind", string(core.PrincipalAgent)), false)
+	proposals := incidentKnowledgeConsumer("provenance_event_refs", incidentKnowledgeCreatorClaim, false)
 	validations := incidentKnowledgeConsumer("validation_refs", nil, true)
 	judgments := validations
 	return `(event_type='KNOWLEDGE_PROPOSED' AND ` + incidentArrayClaim("payload", "$.occurrence_event_refs", ` IN (`+membership+`)`) + ` AND (` + proposals + `)) OR
@@ -71,9 +65,7 @@ func incidentKnowledgeRecordOwner(source string) string {
 }
 
 func incidentKnowledgeIncoming(source string) string {
-	proposal := incidentKnowledgeConsumerFor(source, "provenance_event_refs", func(body, path string) string {
-		return incidentScalarClaim(body, path+".created_by_kind", `='AGENT'`)
-	}, false)
+	proposal := incidentKnowledgeConsumerFor(source, "provenance_event_refs", incidentKnowledgeCreatorClaim, false)
 	validation := incidentKnowledgeConsumerFor(source, "validation_refs", nil, true)
 	return `(CASE WHEN ` + source + `.event_type NOT IN ('KNOWLEDGE_PROPOSED','KNOWLEDGE_VALIDATION_RECORDED','KNOWLEDGE_JUDGMENT_PUBLISHED','HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED','A2A_KNOWLEDGE_JUDGMENT_RECEIVED') THEN 1
 WHEN ` + incidentScalarClaim(source+".payload", "$.projection.projection_kind", `='knowledge'`) + ` THEN 1
@@ -113,12 +105,7 @@ func incidentClaimJSON(source, path string) string {
 
 func incidentClaimQuery(source, path string, array bool, comparison string) string {
 	fields := strings.Split(strings.TrimPrefix(path, "$."), ".")
-	from := `json_each(CASE WHEN json_valid(` + source + `) THEN ` + source + ` ELSE '{}' END)`
-	for index := 0; index < len(fields)-1; index++ {
-		parent := fmt.Sprintf("parent%d", index)
-		from += ` ` + parent + ` JOIN json_each(CASE WHEN ` + parent + `.key='` + fields[index] + `' AND ` + parent + `.type='object' THEN ` + parent + `.value ELSE '{}' END)`
-	}
-	from += ` claim`
+	from := incidentClaimFrom(source, fields)
 	value, typed := "claim.value", `claim.type='text'`
 	if array {
 		from += ` JOIN json_each(CASE WHEN claim.key='` + fields[len(fields)-1] + `' AND claim.type='array' THEN claim.value ELSE '[]' END) ref`
@@ -130,4 +117,29 @@ func incidentClaimQuery(source, path string, array bool, comparison string) stri
 		predicate += ` AND ` + value + comparison
 	}
 	return `SELECT ` + value + ` AS value FROM ` + from + ` WHERE ` + predicate
+}
+
+// Only an unambiguous non-Agent creator kind excludes Agent creator binding.
+// Missing, invalid and repeated discriminators cannot establish that exclusion.
+// Inspect each value object independently, including duplicate ancestors.
+func incidentKnowledgeCreatorClaim(source, path string) string {
+	fields := strings.Split(strings.TrimPrefix(path, "$."), ".")
+	ambiguous := make([]string, 0, len(fields)+1)
+	for index, field := range fields {
+		ambiguous = append(ambiguous, `(SELECT COUNT(*) FROM `+incidentClaimFrom(source, fields[:index+1])+` WHERE claim.key='`+field+`')<>1`)
+	}
+	object := `CASE WHEN claim.type='object' THEN claim.value ELSE '{}' END`
+	ambiguous = append(ambiguous, `EXISTS(SELECT 1 FROM `+incidentClaimFrom(source, fields)+` WHERE claim.key='`+fields[len(fields)-1]+`' AND (
+(SELECT COUNT(*) FROM json_each(`+object+`) creator WHERE creator.key='created_by_kind')<>1 OR
+NOT EXISTS(SELECT 1 FROM json_each(`+object+`) creator WHERE creator.key='created_by_kind' AND creator.type='text' AND creator.value IN ('HUMAN','EXTERNAL_AGENT','RUNTIME'))))`)
+	return `(` + strings.Join(ambiguous, ` OR `) + `)`
+}
+
+func incidentClaimFrom(source string, fields []string) string {
+	from := `json_each(CASE WHEN json_valid(` + source + `) THEN ` + source + ` ELSE '{}' END)`
+	for index := 0; index < len(fields)-1; index++ {
+		parent := fmt.Sprintf("parent%d", index)
+		from += ` ` + parent + ` JOIN json_each(CASE WHEN ` + parent + `.key='` + fields[index] + `' AND ` + parent + `.type='object' THEN ` + parent + `.value ELSE '{}' END)`
+	}
+	return from + ` claim`
 }

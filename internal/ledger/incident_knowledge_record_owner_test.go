@@ -50,3 +50,32 @@ func TestIncidentKnowledgeRecordOwner(t *testing.T) {
 		}
 	}
 }
+
+func TestIncidentKnowledgeCreatorBacking(t *testing.T) {
+	ledger.ParallelIncidentTestForTest(t)
+	for _, duplicate := range []bool{false, true} {
+		mode := "ordinary-runtime"
+		if duplicate {
+			mode = "duplicate-value"
+		}
+		t.Run(mode, func(t *testing.T) {
+			path := ledger.IncidentKnowledgeCreatorFixtureForTest(t, duplicate)
+			_, recoveryErr := ledgerrecovery.Verify(t.Context(), path)
+			if (recoveryErr != nil) != duplicate {
+				t.Fatalf("storage owner applicability: %v", recoveryErr)
+			}
+			store, err := ledger.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = store.Close() }()
+			snapshot, err := store.VerifiedIncidentEvents(t.Context(), "org-2", "selected", 256)
+			if (err != nil) != duplicate {
+				t.Fatalf("incident applicability: %v", err)
+			}
+			if duplicate && !reflect.DeepEqual(snapshot, events.IncidentSnapshot{}) {
+				t.Fatal("invalid evidence returned partial snapshot")
+			}
+		})
+	}
+}

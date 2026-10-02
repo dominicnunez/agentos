@@ -10,9 +10,7 @@ import (
 // Both forms share current consumption rules; separate public writer fixtures
 // verify ownership and malformed applicability metadata.
 func incidentRawApplicableBeforeDispatch(source string) string {
-	proposal := incidentKnowledgeConsumerFor(source, "provenance_event_refs", func(body, path string) string {
-		return incidentScalarClaim(body, path+".created_by_kind", `='AGENT'`)
-	}, false)
+	proposal := incidentKnowledgeConsumerFor(source, "provenance_event_refs", incidentKnowledgeCreatorClaim, false)
 	validation := incidentKnowledgeConsumerFor(source, "validation_refs", nil, true)
 	judgment := validation
 	knowledge := `(` + source + `.event_type NOT IN ('KNOWLEDGE_PROPOSED','KNOWLEDGE_VALIDATION_RECORDED','KNOWLEDGE_JUDGMENT_PUBLISHED','HUMAN_KNOWLEDGE_JUDGMENT_RECEIVED','A2A_KNOWLEDGE_JUDGMENT_RECEIVED') OR ` + incidentScalarClaim(source+".payload", "$.projection.projection_kind", `='knowledge'`) + ` OR
