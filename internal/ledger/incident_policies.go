@@ -48,8 +48,9 @@ func loadIncidentPolicyHistory(ctx context.Context, tx *sql.Tx, organization str
 	if count > budget.events || size > budget.bytes {
 		return fmt.Errorf("incident inference policy history exceeds support limit")
 	}
-	budget.events -= count
-	budget.bytes -= size
+	if err := budget.consume(count, size); err != nil {
+		return err
+	}
 	type storedPolicy struct {
 		fingerprint, activation, connection, activatedAt string
 		body                                             []byte

@@ -17,7 +17,7 @@ const incidentProjectionOwnedOrganization = `CASE WHEN json_valid(r.body) THEN C
 
 // Validate every selected projection against the shared exact admission reader,
 // including projection kinds not needed to discover this incident's Tasks.
-func validateIncidentRecords(ctx context.Context, tx *sql.Tx, stream []events.Event) error {
+func validateIncidentRecords(ctx context.Context, tx *sql.Tx, stream []events.Event, support *incidentSupport) error {
 	if len(stream) == 0 {
 		return nil
 	}
@@ -90,6 +90,9 @@ func validateIncidentRecords(ctx context.Context, tx *sql.Tx, stream []events.Ev
 	}
 	if count != len(wanted) || recordBytes > 2<<20 || eventBytes > 2<<20 {
 		return fmt.Errorf("incident projection records are missing or exceed bounded snapshot")
+	}
+	if err := support.sourceRows(ctx, tx, "records", `SELECT r.rowid,`+incidentProjectionRecordBytes+` FROM records r LEFT JOIN events e ON e.event_id=r.admission_event_id `+where+` LIMIT 257`, args...); err != nil {
+		return err
 	}
 	// Selected event bytes were already bounded to 2 MiB before allocation;
 	// reverse-discovered same-organization admissions and their exact backing

@@ -38,6 +38,11 @@ func (d *incidentDependencies) loadAuthorities(ctx context.Context, tx *sql.Tx) 
 	if count > d.budget.events || size > d.budget.bytes {
 		return fmt.Errorf("incident authority exceeds support limit")
 	}
+	if d.budget.support != nil {
+		if err := d.budget.support.sourceRows(ctx, tx, "records", `SELECT r.rowid,`+incidentProjectionRecordBytes+` FROM records r WHERE r.kind='capability_lease' AND r.record_id IN (`+incidentMarks(len(ids))+`) LIMIT ?`, args...); err != nil {
+			return err
+		}
+	}
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
@@ -61,8 +66,10 @@ func (d *incidentDependencies) loadAuthorities(ctx context.Context, tx *sql.Tx) 
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	d.budget.events -= count
-	d.budget.bytes -= size
+	if d.budget.support == nil {
+		d.budget.events -= count
+		d.budget.bytes -= size
+	}
 	for _, id := range ids {
 		d.records["capability_lease:"+id] = true
 	}
@@ -89,11 +96,21 @@ func (d *incidentDependencies) loadSupportingRows(ctx context.Context, tx *sql.T
 	where := ` WHERE i.observation_event_id IN (` + incidentMarks(len(ids)) + `)`
 	var count int
 	var size int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(size),0) FROM (SELECT length(CAST(i.observation_event_id AS BLOB))+length(CAST(i.event_id AS BLOB))+length(CAST(i.organization_id AS BLOB))+length(CAST(i.recipient_scope AS BLOB))+length(CAST(i.recipient_id AS BLOB)) AS size FROM inbox i`+where+` LIMIT ?)`, append(args, d.budget.events+1)...).Scan(&count, &size); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(size),0) FROM (SELECT `+incidentInboxBytes+` AS size FROM inbox i`+where+` LIMIT ?)`, append(args, d.budget.events+1)...).Scan(&count, &size); err != nil {
 		return err
 	}
 	if count > d.budget.events || size > d.budget.bytes {
 		return fmt.Errorf("incident inbox exceeds support limit")
+	}
+	if d.budget.support != nil {
+		if err := d.budget.support.sourceRows(ctx, tx, "inbox", `SELECT i.rowid,`+incidentInboxBytes+` FROM inbox i`+where+` LIMIT ?`, append(args, d.budget.events+1)...); err != nil {
+			return err
+		}
+		// The derived binding containers and their reference occurrences are
+		// separate items. Their row-backed string bytes are already covered.
+		if err := d.budget.support.reserve(count+2*len(ids), 0); err != nil {
+			return err
+		}
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT i.observation_event_id,i.event_id,i.organization_id,i.recipient_scope,i.recipient_id FROM inbox i LEFT JOIN events e ON e.event_id=i.event_id`+where+` ORDER BY i.observation_event_id,e.sequence`, args...)
 	if err != nil {
@@ -127,11 +144,18 @@ func (d *incidentDependencies) loadSupportingRows(ctx context.Context, tx *sql.T
 		if payload.ExecutionStartEventRef == "" || len(payload.EventIDs) == 0 || !slices.Equal(payload.EventIDs, binding.EventIDs) {
 			return fmt.Errorf("incident inbox observation lacks complete backing")
 		}
+		if d.budget.support != nil && d.public[id] {
+			if err := d.budget.support.reserve(0, int64(len(payload.ExecutionStartEventRef))); err != nil {
+				return err
+			}
+		}
 		binding.ExecutionStartEventRef = payload.ExecutionStartEventRef
 		snapshot.InboxObservations[id] = binding
 	}
-	d.budget.events -= count
-	d.budget.bytes -= size
+	if d.budget.support == nil {
+		d.budget.events -= count
+		d.budget.bytes -= size
+	}
 	return nil
 }
 
@@ -251,7 +275,7 @@ func (d *incidentDependencies) validateInboxCandidates(ctx context.Context, tx *
 	rowWhere = strings.ReplaceAll(rowWhere, "events.organization_id", "i.organization_id")
 	rowWhere = strings.Replace(rowWhere, "organization_id=?", "i.organization_id=?", 1)
 	rowWhere = strings.ReplaceAll(rowWhere, "events.sequence<=json_extract(b.value,'$.cutoff')", "(events.sequence IS NULL OR events.sequence<=json_extract(b.value,'$.cutoff'))")
-	query := `SELECT i.event_id,i.organization_id,i.recipient_scope,i.recipient_id,events.event_id AS backing,events.organization_id AS event_org,events.recipient_scope AS event_scope,events.recipient_id AS event_recipient FROM inbox i LEFT JOIN events ON events.event_id=i.event_id WHERE ` + rowWhere + ` LIMIT ?`
+	query := `SELECT i.rowid AS charge_id,` + incidentInboxBytes + ` AS charge_bytes,i.event_id,i.organization_id,i.recipient_scope,i.recipient_id,events.event_id AS backing,events.organization_id AS event_org,events.recipient_scope AS event_scope,events.recipient_id AS event_recipient FROM inbox i LEFT JOIN events ON events.event_id=i.event_id WHERE ` + rowWhere + ` LIMIT ?`
 	if d.inboxRows == nil {
 		d.inboxRows = map[string]bool{}
 	}
@@ -267,11 +291,16 @@ func (d *incidentDependencies) validateInboxCandidates(ctx context.Context, tx *
 	bounded := append(append([]any{}, args...), string(seenBody), d.budget.events+1)
 	var count int
 	var size int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(CAST(event_id AS BLOB))+length(CAST(organization_id AS BLOB))+length(CAST(recipient_scope AS BLOB))+length(CAST(recipient_id AS BLOB))),0) FROM (`+query+`)`, bounded...).Scan(&count, &size); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(charge_bytes),0) FROM (`+query+`)`, bounded...).Scan(&count, &size); err != nil {
 		return err
 	}
 	if count > d.budget.events || size > d.budget.bytes {
 		return fmt.Errorf("incident inbox candidates exceed support limit")
+	}
+	if d.budget.support != nil {
+		if err := d.budget.support.sourceRows(ctx, tx, "inbox", `SELECT charge_id,charge_bytes FROM (`+query+`)`, bounded...); err != nil {
+			return err
+		}
 	}
 	var invalid bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM (`+query+`) WHERE backing IS NULL OR organization_id<>event_org OR recipient_scope<>event_scope OR recipient_id<>event_recipient)`, bounded...).Scan(&invalid); err != nil {
@@ -303,7 +332,9 @@ func (d *incidentDependencies) validateInboxCandidates(ctx context.Context, tx *
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	d.budget.events -= count
-	d.budget.bytes -= size
+	if d.budget.support == nil {
+		d.budget.events -= count
+		d.budget.bytes -= size
+	}
 	return nil
 }

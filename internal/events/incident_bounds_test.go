@@ -85,3 +85,54 @@ func TestIncidentAdmissionBounds(t *testing.T) {
 		})
 	}
 }
+
+func TestIncidentSeparateByteBounds(t *testing.T) {
+	snapshot := IncidentSnapshot{
+		Work:             VerifiedEventSnapshot{Events: []Event{{Payload: []byte(strings.Repeat("p", 2<<20))}}},
+		DependencyEvents: []Event{{Payload: []byte(strings.Repeat("d", MaximumIncidentEvidenceBytes))}},
+	}
+	if err := ValidateIncidentBounds(snapshot); err != nil {
+		t.Fatalf("independent exact public and support bounds rejected: %v", err)
+	}
+	snapshot.RelatedEvents = []Event{{EventID: "x"}}
+	if err := ValidateIncidentBounds(snapshot); err == nil {
+		t.Fatal("related event escaped the combined public byte bound")
+	}
+	snapshot.RelatedEvents = nil
+	snapshot.Admissions = []IncidentAdmission{{EventRef: "x"}}
+	if err := ValidateIncidentBounds(snapshot); err == nil {
+		t.Fatal("annotation escaped the independent support byte bound")
+	}
+}
+
+func TestIncidentPublicReferenceByteBounds(t *testing.T) {
+	snapshot := IncidentSnapshot{
+		Work:             VerifiedEventSnapshot{Events: []Event{{ArtifactRefs: []string{strings.Repeat("r", 2<<20)}}}},
+		DependencyEvents: []Event{{Payload: []byte(strings.Repeat("d", MaximumIncidentEvidenceBytes-(2<<20)))}},
+	}
+	if err := ValidateIncidentBounds(snapshot); err != nil {
+		t.Fatalf("exact shared reference bytes rejected: %v", err)
+	}
+	snapshot.Admissions = []IncidentAdmission{{Kind: "x"}}
+	if err := ValidateIncidentBounds(snapshot); err == nil {
+		t.Fatal("public reference bytes did not consume support")
+	}
+	snapshot.Admissions = nil
+	snapshot.Work.Events[0].Payload = []byte("x")
+	if err := ValidateIncidentBounds(snapshot); err == nil {
+		t.Fatal("public reference bytes did not consume public allowance")
+	}
+}
+
+func TestIncidentInboxStartItemBound(t *testing.T) {
+	snapshot := IncidentSnapshot{InboxObservations: map[string]InboxObservationBinding{
+		"observed": {ExecutionStartEventRef: "start", EventIDs: make([]string, MaximumIncidentEvidence-2)},
+	}}
+	if err := ValidateIncidentBounds(snapshot); err != nil {
+		t.Fatalf("exact inbox binding/reference item bound rejected: %v", err)
+	}
+	snapshot.Admissions = []IncidentAdmission{{}}
+	if err := ValidateIncidentBounds(snapshot); err == nil {
+		t.Fatal("inbox start reference did not consume its support item")
+	}
+}

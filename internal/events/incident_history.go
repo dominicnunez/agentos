@@ -134,9 +134,15 @@ func ValidateIncidentBounds(snapshot IncidentSnapshot) error {
 			return fmt.Errorf("incident admission evidence exceeds its byte bound")
 		}
 	}
-	for _, stream := range [][]Event{snapshot.Work.Events, snapshot.RelatedEvents, snapshot.DependencyEvents} {
+	publicRemaining := 2 << 20
+	for index, stream := range [][]Event{snapshot.Work.Events, snapshot.RelatedEvents, snapshot.DependencyEvents} {
 		for _, event := range stream {
-			remaining -= len(event.Payload) + len(event.EventID) + len(event.OrganizationID) + len(event.CorrelationID) + len(event.EventType) + len(event.SourceActorID) + len(event.SourceExecutionID) + len(event.RecipientID) + len(event.RecipientScope) + len(event.TaskID)
+			ownBytes := len(event.Payload) + len(event.EventID) + len(event.OrganizationID) + len(event.CorrelationID) + len(event.EventType) + len(event.SourceActorID) + len(event.SourceExecutionID) + len(event.RecipientID) + len(event.RecipientScope) + len(event.TaskID)
+			if index < 2 {
+				publicRemaining -= ownBytes
+			} else {
+				remaining -= ownBytes
+			}
 			for _, refs := range [][]string{event.AuthorizationRefs, event.ArtifactRefs} {
 				if len(refs) > MaximumIncidentEvidence-count {
 					return fmt.Errorf("incident evidence has too many references")
@@ -144,7 +150,13 @@ func ValidateIncidentBounds(snapshot IncidentSnapshot) error {
 				count += len(refs)
 				for _, ref := range refs {
 					remaining -= len(ref)
+					if index < 2 {
+						publicRemaining -= len(ref)
+					}
 				}
+			}
+			if publicRemaining < 0 {
+				return fmt.Errorf("incident public evidence exceeds its byte bound")
 			}
 			if remaining < 0 {
 				return fmt.Errorf("incident evidence exceeds its byte bound")
@@ -160,6 +172,9 @@ func ValidateIncidentBounds(snapshot IncidentSnapshot) error {
 		}
 	}
 	for key, binding := range snapshot.InboxObservations {
+		if binding.ExecutionStartEventRef != "" {
+			count++
+		}
 		if len(binding.EventIDs) > MaximumIncidentEvidence-count {
 			return fmt.Errorf("incident inbox evidence has too many references")
 		}

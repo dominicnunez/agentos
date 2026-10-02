@@ -291,8 +291,9 @@ func loadIncidentInferenceSupport(ctx context.Context, tx *sql.Tx, organization 
 		return support, fmt.Errorf("incident inference accounting exceeds byte limit")
 	}
 
-	budget.events -= reservationCount
-	budget.bytes -= reservationBytes
+	if err := budget.consume(reservationCount, reservationBytes); err != nil {
+		return support, fmt.Errorf("incident inference accounting exceeds byte limit: %w", err)
+	}
 
 	rows, err := tx.QueryContext(ctx, `SELECT reservation_id,request_id,organization_id,purpose,intent_id,task_id,execution_id,correlation_id,prompt_sha256,provider,model,execution_profile_version,policy_fingerprint,state,reserved_input_tokens,reserved_output_tokens,reserved_cost_nano_usd,charged_input_tokens,charged_output_tokens,charged_cost_nano_usd,window_started_at,window_expires_at,connection_id,created_at FROM inference_reservations WHERE organization_id=? AND reservation_id IN (`+reservationMarks+`) ORDER BY reservation_id`, reservationArgs...)
 	if err != nil {

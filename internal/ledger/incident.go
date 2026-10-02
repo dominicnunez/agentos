@@ -17,8 +17,10 @@ const incidentEventColumns = `event_id,sequence,organization_id,event_type,sourc
 const incidentEventBytes = `length(CAST(event_id AS BLOB))+length(CAST(organization_id AS BLOB))+length(CAST(event_type AS BLOB))+length(CAST(source_actor_id AS BLOB))+length(CAST(source_execution_id AS BLOB))+length(CAST(recipient_scope AS BLOB))+length(CAST(recipient_id AS BLOB))+length(CAST(task_id AS BLOB))+length(CAST(authorization_refs AS BLOB))+length(CAST(artifact_refs AS BLOB))+length(CAST(payload AS BLOB))+length(CAST(correlation_id AS BLOB))+length(CAST(created_at AS BLOB))+length(CAST(schema_version AS BLOB))`
 
 type incidentBudget struct {
-	events int
-	bytes  int64
+	support *incidentSupport
+	public  bool
+	events  int
+	bytes   int64
 	// Successful exact event checks may be reused inside this read transaction.
 	checkedEvents map[string]bool
 }
@@ -61,7 +63,8 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 	if err := validateIncidentProjectionScope(ctx, tx, organization); err != nil {
 		return events.IncidentSnapshot{}, err
 	}
-	budget := incidentBudget{events: limit, bytes: 2 << 20}
+	support := newIncidentSupport()
+	budget := incidentBudget{events: limit, bytes: 2 << 20, support: support, public: true}
 	work, err := incidentEvents(ctx, tx, &budget, `organization_id=? AND correlation_id=?`, organization, correlation)
 	if err != nil {
 		return events.IncidentSnapshot{}, err
@@ -70,7 +73,7 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 	if len(work) == 0 {
 		return snapshot, nil
 	}
-	if err := validateIncidentRecords(ctx, tx, work); err != nil {
+	if err := validateIncidentRecords(ctx, tx, work, support); err != nil {
 		return events.IncidentSnapshot{}, err
 	}
 	// Bound the joined record/event rows before the existing complete-chain
@@ -82,6 +85,12 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 	}
 	if freezeCount > limit || freezeBytes > 2<<20 {
 		return events.IncidentSnapshot{}, fmt.Errorf("incident freeze evidence exceeds bounded snapshot")
+	}
+	if err := support.sourceRows(ctx, tx, "records", `SELECT r.rowid,`+incidentProjectionRecordBytes+` FROM records r WHERE r.kind='organization_freeze' AND r.record_id=? LIMIT 257`, organization); err != nil {
+		return events.IncidentSnapshot{}, err
+	}
+	if err := support.eventRows(ctx, tx, true, `event_type='FREEZE_SET' AND organization_id=?`, organization); err != nil {
+		return events.IncidentSnapshot{}, err
 	}
 	history, err := readFreezeHistory(ctx, tx, organization)
 	if err != nil {
@@ -100,21 +109,50 @@ func readIncident(ctx context.Context, tx *sql.Tx, organization, correlation str
 	if err := validateIncidentExecutionEvidence(ctx, tx, work, freezes, &budget); err != nil {
 		return events.IncidentSnapshot{}, err
 	}
-	if err := loadIncidentDependencies(ctx, tx, &snapshot, freezes); err != nil {
-		return events.IncidentSnapshot{}, err
-	}
-	tasks, err := events.ValidateIncidentHistory(snapshot)
-	if err != nil {
-		return events.IncidentSnapshot{}, err
+	// Public Task creation identities select the late timeline before private
+	// loading can charge those same effects as dependencies. Exact backing was
+	// checked above; complete graph admission remains authoritative below.
+	tasks := map[string]int64{}
+	for _, event := range work {
+		payload, present, err := events.AdmittedProjection(event)
+		if err != nil {
+			return events.IncidentSnapshot{}, err
+		}
+		if present && payload.Projection.ProjectionKind == "task" && payload.Projection.Version == 1 {
+			tasks[payload.Projection.RecordID] = event.Sequence
+		}
 	}
 	effects, err := incidentEffects(ctx, tx, &budget, organization, correlation, tasks, work)
 	if err != nil {
 		return events.IncidentSnapshot{}, err
 	}
+	// Keep the original dependency selectors: classifying an effect as public
+	// does not itself introduce new incoming graph edges. A private owner can
+	// still select and validate that source, without charging its public bytes.
+	if err := loadIncidentDependencies(ctx, tx, &snapshot, freezes, support); err != nil {
+		return events.IncidentSnapshot{}, err
+	}
+	publicEffects := map[string]bool{}
+	for _, effect := range effects {
+		publicEffects[effect.EventID] = true
+	}
+	private := snapshot.DependencyEvents[:0]
+	for _, event := range snapshot.DependencyEvents {
+		if !publicEffects[event.EventID] {
+			private = append(private, event)
+		}
+	}
+	snapshot.DependencyEvents = private
 	snapshot.RelatedEvents = append(snapshot.RelatedEvents, effects...)
 	sort.Slice(snapshot.RelatedEvents, func(i, j int) bool { return snapshot.RelatedEvents[i].Sequence < snapshot.RelatedEvents[j].Sequence })
+	if _, err := events.ValidateIncidentHistory(snapshot); err != nil {
+		return events.IncidentSnapshot{}, err
+	}
 	snapshot.Admissions, err = incidentAdmissions(work, snapshot.RelatedEvents, freezes)
 	if err != nil {
+		return events.IncidentSnapshot{}, err
+	}
+	if err := support.admissions(snapshot.Admissions); err != nil {
 		return events.IncidentSnapshot{}, err
 	}
 	if err := events.ValidateIncidentBounds(snapshot); err != nil {
@@ -164,7 +202,23 @@ func incidentEvents(ctx context.Context, tx *sql.Tx, budget *incidentBudget, whe
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(`+incidentEventBytes+`),0),json_group_array(CASE WHEN typeof(sequence)='integer' THEN sequence END),COALESCE(MAX(typeof(sequence)<>'integer'),0) FROM (`+query+`)`, args...).Scan(&count, &size, &identities, &invalid); err != nil {
 		return nil, err
 	}
-	if count > budget.events || size > budget.bytes {
+	byteLimit := budget.bytes
+	if budget.support != nil && !budget.public {
+		// A private consumer may require an already classified public source.
+		// Bound its raw batch by both separate allowances; eventRows below still
+		// reserves only new private evidence against the unchanged support cap.
+		var publicBytes int64
+		for _, charged := range budget.support.events {
+			if charged.public {
+				publicBytes += charged.size
+			}
+		}
+		if publicBytes > 2<<20 {
+			return nil, fmt.Errorf("incident public evidence exceeds byte limit")
+		}
+		byteLimit += publicBytes
+	}
+	if count > budget.events || size > byteLimit {
 		return nil, fmt.Errorf("incident evidence exceeds event or byte limit")
 	}
 	if invalid {
@@ -185,6 +239,11 @@ func incidentEvents(ctx context.Context, tx *sql.Tx, budget *incidentBudget, whe
 	selected := make([]any, 0, len(sequences)+1)
 	for _, sequence := range sequences {
 		selected = append(selected, sequence)
+	}
+	if budget.support != nil {
+		if err := budget.support.eventRows(ctx, tx, budget.public, `sequence IN (`+incidentMarks(count)+`)`, selected...); err != nil {
+			return nil, err
+		}
 	}
 	selected = append(selected, count+1)
 	// The same read transaction preserves these exact rows and their byte
@@ -207,8 +266,10 @@ func incidentEvents(ctx context.Context, tx *sql.Tx, budget *incidentBudget, whe
 	for _, event := range stream {
 		budget.checkedEvents[event.EventID] = true
 	}
-	budget.events -= count
-	budget.bytes -= size
+	if budget.support == nil || budget.public {
+		budget.events -= count
+		budget.bytes -= size
+	}
 	return stream, nil
 }
 
@@ -286,13 +347,13 @@ func incidentEffects(ctx context.Context, tx *sql.Tx, budget *incidentBudget, or
 		}
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].Sequence < all[j].Sequence })
-	if err := validateIncidentEffects(ctx, tx, organization, tasks, effectIDs, all); err != nil {
+	if err := validateIncidentEffects(ctx, tx, organization, tasks, effectIDs, all, budget.support); err != nil {
 		return nil, err
 	}
 	return selected, nil
 }
 
-func validateIncidentEffects(ctx context.Context, tx *sql.Tx, organization string, tasks map[string]int64, ids []string, stream []events.Event) error {
+func validateIncidentEffects(ctx context.Context, tx *sql.Tx, organization string, tasks map[string]int64, ids []string, stream []events.Event, support *incidentSupport) error {
 	histories := map[string][]events.Event{}
 	for _, event := range stream {
 		value, err := events.IncidentEffectValue(event, tasks)
@@ -320,6 +381,11 @@ func validateIncidentEffects(ctx context.Context, tx *sql.Tx, organization strin
 	}
 	if count != len(stream) || count == 0 || count > 256 || size > 2<<20 {
 		return fmt.Errorf("incident effect record/event history is incomplete or exceeds limit")
+	}
+	if support != nil {
+		if err := support.sourceRows(ctx, tx, "records", `SELECT r.rowid,`+incidentProjectionRecordBytes+` FROM records r WHERE r.kind='effect' AND r.record_id IN (`+marks+`) LIMIT 257`, args...); err != nil {
+			return err
+		}
 	}
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {

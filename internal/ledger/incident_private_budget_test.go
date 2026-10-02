@@ -59,7 +59,7 @@ func TestIncidentPrivateInferenceBudget(t *testing.T) {
 				// repeating inference admission for items unrelated to this boundary.
 				// Keep event/accounting totals below the limit until record support
 				// is included. The owning writer retains exact event-chain backing.
-				padding := events.MaximumIncidentEvidence - retained - 2*records + 1
+				padding := events.MaximumIncidentEvidence - retained - records + 1
 				if padding <= 0 {
 					t.Fatal("fixture already exhausted item budget")
 				}
@@ -115,6 +115,11 @@ func TestIncidentPrivateInferenceBudget(t *testing.T) {
 				// the remaining bound with loaded events and accounting rows.
 				if allEvents+rowCount+2*records+2*policies <= events.MaximumIncidentEvidence {
 					t.Fatal("combined support fixture did not exceed the count bound")
+				}
+				// Admission events are already included in allEvents. Count each
+				// physical record and policy once, excluding the public Goal event.
+				if allEvents+rowCount+records+policies-1 <= events.MaximumIncidentEvidence {
+					t.Fatal("distinct support sources did not exceed the count bound")
 				}
 			}
 			if sample.name == "aggregate-bytes" && eventBytes+rowBytes <= events.MaximumIncidentEvidenceBytes {

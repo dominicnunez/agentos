@@ -43,15 +43,11 @@ type incidentDependencies struct {
 	tooManyKeys        bool
 }
 
-func loadIncidentDependencies(ctx context.Context, tx *sql.Tx, snapshot *events.IncidentSnapshot, freezes []events.OrganizationFreezeAdmission) error {
+func loadIncidentDependencies(ctx context.Context, tx *sql.Tx, snapshot *events.IncidentSnapshot, freezes []events.OrganizationFreezeAdmission, support *incidentSupport) error {
 	d := incidentDependencies{organization: snapshot.Work.OrganizationID,
-		budget: incidentBudget{events: events.MaximumIncidentEvidence, bytes: events.MaximumIncidentEvidenceBytes},
+		budget: incidentBudget{events: events.MaximumIncidentEvidence, bytes: events.MaximumIncidentEvidenceBytes, support: support},
 		stream: map[string]events.Event{}, public: map[string]bool{}, keys: map[incidentKey]bool{}, refs: map[string]bool{},
 		correlations: map[string]bool{}, executions: map[string]bool{}, reverse: map[incidentKey]bool{}, records: map[string]bool{}, recordCorrelations: map[string]bool{}, backed: map[string]bool{}}
-	for _, record := range snapshot.FreezeRecords {
-		d.budget.events--
-		d.budget.bytes -= int64(len(record.Body) + len(record.RecordID) + len(record.Kind) + len(record.AdmissionEventID))
-	}
 	for _, stream := range [][]events.Event{snapshot.Work.Events, snapshot.RelatedEvents} {
 		for _, event := range stream {
 			d.public[event.EventID] = true
@@ -645,15 +641,27 @@ func (d *incidentDependencies) loadRecords(ctx context.Context, tx *sql.Tx) erro
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(size),0) FROM (SELECT `+incidentProjectionRecordBytes+`+`+incidentProjectionEventBytes+` AS size FROM records r LEFT JOIN events e ON e.event_id=r.admission_event_id `+where+` LIMIT ?)`, append(args, d.budget.events+1)...).Scan(&count, &size); err != nil {
 		return err
 	}
-	if count*2 > d.budget.events || size > d.budget.bytes {
+	if count > d.budget.events || size > d.budget.bytes+2<<20 {
 		return fmt.Errorf("incident dependency records exceed support limit")
 	}
-	records, err := admittedProjectionRecordsBounded(ctx, tx, int(d.budget.bytes), where+` ORDER BY e.sequence LIMIT ?`, append(args, d.budget.events+1)...)
+	if d.budget.support != nil {
+		if err := d.budget.support.sourceRows(ctx, tx, "records", `SELECT r.rowid,`+incidentProjectionRecordBytes+` FROM records r LEFT JOIN events e ON e.event_id=r.admission_event_id `+where+` LIMIT ?`, append(args, d.budget.events+1)...); err != nil {
+			return err
+		}
+		if err := d.budget.support.eventRows(ctx, tx, false, `sequence IN (SELECT e.sequence FROM records r LEFT JOIN events e ON e.event_id=r.admission_event_id `+where+` LIMIT ?)`, append(args, d.budget.events+1)...); err != nil {
+			return err
+		}
+	} else if count*2 > d.budget.events || size > d.budget.bytes {
+		return fmt.Errorf("incident dependency records exceed support limit")
+	}
+	records, err := admittedProjectionRecordsBounded(ctx, tx, int(d.budget.bytes)+(2<<20), where+` ORDER BY e.sequence LIMIT ?`, append(args, d.budget.events+1)...)
 	if err != nil {
 		return err
 	}
-	d.budget.events -= count * 2
-	d.budget.bytes -= size
+	if d.budget.support == nil {
+		d.budget.events -= count * 2
+		d.budget.bytes -= size
+	}
 	for _, key := range keys {
 		d.records[key.kind+":"+key.id] = true
 	}
