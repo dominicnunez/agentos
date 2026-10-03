@@ -766,9 +766,15 @@ guarantee that later returns can be recorded after shutdown. Joining local calls
 and stop writes does not prove remote termination.
 A persistent storage outage or noncooperative remote service remains a limit.
 
-Full suspended-task reconciliation/resumption and complete coordination/output/effect
-and cancellation-timeline coverage remain
-unfinished under [issue #178](https://github.com/dominicnunez/agentos/issues/178).
+Suspended Tasks retain their fail-closed latch after owner release and restart.
+A general Task-resumption capability is deferred. Complete coordination/output
+and external-effect auditing and cancellation-timeline coverage remain unfinished
+under [issue #178](https://github.com/dominicnunez/agentos/issues/178).
+[Incident replay](../operations/incident-replay.md) exposes validated hold/release
+history, local stop evidence, and Task-bound effects alongside one Work's events.
+Its last-admission references cover execution starts, inference reservations,
+and effect attempts relative to containment boundaries. They do not classify
+coordination/output actions or establish remote dispatch or termination.
 
 For example, after reading the current head, the owner sends this JSON with
 `Content-Type: application/json` on the private user socket. Substitute the

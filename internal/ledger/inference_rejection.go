@@ -38,29 +38,3 @@ func (l *SQLite) appendInferenceRouteRejection(ctx context.Context, draft events
 	})
 	return recorded, err
 }
-
-func validateInferenceRouteRejections(stream []events.Event) error {
-	origins := make(map[string]events.Event)
-	for _, event := range stream {
-		switch event.EventType {
-		case "WORK_CREATED", "PLAN_CREATED", "INTAKE_MESSAGE_RECORDED":
-			origins[event.EventID] = event
-		case "INFERENCE_ROUTE_REJECTED":
-			var payload events.InferenceRouteRejectedPayload
-			if err := decodeExactJSONBytes(event.Payload, &payload); err != nil {
-				return fmt.Errorf("invalid routing rejection history")
-			}
-			draft := events.TrustedDraft{OrganizationID: event.OrganizationID, EventType: event.EventType, SourceActorID: event.SourceActorID,
-				SourceExecutionID: event.SourceExecutionID, RecipientScope: event.RecipientScope, RecipientID: event.RecipientID, TaskID: event.TaskID,
-				AuthorizationRefs: event.AuthorizationRefs, ArtifactRefs: event.ArtifactRefs, CorrelationID: event.CorrelationID, Payload: event.Payload}
-			origin, found := origins[payload.OriginEventRef]
-			if !found || origin.Sequence >= event.Sequence || event.SchemaVersion != events.SchemaVersion {
-				return fmt.Errorf("invalid routing rejection origin history")
-			}
-			if err := events.ValidateInferenceRouteRejectionOrigin(draft, origin); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}

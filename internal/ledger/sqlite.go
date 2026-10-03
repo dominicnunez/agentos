@@ -634,11 +634,20 @@ func ValidateTaskCompletionAdmissions(ctx context.Context, db *sql.DB) error {
 		}
 		streams := make(map[string][]events.Event)
 		teamRevisions := make(map[string]map[core.ID][]events.TeamRevisionBinding)
+		completionEvidence := make(map[string]*events.CompletionEvidenceValidator)
+		transitions, err := taskCompletionEvents(ctx, tx)
+		if err != nil {
+			return fmt.Errorf("read Task completion transitions: %w", err)
+		}
+		tasksByWork := make(map[core.ID][]currentProjectionAdmission[core.Task])
+		for _, candidate := range current {
+			tasksByWork[candidate.value.WorkID] = append(tasksByWork[candidate.value.WorkID], candidate)
+		}
 		for _, candidate := range current {
 			if candidate.value.Status != core.TaskCompleted {
 				continue
 			}
-			transition, err := exactProjectionTransition(ctx, tx, "TASK_VERIFIED_COMPLETE", candidate.record)
+			transition, err := matchProjectionTransition(transitions[candidate.record.RecordID], candidate.record)
 			if err != nil {
 				return fmt.Errorf("completed Task %s transition is invalid: %w", candidate.value.ID, err)
 			}
@@ -658,11 +667,16 @@ func ValidateTaskCompletionAdmissions(ctx context.Context, db *sql.DB) error {
 				}
 				teamRevisions[transition.OrganizationID] = revisions
 			}
-			binding, err := taskCompletionBinding(ctx, tx, transition.OrganizationID, candidate.record.CorrelationID, candidate.value.WorkID, transition.Sequence, current, revisions, inboxObservations)
+			binding, err := taskCompletionBinding(ctx, tx, transition.OrganizationID, candidate.record.CorrelationID, candidate.value.WorkID, transition.Sequence, tasksByWork[candidate.value.WorkID], revisions, inboxObservations)
 			if err != nil {
 				return fmt.Errorf("completed Task %s binding: %w", candidate.value.ID, err)
 			}
-			if _, err := events.ValidateTaskCompletionEvidenceChain(binding, events.WorkCompletionTaskBinding{Task: candidate.value, Version: candidate.record.Version, CorrelationID: candidate.record.CorrelationID}, transition, stream); err != nil {
+			validator := completionEvidence[transition.OrganizationID]
+			if validator == nil {
+				validator = events.NewCompletionEvidenceValidator(stream)
+				completionEvidence[transition.OrganizationID] = validator
+			}
+			if _, err := validator.ValidateTask(binding, events.WorkCompletionTaskBinding{Task: candidate.value, Version: candidate.record.Version, CorrelationID: candidate.record.CorrelationID}, transition); err != nil {
 				return fmt.Errorf("completed Task %s lacks exact durable evidence: %w", candidate.value.ID, err)
 			}
 		}
@@ -676,6 +690,10 @@ FROM events WHERE event_type=? AND json_extract(payload,'$.projection.projection
 	if err != nil {
 		return events.Event{}, err
 	}
+	return matchProjectionTransition(matches, record)
+}
+
+func matchProjectionTransition(matches []events.Event, record events.ProjectionRecord) (events.Event, error) {
 	if len(matches) != 1 {
 		return events.Event{}, fmt.Errorf("requires one exact transition")
 	}

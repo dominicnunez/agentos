@@ -2917,6 +2917,7 @@ func TestExecutionKnowledgeRejectsUnboundedTeamScopes(t *testing.T) {
 }
 
 func TestExecutionKnowledgeCandidateLimitIsTerminalizable(t *testing.T) {
+	parallelIncidentTest(t)
 	for _, use := range []core.KnowledgeContextUse{"", core.KnowledgeBehavioralPolicy, core.KnowledgeFactualReference} {
 		t.Run("classification="+string(use), func(t *testing.T) { testExecutionKnowledgeCandidateLimit(t, use) })
 	}
@@ -3014,6 +3015,7 @@ VALUES('knowledge','knowledge-1',1,'{}','oversized-event','fingerprint',?)`, cre
 }
 
 func TestGoalProgressWitnessSelectionCrossesFormerEvidenceWindow(t *testing.T) {
+	parallelIncidentTest(t)
 	ctx := context.Background()
 	l, err := Open(":memory:")
 	if err != nil {
@@ -3773,6 +3775,15 @@ func TestReviewedReplacementRequiresOnePriorFailedWork(t *testing.T) {
 		{Event: events.TrustedDraft{OrganizationID: "org-1", EventType: "WORK_CREATED", SourceActorID: "runtime", CorrelationID: "replacement"}, ProjectionKind: "work", RecordID: string(replacement.ID), Version: 1, Value: replacement},
 	}); err != nil {
 		t.Fatalf("atomic replacement projections failed: %v", err)
+	}
+	for _, selected := range []string{"old", "replacement"} {
+		snapshot, err := store.VerifiedIncidentEvents(ctx, "org-1", selected, 256)
+		if err != nil {
+			t.Fatalf("incident rejected reviewed replacement history for %s: %v", selected, err)
+		}
+		if _, err := events.ValidateIncidentHistory(snapshot); err != nil {
+			t.Fatalf("shared incident validator rejected reviewed replacement history for %s: %v", selected, err)
+		}
 	}
 
 	duplicateDraft := appendReviewedReplacementIntent(t, ctx, store, "org-1", "replacement-2", "intent-replacement-2", predecessor.ID, "echo second replacement", now)

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "lockfile_sha256": "fdeaffad10e420306e9ff2a716c5abd6151f01664a012b08f55c1adc3df9cd32",
+  "lockfile_sha256": "5c8edcfec3993f4e5c74b5d3899d4126e28b98a1fce75d6845be79cd10117fc1",
   "packages": [
     {
       "name": "@sveltejs/kit",

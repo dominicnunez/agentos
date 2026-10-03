@@ -98,7 +98,7 @@ func validateInferenceAdmissionsSnapshot(ctx context.Context, tx *sql.Tx, pendin
 	if err != nil {
 		return fmt.Errorf("read inference admission events: %w", err)
 	}
-	if err := validateInferenceRouteRejections(stream); err != nil {
+	if err := events.ValidateInferenceRouteRejections(stream); err != nil {
 		return err
 	}
 	if err := events.ValidateModelStops(stream, freezes); err != nil {
@@ -387,8 +387,8 @@ func (r inferenceValidationRow) validate(policy inference.Policy) error {
 }
 
 func validateInferenceReservationEvent(event events.Event, row inferenceValidationRow, policy inference.Policy) error {
-	var payload events.InferenceReservedPayload
-	if decodeExactJSONBytes(event.Payload, &payload) != nil {
+	payload, decodeErr := events.DecodeInferenceReservation(event)
+	if decodeErr != nil {
 		return fmt.Errorf("inference reservation event is invalid")
 	}
 	start, _ := time.Parse(time.RFC3339Nano, row.windowStart)

@@ -90,7 +90,7 @@ Event Contract validator and tenant, revision, sequence, and dispatch rules.
 ## Storage and Event Contract versions
 
 SQLite storage versions are independent of the Agent OS binary version. The
-current runtime writes storage schema v12 and accepts v1 as the oldest supported
+current runtime writes storage schema v15 and accepts v1 as the oldest supported
 upgrade source. Schema v1 is frozen in
 `internal/ledger/testdata/storage-v1.sql`. Schema v2 adds metadata that binds
 the storage version, Agent OS application ID, current Event Contract schema,
@@ -105,6 +105,53 @@ cross-tenant, or malformed. Storage v8 adds the quarantine boundary without
 reusing the already deployed v7 contract. Storage v9 adds the reviewed tenant-scoped index
 used to select current knowledge for an Agent execution without scanning other
 Organizations' knowledge records.
+
+Storage v13 adds indexes for Work replacement predecessors, complete
+organization-scoped execution histories, and typed incoming projection links.
+The incoming links are derived independently from event payloads and record
+bodies and maintained by guarded SQLite triggers. Record links use stable
+record identities rather than implicit row identifiers, preserving them across
+database compaction. Migration backfills the links atomically without changing
+retained record or event bytes. These indexes support bounded incident dependency
+selection without scanning unrelated records for each dependency. Each incident
+read checks the exact link table, index, and trigger definitions in its read
+snapshot; the mutable stored layout fingerprint alone is insufficient. Exact
+link contents are also compared with references derived from every retained
+event and record source in that snapshot. This detects missing or forged links
+even if maintenance guards were removed and later restored. It requires a full
+source scan and indexed link checks per incident read, in addition to ledger
+integrity verification; only aggregate results are returned to the reader, and
+reference extraction retains one source at a time. Admission and lifecycle
+validation remain separate requirements.
+
+Storage v14 extends the incoming-link grammar to evidence-event references.
+Migration first verifies the immutable v13 grammar, guards, and exact index
+contents, then replaces the guards and backfills the new links in one transaction.
+Missing or forged old links fail migration instead of being silently repaired.
+The authoritative event and record bytes remain unchanged.
+
+Storage v15 discovers lifecycle detail references from their reserved event
+labels even when the projection or admission envelope is missing or malformed.
+Migration verifies the immutable v14 grammar, guards, and exact index contents
+before replacing guards and backfilling these references in one transaction.
+It preserves authoritative source bytes and rejects damaged old indexes.
+Discovery retains these claims so admission validation can reject their source;
+ordinary notes and fields outside the owning lifecycle contract add no links.
+The same grammar retains value relationships through lifecycle labels and
+typed record-body claims with physical admission metadata. Generic records
+without that metadata remain opaque. Incident preflight also follows retained
+admission counterparts when both source kind channels are damaged. Knowledge
+consumption follows these ownership channels before filtering a raw statement,
+including references retained only by a malformed event or record. Invalid
+status, method, or principal fields cannot suppress owned validation references;
+admission validates every reference and forbids them on candidates. Runtime
+Knowledge proposals and consumed completion aggregates retain applicability
+independently of a valid projection discriminator. Unconsumed non-runtime
+proposals and unused aggregate statements retain their consumer gates.
+
+Changing the stored reference rules requires a migration and backfill. Updating
+only the runtime extractor can leave historical index rows inconsistent with the
+new rules, which incident reads will reject.
 
 Storage v12 adds an index scoped to correlation, organization, and execution for
 model stop admission. Migration preserves existing event bytes and stop evidence;

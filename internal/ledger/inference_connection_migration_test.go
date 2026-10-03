@@ -12,6 +12,7 @@ import (
 
 func removeConnectionColumnsForLegacyFixture(t *testing.T, db *sql.DB) {
 	t.Helper()
+	removeIncidentLinkSchemaForTest(t, db)
 	if _, err := db.ExecContext(t.Context(), `DROP TRIGGER IF EXISTS freeze_events_delete_change;
 DROP TRIGGER IF EXISTS freeze_events_insert_change;
 DROP TRIGGER IF EXISTS freeze_events_insert_conflict;

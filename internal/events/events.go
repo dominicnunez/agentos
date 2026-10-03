@@ -124,6 +124,17 @@ func (payload EvidencePublishedPayload) ValidFor(envelopeRefs []string) bool {
 // to one admitted running Agent Task revision and its exact execution start.
 // The evidence remains an untrusted claim and grants no authority or completion.
 func ValidateAgentEvidencePublished(event Event, task core.Task, taskVersion int, start Event, stream []Event) error {
+	if err := validateAgentEvidenceBinding(event, task, taskVersion, start); err != nil {
+		return err
+	}
+	if err := ValidateAgentDispatchStart(start, task, taskVersion, stream); err != nil {
+		return fmt.Errorf("published Agent evidence lacks exact dispatch admission: %w", err)
+	}
+	return nil
+}
+
+// Callers may use this after independently validating the exact start admission.
+func validateAgentEvidenceBinding(event Event, task core.Task, taskVersion int, start Event) error {
 	var payload EvidencePublishedPayload
 	if event.EventID == "" || event.Sequence <= start.Sequence || event.CreatedAt.IsZero() || event.SchemaVersion != SchemaVersion ||
 		event.EventType != "EVIDENCE_PUBLISHED" || event.OrganizationID == "" || event.SourceActorID == "" ||
@@ -137,9 +148,6 @@ func ValidateAgentEvidencePublished(event Event, task core.Task, taskVersion int
 		event.SourceExecutionID != fmt.Sprintf("execution-%s-v%d", task.ID, taskVersion) ||
 		event.OrganizationID != start.OrganizationID || event.TaskID != start.TaskID || event.CorrelationID != start.CorrelationID {
 		return fmt.Errorf("published Agent evidence is not bound to its running Task execution")
-	}
-	if err := ValidateAgentDispatchStart(start, task, taskVersion, stream); err != nil {
-		return fmt.Errorf("published Agent evidence lacks exact dispatch admission: %w", err)
 	}
 	return nil
 }
@@ -779,7 +787,9 @@ type ExecutionStartSelection struct {
 type ExecutionStartValidator func(ExecutionStartSelection) (core.ExecutionContextManifest, error)
 
 type WorkCompletionBinding struct {
-	knowledgeReplay *ExecutionKnowledgeReplay
+	completionHistory *completionHistory
+	knowledgeReplay   *ExecutionKnowledgeReplay
+	executionHistory  *executionHistory
 	// CompletionSequence is the final Work transition boundary. Zero is used
 	// while admitting aggregate evidence before that transition exists.
 	CompletionSequence int64
@@ -902,12 +912,29 @@ func ResolvePlan(organizationID, correlationID string, work core.Work, intent co
 }
 
 func resolvePlan(organizationID, correlationID string, work core.Work, intent core.Intent, stream []Event) (core.Plan, Event, error) {
+	return bindResolvedPlan(organizationID, correlationID, work, intent, func() (core.Plan, Event, error) {
+		return resolvePlanEvent(organizationID, correlationID, stream)
+	})
+}
+
+func bindResolvedPlan(organizationID, correlationID string, work core.Work, intent core.Intent, resolve func() (core.Plan, Event, error)) (core.Plan, Event, error) {
 	if organizationID == "" || correlationID == "" || work.ID == "" || work.IntentID == "" || intent.ID == "" || intent.AcceptedFingerprint == "" {
 		return core.Plan{}, Event{}, fmt.Errorf("strategic Plan identity is incomplete")
 	}
 	if intent.ID != work.IntentID || intent.OrganizationID != core.ID(organizationID) {
 		return core.Plan{}, Event{}, fmt.Errorf("strategic Plan Intent does not match durable Work")
 	}
+	plan, event, err := resolve()
+	if err != nil {
+		return core.Plan{}, Event{}, err
+	}
+	if plan.IntentID != work.IntentID || plan.IntentFingerprint != intent.AcceptedFingerprint {
+		return core.Plan{}, Event{}, fmt.Errorf("strategic Plan identity or lifecycle is invalid")
+	}
+	return plan, event, nil
+}
+
+func resolvePlanEvent(organizationID, correlationID string, stream []Event) (core.Plan, Event, error) {
 	var selected Event
 	var plan core.Plan
 	for _, event := range stream {
@@ -929,7 +956,7 @@ func resolvePlan(organizationID, correlationID string, work core.Work, intent co
 	if selected.EventID == "" {
 		return core.Plan{}, Event{}, fmt.Errorf("strategic Plan is unavailable")
 	}
-	if plan.ID != core.ID("plan-"+correlationID) || plan.IntentID != work.IntentID || plan.IntentFingerprint != intent.AcceptedFingerprint || plan.Version != 1 || len(plan.Tasks) == 0 || plan.CreatedAt.IsZero() || offset != 0 {
+	if plan.ID != core.ID("plan-"+correlationID) || plan.Version != 1 || len(plan.Tasks) == 0 || plan.CreatedAt.IsZero() || offset != 0 {
 		return core.Plan{}, Event{}, fmt.Errorf("strategic Plan identity or lifecycle is invalid")
 	}
 	if plan.Fingerprint == "" || plan.Fingerprint != expectedFingerprint {
@@ -1229,6 +1256,10 @@ func ValidateWorkCompletionEvidenceChain(binding WorkCompletionBinding, evidence
 // is the result of the exact runtime-owned completion decision and immutable
 // evidence that precede it. A completed status is not evidence by itself.
 func ValidateTaskCompletionEvidenceChain(binding WorkCompletionBinding, task WorkCompletionTaskBinding, completionEvent Event, stream []Event) (CompletionDecisionPayload, error) {
+	return validateTaskCompletionEvidenceChain(binding, task, completionEvent, stream)
+}
+
+func validateTaskCompletionEvidenceChain(binding WorkCompletionBinding, task WorkCompletionTaskBinding, completionEvent Event, stream []Event) (CompletionDecisionPayload, error) {
 	if binding.OrganizationID == "" || binding.CorrelationID == "" || binding.Work.ID == "" || binding.Work.Status != core.WorkActive || binding.Intent.ID == "" ||
 		binding.Intent.ID != binding.Work.IntentID || binding.Intent.NormalizedObjective != binding.Work.Objective || string(binding.Intent.OrganizationID) != binding.OrganizationID ||
 		task.Task.ID == "" || task.Task.WorkID != binding.Work.ID || task.Task.Status != core.TaskCompleted || task.Version < 2 || task.CorrelationID != binding.CorrelationID {
@@ -1246,7 +1277,7 @@ func ValidateTaskCompletionEvidenceChain(binding WorkCompletionBinding, task Wor
 		return CompletionDecisionPayload{}, fmt.Errorf("task completion transition is invalid")
 	}
 	var verification Event
-	for _, event := range stream {
+	for _, event := range binding.completionHistory.taskEvents(stream, "COMPLETION_VERIFIED", string(task.Task.ID), binding.CorrelationID) {
 		if event.EventType != "COMPLETION_VERIFIED" || event.TaskID != string(task.Task.ID) || event.CorrelationID != binding.CorrelationID || event.Sequence >= completionEvent.Sequence {
 			continue
 		}
@@ -1262,7 +1293,7 @@ func ValidateTaskCompletionEvidenceChain(binding WorkCompletionBinding, task Wor
 	if verification.EventID == "" {
 		return CompletionDecisionPayload{}, fmt.Errorf("task completion lacks its exact verification decision")
 	}
-	outcomeEvent, found := eventWithID(stream, decision.OutcomeEventRef)
+	outcomeEvent, found := binding.completionHistory.event(stream, decision.OutcomeEventRef)
 	var outcome core.ToolOutcome
 	if !found || outcomeEvent.EventType != "TOOL_OUTCOME_RECORDED" || outcomeEvent.OrganizationID != binding.OrganizationID || outcomeEvent.SourceActorID != "runtime" || outcomeEvent.SourceExecutionID == "" || outcomeEvent.RecipientScope != "" || outcomeEvent.RecipientID != "" || outcomeEvent.TaskID != string(task.Task.ID) || len(outcomeEvent.AuthorizationRefs) != 0 || outcomeEvent.CorrelationID != binding.CorrelationID || outcomeEvent.Sequence >= verification.Sequence || outcomeEvent.SchemaVersion != SchemaVersion ||
 		decodeExactEventJSON(outcomeEvent.Payload, &outcome) != nil || !outcome.Valid() || !slices.Equal(outcomeEvent.ArtifactRefs, outcome.ArtifactRefs) || !slices.Equal(verification.ArtifactRefs, outcome.ArtifactRefs) || verification.SourceExecutionID != "" && verification.SourceExecutionID != outcomeEvent.SourceExecutionID {
@@ -1275,7 +1306,7 @@ func ValidateTaskCompletionEvidenceChain(binding WorkCompletionBinding, task Wor
 	if !reflect.DeepEqual(expected, decision.Result) {
 		return CompletionDecisionPayload{}, fmt.Errorf("task completion decision does not match its durable evidence")
 	}
-	if _, _, err := ResolveVerifiedTaskResult(binding.OrganizationID, binding.CorrelationID, task.Task, task.Version, stream, 0); err != nil {
+	if _, _, err := binding.completionHistory.resolveResult(binding, task.Task, task.Version, stream, 0); err != nil {
 		return CompletionDecisionPayload{}, err
 	}
 	return decision, nil
@@ -1426,7 +1457,7 @@ func completionDecisionResult(binding WorkCompletionBinding, task WorkCompletion
 		if task.Task.ExecutionKind != core.ExecutionHuman || !reflect.DeepEqual(*task.Task.CompletionContract, decision.Contract) || decision.SubmissionEventRef == "" || decision.JudgmentRef != "" {
 			return core.CompletionResult{}, fmt.Errorf("work completion user evidence reference is invalid")
 		}
-		submissionEvent, found := eventWithID(stream, decision.SubmissionEventRef)
+		submissionEvent, found := binding.completionHistory.event(stream, decision.SubmissionEventRef)
 		if !found || submissionEvent.EventType != "HUMAN_TASK_COMPLETION_SUBMITTED" || submissionEvent.OrganizationID != binding.OrganizationID || submissionEvent.TaskID != verification.TaskID || submissionEvent.CorrelationID != binding.CorrelationID || submissionEvent.Sequence >= outcomeEvent.Sequence || submissionEvent.SourceActorID == "" || !slices.Equal(submissionEvent.ArtifactRefs, outcome.ArtifactRefs) {
 			return core.CompletionResult{}, fmt.Errorf("work completion user submission reference is invalid")
 		}
@@ -1560,7 +1591,7 @@ func completionDecisionContract(binding WorkCompletionBinding, task core.Task, d
 		if model.Model != outcome.ToolID && model.Provider+"/"+model.Model != outcome.ToolID {
 			return core.CompletionContract{}, core.ToolOutcome{}, fmt.Errorf("work completion Agent execution manifest is invalid")
 		}
-		if err := ValidateExecutionKnowledgeAtUse(binding.OrganizationID, task, model.Manifest, useSequence, binding.TeamRevisions, stream); err != nil {
+		if err := ValidateExecutionKnowledgeAtUse(binding.OrganizationID, task, model.Manifest, useSequence, binding.TeamRevisions, binding.completionHistory.knowledgeEvents(stream, binding.OrganizationID)); err != nil {
 			return core.CompletionContract{}, core.ToolOutcome{}, fmt.Errorf("knowledge is invalid at completion admission: %w", err)
 		}
 		verified, available := core.VerifyPersistedPostcondition(task, outcome, model.ExecutionInputSHA256)
@@ -1580,7 +1611,7 @@ func completionDecisionContract(binding WorkCompletionBinding, task core.Task, d
 			return core.CompletionContract{}, core.ToolOutcome{}, fmt.Errorf("work completion external-input evidence is invalid")
 		}
 		inputID := strings.TrimPrefix(outcomeEvent.SourceExecutionID, "external-input-")
-		inputEvent, found := eventWithID(stream, inputID)
+		inputEvent, found := binding.completionHistory.event(stream, inputID)
 		if !found || !validCompletionInputEvent(binding, task.ID, inputEvent) || inputEvent.Sequence >= outcomeEvent.Sequence {
 			return core.CompletionContract{}, core.ToolOutcome{}, fmt.Errorf("work completion external-input source is invalid")
 		}
@@ -1624,7 +1655,7 @@ func validateAgentExecutionModel(binding WorkCompletionBinding, task core.Task, 
 	}
 	var found Event
 	var manifest core.ExecutionContextManifest
-	for _, event := range stream {
+	for _, event := range binding.completionHistory.taskEvents(stream, "EXECUTION_CONTEXT_MANIFESTED", string(task.ID), binding.CorrelationID) {
 		if event.EventType != "EXECUTION_CONTEXT_MANIFESTED" || event.TaskID != string(task.ID) || event.SourceExecutionID != executionID || event.CorrelationID != binding.CorrelationID {
 			continue
 		}
@@ -1656,7 +1687,7 @@ func validateAgentExecutionModel(binding WorkCompletionBinding, task core.Task, 
 	if binding.knowledgeReplay != nil && manifest.ContextBuilderVersion == "v5" {
 		err = binding.knowledgeReplay.ValidateUse(task, manifest, useSequence, binding.TeamRevisions)
 	} else {
-		err = ValidateExecutionKnowledgeAtUse(binding.OrganizationID, task, manifest, useSequence, binding.TeamRevisions, stream)
+		err = ValidateExecutionKnowledgeAtUse(binding.OrganizationID, task, manifest, useSequence, binding.TeamRevisions, binding.completionHistory.knowledgeEvents(stream, binding.OrganizationID))
 	}
 	if err != nil {
 		return executionModel{}, fmt.Errorf("agent execution Knowledge was invalid at use: %w", err)
@@ -1765,7 +1796,7 @@ func executionKnowledge(binding WorkCompletionBinding, task core.Task, startEven
 	if requireClassification && binding.knowledgeReplay != nil {
 		selected, err = binding.knowledgeReplay.selectionAtStart(binding.OrganizationID, startEvent, task)
 	} else {
-		selected, err = resolveExecutionKnowledge(binding.OrganizationID, task, startEvent.Sequence, binding.TeamRevisions, stream, requireClassification)
+		selected, err = resolveExecutionKnowledge(binding.OrganizationID, task, startEvent.Sequence, binding.TeamRevisions, binding.completionHistory.knowledgeEvents(stream, binding.OrganizationID), requireClassification)
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve execution knowledge: %w", err)
@@ -1782,7 +1813,7 @@ func executionKnowledge(binding WorkCompletionBinding, task core.Task, startEven
 }
 
 func executionCoordination(binding WorkCompletionBinding, task core.Task, startEvent Event, stream []Event) ([]core.VersionedRef, []core.AgentExecutionPeerTask, error) {
-	selected, err := ResolveExecutionCoordination(binding.OrganizationID, binding.CorrelationID, task.WorkID, task.ID, startEvent.Sequence, stream)
+	selected, err := ResolveExecutionCoordination(binding.OrganizationID, binding.CorrelationID, task.WorkID, task.ID, startEvent.Sequence, binding.completionHistory.coordinationEvents(stream, binding.OrganizationID, binding.CorrelationID))
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve execution coordination: %w", err)
 	}
@@ -1804,14 +1835,14 @@ func executionStrategicContext(binding WorkCompletionBinding, startEvent Event, 
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	plan, plannedStrategy, err := ResolvePlanStrategicContext(binding.OrganizationID, binding.CorrelationID, binding.Work, binding.Intent, stream)
+	plan, plannedStrategy, err := completionPlanStrategy(binding, stream)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("resolve execution Plan strategic context: %w", err)
 	}
 	if !slices.Equal(plan.StrategicEventRefs, startDetail.StrategicEventRefs) || !slices.Equal(plan.StrategicContextRefs, startDetail.StrategicContextRefs) {
 		return nil, nil, nil, fmt.Errorf("execution start does not bind the planned strategic context")
 	}
-	strategy, err := ResolveStrategicContextByRefs(binding.OrganizationID, binding.Work, stream, startDetail.StrategicEventRefs, startDetail.StrategicContextRefs)
+	strategy, err := ResolveStrategicContextByRefs(binding.OrganizationID, binding.Work, binding.completionHistory.referenceEvents(stream, startDetail.StrategicEventRefs), startDetail.StrategicEventRefs, startDetail.StrategicContextRefs)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("resolve execution-start strategic context: %w", err)
 	}
@@ -1843,7 +1874,7 @@ func executionDependencies(binding WorkCompletionBinding, task core.Task, manife
 		if dependency == nil || dependency.Task.WorkID != task.WorkID || dependency.Task.Status != core.TaskCompleted || dependency.CorrelationID != binding.CorrelationID {
 			return nil, nil, fmt.Errorf("execution dependency is outside completed durable Work")
 		}
-		selected, result, err := ResolveVerifiedTaskResult(binding.OrganizationID, binding.CorrelationID, dependency.Task, dependency.Version, stream, manifestEvent.Sequence)
+		selected, result, err := binding.completionHistory.resolveResult(binding, dependency.Task, dependency.Version, stream, manifestEvent.Sequence)
 		if err != nil {
 			return nil, nil, fmt.Errorf("execution dependency result is invalid: %w", err)
 		}
@@ -1860,12 +1891,16 @@ func executionDependencies(binding WorkCompletionBinding, task core.Task, manife
 // exact verified Task completion. Later publications cannot replace it because
 // the result and candidate must precede and match the admitted verification.
 func ResolveVerifiedTaskResult(organizationID, correlationID string, task core.Task, taskVersion int, stream []Event, beforeSequence int64) (Event, ResultPublishedPayload, error) {
+	return resolveVerifiedTaskResult(organizationID, correlationID, task, taskVersion, stream, beforeSequence, nil)
+}
+
+func resolveVerifiedTaskResult(organizationID, correlationID string, task core.Task, taskVersion int, stream []Event, beforeSequence int64, history *completionHistory) (Event, ResultPublishedPayload, error) {
 	if organizationID == "" || correlationID == "" || task.ID == "" || task.Status != core.TaskCompleted || taskVersion < 2 {
 		return Event{}, ResultPublishedPayload{}, fmt.Errorf("verified Task result boundary is incomplete")
 	}
 	var completionEvent Event
 	var decision CompletionDecisionPayload
-	for _, event := range stream {
+	for _, event := range history.taskEvents(stream, "TASK_VERIFIED_COMPLETE", string(task.ID), correlationID) {
 		if event.EventType != "TASK_VERIFIED_COMPLETE" || event.TaskID != string(task.ID) || event.CorrelationID != correlationID || beforeSequence > 0 && event.Sequence >= beforeSequence {
 			continue
 		}
@@ -1886,7 +1921,7 @@ func ResolveVerifiedTaskResult(organizationID, correlationID string, task core.T
 		return Event{}, ResultPublishedPayload{}, fmt.Errorf("verified Task result lacks its terminal transition")
 	}
 	var verification Event
-	for _, event := range stream {
+	for _, event := range history.taskEvents(stream, "COMPLETION_VERIFIED", string(task.ID), correlationID) {
 		if event.EventType != "COMPLETION_VERIFIED" || event.TaskID != string(task.ID) || event.CorrelationID != correlationID || event.Sequence >= completionEvent.Sequence {
 			continue
 		}
@@ -1902,7 +1937,7 @@ func ResolveVerifiedTaskResult(organizationID, correlationID string, task core.T
 	if verification.EventID == "" {
 		return Event{}, ResultPublishedPayload{}, fmt.Errorf("verified Task result lacks its completion verification")
 	}
-	outcomeEvent, found := eventWithID(stream, decision.OutcomeEventRef)
+	outcomeEvent, found := history.event(stream, decision.OutcomeEventRef)
 	var outcome core.ToolOutcome
 	if !found || outcomeEvent.EventID == "" || outcomeEvent.Sequence < 1 || outcomeEvent.CreatedAt.IsZero() || outcomeEvent.SchemaVersion != SchemaVersion || outcomeEvent.EventType != "TOOL_OUTCOME_RECORDED" || outcomeEvent.OrganizationID != organizationID || outcomeEvent.SourceActorID != "runtime" || outcomeEvent.SourceExecutionID == "" || outcomeEvent.RecipientScope != "" || outcomeEvent.RecipientID != "" || outcomeEvent.TaskID != string(task.ID) || len(outcomeEvent.AuthorizationRefs) != 0 || outcomeEvent.CorrelationID != correlationID || outcomeEvent.Sequence >= verification.Sequence ||
 		decodeExactEventJSON(outcomeEvent.Payload, &outcome) != nil || !outcome.Valid() || !slices.Equal(outcomeEvent.ArtifactRefs, outcome.ArtifactRefs) || !slices.Equal(verification.ArtifactRefs, outcome.ArtifactRefs) || verification.SourceExecutionID != "" && verification.SourceExecutionID != outcomeEvent.SourceExecutionID {
@@ -1921,7 +1956,7 @@ func ResolveVerifiedTaskResult(organizationID, correlationID string, task core.T
 	}
 	var resultEvent Event
 	var result ResultPublishedPayload
-	for _, event := range stream {
+	for _, event := range history.taskEvents(stream, "RESULT_PUBLISHED", string(task.ID), correlationID) {
 		if event.EventType != "RESULT_PUBLISHED" || event.TaskID != string(task.ID) || event.CorrelationID != correlationID || event.Sequence <= outcomeEvent.Sequence || event.Sequence >= verification.Sequence {
 			continue
 		}
@@ -1938,7 +1973,7 @@ func ResolveVerifiedTaskResult(organizationID, correlationID string, task core.T
 		return Event{}, ResultPublishedPayload{}, fmt.Errorf("verified Task result lacks its exact publication")
 	}
 	var completionCandidate Event
-	for _, event := range stream {
+	for _, event := range history.taskEvents(stream, "CANDIDATE_COMPLETE", string(task.ID), correlationID) {
 		if event.EventType != "CANDIDATE_COMPLETE" || event.TaskID != string(task.ID) || event.CorrelationID != correlationID || event.Sequence <= resultEvent.Sequence || event.Sequence >= verification.Sequence {
 			continue
 		}
@@ -1985,8 +2020,16 @@ func executionInbox(binding WorkCompletionBinding, task core.Task, startEvent Ev
 			routes[recipientKey(RecipientTeam, string(teamID))] = struct{}{}
 		}
 	}
-	indexed := make(map[string]Event, len(stream))
-	for _, event := range stream {
+	indexed := make(map[string]Event)
+	identityStream := stream
+	if binding.completionHistory != nil {
+		if binding.completionHistory.identityErr != nil {
+			return nil, nil, binding.completionHistory.identityErr
+		}
+		indexed = binding.completionHistory.inboxIndex()
+		identityStream = nil
+	}
+	for _, event := range identityStream {
 		if event.EventID == "" {
 			return nil, nil, fmt.Errorf("execution inbox event identity is invalid")
 		}
@@ -1996,38 +2039,20 @@ func executionInbox(binding WorkCompletionBinding, task core.Task, startEvent Ev
 		indexed[event.EventID] = event
 	}
 	observed := make(map[string]struct{})
-	for _, event := range stream {
+	inboxEvents := binding.completionHistory.inboxEvents(stream, binding.OrganizationID, routes)
+	for _, event := range inboxEvents {
 		if event.Sequence > cutoff || event.OrganizationID != binding.OrganizationID || event.EventType != "INBOX_EVENTS_OBSERVED" {
 			continue
 		}
 		if _, ok := routes[recipientKey(event.RecipientScope, event.RecipientID)]; !ok {
 			continue
 		}
-		var payload InboxEventsObservedPayload
-		if event.SourceActorID == "" || event.SourceExecutionID == "" || json.Unmarshal(event.Payload, &payload) != nil || len(payload.EventIDs) == 0 || payload.ExecutionStartEventRef == "" {
-			return nil, nil, fmt.Errorf("execution inbox observation is invalid")
-		}
-		admitted, ok := binding.InboxObservations[event.EventID]
-		if !ok || admitted.ExecutionStartEventRef != payload.ExecutionStartEventRef || !slices.Equal(admitted.EventIDs, payload.EventIDs) {
-			return nil, nil, fmt.Errorf("execution inbox observation lacks atomic admission")
-		}
-		observationStart, err := inboxObservationExecution(binding, event, payload.ExecutionStartEventRef, indexed)
-		if err != nil {
+		if err := validateInboxObservation(binding, event, indexed, observed); err != nil {
 			return nil, nil, err
-		}
-		for _, eventID := range payload.EventIDs {
-			addressed, exists := indexed[eventID]
-			if !exists || addressed.Sequence >= observationStart.Sequence || addressed.OrganizationID != binding.OrganizationID || addressed.RecipientScope != event.RecipientScope || addressed.RecipientID != event.RecipientID || addressed.EventType == "INBOX_EVENTS_OBSERVED" {
-				return nil, nil, fmt.Errorf("execution inbox observation reference is invalid")
-			}
-			if _, duplicate := observed[eventID]; duplicate {
-				return nil, nil, fmt.Errorf("execution inbox event was observed more than once")
-			}
-			observed[eventID] = struct{}{}
 		}
 	}
 	available := make([]Event, 0)
-	for _, event := range stream {
+	for _, event := range inboxEvents {
 		if event.Sequence > cutoff || event.OrganizationID != binding.OrganizationID || event.EventType == "INBOX_EVENTS_OBSERVED" {
 			continue
 		}
@@ -2050,6 +2075,32 @@ func executionInbox(binding WorkCompletionBinding, task core.Task, startEvent Ev
 		})
 	}
 	return refs, inbox, nil
+}
+
+func validateInboxObservation(binding WorkCompletionBinding, event Event, indexed map[string]Event, observed map[string]struct{}) error {
+	var payload InboxEventsObservedPayload
+	if event.SourceActorID == "" || event.SourceExecutionID == "" || json.Unmarshal(event.Payload, &payload) != nil || len(payload.EventIDs) == 0 || payload.ExecutionStartEventRef == "" {
+		return fmt.Errorf("execution inbox observation is invalid")
+	}
+	admitted, ok := binding.InboxObservations[event.EventID]
+	if !ok || admitted.ExecutionStartEventRef != payload.ExecutionStartEventRef || !slices.Equal(admitted.EventIDs, payload.EventIDs) {
+		return fmt.Errorf("execution inbox observation lacks atomic admission")
+	}
+	observationStart, err := inboxObservationExecution(binding, event, payload.ExecutionStartEventRef, indexed)
+	if err != nil {
+		return err
+	}
+	for _, eventID := range payload.EventIDs {
+		addressed, exists := indexed[eventID]
+		if !exists || addressed.Sequence >= observationStart.Sequence || addressed.OrganizationID != binding.OrganizationID || addressed.RecipientScope != event.RecipientScope || addressed.RecipientID != event.RecipientID || addressed.EventType == "INBOX_EVENTS_OBSERVED" {
+			return fmt.Errorf("execution inbox observation reference is invalid")
+		}
+		if _, duplicate := observed[eventID]; duplicate {
+			return fmt.Errorf("execution inbox event was observed more than once")
+		}
+		observed[eventID] = struct{}{}
+	}
+	return nil
 }
 
 func inboxObservationExecution(binding WorkCompletionBinding, observation Event, startEventRef string, indexed map[string]Event) (Event, error) {
@@ -2422,7 +2473,7 @@ func executionRevision(binding WorkCompletionBinding, task core.Task, manifestEv
 	requestSequences := make(map[core.ID]int64)
 	var selected completionReviewDecisionPayload
 	var selectedEvent Event
-	for _, event := range stream {
+	for _, event := range binding.completionHistory.correlationEvents(stream, "COMPLETION_REVIEW_REQUESTED", binding.CorrelationID) {
 		if event.Sequence >= manifestEvent.Sequence || event.CorrelationID != binding.CorrelationID || event.EventType != "COMPLETION_REVIEW_REQUESTED" {
 			continue
 		}
@@ -2441,7 +2492,7 @@ func executionRevision(binding WorkCompletionBinding, task core.Task, manifestEv
 		}
 		requests[request.ID], requestSequences[request.ID] = request, event.Sequence
 	}
-	for _, event := range stream {
+	for _, event := range binding.completionHistory.correlationEvents(stream, "COMPLETION_REVIEW_DECIDED", binding.CorrelationID) {
 		if event.Sequence >= manifestEvent.Sequence || event.CorrelationID != binding.CorrelationID || event.EventType != "COMPLETION_REVIEW_DECIDED" {
 			continue
 		}
@@ -2482,9 +2533,16 @@ func validCompletionInputEvent(binding WorkCompletionBinding, taskID core.ID, ev
 }
 
 func validateExecutionStart(binding WorkCompletionBinding, task core.Task, version int, outcomeEvent Event, stream []Event) (Event, bool, error) {
+	history := binding.executionHistory
+	starts := stream
+	if binding.completionHistory != nil {
+		starts = binding.completionHistory.taskEvents(stream, "EXECUTION_STARTED", string(task.ID), binding.CorrelationID)
+	} else if history != nil {
+		starts = history.correlations[binding.CorrelationID]
+	}
 	var found Event
 	remediation := false
-	for _, event := range stream {
+	for _, event := range starts {
 		if event.EventType != "EXECUTION_STARTED" || event.TaskID != string(task.ID) || event.CorrelationID != binding.CorrelationID {
 			continue
 		}
@@ -2496,7 +2554,7 @@ func validateExecutionStart(binding WorkCompletionBinding, task core.Task, versi
 		if found.EventID != "" || event.Sequence >= outcomeEvent.Sequence || event.OrganizationID != binding.OrganizationID || event.SourceActorID != "runtime" || event.SourceExecutionID != "" || payload.Projection.ProjectionKind != "task" || payload.Projection.RecordID != string(task.ID) || payload.Projection.CorrelationID != binding.CorrelationID || json.Unmarshal(payload.Projection.Value, &projected) != nil || projected.Status != core.TaskRunning || !sameTaskDefinition(projected, task) {
 			return Event{}, false, fmt.Errorf("work completion execution-start record is invalid")
 		}
-		if err := ValidateTaskExecutionStart(event, projected, version, binding.Work, binding.Intent, stream); err != nil {
+		if err := validateTaskExecutionStart(event, projected, version, binding.Work, binding.Intent, stream, history); err != nil {
 			return Event{}, false, err
 		}
 		if task.ExecutionKind == core.ExecutionAgent {
@@ -2515,6 +2573,14 @@ func validateExecutionStart(binding WorkCompletionBinding, task core.Task, versi
 // boundary. Strategic references are coordination context only, but every
 // execution kind must bind the exact Plan revisions that admission accepted.
 func ValidateTaskExecutionStart(start Event, task core.Task, taskVersion int, work core.Work, intent core.Intent, stream []Event) error {
+	return validateTaskExecutionStart(start, task, taskVersion, work, intent, stream, nil)
+}
+
+func (history *executionHistory) validate(start Event, task core.Task, taskVersion int, work core.Work, intent core.Intent) error {
+	return validateTaskExecutionStart(start, task, taskVersion, work, intent, history.stream, history)
+}
+
+func validateTaskExecutionStart(start Event, task core.Task, taskVersion int, work core.Work, intent core.Intent, stream []Event, history *executionHistory) error {
 	if start.OrganizationID == "" || start.SourceActorID != "runtime" || start.SourceExecutionID != "" || start.RecipientScope != "" || start.RecipientID != "" || start.TaskID != string(task.ID) || start.CorrelationID == "" || taskVersion < 2 || task.Status != core.TaskRunning || task.WorkID != work.ID || work.IntentID != intent.ID || intent.OrganizationID != core.ID(start.OrganizationID) {
 		return fmt.Errorf("execution start crosses its durable Task boundary")
 	}
@@ -2524,7 +2590,11 @@ func ValidateTaskExecutionStart(start Event, task core.Task, taskVersion int, wo
 	case core.ExecutionAgent:
 		detail, err = executionStartDetail(start)
 		if err == nil {
-			err = ValidateAgentDispatchStart(start, task, taskVersion, stream)
+			dispatch := stream
+			if history != nil {
+				dispatch = history.dispatchStream(start, detail.DispatchBinding)
+			}
+			err = ValidateAgentDispatchStart(start, task, taskVersion, dispatch)
 		}
 	case core.ExecutionDeterministic, core.ExecutionHuman:
 		detail, err = nonAgentExecutionStartDetail(start, task.ExecutionKind)
@@ -2536,20 +2606,30 @@ func ValidateTaskExecutionStart(start Event, task core.Task, taskVersion int, wo
 	if err != nil {
 		return err
 	}
-	plan, planEvent, err := resolvePlan(start.OrganizationID, start.CorrelationID, work, intent, stream)
+	var plan core.Plan
+	var planEvent Event
+	if history == nil {
+		plan, planEvent, err = resolvePlan(start.OrganizationID, start.CorrelationID, work, intent, stream)
+	} else {
+		plan, planEvent, err = history.resolvePlan(start.OrganizationID, start.CorrelationID, work, intent)
+	}
 	if err != nil {
 		return fmt.Errorf("resolve execution-start Plan context: %w", err)
 	}
 	if planEvent.Sequence >= start.Sequence {
 		return fmt.Errorf("execution start predates its durable Plan")
 	}
-	if _, err := resolveStrategicContextByRefs(start.OrganizationID, work, stream, plan.StrategicEventRefs, plan.StrategicContextRefs, planEvent.Sequence); err != nil {
+	strategy := stream
+	if history != nil {
+		strategy = history.strategyStream(start.OrganizationID, work, start.Sequence, plan.StrategicEventRefs)
+	}
+	if _, err := resolveStrategicContextByRefs(start.OrganizationID, work, strategy, plan.StrategicEventRefs, plan.StrategicContextRefs, planEvent.Sequence); err != nil {
 		return fmt.Errorf("resolve execution-start Plan context: %w", err)
 	}
 	if !slices.Equal(plan.StrategicEventRefs, detail.StrategicEventRefs) || !slices.Equal(plan.StrategicContextRefs, detail.StrategicContextRefs) {
 		return fmt.Errorf("execution start does not bind its durable Plan context")
 	}
-	currentStrategy, currentEventRefs, currentContextRefs, err := ResolveStrategicContext(start.OrganizationID, work, stream, start.Sequence)
+	currentStrategy, currentEventRefs, currentContextRefs, err := ResolveStrategicContext(start.OrganizationID, work, strategy, start.Sequence)
 	if err != nil || !slices.Equal(currentEventRefs, detail.StrategicEventRefs) || !slices.Equal(currentContextRefs, detail.StrategicContextRefs) {
 		return fmt.Errorf("execution start crossed a strategic-context revision")
 	}
@@ -2557,7 +2637,13 @@ func ValidateTaskExecutionStart(start Event, task core.Task, taskVersion int, wo
 		return fmt.Errorf("execution start used inactive strategic context")
 	}
 	if task.ExecutionKind == core.ExecutionHuman {
-		inputEvent, found := eventWithID(stream, detail.InputEventRef)
+		var inputEvent Event
+		var found bool
+		if history == nil {
+			inputEvent, found = eventWithID(stream, detail.InputEventRef)
+		} else {
+			inputEvent, found = history.event(detail.InputEventRef)
+		}
 		if !found || inputEvent.Sequence >= start.Sequence || inputEvent.OrganizationID != start.OrganizationID || inputEvent.TaskID != start.TaskID || inputEvent.CorrelationID != start.CorrelationID {
 			return fmt.Errorf("user execution start lacks its exact prior input event")
 		}
@@ -2789,7 +2875,7 @@ func completionDecisionApproval(binding WorkCompletionBinding, task core.Task, d
 		}
 		return nil, nil
 	}
-	judgmentEvent, found := eventWithID(stream, decision.JudgmentRef)
+	judgmentEvent, found := binding.completionHistory.event(stream, decision.JudgmentRef)
 	if !found || judgmentEvent.EventType != "COMPLETION_REVIEW_DECIDED" || judgmentEvent.OrganizationID != binding.OrganizationID || judgmentEvent.TaskID != verification.TaskID || judgmentEvent.CorrelationID != binding.CorrelationID || judgmentEvent.Sequence >= verification.Sequence || judgmentEvent.SourceActorID == "" || judgmentEvent.SourceExecutionID != "" {
 		return nil, fmt.Errorf("work completion judgment reference is invalid")
 	}
@@ -2799,7 +2885,7 @@ func completionDecisionApproval(binding WorkCompletionBinding, task core.Task, d
 	}
 	var requestEvent Event
 	var request completionReviewRequestPayload
-	for _, event := range stream {
+	for _, event := range binding.completionHistory.taskEvents(stream, "COMPLETION_REVIEW_REQUESTED", verification.TaskID, binding.CorrelationID) {
 		if event.EventType != "COMPLETION_REVIEW_REQUESTED" || event.TaskID != verification.TaskID || event.CorrelationID != binding.CorrelationID {
 			continue
 		}
@@ -2821,7 +2907,7 @@ func completionDecisionApproval(binding WorkCompletionBinding, task core.Task, d
 	}
 	reviewEvidence := make([]Event, 3)
 	for index, eventType := range []string{"TOOL_OUTCOME_RECORDED", "RESULT_PUBLISHED", "CANDIDATE_COMPLETE"} {
-		evidenceEvent, found := eventWithID(stream, request.EvidenceRefs[index])
+		evidenceEvent, found := binding.completionHistory.event(stream, request.EvidenceRefs[index])
 		if !found || evidenceEvent.EventType != eventType || evidenceEvent.OrganizationID != binding.OrganizationID || evidenceEvent.TaskID != verification.TaskID || evidenceEvent.CorrelationID != binding.CorrelationID || evidenceEvent.SourceExecutionID != requestEvent.SourceExecutionID || evidenceEvent.Sequence >= requestEvent.Sequence {
 			return nil, fmt.Errorf("work completion review evidence is invalid")
 		}

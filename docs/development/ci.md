@@ -45,7 +45,36 @@ and security review.
 
 ## Race-test duration
 
-The race suite has a twenty-minute timeout per Go package. Large SQLite history
-tests incur substantial overhead under the race detector, and hosted runners
-vary in speed. Run `go test -race -timeout=20m ./...` to match CI. Assertion
-failures, data races, and expiry of this timeout fail the check.
+CI runs the complete normal Go suite and all race tests. It discovers the app
+and ledger tests, examples, and fuzz seed targets from compiled race binaries,
+then executes their groups on independent runners in parallel. App uses up to
+two nonempty groups. Ledger keeps the complete source-gate differential test
+alone and distributes every other target round-robin across up to sixteen nonempty
+groups. All other packages run under the race detector in one additional job.
+Each package or group retains its twenty-minute timeout and uncached test run.
+No tests, subtests, generated cases or history sizes are omitted from race testing.
+
+Run `python3 scripts/race_tests.py` locally to execute the same race corpus
+sequentially. It also runs the complete normal app and ledger packages.
+`--suite normal` runs the full normal Go suite; `--suite plan` prints the CI
+matrix discovered from the current source. `--suite app --group N` and
+`--suite ledger --group N` execute exactly one discovered group, and
+`--suite other` race-tests every package outside those two exact packages.
+Groups retain every subtest of their top-level targets; completion must match
+fresh discovery. App additionally requires both completion-growth sizes and
+both unrelated-history sizes to pass in their owning group. Invalid group
+numbers, missing targets, failed processes, race reports and timeouts fail.
+
+The required `CI verification (pull_request)` result depends on discovery,
+normal/code/document checks and the entire race matrix. A failed, cancelled or
+unexpectedly skipped prerequisite cannot yield a successful required result.
+Documentation-only changes still run document checks and skip the race matrix;
+their final result requires successful classification and document checks.
+
+Parallel runners reduce elapsed CI time by sharing independent groups across
+more runners; they do not reduce the test workload or speed up individual reads.
+Runner availability and compilation/cache costs affect the actual duration.
+The complete ungrouped normal suite retains shared-process interaction checks.
+As with the previous sequential race groups, race interactions must be exercised
+within one top-level test; grouping does not provide cross-group race detection.
+All groups run on the same workflow revision with the Go version in `go.mod`.

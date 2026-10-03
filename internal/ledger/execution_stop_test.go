@@ -23,6 +23,7 @@ func stopTestExecution(t *testing.T, store *SQLite) core.Task {
 }
 
 func TestExecutionStopHistoryCost(t *testing.T) {
+	parallelIncidentTest(t)
 	// Sixteen Tasks reach the supported fifteen-peer context boundary.
 	for _, size := range []int{1, 16} {
 		t.Run(fmt.Sprintf("stopped-tasks-%d", size), func(t *testing.T) {

@@ -146,7 +146,7 @@ func TestVerifyRejectsAgentEvidenceDetachedFromItsExecution(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	organization := core.Organization{ID: "org-1", Name: "Organization", PolicyVersion: "v1", CreatedAt: now}
-	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "publish evidence", NormalizedObjective: "publish evidence", CreatedAt: now}
+	intent := core.Intent{ID: "intent-1", OrganizationID: organization.ID, OriginalInstruction: "publish evidence", NormalizedObjective: "publish evidence", AcceptedFingerprint: "internal-recovery", CreatedAt: now}
 	work := core.Work{ID: "work-1", IntentID: intent.ID, Objective: intent.NormalizedObjective, Status: core.WorkActive, CreatedAt: now}
 	blueprint := core.AgentBlueprint{ID: "blueprint-1", OrganizationID: organization.ID, Version: "v1", Role: "worker", OperatingInstructions: "bounded work", RequiredCapabilityClasses: []string{}, Status: "ACTIVE", CreatedAt: now}
 	profile := core.ExecutionProfile{ID: "profile-1", OrganizationID: organization.ID, Version: "v1", ModelProvider: "provider", Model: "model", PromptVersion: "v1", ToolRefs: []string{}, Status: "ACTIVE", CreatedAt: now}
@@ -167,6 +167,7 @@ func TestVerifyRejectsAgentEvidenceDetachedFromItsExecution(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	appendRecoveryPlan(t, store, "work-1", intent, task)
 	task.Status = core.TaskRunning
 	if _, _, err := store.AppendExecutionStart(ctx, events.ProjectionDraft{
 		Event:          events.TrustedDraft{OrganizationID: "org-1", EventType: "EXECUTION_STARTED", SourceActorID: "runtime", TaskID: string(task.ID), CorrelationID: "work-1"},

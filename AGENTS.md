@@ -66,20 +66,50 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
    the owners and phases from request admission through preparation, model calls,
    and durable result admission. Identify the authoritative completion boundary;
    a handler return does not necessarily end the operation.
-2. Maintain a compact local evidence matrix for relevant identity, missing or
-   invalid metadata, cancellation, authority failure, timing between writes,
-   and crash boundaries. Distinguish proven, contradicted, missing, and
-   inapplicable coverage; a passing package suite is not exhaustive evidence.
+   Place cross-module tests in an allowed integration layer and keep direct
+   storage mutations in the owning module. Check test architecture boundaries
+   before expanding fixtures across modules.
+2. For cross-boundary behavior changes, maintain a compact contract evidence
+   matrix: invariant, owning writer/validator and callers, independent failure
+   cases, exact evidence and revision, and decision. Derive cases from those
+   owners rather than from the patch. Distinguish proven, contradicted, missing,
+   and inapplicable with a reason. Include relevant identity, missing/forbidden
+   metadata, authority failure, cancellation, write timing and crash boundaries.
+   A passing package suite or clean audit is not exhaustive evidence.
 3. Enforce invariants at their authoritative boundary before dispatch or durable
    publication. Validate relationships in both directions and cover supported
    direct composition as well as the production setup.
 4. Implement a complete, cohesive invariant across its callers. Prefer an
    existing shared boundary that owns the rule over multiple partial fixes.
+   For filtered readers, check selection completeness in both directions before
+   relying on shared validators. Derive each event kind's candidate predicate
+   from its owning validator and its caller's applicability conditions before
+   applying tenant, identity, or time filters;
+   a shared subsystem does not imply a shared identity scope. Build
+   an inventory of reference-bearing fields from owned payload types, including
+   nested arrays, and map each to incoming selection or a justified exclusion.
+   Retain every occurrence of a typed reference and its applicability fields in
+   malformed JSON, including duplicate containers and discriminators, so exact
+   validation can reject the source. A first-value parser or SQL path lookup is
+   not sufficient discovery evidence.
+   Tenant-scoped lookup does not prove that a foreign claim against a global
+   event ID is unrelated. Exercise that claim before excluding it, while keeping
+   valid shared authority references from expanding unrelated history. Reconstruct
+   candidate sets from durable scope and time boundaries, independently of
+   claimed references. Compare required
+   inputs and invariants with full recovery, including private dependencies and
+   omitted candidates. Compare every stored metadata field with the owning
+   writer and recovery rules; include forbidden fields in validation and byte
+   preflight rather than dropping them from the selected columns. Document
+   deliberate scope exclusions rather than assuming parity.
 5. Exercise realistic failure paths through actual entry points and durable
    state. Verify forbidden calls and writes do not occur, necessary evidence
    survives, retry and restart behave correctly, and other tenants are unaffected.
    Test doubles must implement the interfaces production calls. Where feasible,
    verify regressions fail for the intended defect against the prior behavior.
+   Derive valid history fixtures from the owning writer's state transitions.
+   Before treating cross-tenant evidence as unrelated, verify whether the linked
+   identifier is globally unique or tenant-scoped in storage and recovery.
    When validation depends on earlier events, test an invalid earlier event
    followed by plausible later events, and compare live reads with full replay.
    For cancellation changes, exercise the real transport/runtime shutdown path
@@ -88,16 +118,29 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
    that recovery must preserve; one authority generation is not every stop signal.
 6. For changes whose cost grows with history or candidate counts, check a complete
    public operation at representative small and large sizes before review.
+   Scale both admitted operations and supporting history; one operation amid
+   many unrelated events cannot expose repeated validation across many starts.
+   For dependency readers, vary chain depth, branching, and unrelated history
+   separately; a short public timeline can require a deep supporting graph.
    Account for nested calls, repeated polls and concurrent callers; one scan per
    transaction can still mean one scan per poll. Measure relevant allocations,
    query counts or latency, including cold and warm paths when caching is used.
    Preserve snapshot, invalidation, rollback and tenant-isolation guarantees.
    Distinguish necessary full replay from repeated runtime work. Investigate CI
    timeouts before changing their budget; a longer timeout is not a performance fix.
-7. Before each review push, audit the whole changed invariant and diff, address
-   confirmed related gaps, and run the required checks. A review finding triggers
-   a class-wide audit of sibling callers and failure modes before the next push.
-   Record concrete evidence; external review is an independent gate.
+7. Before a ready review push, audit the whole changed invariant and diff against
+   the evidence matrix. For high-risk cross-boundary changes, use an independent
+   reviewer to inspect the raw contract, sources and tests for missing coverage.
+   Required missing or contradicted evidence holds the push; continue diagnosis
+   and logical local commits without asking for routine approval. An exclusion
+   needs a contract or scope reason, not absence from the diff. Run applicable
+   checks and address confirmed related gaps. For performance changes, compare
+   the same complete workload before/after and diagnose regressions before
+   calling the change an improvement. Map each external finding to the missed
+   boundary or evidence row, audit sibling paths, and track repeat defect classes.
+   Apply the verification-before-completion skill when available; these gate
+   requirements remain binding without it. Documentation-only and low-impact
+   mechanical changes do not require this matrix or independent coverage audit.
 8. Keep PRs cohesive and bounded without omitting necessary callers merely to
    reduce diff size. Track independent confirmed defects under the issue policy
    below and resolve them before proceeding to later goal parts.
@@ -120,8 +163,8 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
     merely because guidance was added or a review found nothing.
 11. Use current, relevant skills and adapt them when observed failures justify a
     reusable improvement. Delegate only a concrete subtask whose independent
-    coverage or time savings justify its inference cost. Use Astra (`gpt-6-astra`)
-    for planning agents. For other assignments, choose a model and reasoning
+    coverage or time savings justify its inference cost. Use GPT-6.1 Sol
+    (`gpt-6.1-sol`) for all subagent tasks, including planning. Choose a reasoning
     level suited to the difficulty and security risk, balancing speed and cost
     without compromising quality. Name applicable skills in each assignment and
     have the agent read them. Require inspected entry points, evidence, exclusions
@@ -178,7 +221,8 @@ Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/ar
   Do not request a redundant general review for a push already under review.
 - Once a review is requested or running, wait for its reply before continuing
   implementation or pushing further changes. Do not request additional reviews
-  while waiting for the current review. Read-only review/CI status checks are OK.
+  while waiting for the current review. Wait quietly rather than monitoring CI;
+  check CI when needed for merge readiness or diagnosing a known failure.
 - Track review start/completion times, review type, and change size in a local
   project file outside the repository. Estimate the first status check from
   comparable observations and adjust as evidence changes; avoid frequent fixed
