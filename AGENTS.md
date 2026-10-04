@@ -1,6 +1,8 @@
 # Agent OS repository guidance
 
 Agent OS is a Go modular monolith for operating persistent AI-assisted organizations.
+This file contains Agent OS contracts and workflow details; reusable working
+preferences belong in the user's global agent guidance.
 
 ## Project-wide boundaries
 
@@ -9,284 +11,86 @@ Agent OS is a Go modular monolith for operating persistent AI-assisted organizat
 - Authority and completion fail closed: workers cannot expand their own capabilities or certify their own completion.
 - A2A is an external operator boundary, not internal IPC or implicit administrative authority.
 - Keep deferred architecture deferred unless a human explicitly authorizes its implementation.
-- Keep repository files self-contained. Do not reference workspace-only project
-  files, local planning notes, attachments, or machine-specific project paths.
-  Cite tracked repository files or publicly accessible sources instead. Put any
-  necessary requirement directly in the appropriate repository document.
-
-Run the appropriate repository checks before a review push; hooks and CI provide
-independent enforcement rather than replacing local verification.
-
-## Names in code
-
-Prefer familiar, plain-language names over technical jargon for code identifiers.
-Aim for 30 characters or fewer. Use a longer or technical name when needed for
-clarity, accuracy, or an established interface.
-
-## Documentation layout
-
-- Keep schemas in the repository-root `schemas/` directory.
-- Reserve the root of `docs/` for essential cross-cutting documents:
-  `README.md` and `threat-model.md`. Put other documents in topic folders.
-- Use `guides/` for user workflows, `architecture/` for runtime contracts,
-  `integrations/` for protocols and providers, `security/` for security controls,
-  `operations/` for recovery and release procedures, `governance/` for product
-  governance controls, and `development/` for engineering checks and evidence.
-  Keep documentation images in `docs/images/`.
-- Preserve conventional uppercase filenames such as `AGENTS.md`, `README.md`,
-  `SECURITY.md`, `CONTRIBUTING.md`, and `CHANGELOG.md`. These names contain no
-  spaces, dashes, or underscores. All other Markdown filenames use lowercase
-  words separated by dashes, including generated Markdown artifacts.
-- Keep usage instructions, implemented contracts, software-control evidence,
-  and fixtures consumed by repository checks in the repository. Keep competitive
-  strategy and non-code certification planning outside it; do not link to those
-  records from repository files.
-- Update links, schema consumers, generated artifact names, and document-bundle
-  inputs together when moving or renaming files.
-
-## Scope security work clearly
-
-Follow OpenAI's [additional safety-check guidance](https://help.openai.com/en/articles/20001326-additional-safety-checks-for-biological-and-cybersecurity-requests-in-chatgpt-codex-and-the-api):
-
-- From the outset, state the authorized defensive outcome: identifying,
-  preventing, or remediating a security issue in Agent OS.
-- Keep each request focused on that outcome and include only relevant context.
-  Retain the technical details needed to diagnose, fix, and verify the issue;
-  omit exploit details unnecessary to that work.
-- Check that the request complies with OpenAI's Usage Policies. Clear scope
-  should explain the legitimate work, not conceal its purpose or effects.
-- Changing wording does not change whether a request is allowed or guarantee a
-  response. Do not disguise a request or attempt to bypass safeguards.
-
-## Engineering quality workflow
-
-1. Before editing, identify the intended behavior and scope. Trace affected
-   entry points, alternate compositions, durable writers and readers, output
-   consumers, and retry, recovery, and replay paths. For lifecycle changes, map
-   the owners and phases from request admission through preparation, model calls,
-   and durable result admission. Identify the authoritative completion boundary;
-   a handler return does not necessarily end the operation.
-   Place cross-module tests in an allowed integration layer and keep direct
-   storage mutations in the owning module. Check test architecture boundaries
-   before expanding fixtures across modules.
-2. For cross-boundary behavior changes, maintain a compact contract evidence
-   matrix: invariant, owning writer/validator and callers, independent failure
-   cases, exact evidence and revision, and decision. Derive cases from those
-   owners rather than from the patch. Distinguish proven, contradicted, missing,
-   and inapplicable with a reason. Include relevant identity, missing/forbidden
-   metadata, authority failure, cancellation, write timing and crash boundaries.
-   A passing package suite or clean audit is not exhaustive evidence.
-3. Enforce invariants at their authoritative boundary before dispatch or durable
-   publication. Validate relationships in both directions and cover supported
-   direct composition as well as the production setup.
-4. Implement a complete, cohesive invariant across its callers. Prefer an
-   existing shared boundary that owns the rule over multiple partial fixes.
-   For filtered readers, check selection completeness in both directions before
-   relying on shared validators. Derive each event kind's candidate predicate
-   from its owning validator and its caller's applicability conditions before
-   applying tenant, identity, or time filters;
-   a shared subsystem does not imply a shared identity scope. Build
-   an inventory of reference-bearing fields from owned payload types, including
-   nested arrays, and map each to incoming selection or a justified exclusion.
-   Retain every occurrence of a typed reference and its applicability fields in
-   malformed JSON, including duplicate containers and discriminators, so exact
-   validation can reject the source. A first-value parser or SQL path lookup is
-   not sufficient discovery evidence.
-   Tenant-scoped lookup does not prove that a foreign claim against a global
-   event ID is unrelated. Exercise that claim before excluding it, while keeping
-   valid shared authority references from expanding unrelated history. Reconstruct
-   candidate sets from durable scope and time boundaries, independently of
-   claimed references. Compare required
-   inputs and invariants with full recovery, including private dependencies and
-   omitted candidates. Compare every stored metadata field with the owning
-   writer and recovery rules; include forbidden fields in validation and byte
-   preflight rather than dropping them from the selected columns. Document
-   deliberate scope exclusions rather than assuming parity.
-5. Exercise realistic failure paths through actual entry points and durable
-   state. Verify forbidden calls and writes do not occur, necessary evidence
-   survives, retry and restart behave correctly, and other tenants are unaffected.
-   Test doubles must implement the interfaces production calls. Where feasible,
-   verify regressions fail for the intended defect against the prior behavior.
-   Derive valid history fixtures from the owning writer's state transitions.
-   Before treating cross-tenant evidence as unrelated, verify whether the linked
-   identifier is globally unique or tenant-scoped in storage and recovery.
-   When validation depends on earlier events, test an invalid earlier event
-   followed by plausible later events, and compare live reads with full replay.
-   For cancellation changes, exercise the real transport/runtime shutdown path
-   and interruptions across relevant admission writes. Distinguish stop causes,
-   forbidden publication, required accounting, and any already-committed decision
-   that recovery must preserve; one authority generation is not every stop signal.
-6. For changes whose cost grows with history or candidate counts, check a complete
-   public operation at representative small and large sizes before review.
-   Scale both admitted operations and supporting history; one operation amid
-   many unrelated events cannot expose repeated validation across many starts.
-   For dependency readers, vary chain depth, branching, and unrelated history
-   separately; a short public timeline can require a deep supporting graph.
-   Account for nested calls, repeated polls and concurrent callers; one scan per
-   transaction can still mean one scan per poll. Measure relevant allocations,
-   query counts or latency, including cold and warm paths when caching is used.
-   Preserve snapshot, invalidation, rollback and tenant-isolation guarantees.
-   Distinguish necessary full replay from repeated runtime work. Investigate CI
-   timeouts before changing their budget; a longer timeout is not a performance fix.
-7. Before a ready review push, audit the whole changed invariant and diff against
-   the evidence matrix. For high-risk cross-boundary changes, use an independent
-   reviewer to inspect the raw contract, sources and tests for missing coverage.
-   Required missing or contradicted evidence holds the push; continue diagnosis
-   and logical local commits without asking for routine approval. An exclusion
-   needs a contract or scope reason, not absence from the diff. Run applicable
-   checks and address confirmed related gaps. For performance changes, compare
-   the same complete workload before/after and diagnose regressions before
-   calling the change an improvement. Map each external finding to the missed
-   boundary or evidence row, audit sibling paths, and track repeat defect classes.
-   Apply the verification-before-completion skill when available; these gate
-   requirements remain binding without it. Documentation-only and low-impact
-   mechanical changes do not require this matrix or independent coverage audit.
-8. Keep PRs cohesive and bounded without omitting necessary callers merely to
-   reduce diff size. Track independent confirmed defects under the issue policy
-   below and resolve them before proceeding to later goal parts.
-9. Keep `docs/threat-model.md` aligned with code changes affecting architecture,
-   trust boundaries, attack surfaces, security controls, prerequisites, residual
-   risks, or severity. Update it in the same PR as relevant code. Describe the
-   codebase at the revision containing the document; do not embed or routinely
-   refresh a commit hash merely to identify its baseline. Distinguish implemented
-   controls from incomplete controls and future prerequisites. Preserve the
-   supplied draft's four numbered sections: Overview; Threat model, Trust
-   boundaries and assumptions; Attack surface, mitigations and attacker stories;
-   and Criticality calibration. Retain
-   its subsection structure, explanatory prose, and severity lists when updating
-   the corresponding content.
-10. Use PR findings and verification/review costs as ongoing learning evidence.
-    Update or create relevant skills and revise `AGENTS.md` when a reusable
-    lesson changes how work should be done. Replace contradictory instructions
-    at their source. Prefer targeted changes over growing generic checklists;
-    assess later work for repeated defect classes and avoid claiming improvement
-    merely because guidance was added or a review found nothing.
-11. Use current, relevant skills and adapt them when observed failures justify a
-    reusable improvement. Delegate only a concrete subtask whose independent
-    coverage or time savings justify its inference cost. Use GPT-6.1 Sol
-    (`gpt-6.1-sol`) for all subagent tasks, including planning. Choose a reasoning
-    level suited to the difficulty and security risk, balancing speed and cost
-    without compromising quality. Name applicable skills in each assignment and
-    have the agent read them. Require inspected entry points, evidence, exclusions
-    and uncertainty in its result. For an independent audit, provide the contract
-    and raw artifacts without steering it toward the implementer's conclusions.
-    The parent remains responsible for combined coverage and verification.
-
-## Standing user instructions and goal continuity
-
-- These instructions persist across tasks and context compaction. Later explicit
-  user decisions supersede earlier conflicting instructions; do not revive a
-  superseded policy from an old handoff or task summary.
-- Replace contradictory active instructions at their source when adopting a
-  new workflow. Do not stack competing overrides. Clearly label historical
-  records; preserve historical evidence.
-- Keep user-facing messages minimal. Report meaningful outcomes, blockers, and
-  decisions rather than routine local commits or repeated compliance statements.
-- Use tracked project documentation to guide task work and maintain the
-  user-requested goal and evidence of remaining work. Completing one PR does not
-  complete the broader goal; do not silently narrow it to the current PR.
 - Agent OS should support all providers Hermes offers where feasible, and use
   multiple configured providers/models for different agent tasks according to
   what the user has available. Do not constrain an organization to one provider.
   Record feasibility limits and unfinished coverage explicitly.
-- Assess proposed architectural improvements for merit after the current task/PR,
-  preserving the architecture and scope boundaries above. Treat proposals as
-  proposals to evaluate, not automatically approved implementation.
+- Do not infer authorization for deferred governed ingestion from engineering work.
 
-## Commits, PRs, and review sequencing
+## Ledger selection and recovery evidence
 
-- Make local commits at logical, verified checkpoints instead of accumulating
-  all work until an entire issue or goal is complete. A checkpoint commit does
-  not imply PR readiness; record remaining work and obtain the required review
-  coverage before merge.
-- Choose PR opening time based on cohesion and readiness. An issue does not
-  require an immediate PR; implementation may fully resolve it before opening.
-  Local checkpoint commits continue throughout either approach.
-- For all future commits, use the default configured Git author and committer.
-  Do not substitute a Codex identity through command-line configuration,
-  environment variables, or explicit author/committer overrides. If no default
-  identity is available, resolve that setup before committing instead of
-  inventing an identity.
-- Use [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/#specification)
-  for every commit, including squash commit titles. Use
-  `type(optional-scope): description`; use `feat` for features, `fix` for fixes,
-  and an appropriate type such as `docs`, `test`, or `refactor` for other work.
-  Mark breaking changes with `!` before the colon or a `BREAKING CHANGE:` footer.
-- Every commit needs review. Review and check evidence must cover the final PR
-  head; an approval for an earlier head does not cover subsequent changes.
-- General code reviews run automatically on pushes to ready PRs. Move a draft
-  PR to ready before expecting automatic review. Observe the automatic review
-  before considering a manual request. If it demonstrably
-  did not start and a manual general review is necessary, comment `@codex review`.
-  Do not request a redundant general review for a push already under review.
-- Once a review is requested or running, wait for its reply before continuing
-  implementation or pushing further changes. Do not request additional reviews
-  while waiting for the current review. Wait quietly rather than monitoring CI;
-  check CI when needed for merge readiness or diagnosing a known failure.
-- Track review start/completion times, review type, and change size in a local
-  project file outside the repository. Estimate the first status check from
-  comparable observations and adjust as evidence changes; avoid frequent fixed
-  polling and never treat an estimated completion time as an actual reply.
-- Security-sensitive code and any PR changing `docs/threat-model.md` require a
-  security review. Request it by commenting `@codex security review` only after
-  general review has returned with no outstanding issues. This supersedes the
-  earlier permission to request security review before general review finishes.
-  Applicable checks need not finish before requesting security review, but must
-  pass before merge.
-- If automation has already started a security review, do not duplicate it.
-  Wait for running reviews and verify their coverage of the final head.
-- Address review findings, run appropriate checks, and obtain review of each
-  follow-up commit. Resolve findings with evidence rather than treating silence
-  or an unfinished review as approval.
-- Merge only after required general/security reviews are clean, review threads
-  are resolved, and all applicable checks for the final head pass. For code
-  changes, this includes both push and PR CI where configured. Finish relevant
-  edge-case checks before presenting a branch as ready for merge.
-- Documentation-only PRs may skip code-related workflows, such as builds, code
-  tests, and release-artifact checks. Run applicable documentation checks and
-  obtain all required reviews, including security review for threat-model changes.
-  In mixed workflows, retain document validation when skipping code checks.
-  Changes to executable scripts, CI workflows, dependencies, or runtime
-  configuration are code-related changes, not documentation-only changes.
-- Use PRs for normal work. The user explicitly authorized the 2026-09-07
-  `AGENTS.md` rules consolidation directly on `main` without a PR. That is a
-  one-time exception, not standing permission to bypass PRs or review rules.
+- For filtered readers, check selection completeness in both directions before
+  relying on shared validators. Derive each event kind's candidate predicate
+  from its owning validator and its caller's applicability conditions before
+  applying tenant, identity or time filters; a shared subsystem does not imply
+  a shared identity scope.
+- Inventory reference-bearing fields from owned payload types, including nested
+  arrays, and map each to incoming selection or a justified exclusion. Retain
+  every occurrence of a typed reference and its applicability fields in malformed
+  JSON, including duplicate containers and discriminators, so exact validation
+  can reject the source. First-value parsers and SQL path lookups do not provide
+  sufficient discovery evidence.
+- Tenant-scoped lookup does not prove a foreign claim against a global event ID
+  is unrelated. Exercise that claim before excluding it, while keeping valid
+  shared authority references from expanding unrelated history. Verify whether
+  linked identifiers are globally unique or tenant-scoped in storage and recovery
+  before treating cross-tenant evidence as unrelated.
+- Reconstruct candidate sets from durable scope and time boundaries independently
+  of claimed references. Compare required inputs and invariants with full recovery,
+  including private dependencies and omitted candidates. Compare every stored
+  metadata field with the owning writer and recovery rules; include forbidden
+  fields in validation and byte preflight instead of dropping selected columns.
+  Document deliberate exclusions rather than assuming parity.
+- For cancellation changes, one authority generation does not cover every
+  runtime stop signal; exercise the relevant stop causes and admission writes.
 
-## Findings outside the current PR
+## Documentation layout and threat model
+
+- Keep schemas in the repository-root `schemas/` directory.
+- Reserve the root of `docs/` for `README.md` and `threat-model.md`. Put other
+  documents in topic folders: `guides/` for user workflows, `architecture/` for
+  runtime contracts, `integrations/` for protocols/providers, `security/` for
+  controls, `operations/` for recovery/releases, `governance/` for product
+  governance, and `development/` for engineering checks/evidence. Keep images
+  in `docs/images/`.
+- Keep usage instructions, implemented contracts, software-control evidence and
+  fixtures consumed by repository checks in the repository. Keep competitive
+  strategy and non-code certification planning outside it; do not link to those
+  records from repository files.
+- Update `docs/threat-model.md` in the same PR as code affecting architecture,
+  trust boundaries, attack surfaces, controls, prerequisites, residual risks or
+  severity. Describe the codebase at the document's revision without embedding
+  or routinely refreshing a baseline commit hash. Distinguish implemented and
+  incomplete controls from future prerequisites. Preserve its four numbered
+  sections: Overview; Threat model, Trust boundaries and assumptions; Attack
+  surface, mitigations and attacker stories; Criticality calibration. Retain
+  subsection structure, explanatory prose and severity lists when updating content.
+
+## Repository review automation and CI
+
+- General reviews run automatically on pushes to ready PRs. Move a draft to ready
+  before expecting automatic review. If an automatic review demonstrably did not
+  start and a manual review is necessary, comment `@codex review` once.
+- Security-sensitive code and changes to `docs/threat-model.md` require security
+  review. After general review returns with no outstanding findings, request
+  `@codex security review` once unless automation has already started it. Applicable
+  CI need not finish before that request, but must pass before merge.
+- For code changes, final-head checks include both push and PR CI where configured.
+  Documentation-only PRs retain document validation and required reviews while
+  skipping code checks through the existing change classifier.
+
+## Security backlog and ISO/IEC 42001 decision
 
 - Open GitHub issues are the authoritative security-gap backlog. Local gap
   Markdown files are historical/reference material; reconcile them with current
   issues and code rather than treating them as a separate active backlog.
-- Create GitHub issues for confirmed code problems found outside the current PR
-  scope. Track them separately, then work them to resolution and close them
-  before proceeding to the next part of the broader goal.
-- GitHub issues are for code-related work only. Do not create issues for deferred
-  certification administration, organizational paperwork, or other non-code
-  certification tasks.
-- Issue #126 is excluded from active work and has been closed as not planned
-  following the certification decision. Do not reopen or resume its work unless
-  the user explicitly changes that decision.
-
-## ISO/IEC 42001 decision
-
-- Pursuit of official ISO/IEC 42001 certification is canceled for now.
-- All code must continue to meet applicable ISO/IEC 42001 requirements. Preserve
-  and implement the relevant software controls and their verification; canceling
-  certification does not authorize removing code safeguards.
+- Issue #126 is excluded from active work and closed as not planned following
+  the certification decision. Do not reopen or resume it unless the user
+  explicitly changes that decision.
+- Pursuit of official ISO/IEC 42001 certification is canceled for now. Code must
+  continue to meet applicable requirements; preserve and implement software
+  controls and verification. Canceling certification does not authorize removing
+  safeguards.
 - Non-code ISO/IEC 42001 work is indefinitely deferred. Preserve its status and
   supporting documentation outside GitHub issues so certification can resume
-  later by addressing the outstanding non-code obligations. Do not claim formal
-  certification from code compliance or completed engineering checks.
-
-## Branch cleanup and operational boundaries
-
-- Delete only local branches verified merged into remote main. Prefer Git over
-  browser automation. Remote branch deletion requires new explicit authorization.
-  Preserve checked-out branches, clones, worktrees, unfinished work, and unmerged
-  branches. A squash merge alone is not proof of Git ancestry into remote main.
-- Use the authenticated `gh` CLI for GitHub operations; it replaces the former
-  GitHub desktop plugins/apps in this workflow.
-- Existing GitHub authentication may be used for authorized repository actions.
-  Never print, commit, or ask the user to paste a PAT into conversation.
-- Do not infer authorization for live provider calls/spending, releases,
-  deployments, or deferred governed ingestion from the engineering goal.
+  later. Do not claim formal certification from code compliance or completed checks.
