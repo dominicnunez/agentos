@@ -38,10 +38,9 @@ frontend prerequisite fails or is cancelled. Document verification, document
 history and assessment-bundle checks, and classifier regressions remain active.
 The existing history-verification rules are unchanged.
 
-Skipping code checks does not waive reviews. Follow `AGENTS.md` for review
-sequencing; changes to `docs/threat-model.md` still require security review after
-a clean general review. Workflow changes themselves require full code checks
-and security review.
+Skipping code checks does not waive reviews. Changes to `docs/threat-model.md`
+still require security review after a clean general review. Workflow changes
+themselves require full code checks and security review.
 
 ## Race-test duration
 
