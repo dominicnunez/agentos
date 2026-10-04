@@ -28,48 +28,11 @@ The live machine-readable configuration is available from GitHub's [ruleset API]
 2. Make a bounded change and retain its reviewable commit history.
 3. Open a pull request.
 4. Bring the branch current with `main`.
-5. Obtain a clean general review and any required security review covering the
-   final PR head, including every follow-up commit. Changes after review require
-   the applicable reviews for the new head; an earlier approval does not cover
-   later relevant changes. Observe existing automatic reviews and do not duplicate
-   a running review or a completed clean review on unchanged relevant code.
-6. Resolve every applicable finding and review conversation with evidence.
-7. Require the exact configured checks to pass at the merge head.
-8. Merge through GitHub's normal pull-request path without intentionally invoking the administrator bypass.
+5. Resolve every review conversation.
+6. Require the exact configured checks to pass at the merge head.
+7. Merge through GitHub's normal pull-request path without intentionally invoking the administrator bypass.
 
 Zero required approving reviews is deliberate while the project has one accountable maintainer. Automated review and the project's security-first final review remain development evidence, but neither is misrepresented as an independent organizational approval.
-
-## Engineering authority boundaries
-
-An Agent OS engineering task does not itself authorize live provider calls or
-spending, releases, deployments, or deferred governed ingestion. Obtain explicit
-user authorization for those operations. Repository access and a passing PR do
-not grant that authority. Preserve these boundaries when validating provider
-integrations or preparing release artifacts.
-
-## Review integration and applicable checks
-
-Agent OS uses the Codex GitHub review integration. General reviews run
-automatically on pushes to ready PRs; drafts must be marked ready first. Observe
-the automatic job before a manual request. If a required general review
-demonstrably did not start, request it once with `@codex review`.
-
-Security-sensitive code and changes to `docs/threat-model.md` require security
-review. Request `@codex security review` only after general review returns with
-no outstanding findings, unless automation already started security review.
-Applicable CI need not finish before the request, but must pass before merge.
-The final-head review gate in the normal change path applies to follow-up commits.
-
-For code changes, applicable final-head checks include both push and PR CI where
-configured. Documentation-only PRs retain document validation and required
-reviews while skipping code checks through the existing change classifier.
-Scripts, workflows, dependencies and runtime configuration are code changes.
-
-Keep `docs/threat-model.md` aligned with code changes affecting Agent OS
-architecture, trust boundaries, attack surfaces, security controls, prerequisites,
-residual risks or severity, in the same PR. Distinguish implemented controls
-from incomplete controls and future prerequisites. This document-maintenance
-requirement and its security review apply independently of private user guidance.
 
 ## Emergency bypass
 

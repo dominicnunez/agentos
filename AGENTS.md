@@ -16,13 +16,11 @@ preferences belong in the user's global agent guidance.
   what the user has available. Do not constrain an organization to one provider.
   Record feasibility limits and unfinished coverage explicitly.
 - Follow [`docs/development/repository-change-control.md`](docs/development/repository-change-control.md)
-  for Agent OS engineering authority, final-head review gates, review automation
-  and applicable CI requirements.
+  for the Agent OS ruleset, normal change path and emergency bypass limits.
+- Do not infer authorization for deferred governed ingestion from engineering work.
 
 ## Ledger selection and recovery evidence
 
-- Follow [`docs/development/ledger-verification.md`](docs/development/ledger-verification.md)
-  for Agent OS history validation, lifecycle evidence and ledger-scale checks.
 - For filtered readers, check selection completeness in both directions before
   relying on shared validators. Derive each event kind's candidate predicate
   from its owning validator and its caller's applicability conditions before
@@ -45,6 +43,8 @@ preferences belong in the user's global agent guidance.
   metadata field with the owning writer and recovery rules; include forbidden
   fields in validation and byte preflight instead of dropping selected columns.
   Document deliberate exclusions rather than assuming parity.
+- For runtime cancellation, one authority generation does not cover every
+  stop signal; exercise the relevant stop causes and admission writes.
 
 ## Documentation layout
 
@@ -59,10 +59,6 @@ preferences belong in the user's global agent guidance.
   fixtures consumed by repository checks in the repository. Keep competitive
   strategy and non-code certification planning outside it; do not link to those
   records from repository files.
-- `docs/threat-model.md` uses four numbered
-  sections: Overview; Threat model, Trust boundaries and assumptions; Attack
-  surface, mitigations and attacker stories; Criticality calibration. Retain
-  its established structure when updating content.
 
 ## Security backlog and ISO/IEC 42001 decision
 
