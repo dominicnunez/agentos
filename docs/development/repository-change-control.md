@@ -47,6 +47,30 @@ user authorization for those operations. Repository access and a passing PR do
 not grant that authority. Preserve these boundaries when validating provider
 integrations or preparing release artifacts.
 
+## Review integration and applicable checks
+
+Agent OS uses the Codex GitHub review integration. General reviews run
+automatically on pushes to ready PRs; drafts must be marked ready first. Observe
+the automatic job before a manual request. If a required general review
+demonstrably did not start, request it once with `@codex review`.
+
+Security-sensitive code and changes to `docs/threat-model.md` require security
+review. Request `@codex security review` only after general review returns with
+no outstanding findings, unless automation already started security review.
+Applicable CI need not finish before the request, but must pass before merge.
+The final-head review gate in the normal change path applies to follow-up commits.
+
+For code changes, applicable final-head checks include both push and PR CI where
+configured. Documentation-only PRs retain document validation and required
+reviews while skipping code checks through the existing change classifier.
+Scripts, workflows, dependencies and runtime configuration are code changes.
+
+Keep `docs/threat-model.md` aligned with code changes affecting Agent OS
+architecture, trust boundaries, attack surfaces, security controls, prerequisites,
+residual risks or severity, in the same PR. Distinguish implemented controls
+from incomplete controls and future prerequisites. This document-maintenance
+requirement and its security review apply independently of private user guidance.
+
 ## Emergency bypass
 
 The administrator bypass exists only to restore repository availability when the normal pull-request path cannot operate safely. Administrator identity alone is not routine approval authority.
