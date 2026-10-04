@@ -15,7 +15,8 @@ preferences belong in the user's global agent guidance.
   multiple configured providers/models for different agent tasks according to
   what the user has available. Do not constrain an organization to one provider.
   Record feasibility limits and unfinished coverage explicitly.
-- Do not infer authorization for deferred governed ingestion from engineering work.
+- Follow the Agent OS engineering authority boundaries in
+  [`docs/development/repository-change-control.md`](docs/development/repository-change-control.md#engineering-authority-boundaries).
 
 ## Ledger selection and recovery evidence
 
@@ -41,8 +42,10 @@ preferences belong in the user's global agent guidance.
   metadata field with the owning writer and recovery rules; include forbidden
   fields in validation and byte preflight instead of dropping selected columns.
   Document deliberate exclusions rather than assuming parity.
-- For cancellation changes, one authority generation does not cover every
-  runtime stop signal; exercise the relevant stop causes and admission writes.
+- For cancellation changes, exercise the real transport/runtime shutdown path
+  and interruptions across relevant admission writes. Verify forbidden publication,
+  required accounting and preservation of already-committed decisions during
+  recovery. One authority generation does not cover every runtime stop signal.
 
 ## Documentation layout and threat model
 
@@ -68,6 +71,8 @@ preferences belong in the user's global agent guidance.
 
 ## Repository review automation and CI
 
+- Follow the Agent OS [normal change path](docs/development/repository-change-control.md#normal-change-path),
+  including its final-head review gate for follow-up commits.
 - General reviews run automatically on pushes to ready PRs. Move a draft to ready
   before expecting automatic review. If an automatic review demonstrably did not
   start and a manual review is necessary, comment `@codex review` once.

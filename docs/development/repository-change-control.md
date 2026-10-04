@@ -28,11 +28,24 @@ The live machine-readable configuration is available from GitHub's [ruleset API]
 2. Make a bounded change and retain its reviewable commit history.
 3. Open a pull request.
 4. Bring the branch current with `main`.
-5. Resolve every review conversation.
-6. Require the exact configured checks to pass at the merge head.
-7. Merge through GitHub's normal pull-request path without intentionally invoking the administrator bypass.
+5. Obtain a clean general review and any required security review covering the
+   final PR head, including every follow-up commit. Changes after review require
+   the applicable reviews for the new head; an earlier approval does not cover
+   later relevant changes. Observe existing automatic reviews and do not duplicate
+   a running review or a completed clean review on unchanged relevant code.
+6. Resolve every applicable finding and review conversation with evidence.
+7. Require the exact configured checks to pass at the merge head.
+8. Merge through GitHub's normal pull-request path without intentionally invoking the administrator bypass.
 
 Zero required approving reviews is deliberate while the project has one accountable maintainer. Automated review and the project's security-first final review remain development evidence, but neither is misrepresented as an independent organizational approval.
+
+## Engineering authority boundaries
+
+An Agent OS engineering task does not itself authorize live provider calls or
+spending, releases, deployments, or deferred governed ingestion. Obtain explicit
+user authorization for those operations. Repository access and a passing PR do
+not grant that authority. Preserve these boundaries when validating provider
+integrations or preparing release artifacts.
 
 ## Emergency bypass
 
